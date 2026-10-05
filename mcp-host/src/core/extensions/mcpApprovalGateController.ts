@@ -245,7 +245,9 @@ export class UnifiedApprovalGateController implements LoopController {
 
       const action = typeof params.action === 'string' ? params.action : ''
       if (STATELESS_CRON_GATED_ACTIONS.has(action)) {
-        return this.createSuspension(toolName, params, STATELESS_CRON_APPROVAL_PROMPT, tool)
+        const forced = this.createSuspension(toolName, params, STATELESS_CRON_APPROVAL_PROMPT, tool)
+        // Approving this card runs the call once; it never allowlists cron_manage.
+        return { ...forced, approval: { ...forced.approval, alwaysApproveAllowed: false } }
       }
     }
     return null

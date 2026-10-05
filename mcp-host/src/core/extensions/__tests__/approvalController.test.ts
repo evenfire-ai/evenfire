@@ -292,7 +292,8 @@ describe('ApprovalController', () => {
         approval: expect.objectContaining({
           request_id: 'req-denied',
           tool_call_id: 'tc-denied',
-          description: 'Tool "shell_exec" was denied and must be approved again',
+          description: 'suspended',
+          reask: 'denied',
         }),
       })
     )
@@ -423,8 +424,25 @@ describe('ApprovalController', () => {
   describe('workflow_trigger while a denial is active', () => {
     const proceeds = new DefaultLoopController()
 
-    it('asks again even though the gate would proceed', () => {
+    it('asks again even though the gate would proceed, and says why', () => {
       const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const controller = new ApprovalController(conv, proceeds)
+
+      const result = controller.beforeTool('workflow_trigger', { name: 'wf' }, 'tc-1')
+
+      expect(result).toEqual(expect.objectContaining({ type: 'suspend' }))
+      const approval = (result as { approval: PendingApproval }).approval
+      expect(approval.reask).toBe('denials_active')
+      expect(approval.alwaysApproveAllowed).toBe(false)
+      expect(approval.description).toContain('another tool was denied in this chat')
+      expect(approval.description).not.toContain('"workflow_trigger" was denied')
+    })
+
+    it('asks again even when workflow_trigger is on the allowlist', () => {
+      const conv = makeConversation({
+        denied_tools: new Set(['shell_exec']),
+        auto_approved_tools: new Set(['workflow_trigger']),
+      })
       const controller = new ApprovalController(conv, proceeds)
 
       expect(controller.beforeTool('workflow_trigger', { name: 'wf' }, 'tc-1')).toEqual(
@@ -444,6 +462,89 @@ describe('ApprovalController', () => {
       const controller = new ApprovalController(conv, proceeds, { honorDenials: false })
 
       expect(controller.beforeTool('workflow_trigger', { name: 'wf' }, 'tc-1')).toBe('proceed')
+    })
+  })
+
+  describe('cron_manage while a denial is active', () => {
+    const proceeds = new DefaultLoopController()
+
+    it.each(['create', 'enable', 'trigger'])(
+      'asks again for %s, even when cron_manage is allowlisted',
+      action => {
+        const conv = makeConversation({
+          denied_tools: new Set(['monid__run']),
+          auto_approved_tools: new Set(['cron_manage']),
+        })
+        const controller = new ApprovalController(conv, proceeds)
+
+        const result = controller.beforeTool('cron_manage', { action }, 'tc-1')
+
+        expect(result).toEqual(expect.objectContaining({ type: 'suspend' }))
+        expect((result as { approval: PendingApproval }).approval.reask).toBe('denials_active')
+      }
+    )
+
+    it.each(['list', 'get', 'delete', 'disable'])('follows the allowlist for %s', action => {
+      const conv = makeConversation({
+        denied_tools: new Set(['monid__run']),
+        auto_approved_tools: new Set(['cron_manage']),
+      })
+      const controller = new ApprovalController(conv, proceeds)
+
+      expect(controller.beforeTool('cron_manage', { action }, 'tc-1')).toBe('proceed')
+    })
+
+    it('follows the allowlist when no tool is denied', () => {
+      const conv = makeConversation({ auto_approved_tools: new Set(['cron_manage']) })
+      const controller = new ApprovalController(conv, proceeds)
+
+      expect(controller.beforeTool('cron_manage', { action: 'create' }, 'tc-1')).toBe('proceed')
+    })
+
+    it('does not ask again on a cron lane that ignores denials', () => {
+      const conv = makeConversation({ denied_tools: new Set(['monid__run']) })
+      const controller = new ApprovalController(conv, proceeds, { honorDenials: false })
+
+      expect(controller.beforeTool('cron_manage', { action: 'trigger' }, 'tc-1')).toBe('proceed')
+    })
+
+    it("keeps the gate's own card and only marks it as a re-ask", () => {
+      const conv = makeConversation({ denied_tools: new Set(['monid__run']) })
+      const controller = new ApprovalController(conv, customDelegateThatSuspends)
+
+      const result = controller.beforeTool('cron_manage', { action: 'create' }, 'tc-1')
+
+      const approval = (result as { approval: PendingApproval }).approval
+      expect(approval.request_id).toBe('req-denied')
+      expect(approval.description).toBe('suspended')
+      expect(approval.reask).toBe('denials_active')
+      expect(approval.alwaysApproveAllowed).toBe(false)
+    })
+  })
+
+  describe('a denied tool asks again', () => {
+    it("keeps the gate's description and marks the card as a denial re-ask", () => {
+      const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const controller = new ApprovalController(conv, customDelegateThatSuspends)
+
+      const result = controller.beforeTool('shell_exec', { command: 'ls' }, 'tc-1')
+
+      const approval = (result as { approval: PendingApproval }).approval
+      expect(approval.description).toBe('suspended')
+      expect(approval.reask).toBe('denied')
+      expect(approval.alwaysApproveAllowed).toBe(false)
+    })
+
+    it('builds its own re-ask card when the gate would proceed', () => {
+      const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const controller = new ApprovalController(conv, new DefaultLoopController())
+
+      const result = controller.beforeTool('shell_exec', { command: 'ls' }, 'tc-1')
+
+      const approval = (result as { approval: PendingApproval }).approval
+      expect(approval.description).toBe('Tool "shell_exec" was denied and must be approved again')
+      expect(approval.reask).toBe('denied')
+      expect(approval.alwaysApproveAllowed).toBe(false)
     })
   })
 

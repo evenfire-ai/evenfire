@@ -2137,6 +2137,9 @@ async function handleTaskResult(
           ...(result.approval.reason === 'connect_required' && result.approval.mcpServerName
             ? { mcpServerName: result.approval.mcpServerName }
             : {}),
+          ...(result.approval.alwaysApproveAllowed === false
+            ? { alwaysApproveAllowed: false as const }
+            : {}),
         },
         model: result.model,
       }

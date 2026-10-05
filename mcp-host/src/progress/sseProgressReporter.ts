@@ -166,6 +166,7 @@ export class SseProgressReporter implements ProgressReporter {
     options?: {
       reason?: 'approval_required' | 'connect_required'
       mcpServerName?: string
+      alwaysApproveAllowed?: false
     }
   ): void {
     if (this.completed) return
@@ -174,6 +175,7 @@ export class SseProgressReporter implements ProgressReporter {
     if (reason === 'connect_required') {
       if (options?.mcpServerName) data.mcpServerName = options.mcpServerName
     }
+    if (options?.alwaysApproveAllowed === false) data.alwaysApproveAllowed = false
     const event: ProgressEvent = { type: 'suspended', data }
     // P1: store the exact redacted payload we publish live so late/re-connected
     // subscribers can replay it (see subscribe). displayName is already the

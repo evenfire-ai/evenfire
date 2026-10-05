@@ -106,6 +106,9 @@ export interface SuspendedEvent {
   reason: 'approval_required' | 'connect_required'
   /** Set iff reason==='connect_required' — the oauth mcp-server to connect. */
   mcpServerName?: string
+  /** false when the card must not offer "Always approve" (forced gate or
+   *  denial re-ask). Omitted when allowed. */
+  alwaysApproveAllowed?: false
 }
 
 /**

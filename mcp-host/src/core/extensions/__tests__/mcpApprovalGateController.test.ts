@@ -10,6 +10,7 @@ import {
   UnifiedApprovalGateController,
   isMcpToolName,
 } from '../mcpApprovalGateController'
+import { NudgeController } from '../nudgeController'
 
 /** Mock ToolRegistry that can be configured with tools that requireApproval */
 function makeMockRegistry(tools?: Record<string, { requiresApproval: boolean }>): ToolRegistry {
@@ -437,6 +438,7 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
       expect((result as any).approval.tool_name).toBe('cron_manage')
       expect((result as any).approval.parameters).toEqual({ action })
       expect((result as any).approval.description).toBe(STATELESS_CRON_APPROVAL_PROMPT)
+      expect((result as any).approval.alwaysApproveAllowed).toBe(false)
     }
   })
 
@@ -480,6 +482,21 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
       )
     }
   )
+
+  it('keeps the forced gate forced when a decorator sits between it and the allowlist', () => {
+    const conv = makeConversation({ auto_approved_tools: new Set(['cron_manage']) })
+    const gate = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      waivingConfig,
+      undefined,
+      { statelessLifecycle: true }
+    )
+    const controller = new ApprovalController(conv, new NudgeController(gate))
+
+    expect((controller.beforeTool('cron_manage', { action: 'create' }, 'tc-1') as any).type).toBe(
+      'suspend'
+    )
+  })
 
   it('pins the exact user-facing consequence prompt', () => {
     expect(STATELESS_CRON_APPROVAL_PROMPT).toBe(

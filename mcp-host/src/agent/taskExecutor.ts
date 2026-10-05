@@ -1277,6 +1277,7 @@ export class TaskExecutor {
             {
               reason: result.approval.reason ?? 'approval_required',
               mcpServerName: result.approval.mcpServerName,
+              alwaysApproveAllowed: result.approval.alwaysApproveAllowed,
             }
           )
         }

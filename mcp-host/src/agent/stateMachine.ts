@@ -82,6 +82,8 @@ export interface PendingApprovalInfo {
   // reason==='connect_required' (oauth connect flow).
   reason?: 'approval_required' | 'connect_required'
   mcpServerName?: string
+  /** false when the card must not offer "Always approve". Omitted when allowed. */
+  alwaysApproveAllowed?: false
 }
 
 /**
@@ -984,6 +986,7 @@ export class AgentStateMachine extends EventEmitter {
           ...(approval.reason === 'connect_required' && approval.mcpServerName
             ? { mcpServerName: approval.mcpServerName }
             : {}),
+          ...(approval.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false } : {}),
         })
       }
     }
@@ -1062,6 +1065,7 @@ export class AgentStateMachine extends EventEmitter {
       ...(approval.reason === 'connect_required' && approval.mcpServerName
         ? { mcpServerName: approval.mcpServerName }
         : {}),
+      ...(approval.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false } : {}),
     })
   }
 
@@ -1597,67 +1601,8 @@ export class AgentStateMachine extends EventEmitter {
     _userId: string,
     channelType?: string
   ): string {
-    const workflowName =
-      approval.tool_name === 'workflow_trigger' && typeof approval.parameters.name === 'string'
-        ? approval.parameters.name.trim()
-        : ''
-
-    const paramSummary =
-      Object.keys(approval.parameters).length > 0
-        ? JSON.stringify(approval.parameters).substring(0, 200)
-        : 'none'
-
-    // Check if the user's channel can approve
-    const canApproveViaChannel =
-      this.approvalConfig && this.approvalConfig.defaultPolicy !== 'cli_only'
-
-    if (workflowName && canApproveViaChannel) {
-      return [
-        `Approval needed to run workflow ${workflowName}.`,
-        channelType === 'slack'
-          ? 'Use the approval buttons to continue or cancel.'
-          : 'Reply /approve to continue or /deny to cancel.',
-      ].join(' ')
-    }
-
-    if (workflowName) {
-      return [
-        `Approval needed to run workflow ${workflowName}.`,
-        'Please approve through the configured approval channel.',
-      ].join(' ')
-    }
-
-    if (approval.description === STATELESS_CRON_APPROVAL_PROMPT) {
-      // Cron×stateless gate: the user must see the cost consequence, not
-      // the generic tool-approval line. Parameters stay visible for
-      // transparency; the approve/deny instructions mirror the generic paths.
-      return (
-        `${approval.description} ` +
-        `Parameters: ${paramSummary}. ` +
-        (canApproveViaChannel
-          ? channelType === 'slack'
-            ? 'Use the approval controls to continue or cancel.'
-            : 'Reply /approve or /deny to this message.'
-          : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`)
-      )
-    }
-
-    if (canApproveViaChannel) {
-      return (
-        `Tool \`${approval.tool_name}\` requires approval. ` +
-        `Parameters: ${paramSummary}. ` +
-        (channelType === 'slack'
-          ? `Use the approval controls to continue or cancel.`
-          : `Reply /approve or /deny to this message.`)
-      )
-    }
-
-    return (
-      `Tool \`${approval.tool_name}\` requires approval. ` +
-      `Parameters: ${paramSummary}. ` +
-      `Request ID: ${approval.request_id}. ` +
-      `Please approve via CLI: POST /v1/runtime/approvals/approve`
-    )
+    const body = approvalNotificationBody(this.approvalConfig, approval, channelType)
+    return approval.reask ? `${reaskNotice(approval.reask)} ${body}` : body
   }
 
   /**
@@ -1904,4 +1849,78 @@ export class AgentStateMachine extends EventEmitter {
       })
     }
   }
+}
+
+/** One line in front of a re-ask card's notification saying why it asks again. */
+function reaskNotice(reask: 'denied' | 'denials_active'): string {
+  return reask === 'denied'
+    ? 'You denied this tool earlier in this chat.'
+    : 'This tool can run other tools, and another tool was denied in this chat.'
+}
+
+function approvalNotificationBody(
+  approvalConfig: ApprovalConfig | null | undefined,
+  approval: PendingApproval,
+  channelType?: string
+): string {
+  const workflowName =
+    approval.tool_name === 'workflow_trigger' && typeof approval.parameters.name === 'string'
+      ? approval.parameters.name.trim()
+      : ''
+
+  const paramSummary =
+    Object.keys(approval.parameters).length > 0
+      ? JSON.stringify(approval.parameters).substring(0, 200)
+      : 'none'
+
+  // Check if the user's channel can approve
+  const canApproveViaChannel = approvalConfig && approvalConfig.defaultPolicy !== 'cli_only'
+
+  if (workflowName && canApproveViaChannel) {
+    return [
+      `Approval needed to run workflow ${workflowName}.`,
+      channelType === 'slack'
+        ? 'Use the approval buttons to continue or cancel.'
+        : 'Reply /approve to continue or /deny to cancel.',
+    ].join(' ')
+  }
+
+  if (workflowName) {
+    return [
+      `Approval needed to run workflow ${workflowName}.`,
+      'Please approve through the configured approval channel.',
+    ].join(' ')
+  }
+
+  if (approval.description === STATELESS_CRON_APPROVAL_PROMPT) {
+    // Cron×stateless gate: the user must see the cost consequence, not
+    // the generic tool-approval line. Parameters stay visible for
+    // transparency; the approve/deny instructions mirror the generic paths.
+    return (
+      `${approval.description} ` +
+      `Parameters: ${paramSummary}. ` +
+      (canApproveViaChannel
+        ? channelType === 'slack'
+          ? 'Use the approval controls to continue or cancel.'
+          : 'Reply /approve or /deny to this message.'
+        : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`)
+    )
+  }
+
+  if (canApproveViaChannel) {
+    return (
+      `Tool \`${approval.tool_name}\` requires approval. ` +
+      `Parameters: ${paramSummary}. ` +
+      (channelType === 'slack'
+        ? `Use the approval controls to continue or cancel.`
+        : `Reply /approve or /deny to this message.`)
+    )
+  }
+
+  return (
+    `Tool \`${approval.tool_name}\` requires approval. ` +
+    `Parameters: ${paramSummary}. ` +
+    `Request ID: ${approval.request_id}. ` +
+    `Please approve via CLI: POST /v1/runtime/approvals/approve`
+  )
 }

@@ -542,7 +542,9 @@ export class ConversationManager {
    *
    * Approving one tool does not allowlist other tools, an MCP server, or the
    * rest of the turn. When alwaysApprove=true, only that tool's exact name is
-   * stored for later turns. Approving this tool removes it from denied_tools.
+   * stored for later turns, unless the card does not allow it (a forced gate or
+   * a denial re-ask). Approving this tool removes it from denied_tools when the
+   * approver is the user who denied it (or the denier is unknown).
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
@@ -567,7 +569,7 @@ export class ConversationManager {
         conversation.denied_tools?.delete(toolName)
         if (conversation.denied_by) delete conversation.denied_by[toolName]
         // alwaysApprove stores only the exact tool name (for future turns)
-        if (alwaysApprove) {
+        if (alwaysApprove && conversation.pending_approval.alwaysApproveAllowed !== false) {
           conversation.auto_approved_tools.add(toolName)
         }
       }
@@ -610,6 +612,10 @@ export class ConversationManager {
       if (options?.userId) {
         conversation.denied_by = { ...conversation.denied_by, [deniedTool]: options.userId }
       }
+      // A deny is the latest explicit decision: it also revokes an earlier
+      // "Always approve" for this exact tool, so approving once later does not
+      // bring the blanket grant back.
+      conversation.auto_approved_tools.delete(deniedTool)
       logger.info(
         { event: 'approval_denial_recorded', toolName: deniedTool },
         'Recorded a tool denial'

@@ -340,6 +340,74 @@ describe('ConversationManager — approval transitions', () => {
     expect(conv.auto_approved_tools.has('shell_exec')).toBe(true)
   })
 
+  it('a denial revokes an earlier Always approve, and approving once does not bring it back', async () => {
+    const conv = await manager.getOrCreate('user-revoke')
+    conv.auto_approved_tools.add('shell_exec')
+    await manager.startTurn(conv, 'Run shell', 'task-1')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-revoke-1',
+      tool_name: 'shell_exec',
+      parameters: { command: 'rm -rf /tmp/x' },
+      description: 'Guardrail requires approval',
+      tool_call_id: 'tc-1',
+      context_snapshot: [],
+    })
+
+    await manager.deny(conv, { userId: 'user-revoke' })
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
+
+    await manager.startTurn(conv, 'Run shell again', 'task-2')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-revoke-2',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'x',
+      tool_call_id: 'tc-2',
+      context_snapshot: [],
+    })
+    await manager.approve(conv, false, 'user-revoke')
+
+    expect(conv.denied_tools?.has('shell_exec')).toBe(false)
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
+  })
+
+  it('a timeout does not revoke an earlier Always approve', async () => {
+    const conv = await manager.getOrCreate('user-timeout-keep')
+    conv.auto_approved_tools.add('shell_exec')
+    await manager.startTurn(conv, 'Run shell', 'task-1')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-timeout-keep',
+      tool_name: 'shell_exec',
+      parameters: {},
+      description: 'x',
+      tool_call_id: 'tc-1',
+      context_snapshot: [],
+    })
+
+    await manager.deny(conv, { record: false })
+
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(true)
+  })
+
+  it('does not allowlist a card that does not allow Always approve', async () => {
+    const conv = await manager.getOrCreate('user-forced')
+    await manager.startTurn(conv, 'Schedule it', 'task-1')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-forced',
+      tool_name: 'cron_manage',
+      parameters: { action: 'create' },
+      description: 'forced',
+      tool_call_id: 'tc-1',
+      context_snapshot: [],
+      alwaysApproveAllowed: false,
+    })
+
+    await manager.approve(conv, true, 'user-forced')
+
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.auto_approved_tools.has('cron_manage')).toBe(false)
+  })
+
   it('an approval timeout does not record a denial', async () => {
     const conv = await manager.getOrCreate('user-timeout')
     await manager.startTurn(conv, 'Run shell', 'test-task')

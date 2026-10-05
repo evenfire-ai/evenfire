@@ -31,6 +31,28 @@ export interface ApprovalControllerOptions {
   toolRegistry?: ToolRegistry
 }
 
+/** cron_manage actions that start or schedule autonomous work. */
+const CRON_STARTING_ACTIONS = new Set(['create', 'enable', 'trigger'])
+
+/**
+ * Tools that can run other tools out of the user's sight. While a denial is
+ * active they ask again, since the denied tool could run through them.
+ */
+function startsOtherTools(toolName: string, params: Record<string, unknown>): boolean {
+  if (toolName === 'workflow_trigger') return true
+  return (
+    toolName === 'cron_manage' &&
+    typeof params.action === 'string' &&
+    CRON_STARTING_ACTIONS.has(params.action)
+  )
+}
+
+function reaskDescription(toolName: string, reask: 'denied' | 'denials_active'): string {
+  return reask === 'denied'
+    ? `Tool "${toolName}" was denied and must be approved again`
+    : `Tool "${toolName}" can run other tools, and another tool was denied in this chat, so it must be approved again`
+}
+
 /**
  * Decorator that honors a denial, then an exact allowlisted name, then a
  * one-shot pending approval, before delegating.
@@ -81,31 +103,19 @@ export class ApprovalController implements LoopController {
         { event: 'approval_reask_required', toolName },
         'Previously denied tool requires approval again'
       )
-      const decision = this.delegate.beforeTool(toolName, params, toolCallId)
-      if (decision === 'skip') return decision
-      if (decision === 'proceed') {
-        return { type: 'suspend', approval: this.reapproval(toolName, params) }
-      }
-      // Keep the gate's provenance, and say this card is a denial re-ask.
-      return {
-        type: 'suspend',
-        approval: {
-          ...decision.approval,
-          description: `Tool "${toolName}" was denied and must be approved again`,
-        },
-      }
+      return this.reask(toolName, params, toolCallId, 'denied')
     }
 
     if (
       this.honorDenials &&
-      toolName === 'workflow_trigger' &&
-      (this.conversation.denied_tools?.size ?? 0) > 0
+      (this.conversation.denied_tools?.size ?? 0) > 0 &&
+      startsOtherTools(toolName, params)
     ) {
       logger.info(
         { event: 'approval_reask_required', toolName, reason: 'chat_has_denials' },
-        'Workflow trigger requires approval while a tool denial is active'
+        'A tool that can start other tools requires approval while a tool denial is active'
       )
-      return { type: 'suspend', approval: this.reapproval(toolName, params) }
+      return this.reask(toolName, params, toolCallId, 'denials_active')
     }
 
     // An exact-name allowlist never waives a forced gate (stateless cron
@@ -126,7 +136,31 @@ export class ApprovalController implements LoopController {
     return this.delegate.beforeTool(toolName, params, toolCallId)
   }
 
-  private reapproval(toolName: string, params: Record<string, unknown>): PendingApproval {
+  /**
+   * Suspend for a re-ask. The gate's own card (and its description, e.g. the
+   * stateless cron cost warning) is kept and only marked; when the gate would
+   * proceed, a re-ask card is built here. A re-ask never offers Always approve.
+   */
+  private reask(
+    toolName: string,
+    params: Record<string, unknown>,
+    toolCallId: string | undefined,
+    reask: 'denied' | 'denials_active'
+  ): 'skip' | { type: 'suspend'; approval: PendingApproval } {
+    const decision = this.delegate.beforeTool(toolName, params, toolCallId)
+    if (decision === 'skip') return decision
+    const approval =
+      decision === 'proceed'
+        ? this.reapproval(toolName, params, reaskDescription(toolName, reask))
+        : decision.approval
+    return { type: 'suspend', approval: { ...approval, reask, alwaysApproveAllowed: false } }
+  }
+
+  private reapproval(
+    toolName: string,
+    params: Record<string, unknown>,
+    description: string
+  ): PendingApproval {
     const tool = this.toolRegistry?.get(toolName) ?? null
     const trace = tool?.traceDescriptor?.(params)
     return {
@@ -134,10 +168,14 @@ export class ApprovalController implements LoopController {
       tool_name: toolName,
       ...(trace ? { tool_kind: trace.kind, tool_source_ref: trace.sourceRef } : {}),
       parameters: params,
-      description: `Tool "${toolName}" was denied and must be approved again`,
+      description,
       tool_call_id: '',
       context_snapshot: [],
     }
+  }
+
+  isForcedApproval(toolName: string, params: Record<string, unknown>): boolean {
+    return this.delegate.isForcedApproval?.(toolName, params) === true
   }
 
   onExhaustion(iteration: number): string {

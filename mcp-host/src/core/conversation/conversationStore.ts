@@ -89,7 +89,10 @@ export interface ConversationSessionSummary {
   // U5 — includes the connect_required discriminator (reason/mcpServerName)
   // so the REST rejoin snapshot lets the desktop rebuild a "Connect <server>"
   // suspension, not a generic approval. Absent reason ⇒ generic approval.
-  pendingApproval?: Pick<PendingApproval, 'request_id' | 'tool_name' | 'reason' | 'mcpServerName'>
+  pendingApproval?: Pick<
+    PendingApproval,
+    'request_id' | 'tool_name' | 'reason' | 'mcpServerName' | 'alwaysApproveAllowed'
+  >
   turnCount: number
   messageCount: number
   lastActivityAt: Date

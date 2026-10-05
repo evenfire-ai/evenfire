@@ -683,6 +683,19 @@ export interface PendingApproval {
   reason?: 'approval_required' | 'connect_required'
   /** U5 — the oauth mcp-server to connect. Set iff reason==='connect_required'. */
   mcpServerName?: string
+  /**
+   * Why this card asks again: 'denied' = this exact tool was denied in the
+   * chat; 'denials_active' = the tool can start other tools (workflow_trigger,
+   * cron_manage create/enable/trigger) while a denial is active. Live only, not
+   * persisted.
+   */
+  reask?: 'denied' | 'denials_active'
+  /**
+   * false when "Always approve" must not apply to this card (a forced gate or
+   * a denial re-ask): approve() then runs the call once without allowlisting
+   * it. Absent = allowed. Live only, not persisted.
+   */
+  alwaysApproveAllowed?: false
 }
 
 // ─── Loop Types ─────────────────────────────────────────────

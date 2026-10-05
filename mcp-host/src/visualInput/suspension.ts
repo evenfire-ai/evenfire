@@ -53,5 +53,7 @@ export function projectGfsApproval(approval: PendingApproval): PendingApproval {
     ...(approval.traceContext !== undefined ? { traceContext: approval.traceContext } : {}),
     ...(approval.reason ? { reason: approval.reason } : {}),
     ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
+    ...(approval.reask ? { reask: approval.reask } : {}),
+    ...(approval.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false as const } : {}),
   }
 }

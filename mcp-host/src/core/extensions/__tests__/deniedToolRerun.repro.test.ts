@@ -318,7 +318,8 @@ describe('Lead Scout denial stickiness', () => {
       context_snapshot: [{ role: 'user', content: 'find people again' }],
     })
     await manager.deny(conversation, { userId: 'marcela' })
-    expect(conversation.auto_approved_tools.has(FINDER)).toBe(true)
+    // The deny is the latest decision: it revokes the earlier Always approve.
+    expect(conversation.auto_approved_tools.has(FINDER)).toBe(false)
     expect(conversation.denied_tools?.has(FINDER)).toBe(true)
 
     await manager.startTurn(conversation, 'find people a third time', 'task-after-deny')
@@ -332,9 +333,9 @@ describe('Lead Scout denial stickiness', () => {
     expect(again.type).toBe('need_approval')
     if (again.type === 'need_approval') {
       expect(again.approval.tool_name).toBe(FINDER)
-      expect(again.approval.description).toBe(
-        `Tool "${FINDER}" was denied and must be approved again`
-      )
+      // The gate's own card is kept and marked as a denial re-ask.
+      expect(again.approval.reask).toBe('denied')
+      expect(again.approval.alwaysApproveAllowed).toBe(false)
     }
     expect(argsOf(finder)).toHaveLength(0)
   })
