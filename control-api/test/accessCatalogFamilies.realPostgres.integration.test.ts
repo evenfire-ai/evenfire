@@ -30,6 +30,7 @@ import {
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 import { createUserSession } from '../src/services/auth/userSessionService.js'
 import { __resetBudgetCheckCache, evaluateBudgetCheck } from '../src/services/budgets/check.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
 
 vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
@@ -344,18 +345,21 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
   })
 
   afterAll(async () => {
-    await kubernetesApi.close()
-    await databasePool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
+    try {
+      await kubernetesApi.close()
+      await endPoolAndWaitForClients(databasePool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
            FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-      await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+        await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

@@ -2,11 +2,13 @@ import type { DbClient } from '../db.js'
 import type { PinnedTransport } from '../http/pinnedFetch.js'
 import { pinnedFetch } from '../http/pinnedFetch.js'
 import type { DnsResolver } from '../http/validateMcpServerSpec.js'
+import { rootLogger } from '../observability/logger.js'
 import { getDynamicClient } from './dynamicClientStore.js'
 import {
   type RemoteOAuthSpecIncoherence,
   RemoteOAuthSpecIncoherentError,
 } from './mcpServerOAuthSpec.js'
+import { buildPerServerRedirectUri, resolvePerServerRegistration } from './perServerRegistration.js'
 import { deriveCodeVerifier } from './pkce.js'
 import {
   type GenericAdapterConfig,
@@ -19,20 +21,22 @@ import {
   parseRemoteTokenResponse,
 } from './providers.js'
 import { resolveExactRecipeOAuthClient } from './recipeOAuthClient.js'
+import {
+  InvalidRemoteRedirectUriInputError,
+  REMOTE_CALLBACK_CLIENT_SEGMENT,
+  buildRemoteRedirectUri,
+  remoteCallbackVariant,
+} from './remoteCallback.js'
 import type { OAuthMcpStateClaims } from './state.js'
 import { signOAuthState, verifyOAuthStateSignature } from './state.js'
 import { bootstrapSharedOAuthGrant, setUserGrantBackground, upsertOAuthGrant } from './store.js'
 
-/**
- * Reserved last URL segment of the STABLE remote OAuth callback
- * (`/api/v1/oauth-callback/remote`). The remote lane (CIMD/DCR) registers ONE
- * fixed redirect_uri, so the URL segment is a constant and the real client
- * binding rides the signed state (`subjectKind:'mcp'` + `mcpServerName`, both
- * re-resolved authoritatively). `cimd.ts` derives `REMOTE_CALLBACK_PATH` from
- * this. Kept here (not in `cimd.ts`) to avoid an import cycle
- * (callback → cimd → external/oauthCallback → callback).
- */
-export const REMOTE_CALLBACK_CLIENT_SEGMENT = 'remote'
+// Reserved last URL segment of the shared remote OAuth callback. Defined in
+// `remoteCallback.ts` (the single redirect-URI builder); re-exported for the existing
+// importers of this module.
+export { REMOTE_CALLBACK_CLIENT_SEGMENT }
+
+const log = rootLogger.child({ module: 'oauth-callback' })
 
 /**
  * Discriminator for WHERE an mcp-server's OAuth client credentials live
@@ -69,6 +73,11 @@ export interface RemoteClientRouting {
   supportsRefresh: boolean
   /** RFC 9207 issuer to validate the callback `iss` against, when advertised. */
   issForCallback?: string
+  /**
+   * The pinned AS issuer. Without RFC 9207 an AS may still send `iss`; when it does,
+   * it must match this value rather than being ignored.
+   */
+  issuer?: string
 }
 
 /**
@@ -212,26 +221,55 @@ export interface McpServerOAuthReader {
 export class SecretNotFoundError extends Error {}
 export class RecipeNotFoundError extends Error {}
 
+/**
+ * Which callback URL the provider redirected to. Decided by the route from the path
+ * shape alone; the handler then checks it against the signed state and the CR.
+ *
+ *   - `client`            — `/oauth-callback/<oauthClientId>` (recipe, baked, generic).
+ *   - `remote-shared`     — `/oauth-callback/remote`: every remote server whose AS
+ *                           returns RFC 9207 `iss`, which is what binds the code there.
+ *   - `remote-per-server` — `/oauth-callback/remote/<serverName>[/<installNonce>]`: a
+ *                           remote server whose AS does not return `iss`, where the URI
+ *                           itself is the binding. Both segments are already validated.
+ *
+ * The remote kinds carry an origin, not a URI: the redirect URI replayed on the token
+ * exchange is rebuilt from the signed state and the CR once they have been checked,
+ * never from the request path.
+ */
+export type CallbackTarget =
+  | {
+      kind: 'client'
+      id: string
+      /** Public URL registered for this client; replayed on the token POST. */
+      redirectUri: string
+    }
+  | {
+      kind: 'remote-shared'
+      /** Origin of the shared callback (the configured base URL, else the request Host). */
+      origin: string
+    }
+  | {
+      kind: 'remote-per-server'
+      serverName: string
+      installNonce?: string
+      /** The configured public origin; null when none is configured (fails closed). */
+      origin: string | null
+    }
+
 export interface CallbackInput {
-  /**
-   * oauthClientId from the callback URL path. The (recipeNamespace, recipeName)
-   * are no longer carried in the URL — they are recovered from the signed state
-   * — but this id rides the stable path and is cross-checked against the claims
-   * for defence in depth.
-   */
-  oauthClientId: string
+  target: CallbackTarget
   /** OAuth `code` query parameter from the provider redirect. */
   code: string
   /** Signed state value (we re-verify before doing anything). */
   state: string
-  /** Public URL we registered with the provider; included in the token POST. */
-  redirectUri: string
   /**
-   * RFC 9207 `iss` from the authorization-response redirect (`req.query.iss`);
-   * validated on the remote lane against the pinned `issForCallback`. Absent on
-   * the baked lane (baked ASes do not advertise `iss`), where it is ignored.
+   * RFC 9207 `iss` exactly as parsed from the query (`req.query.iss`): a string, an
+   * array when repeated, an object for bracket syntax, or undefined. Kept raw because
+   * the two remote variants read it differently: the shared callback treats anything
+   * but a string as absent, while the per-server callback rejects a malformed value
+   * instead of letting it pass as "no iss". Ignored on the `client` target.
    */
-  iss?: string
+  iss?: unknown
 }
 
 export interface CallbackDeps {
@@ -329,6 +367,11 @@ export type CallbackResult =
    * closed BEFORE the single-use code is exchanged. No value fields.
    */
   | { kind: 'issuer_binding_required' }
+  /**
+   * A per-server remote callback with no usable configured public origin: its redirect
+   * URI cannot be rebuilt byte-for-byte, so the code is not exchanged.
+   */
+  | { kind: 'callback_base_url_unconfigured' }
   | { kind: 'unknown_oauth_client' }
   | { kind: 'recipe_not_found' }
   /** mcp subject: the McpServer named in the signed state does not exist / is not OAuth. */
@@ -356,6 +399,8 @@ export type CallbackResult =
   | { kind: 'provider_token_exchange_failed'; status: number; body: string }
   | { kind: 'provider_response_invalid'; detail: string }
 
+const BINDING_MISMATCH = { kind: 'invalid_state', reason: 'binding_mismatch' } as const
+
 /**
  * Run the full callback flow. Pure relative to its `CallbackDeps` so tests
  * inject stub readers / fetch / db.
@@ -366,33 +411,44 @@ export async function handleOAuthCallback(
 ): Promise<CallbackResult> {
   // ─── 1. Verify state signature, recover binding from the claims ───────
   // The callback URL no longer carries the subject coordinates — they are
-  // recovered from the signed, unforgeable state. The oauthClientId still rides
-  // the stable URL path, so cross-check it against the claims for defence in
-  // depth. The subject identity itself needs no such check: the HMAC guarantees
-  // it, and every authorize-url minter only signs its own namespace's states.
+  // recovered from the signed, unforgeable state. Whatever the URL does carry is
+  // cross-checked against the claims: the subject identity itself needs no such
+  // check (the HMAC guarantees it), but the URL is where the AS delivered the code,
+  // and on the per-server remote callback that location IS the mix-up defence.
   const verified = verifyOAuthStateSignature(deps.stateSecret, input.state)
   if (verified.kind !== 'ok') {
     return { kind: 'invalid_state', reason: verified.kind }
   }
   const claims = verified.claims
-  // Defence-in-depth: the URL segment must equal the signed client id — EXCEPT on
-  // the stable remote callback (`/oauth-callback/remote`), where CIMD/DCR register
-  // one fixed redirect_uri and the segment is the reserved constant, not the
-  // client id. There the binding rides the HMAC state (`subjectKind:'mcp'` +
-  // `mcpServerName`) and is re-checked below against the freshly-resolved subject
-  // (`subject.decl.id === claims.oauthClientId`). Recipe subjects always enforce
-  // the segment==id check (the reserved segment is mcp-only).
-  const isRemoteStableSegment =
-    claims.subjectKind === 'mcp' && input.oauthClientId === REMOTE_CALLBACK_CLIENT_SEGMENT
-  if (!isRemoteStableSegment && claims.oauthClientId !== input.oauthClientId) {
-    return { kind: 'invalid_state', reason: 'binding_mismatch' }
+  const target = input.target
+
+  if (claims.subjectKind === 'mcp') {
+    // `/oauth-callback/<id>`: the segment must be the signed client id.
+    if (target.kind === 'client' && claims.oauthClientId !== target.id) return BINDING_MISMATCH
+    // `/remote/<serverName>/…`: a code delivered to one server's URI must never be
+    // attributed to another, and this is decided before the CR the state names is even
+    // read — an AS that redirects to `a` with `b`'s state learns nothing about `b`.
+    if (target.kind === 'remote-per-server' && claims.mcpServerName !== target.serverName) {
+      return BINDING_MISMATCH
+    }
+    return handleMcpOAuthCallback(claims, input, deps)
   }
 
-  // Dispatch by the signed subject. mcp subjects go to their own handler; the
-  // recipe path below is unchanged (byte-identical grant persistence).
-  if (claims.subjectKind === 'mcp') {
-    return handleMcpOAuthCallback(claims, input, deps, isRemoteStableSegment)
+  // Recipe subject. The per-server URI only exists for remote mcp servers. A recipe
+  // client may legitimately be named `remote` (operator-authored id), so the shared
+  // path keeps the segment==id rule for it, over the same bytes it always used.
+  let recipeRedirectUri: string
+  let segmentId: string
+  if (target.kind === 'client') {
+    segmentId = target.id
+    recipeRedirectUri = target.redirectUri
+  } else if (target.kind === 'remote-shared') {
+    segmentId = REMOTE_CALLBACK_CLIENT_SEGMENT
+    recipeRedirectUri = buildRemoteRedirectUri({ origin: target.origin, variant: 'shared' })
+  } else {
+    return BINDING_MISMATCH
   }
+  if (claims.oauthClientId !== segmentId) return BINDING_MISMATCH
 
   const recipeNamespace = claims.recipeNamespace
   const recipeName = claims.recipeName
@@ -417,7 +473,13 @@ export async function handleOAuthCallback(
   if (!clientDecl) return { kind: 'unknown_oauth_client' }
 
   // ─── 3-4. Read secrets + exchange code ────────────────────────────────
-  const exchanged = await exchangeAuthCode(clientDecl, recipeNamespace, undefined, input, deps)
+  const exchanged = await exchangeAuthCode(
+    clientDecl,
+    recipeNamespace,
+    undefined,
+    { code: input.code, state: input.state, redirectUri: recipeRedirectUri },
+    deps
+  )
   if (exchanged.kind !== 'ok') return exchanged
   const { provider, parsed } = exchanged
 
@@ -493,8 +555,7 @@ export async function handleOAuthCallback(
 async function handleMcpOAuthCallback(
   claims: OAuthMcpStateClaims,
   input: CallbackInput,
-  deps: CallbackDeps,
-  isRemoteStableSegment: boolean
+  deps: CallbackDeps
 ): Promise<CallbackResult> {
   // Fail closed: an mcp state cannot be processed without an mcp reader wired.
   if (!deps.mcpServerReader) return { kind: 'server_not_found' }
@@ -512,54 +573,39 @@ async function handleMcpOAuthCallback(
   if (!subject) return { kind: 'server_not_found' }
 
   // Defence in depth: the resolved server's declared oauthClient must match the
-  // client id bound in the signed state. Check against `claims.oauthClientId`
-  // (NOT `input.oauthClientId`): on the stable remote callback the URL segment is
-  // the reserved `remote` constant, not the client id — the state carries the real
-  // one. For the baked mcp lane `claims.oauthClientId === input.oauthClientId`
-  // (enforced above), so this stays equivalent.
-  if (subject.decl.id !== claims.oauthClientId) {
-    return { kind: 'invalid_state', reason: 'binding_mismatch' }
-  }
-  // The segment==id waiver above is only sound for remote subjects, whose issuer
-  // check below replaces it. A baked/generic state delivered here would bypass
-  // both, leaving the AS's own redirect_uri comparison as the only binding — and
-  // the generic lane exists precisely for ASes that may not enforce it. A
-  // non-remote server that nonetheless owns the reserved id (e.g. written straight
-  // to the apiserver) fails closed here instead of completing consent.
-  if (isRemoteStableSegment && !subject.decl.remote) {
-    return { kind: 'invalid_state', reason: 'binding_mismatch' }
-  }
+  // client id bound in the signed state. Checked against `claims.oauthClientId`
+  // because on the remote callbacks the URL carries no client id at all.
+  if (subject.decl.id !== claims.oauthClientId) return BINDING_MISMATCH
 
-  // ─── RFC 9207 issuer check (remote lane only) ─────────────────────────────
-  // Authorization-server mix-up defence: an attacker who controls one AS in a
-  // multi-AS deployment can trick a client into sending a code minted by the
-  // honest AS to the attacker's token endpoint (or vice versa). RFC 9207 binds
-  // the authorization response to its issuer via the `iss` query param; we pin
-  // the honest issuer at discovery (`issForCallback`) and require the callback's
-  // `iss` to match it here — BEFORE the single-use code is ever exchanged.
-  //
-  // FAIL CLOSED for every remote subject. The stable remote callback
-  // (`/oauth-callback/remote`) is SHARED across all remote subjects (CIMD/DCR/
-  // pre-registered register ONE fixed redirect_uri), so whether the check runs
-  // must NOT be governed by the resolved AS's own advertised metadata: a
-  // malicious installed AS whose discovery omitted `iss` (⇒ `issForCallback`
-  // absent) could relay the user to an honest AS sharing this redirect/state/PKCE
-  // and have the honest code attributed to itself. So a remote subject with no
-  // pinned issuer can never satisfy the defence — reject rather than bind a code
-  // we cannot attribute. The baked/generic lanes have no `decl.remote`; they are
-  // unaffected (this is a remote-lane defence only).
-  if (subject.decl.remote) {
-    const expectedIss = subject.decl.remote.issForCallback
-    if (typeof expectedIss !== 'string' || expectedIss.length === 0) {
-      // No issuer pinned at install → the mix-up defence is unsatisfiable for this
-      // server. (An install-time guard would surface this to the operator earlier
-      // instead of the user at consent — tracked as a follow-up.)
-      return { kind: 'issuer_binding_required' }
-    }
-    // Fail closed on any deviation, INCLUDING an absent/empty callback `iss`.
-    if (input.iss !== expectedIss) {
-      return { kind: 'issuer_mismatch' }
-    }
+  // The callback URL must be the one this server's lane registers, in both
+  // directions: remote servers only ever register a remote URI, and the remote
+  // URIs waive the segment==id rule on the strength of checks (issuer, per-server
+  // binding) that only exist for remote servers. A baked/generic server that owns
+  // the reserved id, or a remote server reached through `/oauth-callback/<id>`,
+  // fails closed instead of leaving the AS's own redirect_uri comparison — which
+  // the generic lane cannot rely on — as the only binding.
+  const target = input.target
+  const remote = subject.decl.remote
+  const reachedOnRemoteUri = target.kind !== 'client'
+  if (reachedOnRemoteUri !== Boolean(remote)) return BINDING_MISMATCH
+
+  let redirectUri: string
+  if (target.kind === 'client') {
+    redirectUri = target.redirectUri
+  } else if (target.kind === 'remote-shared') {
+    const rejected = checkSharedCallbackIssuer(remote as RemoteClientRouting, input.iss)
+    if (rejected) return rejected
+    redirectUri = buildRemoteRedirectUri({ origin: target.origin, variant: 'shared' })
+  } else {
+    const perServer = await checkPerServerCallback(
+      subject,
+      claims.mcpServerName,
+      target,
+      input.iss,
+      deps.db
+    )
+    if (perServer.kind !== 'ok') return perServer
+    redirectUri = perServer.redirectUri
   }
 
   // ─── Membership guards run BEFORE the token exchange (R3-L1) ──────────────
@@ -597,7 +643,7 @@ async function handleMcpOAuthCallback(
     subject.decl,
     subject.namespace,
     { name: claims.mcpServerName, crUid: subject.crUid },
-    input,
+    { code: input.code, state: input.state, redirectUri },
     deps
   )
   if (exchanged.kind !== 'ok') return exchanged
@@ -610,10 +656,10 @@ async function handleMcpOAuthCallback(
       recipeNamespace: subject.namespace,
       recipeName: claims.mcpServerName,
       contextId: contextRef,
-      // Grant coordinate = the resolved client id (`oauth.id`), NEVER the URL
-      // segment: on the stable remote callback `input.oauthClientId` is the literal
-      // `remote`. `subject.decl.id === claims.oauthClientId` (checked above), and it
-      // matches what the token broker keys by (`resolveServerOAuth`, D4).
+      // Grant coordinate = the resolved client id (`oauth.id`), NEVER the URL: the
+      // remote callbacks carry no client id in it. `subject.decl.id ===
+      // claims.oauthClientId` (checked above), and it matches what the token broker
+      // keys by (`resolveServerOAuth`, D4).
       oauthClientId: subject.decl.id,
       // Bootstrapper = the signed initiator. Audit-only, first-wins on conflict.
       bootstrappedByUserId: claims.userId,
@@ -658,6 +704,111 @@ async function handleMcpOAuthCallback(
   }
 }
 
+/**
+ * RFC 9207 check of the shared remote callback. The shared URI carries no per-server
+ * binding, so `iss` is the only thing that attributes a code to the AS that minted it:
+ * pinned at discovery (`issForCallback`) and required to match exactly, before the
+ * single-use code is exchanged.
+ *
+ * Fails closed when the server pinned no issuer. The shared callback serves every
+ * remote server, so whether the check runs must not depend on the resolved AS's own
+ * metadata: a malicious installed AS that omitted `iss` could otherwise relay the user
+ * to an honest AS sharing this redirect/state/PKCE and have the honest code attributed
+ * to itself. Such a server belongs on its per-server URI instead.
+ */
+function checkSharedCallbackIssuer(
+  remote: RemoteClientRouting,
+  rawIss: unknown
+): { kind: 'issuer_binding_required' } | { kind: 'issuer_mismatch' } | null {
+  const expectedIss = remote.issForCallback
+  if (typeof expectedIss !== 'string' || expectedIss.length === 0) {
+    return { kind: 'issuer_binding_required' }
+  }
+  // Anything but a string (repeated or bracketed parameter) reads as absent, and
+  // absent never matches a pinned issuer.
+  const iss = typeof rawIss === 'string' ? rawIss : undefined
+  return iss === expectedIss ? null : { kind: 'issuer_mismatch' }
+}
+
+type PerServerCheckResult =
+  | { kind: 'ok'; redirectUri: string }
+  | { kind: 'invalid_state'; reason: 'binding_mismatch' }
+  | { kind: 'issuer_mismatch' }
+  | { kind: 'callback_base_url_unconfigured' }
+
+/**
+ * Checks of the per-server remote callback (`/remote/<serverName>[/<installNonce>]`),
+ * for an AS that does not return RFC 9207 `iss`. The server name was already matched
+ * to the signed state before the CR was read; here:
+ *
+ *   1. the CR must use the per-server variant — a server whose AS returns `iss` is
+ *      bound by it on the shared callback and must never be reachable here;
+ *   2. the URI must be the one this installation registered: for DCR, the nonce of the
+ *      row bound to this CR; for pre-registered, no nonce (the mode comes from the CR);
+ *   3. an `iss` the AS sends anyway must be the pinned issuer — but it cannot be
+ *      required, which is why this variant exists;
+ *   4. the redirect URI for the exchange is rebuilt from the signed server name and the
+ *      stored registration, not from the request path.
+ */
+async function checkPerServerCallback(
+  subject: McpServerOAuthSubject,
+  serverName: string,
+  target: Extract<CallbackTarget, { kind: 'remote-per-server' }>,
+  rawIss: unknown,
+  db: DbClient
+): Promise<PerServerCheckResult> {
+  const remote = subject.decl.remote as RemoteClientRouting
+  if (remoteCallbackVariant(remote) !== 'per-server') return BINDING_MISMATCH
+
+  const registration = await resolvePerServerRegistration(db, subject, serverName)
+  if (!registration) return BINDING_MISMATCH
+  const expectedNonce = registration.mode === 'dcr' ? registration.installNonce : undefined
+  if (target.installNonce !== expectedNonce) return BINDING_MISMATCH
+
+  const issRejection = perServerIssRejection(rawIss, remote.issuer)
+  if (issRejection) {
+    // Only the server and the reason: the query also carries `code` and `state`,
+    // which the log redaction does not cover.
+    log.warn({ serverName, reason: issRejection }, 'per-server oauth callback iss rejected')
+    return { kind: 'issuer_mismatch' }
+  }
+
+  if (target.origin === null) return { kind: 'callback_base_url_unconfigured' }
+  try {
+    return {
+      kind: 'ok',
+      redirectUri: buildPerServerRedirectUri(target.origin, serverName, registration),
+    }
+  } catch (err) {
+    if (err instanceof InvalidRemoteRedirectUriInputError) {
+      return { kind: 'callback_base_url_unconfigured' }
+    }
+    throw err
+  }
+}
+
+/**
+ * Validate an `iss` the AS sent on a per-server callback. Absent is fine; a present
+ * value must be a single non-empty string equal to the pinned issuer. A repeated,
+ * bracketed or empty parameter is rejected rather than read as absent, so an attacker
+ * who can append to the query cannot turn a wrong issuer into "no issuer".
+ */
+function perServerIssRejection(
+  rawIss: unknown,
+  pinnedIssuer: string | undefined
+): 'iss_malformed' | 'iss_mismatch' | null {
+  if (rawIss === undefined) return null
+  if (typeof rawIss !== 'string' || rawIss.length === 0) return 'iss_malformed'
+  return rawIss === pinnedIssuer ? null : 'iss_mismatch'
+}
+
+/** The authorization-code grant a callback redeems, with the redirect URI to replay. */
+interface AuthCodeGrant {
+  code: string
+  state: string
+  redirectUri: string
+}
+
 type ExchangeAuthCodeResult =
   | { kind: 'ok'; provider: GrantProviderLabel; parsed: ParsedTokenResponse }
   | { kind: 'unknown_oauth_client' }
@@ -677,21 +828,21 @@ async function exchangeAuthCode(
   secretNamespace: string,
   /** mcp-server owner (dynamic-client coordinate + installation); undefined for the recipe lane. */
   owner: RemoteCredentialOwner | undefined,
-  input: CallbackInput,
+  grant: AuthCodeGrant,
   deps: CallbackDeps
 ): Promise<ExchangeAuthCodeResult> {
   // Remote lane (`source:'remote'`): discovery-derived endpoint ⇒ IP-pinned POST
   // (DEC-17), public token client, credentials per `secretSource`. Byte-identical
   // baked path is below (unchanged).
   if (decl.remote) {
-    return exchangeRemoteAuthCode(decl, secretNamespace, owner, input, deps)
+    return exchangeRemoteAuthCode(decl, secretNamespace, owner, grant, deps)
   }
 
   // Generic self-hosted lane (`source:'generic'`): knob-configured request over
   // the same IP-pinned POST (DEC-17). Credentials per `secretSource` (public or
   // k8s-secret). Baked path is below (unchanged).
   if (decl.generic) {
-    return exchangeGenericAuthCode(decl, secretNamespace, owner, input, deps)
+    return exchangeGenericAuthCode(decl, secretNamespace, owner, grant, deps)
   }
 
   // Baked/recipe lane. clientIdRef is always present here (remote is the only
@@ -745,7 +896,7 @@ async function exchangeAuthCode(
   // PKCE (DEC-1): re-derive the verifier from the EXACT round-tripped state
   // string — the same signed value the authorize URL derived its challenge from.
   const codeVerifier = adapter.usesPkce
-    ? deriveCodeVerifier(deps.stateSecret, input.state)
+    ? deriveCodeVerifier(deps.stateSecret, grant.state)
     : undefined
 
   try {
@@ -755,10 +906,10 @@ async function exchangeAuthCode(
     // closed, no token) instead of an opaque 500 — symmetric with tokenHelper's
     // wrapped `buildRefreshRequest`.
     const tokenRequest = adapter.buildTokenRequest({
-      code: input.code,
+      code: grant.code,
       clientId,
       clientSecret,
-      redirectUri: input.redirectUri,
+      redirectUri: grant.redirectUri,
       codeVerifier,
     })
     const response = await deps.fetchFn(tokenRequest.url, {
@@ -787,7 +938,7 @@ async function exchangeRemoteAuthCode(
   decl: OAuthClientDecl,
   secretNamespace: string,
   owner: RemoteCredentialOwner | undefined,
-  input: CallbackInput,
+  grant: AuthCodeGrant,
   deps: CallbackDeps
 ): Promise<ExchangeAuthCodeResult> {
   // `decl.remote` presence is the branch guard in the caller.
@@ -797,14 +948,14 @@ async function exchangeRemoteAuthCode(
 
   // PKCE (DEC-1 / §6 #3): the remote lane is ALWAYS S256 — re-derive the verifier
   // from the exact round-tripped state, same as the baked PKCE adapters.
-  const codeVerifier = deriveCodeVerifier(deps.stateSecret, input.state)
+  const codeVerifier = deriveCodeVerifier(deps.stateSecret, grant.state)
   const tokenRequest = buildRemoteTokenRequest(
     remote.tokenEndpoint,
     {
-      code: input.code,
+      code: grant.code,
       clientId: credResult.cred.clientId,
       clientSecret: credResult.cred.clientSecret,
-      redirectUri: input.redirectUri,
+      redirectUri: grant.redirectUri,
       codeVerifier,
     },
     remote.resource
@@ -847,7 +998,7 @@ async function exchangeGenericAuthCode(
   decl: OAuthClientDecl,
   secretNamespace: string,
   owner: RemoteCredentialOwner | undefined,
-  input: CallbackInput,
+  grant: AuthCodeGrant,
   deps: CallbackDeps
 ): Promise<ExchangeAuthCodeResult> {
   // `decl.generic` presence is the branch guard in the caller.
@@ -859,7 +1010,7 @@ async function exchangeGenericAuthCode(
   // PKCE gated on the knob: re-derive the verifier from the exact round-tripped
   // state (the authorize URL derived its challenge from the same value).
   const codeVerifier = generic.usePkce
-    ? deriveCodeVerifier(deps.stateSecret, input.state)
+    ? deriveCodeVerifier(deps.stateSecret, grant.state)
     : undefined
 
   let tokenRequest: ReturnType<typeof adapter.buildTokenRequest>
@@ -867,10 +1018,10 @@ async function exchangeGenericAuthCode(
     // The build can throw (e.g. tokenAuthMethod=basic on a secret-less client) —
     // turn that into a typed fail-closed result, never an opaque 500.
     tokenRequest = adapter.buildTokenRequest({
-      code: input.code,
+      code: grant.code,
       clientId: credResult.cred.clientId,
       clientSecret: credResult.cred.clientSecret,
-      redirectUri: input.redirectUri,
+      redirectUri: grant.redirectUri,
       codeVerifier,
     })
   } catch (err) {

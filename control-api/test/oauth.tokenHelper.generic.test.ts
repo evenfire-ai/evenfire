@@ -19,28 +19,31 @@ const VALIDATED_IP = '93.184.216.34'
 const CLIENT_ID = 'my-generic-client'
 
 function genericOwnerDecl(supportsRefresh: boolean, refreshEndpoint?: string) {
-  const resolved = resolveServerOAuthSubject({
-    spec: {
-      contextRef: 'ctx-A',
-      oauth: {
-        source: 'generic',
-        id: CLIENT_ID,
-        authorizationEndpoint: 'https://idp.example.com/authorize',
-        tokenEndpoint: TOKEN_ENDPOINT,
-        refreshEndpoint,
-        resource: 'https://api.example.com',
-        tokenRequestFormat: 'form',
-        tokenAuthMethod: 'body',
-        scopeSeparator: 'space',
-        sendScope: true,
-        usePkce: true,
-        includeResponseType: true,
-        supportsRefresh,
-        grantScope: 'user',
-        scopes: ['read'],
+  const resolved = resolveServerOAuthSubject(
+    {
+      spec: {
+        contextRef: 'ctx-A',
+        oauth: {
+          source: 'generic',
+          id: CLIENT_ID,
+          authorizationEndpoint: 'https://idp.example.com/authorize',
+          tokenEndpoint: TOKEN_ENDPOINT,
+          refreshEndpoint,
+          resource: 'https://api.example.com',
+          tokenRequestFormat: 'form',
+          tokenAuthMethod: 'body',
+          scopeSeparator: 'space',
+          sendScope: true,
+          usePkce: true,
+          includeResponseType: true,
+          supportsRefresh,
+          grantScope: 'user',
+          scopes: ['read'],
+        },
       },
     },
-  })
+    'token'
+  )
   if (!resolved) throw new Error('fixture: generic resolve returned null')
   return { spec: { oauthClients: [resolved.decl] } }
 }

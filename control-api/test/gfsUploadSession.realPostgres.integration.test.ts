@@ -20,6 +20,7 @@ import {
   type UploadSessionServiceDeps,
 } from '../../gfs-controller/src/upload/uploadSession.js'
 import { initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -184,19 +185,22 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
   })
 
   afterAll(async () => {
-    await pool
-      ?.query('DELETE FROM gfs_upload_sessions WHERE drive = $1', [drive])
-      .catch(() => undefined)
-    await pool?.end()
-    await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined)
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await pool
+        ?.query('DELETE FROM gfs_upload_sessions WHERE drive = $1', [drive])
+        .catch(() => undefined)
+      await endPoolAndWaitForClients(pool)
+      await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('serializes concurrent idempotent creates to one session and rejects a changed fingerprint', async () => {

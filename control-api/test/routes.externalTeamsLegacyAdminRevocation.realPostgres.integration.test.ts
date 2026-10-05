@@ -7,6 +7,7 @@ import { initDb } from '../src/db.js'
 import { createExternalTeamsRouter } from '../src/routes/external/teams.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const userId = '11111111-1111-4111-8111-111111111111'
 const teamId = '22222222-2222-4222-8222-222222222222'
@@ -165,16 +166,19 @@ describeRealPostgres('legacy V1 live-admin revocation on real external team rout
   })
 
   afterAll(async () => {
-    await databasePool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
+    try {
+      await endPoolAndWaitForClients(databasePool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
            FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

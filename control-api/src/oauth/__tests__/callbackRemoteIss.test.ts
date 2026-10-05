@@ -5,7 +5,6 @@ import {
   type CallbackDeps,
   type CallbackInput,
   type McpServerOAuthSubject,
-  REMOTE_CALLBACK_CLIENT_SEGMENT,
   handleOAuthCallback,
 } from '../callback.js'
 // State is derived from the REAL producer (T1): never hand-write the signed
@@ -77,12 +76,11 @@ function signedMcpState(): string {
 
 function input(overrides: Partial<CallbackInput> = {}): CallbackInput {
   return {
-    // Stable remote callback: the URL segment is the reserved constant, the real
-    // client id rides the signed state.
-    oauthClientId: REMOTE_CALLBACK_CLIENT_SEGMENT,
+    // Shared remote callback: the URL carries no client id, the real one rides the
+    // signed state.
+    target: { kind: 'remote-shared', origin: 'https://callback.example.test' },
     code: 'auth-code-single-use',
     state: signedMcpState(),
-    redirectUri: 'https://callback.example.test/api/v1/oauth-callback/remote',
     ...overrides,
   }
 }

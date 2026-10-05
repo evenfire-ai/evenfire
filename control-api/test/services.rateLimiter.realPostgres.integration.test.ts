@@ -13,6 +13,7 @@ import {
   checkAndIncrementStrictWithQuery,
   checkAndIncrementWithQuery,
 } from '../src/services/rateLimiterService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -58,27 +59,31 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = ANY($1)', [
-      [
-        bucketKey,
-        preAdmissionKey,
-        sandboxTokenVendKey,
-        sandboxDisconnectKey,
-        sandboxOtherUserKey,
-        messageAdmissionKey,
-        hostRpcKey,
-        hostRpcOtherKey,
-      ],
-    ])
-    await pool?.end()
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = ANY($1)', [
+        [
+          bucketKey,
+          preAdmissionKey,
+          sandboxTokenVendKey,
+          sandboxDisconnectKey,
+          sandboxOtherUserKey,
+          messageAdmissionKey,
+          hostRpcKey,
+          hostRpcOtherKey,
+        ],
+      ])
+      await endPoolAndWaitForClients(pool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('returns distinct post-increment counts under concurrent requests', async () => {
