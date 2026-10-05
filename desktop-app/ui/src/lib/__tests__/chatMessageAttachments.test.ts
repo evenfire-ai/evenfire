@@ -164,7 +164,7 @@ describe('chat message attachments', () => {
       },
     ]
 
-    expect(buildChatMessageAttachments(images, [])[0]).toMatchObject({
+    expect(buildChatMessageAttachments(images, [], [])[0]).toMatchObject({
       type: 'uploaded_file',
       label: 'shot.png',
       filename: 'shot.png',
