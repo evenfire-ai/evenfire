@@ -40,16 +40,67 @@ function registrySecretFactory(registrySource?: string): {
   const registryResourceMetadata: ts.Expression[] = []
   let catalogAnnotations: ts.FunctionDeclaration | undefined
 
-  function canWriteManaged(node: ts.Node): boolean {
-    if (
-      ts.isPropertyAccessExpression(node) &&
-      node.expression.getText(source) === 'mcpServerSpec'
-    ) {
-      return node.name.text === 'managed'
+  /** Assignment operators: plain, compound, and logical forms. */
+  function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
+    return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment
+  }
+
+  /** Every expression `root` writes to, including leaves nested in
+   * destructuring patterns (`[a.managed] = xs`, `({ b: a.managed } = o)`).
+   * Receivers and computed keys are reads, so the walk stops at member
+   * targets instead of descending into them. */
+  function collectWriteTargets(root: ts.Node): ts.Node[] {
+    const targets: ts.Node[] = []
+    function scan(node: ts.Node): void {
+      if (
+        ts.isIdentifier(node) ||
+        ts.isPropertyAccessExpression(node) ||
+        ts.isElementAccessExpression(node)
+      ) {
+        targets.push(node)
+        return
+      }
+      if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
+        // Destructuring defaults (`[target = fallback] = xs`) write only the left side.
+        scan(node.left)
+        return
+      }
+      if (ts.isObjectLiteralExpression(node)) {
+        // Object destructuring: values are nested targets, keys are reads.
+        for (const property of node.properties) {
+          if (ts.isPropertyAssignment(property)) scan(property.initializer)
+          else if (ts.isShorthandPropertyAssignment(property)) targets.push(property.name)
+          else if (ts.isSpreadAssignment(property)) scan(property.expression)
+        }
+        return
+      }
+      // Array destructuring patterns and any other nesting scan every child.
+      ts.forEachChild(node, scan)
     }
-    // Even a dynamic key might resolve to "managed" at runtime. No computed
-    // writes are modeled by the fixture, so every one must fail closed.
-    return ts.isElementAccessExpression(node) && node.expression.getText(source) === 'mcpServerSpec'
+    scan(root)
+    return targets
+  }
+
+  /** A target whose write can change the `managed` value this fixture
+   * derives: the whole `mcpServerSpec` binding (rebinding swaps every
+   * field), any `*.managed` member write (any receiver — an alias like
+   * `const s = mcpServerSpec` still writes the same field), or any
+   * computed key on the spec (the key may resolve to "managed" at
+   * runtime, so every one fails closed). */
+  function writesRegistryManaged(target: ts.Node): boolean {
+    if (ts.isIdentifier(target)) return target.getText(source) === 'mcpServerSpec'
+    if (ts.isPropertyAccessExpression(target)) return target.name.getText(source) === 'managed'
+    return (
+      ts.isElementAccessExpression(target) && target.expression.getText(source) === 'mcpServerSpec'
+    )
+  }
+
+  /** Records the construct when any target it writes can change `managed`.
+   * The construct node is kept so the error shows the full statement. */
+  function rejectManagedWrites(construct: ts.Node, writeRoot: ts.Node): void {
+    if (collectWriteTargets(writeRoot).some(writesRegistryManaged)) {
+      unsupportedManagedWrites.push(construct)
+    }
   }
 
   function visit(node: ts.Node): void {
@@ -66,12 +117,24 @@ function registrySecretFactory(registrySource?: string): {
     if (ts.isVariableDeclaration(node) && node.initializer) {
       const variableName = node.name.getText(source)
       if (variableName === 'mcpServerSpec' && ts.isObjectLiteralExpression(node.initializer)) {
-        const managed = node.initializer.properties.find(
-          property =>
-            ts.isPropertyAssignment(property) && property.name.getText(source) === 'managed'
-        )
-        if (managed && ts.isPropertyAssignment(managed)) {
-          managedExpressions.push(managed.initializer)
+        let managedDerived = false
+        for (const property of node.initializer.properties) {
+          if (ts.isSpreadAssignment(property)) {
+            // A spread after `managed:` can override it with a value the
+            // fixture cannot extract; fail closed instead of deriving stale.
+            if (managedDerived) unsupportedManagedWrites.push(property)
+            continue
+          }
+          if (property.name.getText(source) !== 'managed') continue
+          // Only a literal `managed:` property assignment is derivable.
+          // Shorthand, method, and accessor forms read `managed` from an
+          // unextracted outer scope, so they fail closed.
+          if (ts.isPropertyAssignment(property)) {
+            managedExpressions.push(property.initializer)
+            managedDerived = true
+          } else {
+            unsupportedManagedWrites.push(property)
+          }
         }
       }
       if (variableName === 'registryLabels' && node.pos > 0) {
@@ -99,29 +162,35 @@ function registrySecretFactory(registrySource?: string): {
         assignments.push(node.right)
       }
     }
-    if (
-      ts.isBinaryExpression(node) &&
-      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
-      (canWriteManaged(node.left) || node.left.getText(source) === 'mcpServerSpec')
-    ) {
-      unsupportedManagedWrites.push(node)
+    if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
+      // Catches plain, compound, and destructuring assignments whose targets
+      // nest `managed` writes at any depth of the assignment's left side.
+      rejectManagedWrites(node, node.left)
+    }
+    if (ts.isForInStatement(node) || ts.isForOfStatement(node)) {
+      rejectManagedWrites(node, node.initializer)
     }
     if (
-      ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
-        (node.operator === ts.SyntaxKind.PlusPlusToken ||
-          node.operator === ts.SyntaxKind.MinusMinusToken) &&
-        canWriteManaged(node.operand)) ||
-      (ts.isDeleteExpression(node) && canWriteManaged(node.expression))
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken ||
+        node.operator === ts.SyntaxKind.MinusMinusToken)
     ) {
-      unsupportedManagedWrites.push(node)
+      rejectManagedWrites(node, node.operand)
+    }
+    if (ts.isDeleteExpression(node)) {
+      rejectManagedWrites(node, node.expression)
     }
     if (
       ts.isCallExpression(node) &&
-      node.arguments[0]?.getText(source) === 'mcpServerSpec' &&
-      ['Object.assign', 'Object.defineProperty', 'Object.defineProperties', 'Reflect.set'].includes(
-        node.expression.getText(source)
-      )
+      node.arguments.length > 0 &&
+      [
+        'Object.assign',
+        'Object.defineProperty',
+        'Object.defineProperties',
+        'Reflect.set',
+        'Reflect.defineProperty',
+      ].includes(node.expression.getText(source)) &&
+      writesRegistryManaged(node.arguments[0])
     ) {
       unsupportedManagedWrites.push(node)
     }
