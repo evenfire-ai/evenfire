@@ -49,7 +49,7 @@ export function DetailPageShell<T extends string>({
           />
         }
       >
-        {tabs ? (
+        {tabs && activeTab !== undefined && onTabChange && tabAriaLabel ? (
           <TabBar<T>
             ariaLabel={tabAriaLabel ?? 'Detail sections'}
             activeValue={activeTab as T}

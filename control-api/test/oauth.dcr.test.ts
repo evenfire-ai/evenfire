@@ -88,6 +88,52 @@ describe('registerDynamicClient (RFC 7591, effectful via injected pinned transpo
     redirectUris: REDIRECT_URIS,
   })
 
+  it('an oversized client_id → invalid_response carrying the RFC 7592 handle for cleanup', async () => {
+    const { transport } = makeDcrTransport({
+      responseJson: JSON.stringify({
+        ...DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
+        client_id: `https://as.example.com/${'/'.repeat(200_000)}a`,
+      }),
+    })
+    const started = performance.now()
+    const outcome = await registerDynamicClient(
+      { transport, resolveDns: PUBLIC_IP },
+      DCR_REGISTRATION_ENDPOINT,
+      confReq
+    )
+    expect(performance.now() - started).toBeLessThan(200)
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.error).toMatchObject({
+      kind: 'invalid_response',
+      minted: true,
+      registrationClientUri: DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri,
+      registrationAccessToken: DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_access_token,
+    })
+  })
+
+  it('client_id length: 512 bytes accepted, 513 → invalid_response (the CRD caps spec.oauth.id at 512)', async () => {
+    for (const [length, ok] of [
+      [512, true],
+      [513, false],
+    ] as const) {
+      const { transport } = makeDcrTransport({
+        responseJson: JSON.stringify({
+          ...DCR_PUBLIC_REGISTRATION_RESPONSE,
+          client_id: 'c'.repeat(length),
+        }),
+      })
+      const outcome = await registerDynamicClient(
+        { transport, resolveDns: PUBLIC_IP },
+        DCR_REGISTRATION_ENDPOINT,
+        publicReq
+      )
+      expect(outcome.ok).toBe(ok)
+      if (!outcome.ok)
+        expect(outcome.error).toMatchObject({ kind: 'invalid_response', minted: true })
+    }
+  })
+
   it('public: parses the RFC 7591 response and returns the assigned client_id', async () => {
     const { transport, calls } = makeDcrTransport({
       responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),

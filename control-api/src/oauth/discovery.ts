@@ -1,3 +1,4 @@
+import { getDomain } from 'tldts'
 import {
   type PinnedFetchError,
   type PinnedResponse,
@@ -74,6 +75,12 @@ export interface SelectRegistrationModeInput {
   cimdSupported: boolean
   tokenEndpointAuthMethods: string[]
   hasRegistrationEndpoint: boolean
+  /**
+   * Whether the AS returns `iss` on the authorization response (RFC 9207) — compute it
+   * with {@link advertisesIssBinding}. Required, with no default, so a caller cannot
+   * silently fall back to offering CIMD against an AS without it.
+   */
+  issBindingSupported: boolean
 }
 
 /**
@@ -84,12 +91,134 @@ export interface SelectRegistrationModeInput {
  * ordering is an invariant with a property test (T2): CIMD requires the DOUBLE
  * condition (`cimdSupported` AND `none` ∈ auth methods — a public client); DCR
  * requires a registration endpoint; otherwise the operator registers manually.
+ *
+ * Without RFC 9207 CIMD is never offered, even when the AS supports it: such a server
+ * needs a redirect URI of its own, and the CIMD document is one platform-wide identity
+ * that can only list the shared callback. A CIMD-only AS without `iss` therefore
+ * resolves to `manual` (the operator pre-registers a client).
  */
 export function selectRegistrationMode(input: SelectRegistrationModeInput): RegistrationMode {
   if (input.hasPreRegisteredClient) return 'pre-registered'
-  if (input.cimdSupported && input.tokenEndpointAuthMethods.includes('none')) return 'cimd'
+  if (
+    input.issBindingSupported &&
+    input.cimdSupported &&
+    input.tokenEndpointAuthMethods.includes('none')
+  ) {
+    return 'cimd'
+  }
   if (input.hasRegistrationEndpoint) return 'dcr'
   return 'manual'
+}
+
+/**
+ * The metadata-derived inputs of {@link selectRegistrationMode}, in one place so a
+ * caller asking "what would this AS resolve to" reads the metadata exactly as
+ * discovery does.
+ */
+export function registrationModeInputs(
+  as: AuthorizationServerMetadata,
+  opts: { hasPreRegisteredClient: boolean }
+): SelectRegistrationModeInput {
+  return {
+    hasPreRegisteredClient: opts.hasPreRegisteredClient,
+    cimdSupported: as.client_id_metadata_document_supported === true,
+    tokenEndpointAuthMethods: as.token_endpoint_auth_methods_supported ?? [],
+    hasRegistrationEndpoint: typeof as.registration_endpoint === 'string',
+    issBindingSupported: advertisesIssBinding(as),
+  }
+}
+
+/**
+ * RFC 9207: the AS advertises that it returns `iss` on the authorization response.
+ * The ONE expression behind both `issForCallback` and the registration-mode choice, so
+ * the callback variant and the offered modes cannot disagree about the same AS.
+ * Strictly `=== true`: the metadata is untrusted and a truthy non-boolean is not an
+ * advertisement.
+ */
+export function advertisesIssBinding(as: AuthorizationServerMetadata): boolean {
+  return as.authorization_response_iss_parameter_supported === true
+}
+
+// ─── Same-site rule for AS endpoints (per-server callback only) ─────────────
+
+/**
+ * Registrable domain (eTLD+1, Public Suffix List including its private section) of a
+ * URL, or `null` when it has none.
+ *
+ * The host is taken from WHATWG `new URL()` — the same parse `pinnedFetch` connects
+ * with — and only the hostname is handed to `tldts`. Passing the raw URL would let the
+ * two parsers disagree: `https://evil.com\@honest.com/t` is `evil.com` to WHATWG (and
+ * to the socket) but `honest.com` to `tldts`. A URL carrying userinfo is refused
+ * outright (`null`) since no AS endpoint legitimately has one. `allowPrivateDomains`
+ * keeps shared-hosting suffixes (`github.io`, `herokuapp.com`) as public suffixes, so
+ * two tenants of one platform are two sites; a bare public suffix or an IP literal has
+ * no registrable domain and yields `null`.
+ */
+export function registrableSite(url: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  if (parsed.username !== '' || parsed.password !== '') return null
+  return getDomain(parsed.hostname, { allowPrivateDomains: true })
+}
+
+export interface AsEndpointSites {
+  issuer: string
+  authorization: string
+  token: string
+  registration?: string
+}
+
+export type AsEndpointSiteCheck =
+  | { ok: true }
+  | { ok: false; field: keyof AsEndpointSites; detail: string }
+
+/**
+ * Every AS endpoint must share the issuer's registrable domain. Applies when the AS
+ * does not return `iss` (RFC 9207): the callback then cannot tell which AS produced a
+ * code, so a hostile metadata document that borrows an honest AS's authorize and
+ * registration endpoints but names its own token endpoint would have us register a
+ * client at the honest AS and redeem its codes at the attacker. With `iss` the response
+ * is bound to the issuer and this rule is not needed.
+ *
+ * Only the endpoints we send to are checked. `revocation_endpoint` is neither used nor
+ * pinned on the CR, so an off-site or malformed one must not block an install; whatever
+ * starts sending refresh tokens to it must first pin it on the CR and add it here (and
+ * to the runtime coherence rule). A `null` site is never equal to anything, including
+ * another `null`. Pure: callers pass the endpoints they are about to trust (discovery
+ * output, or the values pinned on a CR).
+ */
+export function checkAsEndpointsSameSite(endpoints: AsEndpointSites): AsEndpointSiteCheck {
+  const issuerSite = registrableSite(endpoints.issuer)
+  if (issuerSite === null) {
+    return {
+      ok: false,
+      field: 'issuer',
+      detail:
+        'issuer has no registrable domain (public suffix, IP literal, userinfo or invalid URL)',
+    }
+  }
+  const fields: Array<Exclude<keyof AsEndpointSites, 'issuer'>> = [
+    'authorization',
+    'token',
+    'registration',
+  ]
+  for (const field of fields) {
+    const url = endpoints[field]
+    if (url === undefined) continue
+    const site = registrableSite(url)
+    if (site !== issuerSite) {
+      return {
+        ok: false,
+        field,
+        detail: `${field} endpoint ${site === null ? 'has no registrable domain' : `is on site "${site}"`}, issuer is on site "${issuerSite}"`,
+      }
+    }
+  }
+  return { ok: true }
 }
 
 // ─── Transport quirks derived from metadata (D-8, pure) ─────────────────────
@@ -153,6 +282,8 @@ export type DiscoveryError =
   | { kind: 'issuer_mismatch'; detail: string }
   /** Response arrived with a non-identity `content-encoding` (fail-closed, never mis-parse). */
   | { kind: 'content_encoding_rejected'; url: string; encoding: string }
+  /** Without RFC 9207, an AS endpoint is not on the issuer's registrable domain. */
+  | { kind: 'as_endpoints_cross_site'; field: string; detail: string }
 
 export interface DiscoveryResult {
   prm: ProtectedResourceMetadata
@@ -496,16 +627,17 @@ async function resolvePrm(
  * Full RFC 9728 → 8414 discovery for a remote MCP server URL. Returns the pinned
  * endpoints, `resource` (RFC 8707), issuer/`iss` handling (RFC 9207), the
  * registration mode (D-3) and transport quirks (D-8). Fail-closed if the AS does
- * not advertise S256 (invariant 3).
+ * not advertise S256 (invariant 3), and — when it does not return `iss` (RFC 9207) —
+ * if any of its endpoints leaves the issuer's registrable domain
+ * (`as_endpoints_cross_site`), before anything is registered against it.
  *
  * `hasPreRegisteredClient` reflects operator config (a pre-registered Secret),
- * defaulting to false — the C1 pilots (Notion/Canva/Linear/Sentry) have none and
- * resolve to CIMD.
+ * defaulting to false.
  *
- * Mirror: control-ui hand-copies this projection (the `detected` shape the remoteMcp
- * route builds from this result) in test/fixtures/__tests__/remoteMcpDiscovery.contract.test.ts
- * (projectDetected), because control-api is not importable there. A shape change here
- * must be reflected in that copy or its fixtures certify a stale shape.
+ * Contract with control-ui: the `/discover` and install responses built from this
+ * result are pinned as wire goldens by test/routes.adminRemoteMcp.wireGoldens.test.ts,
+ * which control-ui's fixtures consume (control-api is not importable there). A shape
+ * change here must regenerate those goldens or control-ui certifies a stale shape.
  */
 export async function discoverRemoteOAuth(
   mcpUrl: string,
@@ -621,12 +753,33 @@ export async function discoverRemoteOAuth(
     }
   }
 
-  const registrationMode = selectRegistrationMode({
-    hasPreRegisteredClient: opts.hasPreRegisteredClient ?? false,
-    cimdSupported: as.client_id_metadata_document_supported === true,
-    tokenEndpointAuthMethods: as.token_endpoint_auth_methods_supported ?? [],
-    hasRegistrationEndpoint: typeof as.registration_endpoint === 'string',
-  })
+  const issBindingSupported = advertisesIssBinding(as)
+  if (!issBindingSupported) {
+    const sameSite = checkAsEndpointsSameSite({
+      issuer: as.issuer,
+      authorization: as.authorization_endpoint,
+      token: as.token_endpoint,
+      ...(typeof as.registration_endpoint === 'string'
+        ? { registration: as.registration_endpoint }
+        : {}),
+    })
+    if (!sameSite.ok) {
+      log.warn(
+        { discovery: 'as_endpoints_cross_site', field: sameSite.field },
+        'authorization server endpoints are not on the issuer site'
+      )
+      return {
+        ok: false,
+        error: { kind: 'as_endpoints_cross_site', field: sameSite.field, detail: sameSite.detail },
+      }
+    }
+  }
+
+  const registrationMode = selectRegistrationMode(
+    registrationModeInputs(as, {
+      hasPreRegisteredClient: opts.hasPreRegisteredClient ?? false,
+    })
+  )
 
   return {
     ok: true,
@@ -635,8 +788,7 @@ export async function discoverRemoteOAuth(
       as,
       resource: prm.resource,
       issuer: as.issuer,
-      issForCallback:
-        as.authorization_response_iss_parameter_supported === true ? as.issuer : undefined,
+      issForCallback: issBindingSupported ? as.issuer : undefined,
       endpoints: {
         authorization: as.authorization_endpoint,
         token: as.token_endpoint,

@@ -1,8 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { PinnedRawResponse, PinnedTransportInput } from '../src/http/pinnedFetch.js'
+import { type DiscoveryResult, discoverRemoteOAuth } from '../src/oauth/discovery.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import * as store from '../src/oauth/store.js'
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
+import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
 
 /**
  * C4/DEC-17 + D-8 — the REMOTE refresh goes through the IP-pinned transport (never
@@ -16,25 +19,34 @@ const TOKEN_ENDPOINT = 'https://mcp.notion.com/token'
 const VALIDATED_IP = '93.184.216.34'
 const CLIENT_ID = 'https://control.example.com/api/v1/.well-known/evenfire-mcp-client'
 
-function remoteOwnerDecl(supportsRefresh: boolean) {
-  const resolved = resolveServerOAuthSubject({
-    spec: {
-      contextRef: 'ctx-A',
-      oauth: {
-        source: 'remote',
-        id: CLIENT_ID,
-        clientMode: 'public',
-        authorizationEndpoint: 'https://mcp.notion.com/authorize',
-        tokenEndpoint: TOKEN_ENDPOINT,
-        issuer: 'https://mcp.notion.com',
-        resource: 'https://mcp.notion.com',
-        grantScope: 'user',
-        scopes: ['read'],
-        bearerInBody: false,
-        supportsRefresh,
-      },
-    },
+// Real Notion discovery: CIMD without RFC 9207. A CIMD client there (the shape a CR
+// installed before the per-server callback carries) is refused at consent, but a grant it
+// already holds keeps refreshing: the refresh reader resolves in the `token` phase.
+let notion: DiscoveryResult
+
+beforeAll(async () => {
+  const outcome = await discoverRemoteOAuth(PILOTS.notion.mcpUrl, {
+    transport: makeDiscoveryTransport(PILOTS.notion),
+    resolveDns: async () => [VALIDATED_IP],
   })
+  if (!outcome.ok) throw new Error(`fixture discovery failed: ${outcome.error.kind}`)
+  notion = outcome.result
+})
+
+function remoteOwnerDecl(supportsRefresh: boolean) {
+  const oauth = buildRemoteOAuthSpec(notion, {
+    clientMode: 'public',
+    grantScope: 'user',
+    cimdClientId: CLIENT_ID,
+  })
+  expect(oauth.issForCallback).toBeUndefined()
+  expect(oauth.tokenEndpoint).toBe(TOKEN_ENDPOINT)
+  // `supportsRefresh` follows the AS metadata (true for Notion); the `false` case is the
+  // same block with the flag flipped, as for an AS that advertises no refresh grant.
+  const resolved = resolveServerOAuthSubject(
+    { spec: { contextRef: 'ctx-A', oauth: { ...oauth, supportsRefresh } } },
+    'token'
+  )
   if (!resolved) throw new Error('fixture: remote resolve returned null')
   return { spec: { oauthClients: [resolved.decl] } }
 }

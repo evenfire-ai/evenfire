@@ -8,14 +8,14 @@ const PROJECTS = [
   {
     name: 'external-rest-api',
     packagePath: 'external-rest-api/package.json',
-    codePrefixes: ['external-rest-api/src/', 'external-rest-api/test/'],
+    codePrefixes: ['external-rest-api/src/', 'external-rest-api/test/', 'packages/jwt-key-policy/'],
     codeFiles: ['external-rest-api/tsconfig.json'],
     ignoredFiles: ['external-rest-api/src/releaseManifest.ts'],
   },
   {
     name: 'rpc-proxy',
     packagePath: 'rpc-proxy/package.json',
-    codePrefixes: ['rpc-proxy/src/', 'rpc-proxy/test/'],
+    codePrefixes: ['rpc-proxy/src/', 'rpc-proxy/test/', 'packages/jwt-key-policy/'],
     codeFiles: ['rpc-proxy/tsconfig.json'],
   },
 ]
