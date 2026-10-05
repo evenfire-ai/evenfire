@@ -13,6 +13,7 @@ import {
   ATLASSIAN_DISCOVER,
   ATLASSIAN_DISCOVER_UNCONFIGURED,
   CALLBACK_UNCONFIGURED_FAILURE,
+  DCR_REGISTRATION_REJECTED_FAILURE,
   LINEAR_DISCOVER,
   LINEAR_DISCOVER_UNCONFIGURED,
   LINEAR_INSTALLED,
@@ -258,6 +259,68 @@ describe('AddRemoteServerWizard', () => {
     expect(error).toHaveTextContent('CONTROL_API_OAUTH_CALLBACK_BASE_URL')
     expect(error).not.toHaveTextContent(/redirect URI of its own/i)
     expect(onInstalled).not.toHaveBeenCalled()
+  })
+
+  it("shows the AS's own reason when it rejects client registration", async () => {
+    discoverMock.mockResolvedValue(discovered(NOTION_DISCOVER)) // dcr
+    installMock.mockRejectedValue(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))
+    renderWizard()
+    await fillIdentity()
+    clickDetect()
+    await screen.findByText('https://mcp.notion.com/authorize')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+    const error = await screen.findByText(/rejected client registration/i)
+    expect(error).toHaveTextContent('HTTP 400, invalid_redirect_uri')
+    expect(error).toHaveTextContent('not approved for use by this authorization server')
+    expect(error).not.toHaveTextContent('fetch_failed')
+  })
+
+  describe('a failed install does not leak into the next attempt', () => {
+    async function failInstallThenReturnToIdentity() {
+      discoverMock.mockResolvedValue(discovered(NOTION_DISCOVER))
+      installMock.mockRejectedValue(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))
+      renderWizard()
+      await fillIdentity()
+      clickDetect()
+      await screen.findByText('https://mcp.notion.com/authorize')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+      await screen.findByText(/rejected client registration/i)
+      // Confirm → Configure → Identify.
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    }
+
+    it('clears the error when the URL is changed and re-detected', async () => {
+      await failInstallThenReturnToIdentity()
+      discoverMock.mockResolvedValue(discovered(LINEAR_DISCOVER)) // cimd
+      fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/mcp'), {
+        target: { value: 'https://mcp.linear.app/mcp' },
+      })
+      clickDetect()
+      await screen.findByText('https://mcp.linear.app/authorize')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+      expect(await screen.findByRole('button', { name: 'Install remote server' })).toBeEnabled()
+      expect(screen.queryByText(/rejected client registration/i)).not.toBeInTheDocument()
+      expect(installMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('clears the error when only the server name is changed', async () => {
+      await failInstallThenReturnToIdentity()
+      fireEvent.change(screen.getByPlaceholderText('example-remote'), {
+        target: { value: 'notion-other' },
+      })
+      // The detection still holds for the same URL, so the wizard can move on.
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+      expect(await screen.findByRole('button', { name: 'Install remote server' })).toBeEnabled()
+      expect(screen.queryByText(/rejected client registration/i)).not.toBeInTheDocument()
+    })
   })
 
   // ── C5 transport probe ──────────────────────────────────────────────────────

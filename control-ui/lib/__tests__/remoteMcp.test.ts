@@ -12,6 +12,7 @@ import {
   CLIENT_ID_IN_USE_FAILURE,
   DCR_CONFIDENTIAL_DETECTED,
   DCR_REDIRECT_MISMATCH_FAILURE,
+  DCR_REGISTRATION_REJECTED_FAILURE,
   DROPBOX_DISCOVER_FAILURE,
   ISSUER_PUBLIC_SUFFIX_DISCOVER_FAILURE,
   LINEAR_DETECTED,
@@ -384,6 +385,71 @@ describe('mapRemoteInstallError', () => {
     expect(copy).toMatch(/different redirect URI/i)
     expect(copy).toMatch(/nothing was installed/i)
     expect(copy).not.toContain('redirect_uris_mismatch')
+  })
+
+  describe('an AS that rejected the client registration (registration_rejected)', () => {
+    function rejected(detail: Record<string, unknown>) {
+      return mapRemoteInstallError(
+        Object.assign(new Error('400'), {
+          code: 'dcr_registration_failed',
+          body: {
+            error: 'dcr_registration_failed',
+            detail: {
+              kind: 'registration_rejected',
+              url: 'https://as.example/register',
+              ...detail,
+            },
+          },
+        })
+      )
+    }
+
+    it("shows the provider's status, code and message, plus guidance (Vercel golden)", () => {
+      expect(mapRemoteInstallError(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))).toBe(
+        'The authorization server rejected client registration (HTTP 400, invalid_redirect_uri): ' +
+          '"The provided redirect URIs are not approved for use by this authorization server." ' +
+          'This provider restricts dynamic client registration: ask it to approve the redirect URI, ' +
+          'or install with a pre-registered client if it offers one.'
+      )
+    })
+
+    it('gives the same guidance for invalid_client_metadata', () => {
+      expect(rejected({ status: 400, error: 'invalid_client_metadata' })).toBe(
+        'The authorization server rejected client registration (HTTP 400, invalid_client_metadata). ' +
+          'This provider restricts dynamic client registration: ask it to approve the redirect URI, ' +
+          'or install with a pre-registered client if it offers one.'
+      )
+    })
+
+    it('shows only the status when the provider gave no error code or message', () => {
+      expect(rejected({ status: 403 })).toBe(
+        'The authorization server rejected client registration (HTTP 403).'
+      )
+    })
+
+    it('omits the guidance for other provider codes', () => {
+      expect(rejected({ status: 401, error: 'unauthorized_client', errorDescription: 'No.' })).toBe(
+        'The authorization server rejected client registration (HTTP 401, unauthorized_client): "No."'
+      )
+    })
+
+    it('never reads as a network failure', () => {
+      const copy = mapRemoteInstallError(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))
+      expect(copy).not.toContain('fetch_failed')
+      expect(copy).not.toContain('registration_rejected')
+    })
+
+    it('bounds third-party text even if the server relays it unbounded', () => {
+      const copy = rejected({
+        status: 400,
+        error: 'x'.repeat(200),
+        errorDescription: `a\u0000b\n${'z'.repeat(2000)}`,
+      })
+      expect(copy).not.toContain('x'.repeat(65))
+      expect(copy).not.toMatch(/[\u0000-\u001f]/)
+      expect(copy).toMatch(/"a b z+…"$/)
+      expect(copy.length).toBeLessThan(450)
+    })
   })
 
   it('gives each refused-DCR kind its own copy', () => {

@@ -114,6 +114,8 @@ export const DROPBOX_DISCOVER_FAILURE = loadGolden('discover.dropbox')
 export const ISSUER_PUBLIC_SUFFIX_DISCOVER_FAILURE = loadGolden('discover.issuerPublicSuffix')
 export const CLIENT_ID_IN_USE_FAILURE = loadGolden('install.clientIdInUse')
 export const DCR_REDIRECT_MISMATCH_FAILURE = loadGolden('install.dcrRedirectMismatch')
+/** Vercel: the AS refused DCR with an RFC 6749 error (`invalid_redirect_uri`). */
+export const DCR_REGISTRATION_REJECTED_FAILURE = loadGolden('install.dcrRegistrationRejected')
 export const CIMD_WITHOUT_ISS_BINDING_FAILURE = loadGolden('install.cimdWithoutIssBinding')
 export const CALLBACK_UNCONFIGURED_FAILURE = loadGolden('install.callbackUnconfigured')
 

@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
-import { buildDcrRequest, registerDynamicClient } from '../src/oauth/dcr.js'
+import {
+  DCR_ERROR_DESCRIPTION_MAX,
+  buildDcrRequest,
+  registerDynamicClient,
+} from '../src/oauth/dcr.js'
 import type { DiscoveryResult } from '../src/oauth/discovery.js'
+import type { Logger } from '../src/observability/logger.js'
 import {
   DCR_BASIC_REGISTRATION_RESPONSE,
   DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
@@ -257,28 +262,87 @@ describe('registerDynamicClient (RFC 7591, effectful via injected pinned transpo
     if (!outcome.ok) expect(outcome.error.kind).toBe('redirect_blocked')
   })
 
-  it('a 4xx with an OAuth error body surfaces error/error_description', async () => {
-    const { transport } = makeDcrTransport({
-      responseJson: JSON.stringify({
-        error: 'invalid_redirect_uri',
-        error_description: 'unregistered uri',
-      }),
-      status: 400,
-    })
-    const outcome = await registerDynamicClient(
-      { transport, resolveDns: PUBLIC_IP },
-      DCR_REGISTRATION_ENDPOINT,
-      publicReq
-    )
-    expect(outcome.ok).toBe(false)
-    if (!outcome.ok) {
-      expect(outcome.error.kind).toBe('fetch_failed')
-      if (outcome.error.kind === 'fetch_failed') {
-        expect(outcome.error.status).toBe(400)
-        expect(outcome.error.detail).toContain('invalid_redirect_uri')
-        expect(outcome.error.detail).toContain('unregistered uri')
-      }
+  describe('an HTTP rejection of the registration is registration_rejected, not fetch_failed', () => {
+    async function rejectWith(responseJson: string, status = 400, logger?: Logger) {
+      const { transport } = makeDcrTransport({ responseJson, status })
+      const outcome = await registerDynamicClient(
+        { transport, resolveDns: PUBLIC_IP, logger },
+        DCR_REGISTRATION_ENDPOINT,
+        publicReq
+      )
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) throw new Error('expected a rejection')
+      return outcome.error
     }
+
+    it('carries the status and the RFC 6749 error / error_description', async () => {
+      const error = await rejectWith(
+        JSON.stringify({
+          error: 'invalid_redirect_uri',
+          error_description:
+            'The provided redirect URIs are not approved for use by this authorization server.',
+        })
+      )
+      expect(error).toEqual({
+        kind: 'registration_rejected',
+        url: DCR_REGISTRATION_ENDPOINT,
+        status: 400,
+        error: 'invalid_redirect_uri',
+        errorDescription:
+          'The provided redirect URIs are not approved for use by this authorization server.',
+      })
+    })
+
+    it('a non-JSON error body carries only the status', async () => {
+      const error = await rejectWith('<html>Forbidden</html>', 403)
+      expect(error).toEqual({
+        kind: 'registration_rejected',
+        url: DCR_REGISTRATION_ENDPOINT,
+        status: 403,
+      })
+    })
+
+    it('an error code outside the RFC 6749 charset or over-long is dropped', async () => {
+      expect(await rejectWith(JSON.stringify({ error: 'bad"quote' }))).not.toHaveProperty('error')
+      expect(await rejectWith(JSON.stringify({ error: 'x'.repeat(65) }))).not.toHaveProperty(
+        'error'
+      )
+      expect(await rejectWith(JSON.stringify({ error: 42 }))).not.toHaveProperty('error')
+    })
+
+    it('the description is third-party text: control chars stripped and length-bounded', async () => {
+      const error = await rejectWith(
+        JSON.stringify({
+          error: 'invalid_client_metadata',
+          error_description: `line1\n\u0000line2\u001b[31m ${'y'.repeat(1000)}`,
+        })
+      )
+      if (error.kind !== 'registration_rejected') throw new Error(error.kind)
+      expect(error.errorDescription).toMatch(/^line1 line2 \[31m y+…$/)
+      expect(error.errorDescription!.length).toBeLessThanOrEqual(DCR_ERROR_DESCRIPTION_MAX)
+    })
+
+    it('a blank description is omitted', async () => {
+      const error = await rejectWith(
+        JSON.stringify({ error: 'invalid_client_metadata', error_description: ' \n\t ' })
+      )
+      expect(error).not.toHaveProperty('errorDescription')
+    })
+
+    it('logs the provider error code and status, never the description', async () => {
+      const warn = vi.fn()
+      const logger = { child: () => logger, warn } as unknown as Logger
+      await rejectWith(
+        JSON.stringify({ error: 'invalid_redirect_uri', error_description: 'SECRET-ish text' }),
+        400,
+        logger
+      )
+      expect(warn).toHaveBeenCalledWith(
+        { dcr: 'registration_rejected', status: 400, error: 'invalid_redirect_uri' },
+        'dcr registration rejected'
+      )
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('SECRET-ish')
+    })
   })
 
   it('a 2xx body without client_id is invalid_response', async () => {

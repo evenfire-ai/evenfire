@@ -170,6 +170,19 @@ export type RemoteDcrRejectionKind =
   | 'redirect_uris_missing'
   | 'client_id_is_cimd_identity'
 
+/**
+ * Detail of `400 { error: 'dcr_registration_failed' }` when the AS answered the
+ * registration POST with an error status. `error` / `errorDescription` are the
+ * provider's RFC 6749 fields (third-party text, already bounded by control-api).
+ */
+export interface RemoteDcrRegistrationRejectedDetail {
+  kind: 'registration_rejected'
+  url: string
+  status: number
+  error?: string
+  errorDescription?: string
+}
+
 /** What already uses a pre-registered client_id (409 `oauth_client_id_in_use`). */
 export type RemoteClientIdConflict = 'cimd_client' | 'remote_server' | 'dynamic_client'
 

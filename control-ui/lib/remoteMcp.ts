@@ -11,6 +11,7 @@ import type {
   RemoteCallbackVariant,
   RemoteClientIdConflict,
   RemoteClientMode,
+  RemoteDcrRegistrationRejectedDetail,
   RemoteDcrRejectionKind,
   RemoteDetected,
   RemoteDiscoveryErrorKind,
@@ -319,6 +320,43 @@ function describeDcrRejection(kind: RemoteDcrRejectionKind): string {
   }
 }
 
+// Provider codes meaning the AS only registers clients it has approved (e.g. Vercel's
+// allow-listed redirect URIs), so retrying the same install cannot succeed.
+const RESTRICTED_REGISTRATION_CODES: readonly string[] = [
+  'invalid_redirect_uri',
+  'invalid_client_metadata',
+]
+// control-api already bounds both fields; re-bound here because this is third-party
+// text rendered to the operator.
+const PROVIDER_CODE_MAX = 64
+const PROVIDER_DESCRIPTION_MAX = 300
+
+function boundedProviderText(value: unknown, max: number): string {
+  if (typeof value !== 'string') return ''
+  const text = value
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
+}
+
+function describeRegistrationRejected(
+  detail: Partial<RemoteDcrRegistrationRejectedDetail> | undefined
+): string {
+  const status = typeof detail?.status === 'number' ? `HTTP ${detail.status}` : ''
+  const rawCode = boundedProviderText(detail?.error, PROVIDER_CODE_MAX + 1)
+  const code = rawCode.length <= PROVIDER_CODE_MAX ? rawCode : ''
+  const description = boundedProviderText(detail?.errorDescription, PROVIDER_DESCRIPTION_MAX)
+  const facts = [status, code].filter(Boolean).join(', ')
+  let copy = `The authorization server rejected client registration${facts ? ` (${facts})` : ''}`
+  copy += description ? `: "${description}"` : '.'
+  if (RESTRICTED_REGISTRATION_CODES.includes(code)) {
+    copy +=
+      ' This provider restricts dynamic client registration: ask it to approve the redirect URI, or install with a pre-registered client if it offers one.'
+  }
+  return copy
+}
+
 const DCR_REJECTION_KINDS: readonly string[] = [
   'redirect_uris_mismatch',
   'redirect_uris_missing',
@@ -375,6 +413,11 @@ export function mapRemoteInstallError(
       return "The authorization server assigned a client authentication method this platform cannot present, so this server can't be installed automatically."
     case 'dcr_registration_failed': {
       const kind = discoveryDetailKind(body)
+      if (kind === 'registration_rejected') {
+        return describeRegistrationRejected(
+          body?.detail as Partial<RemoteDcrRegistrationRejectedDetail>
+        )
+      }
       if (kind && DCR_REJECTION_KINDS.includes(kind)) {
         return describeDcrRejection(kind as RemoteDcrRejectionKind)
       }

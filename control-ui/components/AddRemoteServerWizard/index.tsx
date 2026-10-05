@@ -157,6 +157,7 @@ export function AddRemoteServerWizard({
     setTransport(null)
     setCallback(undefined)
     setDiscoverError('')
+    setInstallError('')
   }
 
   async function copyRedirectUri(uri: string) {
@@ -169,6 +170,8 @@ export function AddRemoteServerWizard({
   async function runDetect() {
     setDetecting(true)
     setDiscoverError('')
+    // A previous install's error belongs to that attempt, not to this detection.
+    setInstallError('')
     setTransport(null)
     setCallback(undefined)
     try {
@@ -289,9 +292,10 @@ export function AddRemoteServerWizard({
                   id="remote-server-name"
                   invalid={Boolean(serverNameError)}
                   monospace
-                  onChange={event =>
+                  onChange={event => {
                     setServerName(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
-                  }
+                    setInstallError('')
+                  }}
                   placeholder="example-remote"
                   disabled={detecting}
                   value={serverName}

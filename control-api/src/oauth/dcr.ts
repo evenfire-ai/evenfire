@@ -75,7 +75,8 @@ export interface DcrRegistrationResponse {
  * unusable to us. It lets the caller run the best-effort RFC 7592 cleanup DELETE so
  * the orphaned client does not linger (DEC-18). Present ONLY on those variants and
  * ONLY when the AS returned a management endpoint + token; never on non-2xx errors
- * (`fetch_failed`/`redirect_blocked`/`kernel_rejected`) where nothing was minted.
+ * (`fetch_failed`/`registration_rejected`/`redirect_blocked`/`kernel_rejected`) where
+ * nothing was minted.
  * In-memory only — used solely for the cleanup DELETE, never persisted or logged.
  */
 export interface DcrMintHandle {
@@ -90,7 +91,20 @@ export interface DcrMintHandle {
 
 export type DcrError =
   | { kind: 'kernel_rejected'; field: string; errors: ValidationError[] }
-  | { kind: 'fetch_failed'; url: string; status?: number; detail: string }
+  /** Transport failure: the registration POST got no HTTP response we could read. */
+  | { kind: 'fetch_failed'; url: string; detail: string }
+  /**
+   * The AS answered the registration POST with a non-2xx, non-3xx status. `error` and
+   * `errorDescription` are the RFC 6749 §5.2 fields from its body, when present and
+   * well-formed; both are third-party text, bounded by {@link boundedRegistrationError}.
+   */
+  | {
+      kind: 'registration_rejected'
+      url: string
+      status: number
+      error?: string
+      errorDescription?: string
+    }
   /** A 3xx from the registration POST — never re-POSTed to `Location` (SSRF fail-closed). */
   | { kind: 'redirect_blocked'; url: string; detail: string }
   /**
@@ -173,19 +187,47 @@ function mapPinnedError(error: PinnedFetchError, url: string): DcrError {
   }
 }
 
-/** Compose a human-readable detail from an RFC 6749-style error body, if present. */
-function errorBodyDetail(status: number, bodyText: string): string {
+/** Upper bound (in characters, ellipsis included) on a relayed `error_description`. */
+export const DCR_ERROR_DESCRIPTION_MAX = 300
+
+// RFC 6749 §5.2: `error` is a code drawn from NQSCHAR (%x20-21 / %x23-5B / %x5D-7E).
+// Anything else is not a code we can show or log as one.
+const RFC6749_ERROR_CODE_RE = /^[\x20\x21\x23-\x5b\x5d-\x7e]{1,64}$/
+
+/**
+ * The RFC 6749 `error` / `error_description` of a rejected registration, bounded for
+ * relay to the operator: the body is third-party content, so the code must match the
+ * RFC charset and the description loses control characters, collapses whitespace and
+ * is length-capped. Missing, malformed or blank fields are omitted.
+ */
+function boundedRegistrationError(bodyText: string): {
+  error?: string
+  errorDescription?: string
+} {
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(bodyText)
-    if (isRecord(parsed) && typeof parsed.error === 'string') {
-      const description =
-        typeof parsed.error_description === 'string' ? `: ${parsed.error_description}` : ''
-      return `${parsed.error}${description}`
-    }
+    parsed = JSON.parse(bodyText)
   } catch {
-    // Non-JSON error body — fall through to the bare status.
+    return {}
   }
-  return `HTTP ${status}`
+  if (!isRecord(parsed)) return {}
+  const result: { error?: string; errorDescription?: string } = {}
+  if (typeof parsed.error === 'string' && RFC6749_ERROR_CODE_RE.test(parsed.error)) {
+    result.error = parsed.error
+  }
+  if (typeof parsed.error_description === 'string') {
+    const description = parsed.error_description
+      .replace(/\p{Cc}/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (description.length > 0) {
+      result.errorDescription =
+        description.length > DCR_ERROR_DESCRIPTION_MAX
+          ? `${description.slice(0, DCR_ERROR_DESCRIPTION_MAX - 1).trimEnd()}…`
+          : description
+    }
+  }
+  return result
 }
 
 /**
@@ -237,11 +279,20 @@ export async function registerDynamicClient(
 
   const isSuccess = response.status >= 200 && response.status < 300
   if (!isSuccess) {
-    const detail = errorBodyDetail(response.status, response.bodyText)
-    log.warn({ dcr: 'fetch_failed', status: response.status }, 'dcr registration rejected')
+    const providerError = boundedRegistrationError(response.bodyText)
+    // The code only: the description is free third-party text and stays out of logs.
+    log.warn(
+      { dcr: 'registration_rejected', status: response.status, error: providerError.error },
+      'dcr registration rejected'
+    )
     return {
       ok: false,
-      error: { kind: 'fetch_failed', url: endpoint, status: response.status, detail },
+      error: {
+        kind: 'registration_rejected',
+        url: endpoint,
+        status: response.status,
+        ...providerError,
+      },
     }
   }
 
