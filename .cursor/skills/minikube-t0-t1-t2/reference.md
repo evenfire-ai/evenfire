@@ -122,8 +122,9 @@ then `rpc-proxy` (`sh: vitest: command not found` →
 and no `next:` line. Cluster Ready ≠ host runner.
 
 Repair on the same HEAD and owned profile: `npm ci` in the named directory
-**and every remaining** package that lacks `node_modules/.bin/vitest`.
-Installing only the failing package dies on the next `run_if_changed`. Then
+**and every remaining** package that declares dependencies but has no
+`node_modules` (zero-dependency `node --test` packages legitimately have
+none). Installing only the failing package dies on the next `run_if_changed`. Then
 re-enter `make minikube-t2`. T1 has not run if this abort is after bootstrap.
 Forbidden: new profile, PVC reset, `docker desktop restart`, `docker run`
 probes, treating Error 127 as GFS/`PROFILE_UNHEALTHY`.

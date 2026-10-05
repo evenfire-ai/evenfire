@@ -115,9 +115,10 @@ runner. `run_if_changed` dirs: `packages/workflow-runtime-core`,
 `workflow-recipes`, `packages/workflow-sdk`,
 `workflow-approval-request-reader`, `control-ui`, `desktop-app` (Node 24 +
 `verify:electron`; no `--ignore-scripts`). `gfs-controller` is not on that
-list. `npm ci` the named dir **and every remaining** package that lacks
-`node_modules/.bin/vitest`, then re-enter `make minikube-t2` on the same
-HEAD/profile. `PROFILE_METADATA_MISSING` surfaces as
+list. `npm ci` the named dir **and every remaining** package that declares
+dependencies but has no `node_modules` (zero-dependency `node --test`
+packages legitimately have none), then re-enter `make minikube-t2` on the
+same HEAD/profile. `PROFILE_METADATA_MISSING` surfaces as
 `PROFILE_OWNERSHIP_MISMATCH`: restore `profile.env` or stop and ask
 (`scripts/minikube-profiles/branch.mk` never regenerates metadata for an
 existing profile directory), never invent ports. Do not edit tracked files while `make minikube-t2`
