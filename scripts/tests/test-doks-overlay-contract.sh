@@ -9,6 +9,7 @@ set -uo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 SKILL="${ROOT_DIR}/.agents/skills/evenfire-digitalocean-doks"
 CONTRACT="${SKILL}/references/overlay-contract.md"
+GUIDE="${ROOT_DIR}/docs/deploy/digitalocean-doks-agent-guide.md"
 RELEASE="v0.10.0"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -134,8 +135,27 @@ render_variant() { # A|B
   ' "$ov" 2>"$work/inst-$v.err" || fail "$v: instances: $(cat "$work/inst-$v.err")"
 }
 
+# The guide's Phase 4 render gate, extracted verbatim (minus the env-file line),
+# must pass on each rendered variant.
+guide_gate() { # A|B
+  local v="$1" tree="$work/tree-$1"
+  [ -f "$GUIDE" ] || { fail "guide missing"; return 1; }
+  ruby -e '
+    blocks = File.read(ARGV[0]).scan(/```bash\n(.*?)```/m).flatten
+    gate = blocks.find { |b| b.include?("render gate: OK") } or abort "no render-gate block in guide"
+    puts gate.lines.reject { |l| l.include?(".evenfire-doks/env.sh") }.join
+  ' "$GUIDE" >"$work/gate-$v.sh" || { fail "$v: cannot extract the guide render gate"; return 1; }
+  (cd "$tree" && env REPO_DIR="$tree" WORK="$work/gate-work-$v" RELEASE_TAG="$RELEASE" \
+    SKILL_SCRIPTS="$SKILL/scripts" bash -c 'mkdir -p "$WORK"; . "$0"' "$work/gate-$v.sh") \
+    >"$work/gate-out-$v.log" 2>&1
+  grep -qx 'render gate: OK' "$work/gate-out-$v.log" \
+    || fail "$v: guide render gate did not pass: $(tail -3 "$work/gate-out-$v.log")"
+}
+
 render_variant A
 render_variant B
+guide_gate A
+guide_gate B
 
 if [ "$fails" -ne 0 ]; then
   echo "test-doks-overlay-contract: $fails failure(s)" >&2
