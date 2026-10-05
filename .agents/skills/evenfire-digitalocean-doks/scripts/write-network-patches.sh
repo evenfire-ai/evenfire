@@ -12,8 +12,8 @@
 #   patches/hcc-cluster.yaml          HCC API CIDRs, NodeLocal DNS CIDR, workspace StorageClass
 #   patches/kube-dns-egress-rule.yaml DNS egress rule for every allow-dns-egress-* policy
 #   patches/cilium-api-egress.yaml    the load-bearing API egress grants (a resource, not a patch)
-#   patches/nginx-ingress-*.yaml      INGRESS_MODE=nginx only: admit the in-cluster
-#                                     ingress-nginx controller pods by selector
+#   patches/ingress-controller-*.yaml INGRESS_MODE=controller only: admit the in-cluster
+#                                     ingress controller pods by selector
 #
 # Required env:
 #   OVERLAY_DIR        path to deploy/overlays/digitalocean-doks in the release checkout
@@ -22,9 +22,9 @@
 #                      policy after translating ClusterIP:443 to endpoint:port)
 #   DNS_IP             kube-dns Service ClusterIP (IPv4)
 #   STORAGE_CLASS      RWO block StorageClass for HCC Host workspaces
-#   INGRESS_MODE       nginx | tunnel
-# Required when INGRESS_MODE=nginx (read both from the live controller pods):
-#   INGRESS_NAMESPACE  namespace of the ingress-nginx controller
+#   INGRESS_MODE       controller | tunnel
+# Required when INGRESS_MODE=controller (read both from the live controller pods):
+#   INGRESS_NAMESPACE  namespace of the ingress controller (e.g. Traefik)
 #   INGRESS_POD_LABELS comma-separated key=value labels of the controller pods
 # Optional env:
 #   NODELOCAL_DNS_IP   single NodeLocal DNSCache IPv4, only if node-local-dns runs
@@ -35,7 +35,7 @@ set -euo pipefail
 : "${API_ENDPOINT_PORT:?set API_ENDPOINT_PORT}"
 : "${DNS_IP:?set DNS_IP}"
 : "${STORAGE_CLASS:?set STORAGE_CLASS}"
-: "${INGRESS_MODE:?set INGRESS_MODE to nginx or tunnel}"
+: "${INGRESS_MODE:?set INGRESS_MODE to controller or tunnel}"
 NODELOCAL_DNS_IP="${NODELOCAL_DNS_IP:-}"
 INGRESS_NAMESPACE="${INGRESS_NAMESPACE:-}"
 INGRESS_POD_LABELS="${INGRESS_POD_LABELS:-}"
@@ -52,15 +52,15 @@ for ip in $API_IPS; do is_ipv4 "$ip" || die "API_IPS entry '$ip' is not IPv4 (DO
 is_ipv4 "$DNS_IP" || die "DNS_IP '$DNS_IP' is not IPv4"
 [ -z "$NODELOCAL_DNS_IP" ] || is_ipv4 "$NODELOCAL_DNS_IP" || die "NODELOCAL_DNS_IP is not a single IPv4"
 case "$INGRESS_MODE" in
-  nginx)
-    is_name "$INGRESS_NAMESPACE" || die "INGRESS_MODE=nginx needs INGRESS_NAMESPACE"
-    [ -n "$INGRESS_POD_LABELS" ] || die "INGRESS_MODE=nginx needs INGRESS_POD_LABELS (read them from the controller pods)"
+  controller)
+    is_name "$INGRESS_NAMESPACE" || die "INGRESS_MODE=controller needs INGRESS_NAMESPACE"
+    [ -n "$INGRESS_POD_LABELS" ] || die "INGRESS_MODE=controller needs INGRESS_POD_LABELS (read them from the controller pods)"
     IFS=',' read -r -a ingress_labels <<<"$INGRESS_POD_LABELS"
     for l in "${ingress_labels[@]}"; do
       [[ "$l" =~ ^[A-Za-z0-9./_-]+=[A-Za-z0-9._-]+$ ]] || die "INGRESS_POD_LABELS entry '$l' is not key=value"
     done ;;
   tunnel) ;;
-  *) die "INGRESS_MODE must be nginx or tunnel (Gateway API traffic carries Cilium's ingress identity, which a NetworkPolicy cannot select)" ;;
+  *) die "INGRESS_MODE must be controller or tunnel (Gateway API traffic carries Cilium's ingress identity, which a NetworkPolicy cannot select)" ;;
 esac
 
 mkdir -p "$OVERLAY_DIR/patches"
@@ -179,12 +179,12 @@ write_ingress_patch() {
   } >"$OVERLAY_DIR/patches/$file"
 }
 
-rm -f "$OVERLAY_DIR"/patches/nginx-ingress-*.yaml
-if [ "$INGRESS_MODE" = nginx ]; then
-  write_ingress_patch nginx-ingress-control-ui.yaml 3000
-  write_ingress_patch nginx-ingress-profiles.yaml 3001 8091
-  write_ingress_patch nginx-ingress-rpc-proxy.yaml 8094
-  write_ingress_patch nginx-ingress-webhook-proxy.yaml 8095
+rm -f "$OVERLAY_DIR"/patches/ingress-controller-*.yaml
+if [ "$INGRESS_MODE" = controller ]; then
+  write_ingress_patch ingress-controller-control-ui.yaml 3000
+  write_ingress_patch ingress-controller-profiles.yaml 3001 8091
+  write_ingress_patch ingress-controller-rpc-proxy.yaml 8094
+  write_ingress_patch ingress-controller-webhook-proxy.yaml 8095
 fi
 
 printf 'write-network-patches: wrote patches for API [%s] endpoint port %s, DNS [%s], ingress %s\n' \

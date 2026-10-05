@@ -39,7 +39,7 @@ deploy/overlays/digitalocean-doks/
   patches/hcc-cluster.yaml                # generated
   patches/kube-dns-egress-rule.yaml       # generated
   patches/cilium-api-egress.yaml          # generated; a resource, not a patch
-  patches/nginx-ingress-*.yaml            # generated, Variant A only
+  patches/ingress-controller-*.yaml       # generated, Variant A only
   patches/wrc-network-policy.yaml         # only after guide step 5.14 allows it
   instances/host.yaml
   instances/context.yaml
@@ -79,16 +79,24 @@ endpoints. On DOKS they do not prove API reachability;
 
 Use `patches:` only. `patchesStrategicMerge` is deprecated in kustomize v5.
 
-### Variant A — in-cluster ingress-nginx behind a DigitalOcean load balancer
+### Variant A — in-cluster ingress controller behind a DigitalOcean load balancer
 
 The base public-ingress policies admit **only** `app: cloudflared` pods from the
 `ingress` namespace. DigitalOcean gives no source CIDR for load-balancer traffic:
 network load balancers preserve the client IP, and "Backend IP addresses may
 change at any time and should not be used to configure firewalls"
 ([load balancer features](https://docs.digitalocean.com/products/networking/load-balancers/details/features/)).
-So the four `nginx-ingress-*` patches admit the ingress-nginx controller pods by
+So the four `ingress-controller-*` patches admit the ingress controller pods by
 namespace and pod labels instead of by address. Client filtering belongs on the
 load balancer (`loadBalancerSourceRanges`).
+
+Use the ingress controller the customer already operates. If there is none,
+DigitalOcean's 1-Click catalog (`doctl kubernetes 1-click list`) offers
+`traefik`; installing it creates a billed load balancer, so ask first. Do not
+install ingress-nginx: the Kubernetes project ended its maintenance in March
+2026, with "no further releases, no bugfixes, and no updates to resolve any
+security vulnerabilities"
+([Ingress NGINX retirement](https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/)).
 
 Cilium Gateway API is not a supported variant: its traffic carries Cilium's
 reserved `ingress` identity, which a NetworkPolicy cannot select.
@@ -116,20 +124,21 @@ patches:
   - target: {group: networking.k8s.io, version: v1, kind: NetworkPolicy, name: sandbox-ui-static-dns-egress, namespace: sandbox-ui}
     path: patches/kube-dns-egress-rule.yaml
   - target: {group: networking.k8s.io, version: v1, kind: NetworkPolicy, name: control-ui-network, namespace: control-plane}
-    path: patches/nginx-ingress-control-ui.yaml
+    path: patches/ingress-controller-control-ui.yaml
   - target: {group: networking.k8s.io, version: v1, kind: NetworkPolicy, name: allow-ingress-profiles, namespace: profiles}
-    path: patches/nginx-ingress-profiles.yaml
+    path: patches/ingress-controller-profiles.yaml
   - target: {group: networking.k8s.io, version: v1, kind: NetworkPolicy, name: rpc-proxy, namespace: rpc-proxy}
-    path: patches/nginx-ingress-rpc-proxy.yaml
+    path: patches/ingress-controller-rpc-proxy.yaml
   - target: {group: networking.k8s.io, version: v1, kind: NetworkPolicy, name: allow-public-ingress-webhook-proxy, namespace: webhook-ingress}
-    path: patches/nginx-ingress-webhook-proxy.yaml
+    path: patches/ingress-controller-webhook-proxy.yaml
 ```
 
 The patch targets are exact. `rpc-proxy/allow-ingress-rpc-proxy` is a different
 policy; do not target it.
 
-Run the generator with `INGRESS_MODE=nginx`, `INGRESS_NAMESPACE`, and
-`INGRESS_POD_LABELS` read from the running controller pods:
+Run the generator with `INGRESS_MODE=controller`, `INGRESS_NAMESPACE`, and
+`INGRESS_POD_LABELS` read from the running controller pods (choose labels that
+select only the controller pods, never a whole namespace):
 
 ```bash
 kubectl --context "$CONTEXT" -n "$INGRESS_NAMESPACE" get pods -o jsonpath='{range .items[*]}{.metadata.labels}{"\n"}{end}'

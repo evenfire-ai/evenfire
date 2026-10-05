@@ -71,7 +71,7 @@ denies pod egress to `169.254.169.254`. On the live cluster it sets
 - "Backend IP addresses may change at any time and should not be used to
   configure firewalls"
   ([load balancer features](https://docs.digitalocean.com/products/networking/load-balancers/details/features/)).
-- So the overlay admits the ingress-nginx controller pods by selector (Variant A)
+- So the overlay admits the in-cluster ingress controller pods by selector (Variant A)
   and filters clients with `loadBalancerSourceRanges` on the load balancer.
 - The network load balancer's idle timeout is not documented. The HTTP load
   balancer's is `do-loadbalancer-http-idle-timeout-seconds` ("The default is

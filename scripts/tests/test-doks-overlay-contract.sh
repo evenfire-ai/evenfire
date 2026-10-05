@@ -56,11 +56,11 @@ render_variant() { # A|B
   local ov="$tree/deploy/overlays/digitalocean-doks"
   mkdir -p "$ov"
   extract "$v" "$ov" >/dev/null || { fail "$v: cannot extract contract blocks"; return 1; }
-  [ "$v" = A ] && mode=nginx || mode=tunnel
+  [ "$v" = A ] && mode=controller || mode=tunnel
   OVERLAY_DIR="$ov" API_IPS='10.201.0.1 198.51.100.10' API_ENDPOINT_PORT=443 \
     DNS_IP=10.201.0.10 STORAGE_CLASS=do-block-storage INGRESS_MODE="$mode" \
-    INGRESS_NAMESPACE=ingress-nginx \
-    INGRESS_POD_LABELS='app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller' \
+    INGRESS_NAMESPACE=traefik \
+    INGRESS_POD_LABELS='app.kubernetes.io/name=traefik,app.kubernetes.io/instance=traefik-traefik' \
     bash "$SKILL/scripts/write-network-patches.sh" >/dev/null || { fail "$v: write-network-patches failed"; return 1; }
   local r="$work/render-$v.yaml"
   kubectl kustomize "$ov" >"$r" 2>"$work/kz-$v.err" || { fail "$v: kustomize: $(head -3 "$work/kz-$v.err")"; return 1; }
@@ -86,8 +86,8 @@ render_variant() { # A|B
     public_ingress.each do |ns, n|
       p = pol.(ns, n) or (errs << "missing #{ns}/#{n}"; next)
       froms = Array(p.dig("spec", "ingress")).flat_map { |r| Array(r["from"]) }
-      has_nginx = froms.any? { |f| f.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "ingress-nginx" }
-      errs << "#{ns}/#{n}: ingress-nginx peer #{has_nginx ? "present" : "absent"} in variant #{v}" if has_nginx != (v == "A")
+      has_ctrl = froms.any? { |f| f.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "traefik" }
+      errs << "#{ns}/#{n}: ingress-controller peer #{has_ctrl ? "present" : "absent"} in variant #{v}" if has_ctrl != (v == "A")
       errs << "#{ns}/#{n}: ipBlock ingress peer" if froms.any? { |f| f["ipBlock"] }
     end
     cf = docs.find { |d| d["kind"] == "Deployment" && d.dig("metadata", "name") == "cloudflared" }
