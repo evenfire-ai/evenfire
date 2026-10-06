@@ -47,6 +47,7 @@ describe('DefaultPromptBuilder — governed GFS workspace files', () => {
     expect(msg.content).toContain('never invent a resourceId')
     expect(msg.content).toContain('call `clerum__gfs_download` and use the exact `path`')
     expect(msg.content).toContain('never guess a `.gfs-downloads/<filename>` path')
+    expect(msg.content).toContain('copy the complete parsed header array verbatim')
     expect(msg.content).toContain('write outputs outside `.gfs-downloads`')
   })
 
