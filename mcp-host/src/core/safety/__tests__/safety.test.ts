@@ -576,8 +576,8 @@ describe('BasicSafety', () => {
     })
 
     it.each([
-      ['a lowercase label', 'password=abc=pwd=defghijk tail'],
-      ['an uppercase label', 'PASSWORD=abc=PWD=defghijk tail'],
+      ['a lowercase label', 'password=abc=pwd=fixturevalue tail'],
+      ['an uppercase label', 'PASSWORD=abc=PWD=fixturevalue tail'],
     ])('redacts the whole value when the part before %s is short', (_label, text) => {
       const result = safety.sanitizeOutput('shell_exec', text)
       expect(result.content).toBe('[REDACTED] tail')
