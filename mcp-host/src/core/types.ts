@@ -34,6 +34,9 @@ export type MessageContentPart =
       data: string
       /** Extra source copy, omitted from the legacy view while another current frame represents it. */
       sourceIdentityOnly?: true
+      /** Producer-measured image shape; used by provider-attempt policy without redecoding. */
+      width?: number
+      height?: number
       /**
        * Optional so pre-#650 producers and provider translators keep compiling;
        * `codexSubscription` rejects an image part without a usable source
@@ -635,6 +638,12 @@ export interface PendingApproval {
   task_budget?: TaskExecutionBudgetSnapshot
   /** Set only by reconstruction of migration-marked legacy rows. */
   legacy_budget?: boolean
+  /**
+   * Consent expansion. New ordinary approvals use `turn_tools`; high-risk
+   * exact-call paths use `exact_invocation`. Legacy NULL rows are treated as
+   * exact because their original expansion cannot be proven.
+   */
+  authorization_scope?: 'turn_tools' | 'exact_invocation'
   /** Internal atomic replacement instruction; not persisted in the snapshot. */
   replaces_request_id?: string
   request_id: string

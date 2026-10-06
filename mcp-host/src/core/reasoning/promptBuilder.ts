@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../internalTools/gfsReadTypes'
 import { logger } from '../../logger'
 import { PromptBuilder } from '../interfaces'
 import { ChatMessage, ToolDefinition } from '../types'
@@ -56,6 +57,19 @@ export const DESKTOP_ENVIRONMENT_HINT =
   'When the user asks you to open applications, click on things, interact with the GUI, or perform ' +
   'browser-based tasks (including OAuth flows), USE THESE TOOLS. You have full computer-use capabilities. ' +
   "Take screenshots to see what's on screen, then use click/type/key to interact."
+
+/**
+ * Governed GFS workspace-file contract. Emitted whenever the explicit download
+ * tool is registered; the per-result `usage` object remains authoritative.
+ */
+export const GFS_WORKSPACE_FILE_GUIDANCE_TEXT =
+  'GFS RESOURCE IDs: GFS resource tools require the drive and a real resourceId from an accessible/list/resolve result or a turn file reference. When the user provides a human path, discover that exact path with `clerum__gfs_accessible` and `clerum__gfs_list` before downloading; never invent a resourceId or pass the path as the id. ' +
+  'After discovering a human path, call `clerum__gfs_download` and use the exact `path` from its `workspace_file` result; never guess a `.gfs-downloads/<filename>` path. ' +
+  'GFS WORKSPACE FILES: When a GFS result says `delivery:"workspace_file"`, its `path` is relative to the caller workspace and the file is already present locally. ' +
+  'Do not print, `file_read`, or paste the whole source. If analysis or conversion is needed, use an approved `shell_exec` command or script with that relative path, write outputs outside `.gfs-downloads`, and return only bounded counts, aggregates, errors, or small samples. ' +
+  GFS_LOCAL_PROCESSING_GUIDANCE +
+  ' ' +
+  'Ask for shell approval with the exact command/script to execute. Do not treat expiry, checksum, version, transfer, or destination selection as model-controlled choices.'
 
 /**
  * Workflow-recipe behavioral contract. Emitted whenever any `workflow_*` tool
@@ -164,6 +178,10 @@ export class DefaultPromptBuilder implements PromptBuilder {
 
     if (tools.some(t => t.name.startsWith('workflow_'))) {
       sections.push(WORKFLOW_RECIPES_TEXT)
+    }
+
+    if (tools.some(t => t.name === 'clerum__gfs_download')) {
+      sections.push(GFS_WORKSPACE_FILE_GUIDANCE_TEXT)
     }
 
     // NOTE: this is intentionally still true when the bridge is active — the
@@ -292,6 +310,7 @@ export class DefaultPromptBuilder implements PromptBuilder {
     if (input.workflowGuidance.trim()) parts.push(input.workflowGuidance.trim())
     if (input.mcpServerGuidance.trim()) parts.push(input.mcpServerGuidance.trim())
     if (input.toolDiscoveryGuidance.trim()) parts.push(input.toolDiscoveryGuidance.trim())
+    if (input.gfsWorkspaceGuidance?.trim()) parts.push(input.gfsWorkspaceGuidance.trim())
     if (input.memoryGuidance.trim()) parts.push(input.memoryGuidance.trim())
     return parts.join('\n\n')
   }

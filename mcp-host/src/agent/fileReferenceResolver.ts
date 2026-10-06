@@ -12,8 +12,13 @@ import { type FileReferenceV1, parseFileReferenceV1 } from '@clerum/gfs-interact
 import { FileReferenceErrorCode } from '../core/errors'
 import type { TurnContextReferencedFile } from '../core/orchestration/turnContext'
 import { GfscHttpError } from '../internalTools/gfsClient'
+import { GFS_FILE_LIMITS } from '../internalTools/gfsFilePolicy'
 import { logger } from '../logger'
 import { VISUAL_INPUT_LIMITS } from '../visualInput/policy'
+import {
+  type GfsSurfaceRuntimeCapability,
+  classifyGfsReferenceSurfaces,
+} from './gfsReferenceSurfaces'
 
 export type FileReferenceAvailability =
   | 'available'
@@ -29,6 +34,8 @@ export interface FileReferenceResolution {
   reference: FileReferenceV1
   /** The version gfsc reports now, when it differs from the reference's. */
   resolvedVersion?: number
+  /** Delivery surfaces proven for this Host/runtime; absent on old resolutions. */
+  surfaces?: ReturnType<typeof classifyGfsReferenceSurfaces>
 }
 
 /** The code each unavailable reference is reported under (log and turn block). */
@@ -261,7 +268,8 @@ function resolvedView(
 async function resolveOne(
   reference: FileReferenceV1,
   client: FileReferenceGfscClient | null,
-  call: { signal: AbortSignal; deadlineMs: number }
+  call: { signal: AbortSignal; deadlineMs: number },
+  runtimeSurfaces: GfsSurfaceRuntimeCapability
 ): Promise<FileReferenceResolution> {
   const source = reference.source
   if (source.kind !== 'gfs' || !client) return { availability: 'unsupported', reference }
@@ -286,8 +294,12 @@ async function resolveOne(
   // Same version, so the same bytes: a different size is a reference that
   // misstates the file, not a change to it.
   if (view.bytes !== reference.byteLength) throw new ResolutionFailure('invalid', 'SizeMismatch')
-  if (view.bytes > VISUAL_INPUT_LIMITS.fileBytes) return { availability: 'too_large', reference }
-  return { availability: 'available', reference }
+  if (view.bytes > GFS_FILE_LIMITS.maxFileBytes) return { availability: 'too_large', reference }
+  return {
+    availability: 'available',
+    reference,
+    surfaces: classifyGfsReferenceSurfaces(reference, runtimeSurfaces),
+  }
 }
 
 /**
@@ -297,14 +309,19 @@ async function resolveOne(
 export async function resolveFileReferences(
   references: readonly FileReferenceV1[],
   client: FileReferenceGfscClient | null,
-  timeoutMs: number = VISUAL_INPUT_LIMITS.validationTimeoutMs
+  timeoutMs: number = VISUAL_INPUT_LIMITS.validationTimeoutMs,
+  runtimeSurfaces: GfsSurfaceRuntimeCapability = {
+    workspaceFile: false,
+    localExecutor: false,
+    visual: false,
+  }
 ): Promise<FileReferenceResolutionResult> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const call = { signal: controller.signal, deadlineMs: Date.now() + timeoutMs }
   try {
     const resolutions = await Promise.all(
-      references.map(reference => resolveOne(reference, client, call))
+      references.map(reference => resolveOne(reference, client, call, runtimeSurfaces))
     )
     return { ok: true, resolutions }
   } catch (error) {
