@@ -1,14 +1,24 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { spawn } from 'child_process'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
-import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
-import type { GfsProcessingLeaseProvider } from '../../internalTools/gfsProcessingLease'
+import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import type { Task } from '../../queue/types'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
+
+// Observe process admission while retaining the real shell, registry, approval
+// controllers, conversation manager and caller-bound processing lease provider.
+vi.mock('child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 const savedConfig = {
   enableApproval: appConfig.enableApproval,
@@ -16,14 +26,8 @@ const savedConfig = {
   dynamicToolsEnabled: appConfig.dynamicToolsEnabled,
   promptCacheEnabled: appConfig.promptCacheEnabled,
 }
-
-const processingLeases: GfsProcessingLeaseProvider = {
-  acquireProcessingLease: async () => ({
-    leaseId: 'gfs-live-approval-lease',
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
-  }),
-  releaseProcessingLease: async () => undefined,
-}
+const stores: GfsDownloadStore[] = []
+const roots: string[] = []
 
 beforeEach(() => {
   Object.assign(appConfig, {
@@ -32,18 +36,35 @@ beforeEach(() => {
     dynamicToolsEnabled: false,
     promptCacheEnabled: false,
   })
+  vi.clearAllMocks()
 })
 
-afterEach(() => {
+afterEach(async () => {
+  for (const store of stores.splice(0)) await store.close()
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
   Object.assign(appConfig, savedConfig)
 })
 
-it('requires live shell approval for GFS processing despite wildcard auto-approval', async () => {
-  const shellCall: ToolCall = {
-    id: 'gfs-shell-call',
-    name: 'shell_exec',
-    arguments: { command: 'printf bounded-result' },
-  }
+function shellCall(id: string, command: string): ToolCall {
+  return { id, name: 'shell_exec', arguments: { command } }
+}
+
+const firstCommand = 'printf first-approved-result'
+const failingCommand = `${firstCommand}; exit 127`
+// Use the verified test runtime; no assumption about Python or an ambient Node.
+const secondCommand = `'${process.execPath.replace(/'/g, "'\\''")}' -e 'process.stdout.write("second-approved-result")'`
+
+async function scenario(calls: ToolCall[], guardrailAsk = false) {
+  const root = await mkdtemp(join(tmpdir(), 'gfs-live-approval-'))
+  roots.push(root)
+  const callerWorkspace = join(root, 'caller')
+  await mkdir(callerWorkspace, { mode: 0o700 })
+  const store = new GfsDownloadStore(root)
+  stores.push(store)
+  await store.initialize()
+  const processingLeases = store.processingLeaseProvider('gfs-caller')
+  const acquireLease = vi.spyOn(processingLeases, 'acquireProcessingLease')
+  const releaseLease = vi.spyOn(processingLeases, 'releaseProcessingLease')
   const providerCalls: ChatMessage[][] = []
   const provider: SingleTurnProvider = {
     getProviderType: () => 'codex-subscription',
@@ -56,16 +77,14 @@ it('requires live shell approval for GFS processing despite wildcard auto-approv
       throw new Error('Unexpected non-tool completion')
     },
     completeSingleTurnWithTools: async messages => {
-      providerCalls.push(messages)
-      if (providerCalls.length === 1) {
-        return {
-          content: null,
-          tool_calls: [shellCall],
-          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-          finish_reason: FinishReason.ToolUse,
-        }
+      providerCalls.push(structuredClone(messages))
+      const call = calls[providerCalls.length - 1]
+      return {
+        content: call ? null : 'Governed processing complete.',
+        tool_calls: call ? [call] : null,
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        finish_reason: call ? FinishReason.ToolUse : FinishReason.Stop,
       }
-      throw new Error('A suspended shell command must not reach another provider round-trip')
     },
   }
 
@@ -91,12 +110,13 @@ it('requires live shell approval for GFS processing despite wildcard auto-approv
   }
 
   const conversationManager = new ConversationManager()
-  const conversation = await conversationManager.getOrCreate(resolveTaskSessionKey(task), {
+  const sessionKey = resolveTaskSessionKey(task)
+  const conversation = await conversationManager.getOrCreate(sessionKey, {
     userId: task.sourceMessage!.sender,
     channelType: task.sourceMessage!.channelType,
     channelId: task.sourceMessage!.channelId,
   })
-  conversation.auto_approved_tools = new Set(['*'])
+  conversation.auto_approved_tools = new Set(['shell_exec'])
 
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
@@ -108,20 +128,28 @@ it('requires live shell approval for GFS processing despite wildcard auto-approv
     llmProvider: provider,
     mcpManager: null,
     workspaceService: undefined,
-    gfsDownloadStore: {} as GfsDownloadStore,
-    gfsCallerWorkspacePath: '/tmp/gfs-live-approval-caller',
+    gfsDownloadStore: store,
+    gfsCallerWorkspacePath: callerWorkspace,
     gfsProcessingLeaseProvider: processingLeases,
     modelName: 'fixture-model',
-    approvalConfig: {
-      defaultPolicy: 'channel_users',
-      channels: {},
-    },
+    approvalConfig: { defaultPolicy: 'channel_users', channels: {} },
+    guardrailsConfig: guardrailAsk
+      ? {
+          rules: [
+            {
+              id: 'ask-every-shell-call',
+              action: 'ask',
+              match: { tool: { provenance: 'native', name: 'shell_exec' } },
+            },
+          ],
+        }
+      : undefined,
     config: {
-      maxTaskDuration: 300_000,
+      maxTaskDuration: 30_000,
       maxToolCallsPerTask: 10,
       autoStart: true,
       taskDelay: 0,
-      approvalTimeout: 300_000,
+      approvalTimeout: 30_000,
     },
     coreEvents: new SimpleEventEmitter(),
     cronScheduler: null,
@@ -132,15 +160,144 @@ it('requires live shell approval for GFS processing despite wildcard auto-approv
     dynamicEnvProvider: () => ({}),
   }
 
-  const executor = new TaskExecutor(task, deps)
-  await executor.run()
+  return {
+    task,
+    deps,
+    sessionKey,
+    conversation,
+    executor: new TaskExecutor(task, deps),
+    providerCalls,
+    acquireLease,
+    releaseLease,
+    onApprovalNeeded,
+    onComplete,
+    onFail,
+  }
+}
 
-  expect(onFail).not.toHaveBeenCalled()
-  expect(executor.executorState).toBe('waiting_approval')
-  expect(executor.pendingApproval).toMatchObject({
-    tool_name: 'shell_exec',
-    tool_call_id: shellCall.id,
+it('requires live shell approval despite persistent shell auto-approval', async () => {
+  const call = shellCall('first-shell-call', firstCommand)
+  const s = await scenario([call])
+  await s.executor.run()
+
+  expect(s.onFail).not.toHaveBeenCalled()
+  expect(s.executor.executorState).toBe('waiting_approval')
+  expect(s.executor.pendingApproval).toMatchObject({
+    tool_name: call.name,
+    tool_call_id: call.id,
+    parameters: call.arguments,
   })
-  expect(onApprovalNeeded).toHaveBeenCalledTimes(1)
-  expect(providerCalls).toHaveLength(1)
+  expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
+  expect(s.providerCalls).toHaveLength(1)
+  expect(spawn).not.toHaveBeenCalled()
+  expect(s.acquireLease).not.toHaveBeenCalled()
 })
+
+const resumeCases = [
+  { firstExit: 0, repeatedCommand: false, alwaysApprove: false, rehydrate: false },
+  { firstExit: 0, repeatedCommand: true, alwaysApprove: true, rehydrate: false },
+  { firstExit: 127, repeatedCommand: false, alwaysApprove: true, rehydrate: false },
+  { firstExit: 127, repeatedCommand: true, alwaysApprove: false, rehydrate: false },
+  { firstExit: 0, repeatedCommand: true, alwaysApprove: false, rehydrate: true },
+  { firstExit: 127, repeatedCommand: false, alwaysApprove: false, rehydrate: true },
+].flatMap(c => [false, true].map(guardrailAsk => ({ ...c, guardrailAsk })))
+
+it.each(resumeCases)(
+  'requires new approval after exit $firstExit (repeated=$repeatedCommand, persistent=$alwaysApprove, rehydrated=$rehydrate, guardrailAsk=$guardrailAsk)',
+  async ({ firstExit, repeatedCommand, alwaysApprove, rehydrate, guardrailAsk }) => {
+    const approvedCommand = firstExit === 127 ? failingCommand : firstCommand
+    const firstCall = shellCall('first-shell-call', approvedCommand)
+    const secondCall = shellCall(
+      'second-shell-call',
+      repeatedCommand ? approvedCommand : secondCommand
+    )
+    const s = await scenario([firstCall, secondCall], guardrailAsk)
+    await s.executor.run()
+    const firstApproval = s.executor.pendingApproval!
+    expect(firstApproval.tool_call_id).toBe(firstCall.id)
+    expect(firstApproval.context_snapshot.length).toBeGreaterThan(0)
+    expect(spawn).not.toHaveBeenCalled()
+    expect(s.acquireLease).not.toHaveBeenCalled()
+
+    let executor = s.executor
+    if (rehydrate) {
+      executor = new TaskExecutor(s.task, s.deps)
+      await executor.rehydrateWaitingApproval(s.sessionKey, firstApproval)
+    }
+    await executor.resumeAfterApproval(alwaysApprove)
+
+    // The approved frozen call executes once, including its real exit status.
+    expect(s.onFail).not.toHaveBeenCalled()
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(spawn).mock.calls[0].slice(0, 2)).toEqual(['/bin/sh', ['-c', approvedCommand]])
+    expect(s.acquireLease).toHaveBeenCalledTimes(1)
+    expect(s.releaseLease).toHaveBeenCalledTimes(1)
+    expect(s.providerCalls).toHaveLength(2)
+    const firstResult = s.providerCalls[1].find(
+      message => message.role === 'tool' && message.tool_call_id === firstCall.id
+    )
+    expect(firstResult?.content).toContain('first-approved-result')
+    if (firstExit === 127) expect(firstResult?.content).toContain('exit code 127')
+    else expect(firstResult?.content).not.toContain('Command failed')
+
+    // Neither the residual pending snapshot nor the real wildcard/individual
+    // approvals authorize a new call, even with identical command text.
+    expect(s.conversation.auto_approved_tools).toEqual(new Set(['*', 'shell_exec']))
+    expect(executor.executorState).toBe('waiting_approval')
+    expect(executor.pendingApproval).toMatchObject({
+      tool_name: secondCall.name,
+      tool_call_id: secondCall.id,
+      parameters: secondCall.arguments,
+    })
+    expect(executor.pendingApproval!.request_id).not.toBe(firstApproval.request_id)
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(2)
+    expect(s.onComplete).not.toHaveBeenCalled()
+
+    // A second explicit approval is sufficient; it does not re-execute A.
+    await executor.resumeAfterApproval(false)
+    expect(s.onFail).not.toHaveBeenCalled()
+    expect(spawn).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(spawn).mock.calls.map(call => call[1])).toEqual([
+      ['-c', approvedCommand],
+      ['-c', secondCall.arguments.command],
+    ])
+    expect(s.acquireLease).toHaveBeenCalledTimes(2)
+    expect(s.releaseLease).toHaveBeenCalledTimes(2)
+    expect(s.providerCalls).toHaveLength(3)
+    const secondResult = s.providerCalls[2].find(
+      message => message.role === 'tool' && message.tool_call_id === secondCall.id
+    )
+    expect(secondResult?.content).toContain(
+      repeatedCommand ? 'first-approved-result' : 'second-approved-result'
+    )
+    if (!repeatedCommand) expect(secondResult?.content).not.toContain('Command failed')
+    expect(executor.executorState).toBe('completed')
+    expect(s.onComplete).toHaveBeenCalledExactlyOnceWith(s.task)
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(2)
+  }
+)
+
+it.each([false, true])(
+  'reissues live approval without a frozen snapshot (guardrailAsk=%s)',
+  async guardrailAsk => {
+    const firstCall = shellCall('first-shell-call', firstCommand)
+    const secondCall = shellCall('regenerated-shell-call', secondCommand)
+    const s = await scenario([firstCall, secondCall], guardrailAsk)
+    await s.executor.run()
+    const firstApproval = s.executor.pendingApproval!
+    firstApproval.context_snapshot = []
+
+    await s.executor.resumeAfterApproval(false)
+
+    expect(s.onFail).not.toHaveBeenCalled()
+    expect(s.executor.executorState).toBe('waiting_approval')
+    expect(s.executor.pendingApproval).toMatchObject({
+      tool_call_id: secondCall.id,
+      parameters: secondCall.arguments,
+    })
+    expect(s.executor.pendingApproval!.request_id).not.toBe(firstApproval.request_id)
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(2)
+    expect(spawn).not.toHaveBeenCalled()
+    expect(s.acquireLease).not.toHaveBeenCalled()
+  }
+)

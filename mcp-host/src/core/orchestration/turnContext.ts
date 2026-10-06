@@ -87,6 +87,7 @@ export interface PreparedGfsUsage {
   processLocally: true
   boundedOutputOnly: true
   wholeFileToContextAllowed: false
+  processingInstructions: string
 }
 
 export type GfsPreparationFailure =

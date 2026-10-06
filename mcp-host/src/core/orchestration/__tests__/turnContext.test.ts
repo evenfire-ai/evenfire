@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../../internalTools/gfsReadTypes'
 import type { Attachment } from '../../types'
 import {
   ATTACHED_FILES_INSTRUCTION,
@@ -41,6 +42,7 @@ describe('prepared GFS receipts', () => {
         processLocally: true,
         boundedOutputOnly: true,
         wholeFileToContextAllowed: false,
+        processingInstructions: GFS_LOCAL_PROCESSING_GUIDANCE,
       },
     },
   }

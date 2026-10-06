@@ -9,7 +9,7 @@
  *   loopController.beforeTool() in toolUseLoop.ts
  *
  * The decorator chain:
- *   ApprovalController (checks auto_approved_tools + one-shot → "proceed" if found)
+ *   ApprovalController (live tools → delegate; other tools → auto_approved_tools + one-shot)
  *     └─ UnifiedApprovalGateController (MCP tool? → suspend. Native requiresApproval? → suspend. Else → "proceed")
  *
  * Gate 2 (tool.requiresApproval() inside toolUseLoop) was REMOVED as part of
@@ -47,10 +47,10 @@ export class ApprovalController implements LoopController {
   }
 
   /**
-   * If the tool is in auto_approved_tools, return "proceed" immediately
-   * WITHOUT consulting the delegate. Otherwise delegate normally.
+   * Live-approval tools always consult the delegate. Other tools retain the
+   * auto_approved_tools and matching pending_approval one-shot behavior.
    *
-   * One-shot approval: if the conversation has a pending_approval whose
+   * Non-live one-shot approval: if the conversation has a pending_approval whose
    * tool_name matches, this means the user approved the tool for this
    * specific call (alwaysApprove=false). Clear pending_approval and proceed.
    * This prevents the infinite re-suspension loop where resumeAfterApproval
@@ -60,17 +60,10 @@ export class ApprovalController implements LoopController {
     toolName: string,
     params: Record<string, unknown>
   ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
-    // GFS local processing requires a live approval for every shell invocation.
-    // Wildcard and persistent approvals remain useful for other tools, but they
-    // cannot become implicit approval to execute a downloaded source.
+    // The approved frozen call executes directly in resumeAfterApproval.
+    // Every model-generated live call needs a new delegate decision; retained
+    // snapshot data and persistent approvals cannot authorize another invocation.
     if (this.liveApprovalTools.has(toolName)) {
-      if (
-        this.conversation.pending_approval &&
-        this.conversation.pending_approval.tool_name === toolName
-      ) {
-        this.conversation.pending_approval = undefined
-        return 'proceed'
-      }
       return this.delegate.beforeTool(toolName, params)
     }
 

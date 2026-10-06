@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm } from 'fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../../llm/registryCore'
@@ -73,6 +73,38 @@ describe('ShellTool', () => {
 
     expect(result.is_error).toBe(false)
     expect(result.content).toContain(workspacePath)
+  })
+
+  it('uses the advertised Node environment to stream parsed records from the caller workspace', async () => {
+    const tool = new ShellTool(workspacePath, 5000, ['PATH'])
+    const description = tool.description()
+    const executable = JSON.parse(
+      description.match(/Node\.js executable: ("(?:[^"\\]|\\.)*")/)![1]
+    ) as string
+    const resolverBase = JSON.parse(
+      description.match(/createRequire\(("(?:[^"\\]|\\.)*")\)/)![1]
+    ) as string
+    await writeFile(
+      join(workspacePath, 'input.csv'),
+      'id,"label,name",notes\r\n' +
+        '1,"comma,label","line1\nline2"\r\n' +
+        '2,"say ""hi""","CRLF\r\ninside"\r\n' +
+        '3,plain,end'
+    )
+    const program =
+      `const load=require('node:module').createRequire(${JSON.stringify(resolverBase)});` +
+      "let records=0;let columns=[];const input=require('node:fs').createReadStream('input.csv',{highWaterMark:1});" +
+      "load('fast-csv').parseStream(input,{headers:true})" +
+      ".on('headers',value=>{columns=value;}).on('data',()=>{records++;})" +
+      ".on('error',()=>{process.exitCode=1;})" +
+      ".on('end',()=>{console.log(JSON.stringify({records,columns}));});"
+    const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`
+    const result = await tool.execute({ command: `${quote(executable)} -e ${quote(program)}` })
+
+    expect(result.is_error).toBe(false)
+    expect(result.content).toContain(
+      JSON.stringify({ records: 3, columns: ['id', 'label,name', 'notes'] })
+    )
   })
 
   it('should kill process on timeout', async () => {

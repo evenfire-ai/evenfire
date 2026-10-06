@@ -5,6 +5,7 @@ import { UnifiedApprovalGateController } from '../../core/extensions/mcpApproval
 import type { Tool, ToolRegistry } from '../../core/interfaces'
 import type { ToolOutput } from '../../core/types'
 import { GFS_FILE_LIMITS } from '../../internalTools/gfsFilePolicy'
+import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../internalTools/gfsReadTypes'
 import type { FileReferenceResolution } from '../fileReferenceResolver'
 import { prepareGfsFiles } from '../gfsFilePreparation'
 
@@ -20,6 +21,7 @@ const usage = {
   processLocally: true,
   boundedOutputOnly: true,
   wholeFileToContextAllowed: false,
+  processingInstructions: GFS_LOCAL_PROCESSING_GUIDANCE,
 }
 
 function resolution(rid = 'a'.repeat(32), bytes = body): FileReferenceResolution {
@@ -104,7 +106,11 @@ describe('GFS file preparation', () => {
     const reference = resolution()
     const value = receipt(reference.reference)
     const execute = vi.fn(async (_params: Record<string, unknown>, _context?: unknown) => ({
-      content: JSON.stringify({ ...value, unexpectedBody: body.toString() }),
+      content: JSON.stringify({
+        ...value,
+        usage: { ...value.usage, processingInstructions: 'untrusted-result-instruction' },
+        unexpectedBody: body.toString(),
+      }),
       duration_ms: 1,
       is_error: false,
     }))

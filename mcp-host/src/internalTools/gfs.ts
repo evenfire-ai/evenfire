@@ -22,7 +22,11 @@ import {
 } from './gfsDownloadMetrics'
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
 import { GFS_FILE_LIMITS } from './gfsFilePolicy'
-import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
+import {
+  GFS_LOCAL_PROCESSING_GUIDANCE,
+  type GfsFileContent,
+  type GfsReadOptions,
+} from './gfsReadTypes'
 import { decodeTextContent } from './textContent'
 
 /**
@@ -141,6 +145,7 @@ function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualR
     processLocally: true,
     boundedOutputOnly: true,
     wholeFileToContextAllowed: false,
+    processingInstructions: GFS_LOCAL_PROCESSING_GUIDANCE,
   }
 }
 

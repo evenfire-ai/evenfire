@@ -660,6 +660,10 @@ export class TaskExecutor {
 
       // Fallback: no snapshot, re-run from scratch
       if (!approval?.context_snapshot?.length) {
+        // There is no frozen call to execute. A regenerated call must not
+        // consume the old approval through a name-only approval/guardrail gate.
+        this.executionBudget.assertTime()
+        this.conversation.pending_approval = undefined
         logger.info({ taskId: this.taskId }, 'No snapshot, re-running from scratch')
         const result = await this.runAgentLoop()
         await this.handleLoopResult(result)
@@ -764,6 +768,11 @@ export class TaskExecutor {
 
       const execStart = Date.now()
       this.executionBudget.assertTime()
+      // approve() already resolved the durable approval. Consume its retained
+      // RAM copy before execution so the next model-generated call cannot reuse
+      // it through either approval gate. The local frozen approval still owns
+      // message reconstruction and any connect_required re-suspension below.
+      this.conversation.pending_approval = undefined
       const toolResult = await executeSingleTool(suspendedCall, loopConfig)
       collectToolAttachments([toolResult], this.completedAttachments)
       this.executionBudget.assertTime()

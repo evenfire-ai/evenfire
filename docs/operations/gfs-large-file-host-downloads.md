@@ -69,6 +69,15 @@ For an admitted source above 8 KiB:
 3. It verifies the exact byte count and SHA-256, publishes the file with private modes, and returns a receipt containing source metadata, version, size, checksum, expiry, and a path relative to that caller workspace.
 4. The tool result instructs the model to use `shell_exec` for local processing, write outputs outside `.gfs-downloads`, and return only bounded counts, aggregates, errors, or samples.
 
+Tool receipts and prepared references carry the same locally authored processing
+instructions. The shell description advertises the actual Node executable and
+the module resolver anchored to the installed `exceljs` dependency, so scripts can use already installed libraries
+from the caller workspace. The pinned runtime includes the streaming `fast-csv`
+parser through its existing `exceljs` dependency; no additional package or
+format-specific MCP tool is installed. Scripts must respect logical records,
+quoted delimiters, escaped quotes and embedded newlines, and report parse or
+execution failures instead of inferring a result from physical line counts.
+
 If a surface has no caller-bound workspace/download capability, an admitted source is reported as `workspace_delivery_unavailable`; MCP Host does not fall back to returning an oversized body.
 
 ## Approval and local processing

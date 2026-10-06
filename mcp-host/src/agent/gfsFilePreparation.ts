@@ -9,6 +9,7 @@ import type {
 import type { ToolOutput } from '../core/types'
 import { normalizeRid } from '../internalTools/gfsContentRead'
 import { GFS_FILE_LIMITS } from '../internalTools/gfsFilePolicy'
+import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../internalTools/gfsReadTypes'
 import type { FileReferenceResolution } from './fileReferenceResolver'
 import type { TaskExecutionBudget } from './taskExecutionBudget'
 
@@ -133,6 +134,8 @@ function checkedPreparation(
     processLocally: true,
     boundedOutputOnly: true,
     wholeFileToContextAllowed: false,
+    // Publish our trusted instructions, never instruction text from a tool result.
+    processingInstructions: GFS_LOCAL_PROCESSING_GUIDANCE,
   }
   return {
     referenceId: reference.id,
