@@ -40,6 +40,13 @@ import {
 // are confined to teardown of those exact resources, never setup or assertions.
 
 const CAPABILITIES = '/api/v1/admin/llm/providers/capabilities'
+// Required fields append " *" to their accessible name, and the catalog tab
+// appends its model count.
+const PROVIDER_FIELD = /^Provider(?: \*)?$/
+const MODEL_FIELD = /^Model(?: \*)?$/
+const NAME_FIELD = /^Name(?: \*)?$/
+const UNIT_FIELD = /^Unit(?: \*)?$/
+const CATALOG_TAB = /^Catalog(?: \(\d+\))?$/
 const INVENTORIES = [
   '/api/v1/admin/llm/providers/codex-subscription/connections',
   '/api/v1/admin/llm/providers/grok-subscription/connections',
@@ -176,7 +183,10 @@ async function signOut(page: Page): Promise<void> {
   )
   await page.getByRole('button', { name: 'Log out', exact: true }).click()
   expect([200, 204]).toContain((await signedOut).status())
-  await expect(page).toHaveURL(new RegExp(`${escapeRegex(CONTROL_ROUTES.login)}$`))
+  // Logout keeps the current route as `?next=` so the next sign-in returns to it.
+  await expect(page).toHaveURL(
+    new RegExp(`${escapeRegex(CONTROL_ROUTES.login)}(?:\\?next=[^&#]+)?$`)
+  )
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
 }
 
@@ -215,8 +225,10 @@ async function createAgent(page: Page, owned: OwnedAgent, fixture: AgentFixture)
   await page.getByRole('button', { name: 'Create agent', exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`${escapeRegex(CONTROL_ROUTES.agents.new)}$`))
   await expect(page.getByRole('heading', { name: 'Create agent', exact: true })).toBeVisible()
-  await page.getByLabel('Agent name', { exact: true }).fill(owned.name)
-  await expect(page.getByLabel('Agent name', { exact: true })).toHaveValue(owned.name)
+  // The field is required, so its accessible name carries the "*" marker.
+  const agentName = page.getByLabel(/^Agent name/)
+  await agentName.fill(owned.name)
+  await expect(agentName).toHaveValue(owned.name)
   await page.getByRole('button', { name: 'Next', exact: true }).click()
 
   await expect(page.getByRole('region', { name: 'LLM configuration', exact: true })).toBeVisible()
@@ -320,7 +332,15 @@ async function withOwnedAgent(
         name => `/api/v1/admin/contexts/${encodeURIComponent(name)}`
       ),
     ]
-    for (const path of resources) {
+    // The journey signs out and back in, so a failure between the two leaves the
+    // browser session logged out. Cleanup authenticates on its own.
+    if (resources.length > 0) {
+      const { status } = await directApi(page.request, 'POST', '/api/v1/admin/auth/login', {
+        ...adminCredentials(),
+      })
+      if (status !== 200) failures.push(new Error(`Cleanup login failed: HTTP ${status}`))
+    }
+    for (const path of failures.length > 0 ? [] : resources) {
       try {
         const { status } = await directApi(page.request, 'DELETE', path)
         if (![200, 204, 404].includes(status))
@@ -332,7 +352,12 @@ async function withOwnedAgent(
     if (failures.length > 0) {
       throw new AggregateError(
         [...(journeyFailure === undefined ? [] : [journeyFailure]), ...failures],
-        'This run left owned resources requiring cleanup'
+        // Playwright prints only the message, so name every cause in it.
+        `This run left owned resources requiring cleanup: ${failures
+          .map(failure => failure.message)
+          .join(
+            '; '
+          )}${journeyFailure instanceof Error ? `; journey: ${journeyFailure.message}` : ''}`
       )
     }
   }
@@ -527,21 +552,21 @@ async function catalogForms(page: Page, owned: OwnedAgent): Promise<void> {
   await nav.getByRole('link', { name: 'LLM Models', exact: true }).click()
   expect((await models).status()).toBe(200)
   await expect(page).toHaveURL(new RegExp(`${escapeRegex(CONTROL_ROUTES.llmModels.root)}$`))
-  await expect(page.getByRole('tab', { name: 'Catalog', exact: true })).toHaveAttribute(
+  await expect(page.getByRole('tab', { name: CATALOG_TAB })).toHaveAttribute(
     'aria-selected',
     'true'
   )
   await page.getByRole('button', { name: 'Add model', exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`${escapeRegex(CONTROL_ROUTES.llmModels.new)}$`))
   await expect(page.getByRole('heading', { name: 'Add allowed model', exact: true })).toBeVisible()
-  const provider = page.getByRole('combobox', { name: 'Provider', exact: true })
+  const provider = page.getByRole('combobox', { name: PROVIDER_FIELD })
   await expect(
     provider.getByRole('option', { name: 'xAI Grok Subscription', exact: true })
   ).toHaveCount(1)
   await provider.selectOption('grok-subscription')
   await expect(provider).toHaveValue('grok-subscription')
-  await page.getByLabel('Model', { exact: true }).fill(`${owned.name}-model-draft`)
-  await expect(page.getByLabel('Model', { exact: true })).toHaveValue(`${owned.name}-model-draft`)
+  await page.getByLabel(MODEL_FIELD).fill(`${owned.name}-model-draft`)
+  await expect(page.getByLabel(MODEL_FIELD)).toHaveValue(`${owned.name}-model-draft`)
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`${escapeRegex(CONTROL_ROUTES.llmModels.root)}$`))
 
@@ -559,11 +584,11 @@ async function catalogForms(page: Page, owned: OwnedAgent): Promise<void> {
   await expect(page.getByRole('heading', { name: 'Add LLM price', exact: true })).toBeVisible()
   await expect(
     page
-      .getByRole('combobox', { name: 'Provider', exact: true })
+      .getByRole('combobox', { name: PROVIDER_FIELD })
       .getByRole('option', { name: 'xAI Grok Subscription', exact: true })
   ).toHaveCount(1)
-  await page.getByLabel('Model', { exact: true }).fill(`${owned.name}-price-draft`)
-  await expect(page.getByLabel('Model', { exact: true })).toHaveValue(`${owned.name}-price-draft`)
+  await page.getByLabel(MODEL_FIELD).fill(`${owned.name}-price-draft`)
+  await expect(page.getByLabel(MODEL_FIELD)).toHaveValue(`${owned.name}-price-draft`)
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`${escapeRegex(CONTROL_ROUTES.costAndUsage.llmPrices)}$`))
 
@@ -578,8 +603,8 @@ async function catalogForms(page: Page, owned: OwnedAgent): Promise<void> {
     new RegExp(`${escapeRegex(CONTROL_ROUTES.costAndUsage.newTokenBudget)}$`)
   )
   await expect(page.getByRole('heading', { name: 'New token budget', exact: true })).toBeVisible()
-  await page.getByLabel('Name', { exact: true }).fill(`${owned.name}-budget-draft`)
-  await page.getByLabel('Unit', { exact: true }).selectOption('tokens')
+  await page.getByLabel(NAME_FIELD).fill(`${owned.name}-budget-draft`)
+  await page.getByLabel(UNIT_FIELD).selectOption('tokens')
   await page
     .getByRole('combobox', { name: 'Add Provider to scope', exact: true })
     .selectOption('grok-subscription')
@@ -589,7 +614,7 @@ async function catalogForms(page: Page, owned: OwnedAgent): Promise<void> {
       exact: true,
     })
   ).toBeVisible()
-  await expect(page.getByLabel('Name', { exact: true })).toHaveValue(`${owned.name}-budget-draft`)
+  await expect(page.getByLabel(NAME_FIELD)).toHaveValue(`${owned.name}-budget-draft`)
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page).toHaveURL(
     new RegExp(`${escapeRegex(CONTROL_ROUTES.costAndUsage.tokenBudgets)}$`)
