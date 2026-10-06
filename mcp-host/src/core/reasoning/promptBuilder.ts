@@ -64,6 +64,7 @@ export const DESKTOP_ENVIRONMENT_HINT =
  */
 export const GFS_WORKSPACE_FILE_GUIDANCE_TEXT =
   'GFS RESOURCE IDs: GFS resource tools require the drive and a real resourceId from an accessible/list/resolve result or a turn file reference. When the user provides a human path, discover that exact path with `clerum__gfs_accessible` and `clerum__gfs_list` before downloading; never invent a resourceId or pass the path as the id. ' +
+  'After discovering a human path, call `clerum__gfs_download` and use the exact `path` from its `workspace_file` result; never guess a `.gfs-downloads/<filename>` path. ' +
   'GFS WORKSPACE FILES: When a GFS result says `delivery:"workspace_file"`, its `path` is relative to the caller workspace and the file is already present locally. ' +
   'Do not print, `file_read`, or paste the whole source. If analysis or conversion is needed, use an approved `shell_exec` command or script with that relative path, write outputs outside `.gfs-downloads`, and return only bounded counts, aggregates, errors, or small samples. ' +
   GFS_LOCAL_PROCESSING_GUIDANCE +
