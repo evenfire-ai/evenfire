@@ -24,8 +24,12 @@ import { SanitizedOutput, ValidationResult } from '../types'
 export type SecretEntriesProvider = () => Array<{ name: string; value: string }>
 
 // Any opening or closing `tool_output` tag, whatever its attributes, spacing or
-// case: the model must not read a forged wrapper boundary inside the content.
-const TOOL_OUTPUT_TAG_PATTERN = /<\/?tool_output\b[^>]*>/gi
+// case, closed or not: the model must not read a forged wrapper boundary inside
+// the content. `[^<>]*` stops at the next `<`, so each match scans only up to
+// the next tag start and the whole pass stays linear; the optional `>` escapes
+// an unclosed forged tag too. The replacement only escapes `<` and `>`, so no
+// text is lost.
+const TOOL_OUTPUT_TAG_PATTERN = /<(?:\s*\/)?\s*tool_output\b[^<>]*>?/gi
 
 function wrapToolOutput(toolName: string, content: string, wasSanitized: boolean): string {
   const escaped = content.replace(TOOL_OUTPUT_TAG_PATTERN, tag =>
@@ -41,6 +45,66 @@ function parsesAsJson(text: string): boolean {
   } catch {
     return false
   }
+}
+
+type RedactionRange = { start: number; end: number; replacement: string }
+
+/**
+ * String tokens of a valid JSON text, found in one iterative scan. `tokenOf[i]`
+ * is the index of the token whose inner span (between its quotes, escapes still
+ * encoded) holds code unit `i`, or -1 outside every string. `escapeOffset[i]`
+ * is the distance from code unit `i` back to the backslash that opens the
+ * escape sequence holding it, or 0 when `i` is not inside one past its start.
+ */
+function scanJsonStrings(text: string): {
+  tokens: Array<{ start: number; end: number }>
+  tokenOf: Int32Array
+  escapeOffset: Uint8Array
+} {
+  const tokens: Array<{ start: number; end: number }> = []
+  const tokenOf = new Int32Array(text.length).fill(-1)
+  const escapeOffset = new Uint8Array(text.length)
+  let i = 0
+  while (i < text.length) {
+    if (text.charCodeAt(i) !== 0x22) {
+      i++
+      continue
+    }
+    const start = i + 1
+    let j = start
+    while (j < text.length && text.charCodeAt(j) !== 0x22) {
+      if (text.charCodeAt(j) === 0x5c) {
+        const length = text.charCodeAt(j + 1) === 0x75 ? 6 : 2
+        for (let k = 1; k < length; k++) escapeOffset[j + k] = k
+        j += length
+      } else {
+        j++
+      }
+    }
+    if (j >= text.length) throw new Error('scanJsonStrings: unterminated string in valid JSON')
+    tokenOf.fill(tokens.length, start, j)
+    tokens.push({ start, end: j })
+    i = j + 1
+  }
+  return { tokens, tokenOf, escapeOffset }
+}
+
+// JSON punctuation and whitespace: the only bytes outside a string that a
+// redaction range may cover while the output can still be redacted in place.
+function isJsonStructural(code: number): boolean {
+  return (
+    code === 0x22 || // "
+    code === 0x7b || // {
+    code === 0x7d || // }
+    code === 0x5b || // [
+    code === 0x5d || // ]
+    code === 0x3a || // :
+    code === 0x2c || // ,
+    code === 0x20 ||
+    code === 0x09 ||
+    code === 0x0a ||
+    code === 0x0d
+  )
 }
 
 export class BasicSafety implements Safety {
@@ -78,13 +142,18 @@ export class BasicSafety implements Safety {
     /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9\/]+/g,
   ]
 
+  private static readonly INJECTION_REPLACEMENT = '[filtered]'
+  private static readonly SECRET_REPLACEMENT = '[REDACTED]'
+
   private static readonly ASSISTANT_RESPONSE_FILTER_PATTERNS: Array<{
     pattern: RegExp
     replacement: string
     warning: string
   }> = [
     {
-      pattern: /<\/?tool_output\b[^>]*>/gi,
+      // Closed tags only, because this replacement removes text. `[^<>]*`
+      // keeps the scan linear (see TOOL_OUTPUT_TAG_PATTERN).
+      pattern: /<(?:\s*\/)?\s*tool_output\b[^<>]*>/gi,
       replacement: '[filtered]',
       warning: 'Potential tool_output tag filtered from assistant response',
     },
@@ -297,19 +366,27 @@ export class BasicSafety implements Safety {
   }
 
   /**
-   * Tool-output redaction that keeps JSON output parseable. The patterns run
-   * over the raw text, so a match can swallow JSON syntax: the password value
-   * class `[^\s,;]{8,}` eats a closing `"}` when the value ends the last
-   * string of an object, as an attachment page cut inside `password=…` does.
-   * Only when the original output was valid JSON and the text pass made it
-   * invalid is the redaction redone leaf by leaf: every key and string value
-   * goes through the same rules and the result is re-serialized. Every other
-   * output keeps the text-pass result byte for byte.
+   * Tool-output redaction that keeps JSON output parseable. The text pass
+   * (`sanitizeFreeformContent`) runs over the raw text, so a match can swallow
+   * JSON syntax: the password value class `[^\s,;]{8,}` eats a closing `"}`,
+   * and a raw `\n` escape is not whitespace to it. The text-pass result is
+   * returned unchanged when it did not modify the output, when it still
+   * parses, or when the original output does not parse.
    *
-   * The text-pass result is kept as well when the leaf pass cannot reproduce
-   * it: a match that spans JSON syntax (a key ending in `password:` followed
-   * by its value) is invisible to any single leaf, and two keys that redact to
-   * the same text cannot both be kept. Redaction wins over parseability there.
+   * Otherwise the redaction is redone in place on the original text:
+   * 1. One iterative scan records the inner span of every string token, keys
+   *    and values alike, with escapes still encoded.
+   * 2. Every injection pattern, secret pattern and configured secret form is
+   *    matched independently against the original text.
+   * 3. If a match covers any byte outside every string other than JSON
+   *    punctuation or whitespace (a number, `true`, `false`, `null`), or
+   *    touches no string at all, the text-pass result is returned.
+   * 4. Each match is clipped to every string it covers and widened to whole
+   *    escape sequences. Pieces that overlap or touch inside one string are
+   *    merged (`[REDACTED]` when their replacements differ) and spliced in.
+   *    Every byte outside the replaced pieces stays as it was.
+   * 5. If that result does not parse, the text-pass result is returned.
+   * The warnings are always the text pass's.
    */
   private sanitizeToolOutputContent(toolName: string, content: string): SanitizedOutput {
     const options = { secretWarning: `Potential secret detected in ${toolName} output` }
@@ -317,35 +394,109 @@ export class BasicSafety implements Safety {
     if (!textPass.was_modified || parsesAsJson(textPass.content) || !parsesAsJson(content)) {
       return textPass
     }
-    const leaves = { warnings: new Set<string>(), modified: false, keyCollision: false }
-    const redacted = JSON.stringify(this.sanitizeJsonLeaves(JSON.parse(content), options, leaves))
-    const residual = this.sanitizeFreeformContent(redacted, options)
-    if (!leaves.modified || leaves.keyCollision || residual.was_modified) return textPass
-    return { content: redacted, was_modified: true, warnings: [...leaves.warnings] }
+    const { tokens, tokenOf, escapeOffset } = scanJsonStrings(content)
+    const pieces: RedactionRange[] = []
+    for (const range of this.redactionRanges(content)) {
+      let touchedString = false
+      let i = range.start
+      while (i < range.end) {
+        const token = tokenOf[i]
+        if (token === -1) {
+          if (!isJsonStructural(content.charCodeAt(i))) return textPass
+          i++
+          continue
+        }
+        const tokenEnd = tokens[token].end
+        let start = i
+        let end = Math.min(range.end, tokenEnd)
+        start -= escapeOffset[start]
+        if (end < tokenEnd && escapeOffset[end] > 0) {
+          const escapeStart = end - escapeOffset[end]
+          end = escapeStart + (content.charCodeAt(escapeStart + 1) === 0x75 ? 6 : 2)
+        }
+        pieces.push({ start, end, replacement: range.replacement })
+        touchedString = true
+        i = tokenEnd
+      }
+      if (!touchedString) return textPass
+    }
+
+    // A piece ends at most at its string's closing quote and the next string
+    // starts at least two code units later, so merging sorted pieces that
+    // overlap or touch only ever joins pieces of the same string.
+    pieces.sort((a, b) => a.start - b.start)
+    const merged: RedactionRange[] = []
+    for (const piece of pieces) {
+      const last = merged[merged.length - 1]
+      if (last && piece.start <= last.end) {
+        last.end = Math.max(last.end, piece.end)
+        if (last.replacement !== piece.replacement) {
+          last.replacement = BasicSafety.SECRET_REPLACEMENT
+        }
+      } else {
+        merged.push({ ...piece })
+      }
+    }
+    let redacted = ''
+    let cursor = 0
+    for (const piece of merged) {
+      redacted += content.slice(cursor, piece.start) + piece.replacement
+      cursor = piece.end
+    }
+    redacted += content.slice(cursor)
+    if (!parsesAsJson(redacted)) return textPass
+    return { content: redacted, was_modified: true, warnings: textPass.warnings }
   }
 
-  private sanitizeJsonLeaves(
-    value: unknown,
-    options: { secretWarning: string },
-    leaves: { warnings: Set<string>; modified: boolean; keyCollision: boolean }
-  ): unknown {
-    if (typeof value === 'string') {
-      const result = this.sanitizeFreeformContent(value, options)
-      for (const warning of result.warnings) leaves.warnings.add(warning)
-      if (result.was_modified) leaves.modified = true
-      return result.content
+  /**
+   * Every match of the redaction rules `sanitizeFreeformContent` applies to
+   * tool output, each rule matched independently against `content`.
+   */
+  private redactionRanges(content: string): RedactionRange[] {
+    const ranges: RedactionRange[] = []
+    const addMatches = (pattern: RegExp, replacement: string) => {
+      for (const match of content.matchAll(pattern)) {
+        if (match[0].length === 0) continue
+        ranges.push({ start: match.index, end: match.index + match[0].length, replacement })
+      }
     }
-    if (Array.isArray(value))
-      return value.map(item => this.sanitizeJsonLeaves(item, options, leaves))
-    if (value === null || typeof value !== 'object') return value
-    // A null-prototype record keeps a parsed `__proto__` key as an own property.
-    const out: Record<string, unknown> = Object.create(null)
-    for (const [key, item] of Object.entries(value)) {
-      const sanitizedKey = this.sanitizeJsonLeaves(key, options, leaves) as string
-      if (Object.prototype.hasOwnProperty.call(out, sanitizedKey)) leaves.keyCollision = true
-      out[sanitizedKey] = this.sanitizeJsonLeaves(item, options, leaves)
+    for (const pattern of BasicSafety.INJECTION_PATTERNS) {
+      addMatches(pattern, BasicSafety.INJECTION_REPLACEMENT)
     }
-    return out
+    for (const pattern of BasicSafety.SECRET_PATTERNS) {
+      addMatches(pattern, BasicSafety.SECRET_REPLACEMENT)
+    }
+    for (const secret of this.configuredSecretForms()) {
+      const replacement = `[REDACTED:${secret.name}]`
+      for (const form of secret.forms) {
+        let at = content.indexOf(form)
+        while (at !== -1) {
+          ranges.push({ start: at, end: at + form.length, replacement })
+          at = content.indexOf(form, at + form.length)
+        }
+      }
+    }
+    return ranges
+  }
+
+  /**
+   * The ConfigStore secret values to redact by literal match, each with every
+   * form it takes in output: the plain value and, when different, its JSON
+   * string encoding (a value holding `"`, `\` or a control character appears
+   * escaped inside raw JSON). The encoded form, never shorter, comes first so
+   * the plain pass cannot split it.
+   */
+  private configuredSecretForms(): Array<{ name: string; forms: string[] }> {
+    const secrets: Array<{ name: string; forms: string[] }> = []
+    for (const entry of this.secretEntriesProvider?.() ?? []) {
+      if (!entry.value || entry.value.length < 4) continue // ignore trivially-short values
+      const encoded = JSON.stringify(entry.value).slice(1, -1)
+      secrets.push({
+        name: entry.name,
+        forms: encoded === entry.value ? [entry.value] : [encoded, entry.value],
+      })
+    }
+    return secrets
   }
 
   /**
@@ -367,7 +518,7 @@ export class BasicSafety implements Safety {
 
     for (const pattern of BasicSafety.INJECTION_PATTERNS) {
       const before = sanitized
-      sanitized = sanitized.replace(pattern, '[filtered]')
+      sanitized = sanitized.replace(pattern, BasicSafety.INJECTION_REPLACEMENT)
       if (sanitized !== before) {
         warnings.push('Potential prompt injection pattern filtered')
       }
@@ -383,23 +534,29 @@ export class BasicSafety implements Safety {
 
     for (const pattern of BasicSafety.SECRET_PATTERNS) {
       const before = sanitized
-      sanitized = sanitized.replace(pattern, '[REDACTED]')
+      sanitized = sanitized.replace(pattern, BasicSafety.SECRET_REPLACEMENT)
       if (sanitized !== before) {
         warnings.push(options.secretWarning)
       }
     }
 
     // Defense-in-depth: redact ConfigStore-managed secret values by literal
-    // substring match. Catches values that don't fit the regex shapes
-    // above — operator-supplied integration tokens, the LLM key, etc.
-    // Length-descending traversal ensures a longer secret containing a
-    // shorter one is masked before the shorter pass would erase its anchor.
-    const entries = this.secretEntriesProvider?.() ?? []
-    for (const entry of entries) {
-      if (!entry.value || entry.value.length < 4) continue // ignore trivially-short values
-      if (!sanitized.includes(entry.value)) continue
-      sanitized = sanitized.split(entry.value).join(`[REDACTED:${entry.name}]`)
-      warnings.push(`ConfigStore secret value redacted (${entry.name})`)
+    // substring match, in plain and JSON-encoded form. Catches values that
+    // don't fit the regex shapes above — operator-supplied integration
+    // tokens, the LLM key, etc. Entries are traversed in provider order;
+    // ConfigStore sorts them by descending length, so a longer secret
+    // containing a shorter one is masked before the shorter pass would erase
+    // its anchor.
+    for (const secret of this.configuredSecretForms()) {
+      const before = sanitized
+      for (const form of secret.forms) {
+        if (sanitized.includes(form)) {
+          sanitized = sanitized.split(form).join(`[REDACTED:${secret.name}]`)
+        }
+      }
+      if (sanitized !== before) {
+        warnings.push(`ConfigStore secret value redacted (${secret.name})`)
+      }
     }
 
     return {

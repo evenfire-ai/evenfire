@@ -421,6 +421,64 @@ describe('C17 prePrune — real attachment_read producer (M1, L14)', () => {
     })
   }
 
+  it('collapses an env-dump page whose PWD= match runs across its newline escapes', async () => {
+    const head = 'PWD=/app\nHOME=/root\nPORT=5432'
+    const fileText = `${head}\nUSER=app\n`
+    const tool = readerFor(Buffer.from(fileText))
+    const registry: ToolRegistry = {
+      get: name => (name === tool.name() ? tool : null),
+      listDefinitions: () => [],
+      register: () => undefined,
+    }
+    const result = await executeSingleTool(
+      {
+        id: 'tc_env_dump',
+        name: 'clerum__attachment_read',
+        arguments: { attachmentId: ATTACHMENT_ID, maxBytes: Buffer.byteLength(head) },
+      },
+      {
+        toolRegistry: registry,
+        toolOutputProcessor: new DefaultToolOutputProcessor(safety),
+        safety,
+        events: new SimpleEventEmitter(),
+        toolTimeout: 1000,
+        progressReporter: undefined,
+        toolProgressInterval: 0,
+        measureToolMessage: message =>
+          Math.max(Math.ceil(Buffer.byteLength(message.content ?? '', 'utf8') / 4) + 4, 1),
+      }
+    )
+
+    expect(result.is_error).toBe(false)
+    expect(result.content.startsWith(OPEN)).toBe(true)
+    expect(result.content.endsWith(CLOSE)).toBe(true)
+    const inner = result.content.slice(OPEN.length, -CLOSE.length)
+    expect(parsesAsJson(inner)).toBe(true)
+    expect(JSON.parse(inner).nextOffset).toBe(Buffer.byteLength(head))
+    expect(inner).not.toContain('HOME=/root')
+
+    const messages: ChatMessage[] = [
+      userMsg('Review the attached config'),
+      assistantToolCall('tc_env_dump', 'clerum__attachment_read', { attachmentId: ATTACHMENT_ID }),
+      { role: 'tool', tool_call_id: 'tc_env_dump', name: result.name, content: result.content },
+      userMsg('next turn'),
+    ]
+    const pruned = prePrune(messages, OPTIONS, PRESSURE_ON)
+    expect(pruned.passesApplied).toContain('attachment_page_collapse')
+    const stub = JSON.parse(pruned.messages[2].content.slice(OPEN.length, -CLOSE.length))
+    expect(stub).toEqual({
+      attachmentId: ATTACHMENT_ID,
+      referenceId: expect.any(String),
+      kind: 'text',
+      byteRange: { offset: 0, length: Buffer.byteLength(head) },
+      truncated: true,
+      limit: 'max_bytes',
+      nextOffset: Buffer.byteLength(head),
+      text: stubMarker(),
+    })
+    expect(() => validateToolLinkages(pruned.messages)).not.toThrow()
+  })
+
   it('collapses a page whose text ends inside password=<value> and keeps its paging fields', async () => {
     const head = 'DB_HOST=db.internal\npassword=supersecret99'
     const fileText = `${head}\nPORT=5432\n`
