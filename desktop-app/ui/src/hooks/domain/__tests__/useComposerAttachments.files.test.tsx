@@ -3,7 +3,8 @@
  * Issue #678 — the composer's document state machine: a picked file is
  * `reading` at once, then `ready`; the user can remove it at any point, and a
  * removed file never comes back. A refused or unreadable file leaves no chip,
- * only a notice that the next attach, a send or an agent change clears.
+ * only a notice that the next attach, removing a file, a send or an agent
+ * change clears.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
@@ -187,6 +188,34 @@ describe('useComposerAttachments — documents (#678)', () => {
     ])
   })
 
+  it('clears the refusal when the user removes a file chip to make room', async () => {
+    const { result } = render()
+    const files = Array.from({ length: COMPOSER_MAX_ATTACHMENTS + 1 }, (_, index) =>
+      textFile(`f${index}.txt`, `content ${index}`)
+    )
+    act(() => {
+      result.current.handleAddComposerFiles(files, '')
+    })
+    await waitFor(() =>
+      expect(statuses(result).filter(status => status === 'ready')).toHaveLength(
+        COMPOSER_MAX_ATTACHMENTS
+      )
+    )
+    // Witness: the refusal is on screen before the chip is removed.
+    expect(refusalTexts(result)).toEqual([
+      `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`,
+    ])
+    const [first] = result.current.composerFileAttachments
+
+    act(() => {
+      result.current.handleRemoveComposerFileAttachment(first!.id)
+    })
+
+    expect(result.current.composerFileAttachments).toHaveLength(COMPOSER_MAX_ATTACHMENTS - 1)
+    expect(result.current.composerFileAttachments.map(file => file.id)).not.toContain(first!.id)
+    expect(refusalTexts(result)).toEqual([])
+  })
+
   it('does not bring back a file removed while it was being read', async () => {
     const { result } = render()
     const file = textFile('gone.txt', 'gone')
@@ -354,6 +383,27 @@ describe('useComposerAttachments — documents (#678)', () => {
     expect(refusalTexts(result)).toEqual([
       `"late.png" was not attached: a message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`,
     ])
+  })
+
+  it('clears the refusal when the user removes an image chip to make room', () => {
+    const { result } = render()
+    act(() => {
+      result.current.handleAddComposerImageAttachments(
+        Array.from({ length: COMPOSER_MAX_ATTACHMENTS + 1 }, (_, index) => image(index))
+      )
+    })
+    // Witness: the twenty-first image was refused with a notice on screen.
+    expect(result.current.composerImageAttachments).toHaveLength(COMPOSER_MAX_ATTACHMENTS)
+    expect(refusalTexts(result)).toEqual([
+      `"${image(COMPOSER_MAX_ATTACHMENTS).name}" was not attached: a message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`,
+    ])
+
+    act(() => {
+      result.current.handleRemoveComposerImageAttachment(image(0).id)
+    })
+
+    expect(result.current.composerImageAttachments).toHaveLength(COMPOSER_MAX_ATTACHMENTS - 1)
+    expect(refusalTexts(result)).toEqual([])
   })
 
   it('clears the documents when the selected agent changes', async () => {

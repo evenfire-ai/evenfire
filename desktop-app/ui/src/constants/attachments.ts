@@ -51,16 +51,25 @@ export const COMPOSER_FILE_ENTRY_METADATA_BYTES = 640
 export const COMPOSER_MAX_IMAGE_BYTES = 3 * 1024 * 1024
 /**
  * Combined base64 size of the images in one non-Codex message. Images have
- * their own quota in rpc-proxy and mcp-host (up to the 24 MiB request body);
- * this is the composer's product ceiling for them.
+ * their own quota in rpc-proxy and mcp-host (16 MiB decoded, up to the 24 MiB
+ * request body); this is the composer's product ceiling for them and is
+ * stricter than that quota.
  */
 export const COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES = 8 * 1024 * 1024
 
 /**
- * Codex-only (#650) per-image ceiling. The 16 MiB aggregate lives on the
- * Codex chat hop and the shared contract, not in this picker.
+ * Codex-only (#650) per-image ceiling. Must match `MAX_IMAGE_DECODED_BYTES` in
+ * `rpc-proxy/src/middleware/chatJsonBody.ts` and in `mcp-host/src/server.ts`.
  */
 export const CODEX_COMPOSER_MAX_IMAGE_BYTES = 16 * 1024 * 1024
+/**
+ * Codex-only (#650) combined size of the images in one message, counted as
+ * their decoded bytes. rpc-proxy and mcp-host sum the decoded bytes of every
+ * image and refuse the request above this, so the composer refuses the image
+ * first. Must match `MAX_IMAGE_DECODED_BYTES_TOTAL` in
+ * `rpc-proxy/src/middleware/chatJsonBody.ts` and in `mcp-host/src/server.ts`.
+ */
+export const CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES = 16 * 1024 * 1024
 /** Official Codex client long-side bound. The Codex hop 400s frames above this. */
 export const CODEX_COMPOSER_MAX_IMAGE_DIMENSION = 2048
 
@@ -70,8 +79,11 @@ export const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 
 export type ComposerImageBudget = {
   maxImageBytes: number
-  /** `null` → no composer aggregate; the Codex hop owns that ceiling. */
-  maxTotalBase64Bytes: number | null
+  /**
+   * Combined size of the images in one message, measured either as the length
+   * of their base64 or as their decoded bytes.
+   */
+  maxTotal: { bytes: number; measure: 'base64' | 'decoded' }
   /** `null` → no composer pixel bound (general models). */
   maxDimension: number | null
   sizeUnit: 'MB' | 'MiB'
@@ -82,15 +94,35 @@ export function composerImageBudget(provider: string | null | undefined): Compos
   if (provider === CODEX_SUBSCRIPTION_PROVIDER) {
     return {
       maxImageBytes: CODEX_COMPOSER_MAX_IMAGE_BYTES,
-      maxTotalBase64Bytes: null,
+      maxTotal: { bytes: CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES, measure: 'decoded' },
       maxDimension: CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
       sizeUnit: 'MiB',
     }
   }
   return {
     maxImageBytes: COMPOSER_MAX_IMAGE_BYTES,
-    maxTotalBase64Bytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+    maxTotal: { bytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES, measure: 'base64' },
     maxDimension: null,
     sizeUnit: 'MB',
   }
+}
+
+/**
+ * Bytes one image's base64 counts against `ComposerImageBudget.maxTotal`. The
+ * decoded size is computed from the base64 as rpc-proxy and mcp-host compute
+ * it (`decodedBase64Bytes`): three bytes per four characters, minus one per
+ * `=` of padding. The composer only holds canonical base64 (FileReader and
+ * canvas output), so a length that is not a multiple of four is a defect and
+ * throws.
+ */
+export function composerImageBudgetBytes(
+  dataBase64: string,
+  measure: ComposerImageBudget['maxTotal']['measure']
+): number {
+  if (measure === 'base64') return dataBase64.length
+  if (dataBase64.length % 4 !== 0) {
+    throw new Error('Image data is not canonical base64.')
+  }
+  const padding = dataBase64.endsWith('==') ? 2 : dataBase64.endsWith('=') ? 1 : 0
+  return (dataBase64.length / 4) * 3 - padding
 }

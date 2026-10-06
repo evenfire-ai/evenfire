@@ -2059,6 +2059,66 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
     expect(sentAttachmentIds()).toEqual(expect.arrayContaining(['file-big', 'image-8mib']))
   })
 
+  it('refuses Codex images and text that pass the 24 MiB body without any file, and sends the text that fills it', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    const codexCatalog: HostModelsResult = {
+      provider: 'codex-subscription',
+      hostDefault: 'gpt-5.5',
+      // A broker-backed provider has no silent default: the session names its model.
+      sessionModel: 'gpt-5.5',
+      degraded: false,
+      modelSelectionRevision: 0,
+      models: [{ name: 'gpt-5.5', imageInput: { state: 'supported', reason: 'supported' } }],
+    }
+    await act(async () => {
+      await loadHostModels(
+        { getHostModels: vi.fn(async () => codexCatalog), setHostModel: vi.fn() },
+        'agent-x',
+        null
+      )
+    })
+    // Four bytes under the 16 MiB decoded quota Codex admits, as canonical
+    // base64 without padding.
+    const decodedBytes = 16 * MIB - 4
+    const imageBase64Length = base64Length(decodedBytes)
+    expect(imageBase64Length % 4).toBe(0)
+    const image: ComposerImageAttachment = {
+      id: 'image-codex',
+      name: 'scan.png',
+      mimeType: 'image/png',
+      dataBase64: 'A'.repeat(imageBase64Length),
+      sizeBytes: decodedBytes,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(0)
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
+    // Envelope (4096) + the fields rpc-proxy adds (2048) + the text as a JSON
+    // string (+2 quotes) + the agent twice as a JSON string (2 × 9) + the
+    // image's JSON name and fixed fields + the image's base64.
+    const fullBodyText =
+      24 * MIB - 4096 - 2048 - 2 - 18 - JSON.stringify('scan.png').length - 640 - imageBase64Length
+    // Precondition: the text share stays far inside its 6 MiB, so only the
+    // whole-body limit can refuse this send.
+    expect(fullBodyText + 1).toBeLessThan(3 * MIB)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullBodyText + 1))
+    })
+    expectBlocked(rendered, REQUEST_BODY_BLOCKER)
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullBodyText))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['image-codex'])
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
+    expect(request.content).toHaveLength(fullBodyText)
+  })
+
   it('refuses a twenty-first attachment and sends twenty', async () => {
     const files = Array.from({ length: 21 }, (_, index) =>
       readyTextFile(`file-${index}`, `part-${index}.txt`, 10)

@@ -423,6 +423,30 @@ function imageFileWithReportedSize(name: string, type: string, sizeBytes: number
   return file
 }
 
+const MIB = 1024 * 1024
+
+/** A PNG of exactly `sizeBytes` real bytes; `marker` makes its bytes unique. */
+function pngOfSize(name: string, sizeBytes: number, marker: number): File {
+  const bytes = new Uint8Array(sizeBytes)
+  bytes.set(PNG_BYTES)
+  bytes[PNG_BYTES.length] = marker
+  return imageFile(name, 'image/png', bytes)
+}
+
+/** An attached PNG whose canonical base64 decodes to exactly `decodedBytes` bytes. */
+function attachedImage(id: string, name: string, decodedBytes: number): ComposerImageAttachment {
+  const padding = (3 - (decodedBytes % 3)) % 3
+  const dataBase64 = `iVBORw0KGgo${'A'.repeat(Math.ceil(decodedBytes / 3) * 4 - padding - 11)}${'='.repeat(padding)}`
+  return {
+    id,
+    name,
+    mimeType: 'image/png',
+    dataBase64,
+    sizeBytes: decodedBytes,
+    previewDataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+  }
+}
+
 function pngIhdrFile(name: string, width: number, height: number): File {
   const bytes = new Uint8Array(8 + 8 + 13)
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
@@ -898,24 +922,88 @@ describe('ComposerPanel Codex image budgets', () => {
     expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
   })
 
-  it('attaches 10MiB + 7MiB in the composer; the hop owns the aggregate', async () => {
+  it('refuses a second 8.5 MiB PNG: rpc-proxy and mcp-host cap the decoded images at 16 MiB', async () => {
     const { container } = render(<ComposerPanel inline />)
+    const files = [pngOfSize('first.png', 8.5 * MIB, 1), pngOfSize('second.png', 8.5 * MIB, 2)]
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    // Witness: the first image fits on its own and is attached.
+    expect(addedBatches()[0]?.map(attachment => attachment.name)).toEqual(['first.png'])
+    expect(screen.getByRole('alert').textContent).toBe(
+      'second.png does not fit in this message: the images in one message are limited to 16 MiB in total. Send the attached images first or remove one.'
+    )
+  })
+
+  it('attaches two PNGs whose decoded bytes fill the 16 MiB image quota exactly', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    const files = [pngOfSize('left.png', 8 * MIB, 1), pngOfSize('right.png', 8 * MIB, 2)]
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(['left.png', 'right.png'])
+    expect(batch?.map(attachment => attachment.sizeBytes)).toEqual([8 * MIB, 8 * MIB])
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('counts the decoded bytes of images already in the composer toward the 16 MiB quota', async () => {
+    composerState.composerImageAttachments = [
+      attachedImage('already', 'already.png', 8.5 * MIB - 2),
+    ]
+    const { container } = render(<ComposerPanel inline />)
+
     fireEvent.change(pickerInput(container), {
-      target: {
-        files: [
-          imageFileWithReportedSize('fits.png', 'image/png', 10 * 1024 * 1024),
-          imageFileWithReportedSize('over-total.png', 'image/png', 7 * 1024 * 1024),
-        ],
-      },
+      target: { files: [pngOfSize('next.png', 7.5 * MIB + 3, 1)] },
+    })
+
+    await waitFor(() =>
+      expect(screen.queryByRole('alert')?.textContent).toBe(
+        'next.png does not fit in this message: the images in one message are limited to 16 MiB in total. Send the attached images first or remove one.'
+      )
+    )
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+
+    // Twin: the same composer admits the image one byte smaller, which fills the quota.
+    cleanup()
+    composerState.composerImageAttachments = [
+      attachedImage('already', 'already.png', 8.5 * MIB - 2),
+    ]
+    const twin = render(<ComposerPanel inline />)
+    fireEvent.change(pickerInput(twin.container), {
+      target: { files: [pngOfSize('next.png', 7.5 * MIB + 2, 1)] },
     })
     await waitFor(() =>
       expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
     )
-    expect(addedBatches()[0]?.map(attachment => attachment.name)).toEqual([
-      'fits.png',
-      'over-total.png',
-    ])
-    expect(screen.queryByRole('alert')).toBeNull()
+    expect(expectSinglePreparedImage().name).toBe('next.png')
+  })
+
+  it('refuses an annotation save that would push the decoded images past 16 MiB', () => {
+    const already = attachedImage('already', 'already.png', 8 * MIB)
+    const editing = attachedImage('editing', 'edit.png', 8 * MIB - 3)
+    composerState.composerImageAttachments = [already, editing]
+    render(<ComposerPanel inline />)
+    fireEvent.click(screen.getByText('edit.png'))
+    expect(annotationCanvasMock.onSave).toEqual(expect.any(Function))
+
+    expect(() =>
+      annotationCanvasMock.onSave?.({ ...attachedImage('editing', 'edit.png', 8 * MIB + 1) })
+    ).toThrow(
+      'edit.png was kept unchanged. The images in one message are limited to 16 MiB in total.'
+    )
+    expect(actionsMock.handleUpdateComposerImageAttachment).not.toHaveBeenCalled()
+
+    // Twin: a save that fills the quota exactly replaces the attachment.
+    const fits = attachedImage('editing', 'edit.png', 8 * MIB)
+    annotationCanvasMock.onSave?.(fits)
+    expect(actionsMock.handleUpdateComposerImageAttachment).toHaveBeenCalledWith(fits)
   })
 })
 

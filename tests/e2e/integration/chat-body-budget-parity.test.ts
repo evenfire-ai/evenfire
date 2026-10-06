@@ -25,6 +25,10 @@ const sources = {
   rpcProxy: readFileSync(join(repoRoot, 'rpc-proxy/src/middleware/chatJsonBody.ts'), 'utf8'),
   mcpHost: readFileSync(join(repoRoot, 'mcp-host/src/server.ts'), 'utf8'),
   composer: readFileSync(join(repoRoot, 'desktop-app/ui/src/constants/attachments.ts'), 'utf8'),
+  composerAdmission: readFileSync(
+    join(repoRoot, 'desktop-app/ui/src/lib/composerFileAdmission.ts'),
+    'utf8'
+  ),
   hostConfig: readFileSync(join(repoRoot, 'mcp-host/src/config.ts'), 'utf8'),
   hostAdmission: readFileSync(join(repoRoot, 'mcp-host/src/agent/incomingAttachments.ts'), 'utf8'),
   rpcProxyForwardingTest: readFileSync(
@@ -53,11 +57,14 @@ function constantValue(source: string, name: string, label: string): number {
     .reduce((product, factor) => product * factor, 1)
 }
 
-/** Source text of a top-level `function name(...) { ... }`, closed by a column-0 `}`. */
+/**
+ * Source text of a top-level `function name(...) { ... }` (exported or not),
+ * closed by a column-0 `}`.
+ */
 function functionSource(source: string, name: string, label: string): string {
   return soleMatch(
     source,
-    new RegExp(`^function ${name}\\([\\s\\S]*?^\\}$`, 'm'),
+    new RegExp(`^(?:export )?function ${name}\\([\\s\\S]*?^\\}$`, 'm'),
     `${label} ${name}`
   )[0]
 }
@@ -159,6 +166,14 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
         'COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES',
         constantValue(sources.rpcProxy, 'MAX_FILE_BASE64_BYTES_TOTAL', 'rpc-proxy'),
       ],
+      [
+        'CODEX_COMPOSER_MAX_IMAGE_BYTES',
+        constantValue(sources.rpcProxy, 'MAX_IMAGE_DECODED_BYTES', 'rpc-proxy'),
+      ],
+      [
+        'CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES',
+        constantValue(sources.rpcProxy, 'MAX_IMAGE_DECODED_BYTES_TOTAL', 'rpc-proxy'),
+      ],
       // The composer counts images and files together, as the Host admission does;
       // MAX_CHAT_FILES bounds only the credited files.
       [
@@ -169,6 +184,116 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
     for (const [name, serverValue] of composer) {
       expect(constantValue(sources.composer, name, 'composer'), name).toBe(serverValue)
     }
+  })
+
+  it('the composer counts the Codex image quota in decoded bytes, as both parsers do', () => {
+    const budget = functionSource(sources.composer, 'composerImageBudget', 'composer')
+    expect(soleLine(budget, 'maxTotal: { bytes: CODEX_', 'composer Codex image total')).toBe(
+      "maxTotal: { bytes: CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES, measure: 'decoded' },"
+    )
+    const composerDecoded = functionSource(sources.composer, 'composerImageBudgetBytes', 'composer')
+    const serverDecoded = functionSource(sources.rpcProxy, 'decodedBase64Bytes', 'rpc-proxy')
+    // The decoded size is the same arithmetic on the same base64 on both sides.
+    for (const prefix of ['const padding = ', 'return (dataBase64.length / 4) * 3']) {
+      expect(soleLine(composerDecoded, prefix, `composer ${prefix}`)).toBe(
+        soleLine(serverDecoded, prefix, `rpc-proxy ${prefix}`)
+      )
+    }
+    // Both refuse only above the quota: a set that fills it exactly is admitted.
+    const inspect = functionSource(sources.rpcProxy, 'inspectChatImageBudget', 'rpc-proxy')
+    expect(soleLine(inspect, 'if (counted >=', 'image quota condition')).toBe(
+      'if (counted >= MAX_CHAT_IMAGES || decodedTotal + decoded > MAX_IMAGE_DECODED_BYTES_TOTAL) {'
+    )
+  })
+
+  it('the composer estimates the non-image share and the file quota from these constants', () => {
+    // The estimate constants have no server counterpart: they bound the JSON
+    // around the text and the attachments. Pin them and every place the
+    // estimate uses them, so a changed literal or a dropped term fails here.
+    expect(constantValue(sources.composer, 'COMPOSER_REQUEST_ENVELOPE_BYTES', 'composer')).toBe(
+      4096
+    )
+    expect(constantValue(sources.composer, 'COMPOSER_FILE_ENTRY_METADATA_BYTES', 'composer')).toBe(
+      640
+    )
+    const admission = sources.composerAdmission
+    const lines: ReadonlyArray<readonly [string, string, string]> = [
+      ['jsonBytes', 'return ', 'return textEncoder.encode(JSON.stringify(value)).length'],
+      ['base64Length', 'return ', 'return Math.ceil(sizeBytes / 3) * 4'],
+      [
+        'composerFileDetailBytes',
+        'return ',
+        'return jsonBytes(file.filename) + COMPOSER_FILE_ENTRY_METADATA_BYTES',
+      ],
+      [
+        'composerFileBase64Bytes',
+        'return ',
+        'return files.reduce((total, file) => total + base64Length(file.sizeBytes), 0)',
+      ],
+      [
+        'composerNonImageShareBytes',
+        'COMPOSER_REQUEST_ENVELOPE_BYTES',
+        'COMPOSER_REQUEST_ENVELOPE_BYTES +',
+      ],
+      [
+        'composerNonImageShareBytes',
+        'COMPOSER_FORWARDED_FIELDS_BYTES',
+        'COMPOSER_FORWARDED_FIELDS_BYTES +',
+      ],
+      ['composerNonImageShareBytes', 'jsonBytes(request.content)', 'jsonBytes(request.content) +'],
+      [
+        'composerNonImageShareBytes',
+        '(request.fileReferences.length',
+        '(request.fileReferences.length ? jsonBytes(request.fileReferences) : 0) +',
+      ],
+      [
+        'composerNonImageShareBytes',
+        '2 * jsonBytes(request.hostRef)',
+        '2 * jsonBytes(request.hostRef) +',
+      ],
+      [
+        'composerNonImageShareBytes',
+        'request.files.reduce(',
+        'request.files.reduce((total, file) => total + composerFileDetailBytes(file), 0) +',
+      ],
+      [
+        'composerNonImageShareBytes',
+        '(total, image) =>',
+        '(total, image) => total + jsonBytes(image.name) + COMPOSER_FILE_ENTRY_METADATA_BYTES,',
+      ],
+      [
+        'composerFileAdmissionError',
+        'if (file.size >',
+        'if (file.size > COMPOSER_MAX_FILE_BYTES) {',
+      ],
+      [
+        'composerFileAdmissionError',
+        'if (context.attachedCount',
+        'if (context.attachedCount >= COMPOSER_MAX_ATTACHMENTS) {',
+      ],
+      [
+        'composerFileAdmissionError',
+        'if (composerFileBase64Bytes(',
+        'if (composerFileBase64Bytes(files) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES) {',
+      ],
+      [
+        'composerFileAdmissionError',
+        'const bodyBytes =',
+        'const bodyBytes = composerNonImageShareBytes({ ...context.request, files })',
+      ],
+      [
+        'composerFileAdmissionError',
+        'if (bodyBytes >',
+        'if (bodyBytes > COMPOSER_MAX_NON_IMAGE_BODY_BYTES) {',
+      ],
+    ]
+    for (const [name, prefix, expected] of lines) {
+      const body = functionSource(admission, name, 'composer admission')
+      expect(soleLine(body, prefix, `composer admission ${name} ${prefix}`)).toBe(expected)
+    }
+    // The non-image share is the sum of exactly the terms pinned above.
+    const share = functionSource(admission, 'composerNonImageShareBytes', 'composer admission')
+    expect(share.match(/ \+$/gm), 'composerNonImageShareBytes term count').toHaveLength(6)
   })
 
   it('the composer reserves the headroom rpc-proxy is tested to add when forwarding', () => {

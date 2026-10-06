@@ -23,6 +23,7 @@ import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_ATTACHMENTS,
   composerImageBudget,
+  composerImageBudgetBytes,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -576,10 +577,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           } not added.`
         )
       }
-      // Non-Codex images travel inline in one 10 MB body (#669). Codex leaves
-      // the aggregate to the hop (#650).
-      let totalBase64Bytes = composerImageAttachments.reduce(
-        (total, attachment) => total + attachment.dataBase64.length,
+      // Non-Codex images keep the #669 base64 ceiling; Codex images are held
+      // to the decoded image quota rpc-proxy and mcp-host enforce (#650).
+      const totalMeasure = imageBudget.maxTotal.measure
+      let totalImageBytes = composerImageAttachments.reduce(
+        (total, attachment) =>
+          total + composerImageBudgetBytes(attachment.dataBase64, totalMeasure),
         0
       )
 
@@ -617,19 +620,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             revokePreviewUrl(previewUrl)
             continue
           }
-          if (
-            imageBudget.maxTotalBase64Bytes != null &&
-            totalBase64Bytes + dataBase64.length > imageBudget.maxTotalBase64Bytes
-          ) {
+          const imageBytes = composerImageBudgetBytes(dataBase64, totalMeasure)
+          if (totalImageBytes + imageBytes > imageBudget.maxTotal.bytes) {
             validationErrors.push(
               `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${formatComposerMebibytes(
-                imageBudget.maxTotalBase64Bytes
+                imageBudget.maxTotal.bytes
               )} ${imageBudget.sizeUnit} in total. Send the attached images first or remove one.`
             )
             revokePreviewUrl(previewUrl)
             continue
           }
-          totalBase64Bytes += dataBase64.length
+          totalImageBytes += imageBytes
           accepted.push({
             id: crypto.randomUUID(),
             name: buildAttachmentName(file, source, mimeType, index),
@@ -708,14 +709,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         updated.dataBase64,
         imageBudget.maxDimension
       )
-      const otherBase64Bytes = composerImageAttachments.reduce(
+      const totalMeasure = imageBudget.maxTotal.measure
+      const otherImageBytes = composerImageAttachments.reduce(
         (total, attachment) =>
-          attachment.id === updated.id ? total : total + attachment.dataBase64.length,
+          attachment.id === updated.id
+            ? total
+            : total + composerImageBudgetBytes(attachment.dataBase64, totalMeasure),
         0
       )
       const combinedOverflow =
-        imageBudget.maxTotalBase64Bytes != null &&
-        otherBase64Bytes + updated.dataBase64.length > imageBudget.maxTotalBase64Bytes
+        otherImageBytes + composerImageBudgetBytes(updated.dataBase64, totalMeasure) >
+        imageBudget.maxTotal.bytes
       if (
         !composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes) &&
         !dimensionError &&
@@ -738,7 +742,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       }
       throw new Error(
         `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${formatComposerMebibytes(
-          imageBudget.maxTotalBase64Bytes ?? 0
+          imageBudget.maxTotal.bytes
         )} ${imageBudget.sizeUnit} in total.`
       )
     },

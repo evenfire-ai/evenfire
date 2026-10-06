@@ -2868,8 +2868,9 @@ export function useAgentChatController({
       // The limits rpc-proxy and mcp-host enforce, most specific first: the
       // count, the file quota, the share left for text and attachment details,
       // then the whole body (images included), so the reason names what to
-      // remove. The share applies to every send; the others only when files
-      // are attached.
+      // remove. The share and the whole body apply to every send, so images
+      // alone that fill the body are refused here rather than by the proxy;
+      // the count and the file quota only when files are attached.
       const requestForBudget = {
         content: effectiveContentForRequest,
         fileReferences: fileReferencesForSend,
@@ -2892,7 +2893,6 @@ export function useAgentChatController({
       } else if (composerNonImageShareBytes(requestForBudget) > COMPOSER_MAX_NON_IMAGE_BODY_BYTES) {
         budgetBlocker = `The message text and attachment details take more than ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} once encoded. Shorten the message or remove an attachment.`
       } else if (
-        hasFiles &&
         composerRequestBodyBytes(
           requestForBudget,
           effectiveAttachments.reduce((total, image) => total + image.dataBase64.length, 0)

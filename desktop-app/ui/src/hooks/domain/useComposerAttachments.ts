@@ -209,6 +209,9 @@ export function useComposerAttachments({
         }
         return previous.filter(att => att.id !== attachmentId)
       })
+      // Images and files share one per-message count, so removing an image
+      // frees a slot and a refusal such as the attachment count is stale.
+      setComposerFileRefusals([])
     },
     [commitComposerImages, revokeComposerPreviewUrls]
   )
@@ -320,6 +323,9 @@ export function useComposerAttachments({
     (attachmentId: string) => {
       composerAttachmentRevisionRef.current += 1
       commitComposerFiles(previous => previous.filter(item => item.id !== attachmentId))
+      // Removing a file is how the user answers a refusal such as the
+      // attachment count or the file quota, so it must not stay on screen.
+      setComposerFileRefusals([])
       clearSendError()
     },
     [clearSendError, commitComposerFiles]
