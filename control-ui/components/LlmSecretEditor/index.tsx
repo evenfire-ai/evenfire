@@ -117,15 +117,19 @@ export function LlmSecretEditor({
 
   return (
     <>
-      <div className="cu-form-stack" style={{ maxWidth: '100%' }}>
-        <p className="cu-field__hint">
-          Updates the listed keys and deletes the ones you remove here; every other key already
-          stored in this secret is preserved.
-        </p>
+      <div className="cu-form-stack">
+        <div className="cu-banner cu-banner--info">
+          Stored values are never returned by the API: rows marked <strong>Stored</strong> already
+          have a value — keep it as is or choose <strong>Replace</strong> to overwrite it. Removing
+          an additional credential slot deletes that key on save; slots marked{' '}
+          <strong>fallback-locked</strong> are referenced by an active fallback policy and cannot be
+          removed here. Every other key already stored in this secret is preserved.
+        </div>
         <LlmCredentialFields
           draft={keyDraft}
           onChange={(dataKey, value) => setKeyDraft(prev => ({ ...prev, [dataKey]: value }))}
           existingKeys={existingKeys}
+          protectedKeys={protectedCredentialSlots}
           // The editor reports on every change. Keep the parent state
           // identity-stable so it does not cause an unnecessary rerender.
           onRemovedKeysChange={next =>

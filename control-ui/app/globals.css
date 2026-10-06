@@ -8500,6 +8500,12 @@ td.cu-registry-description {
   min-width: 0;
 }
 
+/* A fallback-locked extra slot adds a `cu-chip` state marker beside the
+   remove control, so the row gains a fourth (auto) actions track. */
+.cu-llm-cred-extra--locked {
+  grid-template-columns: 1fr 1fr auto auto;
+}
+
 /* Chip + optional remove icon-button on the right side of a group head. */
 .cu-llm-cred-group__head-actions {
   display: flex;

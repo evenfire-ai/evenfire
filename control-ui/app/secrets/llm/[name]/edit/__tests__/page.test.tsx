@@ -384,7 +384,7 @@ describe('Edit LLM secret page — update payload', () => {
 })
 
 describe('Edit LLM secret page — fallback credential slot guard', () => {
-  it('blocks removing a stored slot still referenced by a Host fallback policy', async () => {
+  it('marks a stored slot still referenced by a Host fallback as locked and unremovable', async () => {
     const fallbackSlot = 'claude-api-key-fb1'
     seedSecret(['openai-api-key', fallbackSlot])
     // The guard scans every Host, not just the linking surface's: any Host
@@ -395,7 +395,45 @@ describe('Edit LLM secret page — fallback credential slot guard', () => {
     ])
 
     await renderEditor()
-    removeExtraSlotIn('Anthropic')
+
+    // Recipe-edit parity: the row carries a locked state chip, and the remove
+    // control is disabled so the retirement cannot even be queued.
+    const lockedChip = screen.getByText('fallback-locked', { selector: '.cu-chip' })
+    expect(lockedChip).toBeInTheDocument()
+    expect(lockedChip).toHaveAttribute(
+      'title',
+      'An active Host fallback still references this credential slot. Update the fallback configuration before removing this key.'
+    )
+    const removeButton = within(sectionFor('Anthropic')).getByRole('button', {
+      name: 'Remove extra credential slot',
+    })
+    expect(removeButton).toBeDisabled()
+    fireEvent.click(removeButton)
+    save()
+
+    expect(screen.getAllByText(/Provide at least one API key/i).length).toBeGreaterThan(0)
+    expect(
+      apiSendMock.mock.calls.some(args => args[0] === 'PUT' && args[1] === '/api/v1/admin/secrets')
+    ).toBe(false)
+  })
+
+  it('still blocks a rename that would retire a fallback-locked slot at save time', async () => {
+    // The chip and disabled X close the click path; renaming a locked slot
+    // with a value still queues the old key for retirement, and the save-time
+    // guard refuses it with the actionable reason.
+    const fallbackSlot = 'claude-api-key-fb1'
+    seedSecret(['openai-api-key', fallbackSlot])
+    seedHosts([{ name: 'foo', secretRef: SECRET, fallbackSlot }])
+
+    await renderEditor()
+    const anthropic = sectionFor('Anthropic')
+    fireEvent.change(within(anthropic).getByLabelText(/Extra credential slot key name/i), {
+      target: { value: 'claude-api-key-fb2' },
+    })
+    // The rename commits the new key, so the row's value input is live.
+    fireEvent.change(within(anthropic).getByLabelText(/Extra credential slot value/i), {
+      target: { value: 'sk-ant-new' },
+    })
     save()
 
     expect(
