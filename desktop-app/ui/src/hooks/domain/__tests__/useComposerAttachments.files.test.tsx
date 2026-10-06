@@ -16,9 +16,20 @@ import type { ComposerGlobalFileReference, ComposerImageAttachment } from '../..
 import { useComposerAttachments } from '../useComposerAttachments'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+const renderedHooks: Array<{ current: ReturnType<typeof useComposerAttachments> }> = []
 
 afterEach(() => {
   vi.restoreAllMocks()
+  // A read still in flight when a test ends can finish outside act and
+  // schedule React work that runs after jsdom is torn down, which Vitest
+  // reports as `window is not defined`. Every test settles its reads.
+  const unsettled = renderedHooks.flatMap(result =>
+    result.current.composerFileAttachments
+      .filter(file => file.status === 'reading')
+      .map(file => file.filename)
+  )
+  renderedHooks.length = 0
+  expect(unsettled, 'files still reading when the test ended').toEqual([])
 })
 
 function textFile(name: string, text: string): File {
@@ -32,6 +43,7 @@ function render(selectedAgent: string | null = 'agent-x') {
       useComposerAttachments({ selectedAgent: props.agent, clearSendError }),
     { initialProps: { agent: selectedAgent } }
   )
+  renderedHooks.push(hook.result)
   return { ...hook, clearSendError }
 }
 
@@ -453,7 +465,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     })
   }
 
-  it('counts the selected references and the agent against the 6 MiB share', () => {
+  it('counts the selected references and the agent against the 6 MiB share', async () => {
     const { result } = render()
     const references = globalReferences(4, () => `${'文'.repeat(251)}.txt`)
     act(() => {
@@ -496,9 +508,10 @@ describe('useComposerAttachments — documents (#678)', () => {
     })
     expect(refusalTexts(result)).toEqual([])
     expect(statuses(result)).toEqual(['reading'])
+    await waitFor(() => expect(statuses(result)).toEqual(['ready']))
   })
 
-  it('refuses a file while no agent is selected, and admits it for an agent', () => {
+  it('refuses a file while no agent is selected, and admits it for an agent', async () => {
     const doc = textFile('doc.txt', 'hello')
     const withoutAgent = render(null)
     act(() => {
@@ -513,9 +526,10 @@ describe('useComposerAttachments — documents (#678)', () => {
     })
     expect(refusalTexts(withAgent.result)).toEqual([])
     expect(statuses(withAgent.result)).toEqual(['reading'])
+    await waitFor(() => expect(statuses(withAgent.result)).toEqual(['ready']))
   })
 
-  it('refuses a file beside more than 10 Global Files references, and admits it beside 10', () => {
+  it('refuses a file beside more than 10 Global Files references, and admits it beside 10', async () => {
     const doc = textFile('doc.txt', 'hello')
     const eleven = render()
     act(() => {
@@ -540,5 +554,6 @@ describe('useComposerAttachments — documents (#678)', () => {
     })
     expect(refusalTexts(ten.result)).toEqual([])
     expect(statuses(ten.result)).toEqual(['reading'])
+    await waitFor(() => expect(statuses(ten.result)).toEqual(['ready']))
   })
 })
