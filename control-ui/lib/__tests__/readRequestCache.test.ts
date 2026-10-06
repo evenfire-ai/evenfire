@@ -466,6 +466,75 @@ describe('bounded metadata read reuse', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4)
   })
 
+  describe('consumers refused by the family cooldown', () => {
+    const connections = '/api/v1/admin/connections'
+    const models = '/api/v1/admin/models'
+
+    async function denyFirstConsumer(signal: AbortSignal) {
+      fetchMock.mockResolvedValueOnce(throttled(2))
+      await expect(
+        apiGet(connections, {}, { metadataRead: 'subscription-connections', signal })
+      ).rejects.toMatchObject({ status: 429 })
+    }
+
+    it.each([
+      ['the same URL', connections],
+      ['a different URL in the same family', models],
+    ])(
+      'keep the recovery alive after the first consumer leaves (%s)',
+      async (_label, joinedPath) => {
+        const first = new AbortController()
+        const second = new AbortController()
+        await denyFirstConsumer(first.signal)
+        await vi.advanceTimersByTimeAsync(1_000)
+        await expect(
+          apiGet(
+            joinedPath,
+            {},
+            { metadataRead: 'subscription-model-catalog', signal: second.signal }
+          )
+        ).rejects.toMatchObject({ status: 429 })
+        // Joining sends nothing.
+        expect(fetchMock).toHaveBeenCalledOnce()
+
+        first.abort()
+        fetchMock.mockResolvedValueOnce(success({ connections: ['recovered'] }))
+        // The original deadline (t = 2 s) still applies: joining at t = 1 s
+        // neither extended it nor added a second attempt.
+        await vi.advanceTimersByTimeAsync(1_000)
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(String(fetchMock.mock.calls[1][0])).toMatch(/\/api\/v1\/admin\/connections$/)
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+      }
+    )
+
+    it('cancel the recovery once every registered consumer has left', async () => {
+      const first = new AbortController()
+      const second = new AbortController()
+      await denyFirstConsumer(first.signal)
+      await expect(
+        apiGet(models, {}, { metadataRead: 'subscription-model-catalog', signal: second.signal })
+      ).rejects.toMatchObject({ status: 429 })
+      first.abort()
+      second.abort()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(fetchMock).toHaveBeenCalledOnce()
+    })
+
+    it('do not hold the recovery alive when they have no signal to observe', async () => {
+      const first = new AbortController()
+      await denyFirstConsumer(first.signal)
+      await expect(
+        apiGet(models, {}, { metadataRead: 'subscription-model-catalog' })
+      ).rejects.toMatchObject({ status: 429 })
+      expect(fetchMock).toHaveBeenCalledOnce()
+      first.abort()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(fetchMock).toHaveBeenCalledOnce()
+    })
+  })
+
   it('schedules a recovery for a remount after every earlier subscriber left', async () => {
     const path = '/api/v1/admin/connections'
     const firstMount = new AbortController()

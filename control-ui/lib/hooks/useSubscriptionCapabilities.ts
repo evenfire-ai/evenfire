@@ -1,11 +1,16 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   METADATA_READ_MAX_RECOVERY_ATTEMPTS,
   METADATA_READ_UNTIMED_COOLDOWN_MS,
 } from '@constants/readRequests'
 import type { ApiRequestError } from '../api.types'
+import {
+  getReadRequestPrincipal,
+  getReadRequestSessionIdentity,
+  subscribeReadRequestSessionIdentity,
+} from '../readRequestCache'
 import {
   type SubscriptionCapabilities,
   loadSubscriptionCapabilities,
@@ -59,11 +64,37 @@ export function useSubscriptionCapabilities(
     }
   }, [])
 
+  // The confirmed principal. When it changes, the previous session's result,
+  // error and recovery budget are dropped and the new session loads its own;
+  // with no confirmed principal the hook waits, loading, for /me to confirm one.
+  const sessionIdentity = useSyncExternalStore(
+    subscribeReadRequestSessionIdentity,
+    getReadRequestSessionIdentity,
+    () => 0
+  )
+  const sessionIdentityRef = useRef(sessionIdentity)
+  // Set when the session this consumer loaded for ended without a successor;
+  // Retry cannot load for an unconfirmed session, only /me can end the wait.
+  const sessionEndedRef = useRef(false)
+
   useEffect(() => {
+    if (sessionIdentityRef.current !== sessionIdentity) {
+      sessionIdentityRef.current = sessionIdentity
+      setCapabilities(null)
+      setError(null)
+      recoveryAttemptsRef.current = 0
+      sessionEndedRef.current = getReadRequestPrincipal() === null
+    }
     if (!enabled) {
       requestRef.current += 1
       controllerRef.current?.abort()
       setLoading(false)
+      return
+    }
+    if (sessionEndedRef.current) {
+      requestRef.current += 1
+      controllerRef.current?.abort()
+      setLoading(true)
       return
     }
     void load()
@@ -71,7 +102,7 @@ export function useSubscriptionCapabilities(
       requestRef.current += 1
       controllerRef.current?.abort()
     }
-  }, [enabled, load, retryNonce])
+  }, [enabled, load, retryNonce, sessionIdentity])
 
   useEffect(() => {
     if (

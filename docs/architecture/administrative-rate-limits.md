@@ -155,7 +155,13 @@ once each and one at a time, every URL the server denied while it was
 scheduled (for example the Codex and Grok inventories loaded together), and
 stops at the first reread that is denied again. A denied recovery schedules no
 further attempt, but it releases its reservation, so the next denial in that
-read family schedules its own. Forced refresh respects the same pause. Authentication changes, 401 and
+read family schedules its own. A consumer refused by the cooldown joins the
+scheduled recovery as an interest without sending a request or changing its
+deadline, members or budget, so the recovery is cancelled only when every
+registered consumer has left; a consumer without an abort signal is not
+registered. Capability consumers follow the confirmed principal: when it
+changes they drop the previous session's result and error and load for the
+new session, and with no confirmed principal they wait for one. Forced refresh respects the same pause. Authentication changes, 401 and
 cross-tab invalidation fence old awaits and clear identity-bound state.
 Aborting one subscriber does not cancel another subscriber’s shared request.
 SSR does not retain cached/deduplicated results across requests.

@@ -21,6 +21,7 @@ import {
   getReadRequestPrincipal,
   getReadRequestRecovery,
   invalidateReadRequestCacheEntry,
+  joinReadRequestRecovery,
   reserveReadRequestRecovery,
   setReadRequestCacheEntry,
   setReadRequestCooldown,
@@ -449,7 +450,10 @@ async function apiRead(
   }
   if (familyKey) {
     const cooldown = getReadRequestCooldown(familyKey)
-    if (cooldown) throw cooldown
+    if (cooldown) {
+      joinReadRequestRecovery(familyKey, options.signal)
+      throw cooldown
+    }
     if (!recoveringFamily) {
       const recovery = getReadRequestRecovery(familyKey)
       if (recovery) {

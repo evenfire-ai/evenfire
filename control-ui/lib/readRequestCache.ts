@@ -43,9 +43,30 @@ let principal: PrincipalContext | null = null
 let invalidationChannel: BroadcastChannel | null = null
 let invalidationHandler: ((remote?: boolean) => void) | null = null
 let generation = 0
+// Changes only when the confirmed principal changes (A -> B, A -> none,
+// none -> A). Unlike `generation`, unrelated metadata mutations leave it alone,
+// so mounted consumers can use it to drop the previous session's state.
+let sessionIdentity = 0
+const sessionIdentityListeners = new Set<() => void>()
 
 function isBrowser(): boolean {
   return typeof window !== 'undefined'
+}
+
+function announceSessionIdentityChange(): void {
+  sessionIdentity += 1
+  for (const listener of Array.from(sessionIdentityListeners)) listener()
+}
+
+export function getReadRequestSessionIdentity(): number {
+  return sessionIdentity
+}
+
+export function subscribeReadRequestSessionIdentity(listener: () => void): () => void {
+  sessionIdentityListeners.add(listener)
+  return () => {
+    sessionIdentityListeners.delete(listener)
+  }
 }
 
 function ensureChannel(): BroadcastChannel | null {
@@ -56,9 +77,11 @@ function ensureChannel(): BroadcastChannel | null {
       if ((event.data as { type?: unknown } | null)?.type === 'session-invalidation') {
         // Another tab may have replaced the shared cookie. A fresh authenticated
         // /me read must confirm the principal before this tab can cache again.
+        const wasVerified = principal !== null
         principal = null
         clearReadRequestCache()
         invalidationHandler?.(true)
+        if (wasVerified) announceSessionIdentityChange()
       }
     }
   }
@@ -90,6 +113,7 @@ export function setReadRequestPrincipal(principalId: string, scope: string): voi
   // Initial /me confirmation is local; rebroadcasting it would make two tabs
   // invalidate one another indefinitely. Actual identity/scope changes propagate.
   if (wasVerified) channel?.postMessage({ type: 'session-invalidation' })
+  announceSessionIdentityChange()
 }
 
 export function clearReadRequestPrincipal(options: { sessionChanged?: boolean } = {}): void {
@@ -106,6 +130,7 @@ export function clearReadRequestPrincipal(options: { sessionChanged?: boolean } 
   if (wasVerified || options.sessionChanged) {
     channel?.postMessage({ type: 'session-invalidation' })
   }
+  if (wasVerified) announceSessionIdentityChange()
 }
 
 export function clearReadRequestCache(): void {
@@ -199,6 +224,20 @@ function disposeRecovery(entry: RecoveryEntry): void {
   entry.removeListeners()
   entry.controller.abort()
   entry.reject(new DOMException('The read was cancelled', 'AbortError'))
+}
+
+/**
+ * Register a consumer that the family cooldown refused as an interest in the
+ * scheduled recovery, so another consumer unmounting cannot cancel it while
+ * this one is still mounted. It sends nothing and leaves the deadline, the
+ * reread members and the attempt budget unchanged. A consumer without a
+ * signal has no lifecycle to observe and is not registered, so it can never
+ * hold a recovery alive on its own.
+ */
+export function joinReadRequestRecovery(key: string, signal: AbortSignal | undefined): void {
+  if (!signal || signal.aborted) return
+  const recovery = recoveries.get(key)
+  if (recovery?.state === 'scheduled') recovery.addSubscribers([signal])
 }
 
 export function getReadRequestRecovery(key: string): Promise<void> | undefined {
