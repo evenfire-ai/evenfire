@@ -296,23 +296,17 @@ export class BasicSafety implements Safety {
     /<<\/SYS>>/gi,
   ]
 
-  // Each entry is one rule; an array entry is one rule matched with each of
-  // its patterns or finders, so its warning is reported once.
-  private static readonly SECRET_PATTERNS: Array<RegExp | Array<RegExp | MatchFinder>> = [
+  // Each entry is one rule.
+  private static readonly SECRET_PATTERNS: Array<RegExp | MatchFinder> = [
     /(?:sk|pk|api)[_-](?:live|test|prod)[_-][a-zA-Z0-9]{16,}/g,
     /(?:ghp|gho|ghs|ghr)_[a-zA-Z0-9]{36,}/g,
     /(?:xox[bprs])-[a-zA-Z0-9-]+/g,
     /Bearer\s+[a-zA-Z0-9._~+\/=-]{20,}/gi,
     /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
-    // Password values, matched twice so the coverage is the union of both:
-    // - stopping before the next password label, so a label glued to the
-    //   value still starts a match of its own (`password=Sup3rS3cretPwd:x1`);
-    // - running to the next separator from every label, so a value that
-    //   holds a label (`password=abc=pwd=defghijk`) is covered whole.
-    [
-      /(?:password|passwd|pwd)\s*[:=]\s*(?:(?!(?:password|passwd|pwd)\s*[:=])[^\s,;]){8,}/gi,
-      passwordValueMatches,
-    ],
+    // Password values, from every password label to the next separator, so
+    // a value that holds a label (`password=abc=pwd=defghijk`) is covered
+    // whole.
+    passwordValueMatches,
     // AWS access keys
     /AKIA[0-9A-Z]{16}/g,
     // Slack webhook URLs
@@ -688,14 +682,13 @@ export class BasicSafety implements Safety {
         find: [text => patternMatches(text, filter.pattern)],
       })
     }
-    for (const entry of BasicSafety.SECRET_PATTERNS) {
-      const patterns = Array.isArray(entry) ? entry : [entry]
+    for (const pattern of BasicSafety.SECRET_PATTERNS) {
       rules.push({
         replacement: BasicSafety.SECRET_REPLACEMENT,
         warning: options.secretWarning,
-        find: patterns.map(pattern =>
-          typeof pattern === 'function' ? pattern : (text: string) => patternMatches(text, pattern)
-        ),
+        find: [
+          typeof pattern === 'function' ? pattern : (text: string) => patternMatches(text, pattern),
+        ],
       })
     }
     for (const secret of this.configuredSecretForms()) {

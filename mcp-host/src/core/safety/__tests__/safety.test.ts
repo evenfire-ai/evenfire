@@ -481,6 +481,16 @@ describe('BasicSafety', () => {
       expect(result.was_modified).toBe(true)
       expect(result.warnings).toEqual(['Potential secret detected in shell_exec output'])
     })
+
+    it('reports no warning for a configured secret inside a password value', () => {
+      // `pwd:` runs to the space and `password =` runs on from there; the
+      // joined password match covers the configured value whole.
+      const s = new BasicSafety(() => [{ name: 'DB_TOKEN', value: 'Tok3nVal' }])
+      const result = s.sanitizeOutput('shell_exec', 'pwd:password =Tok3nVal tail')
+      expect(result.content).toBe('[REDACTED] tail')
+      expect(result.was_modified).toBe(true)
+      expect(result.warnings).toEqual(['Potential secret detected in shell_exec output'])
+    })
   })
 
   describe('a configured secret made only of JSON punctuation', () => {
@@ -553,14 +563,40 @@ describe('BasicSafety', () => {
         'password=aaaaaaaapwd: SuperSecretValue123 tail'
       )
       expect(result.was_modified).toBe(true)
-      expect(result.content).toBe('[REDACTED][REDACTED] tail')
+      expect(result.content).toBe('[REDACTED] tail')
       expect(result.content).not.toContain('SuperSecretValue123')
     })
 
-    it('redacts the whole value when the part before the next label is short', () => {
-      const result = safety.sanitizeOutput('shell_exec', 'password=abc=pwd=defghijk tail')
+    it('keeps a short value before a label whose value is long', () => {
+      // The value of `pwd=` runs to the space inside `passwd =`, so it is
+      // `apasswd`, 7 code units, and stays.
+      const result = safety.sanitizeOutput('shell_exec', 'pwd=apasswd = hunter2hunter2 tail')
+      expect(result.was_modified).toBe(true)
+      expect(result.content).toBe('pwd=a[REDACTED] tail')
+    })
+
+    it.each([
+      ['a lowercase label', 'password=abc=pwd=defghijk tail'],
+      ['an uppercase label', 'PASSWORD=abc=PWD=defghijk tail'],
+    ])('redacts the whole value when the part before %s is short', (_label, text) => {
+      const result = safety.sanitizeOutput('shell_exec', text)
       expect(result.content).toBe('[REDACTED] tail')
       expect(result.content).not.toContain('abc')
+    })
+
+    it('redacts a value of 8 code units and keeps a value of 7', () => {
+      const redacted = safety.sanitizeOutput('shell_exec', 'password=abcdefgh tail')
+      expect(redacted.was_modified).toBe(true)
+      expect(redacted.content).toBe('[REDACTED] tail')
+
+      const kept = safety.sanitizeOutput('shell_exec', 'password=abcdefg tail')
+      expect(kept.was_modified).toBe(false)
+      expect(kept.content).toBe('password=abcdefg tail')
+    })
+
+    it('ends a value at a semicolon', () => {
+      const result = safety.sanitizeOutput('shell_exec', 'password=abcdefgh;user=bob')
+      expect(result.content).toBe('[REDACTED];user=bob')
     })
 
     it.each([
