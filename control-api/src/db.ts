@@ -5,6 +5,8 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { rootLogger } from './observability/logger.js'
+import { applyPasswordAdmissionSchema } from './services/auth/passwordAdmissionSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
@@ -6324,6 +6326,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0124_entity_change_definer_search_path',
     apply: applyEntityChangeDefinerSearchPathSchema,
   },
+  {
+    version: '0125_bug192_password_admission',
+    apply: applyPasswordAdmissionSchema,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6675,7 +6681,7 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query('ROLLBACK')
       } catch (rollbackError) {
-        console.warn('[ControlAPI] initDb rollback failed:', rollbackError)
+        rootLogger.warn({ err: rollbackError }, 'database migration rollback failed')
       }
     }
     throw error
@@ -6684,7 +6690,7 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query(`SELECT pg_advisory_unlock(${INIT_DB_LOCK_KEY_SQL})`)
       } catch (unlockError) {
-        console.warn('[ControlAPI] initDb advisory unlock failed:', unlockError)
+        rootLogger.warn({ err: unlockError }, 'database migration advisory unlock failed')
       }
     }
     client.release()
