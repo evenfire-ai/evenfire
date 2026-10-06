@@ -107,7 +107,9 @@ function postMessage(app: express.Express) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks()
+  // Reset, not clear: clearing keeps implementations and queued `*Once` values,
+  // so a test that stops early would hand them to the next test.
+  vi.resetAllMocks()
   authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS })
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
 })
@@ -960,8 +962,9 @@ describe('Host error bodies stay out of rpc-proxy logs', () => {
       const failureLines = logs
         .warnLines()
         .filter(line => line.includes('[RPC_PROXY] cancel forward failed'))
-      // Witness: the inner catch ran and logged exactly once (the outer catch,
-      // which logs the same prefix, did not run).
+      // Witness: a cancel failure was logged exactly once. The inner and outer
+      // catches log the same prefix and both answer 502, so this does not tell
+      // them apart; both describe the error with `describeErrorForLog`.
       expect(failureLines).toHaveLength(1)
       expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
       expect(failureLines[0]).toContain('error=UpstreamHostError status=500')
