@@ -149,9 +149,16 @@ export function LlmCredentialFields({
 
   // Filtering LLM_CREDENTIAL_GROUPS (instead of iterating the sets) keeps the
   // canonical package order regardless of the order providers were added.
+  // Sections for providers the Secret already holds (or that carry typed
+  // values) render first; providers surfaced this session through "Add
+  // provider" append BELOW them — a newly added provider that canonically
+  // precedes a stored one (openai over zai) must not push itself on top of
+  // the operator's existing credentials. Array#sort is stable, so each rank
+  // keeps its canonical order. In the create flow every section is
+  // session-added (rank 1), leaving that order untouched.
   const visibleGroups = LLM_SECRET_EDITOR_GROUPS.filter(group =>
     visibleProviders.has(group.provider)
-  )
+  ).sort((a, b) => Number(manuallyAdded.has(a.provider)) - Number(manuallyAdded.has(b.provider)))
   const addableGroups = LLM_SECRET_EDITOR_GROUPS.filter(
     group => !visibleProviders.has(group.provider) && !excludedProviderSet.has(group.provider)
   )

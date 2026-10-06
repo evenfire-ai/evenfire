@@ -483,4 +483,17 @@ describe('Edit LLM secret page — additional provider credentials', () => {
     ).toBeInTheDocument()
     expect(screen.getByLabelText(/Claude API key/i)).toBeInTheDocument()
   })
+
+  it('appends a newly added provider below the stored one, whatever the canonical order', async () => {
+    // openai canonically precedes zai; the stored zai credentials must stay
+    // on top and the session-added OpenAI section must land below them.
+    seedSecret(['zai-api-key'])
+    await renderEditor()
+
+    fireEvent.click(screen.getByLabelText('Add provider'))
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI' }))
+
+    const titles = document.querySelectorAll('.cu-llm-cred-group__title')
+    expect(Array.from(titles).map(entry => entry.textContent)).toEqual(['Z.AI', 'OpenAI'])
+  })
 })
