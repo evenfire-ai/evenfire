@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import { cancellableInvoke } from './gfs/cancellableInvoke.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   EntityChangeStreamEvent,
@@ -46,23 +47,22 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
 ])
 
 /**
- * Producer-side cancellation wiring (folder-zip Stop, R1-M1): a cancellable
- * invoke carries a requestId; if the caller's signal aborts, tell main to abort
- * the in-flight request. The cleanup detaches the listener once the invoke
- * settles either way.
+ * Producer-side cancellation wiring (folder-zip Stop, R1-M1): see
+ * gfs/cancellableInvoke.ts — a cancellable invoke carries a requestId; if the
+ * caller's signal aborts, main aborts the in-flight request. An already-
+ * aborted signal never starts producer work at all (R2-L3).
  */
-function attachRequestAbort(signal?: AbortSignal): {
-  requestId?: string
-  cleanup: () => void
-} {
-  if (!signal) return { cleanup: () => undefined }
-  const requestId = crypto.randomUUID()
-  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
-  signal.addEventListener('abort', onAbort, { once: true })
-  return {
-    requestId,
-    cleanup: () => signal.removeEventListener('abort', onAbort),
-  }
+function cancellableGfsInvoke<T>(
+  channel: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal
+): Promise<T> {
+  return cancellableInvoke<T>(
+    { invoke: (c, p) => ipcRenderer.invoke(c, p), send: (c, p) => ipcRenderer.send(c, p) },
+    channel,
+    payload,
+    signal
+  )
 }
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
@@ -163,16 +163,8 @@ const clerum = Object.freeze({
   },
   gfs: {
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
-    download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) => {
-      const abort = attachRequestAbort(options?.signal)
-      return ipcRenderer
-        .invoke('gfs:download', {
-          uri,
-          maxBytes: options?.maxBytes,
-          requestId: abort.requestId,
-        })
-        .finally(abort.cleanup)
-    },
+    download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
+      cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
     downloadPreview: (uri: string, maxBytes: number) =>
       ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
@@ -182,12 +174,7 @@ const clerum = Object.freeze({
       drive?: string,
       cursor?: string,
       options?: { signal?: AbortSignal }
-    ) => {
-      const abort = attachRequestAbort(options?.signal)
-      return ipcRenderer
-        .invoke('gfs:listChildren', { resourceId, drive, cursor, requestId: abort.requestId })
-        .finally(abort.cleanup)
-    },
+    ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
     affordances: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
     createFolder: (parentResourceId: string, name: string, drive?: string) =>
