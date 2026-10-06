@@ -3,6 +3,7 @@ import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import { revisionOfValues } from './authorizationRevision.js'
 import { compareCanonicalUtf8Text } from './canonicalText.js'
+import type { CatalogOperationalSourceState } from './catalogContracts.js'
 import { canonicalContextLogicalIdSql } from './contextIdentitySql.js'
 import type {
   OperationalBehaviorSources,
@@ -40,6 +41,13 @@ export type OperationalResourceGraphResult =
     }>
   | Readonly<{ status: 'not_found'; sourceStateRevision: string }>
   | Readonly<{ status: 'unavailable'; safeCode: string }>
+
+export function operationalResourceGraphKey(
+  resourceType: AccessResourceType,
+  logicalId: string
+): string {
+  return JSON.stringify([resourceType, logicalId])
+}
 
 /**
  * Restrict a loaded live graph to one selected runtime path. The graph loader
@@ -399,81 +407,127 @@ async function budgetedQuery(
 }
 
 /**
- * Load one bounded page of operational resource graphs with a constant number
- * of database statements. Catalog hydration can contain many resources; doing
- * the single-resource graph lookup once per item would turn a 100-item page
- * into hundreds of statements and exhaust both the producer and statement
- * budgets.
+ * Load heterogeneous operational resource graphs with a constant number of
+ * database statements, keeping every graph keyed by its full resource identity.
  */
 export async function loadOperationalResourceGraphs(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
   environmentId: string
-  resourceType: AccessResourceType
-  logicalIds: readonly string[]
+  roots: readonly Readonly<{ resourceType: AccessResourceType; logicalId: string }>[]
+  sourceStates?: ReadonlyMap<OperationalSourceFamily, CatalogOperationalSourceState>
 }): Promise<ReadonlyMap<string, OperationalResourceGraphResult>> {
-  const requiredFamilies = SOURCE_FAMILIES_BY_TYPE[input.resourceType]
-  const targetFamily = sourceFamilyForType(input.resourceType)
-  if (!requiredFamilies || !targetFamily) {
-    throw new Error('operational_resource_type_unsupported')
-  }
-  const logicalIds = [...new Set(input.logicalIds)]
-  if (logicalIds.length === 0) return new Map()
+  const roots = [
+    ...new Map(
+      input.roots.map(root => {
+        const requiredFamilies = SOURCE_FAMILIES_BY_TYPE[root.resourceType]
+        const targetFamily = sourceFamilyForType(root.resourceType)
+        if (!requiredFamilies || !targetFamily) {
+          throw new Error('operational_resource_type_unsupported')
+        }
+        const key = operationalResourceGraphKey(root.resourceType, root.logicalId)
+        return [key, { ...root, key, requiredFamilies, targetFamily }] as const
+      })
+    ).values(),
+  ]
+  if (roots.length === 0) return new Map()
 
-  const states = await budgetedQuery(
-    input.db,
-    input.budget,
-    `SELECT source_family, generation, resource_version, status, safe_error_code
-       FROM operational_catalog_source_state
-      WHERE environment_id = $1
-        AND source_family = ANY($2::text[])
-      ORDER BY source_family`,
-    [input.environmentId, requiredFamilies]
-  )
-  const stateRows = states.rows as Record<string, unknown>[]
-  const sourceStateRevision = revisionOfValues(
-    stateRows.map(row => [row.source_family, row.generation, row.status])
-  )
-  const unavailable =
-    stateRows.length !== requiredFamilies.length || stateRows.some(row => row.status !== 'current')
-  if (unavailable) {
-    return new Map(
-      logicalIds.map(logicalId => [
-        logicalId,
-        { status: 'unavailable', safeCode: 'operational_source_not_current' } as const,
+  let sourceStates = input.sourceStates
+  if (!sourceStates) {
+    const requiredFamilies = [...new Set(roots.flatMap(root => root.requiredFamilies))].sort(
+      compareCanonicalUtf8Text
+    )
+    const states = await budgetedQuery(
+      input.db,
+      input.budget,
+      `SELECT source_family, generation, resource_version, status, safe_error_code
+         FROM operational_catalog_source_state
+        WHERE environment_id = $1
+          AND source_family = ANY($2::text[])
+        ORDER BY source_family`,
+      [input.environmentId, requiredFamilies]
+    )
+    sourceStates = new Map(
+      (states.rows as Record<string, unknown>[]).map(row => [
+        String(row.source_family) as OperationalSourceFamily,
+        Object.freeze({
+          family: String(row.source_family) as OperationalSourceFamily,
+          generation: String(row.generation),
+          resourceVersion:
+            row.resource_version === null || row.resource_version === undefined
+              ? null
+              : String(row.resource_version),
+          status: String(row.status) as CatalogOperationalSourceState['status'],
+        }),
       ])
     )
   }
 
+  const sourceRevisionByRoot = new Map<string, string>()
+  const readyRoots: typeof roots = []
+  const graphs = new Map<string, OperationalResourceGraphResult>()
+  for (const root of roots) {
+    const states = [...root.requiredFamilies].sort(compareCanonicalUtf8Text).flatMap(family => {
+      const state = sourceStates.get(family)
+      return state ? [state] : []
+    })
+    const sourceStateRevision = revisionOfValues(
+      states.map(state => [state.family, state.generation, state.status])
+    )
+    sourceRevisionByRoot.set(root.key, sourceStateRevision)
+    if (
+      states.length !== root.requiredFamilies.length ||
+      states.some(state => state.status !== 'current')
+    ) {
+      graphs.set(root.key, { status: 'unavailable', safeCode: 'operational_source_not_current' })
+      continue
+    }
+    readyRoots.push(root)
+    graphs.set(root.key, { status: 'not_found', sourceStateRevision })
+  }
+  if (readyRoots.length === 0) return graphs
+
   const rootResult = await budgetedQuery(
     input.db,
     input.budget,
-    `SELECT environment_id, resource_type, logical_id, source_family,
-            provider_uid, provider_resource_version, display_name, enabled,
-            deleted_at, observed_generation, content_bytes, behavior_sources
-       FROM operational_resource_index
-      WHERE environment_id = $1
-        AND resource_type = $2
-        AND logical_id = ANY($3::text[])
-        AND source_family = $4
-      ORDER BY logical_id`,
-    [input.environmentId, input.resourceType, logicalIds, targetFamily]
+    `SELECT resource.environment_id, resource.resource_type, resource.logical_id,
+            resource.source_family, resource.provider_uid,
+            resource.provider_resource_version, resource.display_name, resource.enabled,
+            resource.deleted_at, resource.observed_generation, resource.content_bytes,
+            resource.behavior_sources
+       FROM operational_resource_index resource
+      WHERE resource.environment_id = $1
+        AND (resource.resource_type, resource.logical_id, resource.source_family) IN (
+          SELECT value->>0, value->>1, value->>2
+            FROM jsonb_array_elements($2::jsonb) AS value
+        )
+      ORDER BY resource.resource_type, resource.logical_id`,
+    [
+      input.environmentId,
+      JSON.stringify(
+        readyRoots.map(root => [root.resourceType, root.logicalId, root.targetFamily])
+      ),
+    ]
   )
   const rootResources = new Map<string, OperationalIndexedResource>()
   for (const row of rootResult.rows as Record<string, unknown>[]) {
     const resource = parseResource(row)
-    rootResources.set(resource.logicalId, resource)
+    rootResources.set(
+      operationalResourceGraphKey(resource.resourceType, resource.logicalId),
+      resource
+    )
   }
-  const missingIds = logicalIds.filter(id => !rootResources.has(id))
-  const graphs = new Map<string, OperationalResourceGraphResult>(
-    missingIds.map(id => [id, { status: 'not_found', sourceStateRevision }])
-  )
   const currentResources = [...rootResources.values()].filter(
     resource => resource.enabled && !resource.deletedAt
   )
   for (const resource of rootResources.values()) {
     if (!resource.enabled || resource.deletedAt) {
-      graphs.set(resource.logicalId, { status: 'not_found', sourceStateRevision })
+      graphs.set(operationalResourceGraphKey(resource.resourceType, resource.logicalId), {
+        status: 'not_found',
+        sourceStateRevision: sourceRevisionByRoot.get(
+          operationalResourceGraphKey(resource.resourceType, resource.logicalId)
+        )!,
+      })
     }
   }
   if (currentResources.length === 0) return graphs
@@ -507,27 +561,6 @@ export async function loadOperationalResourceGraphs(input: {
          AND relationship.relationship_type <> 'context_identity_alias'
          AND (relationship.relationship_type <> 'uses_context'
            OR ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IS NOT NULL)
-         AND (
-           relationship.source_type <> 'context'
-           OR NOT EXISTS (
-             SELECT 1 FROM roots derived_root
-              WHERE derived_root.resource_type IN ('mcp_server', 'shared_filesystem')
-           )
-           OR EXISTS (
-             SELECT 1 FROM roots mcp_root
-              WHERE mcp_root.resource_type = 'mcp_server'
-                AND relationship.relationship_type = 'includes_mcp_server'
-                AND relationship.target_type = 'mcp_server'
-                AND relationship.target_id = mcp_root.logical_id
-           )
-           OR EXISTS (
-             SELECT 1 FROM roots filesystem_root
-              WHERE filesystem_root.resource_type = 'shared_filesystem'
-                AND relationship.relationship_type = 'mounts_shared_filesystem'
-                AND relationship.target_type = 'shared_filesystem'
-                AND relationship.target_id = filesystem_root.logical_id
-           )
-         )
      ),
      context_ids AS (
        SELECT roots.resource_type, roots.logical_id, edge.target_id AS context_id
@@ -584,6 +617,21 @@ export async function loadOperationalResourceGraphs(input: {
          JOIN relationship_rows edge
            ON edge.source_type = 'context'
           AND edge.source_id = context_ids.context_id
+          AND (
+            context_ids.resource_type NOT IN ('mcp_server', 'shared_filesystem')
+            OR (
+              context_ids.resource_type = 'mcp_server'
+              AND edge.relationship_type = 'includes_mcp_server'
+              AND edge.target_type = 'mcp_server'
+              AND edge.target_id = context_ids.logical_id
+            )
+            OR (
+              context_ids.resource_type = 'shared_filesystem'
+              AND edge.relationship_type = 'mounts_shared_filesystem'
+              AND edge.target_type = 'shared_filesystem'
+              AND edge.target_id = context_ids.logical_id
+            )
+          )
        UNION
        SELECT roots.resource_type, roots.logical_id, edge.*
          FROM roots
@@ -640,21 +688,25 @@ export async function loadOperationalResourceGraphs(input: {
       authorityRequired: true,
     })
   }
-  const relationshipsById = new Map<string, OperationalIndexedRelationship[]>()
-  const resourceKeysById = new Map<string, Map<string, readonly [string, string]>>()
+  const relationshipsByRoot = new Map<string, OperationalIndexedRelationship[]>()
+  const resourceKeysByRoot = new Map<string, Map<string, readonly [string, string]>>()
   for (const resource of currentResources) {
+    const graphKey = operationalResourceGraphKey(resource.resourceType, resource.logicalId)
     const keys = new Map<string, readonly [string, string]>()
     keys.set(JSON.stringify([resource.resourceType, resource.logicalId]), [
       resource.resourceType,
       resource.logicalId,
     ])
-    resourceKeysById.set(resource.logicalId, keys)
-    relationshipsById.set(resource.logicalId, [])
+    resourceKeysByRoot.set(graphKey, keys)
+    relationshipsByRoot.set(graphKey, [])
   }
   for (const row of relationshipRows) {
-    const logicalId = row.graph_logical_id
-    const list = relationshipsById.get(logicalId)
-    const keys = resourceKeysById.get(logicalId)
+    const graphKey = operationalResourceGraphKey(
+      row.graph_resource_type as AccessResourceType,
+      row.graph_logical_id
+    )
+    const list = relationshipsByRoot.get(graphKey)
+    const keys = resourceKeysByRoot.get(graphKey)
     if (!list || !keys) continue
     const relationship = parseRelationship(row)
     list.push(relationship)
@@ -670,7 +722,7 @@ export async function loadOperationalResourceGraphs(input: {
     }
   }
   const allResourceKeys = new Map<string, readonly [string, string]>()
-  for (const keys of resourceKeysById.values()) {
+  for (const keys of resourceKeysByRoot.values()) {
     for (const [key, value] of keys) allResourceKeys.set(key, value)
   }
   const relatedResult = await budgetedQuery(
@@ -693,9 +745,11 @@ export async function loadOperationalResourceGraphs(input: {
     const resource = parseResource(row)
     resourcesByKey.set(JSON.stringify([resource.resourceType, resource.logicalId]), resource)
   }
-  const missingResourceById = new Set<string>()
-  for (const [logicalId, keys] of resourceKeysById) {
-    if ([...keys.keys()].some(key => !resourcesByKey.has(key))) missingResourceById.add(logicalId)
+  const missingResourceByRoot = new Set<string>()
+  for (const [graphKey, keys] of resourceKeysByRoot) {
+    if ([...keys.keys()].some(key => !resourcesByKey.has(key))) {
+      missingResourceByRoot.add(graphKey)
+    }
   }
   input.budget.charge({
     kind: 'decodedBytes',
@@ -703,15 +757,16 @@ export async function loadOperationalResourceGraphs(input: {
   })
 
   for (const resource of currentResources) {
-    const logicalId = resource.logicalId
-    if (missingResourceById.has(logicalId)) {
-      graphs.set(logicalId, {
+    const graphKey = operationalResourceGraphKey(resource.resourceType, resource.logicalId)
+    const sourceStateRevision = sourceRevisionByRoot.get(graphKey)!
+    if (missingResourceByRoot.has(graphKey)) {
+      graphs.set(graphKey, {
         status: 'unavailable',
         safeCode: 'operational_related_resource_incomplete',
       })
       continue
     }
-    const relationships = relationshipsById.get(logicalId) ?? []
+    const relationships = relationshipsByRoot.get(graphKey) ?? []
     if (relationships.length > 0) {
       input.budget.charge({ kind: 'relationships', amount: relationships.length })
     }
@@ -721,11 +776,11 @@ export async function loadOperationalResourceGraphs(input: {
     )
     if (relationshipBytes > 0)
       input.budget.charge({ kind: 'decodedBytes', amount: relationshipBytes })
-    const resources = [...(resourceKeysById.get(logicalId)?.keys() ?? [])]
+    const resources = [...(resourceKeysByRoot.get(graphKey)?.keys() ?? [])]
       .map(key => resourcesByKey.get(key))
       .filter((value): value is OperationalIndexedResource => Boolean(value))
     graphs.set(
-      logicalId,
+      graphKey,
       Object.freeze({
         status: 'current',
         resource,

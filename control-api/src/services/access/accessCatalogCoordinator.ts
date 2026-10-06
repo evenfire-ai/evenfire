@@ -34,6 +34,7 @@ import {
   type CatalogFamily,
   type CatalogIdentityCandidate,
   type CatalogKey,
+  type CatalogOperationalHydration,
   type CatalogProducerPage,
   type CatalogRelationship,
   type CatalogRequestContext,
@@ -44,7 +45,16 @@ import {
 import { CatalogProducerContractError } from './catalogProducerSupport.js'
 import { requireCatalogProducer } from './catalogProducers.js'
 import { canonicalEnvironmentId } from './operationalAccessProjection.js'
-import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  isOperationalAccessResourceType,
+  loadOperationalResourceGraphs,
+  operationalResourceGraphKey,
+} from './operationalAccessReader.js'
+import type { AccessResourceType, CanonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  budgetContextRefsForGraph,
+  loadRuntimeBehaviorPolicySnapshot,
+} from './runtimeBehaviorSource.js'
 import { configuredCatalogBudgetOptions } from './userAccessPolicy.js'
 
 export type PublicCatalogAccessPath = Readonly<{
@@ -127,7 +137,8 @@ function safePartialErrors(runtimes: readonly ProducerRuntime[]): SafeCatalogPar
 
 async function hydrateSelected(
   context: CatalogRequestContext,
-  selected: readonly CatalogIdentityCandidate[]
+  selected: readonly CatalogIdentityCandidate[],
+  operationalHydration?: CatalogOperationalHydration
 ): Promise<Map<string, HydratedCatalogResource>> {
   const byFamily = new Map<CatalogFamily, CatalogKey[]>()
   for (const candidate of selected) {
@@ -139,7 +150,11 @@ async function hydrateSelected(
   for (const family of CATALOG_FAMILIES) {
     const keys = byFamily.get(family)
     if (!keys?.length) continue
-    const values = await requireCatalogProducer(family).hydrateCanonicalKeys(context, keys)
+    const values = await requireCatalogProducer(family).hydrateCanonicalKeys(
+      context,
+      keys,
+      operationalHydration
+    )
     hydratedValues.push(...values)
   }
   const hydrated = mergeHydratedCatalogResources(hydratedValues)
@@ -149,6 +164,42 @@ async function hydrateSelected(
     }
   }
   return hydrated
+}
+
+async function prepareOperationalHydration(
+  context: CatalogRequestContext,
+  selected: readonly CatalogIdentityCandidate[]
+): Promise<CatalogOperationalHydration | undefined> {
+  const roots = selected.flatMap(candidate => {
+    const resourceType = candidate.key[1]
+    return isOperationalAccessResourceType(resourceType as AccessResourceType)
+      ? [{ resourceType: resourceType as AccessResourceType, logicalId: candidate.key[2] }]
+      : []
+  })
+  if (roots.length === 0) return undefined
+
+  const graphs = await loadOperationalResourceGraphs({
+    db: context.db,
+    budget: context.budget,
+    environmentId: context.environmentId,
+    roots,
+    sourceStates: context.sourceStates,
+  })
+  const contextRefs = [...graphs.values()].flatMap(graph =>
+    graph.status === 'current' ? budgetContextRefsForGraph(graph) : []
+  )
+  const policySnapshot = await loadRuntimeBehaviorPolicySnapshot({
+    db: context.db,
+    budget: context.budget,
+    contextRefs,
+  })
+  for (const root of roots) {
+    const graph = graphs.get(operationalResourceGraphKey(root.resourceType, root.logicalId))
+    if (!graph || graph.status !== 'current') {
+      throw new CatalogProducerContractError('operational_source_changed_before_hydration')
+    }
+  }
+  return Object.freeze({ graphs, policySnapshot })
 }
 
 function catalogItem(
@@ -297,7 +348,8 @@ async function buildInTransaction(input: {
     input.limit + 1
   )
   const selected = merged.slice(0, input.limit)
-  const hydrated = await hydrateSelected(context, selected)
+  const operationalHydration = await prepareOperationalHydration(context, selected)
+  const hydrated = await hydrateSelected(context, selected, operationalHydration)
   const items = selected.map(candidate =>
     catalogItem(context, hydrated.get(JSON.stringify(candidate.key))!)
   )

@@ -13,6 +13,7 @@ import {
   CATALOG_FAMILIES,
   type CatalogFamily,
   type CatalogKey,
+  type CatalogOperationalHydration,
   type CatalogProducer,
   type CatalogProducerPage,
   type CatalogRelationship,
@@ -43,6 +44,7 @@ import type { OperationalSourceFamily } from './operationalAccessProjection.js'
 import {
   type OperationalResourceGraphResult,
   loadOperationalResourceGraphs,
+  operationalResourceGraphKey,
   selectOperationalPathGraph,
 } from './operationalAccessReader.js'
 import { type AccessResourceType, canonicalResourceIdentity } from './resourceIdentity.js'
@@ -434,6 +436,7 @@ async function hydrateRows(input: {
   family: CatalogFamily
   sourceRevision: string
   rows: readonly JsonRecord[]
+  operationalHydration?: CatalogOperationalHydration
 }): Promise<HydratedCatalogResource[]> {
   input.context.budget.charge({
     kind: 'decodedBytes',
@@ -458,34 +461,43 @@ async function hydrateRows(input: {
   const hasOperationalRows =
     operationalFamilies.has(input.family) && input.rows.some(row => records(row.paths).length > 0)
   const operationalGraphs = hasOperationalRows
-    ? await loadOperationalResourceGraphs({
+    ? (input.operationalHydration?.graphs ??
+      (await loadOperationalResourceGraphs({
         db: input.context.db,
         budget: input.context.budget,
         environmentId: input.context.environmentId,
-        resourceType: input.family as AccessResourceType,
-        logicalIds: input.rows
+        roots: input.rows
           .filter(row => records(row.paths).length > 0)
-          .map(row => boundedString(row.logical_id, 'resource_logical_id')),
-      })
+          .map(row => ({
+            resourceType: input.family as AccessResourceType,
+            logicalId: boundedString(row.logical_id, 'resource_logical_id'),
+          })),
+        sourceStates: input.context.sourceStates,
+      })))
     : null
-  const contextRefs = operationalGraphs
-    ? [...operationalGraphs.values()].flatMap(graph =>
-        graph.status === 'current' ? budgetContextRefsForGraph(graph) : []
-      )
-    : []
+  const contextRefs =
+    operationalGraphs && !input.operationalHydration
+      ? [...operationalGraphs.values()].flatMap(graph =>
+          graph.status === 'current' ? budgetContextRefsForGraph(graph) : []
+        )
+      : []
   const policySnapshot = hasOperationalRows
-    ? await loadRuntimeBehaviorPolicySnapshot({
+    ? (input.operationalHydration?.policySnapshot ??
+      (await loadRuntimeBehaviorPolicySnapshot({
         db: input.context.db,
         budget: input.context.budget,
         contextRefs,
-      })
+      })))
     : null
   for (const row of input.rows) {
     const logicalId = boundedString(row.logical_id, 'resource_logical_id')
     const pathRows = records(row.paths)
     if (pathRows.length === 0) continue
     const relationshipRows = records(row.relationships)
-    const graphResult = operationalGraphs?.get(logicalId) ?? null
+    const graphResult =
+      operationalGraphs?.get(
+        operationalResourceGraphKey(input.family as AccessResourceType, logicalId)
+      ) ?? null
     if (hasOperationalRows && (!graphResult || graphResult.status !== 'current')) {
       throw new CatalogProducerContractError('operational_source_changed_before_hydration')
     }
@@ -639,7 +651,8 @@ class SqlCatalogProducer implements CatalogProducer {
 
   async hydrateCanonicalKeys(
     context: CatalogRequestContext,
-    keys: readonly CatalogKey[]
+    keys: readonly CatalogKey[],
+    operationalHydration?: CatalogOperationalHydration
   ): Promise<readonly HydratedCatalogResource[]> {
     const logicalIds = validateHydrationKeys({ context, family: this.family, keys })
     if (logicalIds.length === 0) return Object.freeze([])
@@ -662,6 +675,7 @@ class SqlCatalogProducer implements CatalogProducer {
             ? 'database-resource'
             : readiness.sourceRevision,
         rows: result.rows as JsonRecord[],
+        operationalHydration,
       })
     )
   }

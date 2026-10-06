@@ -4,7 +4,9 @@ import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import type { AccessPathSeed } from './accessPath.js'
 import { compareCanonicalUtf8Text } from './canonicalText.js'
 import type { OperationalSourceFamily } from './operationalAccessProjection.js'
+import type { OperationalResourceGraphResult } from './operationalAccessReader.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import type { RuntimeBehaviorPolicySnapshot } from './runtimeBehaviorSource.js'
 
 export const CATALOG_FAMILIES = [
   'user',
@@ -101,6 +103,12 @@ export type CatalogRequestContext = Readonly<{
   sourceStates: ReadonlyMap<OperationalSourceFamily, CatalogOperationalSourceState>
 }>
 
+/** Facts computed once for selected operational roots inside one catalog transaction. */
+export type CatalogOperationalHydration = Readonly<{
+  graphs: ReadonlyMap<string, OperationalResourceGraphResult>
+  policySnapshot: RuntimeBehaviorPolicySnapshot
+}>
+
 export interface CatalogProducer {
   readonly family: CatalogFamily
   readonly requiredOperationalSources: readonly OperationalSourceFamily[]
@@ -111,7 +119,8 @@ export interface CatalogProducer {
   ): Promise<CatalogProducerPage>
   hydrateCanonicalKeys(
     context: CatalogRequestContext,
-    keys: readonly CatalogKey[]
+    keys: readonly CatalogKey[],
+    operationalHydration?: CatalogOperationalHydration
   ): Promise<readonly HydratedCatalogResource[]>
 }
 

@@ -407,6 +407,97 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       sandbox_app: ['direct', 'team'],
     })
 
+  it('composes the default twelve-family catalog within the mounted request reserve', async () => {
+    const budget = AccessExecutionBudget.create('catalog')
+    let sqlQueries = 0
+    let transactionIsolation: string | undefined
+    let transactionReadOnly: string | undefined
+    const measuredTransaction = async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => {
+      const client = (await databasePool.connect()) as PoolClient
+      try {
+        await client.query('BEGIN')
+        const db = new Proxy(client, {
+          get(target, property) {
+            if (property === 'query') {
+              return (...args: unknown[]) => {
+                sqlQueries += 1
+                return Reflect.apply(
+                  target.query as (...queryArgs: unknown[]) => unknown,
+                  target,
+                  args
+                )
+              }
+            }
+            return Reflect.get(target, property, target)
+          },
+        }) as DbClient
+        const value = await work(db)
+        const transactionSettings = await client.query(
+          `SELECT current_setting('transaction_isolation') AS isolation,
+                  current_setting('transaction_read_only') AS read_only`
+        )
+        transactionIsolation = String(transactionSettings.rows[0]?.isolation)
+        transactionReadOnly = String(transactionSettings.rows[0]?.read_only)
+        await client.query('COMMIT')
+        return value
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+    try {
+      const catalog = await buildAccessCatalog(
+        { session, limit: 100 },
+        { transaction: measuredTransaction, budget }
+      )
+      const producerCalls = 42 - budget.remaining('producerCalls')
+      expect(catalog.complete).toBe(true)
+      expect(catalog.partialErrors).toEqual([])
+      expect(catalog.nextCursor).toBeNull()
+      expect(catalog.items).toHaveLength(
+        Object.values(expectedItemCounts).reduce((total, count) => total + count, 0)
+      )
+      expect(
+        Object.fromEntries(
+          CATALOG_FAMILIES.map(family => [
+            family,
+            catalog.items.filter(item => item.resource.type === family).length,
+          ])
+        )
+      ).toEqual(expectedItemCounts)
+      expect([...new Set(catalog.items.map(item => item.resource.type))].sort()).toEqual(
+        [...CATALOG_FAMILIES].sort()
+      )
+      expect(producerCalls).toBeLessThanOrEqual(36)
+      expect(transactionIsolation).toBe('repeatable read')
+      expect(transactionReadOnly).toBe('on')
+      console.info(
+        `[r34-h2] families=${CATALOG_FAMILIES.length} items=${catalog.items.length} ` +
+          `producerCalls=${producerCalls} sqlQueries=${sqlQueries}`
+      )
+    } finally {
+      budget.close()
+    }
+  })
+
+  it('does not hydrate unrelated operational families for a small-family request', async () => {
+    const budget = AccessExecutionBudget.create('catalog')
+    try {
+      const catalog = await buildAccessCatalog(
+        { session, families: ['user'], limit: 10 },
+        { transaction: transaction(databasePool), budget }
+      )
+      expect(catalog.complete).toBe(true)
+      expect(catalog.items).toHaveLength(1)
+      expect(catalog.items[0]?.resource.type).toBe('user')
+      expect(42 - budget.remaining('producerCalls')).toBeLessThanOrEqual(4)
+    } finally {
+      budget.close()
+    }
+  })
+
   for (const family of CATALOG_FAMILIES) {
     it(`${family} producer paths round-trip through catalog and live resolution`, async () => {
       const catalog = await buildAccessCatalog(
@@ -865,7 +956,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     const contextName = `catalog-context-dangling-sibling-${randomBytes(5).toString('hex')}`
     const missingFilesystemName = `catalog-filesystem-missing-${randomBytes(5).toString('hex')}`
     const baseline = await buildAccessCatalog(
-      { session, families: ['mcp_server'], limit: 100 },
+      { session, families: ['mcp_server', 'shared_filesystem'], limit: 100 },
       { transaction: transaction(databasePool) }
     )
     const baselineItem = baseline.items.find(
@@ -910,7 +1001,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       expect(persistedTarget.rows).toHaveLength(0)
 
       const catalog = await buildAccessCatalog(
-        { session, families: ['mcp_server'], limit: 100 },
+        { session, families: ['mcp_server', 'shared_filesystem'], limit: 100 },
         { transaction: transaction(databasePool) }
       )
       const item = catalog.items.find(
