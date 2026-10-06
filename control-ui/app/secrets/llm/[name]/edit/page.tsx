@@ -49,13 +49,9 @@ function EditLlmSecretContent() {
   }, [params])
 
   // Optional return context for flows that linked here from another surface
-  // (the agent Models & creds editor). Only same-app paths are honored so the
-  // param can never aim the back action off-site.
+  // (the agent Models & creds editor). Treat it as untrusted until it resolves
+  // to a canonical local URL in goBack.
   const fromParam = (searchParams.get('from') ?? '').trim()
-  const backTarget =
-    fromParam.startsWith('/') && !fromParam.startsWith('//')
-      ? fromParam
-      : CONTROL_ROUTES.secrets.llm
 
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -100,6 +96,26 @@ function EditLlmSecretContent() {
   }, [secretName])
 
   function goBack() {
+    let backTarget: string = CONTROL_ROUTES.secrets.llm
+    if (fromParam.startsWith('/') && !fromParam.startsWith('//')) {
+      try {
+        const origin = window.location.origin
+        const destination = new URL(fromParam, origin)
+        const hasEncodedBackslash = /%(?:25)*5c/i.test(destination.pathname)
+        if (
+          destination.origin === origin &&
+          destination.pathname.startsWith('/') &&
+          !destination.pathname.startsWith('//') &&
+          !fromParam.includes('\\') &&
+          !destination.pathname.includes('\\') &&
+          !hasEncodedBackslash
+        ) {
+          backTarget = `${destination.pathname}${destination.search}${destination.hash}`
+        }
+      } catch {
+        // Invalid or malformed destinations fall back to the LLM Secrets list.
+      }
+    }
     router.push(backTarget)
   }
 

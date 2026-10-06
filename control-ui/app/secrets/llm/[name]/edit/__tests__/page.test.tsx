@@ -204,12 +204,31 @@ describe('Edit LLM secret page — navigation', () => {
 
   it('honors an internal from path and returns to it', async () => {
     seedSecret(['openai-api-key'])
-    navigation.searchParams = new URLSearchParams({ from: '/agents/foo/model' })
+    navigation.searchParams = new URLSearchParams({
+      from: '/agents/foo/model?tab=allowed#credentials',
+    })
     await renderEditor()
 
     fireEvent.click(screen.getByRole('button', { name: 'Back to secrets' }))
 
-    expect(navigation.push).toHaveBeenCalledWith('/agents/foo/model')
+    expect(navigation.push).toHaveBeenCalledWith('/agents/foo/model?tab=allowed#credentials')
+  })
+
+  it.each([
+    ['known slash-encoded backslash', 'from=/%5Cattacker.example'],
+    ['literal slash-backslash', 'from=/\\attacker.example'],
+    ['multiply encoded backslash', 'from=/%255Cattacker.example'],
+    ['protocol-relative external URL', 'from=//attacker.example/path'],
+    ['normalized protocol-relative path', 'from=/%2e%2e//attacker.example'],
+    ['absolute external URL', 'from=https%3A%2F%2Fattacker.example%2Fpath'],
+  ])('falls back for %s', async (_caseName, query) => {
+    seedSecret(['openai-api-key'])
+    navigation.searchParams = new URLSearchParams(query)
+    await renderEditor()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to secrets' }))
+
+    expect(navigation.push).toHaveBeenCalledWith('/secrets/llm')
   })
 
   it('ignores a non-internal from value', async () => {
