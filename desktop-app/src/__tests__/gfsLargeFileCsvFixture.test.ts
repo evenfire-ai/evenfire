@@ -7,6 +7,7 @@ import {
   GFS_OLD_VISUAL_LIMIT,
   buildGfsLargeCsvFixture,
   countMissingCsvColumns,
+  csvColumnCountClaims,
   hasCsvDataRecordCount,
   parseCsvMetadata,
   resolveGfsLargeCsvFixture,
@@ -98,6 +99,32 @@ describe('large-file CSV fixture oracle', () => {
 })
 
 describe('large-file CSV summary assertions', () => {
+  it.each([
+    ['El archivo tiene 78 columnas.', [78]],
+    ['Columnas: 79', [79]],
+    ['Columnas (77)', [77]],
+    ['**Columnas:** 78', [78]],
+    ['columns: 78', [78]],
+    ['Total de 78 columnas', [78]],
+    ['78 columnas de datos y 56.992 registros', [78]],
+    ['Columnas: notes,value', []],
+    ['Columnas:\n1. id\n2. value', []],
+    ['La columna value tiene 78 valores distintos', []],
+    ['Columnas: 7,8', []],
+    ['Columnas: 78,59', []],
+    ['Columnas: -78', []],
+    ['Columnas: 78; total: 79 columnas', [78, 79]],
+  ] as const)('extracts explicit column-count claims from %j', (summary, claims) => {
+    expect(csvColumnCountClaims(summary)).toEqual(claims)
+  })
+
+  it.each([77, 79])('rejects a contradictory count of %i despite complete names', claim => {
+    const columns = Array.from({ length: 78 }, (_, index) => `field_${index}`)
+    const summary = `Contiene ${claim} columnas: ${columns.join(', ')}`
+    expect(countMissingCsvColumns(summary, columns)).toBe(0)
+    expect(csvColumnCountClaims(summary).filter(value => value !== columns.length)).toEqual([claim])
+  })
+
   it.each([
     ['Hay 923 registros de datos, sin contar la cabecera.', 923, true],
     ['**Registros de datos (sin cabecera):** 923.', 923, true],

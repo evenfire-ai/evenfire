@@ -17,38 +17,6 @@ type Pending = {
 }
 const MAX_REQUEST_BYTES = 1_024
 const MAX_COMMAND_BYTES = 65_536
-const ALLOWED_NODE_MODULE_ROOT = '/app/mcp-host/node_modules/'
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-function assertReadonlyReceiptCommand(command: string, receiptPath: string): void {
-  if (!command.includes(receiptPath))
-    throw new Error('Reviewed command does not use the verified receipt')
-  if (!/^node\s+-\s*<<'NODE'\n/.test(command))
-    throw new Error('Reviewed command must be a Node stdin program')
-  const receiptMatches = command.match(new RegExp(escapeRegExp(receiptPath), 'g')) ?? []
-  if (receiptMatches.length !== 1 || receiptMatches[0] !== receiptPath)
-    throw new Error('Reviewed command must reference exactly one verified receipt')
-  if (command.includes('.gfs-download-store'))
-    throw new Error('Reviewed command cannot access the download store')
-  const forbidden = [
-    /\b(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|unlink)\b/,
-    /\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|truncate(?:Sync)?|rmSync|unlinkSync)\b/,
-    /\b(?:child_process|spawnSync|spawn\(|execSync|exec\(|fork\(|forkSync)\b/,
-    /\b(?:fetch|axios|XMLHttpRequest|net\.connect|dns\.)\b/,
-    /https?:\/\//,
-    /\bprocess\.env\b/,
-  ]
-  if (forbidden.some(pattern => pattern.test(command)))
-    throw new Error('Reviewed command contains a forbidden write, process, or network operation')
-  for (const match of command.matchAll(/(['"])(\/[^'"\n]+)\1/g)) {
-    const value = match[2]
-    if (!value.startsWith(ALLOWED_NODE_MODULE_ROOT))
-      throw new Error(`Reviewed command contains an unapproved absolute path: ${value}`)
-  }
-}
 
 /** Only opt-in attended E2E uses this local reviewer transport. */
 export async function createGfsApprovalReview(
@@ -174,28 +142,6 @@ export async function createGfsApprovalReview(
     }
   }
 
-  async function reviewAndApproveVisible(receiptPath: string): Promise<boolean> {
-    verifyOwnedPage()
-    if (!active || result || deciding) return false
-    const approve = page.getByTestId('approval-approve-btn')
-    const approveCount = await approve.count()
-    if (approveCount === 0) return false
-    if (approveCount !== 1 || !(await approve.isVisible()) || !(await approve.isEnabled()))
-      return false
-    const current = await visibleApproval()
-    if (!current) return false
-    assertReadonlyReceiptCommand(current.command, receiptPath)
-    pending = {
-      nonce: randomUUID(),
-      command: current.command,
-      button: current.button,
-      denyButton: current.denyButton,
-      expiresAt: Date.now() + requestTimeoutMs,
-    }
-    await decideReview('approve', pending.nonce)
-    return true
-  }
-
   async function decideReview(action: 'approve' | 'deny', nonce: unknown): Promise<unknown> {
     if (
       !active ||
@@ -316,8 +262,6 @@ export async function createGfsApprovalReview(
     activate() {
       active = true
     },
-    /** Reviews and clicks each actionable visible request for one verified receipt. */
-    reviewAndApproveVisible,
     /** Result observation cannot bypass or satisfy the journey's business assertions. */
     async observeResult(verdict: 'passed' | 'failed', visibleResponse?: string) {
       result = verdict

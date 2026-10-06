@@ -45,6 +45,22 @@ export function hasCsvDataRecordCount(summary: string, count: number): boolean {
   ).test(summary)
 }
 
+/** Extract explicit plural count claims without requiring a numeric summary. */
+export function csvColumnCountClaims(summary: string): number[] {
+  const label = String.raw`(?:columnas|columns)`
+  const number = String.raw`(?<![\p{L}\p{N}_\-\u2212])(\d{1,3}(?:[., \t]\d{3})+|\d+)(?![\p{L}\p{N}_]|[.,]\d)`
+  // Horizontal spacing cannot mistake the first numbered item below a
+  // "Columns:" heading for a count of columns.
+  const pattern = new RegExp(
+    String.raw`(?:\b${label}\b\*{0,2}[ \t]*(?:\(|:|es|=|de|son)?[ \t]*\*{0,2}[ \t]*${number}|${number}[ \t*\x60_]{1,12}\b${label}\b)`,
+    'giu'
+  )
+  return [...summary.matchAll(pattern)]
+    .flatMap(match => [match[1], match[2]])
+    .filter((raw): raw is string => Boolean(raw))
+    .map(raw => Number(raw.replace(/[., \t]/g, '')))
+}
+
 /** Count distinct header mentions without returning private field names. */
 export function countMissingCsvColumns(summary: string, columns: readonly string[]): number {
   const normalize = (value: string): string => value.replace(/\s+/g, ' ').trim()

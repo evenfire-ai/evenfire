@@ -33,6 +33,7 @@ import {
   GFS_OLD_VISUAL_LIMIT,
   type GfsLargeCsvFixture,
   countMissingCsvColumns,
+  csvColumnCountClaims,
   hasCsvDataRecordCount,
   resolveGfsLargeCsvFixture,
 } from './helpers/gfsLargeFileCsvFixture'
@@ -162,35 +163,12 @@ async function sendTaskAndWaitForReviewedShell(
   // Local control becomes actionable only after this test verifies the initial
   // receipt and unexecuted shell. Every decision still clicks the visible UI.
   reviewer?.activate()
-  const responseDeadline = Date.now() + RESPONSE_TIMEOUT_MS
-  let stepperClass = ''
-  let lastReviewState = 'not started'
-  while (Date.now() < responseDeadline) {
-    if (reviewer) {
-      const clicked = await reviewer.reviewAndApproveVisible(receiptPath!)
-      lastReviewState = clicked ? 'clicked visible approval' : 'no actionable approval'
-    }
-    stepperClass = (await stepper.getAttribute('class')) ?? ''
-    if (/\bstatus-completed\b/.test(stepperClass)) break
-    await page.waitForFunction(
-      () => {
-        const currentStepper = document.querySelector('[data-testid="progress-stepper"]')
-        const approve = document.querySelector<HTMLButtonElement>(
-          '[data-testid="approval-approve-btn"]'
-        )
-        return (
-          currentStepper?.classList.contains('status-completed') === true ||
-          approve?.disabled === false
-        )
-      },
-      undefined,
-      { timeout: Math.max(1, responseDeadline - Date.now()), polling: 'raf' }
-    )
-  }
-  expect(
-    stepperClass,
-    `Governed turn did not complete; last review state: ${lastReviewState}`
-  ).toMatch(/\bstatus-completed\b/)
+  // Wait on the stable turn while the attending reviewer handles every
+  // request through the one-use local transport and visible approval button.
+  // Merely recognizing a program's keywords cannot grant execution consent.
+  await expect(stepper).toHaveClass(/\bstatus-completed\b/, {
+    timeout: RESPONSE_TIMEOUT_MS,
+  })
   await expect(approval).toHaveCount(0, { timeout: RESPONSE_TIMEOUT_MS })
   await expect(response).toBeVisible({ timeout: RESPONSE_TIMEOUT_MS })
   const expandButton = page.getByTestId('progress-expand-btn')
@@ -434,6 +412,10 @@ test.describe('GFS large-file business analysis with attended approval', () => {
             countMissingCsvColumns(responseSummary, csv.columns),
             'Response must include every independently parsed CSV column'
           ).toBe(0)
+          expect(
+            csvColumnCountClaims(responseSummary).filter(claim => claim !== csv.columns.length),
+            'Every stated column count must match the independently parsed header'
+          ).toEqual([])
           if (csv.source === 'synthetic') {
             await expect(response).toContainText(csv.lastRecordId!)
           }

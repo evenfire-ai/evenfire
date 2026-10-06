@@ -8,7 +8,7 @@ import { createGfsApprovalReview } from './e2e-playwright/helpers/gfsApprovalRev
 type Review = Awaited<ReturnType<typeof createGfsApprovalReview>>
 const reviews: Review[] = []
 const compiledUrl = 'file:///owned/worktree/desktop-app/ui-dist/index.html'
-const receiptPath = '.gfs-downloads/input/01234567-89ab-cdef-0123-456789abcdef/source'
+const receiptPath = '.gfs-downloads/input-01234567-89ab-cdef-0123-456789abcdef/source'
 const command = `node - <<'NODE'
 const fs = require('fs');
 const stream = fs.createReadStream(${JSON.stringify(receiptPath)});
@@ -159,11 +159,14 @@ describe('attended GFS approval reviewer', () => {
     expect(f.approveClick).toHaveBeenCalledTimes(1)
   })
 
-  it('automatically reviews and clicks successive visible requests for the verified receipt', async () => {
+  it('requires a fresh explicit decision for every successive visible request', async () => {
     const f = await fixture()
-    expect(await f.review.reviewAndApproveVisible(receiptPath)).toBe(false)
     f.review.activate()
-    expect(await f.review.reviewAndApproveVisible(receiptPath)).toBe(true)
+    const first = await request(f.review, { action: 'view' })
+    expect(f.approveClick).not.toHaveBeenCalled()
+    expect(await request(f.review, { action: 'approve', nonce: first.nonce })).toMatchObject({
+      clicked: 'approve',
+    })
     expect(f.approveClick).toHaveBeenCalledExactlyOnceWith({ timeout: expect.any(Number) })
 
     f.state.visible = true
@@ -171,37 +174,16 @@ describe('attended GFS approval reviewer', () => {
       'stream.resume();',
       "stream.resume(); if (/^record-/i.test('record')) globalThis.checked = true;"
     )
-    expect(await f.review.reviewAndApproveVisible(receiptPath)).toBe(true)
-    expect(f.approveClick).toHaveBeenCalledTimes(2)
-    expect(f.denyClick).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    [
-      'different receipt',
-      command.replace(
-        receiptPath,
-        '.gfs-downloads/input/ffffffff-ffff-ffff-ffff-ffffffffffff/source'
-      ),
-    ],
-    ['write operation', command.replace('stream.resume();', "fs.writeFileSync('out.txt', 'x');")],
-    ['network operation', command.replace('stream.resume();', "fetch('https://example.invalid');")],
-    [
-      'unapproved absolute path',
-      command.replace('const fs', "const path = '/etc/passwd'; const fs"),
-    ],
-    [
-      'non-stdin command',
-      `node -e ${JSON.stringify(`require('fs').createReadStream(${receiptPath})`)}`,
-    ],
-  ])('automatic review rejects %s without clicking', async (_name, unsafeCommand) => {
-    const f = await fixture()
-    f.state.command = unsafeCommand
-    f.review.activate()
-    await expect(f.review.reviewAndApproveVisible(receiptPath)).rejects.toThrow(
-      /receipt|forbidden|absolute path|stdin/
+    const next = await request(f.review, { action: 'view' })
+    expect(next.nonce).not.toEqual(first.nonce)
+    expect(f.approveClick).toHaveBeenCalledTimes(1)
+    expect(await request(f.review, { action: 'approve', nonce: first.nonce })).toHaveProperty(
+      'error'
     )
-    expect(f.approveClick).not.toHaveBeenCalled()
+    expect(await request(f.review, { action: 'approve', nonce: next.nonce })).toMatchObject({
+      clicked: 'approve',
+    })
+    expect(f.approveClick).toHaveBeenCalledTimes(2)
     expect(f.denyClick).not.toHaveBeenCalled()
   })
 
