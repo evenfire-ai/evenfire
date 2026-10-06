@@ -103,8 +103,9 @@ function scanJsonStrings(text: string): {
  * Only the replacements are stored, as segments sorted along the copy: code
  * units `[textStart, textEnd)` stand for `[origStart, origEnd)`. The code
  * units between two segments are original and consecutive, and the first one
- * after a segment stands for that segment's `origEnd`, so a replacement costs
- * time in the number of segments, not in the length of the text.
+ * after a segment stands for that segment's `origEnd`, so the bookkeeping of a
+ * replacement costs time in the number of segments, not in the length of the
+ * text. Rebuilding the copy itself still costs time in its length.
  */
 class RedactionReplay {
   text: string
@@ -643,8 +644,8 @@ export class BasicSafety implements Safety {
   /**
    * Tool-output redaction that keeps JSON output parseable. The text pass
    * (`sanitizeFreeformContent`) runs over the raw text, so a match can swallow
-   * JSON syntax: the password value class `[^\s,;]{8,}` eats a closing `"}`,
-   * and a raw `\n` escape is not whitespace to it. The text-pass result is
+   * JSON syntax: a password value, which runs to the next whitespace, `,` or
+   * `;`, eats a closing `"}`, and a raw `\n` escape is not whitespace to it. The text-pass result is
    * returned unchanged when it did not modify the output, when it still
    * parses, or when the original output does not parse.
    *

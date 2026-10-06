@@ -504,11 +504,16 @@ describe('BasicSafety', () => {
       const textPass = s.sanitizeFreeformContent(output, {
         secretWarning: 'Potential secret detected in mcp__config output',
       })
+      // Precondition: the text pass broke the JSON.
+      expect(() => JSON.parse(textPass.content)).toThrow()
       const result = s.sanitizeOutput('mcp__config', output)
       // Witness: the configured rule matched.
-      expect(result.warnings).toContain('ConfigStore secret value redacted (S)')
+      expect(result.warnings).toEqual([
+        'Potential secret detected in mcp__config output',
+        'ConfigStore secret value redacted (S)',
+      ])
+      expect(result.content).toBe('[{"a":"[REDACTED]b":1}]')
       expect(result.content).toBe(textPass.content)
-      expect(result.content).not.toContain('"},{"')
     })
   })
 
@@ -606,35 +611,56 @@ describe('BasicSafety', () => {
         'password=hunter2hunter2password=pwd : S3cretValue1',
       ],
     ])('redacts the last value after %s', (_label, text) => {
-      const result = safety.sanitizeOutput('shell_exec', text)
-      expect(result.was_modified).toBe(true)
-      expect(result.content).not.toContain('S3cretValue1')
+      expect(safety.sanitizeOutput('shell_exec', text).content).toBe('[REDACTED]')
 
       const output = JSON.stringify({ log: text })
-      const inJson = safety.sanitizeOutput('mcp__config', output)
-      expect(inJson.was_modified).toBe(true)
-      expect(inJson.content).not.toContain('S3cretValue1')
+      // Precondition: the text pass breaks the JSON, so the in-place path runs.
+      const textPass = safety.sanitizeFreeformContent(output, { secretWarning: 'w' })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+      expect(safety.sanitizeOutput('mcp__config', output).content).toBe('{"log":"[REDACTED]"}')
     })
 
     it.each([
-      // `PASSWORD:` has a short value, so the value of `pwd :` that runs to
-      // the next separator swallows `passwd =`, whose value starts with a
-      // label of its own.
-      ['starts with a label', 'PASSWORD:pwd :Zq8Lm2Xvpasswd =pwd=Ab3x tail', 'Ab3x'],
-      ['starts with a label and a colon', 'PASSWORD:pwd :Zq8Lm2Xvpasswd =Pwd:7Kq2', '7Kq2'],
+      // `PASSWORD:` has a short value, so the value of `pwd :` runs to the
+      // space and swallows `passwd`, the start of the label `passwd =`, whose
+      // value starts with a label of its own.
+      [
+        'starts with a label',
+        'PASSWORD:pwd :Zq8Lm2Xvpasswd =pwd=Ab3x tail',
+        'PASSWORD:[REDACTED] tail',
+      ],
+      [
+        'starts with a label and a colon',
+        'PASSWORD:pwd :Zq8Lm2Xvpasswd =Pwd:7Kq2',
+        'PASSWORD:[REDACTED]',
+      ],
     ])(
       'redacts the value of a label inside an earlier value when it %s',
-      (_label, text, secret) => {
-        const result = safety.sanitizeOutput('shell_exec', text)
-        expect(result.was_modified).toBe(true)
-        expect(result.content).not.toContain(secret)
+      (_label, text, redacted) => {
+        expect(safety.sanitizeOutput('shell_exec', text).content).toBe(redacted)
 
         const output = JSON.stringify({ log: text })
-        const inJson = safety.sanitizeOutput('mcp__config', output)
-        expect(inJson.was_modified).toBe(true)
-        expect(inJson.content).not.toContain(secret)
+        expect(safety.sanitizeOutput('mcp__config', output).content).toBe(
+          JSON.stringify({ log: redacted })
+        )
       }
     )
+
+    it('joins password values that overlap before a later rule runs', () => {
+      // `passwd =` and `PASSWORD:` both start a value that runs to the end.
+      // Joined, they are one match; unjoined, the configured secret matches
+      // inside the second replacement of an overlapping pair.
+      const text = 'passwd =PASSWORD: xoxb-1'
+      const s = new BasicSafety(() => [{ name: 'A', value: 'REDA' }])
+      expect(s.sanitizeFreeformContent(text, { secretWarning: 'w' })).toEqual({
+        content: '[REDACTED]',
+        was_modified: true,
+        warnings: ['w', 'w', 'ConfigStore secret value redacted (A)'],
+      })
+      expect(s.sanitizeOutput('mcp__config', JSON.stringify({ log: text })).content).toBe(
+        '{"log":"[REDACTED]"}'
+      )
+    })
 
     it('matches a long run of labels in linear time', () => {
       const content = 'pwd:'.repeat(250_000)
@@ -648,13 +674,24 @@ describe('BasicSafety', () => {
 
   describe('a rule with many matches', () => {
     it('redacts 200,000 injection markers without exceeding the call stack', () => {
-      const content = '[INST] '.repeat(200_000)
+      // The `<system>` match comes first, so the `[INST]` rule runs on a
+      // rewritten copy and its 200,000 matches on the original text are
+      // collected and checked against the replay's coverage. Without an
+      // earlier match that step is skipped.
+      const content = '<system> ' + '[INST] '.repeat(200_000)
       let result: ReturnType<BasicSafety['sanitizeOutput']> | undefined
+      const started = performance.now()
       expect(() => {
         result = safety.sanitizeOutput('shell_exec', content)
       }).not.toThrow()
-      expect(result?.content).toBe('[filtered] '.repeat(200_000))
-      expect(result?.warnings).toEqual(['Potential prompt injection pattern filtered'])
+      const elapsedMs = performance.now() - started
+      expect(result?.content).toBe('[filtered] ' + '[filtered] '.repeat(200_000))
+      expect(result?.warnings).toEqual([
+        'Potential prompt injection pattern filtered',
+        'Potential prompt injection pattern filtered',
+      ])
+      // A coverage lookup that scans every range takes about 20 s here.
+      expect(elapsedMs).toBeLessThan(2_000)
     }, 60_000)
   })
 
@@ -726,6 +763,18 @@ describe('BasicSafety', () => {
         warnings: warned('A', 'C'),
       })
     })
+
+    it('keeps the end of a joined range when a range inside it ends earlier', () => {
+      // The password match covers the whole text and the Slack token match
+      // inside it ends at `xoxb-1ED`, before the configured secret `ED:A`
+      // ends. Joined, the two still cover `ED:A`, so the secret adds no
+      // replacement and no warning of its own.
+      expect(freeform([{ name: 'A', value: 'ED:A' }], 'PASSWORD:xoxb-1ED:A\\')).toEqual({
+        content: '[REDACTED]',
+        was_modified: true,
+        warnings: ['w', 'w'],
+      })
+    })
   })
 
   describe('redaction patterns that can match nothing', () => {
@@ -742,6 +791,22 @@ describe('BasicSafety', () => {
       })
       expect(() => safety.sanitizeFreeformContent('axb', filter(/x*/g))).toThrow(
         'redaction pattern /x*/g matched an empty string'
+      )
+    })
+
+    it('refuses a filter whose replacement is empty', () => {
+      const filter = (replacement: string) => ({
+        secretWarning: 'unused',
+        extraFilters: [{ pattern: /x+/g, replacement, warning: 'x filtered' }],
+      })
+      // Precondition: the same filter with a non-empty replacement is applied.
+      expect(safety.sanitizeFreeformContent('axb', filter('-'))).toEqual({
+        content: 'a-b',
+        was_modified: true,
+        warnings: ['x filtered'],
+      })
+      expect(() => safety.sanitizeFreeformContent('axb', filter(''))).toThrow(
+        'RedactionReplay: empty replacement'
       )
     })
   })
