@@ -74,6 +74,13 @@ the IP has spent 6000 verifications in the minute. Verified principals that
 share one source IP share this budget, and the internal SDK edge allowance
 cannot exceed it from one IP.
 
+Known limitation: the budget does not isolate callers that share a source
+IP. Hosts behind one NAT, egress gateway or proxy can exhaust it for one
+another, and a flood of invalid tokens from the WRC source IP can deny WRC
+revocation calls until the window resets. With `trust proxy` set to 1, an
+in-cluster caller is identified by its pod IP, so this requires sharing that
+address with the affected caller.
+
 ## SDK operation multiplicity
 
 A healthy static-secret attempt performs reissue, pre-Secret introspection and
