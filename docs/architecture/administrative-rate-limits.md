@@ -77,9 +77,12 @@ cannot exceed it from one IP.
 Known limitation: the budget does not isolate callers that share a source
 IP. Hosts behind one NAT, egress gateway or proxy can exhaust it for one
 another, and a flood of invalid tokens from the WRC source IP can deny WRC
-revocation calls until the window resets. With `trust proxy` set to 1, an
-in-cluster caller is identified by its pod IP, so this requires sharing that
-address with the affected caller.
+revocation calls until the window resets. `trust proxy` is set to 1, so the
+source IP is the rightmost `X-Forwarded-For` entry when that header is present
+and the socket address otherwise. A caller that reaches Control API directly,
+such as another in-cluster pod, can set that header itself and be charged to
+any address it names, so exhausting another caller's budget does not require
+sharing its address.
 
 ## SDK operation multiplicity
 
