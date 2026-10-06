@@ -24,9 +24,10 @@ function rawQueryOf(req: Request): string {
  * untouched so the signed `state` and `code` are never re-encoded — and relay its
  * response, including the HTML success page that bounces to clerum://oauth-completed.
  *
- * Together with the CIMD document below, these are the only public, unauthenticated
- * routes in this gateway, so they MUST stay thin passthroughs: never read or trust
- * anything beyond the validated path segments and the opaque query string.
+ * These routes, and the CIMD document below, are public and unauthenticated yet
+ * forward with this gateway's service token, so they MUST stay thin passthroughs:
+ * never read or trust anything beyond the validated path segments and the opaque
+ * query string.
  */
 export function createOauthCallbackRouter(): Router {
   const router = Router()

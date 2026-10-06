@@ -309,6 +309,36 @@ describe('AddRemoteServerWizard', () => {
       expect(installMock).toHaveBeenCalledTimes(1)
     })
 
+    it('cannot leave the Confirm step while an install is in flight', async () => {
+      discoverMock.mockResolvedValue(discovered(NOTION_DISCOVER))
+      let rejectInstall: (error: unknown) => void = () => {}
+      installMock.mockReturnValue(
+        new Promise((_resolve, reject) => {
+          rejectInstall = reject
+        })
+      )
+      renderWizard()
+      await fillIdentity()
+      clickDetect()
+      await screen.findByText('https://mcp.notion.com/authorize')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+      await screen.findByRole('button', { name: 'Installing…' })
+
+      // Neither the rail nor Back can reach a step whose edits the pending install
+      // would ignore and whose result it would then overwrite.
+      expect(screen.getByRole('button', { name: /Identify/ })).toBeDisabled()
+      expect(screen.getByRole('button', { name: /Configure/ })).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: /Identify/ }))
+      expect(screen.getByRole('button', { name: 'Back' })).toBeDisabled()
+      expect(screen.queryByPlaceholderText('example-remote')).not.toBeInTheDocument()
+
+      rejectInstall(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))
+      await screen.findByText(/rejected client registration/i)
+      // Once settled, navigation is available again.
+      expect(screen.getByRole('button', { name: /Identify/ })).toBeEnabled()
+    })
+
     it('clears the error when only the server name is changed', async () => {
       await failInstallThenReturnToIdentity()
       fireEvent.change(screen.getByPlaceholderText('example-remote'), {

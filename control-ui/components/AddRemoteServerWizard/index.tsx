@@ -138,6 +138,9 @@ export function AddRemoteServerWizard({
   function canSelectStep(target: number): boolean {
     // Once installed, going back would offer a second install of the same server.
     if (installed) return target === 2
+    // Like Back, the rail is held while an install is in flight: its result belongs
+    // to the values on screen, so they must not change underneath it.
+    if (installing) return target === step
     if (target === 0) return true
     if (target === 1) return Boolean(detected) && identifiersValid
     return step1Valid
@@ -170,8 +173,6 @@ export function AddRemoteServerWizard({
   async function runDetect() {
     setDetecting(true)
     setDiscoverError('')
-    // A previous install's error belongs to that attempt, not to this detection.
-    setInstallError('')
     setTransport(null)
     setCallback(undefined)
     try {

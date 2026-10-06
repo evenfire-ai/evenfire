@@ -218,6 +218,15 @@ describe('CIMD client metadata document passthrough', () => {
     vi.restoreAllMocks()
   })
 
+  // Liveness witness for the negative cases: the route is registered and forwards,
+  // so their 404 comes from the rejection, not from a missing route.
+  async function expectCimdRouteLive(spy: ReturnType<typeof mockControlApi>) {
+    const res = await request(createApp()).get(CIMD_URL)
+    expect(res.status).toBe(200)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy).toHaveBeenCalledWith('/.well-known/evenfire-mcp-client', '')
+  }
+
   function mockControlApi() {
     return vi.spyOn(client, 'controlApiPassthroughGet').mockResolvedValue({
       status: 200,
@@ -266,11 +275,12 @@ describe('CIMD client metadata document passthrough', () => {
     'does not route %s (read-only document)',
     async method => {
       const spy = mockControlApi()
+      await expectCimdRouteLive(spy)
 
       const res = await request(createApp())[method](CIMD_URL)
 
       expect(res.status).toBe(404)
-      expect(spy).not.toHaveBeenCalled()
+      expect(spy).toHaveBeenCalledTimes(1)
     }
   )
 
@@ -283,10 +293,11 @@ describe('CIMD client metadata document passthrough', () => {
 
   it.each(rejected)('404s without contacting control-api: %s', async (_label, url) => {
     const spy = mockControlApi()
+    await expectCimdRouteLive(spy)
 
     const res = await rawGet(url)
 
     expect(res.status).toBe(404)
-    expect(spy).not.toHaveBeenCalled()
+    expect(spy).toHaveBeenCalledTimes(1)
   })
 })
