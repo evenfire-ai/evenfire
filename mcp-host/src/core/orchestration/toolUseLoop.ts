@@ -25,7 +25,7 @@ import {
   shouldRecoverWorkflowTriggerTextResponse,
 } from './toolUseLoopIntentRecovery'
 import { validateToolLinkages } from './toolUseLoopLinkages'
-import { appendToolResults } from './toolUseLoopMessages'
+import { appendToolResults, loopInjectedUserMessage, markLoopInjected } from './toolUseLoopMessages'
 import {
   callReasoningForIteration,
   exhaustionResult,
@@ -198,11 +198,11 @@ export async function runToolUseLoop(
               'recovering workflow trigger text response after workflow_list'
             )
             messages.push({ role: 'assistant', content: result.content })
-            messages.push({
-              role: 'user',
-              content:
-                'The previous assistant response listed or described workflows but did not trigger the requested workflow. The user asked to run a named workflow recipe and provided any business inputs in the original message. Call workflow_trigger for that workflow with those inputs when it is available, or use workflow tools to prove it is not available. Do not only summarize workflow_list.',
-            })
+            messages.push(
+              loopInjectedUserMessage(
+                'The previous assistant response listed or described workflows but did not trigger the requested workflow. The user asked to run a named workflow recipe and provided any business inputs in the original message. Call workflow_trigger for that workflow with those inputs when it is available, or use workflow tools to prove it is not available. Do not only summarize workflow_list.'
+              )
+            )
             continue
           }
 
@@ -222,11 +222,11 @@ export async function runToolUseLoop(
               'recovering workflow list text response without tool call'
             )
             messages.push({ role: 'assistant', content: result.content })
-            messages.push({
-              role: 'user',
-              content:
-                'The previous assistant response answered a workflow recipe list request without calling workflow_list. Use workflow_list now and answer only from its current results. Do not reuse prior conversation workflow names.',
-            })
+            messages.push(
+              loopInjectedUserMessage(
+                'The previous assistant response answered a workflow recipe list request without calling workflow_list. Use workflow_list now and answer only from its current results. Do not reuse prior conversation workflow names.'
+              )
+            )
             continue
           }
 
@@ -242,11 +242,11 @@ export async function runToolUseLoop(
               'recovering workflow trigger text response without tool call'
             )
             messages.push({ role: 'assistant', content: result.content })
-            messages.push({
-              role: 'user',
-              content:
-                'The previous assistant response did not trigger the requested workflow. The user asked to trigger a workflow recipe by name. Use workflow_trigger for the requested workflow and target when it is available, or use the workflow tools to prove that it is not available. Do not create or report a workflow run without workflow_trigger.',
-            })
+            messages.push(
+              loopInjectedUserMessage(
+                'The previous assistant response did not trigger the requested workflow. The user asked to trigger a workflow recipe by name. Use workflow_trigger for the requested workflow and target when it is available, or use the workflow tools to prove that it is not available. Do not create or report a workflow run without workflow_trigger.'
+              )
+            )
             continue
           }
 
@@ -261,11 +261,11 @@ export async function runToolUseLoop(
               'recovering workflow artifact text response without tool call'
             )
             messages.push({ role: 'assistant', content: result.content })
-            messages.push({
-              role: 'user',
-              content:
-                'The previous assistant response did not retrieve the requested workflow result artifact. The user asked for an existing workflow result artifact by name. Use workflow_result for the named workflow, or use the workflow tools to prove that it is unavailable. Do not invent artifact URLs, proof values, or run outputs.',
-            })
+            messages.push(
+              loopInjectedUserMessage(
+                'The previous assistant response did not retrieve the requested workflow result artifact. The user asked for an existing workflow result artifact by name. Use workflow_result for the named workflow, or use the workflow tools to prove that it is unavailable. Do not invent artifact URLs, proof values, or run outputs.'
+              )
+            )
             continue
           }
 
@@ -281,7 +281,12 @@ export async function runToolUseLoop(
           }
 
           const nudgeMsg = loopController.onTextRejected(result.content, iteration)
-          if (nudgeMsg) messages.push({ role: 'assistant', content: result.content }, nudgeMsg)
+          if (nudgeMsg) {
+            messages.push(
+              { role: 'assistant', content: result.content },
+              markLoopInjected(nudgeMsg)
+            )
+          }
           continue
         }
 
@@ -307,11 +312,11 @@ export async function runToolUseLoop(
               )
             }
 
-            messages.push({
-              role: 'user',
-              content:
-                'The user asked to list workflow recipes, not trigger one. Do not call workflow_trigger for workflow availability questions. Use workflow_list and answer only from its results.',
-            })
+            messages.push(
+              loopInjectedUserMessage(
+                'The user asked to list workflow recipes, not trigger one. Do not call workflow_trigger for workflow availability questions. Use workflow_list and answer only from its results.'
+              )
+            )
             continue
           }
 
@@ -321,11 +326,11 @@ export async function runToolUseLoop(
             result.calls.some(call => call.name === 'workflow_trigger')
           ) {
             workflowArtifactIntentRecovered = true
-            messages.push({
-              role: 'user',
-              content:
-                'The previous tool choice would trigger a workflow, but the user asked for an existing workflow result artifact. Do not call workflow_trigger for result, artifact, output, or download requests. Use workflow_result for the named workflow.',
-            })
+            messages.push(
+              loopInjectedUserMessage(
+                'The previous tool choice would trigger a workflow, but the user asked for an existing workflow result artifact. Do not call workflow_trigger for result, artifact, output, or download requests. Use workflow_result for the named workflow.'
+              )
+            )
             continue
           }
 

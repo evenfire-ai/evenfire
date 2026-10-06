@@ -8,6 +8,28 @@ import {
 } from '../tools/generatedArtifactAttachments'
 import type { Attachment, ChatMessage, MessageContentPart, ToolResult } from '../types'
 
+/**
+ * A `role: 'user'` message the loop injects itself (a recovery prompt or a
+ * controller nudge). It does not start a user turn, so turn-scoped passes such
+ * as the C17 attachment page collapse skip it when they look for the latest
+ * user message. The flag is internal: the LLM drivers map message fields
+ * explicitly, so it never reaches a provider, and it survives the JSON approval
+ * context snapshot.
+ */
+export type LoopInjectedMessage = ChatMessage & { loopInjected: true }
+
+export function loopInjectedUserMessage(content: string): LoopInjectedMessage {
+  return { role: 'user', content, loopInjected: true }
+}
+
+export function markLoopInjected(message: ChatMessage): LoopInjectedMessage {
+  return { ...message, loopInjected: true }
+}
+
+export function isLoopInjectedMessage(message: ChatMessage): boolean {
+  return (message as Partial<LoopInjectedMessage>).loopInjected === true
+}
+
 function shouldCollectAttachment(result: ToolResult, attachment: Attachment): boolean {
   if (result.is_error || attachment.visualSource?.kind === 'gfs') return false
   if (attachment.kind === 'image') return true

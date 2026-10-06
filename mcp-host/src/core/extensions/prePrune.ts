@@ -33,6 +33,7 @@
 import { createHash } from 'node:crypto'
 import { Counter } from 'prom-client'
 import { extractInputPreview } from '../orchestration/toolUseLoop'
+import { isLoopInjectedMessage } from '../orchestration/toolUseLoopMessages'
 import { heuristicCount } from '../tokenizer/heuristic'
 import type { ChatMessage, MessageContentPart, ToolCall } from '../types'
 
@@ -104,8 +105,10 @@ export const DEFAULT_PRE_PRUNE_OPTIONS: PrePruneOptions = {
 
 const DUPLICATE_PREFIX = '[duplicate of tool_call_id='
 const ATTACHMENT_READ_TOOL_NAME = 'clerum__attachment_read'
+// A later turn registers `clerum__attachment_read` only for the files attached
+// to its own message, so the model must ask for the file again to re-read it.
 const ATTACHMENT_PAGE_COLLAPSE_MARKER =
-  '[earlier attachment page collapsed; re-read with clerum__attachment_read if needed]'
+  '[earlier attachment page collapsed; reattach the file in a new message to re-read it, and resume reading at nextOffset]'
 const WRAPPED_ATTACHMENT_OUTPUT_PATTERN =
   /^<tool_output name="clerum__attachment_read" sanitized="(true|false)">\n([\s\S]*)\n<\/tool_output>$/
 
@@ -228,17 +231,22 @@ interface AttachmentTextPage {
 /**
  * C17 — collapse the text of `clerum__attachment_read` pages that belong to
  * turns strictly before the LATEST user message. The stub keeps every field
- * the model needs to re-read the page on demand — attachment/reference
- * identity, byte range, truncation flag and the tool linkage — and replaces
- * only `text` with a fixed marker. Pages of the current turn (from the latest
- * user message onwards) stay byte-identical, as do foreign tools, malformed
- * payloads and binary results.
+ * the model needs to resume reading once the user attaches the file again —
+ * attachment/reference identity, byte range, truncation flag, `limit`,
+ * `nextOffset` and the tool linkage — and replaces only `text` with a fixed
+ * marker. Pages of the current turn (from the latest user message onwards)
+ * stay byte-identical, as do foreign tools, malformed payloads and binary
+ * results. User messages the loop injects itself (nudges, recovery prompts)
+ * do not start a turn, so they never move that boundary.
  *
  * Boundary note: this pass deliberately uses the latest-user boundary, not
- * `computeProtectedTailStart`. Attachment pages are the one payload the model
- * can re-fetch deterministically, so under pressure they collapse even inside
- * the protected tail, while every other pass keeps its protected-tail
- * semantics unchanged.
+ * `computeProtectedTailStart`. A collapsed page cannot be re-read in a later
+ * turn: the tool is registered only for the files attached to that turn's
+ * message, so the marker tells the model to ask for the file again and to
+ * resume at `nextOffset`. The pinned digest (`referenceId`) lets a reattached
+ * copy be matched to the collapsed range. Under pressure these pages collapse
+ * even inside the protected tail, while every other pass keeps its
+ * protected-tail semantics unchanged.
  */
 export function collapseEarlierAttachmentPages(messages: ChatMessage[]): ChatMessage[] {
   const lastUserIndex = findLastUserIndex(messages)
@@ -259,7 +267,14 @@ export function collapseEarlierAttachmentPages(messages: ChatMessage[]): ChatMes
 
 function findLastUserIndex(messages: ChatMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user' && messages[i].imageOrigin !== 'tool_result') return i
+    const message = messages[i]
+    if (
+      message.role === 'user' &&
+      message.imageOrigin !== 'tool_result' &&
+      !isLoopInjectedMessage(message)
+    ) {
+      return i
+    }
   }
   return -1
 }

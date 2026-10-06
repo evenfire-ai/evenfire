@@ -8,8 +8,16 @@
  * stay untouched. The pass is pressure-gated inside `prePrune`.
  */
 import { describe, expect, it } from 'vitest'
-import { validateToolLinkages } from '../../orchestration/toolUseLoop'
+import { createHash } from 'node:crypto'
+import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
+import type { IncomingMessage } from '../../../server'
+import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
+import type { ToolRegistry } from '../../interfaces'
+import { SimpleEventEmitter } from '../../orchestration/eventEmitter'
+import { executeSingleTool, validateToolLinkages } from '../../orchestration/toolUseLoop'
 import { BasicSafety } from '../../safety/safety'
+import { DefaultToolOutputProcessor } from '../../safety/toolOutputProcessor'
+import { AttachmentReadTool } from '../../tools/attachmentRead'
 import type { ChatMessage } from '../../types'
 import {
   DEFAULT_PRE_PRUNE_OPTIONS,
@@ -53,7 +61,17 @@ function wrapped(content: string, toolName = 'clerum__attachment_read'): string 
 }
 
 function stubMarker(): string {
-  return '[earlier attachment page collapsed; re-read with clerum__attachment_read if needed]'
+  // M3: a later turn has no attachment_read tool for this file unless the
+  // user attaches it again, so the stub must say so instead of "re-read".
+  return '[earlier attachment page collapsed; reattach the file in a new message to re-read it, and resume reading at nextOffset]'
+}
+
+/**
+ * Liveness witness for the negative assertions below: the page at `index`
+ * of `messages` was replaced by a collapse stub, so the pass did run.
+ */
+function expectCollapsedAt(messages: ChatMessage[], index: number): void {
+  expect((JSON.parse(messages[index]!.content) as Record<string, unknown>).text).toBe(stubMarker())
 }
 
 const PRESSURE_ON: PrePrunePressure = { inputTokens: 900, contextWindowTokens: 1000 }
@@ -75,6 +93,7 @@ function conversation(): ChatMessage[] {
 describe('C17 collapseEarlierAttachmentPages — export', () => {
   it('exports the frozen collapseEarlierAttachmentPages function', () => {
     expect(typeof prePruneModule.collapseEarlierAttachmentPages).toBe('function')
+    expectCollapsedAt(prePruneModule.collapseEarlierAttachmentPages(conversation()), 2)
   })
 })
 
@@ -121,6 +140,7 @@ describe('C17 collapseEarlierAttachmentPages — direct pass', () => {
   it('keeps current-turn pages byte-identical and referentially intact', () => {
     const messages = conversation()
     const out = prePruneModule.collapseEarlierAttachmentPages(messages)
+    expectCollapsedAt(out, 2)
     expect(out[5]).toBe(messages[5])
     expect(out[5].content).toBe(messages[5].content)
   })
@@ -202,6 +222,7 @@ describe('C17 collapseEarlierAttachmentPages — direct pass', () => {
     const messages = conversation()
     const before = structuredClone(messages)
     const out = prePruneModule.collapseEarlierAttachmentPages(messages)
+    expectCollapsedAt(out, 2)
     expect(messages).toEqual(before)
     for (const i of [0, 1, 3, 4, 5]) expect(out[i]).toBe(messages[i])
   })
@@ -209,6 +230,8 @@ describe('C17 collapseEarlierAttachmentPages — direct pass', () => {
   it('is idempotent: a second pass returns the same array reference', () => {
     const messages = conversation()
     const once = prePruneModule.collapseEarlierAttachmentPages(messages)
+    expect(once).not.toBe(messages)
+    expectCollapsedAt(once, 2)
     const twice = prePruneModule.collapseEarlierAttachmentPages(once)
     expect(twice).toBe(once)
   })
@@ -230,14 +253,22 @@ describe('C17 collapseEarlierAttachmentPages — direct pass', () => {
       attachmentToolResult('tc_b', nativePage({ kind: 'binary' })),
       assistantToolCall('tc_e', 'clerum__attachment_read', { attachmentId: 'att_1' }),
       attachmentToolResult('tc_e', nativePage({ extra: true })),
+      // Witness: a genuine page in the same input collapses, so the pass ran.
+      assistantToolCall('tc_g', 'clerum__attachment_read', { attachmentId: 'att_1' }),
+      attachmentToolResult('tc_g', nativePage()),
       userMsg('now'),
     ]
     const wrappedForeign = wrapped(nativePage(), 'clerum__gfs_read')
     malformed.push(attachmentToolResult('tc_w', wrappedForeign))
 
     const input = [foreignTool, ...malformed]
+    const genuineIndex = input.findIndex(m => m.role === 'tool' && m.tool_call_id === 'tc_g')
     const out = prePruneModule.collapseEarlierAttachmentPages(input)
-    expect(out).toBe(input)
+    expect(out).not.toBe(input)
+    expectCollapsedAt(out, genuineIndex)
+    for (let i = 0; i < input.length; i++) {
+      if (i !== genuineIndex) expect(out[i]).toBe(input[i])
+    }
   })
 
   it('uses the latest-user boundary, not the protected-tail boundary', () => {
@@ -288,12 +319,21 @@ describe('C17 prePrune — pressure-gated wiring', () => {
     const result = prePrune(messages, OPTIONS)
     expect(result.messages[2]).toBe(messages[2])
     expect(result.passesApplied).not.toContain('attachment_page_collapse')
+    // Witness: the same messages collapse once pressure is supplied.
+    const pressured = prePrune(messages, OPTIONS, PRESSURE_ON)
+    expect(pressured.passesApplied).toContain('attachment_page_collapse')
+    expectCollapsedAt(pressured.messages, 2)
   })
 
   it('does not collapse below the 0.8 window threshold', () => {
     const messages = conversation()
     const result = prePrune(messages, OPTIONS, PRESSURE_OFF)
     expect(result.messages[2]).toBe(messages[2])
+    expect(result.passesApplied).not.toContain('attachment_page_collapse')
+    // Witness: exactly at the threshold the same messages collapse.
+    const atThreshold = prePrune(messages, OPTIONS, { inputTokens: 800, contextWindowTokens: 1000 })
+    expect(atThreshold.passesApplied).toContain('attachment_page_collapse')
+    expectCollapsedAt(atThreshold.messages, 2)
   })
 
   it('does not collapse when the option is explicitly disabled', () => {
@@ -304,6 +344,11 @@ describe('C17 prePrune — pressure-gated wiring', () => {
       PRESSURE_ON
     )
     expect(result.messages[2]).toBe(messages[2])
+    expect(result.passesApplied).not.toContain('attachment_page_collapse')
+    // Witness: the same call with the option left on collapses.
+    const enabled = prePrune(messages, OPTIONS, PRESSURE_ON)
+    expect(enabled.passesApplied).toContain('attachment_page_collapse')
+    expectCollapsedAt(enabled.messages, 2)
   })
 
   it('rejects non-finite or non-positive windows and non-finite input tokens', () => {
@@ -318,6 +363,121 @@ describe('C17 prePrune — pressure-gated wiring', () => {
     for (const pressure of bad) {
       const result = prePrune(messages, OPTIONS, pressure)
       expect(result.messages[2]).toBe(messages[2])
+      expect(result.passesApplied).not.toContain('attachment_page_collapse')
     }
+    // Witness: a finite qualifying snapshot collapses the same messages.
+    const valid = prePrune(messages, OPTIONS, PRESSURE_ON)
+    expect(valid.passesApplied).toContain('attachment_page_collapse')
+    expectCollapsedAt(valid.messages, 2)
+  })
+})
+
+describe('C17 prePrune — real attachment_read producer (M1, L14)', () => {
+  const ATTACHMENT_ID = 'c3d9e8f7-1a2b-4c5d-8e9f-0a1b2c3d4e5f'
+  const MESSAGE_ID = '6f1c2a9e-4b7d-4c1e-9a53-2f8e7d6c5b4a'
+  const OPEN = '<tool_output name="clerum__attachment_read" sanitized="true">\n'
+  const CLOSE = '\n</tool_output>'
+
+  function parsesAsJson(text: string): boolean {
+    try {
+      JSON.parse(text)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  function readerFor(bytes: Buffer): AttachmentReadTool {
+    const admitted = validateIncomingAttachments(
+      [
+        {
+          id: ATTACHMENT_ID,
+          kind: 'file',
+          mimeType: 'text/plain',
+          detectedMediaType: 'text/plain',
+          encoding: 'base64',
+          dataBase64: bytes.toString('base64'),
+          filename: 'service.env',
+          sizeBytes: bytes.length,
+          digest: { algorithm: 'sha256', hex: createHash('sha256').update(bytes).digest('hex') },
+        },
+      ],
+      { maxCount: 20, maxBytes: 1_000_000, maxFileBytes: 3_145_728, messageId: MESSAGE_ID }
+    )
+    if (!admitted.ok) throw new Error(`fixture rejected: ${admitted.error.code}`)
+    const message: IncomingMessage = {
+      content: 'Review the attached config',
+      channelType: 'rpc',
+      channelId: 'agent-1',
+      sender: 'user-1',
+      timestamp: '2026-10-06T10:00:00Z',
+      messageId: MESSAGE_ID,
+      hostRef: 'host-1',
+      attachments: admitted.attachments,
+    }
+    return new AttachmentReadTool(message, 65_536, {
+      contextWindowTokens: 100_000,
+      ledger: new AttachmentReadLedger(),
+    })
+  }
+
+  it('collapses a page whose text ends inside password=<value> and keeps its paging fields', async () => {
+    const head = 'DB_HOST=db.internal\npassword=supersecret99'
+    const fileText = `${head}\nPORT=5432\n`
+    const tool = readerFor(Buffer.from(fileText))
+    const registry: ToolRegistry = {
+      get: name => (name === tool.name() ? tool : null),
+      listDefinitions: () => [],
+      register: () => undefined,
+    }
+    const result = await executeSingleTool(
+      {
+        id: 'tc_env',
+        name: 'clerum__attachment_read',
+        arguments: { attachmentId: ATTACHMENT_ID, maxBytes: Buffer.byteLength(head) },
+      },
+      {
+        toolRegistry: registry,
+        toolOutputProcessor: new DefaultToolOutputProcessor(safety),
+        safety,
+        events: new SimpleEventEmitter(),
+        toolTimeout: 1000,
+        progressReporter: undefined,
+        toolProgressInterval: 0,
+        measureToolMessage: message =>
+          Math.max(Math.ceil(Buffer.byteLength(message.content ?? '', 'utf8') / 4) + 4, 1),
+      }
+    )
+
+    // The stored output: the real wrapper around a page that still parses.
+    expect(result.is_error).toBe(false)
+    expect(result.content.startsWith(OPEN)).toBe(true)
+    expect(result.content.endsWith(CLOSE)).toBe(true)
+    const inner = result.content.slice(OPEN.length, -CLOSE.length)
+    expect(parsesAsJson(inner)).toBe(true)
+    expect(inner).not.toContain('supersecret99')
+
+    const messages: ChatMessage[] = [
+      userMsg('Review the attached config'),
+      assistantToolCall('tc_env', 'clerum__attachment_read', { attachmentId: ATTACHMENT_ID }),
+      { role: 'tool', tool_call_id: 'tc_env', name: result.name, content: result.content },
+      userMsg('next turn'),
+    ]
+    const pruned = prePrune(messages, OPTIONS, PRESSURE_ON)
+    expect(pruned.passesApplied).toContain('attachment_page_collapse')
+    const stubContent = pruned.messages[2].content
+    expect(stubContent.startsWith(OPEN)).toBe(true)
+    const stub = JSON.parse(stubContent.slice(OPEN.length, -CLOSE.length))
+    expect(stub).toEqual({
+      attachmentId: ATTACHMENT_ID,
+      referenceId: expect.any(String),
+      kind: 'text',
+      byteRange: { offset: 0, length: Buffer.byteLength(head) },
+      truncated: true,
+      limit: 'max_bytes',
+      nextOffset: Buffer.byteLength(head),
+      text: stubMarker(),
+    })
+    expect(() => validateToolLinkages(pruned.messages)).not.toThrow()
   })
 })

@@ -97,7 +97,7 @@ async function fixture(readInitially = true) {
         usage,
         finish_reason: FinishReason.ToolUse,
         tool_calls: [
-          ...(readInitially || requestReadAfterResume
+          ...(readInitially
             ? [
                 {
                   id: 'read-first',
@@ -264,6 +264,8 @@ describe('attachment budget through real approval persistence', () => {
       const next = await f.cold(mode)
       expect(next.value.executorState).toBe('failed')
       expect(next.onFail).toHaveBeenCalledTimes(1)
+      // The task fails because the read was refused, not for an unrelated reason.
+      expect(next.onFail.mock.calls[0]![1].message).toMatch(/notice cannot fit/)
       expect(f.messages().some(m => m.tool_call_id === 'read-after-0')).toBe(false)
     }
   )
@@ -293,6 +295,19 @@ describe('attachment budget through real approval persistence', () => {
     expect(next.value.executorState).toBe('completed')
     const read = f.messages().find(m => m.tool_call_id === 'read-after-0')
     expect(read).toBeTruthy()
+    // The permitted invocation answers with the typed unavailable-bytes result.
+    const inner =
+      /^<tool_output name="clerum__attachment_read" sanitized="false">\n([\s\S]*)\n<\/tool_output>$/.exec(
+        read!.content
+      )
+    expect(inner).not.toBeNull()
+    expect(JSON.parse(inner![1]!)).toEqual({
+      attachmentId: 'public-file',
+      referenceId: expect.any(String),
+      kind: 'binary',
+      reader: 'none',
+      reason: 'bytes_unavailable_after_restart',
+    })
     expect(read?.content).not.toContain('read_budget_exhausted')
     expect(read?.content).not.toContain('Public first-page sentinel')
   })

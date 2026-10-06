@@ -268,11 +268,16 @@ describe('clerum__attachment_read', () => {
     expect(toolFor([]).spilloverExempt?.()).toBe(true)
   })
 
-  it('describes a page as returned whole and never mentions spillover', () => {
+  it('describes a page as bounded by maxBytes and the budgets, and never mentions spillover', () => {
     const description = toolFor([]).description()
     // Witness: the description is the tool's full text.
     expect(description).toContain('Files with reader=text return UTF-8 text')
-    expect(description).toContain('A page is returned whole')
+    // C16 can end a page before maxBytes, so the page is not promised whole.
+    expect(description).not.toContain('returned whole')
+    expect(description).toContain(
+      `A page holds at most maxBytes (default ${READ_LIMIT} bytes) and ends earlier when the page or turn budget binds; ` +
+        'when truncated is true, limit names the bound that ended the page and nextOffset is where the next page starts.'
+    )
     expect(description).not.toContain('spillover')
   })
 

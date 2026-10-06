@@ -23,9 +23,24 @@ import { SanitizedOutput, ValidationResult } from '../types'
  */
 export type SecretEntriesProvider = () => Array<{ name: string; value: string }>
 
+// Any opening or closing `tool_output` tag, whatever its attributes, spacing or
+// case: the model must not read a forged wrapper boundary inside the content.
+const TOOL_OUTPUT_TAG_PATTERN = /<\/?tool_output\b[^>]*>/gi
+
 function wrapToolOutput(toolName: string, content: string, wasSanitized: boolean): string {
-  const escaped = content.replace(/<\/tool_output>/gi, '&lt;/tool_output&gt;')
+  const escaped = content.replace(TOOL_OUTPUT_TAG_PATTERN, tag =>
+    tag.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  )
   return `<tool_output name="${toolName}" sanitized="${wasSanitized}">\n${escaped}\n</tool_output>`
+}
+
+function parsesAsJson(text: string): boolean {
+  try {
+    JSON.parse(text)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export class BasicSafety implements Safety {
@@ -234,9 +249,7 @@ export class BasicSafety implements Safety {
    * cause the LLM to deviate from its instructions.
    */
   sanitizeOutput(toolName: string, output: string): SanitizedOutput {
-    const result = this.sanitizeFreeformContent(output, {
-      secretWarning: `Potential secret detected in ${toolName} output`,
-    })
+    const result = this.sanitizeToolOutputContent(toolName, output)
     logger.info(
       {
         component: 'Safety',
@@ -279,10 +292,60 @@ export class BasicSafety implements Safety {
   }
 
   previewOutputForLlm(toolName: string, content: string): string {
-    const sanitized = this.sanitizeFreeformContent(content, {
-      secretWarning: `Potential secret detected in ${toolName} output`,
-    })
+    const sanitized = this.sanitizeToolOutputContent(toolName, content)
     return wrapToolOutput(toolName, sanitized.content, sanitized.was_modified)
+  }
+
+  /**
+   * Tool-output redaction that keeps JSON output parseable. The patterns run
+   * over the raw text, so a match can swallow JSON syntax: the password value
+   * class `[^\s,;]{8,}` eats a closing `"}` when the value ends the last
+   * string of an object, as an attachment page cut inside `password=…` does.
+   * Only when the original output was valid JSON and the text pass made it
+   * invalid is the redaction redone leaf by leaf: every key and string value
+   * goes through the same rules and the result is re-serialized. Every other
+   * output keeps the text-pass result byte for byte.
+   *
+   * The text-pass result is kept as well when the leaf pass cannot reproduce
+   * it: a match that spans JSON syntax (a key ending in `password:` followed
+   * by its value) is invisible to any single leaf, and two keys that redact to
+   * the same text cannot both be kept. Redaction wins over parseability there.
+   */
+  private sanitizeToolOutputContent(toolName: string, content: string): SanitizedOutput {
+    const options = { secretWarning: `Potential secret detected in ${toolName} output` }
+    const textPass = this.sanitizeFreeformContent(content, options)
+    if (!textPass.was_modified || parsesAsJson(textPass.content) || !parsesAsJson(content)) {
+      return textPass
+    }
+    const leaves = { warnings: new Set<string>(), modified: false, keyCollision: false }
+    const redacted = JSON.stringify(this.sanitizeJsonLeaves(JSON.parse(content), options, leaves))
+    const residual = this.sanitizeFreeformContent(redacted, options)
+    if (!leaves.modified || leaves.keyCollision || residual.was_modified) return textPass
+    return { content: redacted, was_modified: true, warnings: [...leaves.warnings] }
+  }
+
+  private sanitizeJsonLeaves(
+    value: unknown,
+    options: { secretWarning: string },
+    leaves: { warnings: Set<string>; modified: boolean; keyCollision: boolean }
+  ): unknown {
+    if (typeof value === 'string') {
+      const result = this.sanitizeFreeformContent(value, options)
+      for (const warning of result.warnings) leaves.warnings.add(warning)
+      if (result.was_modified) leaves.modified = true
+      return result.content
+    }
+    if (Array.isArray(value))
+      return value.map(item => this.sanitizeJsonLeaves(item, options, leaves))
+    if (value === null || typeof value !== 'object') return value
+    // A null-prototype record keeps a parsed `__proto__` key as an own property.
+    const out: Record<string, unknown> = Object.create(null)
+    for (const [key, item] of Object.entries(value)) {
+      const sanitizedKey = this.sanitizeJsonLeaves(key, options, leaves) as string
+      if (Object.prototype.hasOwnProperty.call(out, sanitizedKey)) leaves.keyCollision = true
+      out[sanitizedKey] = this.sanitizeJsonLeaves(item, options, leaves)
+    }
+    return out
   }
 
   /**

@@ -139,7 +139,9 @@ export class AttachmentReadTool implements Tool {
     return (
       'Read a file attached to the current message, by the attachmentId listed as attached_file in the turn context. ' +
       'Files with reader=text return UTF-8 text; read further pages with offset when truncated is true. ' +
-      `A page is returned whole, up to maxBytes (default ${this.maxBytesPerCall} bytes); pass a smaller maxBytes to read less at a time. ` +
+      `A page holds at most maxBytes (default ${this.maxBytesPerCall} bytes) and ends earlier when the page or turn budget binds; ` +
+      'when truncated is true, limit names the bound that ended the page and nextOffset is where the next page starts. ' +
+      'Pass a smaller maxBytes to read less at a time. ' +
       'Files the native UTF-8 reader cannot interpret return a binary result without content; ' +
       'say this tool cannot read the file instead of guessing its content. ' +
       'Reading is current-turn only: page and turn budgets bound each response, and when they are exhausted ' +
