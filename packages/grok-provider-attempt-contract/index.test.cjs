@@ -1579,6 +1579,13 @@ test('parity: shared container-reader branches return the same exact verdict in 
   const validJpeg = [...SOI, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]
   const corpus = [
     ['png, well formed', png(validPng), accepted(validPng.length, 3, 2)],
+    // Eight or more bytes with one wrong signature byte and otherwise valid
+    // chunks: the signature check alone must refuse it.
+    [
+      'png, wrong last signature byte',
+      png([...SIG.slice(0, 7), 0x0b, ...ihdr(3, 2), ...idat, ...iend]),
+      invalid('PNG signature is missing'),
+    ],
     ['png, zero width', png([...SIG, ...ihdr(0, 2), ...idat, ...iend]), invalid('PNG dimensions must be positive')],
     ['png, zero height', png([...SIG, ...ihdr(3, 0), ...idat, ...iend]), invalid('PNG dimensions must be positive')],
     [
@@ -1664,6 +1671,17 @@ test('parity: shared container-reader branches return the same exact verdict in 
       'jpeg, short frame header',
       jpeg([...SOI, 0xff, 0xc0, 0x00, 0x04, 0x08, 0x00, ...sos, ...scan, ...EOI]),
       invalid('JPEG frame header is truncated'),
+    ],
+    // SOF length boundary: 7 is one byte short of length+P+Y+X+Nf, 8 is the minimum.
+    [
+      'jpeg, 7-byte frame header',
+      jpeg([...SOI, 0xff, 0xc0, 0x00, 0x07, 0x08, 0x00, 0x06, 0x00, 0x08, ...sos, ...scan, ...EOI]),
+      invalid('JPEG frame header is truncated'),
+    ],
+    [
+      'jpeg, 8-byte frame header is the minimum accepted',
+      jpeg([...SOI, 0xff, 0xc0, 0x00, 0x08, 0x08, 0x00, 0x06, 0x00, 0x08, 0x01, ...sos, ...scan, ...EOI]),
+      accepted(2 + 10 + 14 + 2 + 2, 8, 6),
     ],
     [
       'jpeg, zero width',

@@ -422,6 +422,41 @@ describe('AuthorizeBodyAdmission FIFO and verified-principal share', () => {
     expect(gate.snapshot()).toEqual({ inFlight: 0, queued: 0, principals: 0 })
   })
 
+  it('gives the same signed subject on a different Host set its own share', async () => {
+    const gate = queuedGate()
+    const holder = gate.tryAcquire({ sub: 'same-sub', hostRefs: ['host-a'] })
+    expect(holder).not.toBeNull()
+    const parser = vi.fn<RequestHandler>((_request, _response, next) => next())
+    const sameHost = gate.run(
+      fakeRequest() as never,
+      fakeResponse() as never,
+      parser,
+      async () => undefined,
+      {
+        sub: 'same-sub',
+        hostRefs: ['host-a'],
+      }
+    )
+    // host-a now holds its two positions; host-b must still be queued, not refused.
+    const otherHostRes = fakeResponse()
+    const otherHost = gate.run(
+      fakeRequest() as never,
+      otherHostRes as never,
+      parser,
+      async () => undefined,
+      {
+        sub: 'same-sub',
+        hostRefs: ['host-b'],
+      }
+    )
+    expect(otherHostRes.body).toBeUndefined()
+    expect(gate.snapshot()).toEqual({ inFlight: 1, queued: 2, principals: 2 })
+    holder?.()
+    await Promise.all([sameHost, otherHost])
+    expect(parser).toHaveBeenCalledTimes(2)
+    expect(gate.snapshot()).toEqual({ inFlight: 0, queued: 0, principals: 0 })
+  })
+
   it.each(['aborted', 'close'] as const)(
     'removes a queued %s once, cleans its wait hooks and serves the next request',
     async event => {
