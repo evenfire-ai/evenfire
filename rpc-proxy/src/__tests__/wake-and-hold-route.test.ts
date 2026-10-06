@@ -7,7 +7,11 @@ import request from 'supertest'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
-import { forwardHostMessageToHost } from '../services/mcpHostRestService.js'
+import {
+  forwardHostMessageToHost,
+  forwardHostStatus,
+  forwardTaskResultFromHost,
+} from '../services/mcpHostRestService.js'
 
 const authTokenMock = vi.hoisted(() => ({
   verifyRpcToken: vi.fn(),
@@ -672,5 +676,204 @@ describe('task result and cancel host-down paths', () => {
 
     expect(response.body).toEqual({ ok: true })
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+  })
+})
+
+// A Host error body can carry user content (a prompt echo, a file name, a tool
+// argument). rpc-proxy logs which failure happened, never what the Host said:
+// these tests drive the REAL Host REST forwarders against a local Host whose
+// error body holds a unique marker, then search every console line for it.
+describe('Host error bodies stay out of rpc-proxy logs', () => {
+  const CONSOLE_METHODS = ['debug', 'info', 'log', 'warn', 'error'] as const
+  const MARKER_FRAGMENT_WIDTH = 12
+
+  type ScriptedReply = { status: number; body: Record<string, unknown> }
+
+  function captureConsole() {
+    const spies = CONSOLE_METHODS.map(method =>
+      vi.spyOn(console, method).mockImplementation(() => {})
+    )
+    const render = (args: unknown[]) =>
+      args
+        .map(arg => (typeof arg === 'string' ? arg : (JSON.stringify(arg) ?? String(arg))))
+        .join(' ')
+    return {
+      allLines: () => spies.flatMap(spy => spy.mock.calls.map(render)),
+      warnLines: () => spies[CONSOLE_METHODS.indexOf('warn')].mock.calls.map(render),
+      restore: () => spies.forEach(spy => spy.mockRestore()),
+    }
+  }
+
+  function markerFragmentsIn(lines: string[], marker: string): string[] {
+    const hits: string[] = []
+    for (let start = 0; start + MARKER_FRAGMENT_WIDTH <= marker.length; start++) {
+      const fragment = marker.slice(start, start + MARKER_FRAGMENT_WIDTH)
+      if (lines.some(line => line.includes(fragment))) hits.push(fragment)
+    }
+    return hits
+  }
+
+  // Answers hit N with replies[N-1] (the last reply repeats) and points the
+  // resolved host connection at it.
+  async function withScriptedHost(
+    replies: ScriptedReply[],
+    run: (hostHits: () => number) => Promise<void>
+  ): Promise<void> {
+    let hits = 0
+    const server = createServer((req, res) => {
+      hits += 1
+      const reply = replies[Math.min(hits, replies.length) - 1]
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(reply.status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(reply.body))
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = server.address() as AddressInfo
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      ...HOST_CONNECTION,
+      url: `http://127.0.0.1:${port}`,
+    })
+    try {
+      await run(() => hits)
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  }
+
+  function userContentMarker(): string {
+    return `user-content-${randomUUID()}`
+  }
+
+  it('logs the status of a first-attempt Host failure without the Host body', async () => {
+    const marker = userContentMarker()
+    serviceMock.forwardHostMessageToHost.mockImplementation(
+      forwardHostMessageToHost as typeof serviceMock.forwardHostMessageToHost
+    )
+    const logs = captureConsole()
+    try {
+      await withScriptedHost(
+        [{ status: 500, body: { error: 'boom', detail: marker } }],
+        async hostHits => {
+          const response = await postMessage(makeApp())
+
+          expect(hostHits()).toBe(1)
+          expect(response.status).toBe(502)
+        }
+      )
+      const failureLines = logs
+        .warnLines()
+        .filter(line => line.includes('[RPC_PROXY] host message forward failed host=chatllm'))
+      // Witness: the failure path ran and logged exactly once.
+      expect(failureLines).toHaveLength(1)
+      expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
+      expect(failureLines[0]).toContain('error=UpstreamHostError status=500')
+    } finally {
+      logs.restore()
+    }
+  })
+
+  it('logs the status of a post-wake retry Host failure without the Host body', async () => {
+    const marker = userContentMarker()
+    serviceMock.forwardHostMessageToHost.mockImplementation(
+      forwardHostMessageToHost as typeof serviceMock.forwardHostMessageToHost
+    )
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
+      kind: 'active',
+      wakeGeneration: 22,
+    })
+    const logs = captureConsole()
+    try {
+      await withScriptedHost(
+        [
+          { status: 503, body: { code: 'host_draining', retryAfterMs: 1000 } },
+          { status: 500, body: { error: 'boom', detail: marker } },
+        ],
+        async hostHits => {
+          const response = await postMessage(makeApp())
+
+          expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+          expect(hostHits()).toBe(2)
+          expect(response.status).toBe(502)
+        }
+      )
+      const retryLines = logs
+        .warnLines()
+        .filter(line => line.includes('[RPC_PROXY] wake-hold upstream retry failed host=chatllm'))
+      // Witness: the post-wake retry failure path ran and logged exactly once.
+      expect(retryLines).toHaveLength(1)
+      expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
+      expect(retryLines[0]).toContain('error=UpstreamHostError status=500')
+    } finally {
+      logs.restore()
+    }
+  })
+
+  it('logs the status of a task result Host failure without the Host body', async () => {
+    const marker = userContentMarker()
+    serviceMock.forwardTaskResultFromHost.mockImplementation(
+      forwardTaskResultFromHost as typeof serviceMock.forwardTaskResultFromHost
+    )
+    const logs = captureConsole()
+    try {
+      await withScriptedHost(
+        [{ status: 500, body: { error: 'boom', detail: marker } }],
+        async hostHits => {
+          const response = await request(makeApp())
+            .get('/rpc/hosts/chatllm/tasks/t-9/result')
+            .set('authorization', 'Bearer token')
+
+          expect(hostHits()).toBe(1)
+          expect(response.status).toBe(502)
+        }
+      )
+      const failureLines = logs
+        .warnLines()
+        .filter(line => line.includes('[RPC_PROXY] task result forward failed'))
+      // Witness: the failure path ran and logged exactly once.
+      expect(failureLines).toHaveLength(1)
+      expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
+      expect(failureLines[0]).toContain('error=UpstreamHostError status=500')
+    } finally {
+      logs.restore()
+    }
+  })
+
+  it('logs the status of a host status read failure without the Host body', async () => {
+    const marker = userContentMarker()
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      scopes: ['host:status:read'],
+    })
+    serviceMock.forwardHostStatus.mockImplementation(
+      forwardHostStatus as typeof serviceMock.forwardHostStatus
+    )
+    const logs = captureConsole()
+    try {
+      await withScriptedHost(
+        [{ status: 500, body: { error: 'boom', detail: marker } }],
+        async hostHits => {
+          await request(makeApp())
+            .get('/rpc/hosts/chatllm/status')
+            .set('authorization', 'Bearer token')
+
+          expect(hostHits()).toBe(1)
+        }
+      )
+      const failureLines = logs
+        .warnLines()
+        .filter(line => line.includes('[RPC_PROXY] host status failed host=chatllm'))
+      // Witness: the failure path ran and logged exactly once.
+      expect(failureLines).toHaveLength(1)
+      expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
+      expect(failureLines[0]).toContain('error=UpstreamHostError status=500')
+    } finally {
+      logs.restore()
+    }
   })
 })

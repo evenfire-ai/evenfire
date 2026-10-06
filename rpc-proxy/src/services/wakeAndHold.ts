@@ -9,6 +9,35 @@ function sanitizeHostRefForLog(hostRef: string): string {
   return hostRef.replace(/[\r\n\t\x00-\x1f\x7f]/g, '')
 }
 
+/** Keeps an error name or code to the characters such identifiers use. */
+function logToken(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.:-]/g, '').slice(0, 64)
+}
+
+/**
+ * Identifies a failed upstream call for a log line WITHOUT its message. An
+ * UpstreamHostError message embeds up to 300 characters of the Host response
+ * body, and a Host error body can carry user content, so no Host-facing log
+ * line may print `error.message`. What tells failures apart survives: the
+ * error name, the upstream HTTP status and the network error code, e.g.
+ * `UpstreamHostError status=500` or `TypeError code=ECONNREFUSED`.
+ */
+export function describeErrorForLog(error: unknown): string {
+  if (!(error instanceof Error)) return `non-error type=${typeof error}`
+  const { status, code, cause } = error as Error & {
+    status?: unknown
+    code?: unknown
+    cause?: unknown
+  }
+  const parts = [logToken(error.name)]
+  if (typeof status === 'number' && Number.isInteger(status)) parts.push(`status=${status}`)
+  const causeCode =
+    cause !== null && typeof cause === 'object' ? (cause as { code?: unknown }).code : undefined
+  const errorCode = typeof code === 'string' ? code : causeCode
+  if (typeof errorCode === 'string') parts.push(`code=${logToken(errorCode)}`)
+  return parts.join(' ')
+}
+
 /**
  * Stateless wake-and-hold (Stage 5, Issue #791 §11).
  *
@@ -744,9 +773,9 @@ export async function respondWithWakeAndHold(
             // success write threw): the request is resolved. A retry here is
             // the duplicate-delivery bug — never re-forward, fail loudly.
             console.warn(
-              `[RPC_PROXY] wake-hold post-response failure suppressed (already resolved) host=${safeHostRef} error=${
-                error instanceof Error ? error.message : String(error)
-              }`
+              `[RPC_PROXY] wake-hold post-response failure suppressed (already resolved) host=${safeHostRef} error=${describeErrorForLog(
+                error
+              )}`
             )
             return
           }
@@ -765,9 +794,9 @@ export async function respondWithWakeAndHold(
           // The host answered with a non-availability failure — exactly
           // today's behavior for an up-but-erroring host.
           console.warn(
-            `[RPC_PROXY] wake-hold upstream retry failed host=${safeHostRef} error=${
-              error instanceof Error ? error.message : String(error)
-            }`
+            `[RPC_PROXY] wake-hold upstream retry failed host=${safeHostRef} error=${describeErrorForLog(
+              error
+            )}`
           )
           options.respondLegacy(error)
           return
