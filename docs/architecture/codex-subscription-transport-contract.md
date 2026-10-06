@@ -137,7 +137,11 @@ order, paused before any read. One principal (JWT `sub` plus its sorted
 `hostRefs`) holds at most two positions, running or queued. A waiter is
 refused after 40 s, the holder's read deadline (10 s) plus its work deadline
 (30 s). These bounds limit latency and fairness, not memory; the count of one
-is an uncertified ceiling (#813).
+is an uncertified ceiling (#813). The gateway's authorize location sets its
+read and send timeouts to 90 s, above the 80 s a retained authorize can take
+(queue, read and work), so control-api's own answer reaches the Host. A bare
+504 from the gateway (a read or send timeout on an accepted connection) is
+read as `authorize_timeout`, never as a provider outage.
 
 The critical Codex test title migrated from "visual admission overflow answers
 503 provider_unavailable and logs visual_gate" to "visual admission overflow

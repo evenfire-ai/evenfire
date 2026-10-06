@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY } from '../src/middleware/llmProviderAttemptAdmissionLimits.js'
 
 // G1-10 (#720): a 502 that a gateway generates itself means control-api
 // produced no valid response (connect refused, closed before a response, or an
@@ -30,12 +31,17 @@ function proxyRedeemAbortMs(proxy: string): number {
   return Number(match![1].replace(/_/g, ''))
 }
 
-/** The one `proxy_connect_timeout` in a block, in milliseconds (`Ns` or `Nms`). */
-function connectTimeoutMs(block: string): number {
-  const matches = [...block.matchAll(/\bproxy_connect_timeout\s+([0-9]+)(ms|s)\s*;/g)]
-  expect(matches, 'exactly one proxy_connect_timeout').toHaveLength(1)
+/** The one `<directive>` timeout in a block, in milliseconds (`Ns` or `Nms`). */
+function timeoutMs(block: string, directive: string): number {
+  const matches = [...block.matchAll(new RegExp(`\\b${directive}\\s+([0-9]+)(ms|s)\\s*;`, 'g'))]
+  expect(matches, `exactly one ${directive}`).toHaveLength(1)
   const [, value, unit] = matches[0]
   return unit === 's' ? Number(value) * 1000 : Number(value)
+}
+
+/** The one `proxy_connect_timeout` in a block, in milliseconds. */
+function connectTimeoutMs(block: string): number {
+  return timeoutMs(block, 'proxy_connect_timeout')
 }
 
 // Any spelling nginx accepts: `error_page 502 = @x;`, `error_page 502 =@x;`, …
@@ -222,6 +228,25 @@ describe('gateway-generated connect-timeout 504 on user-facing control-plane hop
     expect(block).toContain(AUTHORIZE_PROXY_PASS)
     expect(block).not.toMatch(/\bproxy_connect_timeout\b/)
   })
+
+  it.each(['proxy_read_timeout', 'proxy_send_timeout'])(
+    'G1-12f: authorize %s outlasts the longest retained authorize, so control-api answers it',
+    directive => {
+      const approval = directives(configMap(WORKFLOW_APPROVAL_GATEWAY))
+      const block = locationBlock(approval, AUTHORIZE)
+      const { queueWaitMs, readDeadlineMs, workDeadlineMs } = LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY
+      const longestAuthorizeMs = queueWaitMs + readDeadlineMs + workDeadlineMs
+      // Witnesses: the authorize block and the admission policy were read, and
+      // the server keeps 30 s for every other route, so the bound is local.
+      expect(block).toContain(AUTHORIZE_PROXY_PASS)
+      expect(longestAuthorizeMs).toBeGreaterThan(30_000)
+      const outside = approval.replace(block, '')
+      expect(timeoutMs(outside, directive)).toBe(30_000)
+      // Otherwise a queued request gets nginx's bare 504 before control-api's
+      // queue_wait or authorize_timeout.
+      expect(timeoutMs(block, directive)).toBeGreaterThan(longestAuthorizeMs)
+    }
+  )
 
   it.each([
     ['Codex finalize', CODEX_FINALIZE],

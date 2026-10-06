@@ -197,6 +197,11 @@ export class ProviderAttemptAuthorizer {
       // `Too Many Requests`, so only a machine code a 429 carries (such as
       // `budget_denied`) replaces `rate_limited`; a 429 with no JSON code is
       // `rate_limited` too.
+      // A 504 with no JSON code is the gateway's read or send timeout on a
+      // connection control-api accepted (a connect timeout is answered as
+      // `control_plane_unavailable`), so authorize outlived the gateway, as
+      // with control-api's own `authorize_timeout`. It is not a provider
+      // outage and must not fail over.
       const code =
         response.status === 413
           ? 'payload_too_large'
@@ -204,7 +209,9 @@ export class ProviderAttemptAuthorizer {
             ? rateLimitedCode(payload.error)
             : typeof payload.error === 'string'
               ? payload.error
-              : 'provider_unavailable'
+              : response.status === 504
+                ? 'authorize_timeout'
+                : 'provider_unavailable'
       throw new CodexAuthorizeError(
         code,
         code === 'payload_too_large'

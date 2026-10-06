@@ -890,6 +890,13 @@ data:
           }
           error_page 502 = @control_plane_unavailable;
           error_page 504 = @control_plane_connect_timeout;
+          # control-api holds a retained authorize for up to its queue wait
+          # (40 s), body read (10 s) and work deadline (30 s), and answers
+          # queue_wait or authorize_timeout itself. The server's 30 s would
+          # turn those answers into nginx's own 504. control-api pauses a
+          # queued body, so the send timer stalls as well as the read timer.
+          proxy_read_timeout 90s;
+          proxy_send_timeout 90s;
           # This exact location matches the normalized URI, but a proxy_pass
           # without a URI part forwards the raw one. Aliases such as
           # %61uthorize or ./authorize would then reach control-api with the

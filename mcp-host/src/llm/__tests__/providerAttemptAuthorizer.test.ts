@@ -453,6 +453,43 @@ describe('ProviderAttemptAuthorizer', () => {
     })
   })
 
+  // M-B (review 5426789128): the gateway's read or send timeout on authorize
+  // is a bare 504. control-api accepted the connection and authorize outlived
+  // the gateway, so it is a terminal authorize_timeout, not a provider outage
+  // that fails over and installs a cooldown.
+  it('T-R7-1c reads an HTML 504 from the gateway as a terminal authorize_timeout', async () => {
+    const { err, fetchFn } = await authorizeFailure(nginx(504, 'Gateway Time-out'))
+    // Liveness witness: the authorize hop really ran and got the 504.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    const message =
+      'Request authorization timed out. Wait for active requests to finish, then try again.'
+    expect(err).toMatchObject({ code: 'authorize_timeout', message })
+    expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+    for (const provider of [
+      new CodexSubscriptionProvider('gpt-5.3-codex', {} as never),
+      new GrokSubscriptionProvider('grok-4.6', {} as never),
+    ]) {
+      const classified = provider.classifyError(err)
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        message,
+        providerCode: 'authorize_timeout',
+        providerDispatched: false,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  })
+
+  it('T-R7-1c keeps a coded 504 from control-api as its own code', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json({ error: 'control_plane_unavailable' }, { status: 504 })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'control_plane_unavailable' })
+  })
+
   async function nativeAuthorizeFailure(response: Response) {
     const responseBody = await response.text()
     const responseHeaders: Record<string, string> = {}
