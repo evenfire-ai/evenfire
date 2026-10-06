@@ -1,9 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import express from 'express'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
+import request from 'supertest'
 import { config } from '../src/config.js'
 import { type DbClient, initDb } from '../src/db.js'
 import { K8sGateway } from '../src/k8s.js'
+import { createExternalAccessRouter } from '../src/routes/external/access.js'
 import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
 import {
   AccessBudgetExceededError,
@@ -25,13 +28,58 @@ import { canonicalEnvironmentId } from '../src/services/access/operationalAccess
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import {
   catalogBudgetOptionsForIntent,
+  configuredUserAccessIntent,
   loadConfiguredUserAccessIntent,
 } from '../src/services/access/userAccessPolicy.js'
+import { catalogConfigurationRevision } from '../src/services/access/userAccessRuntimePolicy.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 import { createUserSession } from '../src/services/auth/userSessionService.js'
 import { __resetBudgetCheckCache, evaluateBudgetCheck } from '../src/services/budgets/check.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
+
+const routeTestState = vi.hoisted(() => {
+  return {
+    teamIds: [globalThis.crypto.randomUUID()],
+    databasePool: null as unknown,
+  }
+})
+
+vi.mock('../src/db.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/db.js')>()
+  const testPool = new Proxy(
+    {},
+    {
+      get(_target, property) {
+        const target = routeTestState.databasePool
+        if (!target || typeof target !== 'object') {
+          throw new Error('realpg_test_database_pool_not_bound')
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }
+  )
+  return { ...actual, pool: testPool, corePool: testPool, rateLimitPool: testPool }
+})
+
+vi.mock('../src/services/access/userAccessPolicy.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/access/userAccessPolicy.js')>()
+  const configuredUserAccessIntent = actual.loadConfiguredUserAccessIntent({
+    ...process.env,
+    CONTROL_API_USER_ACCESS_CATALOG_MODE: 'serve',
+    CONTROL_API_USER_ACCESS_TEAM_GFS_MEMBERSHIP_ADMISSION_LIMIT: String(
+      routeTestState.teamIds.length
+    ),
+  })
+  return {
+    ...actual,
+    configuredUserAccessIntent,
+    configuredCatalogBudgetOptions: actual.catalogBudgetOptionsForIntent(
+      configuredUserAccessIntent
+    ),
+  }
+})
 
 vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/services/access/operationTarget.js')>()
@@ -134,7 +182,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
   )
   const environmentId = canonicalEnvironmentId()
   const userId = randomUUID()
-  const teamId = randomUUID()
+  const teamId = routeTestState.teamIds[0]!
   const directRunId = randomUUID()
   const teamRunId = randomUUID()
   const directApprovalId = randomUUID()
@@ -216,6 +264,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(database)}`)
     databasePool = new Pool({ connectionString })
+    routeTestState.databasePool = databasePool
     await initDb({ connect: () => databasePool.connect() })
     await databasePool.query(
       `INSERT INTO llm_allowed_models(provider, model, vendor, enabled)
@@ -245,6 +294,15 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       `INSERT INTO team_members(team_id, user_id, role, status)
        VALUES ($1, $2, 'admin', 'active')`,
       [teamId, userId]
+    )
+    const activeMembershipCount = await databasePool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM team_members
+        WHERE user_id = $1 AND status = 'active'`,
+      [userId]
+    )
+    expect(Number(activeMembershipCount.rows[0]?.count)).toBe(
+      configuredUserAccessIntent.teamGfsMembershipAdmissionLimit
     )
     await databasePool.query(
       `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, 'catalog-host')`,
@@ -348,6 +406,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     try {
       await kubernetesApi.close()
       await endPoolAndWaitForClients(databasePool)
+      routeTestState.databasePool = null
       if (adminPool) {
         await adminPool.query(
           `SELECT pg_terminate_backend(pid)
@@ -407,8 +466,23 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       sandbox_app: ['direct', 'team'],
     })
 
-  it('composes the default twelve-family catalog within the mounted request reserve', async () => {
-    const budget = AccessExecutionBudget.create('catalog')
+  it('composes twelve families within the existing six-call mounted-route reserve', async () => {
+    const activeMemberships = await databasePool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM team_members
+        WHERE user_id = $1 AND status = 'active'`,
+      [userId]
+    )
+    const teamGfsAdmissionLimit = Number(activeMemberships.rows[0]?.count)
+    expect(teamGfsAdmissionLimit).toBeGreaterThan(0)
+    const catalogIntent = loadConfiguredUserAccessIntent({
+      CONTROL_API_USER_ACCESS_CATALOG_MODE: 'serve',
+      CONTROL_API_USER_ACCESS_TEAM_GFS_MEMBERSHIP_ADMISSION_LIMIT: String(teamGfsAdmissionLimit),
+    })
+    const budget = AccessExecutionBudget.create(
+      'catalog',
+      catalogBudgetOptionsForIntent(catalogIntent)
+    )
     let sqlQueries = 0
     let transactionIsolation: string | undefined
     let transactionReadOnly: string | undefined
@@ -470,6 +544,10 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       expect([...new Set(catalog.items.map(item => item.resource.type))].sort()).toEqual(
         [...CATALOG_FAMILIES].sort()
       )
+      // The mounted route reserves producer work for authenticated identity and
+      // readiness checks before the catalog coordinator receives this budget.
+      // Keep the coordinator within that existing six-call reserve; the mount
+      // contract separately fixes the total request ceiling at 42.
       expect(producerCalls).toBeLessThanOrEqual(36)
       expect(transactionIsolation).toBe('repeatable read')
       expect(transactionReadOnly).toBe('on')
@@ -482,17 +560,138 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     }
   })
 
+  it('serves the mounted twelve-family catalog within the unchanged 42-call request budget', async () => {
+    const issued = await createUserSession(
+      {
+        userId,
+        email: `${userId}@example.test`,
+        authenticationMethods: ['password'],
+      },
+      { db: databasePool as never }
+    )
+    const priorIndexerEnabled = config.operationalAccessIndexerEnabled
+    const priorReadinessMaxAgeMs = config.operationalAccessReadinessMaxAgeMs
+    const priorActivationRecord = config.userAccessCatalogActivationRecord
+    const intent = configuredUserAccessIntent
+    config.operationalAccessIndexerEnabled = true
+    config.operationalAccessReadinessMaxAgeMs = 60_000
+    config.userAccessCatalogActivationRecord = JSON.stringify({
+      version: 1,
+      active: true,
+      revision: 'realpg-r34-h2-acceptance',
+      acceptedBy: 'realpg-test-harness',
+      acceptedAt: new Date().toISOString(),
+      catalogConfigurationRevision: catalogConfigurationRevision(intent),
+      requiredFamilies: CATALOG_FAMILIES,
+      comparisonEvidence: CATALOG_FAMILIES.map(family => ({
+        family,
+        attempted: 1,
+        completed: 1,
+        reference: 'realpg-test-harness',
+      })),
+    })
+    const app = express()
+    app.use(createExternalAccessRouter(gateway))
+    const budgetSpy = vi.spyOn(AccessExecutionBudget, 'create')
+    const producerBudgetFailures: string[] = []
+    const originalCharge = AccessExecutionBudget.prototype.charge
+    const chargeSpy = vi.spyOn(AccessExecutionBudget.prototype, 'charge')
+    chargeSpy.mockImplementation(function (this: AccessExecutionBudget, event) {
+      try {
+        originalCharge.call(this, event)
+      } catch (error) {
+        if (error instanceof AccessBudgetExceededError) producerBudgetFailures.push(error.limit)
+        throw error
+      }
+    })
+    try {
+      const response = await request(app)
+        .get('/external/access/catalog')
+        .set('x-user-session-token', issued.token)
+
+      const requestBudgets = budgetSpy.mock.results
+        .filter(result => result.type === 'return')
+        .map(result => result.value)
+        .filter(budget => budget.limits.producerCalls === 42)
+      expect(requestBudgets).toHaveLength(1)
+      const producerCalls = 42 - requestBudgets[0]!.remaining('producerCalls')
+      console.info(
+        `[r34-h2-http] status=${response.status} error=${String(response.body?.error ?? '')} ` +
+          `families=${CATALOG_FAMILIES.length} producerCalls=${producerCalls} ` +
+          `budgetFailures=${JSON.stringify(producerBudgetFailures)}`
+      )
+
+      expect(producerBudgetFailures).toEqual([])
+      expect(response.status).toBe(200)
+      expect(response.body.complete).toBe(true)
+      expect(response.body.partialErrors).toEqual([])
+      expect(response.body.nextCursor).toBeNull()
+      expect(response.body.items).toHaveLength(
+        Object.values(expectedItemCounts).reduce((total, count) => total + count, 0)
+      )
+      expect(
+        Object.fromEntries(
+          CATALOG_FAMILIES.map(family => [
+            family,
+            response.body.items.filter(
+              (item: { resource?: { type?: string } }) => item.resource?.type === family
+            ).length,
+          ])
+        )
+      ).toEqual(expectedItemCounts)
+      expect(producerCalls).toBeLessThanOrEqual(42)
+      console.info(
+        `[r34-h2-http] status=${response.status} families=${CATALOG_FAMILIES.length} ` +
+          `items=${response.body.items.length} producerCalls=${producerCalls}`
+      )
+    } finally {
+      chargeSpy.mockRestore()
+      budgetSpy.mockRestore()
+      config.operationalAccessIndexerEnabled = priorIndexerEnabled
+      config.operationalAccessReadinessMaxAgeMs = priorReadinessMaxAgeMs
+      config.userAccessCatalogActivationRecord = priorActivationRecord
+    }
+  })
+
   it('does not hydrate unrelated operational families for a small-family request', async () => {
     const budget = AccessExecutionBudget.create('catalog')
+    const observedStatements: string[] = []
+    const measuredTransaction = async <T>(work: (db: DbClient) => Promise<T>): Promise<T> =>
+      transaction(databasePool)(db =>
+        work(
+          new Proxy(db, {
+            get(target, property) {
+              if (property === 'query') {
+                return (text: string, values?: unknown[]) => {
+                  observedStatements.push(text)
+                  return Reflect.apply(target.query, target, [text, values])
+                }
+              }
+              return Reflect.get(target, property, target)
+            },
+          }) as DbClient
+        )
+      )
     try {
       const catalog = await buildAccessCatalog(
         { session, families: ['user'], limit: 10 },
-        { transaction: transaction(databasePool), budget }
+        { transaction: measuredTransaction, budget }
       )
+      const producerCalls = 42 - budget.remaining('producerCalls')
       expect(catalog.complete).toBe(true)
       expect(catalog.items).toHaveLength(1)
       expect(catalog.items[0]?.resource.type).toBe('user')
-      expect(42 - budget.remaining('producerCalls')).toBeLessThanOrEqual(4)
+      // User-only producer work is unchanged from e99a04f: the R34 delta only
+      // prepares hydration when the selected roots contain operational types.
+      expect(producerCalls).toBe(6)
+      expect(
+        observedStatements.filter(statement =>
+          /\boperational_resource_(?:index|relationships)\b/i.test(statement)
+        )
+      ).toEqual([])
+      console.info(
+        `[r34-h2-small] selected=user producerCalls=${producerCalls} unrelatedOperationalReads=0`
+      )
     } finally {
       budget.close()
     }
