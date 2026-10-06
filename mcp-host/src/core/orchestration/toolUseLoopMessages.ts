@@ -94,6 +94,8 @@ function collectVisualImageParts(
       mimeType,
       data: attachment.dataBase64,
       source: { kind: 'tool', attachmentId: attachment.id, toolCallId: result.tool_call_id },
+      ...(attachment.width === undefined ? {} : { width: attachment.width }),
+      ...(attachment.height === undefined ? {} : { height: attachment.height }),
       ...(!retained ? { sourceIdentityOnly: true as const } : {}),
     })
   }
@@ -130,6 +132,8 @@ function imagePart(attachment: Attachment, toolCallId: string): MessageContentPa
     type: 'image',
     mimeType: attachment.mimeType,
     data: attachment.dataBase64,
+    ...(attachment.width === undefined ? {} : { width: attachment.width }),
+    ...(attachment.height === undefined ? {} : { height: attachment.height }),
     ...(attachment.visualSource
       ? { source: { ...attachment.visualSource, attachmentId: attachment.id, toolCallId } }
       : {}),
