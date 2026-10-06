@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { GfsDownloadStore } from './gfsDownloadStore'
@@ -83,6 +83,18 @@ async function simulateWriterDeath(store: GfsDownloadStore) {
   // the actual kernel connection to model loss of the old Host process.
   await (store as unknown as { writerLease: { release(): Promise<void> } }).writerLease.release()
 }
+
+async function expectPrivateExclusiveCreateToFail(target: string): Promise<void> {
+  let unexpectedHandle: FileHandle | undefined
+  try {
+    await expect(async () => {
+      unexpectedHandle = await fs.open(target, 'wx', 0o600)
+    }).rejects.toMatchObject({ code: 'EEXIST' })
+  } finally {
+    await unexpectedHandle?.close()
+  }
+}
+
 async function legacyCopy() {
   const store = fresh()
   await store.initialize()
@@ -128,9 +140,7 @@ describe('local GFS operator recovery', () => {
     expect(outcome.before.counts).toMatchObject({ files: 1, bytes: 7 })
     expect(outcome.after.counts).toMatchObject({ files: 1, bytes: 7 })
     expect((await fs.stat(markerPath)).ino).toBe(markerBefore.ino)
-    await expect(
-      fs.open(markerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL)
-    ).rejects.toMatchObject({ code: 'EEXIST' })
+    await expectPrivateExclusiveCreateToFail(markerPath)
     const reopened = fresh()
     await reopened.initialize()
     expect(await reopened.reusableReceipt('caller-a', source, 7)).toMatchObject({
@@ -257,9 +267,7 @@ describe('local GFS operator recovery', () => {
     const databasePath = path.join(root, '.gfs-download-store', 'writer-v2.sqlite')
     const databaseBefore = await fs.stat(databasePath)
     expect((await fs.stat(markerPath)).size).toBe(0)
-    await expect(
-      fs.open(markerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL)
-    ).rejects.toMatchObject({ code: 'EEXIST' })
+    await expectPrivateExclusiveCreateToFail(markerPath)
     expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
     const retried = await recoverGfsStoreUnderPhysicalFence(await recoveryInput())
     expect(retried.after.counts).toMatchObject({ files: 1, bytes: 7 })

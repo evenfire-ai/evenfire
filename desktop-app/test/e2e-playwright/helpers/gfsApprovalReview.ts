@@ -99,68 +99,50 @@ export async function createGfsApprovalReview(
     if (snapshot) await Promise.all([snapshot.button.dispose(), snapshot.denyButton.dispose()])
   }
 
-  async function handleRequest(raw: Buffer): Promise<unknown> {
-    if (raw.byteLength > MAX_REQUEST_BYTES) throw new Error('Review request exceeds byte bound')
-    let request: unknown
-    try {
-      request = JSON.parse(raw.toString('utf8'))
-    } catch {
-      throw new Error('Invalid review request')
-    }
-    if (!request || typeof request !== 'object' || Array.isArray(request))
-      throw new Error('Invalid review request')
-    const { action, nonce } = request as Record<string, unknown>
-    if (Object.keys(request).some(key => key !== 'action' && key !== 'nonce'))
-      throw new Error('Unknown review request field')
-    if (action === 'release') {
-      if (!result || nonce !== undefined) throw new Error('No completed result to release')
-      releaseResult?.()
-      return { released: true, result }
-    }
-    if (action === 'view') {
-      if (nonce !== undefined) throw new Error('Invalid view request')
-      verifyOwnedPage()
-      if (result) {
-        return {
-          state: 'result',
-          result,
-          binding,
-          ...(resultResponse !== undefined ? { response: resultResponse } : {}),
-        }
-      }
-      if (!active) return { state: 'preparing', binding }
-      if (deciding) return { state: 'deciding', binding }
-      const current = await visibleApproval()
-      if (!current) {
-        await disposeButtons(pending)
-        pending = undefined
-        return { state: 'running', binding }
-      }
-      if (
-        !pending ||
-        pending.command !== current.command ||
-        Date.now() >= pending.expiresAt ||
-        !(await sameButton(pending.button, current.button)) ||
-        !(await sameButton(pending.denyButton, current.denyButton))
-      ) {
-        await disposeButtons(pending)
-        pending = {
-          nonce: randomUUID(),
-          command: current.command,
-          button: current.button,
-          denyButton: current.denyButton,
-          expiresAt: Date.now() + requestTimeoutMs,
-        }
-      } else await disposeButtons(current)
+  async function inspectReview(): Promise<unknown> {
+    verifyOwnedPage()
+    if (result) {
       return {
-        state: 'waiting_approval',
+        state: 'result',
+        result,
         binding,
-        nonce: pending.nonce,
-        command: pending.command,
-        expiresAt: pending.expiresAt,
+        ...(resultResponse !== undefined ? { response: resultResponse } : {}),
       }
     }
-    if (action !== 'approve' && action !== 'deny') throw new Error('Invalid review decision')
+    if (!active) return { state: 'preparing', binding }
+    if (deciding) return { state: 'deciding', binding }
+    const current = await visibleApproval()
+    if (!current) {
+      await disposeButtons(pending)
+      pending = undefined
+      return { state: 'running', binding }
+    }
+    if (
+      !pending ||
+      pending.command !== current.command ||
+      Date.now() >= pending.expiresAt ||
+      !(await sameButton(pending.button, current.button)) ||
+      !(await sameButton(pending.denyButton, current.denyButton))
+    ) {
+      await disposeButtons(pending)
+      pending = {
+        nonce: randomUUID(),
+        command: current.command,
+        button: current.button,
+        denyButton: current.denyButton,
+        expiresAt: Date.now() + requestTimeoutMs,
+      }
+    } else await disposeButtons(current)
+    return {
+      state: 'waiting_approval',
+      binding,
+      nonce: pending.nonce,
+      command: pending.command,
+      expiresAt: pending.expiresAt,
+    }
+  }
+
+  async function decideReview(action: 'approve' | 'deny', nonce: unknown): Promise<unknown> {
     if (
       !active ||
       result ||
@@ -197,6 +179,38 @@ export async function createGfsApprovalReview(
       } finally {
         await disposeButtons(reviewed)
       }
+    }
+  }
+
+  async function handleRequest(raw: Buffer): Promise<unknown> {
+    if (raw.byteLength > MAX_REQUEST_BYTES) throw new Error('Review request exceeds byte bound')
+    let request: unknown
+    try {
+      request = JSON.parse(raw.toString('utf8'))
+    } catch {
+      throw new Error('Invalid review request')
+    }
+    if (!request || typeof request !== 'object' || Array.isArray(request))
+      throw new Error('Invalid review request')
+    const { action, nonce } = request as Record<string, unknown>
+    if (Object.keys(request).some(key => key !== 'action' && key !== 'nonce'))
+      throw new Error('Unknown review request field')
+    // Each fixed route owns its checks. Selecting an observation route cannot
+    // skip the nonce, deadline, binding or DOM checks in the decision route.
+    switch (action) {
+      case 'release':
+        if (!result || nonce !== undefined) throw new Error('No completed result to release')
+        releaseResult?.()
+        return { released: true, result }
+      case 'view':
+        if (nonce !== undefined) throw new Error('Invalid view request')
+        return inspectReview()
+      case 'approve':
+        return decideReview('approve', nonce)
+      case 'deny':
+        return decideReview('deny', nonce)
+      default:
+        throw new Error('Invalid review decision')
     }
   }
 

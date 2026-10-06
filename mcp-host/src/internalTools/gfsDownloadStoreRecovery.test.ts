@@ -3,6 +3,7 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import type { GfsImageSource } from '../visualInput/policy'
@@ -445,7 +446,12 @@ describe('GFS writer recovery and filesystem invariants', () => {
     await fs.rename(databasePath, `${databasePath}.old`)
     await expect(freshStore().initialize()).rejects.toMatchObject({ code: 'workspace_unavailable' })
     await expect(fs.stat(databasePath)).rejects.toMatchObject({ code: 'ENOENT' })
-    await fs.writeFile(databasePath, '', { mode: 0o600 })
+    let replacementDatabase: FileHandle | undefined
+    try {
+      replacementDatabase = await fs.open(databasePath, 'wx', 0o600)
+    } finally {
+      await replacementDatabase?.close()
+    }
     await expect(freshStore().initialize()).rejects.toMatchObject({ code: 'writer_locked' })
   })
 
