@@ -423,6 +423,17 @@ export async function createGfsFolderZip(
   let addedBytes = 0
   for (const [index, file] of files.entries()) {
     throwIfAborted()
+    // R2-L2 — exact budget exhaustion: stop BEFORE the next transfer so a
+    // zero-or-negative bound is never requested; the un-fetched files are
+    // reported as visible skips and the archive finishes cleanly with what it
+    // holds (spec: round-2 extensions).
+    const remainingBytes = maxTotalBytes - addedBytes
+    if (remainingBytes <= 0) {
+      for (const remainingFile of files.slice(index)) {
+        skipped.push({ path: remainingFile.path, reason: 'Zip byte limit reached' })
+      }
+      break
+    }
     // 1-based: the copy says "downloading N of M" while file N is fetched.
     report({
       phase: 'downloading',
@@ -437,16 +448,16 @@ export async function createGfsFolderZip(
       // over-limit body (dishonest or missing declared size) is rejected
       // before it materializes in the renderer; the receipt check below stays
       // as the backstop.
-      const remainingBytes = maxTotalBytes - addedBytes
       bytes = (await withRateLimitRetry(() => download(file.uri, { maxBytes: remainingBytes })))
         .bytes
     } catch (error) {
       if (isFolderZipAbortError(error)) throw error
       const message = toMessage(error)
       if (parseHttpStatus(message) === 413) {
-        throw new GfsFolderZipLimitError(
-          `"${folder.name}" exceeded the ${formatZipBytes(maxTotalBytes)} folder-zip limit while downloading. Download smaller subfolders individually.`
-        )
+        // The remaining budget cannot hold this body: skip it visibly and let
+        // the walk terminate cleanly (later files hit the remaining-0 rule).
+        skipped.push({ path: file.path, reason: 'Zip byte limit reached' })
+        continue
       }
       if (isAccessDenied(message)) {
         skipped.push({ path: file.path, reason: 'Permission denied' })
@@ -457,12 +468,18 @@ export async function createGfsFolderZip(
     const data = new Uint8Array(bytes)
     addedBytes += data.length
     if (addedBytes > maxTotalBytes) {
+      // Defensive backstop: the producer-side bound makes this unreachable
+      // unless the bound itself was ignored — fail loudly, not silently.
       throw new GfsFolderZipLimitError(
         `"${folder.name}" exceeded the ${formatZipBytes(maxTotalBytes)} folder-zip limit while downloading. Download smaller subfolders individually.`
       )
     }
     writer.addFile(file.path, data)
   }
+
+  // Downloads can skip every file (permissions, exhausted budget): the empty
+  // short-circuit applies to the archived result, not only the planned list.
+  if (writer.entryCount() === 0) throw new GfsFolderZipEmptyError(folder.name, skipped)
 
   // ── Phase 3: assemble the archive. ──
   report({

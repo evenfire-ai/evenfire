@@ -416,12 +416,76 @@ describe('createGfsFolderZip', () => {
       }
     )
 
-    await expect(
-      createGfsFolderZip(
-        { resourceId: 'root', drive: 'main', name: 'Ghost' },
-        { deps, limits: { maxTotalBytes: 1024 } }
-      )
-    ).rejects.toThrow(/exceeded the 1 KiB folder-zip limit while downloading/)
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Ghost' },
+      { deps, limits: { maxTotalBytes: 1024 } }
+    ).catch(error => error)
+    // R2-L2: a producer-refused body no longer kills the job — the file is
+    // skipped with a visible reason and the walk terminates cleanly.
+    expect(result).toBeInstanceOf(GfsFolderZipEmptyError)
+    expect((result as GfsFolderZipEmptyError).skipped).toEqual([
+      { path: 'Ghost/ghost.bin', reason: 'Zip byte limit reached' },
+    ])
+  })
+
+  it('stops before the next transfer at exact budget exhaustion, never maxBytes 0 (R2-L2)', async () => {
+    // Missing declared sizes: the first file honestly consumes the whole
+    // budget; the two behind it must never be requested (a zero bound is an
+    // invalid IPC), and the archive finishes with a visible notice per file.
+    const seenBounds: Array<number | undefined> = []
+    const deps = depsFor(
+      {
+        root: [
+          {
+            items: [
+              folder({
+                resourceId: 'fill',
+                name: 'fill.bin',
+                bytes: undefined as unknown as number,
+              }),
+              folder({
+                resourceId: 'after-a',
+                name: 'after-a.bin',
+                bytes: undefined as unknown as number,
+              }),
+              folder({
+                resourceId: 'after-b',
+                name: 'after-b.bin',
+                bytes: undefined as unknown as number,
+              }),
+            ],
+            nextCursor: null,
+          },
+        ],
+      },
+      {
+        'gfs://main/fill': async (_uri: string, options?: { maxBytes?: number }) => {
+          seenBounds.push(options?.maxBytes)
+          return { bytes: new ArrayBuffer(1024) }
+        },
+        'gfs://main/after-a': async (_uri: string, options?: { maxBytes?: number }) => {
+          seenBounds.push(options?.maxBytes)
+          return { bytes: new ArrayBuffer(1) }
+        },
+        'gfs://main/after-b': async (_uri: string, options?: { maxBytes?: number }) => {
+          seenBounds.push(options?.maxBytes)
+          return { bytes: new ArrayBuffer(1) }
+        },
+      }
+    )
+
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Exact' },
+      { deps, limits: { maxTotalBytes: 1024 } }
+    )
+
+    expect(seenBounds).toEqual([1024])
+    expect(result.fileCount).toBe(1)
+    expect(result.skipped).toEqual([
+      { path: 'Exact/after-a.bin', reason: 'Zip byte limit reached' },
+      { path: 'Exact/after-b.bin', reason: 'Zip byte limit reached' },
+    ])
+    expect(zipEntryNames(result.bytes)).toEqual(['Exact/fill.bin'])
   })
 
   it('carries a near-limit folder through download, zip and save-sized output (R1-H2)', async () => {
