@@ -445,7 +445,8 @@ describe('GFS writer recovery and filesystem invariants', () => {
     const databasePath = path.join(root, '.gfs-download-store', 'writer-v2.sqlite')
     await fs.rename(databasePath, `${databasePath}.old`)
     await expect(freshStore().initialize()).rejects.toMatchObject({ code: 'workspace_unavailable' })
-    await expect(fs.stat(databasePath)).rejects.toMatchObject({ code: 'ENOENT' })
+    // Exclusive creation proves initialization left the target absent in the
+    // same atomic operation. An unexpected second inode fails with EEXIST.
     let replacementDatabase: FileHandle | undefined
     try {
       replacementDatabase = await fs.open(databasePath, 'wx', 0o600)
