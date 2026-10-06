@@ -266,6 +266,7 @@ describe('STORY-38 — attachments survive message cancel', () => {
     act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
     act(() => rendered.result.current.handleAddComposerReferenceAttachments([pluginReference]))
     await sendAsync(rendered.result, 'task-slow')
+    const originChat = rendered.result.current.activeChatId
 
     let cancelDone!: Promise<void>
     act(() => {
@@ -282,6 +283,14 @@ describe('STORY-38 — attachments survive message cancel', () => {
     expect(rendered.result.current.composerImageAttachments).toHaveLength(0)
     expect(rendered.result.current.composerReferenceAttachments).toHaveLength(0)
     expect(keptToastCall(rendered.spies)).toBeUndefined()
+    // R2-M1 — the canceled agent's attachments are not lost: returning to the
+    // originating agent and chat applies the parked restoration there.
+    rendered.rerender({ selectedAgent: 'agent-x', agentNames: ['agent-x', 'agent-y'] })
+    await act(async () => {
+      await rendered.result.current.switchToChat('agent-x', originChat!)
+    })
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
+    expect(keptToastCall(rendered.spies)?.[0]).toBe('Attachments kept')
   })
 
   it.each([
@@ -331,11 +340,14 @@ describe('STORY-38 — attachments survive message cancel', () => {
       expect(rendered.result.current.composerImageAttachments).toHaveLength(0)
       expect(rendered.result.current.composerReferenceAttachments).toHaveLength(0)
       expect(keptToastCall(rendered.spies)).toBeUndefined()
-      // The origin chat's composer surface is the same per-agent state: empty.
+      // R2-M1 — returning to the origin chat PRESERVES the kept attachments:
+      // the parked restoration applies there with its toast.
       await act(async () => {
         await rendered.result.current.switchToChat('agent-x', originChat!)
       })
-      expect(rendered.result.current.composerImageAttachments).toHaveLength(0)
+      expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
+      expect(rendered.result.current.composerReferenceAttachments).toHaveLength(1)
+      expect(keptToastCall(rendered.spies)?.[0]).toBe('Attachments kept')
     }
   )
 

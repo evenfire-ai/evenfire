@@ -578,6 +578,7 @@ export function useAgentChatController({
     agentSendInFlightRef.current = false
     setAgentSending(false)
     retainedSends.resetRetainedSendStore()
+    parkedRestorationsRef.current.clear()
     setFailedAgentSend(null)
     setAgentError(null)
   }, [authenticatedScope, isAuthenticated, retainedSends])
@@ -712,6 +713,78 @@ export function useAgentChatController({
     restoreComposerImageAttachments,
     restoreComposerReferenceAttachments,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
+
+  // R2-M1 — cancel-restorations parked while their originating chat is not the
+  // active one, keyed `${agentRef}::${chatId}`. Memory-only, same lifetime as
+  // composer state (cleared on session/agent-scope reset, never persisted): a
+  // cancel settling while another chat is viewed PRESERVES the kept
+  // attachments and applies them when the originating chat is active again.
+  const parkedRestorationsRef = useRef(
+    new Map<
+      string,
+      {
+        agentRef: string
+        chatId: string | null
+        images: ComposerImageAttachment[]
+        references: ComposerReferenceAttachment[]
+      }
+    >()
+  )
+
+  /**
+   * Applies one kept-attachment restoration to the composer the user is
+   * currently viewing, with the atomic merge, honest drop reporting, and a
+   * Discard-all action bound to the originating agent AND chat. Shared by the
+   * settle-now path and the parked path (spec: round-2 extensions).
+   */
+  const applyKeptAttachments = useCallback(
+    (
+      agentRef: string,
+      chatId: string | null,
+      images: ComposerImageAttachment[],
+      references: ComposerReferenceAttachment[]
+    ) => {
+      const stillViewingOrigin = () =>
+        activeChatVisibilityRef.current.selectedAgent === agentRef &&
+        activeChatVisibilityRef.current.activeChatId === chatId
+      if (!stillViewingOrigin()) return
+      // One merge per kind against the live composer snapshot — the counts and
+      // the committed state can never disagree (R1-M4), and the reference cap
+      // is enforced while restoring so the composer stays sendable (R1-M5).
+      const imageOutcome = restoreComposerImageAttachments(images)
+      const referenceOutcome = restoreComposerReferenceAttachments(references)
+      const droppedParts: string[] = []
+      if (imageOutcome.dropped > 0) {
+        droppedParts.push(
+          `${imageOutcome.dropped} of ${images.length} ${imageOutcome.dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_IMAGE_ATTACHMENTS}-image limit`
+        )
+      }
+      if (referenceOutcome.dropped > 0) {
+        droppedParts.push(
+          `${referenceOutcome.dropped} of ${references.length} ${referenceOutcome.dropped === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
+        )
+      }
+      const totalDropped = imageOutcome.dropped + referenceOutcome.dropped
+      const message = droppedParts.length
+        ? `Attachments kept — ${droppedParts.join('; ')} and ${totalDropped === 1 ? 'was' : 'were'} dropped.`
+        : 'Attachments kept'
+      pushToast(message, 'info', {
+        action: {
+          label: 'Discard all',
+          onAction: () => {
+            if (!stillViewingOrigin()) return
+            resetComposerAttachments()
+          },
+        },
+      })
+    },
+    [
+      pushToast,
+      resetComposerAttachments,
+      restoreComposerImageAttachments,
+      restoreComposerReferenceAttachments,
+    ]
+  )
 
   const { chatEndRef, scrollChatToBottom } = useChatScroll({
     selectedAgent,
@@ -854,6 +927,18 @@ export function useAgentChatController({
     }
   }, [activeChatId, currentTeamId, navItem, selectedAgent])
 
+  // R2-M1 — a parked cancel-restoration applies when its originating chat
+  // becomes active again (runs after the visibility sync above, so the ref it
+  // guards through is current).
+  useEffect(() => {
+    if (!selectedAgent) return
+    const key = `${selectedAgent}::${activeChatId}`
+    const parked = parkedRestorationsRef.current.get(key)
+    if (!parked) return
+    parkedRestorationsRef.current.delete(key)
+    applyKeptAttachments(parked.agentRef, parked.chatId, parked.images, parked.references)
+  }, [activeChatId, selectedAgent, applyKeptAttachments])
+
   // Cleanup activity streams on unmount
   useEffect(() => {
     return () => {
@@ -904,6 +989,7 @@ export function useAgentChatController({
     agentSendSetupOwnerRef.current = null
     agentSendInFlightRef.current = false
     retainedSends.resetRetainedSendStore()
+    parkedRestorationsRef.current.clear()
     // Abort any in-flight reconcile so a run mid-backoff can't resurrect a
     // just-cleared tracker/FSM entry after this teardown (security review).
     reconcileChatRef.current?.reset()
@@ -3507,11 +3593,10 @@ export function useAgentChatController({
    * not GFS or any persisted store, owns the kept attachments.
    *
    * The restore and its Discard-all action are bound to BOTH the originating
-   * agent and the originating chat (the retained snapshot's chatId): the
-   * awaited cancel RPC — and the toast — can outlive a switch to a different
-   * agent or a different chat, and neither the attachments nor the discard may
-   * act on a composer the user has navigated away from. A skipped restore
-   * still releases the snapshot (a cancel is terminal by intent; see
+   * agent and the originating chat (the retained snapshot's chatId). When the
+   * cancel settles while a different agent or chat is viewed, the restoration
+   * is PARKED under that identity instead of dropped, and applies when the
+   * originating chat is active again (R2-M1 — preservation, not loss; see
    * work-tracker/specs/folder-zip-and-cancel-restore-budget.md).
    */
   const restoreComposerAttachmentsAfterCancel = useCallback(
@@ -3521,52 +3606,27 @@ export function useAgentChatController({
       const references = snapshots.flatMap(snapshot => snapshot.references)
       if (!images.length && !references.length) return
       const originChatId = snapshots[0]?.chatId ?? null
-      const stillViewingOrigin = () =>
+      const stillViewingOrigin =
         activeChatVisibilityRef.current.selectedAgent === agentRef &&
         activeChatVisibilityRef.current.activeChatId === originChatId
-      if (!stillViewingOrigin()) return
-      // One merge per kind against the live composer snapshot — the counts and
-      // the committed state can never disagree (R1-M4), and the reference cap
-      // is enforced while restoring so the composer stays sendable (R1-M5).
-      const imageOutcome = restoreComposerImageAttachments(
-        images.map(attachment => ({
-          ...attachment,
-          previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
-        }))
-      )
-      const referenceOutcome = restoreComposerReferenceAttachments(references)
-      const droppedParts: string[] = []
-      if (imageOutcome.dropped > 0) {
-        droppedParts.push(
-          `${imageOutcome.dropped} of ${images.length} ${imageOutcome.dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_IMAGE_ATTACHMENTS}-image limit`
-        )
+      const preparedImages = images.map(attachment => ({
+        ...attachment,
+        previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+      }))
+      if (!stillViewingOrigin) {
+        // Preserve: the task snapshot is released by the caller, but the kept
+        // payload survives here until its chat is viewed again.
+        parkedRestorationsRef.current.set(`${agentRef}::${originChatId}`, {
+          agentRef,
+          chatId: originChatId,
+          images: preparedImages,
+          references,
+        })
+        return
       }
-      if (referenceOutcome.dropped > 0) {
-        droppedParts.push(
-          `${referenceOutcome.dropped} of ${references.length} ${referenceOutcome.dropped === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
-        )
-      }
-      const totalDropped = imageOutcome.dropped + referenceOutcome.dropped
-      const message = droppedParts.length
-        ? `Attachments kept — ${droppedParts.join('; ')} and ${totalDropped === 1 ? 'was' : 'were'} dropped.`
-        : 'Attachments kept'
-      pushToast(message, 'info', {
-        action: {
-          label: 'Discard all',
-          onAction: () => {
-            if (!stillViewingOrigin()) return
-            resetComposerAttachments()
-          },
-        },
-      })
+      applyKeptAttachments(agentRef, originChatId, preparedImages, references)
     },
-    [
-      getRetainedSendsForTask,
-      pushToast,
-      resetComposerAttachments,
-      restoreComposerImageAttachments,
-      restoreComposerReferenceAttachments,
-    ]
+    [getRetainedSendsForTask, applyKeptAttachments]
   )
 
   const cancelTask = useCallback(
