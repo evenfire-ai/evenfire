@@ -658,7 +658,11 @@ export type RespondWithWakeAndHoldOptions = {
    * transfer) that `timeoutMs` alone does not bound.
    */
   attemptUpstream: (timeoutMs: number, deadlineMs: number) => Promise<void>
-  /** Writes today's error response (502/504) — the pre-wake behavior. */
+  /**
+   * Writes the route's pre-wake error response (502/504, plus any route-owned
+   * mapping such as the messages route's Host 413). Also receives the error of
+   * a post-wake retry the Host answered with a non-availability failure.
+   */
   respondLegacy: (error: unknown) => void
   coordinator?: WakeAndHoldCoordinator
   /** Absolute deadline captured before a route's initial availability probe. */

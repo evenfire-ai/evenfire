@@ -16,9 +16,11 @@ import express, { type NextFunction, type Request, type Response } from 'express
  *     base64 and MINUS credited file base64. Without those subtractions the
  *     attachment budgets would become a general 24MiB text budget.
  *
- * `kind:'file'` has its own quota (issue #678): at most 11MiB decoded per file
- * and 16MiB of base64 in total, credited exactly like images. The text, the
- * JSON envelope and the non-base64 fields of each file entry stay in the 6MiB
+ * `kind:'file'` has its own credited quota (issue #678), separate from the
+ * image budget and with its own qualification rules (inspectChatFileBudget):
+ * at most 20 files, 11MiB decoded per file and 16MiB of base64 (not decoded
+ * bytes) in total, with no MIME or signature check. The text, the JSON
+ * envelope and the non-base64 fields of each file entry stay in the 6MiB
  * share, so a text-only message keeps its 6MiB ceiling.
  *
  * Mount `chatJsonBody` on `POST /rpc/hosts/:hostRef/messages` right after

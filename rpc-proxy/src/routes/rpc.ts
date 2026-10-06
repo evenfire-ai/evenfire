@@ -100,6 +100,21 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
 }
 
 /**
+ * Terminal mapping for a failed Host message forward, on the first attempt and
+ * on the post-wake retry alike. A Host 413 is the client's body to fix, not an
+ * unavailable Host: it gets the same body as chatJsonBody's own 413, so the
+ * Desktop maps a Host refusal and a proxy refusal identically. Everything else
+ * keeps the respondUpstreamUnavailable mapping, including its headersSent guard.
+ */
+function respondHostMessageForwardFailure(res: ExpressResponse, error: unknown): void {
+  if (isHostPayloadTooLargeError(error) && !res.headersSent) {
+    res.status(413).json({ error: 'Payload Too Large' })
+    return
+  }
+  respondUpstreamUnavailable(res, error)
+}
+
+/**
  * Guards a `next(error)` handoff against a committed response (§11.5). Express
  * routes an error to the default handler which, when headers are already sent,
  * aborts the socket; suppress it loudly instead so a held request that already
@@ -536,17 +551,11 @@ export function createRpcRouter(): Router {
                 })
                 res.status(200).json(retried)
               },
-              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+              respondLegacy: legacyError => respondHostMessageForwardFailure(res, legacyError),
             })
             return
           }
-          if (isHostPayloadTooLargeError(error)) {
-            // Same body as chatJsonBody's own 413, so the Desktop maps a Host
-            // refusal and a proxy refusal identically.
-            res.status(413).json({ error: 'Payload Too Large' })
-            return
-          }
-          respondUpstreamUnavailable(res, error)
+          respondHostMessageForwardFailure(res, error)
           return
         }
         // The upstream accepted the message: the request is resolved. Writing

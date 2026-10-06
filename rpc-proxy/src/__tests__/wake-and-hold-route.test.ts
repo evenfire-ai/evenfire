@@ -387,6 +387,84 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     }
   })
 
+  // A real Host that answers the first POST with a draining 503 and the
+  // post-wake retry with `retryStatus`, so both errors come from the real
+  // forwardHostMessageToHost rather than hand-built UpstreamHostErrors.
+  async function withDrainingThenHost(
+    retryStatus: number,
+    retryBody: Record<string, unknown>,
+    run: (hostHits: () => number) => Promise<void>
+  ): Promise<void> {
+    let hits = 0
+    const server = createServer((req, res) => {
+      hits += 1
+      const hit = hits
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(hit === 1 ? 503 : retryStatus, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify(hit === 1 ? { code: 'host_draining', retryAfterMs: 1000 } : retryBody)
+        )
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = server.address() as AddressInfo
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      ...HOST_CONNECTION,
+      url: `http://127.0.0.1:${port}`,
+    })
+    serviceMock.forwardHostMessageToHost.mockImplementation(
+      forwardHostMessageToHost as typeof serviceMock.forwardHostMessageToHost
+    )
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
+      kind: 'active',
+      wakeGeneration: 21,
+    })
+    try {
+      await run(() => hits)
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  }
+
+  it('passes a Host 413 on the post-wake retry through as the same 413 as the direct path', async () => {
+    await withDrainingThenHost(413, { error: 'Payload Too Large' }, async hostHits => {
+      const response = await postMessage(makeApp())
+
+      // Witness: the 503 entered the wake hold and the retry reached the Host.
+      expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+      expect(hostHits()).toBe(2)
+      expect(response.status).toBe(413)
+      expect(response.body).toEqual({ error: 'Payload Too Large' })
+    })
+  })
+
+  it('still answers 200 when the post-wake retry is accepted by the Host', async () => {
+    await withDrainingThenHost(200, { success: true, taskId: 't-after-wake' }, async hostHits => {
+      const response = await postMessage(makeApp())
+
+      expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+      expect(hostHits()).toBe(2)
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({ success: true, taskId: 't-after-wake' })
+    })
+  })
+
+  it('keeps a non-413 Host failure on the post-wake retry on the 502 path', async () => {
+    await withDrainingThenHost(500, { error: 'boom' }, async hostHits => {
+      const response = await postMessage(makeApp())
+
+      expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+      expect(hostHits()).toBe(2)
+      expect(response.status).toBe(502)
+      expect(response.body).toEqual({ error: 'Upstream host unavailable' })
+    })
+  })
+
   it('forwards at most the Desktop headroom of bytes beyond the inbound Desktop body', async () => {
     let forwardedRaw = ''
     const server = createServer((req, res) => {
