@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { spawn } from 'child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { config as appConfig } from '../../config'
@@ -18,6 +18,8 @@ import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { MessageQueue } from '../../queue'
 import type { Task } from '../../queue/types'
+import { resolveCallerRootBinding } from '../../workspace/callerRootBinding'
+import { ScopedWorkspaceProvider } from '../../workspace/scopedWorkspace'
 import { CronScheduler } from '../cronScheduler'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 
@@ -78,11 +80,36 @@ async function scenario(
 ) {
   const root = await mkdtemp(join(tmpdir(), 'gfs-live-approval-'))
   roots.push(root)
-  const callerWorkspace = join(root, 'caller')
-  await mkdir(callerWorkspace, { mode: 0o700 })
   const store = new GfsDownloadStore(root)
   stores.push(store)
   await store.initialize()
+  const task: Task = {
+    id: randomUUID(),
+    source: 'channel',
+    status: 'pending',
+    priority: 'normal',
+    createdAt: new Date(),
+    sourceMessage: {
+      sender: 'gfs-caller',
+      content: 'Process the governed file',
+      channelType: 'rpc',
+      channelId: 'gfs-live-approval-channel',
+      messageId: 'gfs-live-approval-message',
+      timestamp: new Date().toISOString(),
+      hostRef: 'gfs-live-approval-host',
+    },
+    conversationHistory: [
+      { role: 'user', content: 'Process the governed file', timestamp: new Date() },
+    ],
+    responseCallback: vi.fn(async () => undefined),
+  }
+  const callerBinding = resolveCallerRootBinding(
+    new ScopedWorkspaceProvider(root),
+    task.sourceMessage
+  )
+  if (!callerBinding.root)
+    throw new Error(`Test caller binding failed: ${callerBinding.failureCode}`)
+  const callerWorkspace = callerBinding.root
   const releaseReceiptOwner = vi.spyOn(store, 'releaseReceiptOwner')
   const processingLeases = store.processingLeaseProvider('gfs-caller')
   const acquireLease = vi.spyOn(processingLeases, 'acquireProcessingLease')
@@ -108,27 +135,6 @@ async function scenario(
         finish_reason: call ? FinishReason.ToolUse : FinishReason.Stop,
       }
     },
-  }
-
-  const task: Task = {
-    id: randomUUID(),
-    source: 'channel',
-    status: 'pending',
-    priority: 'normal',
-    createdAt: new Date(),
-    sourceMessage: {
-      sender: 'gfs-caller',
-      content: 'Process the governed file',
-      channelType: 'rpc',
-      channelId: 'gfs-live-approval-channel',
-      messageId: 'gfs-live-approval-message',
-      timestamp: new Date().toISOString(),
-      hostRef: 'gfs-live-approval-host',
-    },
-    conversationHistory: [
-      { role: 'user', content: 'Process the governed file', timestamp: new Date() },
-    ],
-    responseCallback: vi.fn(async () => undefined),
   }
 
   const sessionKey = resolveTaskSessionKey(task)

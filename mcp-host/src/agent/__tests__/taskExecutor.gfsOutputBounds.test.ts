@@ -15,6 +15,8 @@ import { SseProgressReporter, progressReporterRegistry } from '../../progress/ss
 import type { SuspendedEvent } from '../../progress/types'
 import type { Task } from '../../queue/types'
 import { createSessionRouteHandlers } from '../../server/sessionRouteHandlers'
+import { resolveCallerRootBinding } from '../../workspace/callerRootBinding'
+import { ScopedWorkspaceProvider } from '../../workspace/scopedWorkspace'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 
 const savedConfig = {
@@ -26,11 +28,12 @@ const savedConfig = {
 }
 
 let callerWorkspace: string
+let hostRoot: string
 let store: GfsDownloadStore
 
 beforeEach(async () => {
-  callerWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-output-bounds-'))
-  store = new GfsDownloadStore(callerWorkspace)
+  hostRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-output-bounds-'))
+  store = new GfsDownloadStore(hostRoot)
   await store.initialize()
   Object.assign(appConfig, {
     enableApproval: true,
@@ -43,7 +46,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await store.close()
   Object.assign(appConfig, savedConfig)
-  fs.rmSync(callerWorkspace, { recursive: true, force: true })
+  fs.rmSync(hostRoot, { recursive: true, force: true })
 })
 
 function makeScenario(options: {
@@ -110,6 +113,13 @@ function makeScenario(options: {
     ],
     responseCallback: vi.fn(async () => undefined),
   }
+  const callerBinding = resolveCallerRootBinding(
+    new ScopedWorkspaceProvider(hostRoot),
+    task.sourceMessage
+  )
+  if (!callerBinding.root)
+    throw new Error(`Test caller binding failed: ${callerBinding.failureCode}`)
+  callerWorkspace = callerBinding.root
 
   const conversationManager = new ConversationManager()
   const sessionKey = resolveTaskSessionKey(task)
