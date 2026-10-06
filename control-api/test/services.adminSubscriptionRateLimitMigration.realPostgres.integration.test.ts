@@ -39,11 +39,14 @@ describeRealPostgres('administrative subscription counter namespace migration', 
   })
 
   afterAll(async () => {
-    client?.release()
-    await pool?.end()
-    if (!adminPool) return
-    await adminPool.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`)
-    await adminPool.end()
+    try {
+      client?.release()
+      await pool?.end()
+      if (!adminPool) return
+      await adminPool.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   async function migrate() {
