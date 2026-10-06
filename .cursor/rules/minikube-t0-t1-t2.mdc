@@ -121,7 +121,9 @@ packages legitimately have none), then re-enter `make minikube-t2` on the
 same HEAD/profile. `PROFILE_METADATA_MISSING` surfaces as
 `PROFILE_OWNERSHIP_MISMATCH`: restore `profile.env` or stop and ask
 (`scripts/minikube-profiles/branch.mk` never regenerates metadata for an
-existing profile directory), never invent ports. Do not edit tracked files while `make minikube-t2`
+existing profile directory), never invent ports. A never-created profile
+has no directory: run `branch-profile-start` (an explicit `MINIKUBE_PROFILE`
+must equal this branch's derived name), then retry. Do not edit tracked files while `make minikube-t2`
 is running: T0 fixtures fail with `fixture mutated the host checkout
 working tree`, and T2 refuses a dirty tree (`DEVELOPMENT_SCOPE_REQUIRED`).
 
