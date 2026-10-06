@@ -830,8 +830,8 @@ export type AdminLoginResponse = {
   me: { id: string; username?: string; email?: string | null; role: 'admin' }
 }
 
-export function clearAdminAuthToken(): void {
-  clearReadRequestPrincipal()
+export function clearAdminAuthToken(options: { sessionChanged?: boolean } = {}): void {
+  clearReadRequestPrincipal(options)
   if (typeof window === 'undefined') return
   // Remove the legacy browser-readable admin JWT if it exists. Active admin
   // sessions now live in an HttpOnly cookie set by control-api.
@@ -858,7 +858,8 @@ export async function loginControlUI(
     throw new Error(`${res.status} ${res.statusText} - ${text}`)
   }
   const data = (await res.json()) as AdminLoginResponse
-  clearAdminAuthToken()
+  // The shared cookie now belongs to the new session; tell every peer tab.
+  clearAdminAuthToken({ sessionChanged: true })
   return data
 }
 
@@ -870,7 +871,7 @@ export async function logoutControlUI(): Promise<void> {
     // Logout is best-effort: a stale token or backend revoke failure should not
     // keep the local admin session alive or surface a dev/runtime overlay.
   } finally {
-    clearAdminAuthToken()
+    clearAdminAuthToken({ sessionChanged: true })
   }
 }
 

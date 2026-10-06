@@ -61,6 +61,19 @@ Code defaults and base/minikube ConfigMap literals must agree. A code-only
 increase can be defeated by an older deployment override. This document and
 changed manifests are source artifacts, not confirmation of a rollout.
 
+## SDK verification budget
+
+The SDK pre-auth gates and the internal SDK edge verify a bearer token to
+choose a bucket, so the IP600 ceiling cannot deny before that verification.
+A per-source-IP verification budget runs first on both SDK routers. It counts
+only requests that present a bearer token, uses
+CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN (6000) as its limit, and
+denies further tokens from that IP without verifying them. Invalid credentials
+still stop at IP600, and valid callers behind a flooded IP keep passing until
+the IP has spent 6000 verifications in the minute. Verified principals that
+share one source IP share this budget, and the internal SDK edge allowance
+cannot exceed it from one IP.
+
 ## SDK operation multiplicity
 
 A healthy static-secret attempt performs reissue, pre-Secret introspection and

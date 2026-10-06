@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import * as api from '../../lib/api'
 import {
+  listCodexConnectionModels,
+  listCodexSubscriptionConnections,
+} from '../../lib/codexSubscription'
+import {
   listGrokConnectionModels,
   listGrokSubscriptionConnections,
 } from '../../lib/grokSubscription'
@@ -20,12 +24,23 @@ const grokCapabilityState = vi.hoisted(() => ({
   capabilities: {
     providers: { 'codex-subscription': { enabled: true }, 'grok-subscription': { enabled: true } },
   },
+  // When set, the enabled probe fails with this error and offers this retry.
+  error: null as Error | null,
+  retry: vi.fn(),
 }))
 
 vi.mock('../../lib/hooks/useSubscriptionCapabilities', () => ({
-  useSubscriptionCapabilities: () => {
+  useSubscriptionCapabilities: (options?: { enabled?: boolean }) => {
     grokCapabilityState.capabilities.providers['grok-subscription'].enabled =
       grokCapabilityState.enabled
+    if (grokCapabilityState.error && options?.enabled) {
+      return {
+        capabilities: null,
+        loading: false,
+        error: grokCapabilityState.error,
+        retry: grokCapabilityState.retry,
+      }
+    }
     return {
       capabilities: grokCapabilityState.capabilities,
       loading: false,
@@ -171,6 +186,8 @@ if (!Element.prototype.scrollIntoView) {
 
 beforeEach(() => {
   grokCapabilityState.enabled = true
+  grokCapabilityState.error = null
+  grokCapabilityState.retry.mockReset()
 })
 
 async function renderWizard(props?: {
@@ -1373,6 +1390,84 @@ describe('HostWizard — broker-backed Codex authoring', () => {
     fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
     expect(screen.getByRole('option', { name: /^OpenAI$/ })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'xAI Grok Subscription' })).not.toBeInTheDocument()
+  }, 15_000)
+
+  it('never offers one subscription connection catalog under another connection that throttles', async () => {
+    const connections = vi.mocked(listCodexSubscriptionConnections)
+    const models = vi.mocked(listCodexConnectionModels)
+    const defaultConnections = connections.getMockImplementation()
+    const defaultModels = models.getMockImplementation()
+    const row = (await defaultConnections!())[0]!
+    connections.mockResolvedValue([
+      row,
+      { ...row, connectionKey: 'codex-bbb', displayName: 'Team B', defaultModel: 'gpt-5.4' },
+    ])
+    models.mockImplementation(async connectionRef => {
+      if (connectionRef === 'codex-bbb') {
+        throw Object.assign(
+          new Error('This request limit has been reached. Try again in 9 seconds.'),
+          { status: 429, code: 'rate_limited', retryAfterSeconds: 9 }
+        )
+      }
+      return [{ model: 'gpt-5.1', enabled: true, stale: false }]
+    })
+    try {
+      await renderWizard()
+      await walkToModelStep({ agentName: 'catalog-binding' })
+      await selectCodexSubscription()
+      fireEvent.click(screen.getByRole('button', { name: /Team A/i }))
+      fireEvent.click(screen.getByRole('option', { name: /Team B/i }))
+      // Witness: B's catalog was requested and its throttle is on screen.
+      expect(await screen.findByText(/Try again in 9 seconds/)).toBeInTheDocument()
+      expect(models).toHaveBeenCalledWith('codex-bbb', expect.anything())
+      fireEvent.click(screen.getByLabelText('Default model', { selector: '#llm-primary-model' }))
+      const offered = screen
+        .queryAllByRole('option')
+        .filter(option => /gpt-5\.1/.test(option.textContent ?? ''))
+      for (const option of offered) expect(option).toHaveTextContent(/out of allowlist/i)
+    } finally {
+      connections.mockImplementation(defaultConnections!)
+      models.mockImplementation(defaultModels!)
+    }
+  }, 15_000)
+
+  it('blocks Next when a reloaded catalog offers no models instead of keeping the previous model', async () => {
+    const models = vi.mocked(listCodexConnectionModels)
+    const defaultModels = models.getMockImplementation()
+    models.mockResolvedValue([{ model: 'gpt-5.1', enabled: true, stale: false }])
+    try {
+      await renderWizard()
+      await walkToModelStep({ agentName: 'empty-catalog' })
+      await selectCodexSubscription()
+      // Witness: the first catalog makes the selected model valid.
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+      const loadsBefore = models.mock.calls.length
+
+      // Leave the step and come back; the reloaded catalog is now empty.
+      models.mockResolvedValue([])
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+      await waitFor(() => expect(models.mock.calls.length).toBeGreaterThan(loadsBefore))
+      expect(screen.getByRole('button', { name: /Team A/i })).toBeInTheDocument()
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled())
+    } finally {
+      models.mockImplementation(defaultModels!)
+    }
+  }, 15_000)
+
+  it('shows a capability probe failure and its Retry on the model step that runs the probe', async () => {
+    grokCapabilityState.error = new Error('Try again in 7 seconds.')
+    await renderWizard()
+    // Step 0 does not run the probe, so it has nothing to report.
+    expect(screen.getByLabelText(/^Agent name/, { selector: 'input' })).toBeInTheDocument()
+    expect(screen.queryByText(/Provider availability could not be checked/)).toBeNull()
+    await walkToModelStep({ agentName: 'capability-failure' })
+    const notice = (await screen.findByText(/Provider availability could not be checked/)).closest(
+      '[role="alert"]'
+    ) as HTMLElement
+    expect(notice).toHaveTextContent('Try again in 7 seconds.')
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }))
+    expect(grokCapabilityState.retry).toHaveBeenCalledTimes(1)
   }, 15_000)
 
   it('loads inventories only at the model step and keeps the provider through a throttle and explicit retry', async () => {

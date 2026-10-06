@@ -43,7 +43,8 @@ describe('useSubscriptionCapabilities', () => {
     await waitFor(() =>
       expect(result.current.capabilities?.providers['grok-subscription'].enabled).toBe(true)
     )
-    expect(load).toHaveBeenNthCalledWith(2, { refresh: true, signal: expect.any(AbortSignal) })
+    // Retry re-runs the load through the shared cache; it never forces a refresh.
+    expect(load).toHaveBeenNthCalledWith(2, { signal: expect.any(AbortSignal) })
   })
 
   it('keeps a previously confirmed provider enabled during a transient failure', async () => {

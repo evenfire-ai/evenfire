@@ -55,6 +55,27 @@ export function pluginSdkPreauthAssignment(principal: string | null): {
   return { limit: config.pluginSdkPreauthRlPerMin, key: null }
 }
 
+/**
+ * Bound signature verification per source IP before any limiter that needs a
+ * verified principal to pick its bucket. Only requests presenting a bearer
+ * token reach the verifier, so only they are counted. The budget equals the
+ * verified SDK allowance: invalid credentials still stop at the IP600 ceiling
+ * and valid callers behind a flooded IP keep passing until this budget, after
+ * which further tokens from that IP are denied without being verified.
+ */
+export function createPluginWorkloadSdkVerificationBudgetRateLimit(): RequestHandler {
+  return rateLimit({
+    windowMs: 60_000,
+    limit: config.pluginSdkAuthenticatedPreauthRlPerMin,
+    skip: req => extractBearerToken(req) === '',
+    keyGenerator: req =>
+      `plugin_workload_sdk_verification:ip:${ipKeyGenerator(req.ip || 'unknown')}`,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Too Many Requests', retryable: true },
+  })
+}
+
 export function createPluginWorkloadSdkAnonymousPreauthRateLimit(): RequestHandler {
   return rateLimit({
     windowMs: 60_000,

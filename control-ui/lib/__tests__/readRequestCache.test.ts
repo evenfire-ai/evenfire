@@ -4,6 +4,7 @@ import {
   apiSend,
   clearAdminAuthToken,
   loginControlUI,
+  logoutControlUI,
   setControlUIReadPrincipal,
   setGlobalAuthErrorHandler,
 } from '../api'
@@ -369,50 +370,124 @@ describe('bounded metadata read reuse', () => {
     const listener = new BroadcastChannel('control-ui-read-metadata-invalidation')
     const received: unknown[] = []
     listener.onmessage = event => received.push(event.data)
+    const sends = vi.spyOn(BroadcastChannel.prototype, 'postMessage')
+    try {
+      fetchMock.mockResolvedValueOnce(success({ principal: 'one' }))
+      await expect(apiGet('/api/v1/admin/metadata', {}, metadataOptions)).resolves.toEqual({
+        principal: 'one',
+      })
 
-    fetchMock.mockResolvedValueOnce(success({ principal: 'one' }))
-    await expect(apiGet('/api/v1/admin/metadata', {}, metadataOptions)).resolves.toEqual({
-      principal: 'one',
-    })
+      clearAdminAuthToken()
+      expect(sends).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(received).toEqual([{ type: 'session-invalidation' }]))
+      expect(JSON.stringify(received)).not.toContain('admin-one')
 
-    clearAdminAuthToken()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(received).toEqual([{ type: 'session-invalidation' }])
-    expect(JSON.stringify(received)).not.toContain('admin-one')
+      setControlUIReadPrincipal('admin-one', 'admin')
+      setControlUIReadPrincipal('admin-two', 'admin')
+      expect(sends).toHaveBeenCalledTimes(2)
+      await vi.waitFor(() =>
+        expect(received).toEqual([
+          { type: 'session-invalidation' },
+          { type: 'session-invalidation' },
+        ])
+      )
 
-    setControlUIReadPrincipal('admin-one', 'admin')
-    setControlUIReadPrincipal('admin-two', 'admin')
-    await vi.advanceTimersByTimeAsync(0)
-    expect(received).toEqual([{ type: 'session-invalidation' }, { type: 'session-invalidation' }])
-
-    fetchMock.mockResolvedValueOnce(success({ principal: 'two' }))
-    await expect(apiGet('/api/v1/admin/metadata', {}, metadataOptions)).resolves.toEqual({
-      principal: 'two',
-    })
-    listener.close()
+      fetchMock.mockResolvedValueOnce(success({ principal: 'two' }))
+      await expect(apiGet('/api/v1/admin/metadata', {}, metadataOptions)).resolves.toEqual({
+        principal: 'two',
+      })
+    } finally {
+      listener.close()
+    }
   })
 
   it('invalidates on a remote session change without rebroadcast or caching an unverified identity', async () => {
     const remoteTab = new BroadcastChannel('control-ui-read-metadata-invalidation')
-    const rebroadcasts: unknown[] = []
-    remoteTab.onmessage = event => rebroadcasts.push(event.data)
-    fetchMock.mockResolvedValueOnce(success({ revision: 'old-tab' }))
-    await apiGet('/api/v1/admin/metadata', {}, metadataOptions)
-    remoteTab.postMessage({ type: 'session-invalidation' })
-    await vi.advanceTimersByTimeAsync(0)
-    expect(getReadRequestPrincipal()).toBeNull()
-    expect(rebroadcasts).toEqual([])
-    fetchMock
-      .mockResolvedValueOnce(success({ revision: 'new-tab' }))
-      .mockResolvedValueOnce(success({ revision: 'fresh' }))
-    await expect(apiGet('/api/v1/admin/metadata', {}, metadataOptions)).resolves.toEqual({
-      revision: 'new-tab',
-    })
-    await expect(apiGet('/api/v1/admin/metadata', {}, metadataOptions)).resolves.toEqual({
-      revision: 'fresh',
-    })
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-    remoteTab.close()
+    try {
+      fetchMock.mockResolvedValueOnce(success({ revision: 'old-tab' }))
+      await apiGet('/api/v1/admin/metadata', {}, metadataOptions)
+      const sends = vi.spyOn(BroadcastChannel.prototype, 'postMessage')
+      remoteTab.postMessage({ type: 'session-invalidation' })
+      // Witness: the message was delivered and this tab dropped its principal.
+      await vi.waitFor(() => expect(getReadRequestPrincipal()).toBeNull())
+      expect(sends.mock.contexts.filter(channel => channel !== remoteTab)).toHaveLength(0)
+      fetchMock
+        .mockResolvedValueOnce(success({ revision: 'new-tab' }))
+        .mockResolvedValueOnce(success({ revision: 'fresh' }))
+      await expect(apiGet('/api/v1/admin/metadata', {}, metadataOptions)).resolves.toEqual({
+        revision: 'new-tab',
+      })
+      await expect(apiGet('/api/v1/admin/metadata', {}, metadataOptions)).resolves.toEqual({
+        revision: 'fresh',
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    } finally {
+      remoteTab.close()
+    }
+  })
+
+  it('answers the post-invalidation 401 locally so logged-out tabs cannot invalidate each other forever', async () => {
+    const remoteTab = new BroadcastChannel('control-ui-read-metadata-invalidation')
+    const received: unknown[] = []
+    remoteTab.onmessage = event => received.push(event.data)
+    const sends = vi.spyOn(BroadcastChannel.prototype, 'postMessage')
+    const sentByThisTab = () => sends.mock.contexts.filter(channel => channel !== remoteTab).length
+    try {
+      // The other tab logged out: this tab drops its principal on the message.
+      remoteTab.postMessage({ type: 'session-invalidation' })
+      await vi.waitFor(() => expect(getReadRequestPrincipal()).toBeNull())
+
+      // Its /auth/me re-check now answers 401, which clears the token again.
+      setReadRequestCacheEntry('post-invalidation-entry', { stale: true }, 30_000)
+      clearAdminAuthToken()
+      // Witness: the local clear ran and dropped the entry cached after the message.
+      expect(getReadRequestCacheEntry('post-invalidation-entry')).toBeUndefined()
+      expect(sentByThisTab()).toBe(0)
+
+      // A verified tab that logs out still tells the others exactly once.
+      setControlUIReadPrincipal('admin-one', 'admin')
+      clearAdminAuthToken()
+      expect(sentByThisTab()).toBe(1)
+      await vi.waitFor(() => expect(received).toEqual([{ type: 'session-invalidation' }]))
+    } finally {
+      remoteTab.close()
+    }
+  })
+
+  it('tells peer tabs about the committed cookie change after a login or logout POST', async () => {
+    const peerTab = new BroadcastChannel('control-ui-read-metadata-invalidation')
+    const received: unknown[] = []
+    peerTab.onmessage = event => received.push(event.data)
+    const sends = vi.spyOn(BroadcastChannel.prototype, 'postMessage')
+    const invalidation = { type: 'session-invalidation' }
+    try {
+      let commitLogin: (response: Response) => void = () => {}
+      fetchMock.mockReturnValueOnce(new Promise<Response>(resolve => (commitLogin = resolve)))
+      const login = loginControlUI('operator', 'unit-test-password')
+      // Pre-POST clear of the verified principal; a peer may now reconfirm the old cookie.
+      expect(sends).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(received).toEqual([invalidation]))
+      commitLogin(success({ me: { id: 'admin-two', role: 'admin' } }))
+      await login
+      expect(sends).toHaveBeenCalledTimes(2)
+      await vi.waitFor(() => expect(received).toEqual([invalidation, invalidation]))
+
+      setControlUIReadPrincipal('admin-two', 'admin')
+      sends.mockClear()
+      received.length = 0
+      let commitLogout: (response: Response) => void = () => {}
+      fetchMock.mockReturnValueOnce(new Promise<Response>(resolve => (commitLogout = resolve)))
+      const logout = logoutControlUI()
+      expect(sends).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(received).toEqual([invalidation]))
+      commitLogout(success({ ok: true }))
+      await logout
+      expect(sends).toHaveBeenCalledTimes(2)
+      await vi.waitFor(() => expect(received).toEqual([invalidation, invalidation]))
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      peerTab.close()
+    }
   })
 
   it('clears cached reads on successful login even when the principal is unchanged', async () => {

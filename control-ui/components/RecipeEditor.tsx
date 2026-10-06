@@ -1846,7 +1846,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
     const controller = new AbortController()
     setGrantInventoryLoading(true)
     const loader = isGrokRecipe ? listGrokSubscriptionConnections : listCodexSubscriptionConnections
-    loader({ signal: controller.signal, refresh: grantInventoryRetryNonce > 0 })
+    loader({ signal: controller.signal })
       .then(rows => {
         if (controller.signal.aborted) return
         if (isGrokRecipe) {

@@ -560,10 +560,7 @@ function GrantFormModal({
     if (!isCodexProvider) return
     const controller = new AbortController()
     setGrantInventoryLoading(true)
-    listCodexSubscriptionConnections({
-      signal: controller.signal,
-      refresh: grantInventoryRetryNonce > 0,
-    })
+    listCodexSubscriptionConnections({ signal: controller.signal })
       .then(connections => {
         if (controller.signal.aborted) return
         setCodexConnections(connections.filter(isAssignableCodexGrant))
@@ -584,10 +581,7 @@ function GrantFormModal({
     if (!isGrokProvider) return
     const controller = new AbortController()
     setGrantInventoryLoading(true)
-    listGrokSubscriptionConnections({
-      signal: controller.signal,
-      refresh: grantInventoryRetryNonce > 0,
-    })
+    listGrokSubscriptionConnections({ signal: controller.signal })
       .then(connections => {
         if (controller.signal.aborted) return
         setGrokConnections(connections.filter(isAssignableGrokGrant))
@@ -609,9 +603,12 @@ function GrantFormModal({
       setCodexModels([])
       return
     }
+    // A catalog belongs to one connection: drop the previous connection's
+    // models so they cannot be added under this connection's reference.
+    setCodexModels([])
     const controller = new AbortController()
     const loader = isGrokProvider ? listGrokConnectionModels : listCodexConnectionModels
-    loader(codexConnectionRef, { signal: controller.signal, refresh: grantInventoryRetryNonce > 0 })
+    loader(codexConnectionRef, { signal: controller.signal })
       .then(models => {
         if (controller.signal.aborted) return
         setCodexModels(models.filter(row => row.enabled && !row.stale).map(row => row.model))

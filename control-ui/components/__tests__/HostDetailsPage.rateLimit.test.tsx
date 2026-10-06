@@ -278,6 +278,61 @@ describe('HostDetailsPage optional subscription throttling', () => {
     expect(api.apiSend).not.toHaveBeenCalled()
   })
 
+  it('answers the visible Retry from the background recovery without spending another read in its window', async () => {
+    vi.useFakeTimers()
+    // The server's shared subscription-read quota: two reads per twelve-second window.
+    const windowMs = 12_000
+    const startedAt = Date.now()
+    const reads: Array<{ url: string; window: number; status: number }> = []
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      const window = Math.floor((Date.now() - startedAt) / windowMs)
+      const inWindow = reads.filter(read => read.window === window).length
+      const response =
+        inWindow >= 2
+          ? throttle()
+          : url.endsWith('/capabilities')
+            ? json({
+                providers: {
+                  'codex-subscription': { enabled: true },
+                  'grok-subscription': { enabled: true },
+                },
+              })
+            : json({ connections: [] })
+      reads.push({ url, window, status: response.status })
+      return Promise.resolve(response)
+    })
+    const flush = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+    renderPage()
+    await flush()
+    navigate('Models & creds')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await flush()
+    const dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
+    const alert = within(dialog).getByRole('alert')
+    expect(alert).toHaveTextContent('Try again in 12 seconds.')
+    expect(reads.map(read => read.status)).toEqual([200, 200, 429])
+
+    // The shared recovery reads the denied inventory once the deadline passes.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(windowMs)
+    })
+    const afterDeadline = () => reads.filter(read => read.window >= 1)
+    expect(afterDeadline()).toHaveLength(1)
+    expect(afterDeadline()[0]?.status).toBe(200)
+
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
+    await flush()
+    // Witness: the visible error cleared through the Retry.
+    expect(within(dialog).queryByRole('alert')).toBeNull()
+    expect(afterDeadline().map(read => read.status)).not.toContain(429)
+    expect(afterDeadline().length).toBeLessThanOrEqual(2)
+    expect(api.apiSend).not.toHaveBeenCalled()
+  })
+
   it.each(['codex-subscription', 'grok-subscription'] as const)(
     'does not confirm retained %s models under a different connection that throttles, then recovers only that binding',
     async provider => {

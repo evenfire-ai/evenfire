@@ -199,9 +199,9 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
       isOauthBrokerProvider(state.provider) &&
       (!state.connectionRef.trim() ||
         state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY ||
-        (state.provider === GROK_SUBSCRIPTION_PROVIDER
-          ? state.grokModels.length > 0 && !state.grokModels.includes(state.modelName.trim())
-          : state.codexModels.length > 0 && !state.codexModels.includes(state.modelName.trim())))
+        // An empty picker offers nothing, so a model kept from an earlier
+        // catalog or connection cannot pass.
+        !state.brokerModelOptions.includes(state.modelName.trim()))
     ) {
       return false
     }
@@ -425,6 +425,13 @@ export function HostWizard({
     () => getModelOptions(catalogForEditor, provider),
     [catalogForEditor, provider]
   )
+  const brokerModelOptions = useMemo(
+    () =>
+      isOauthBrokerProvider(provider)
+        ? constrainModelOptions(catalogForEditor, allowedModels, provider)
+        : [],
+    [allowedModels, catalogForEditor, provider]
+  )
   const chainRequiresSecret = llmChainRequiresSecret(provider, llmPolicy?.fallbacks)
   const handleExistingSecretChange = useCallback(
     (secretName: string) => {
@@ -461,19 +468,9 @@ export function HostWizard({
     setGrantInventoryLoading(true)
     const requests = [
       codexEnabled
-        ? listCodexSubscriptionConnections({
-            signal: controller.signal,
-            refresh: inventoryRetryNonce > 0,
-          })
+        ? listCodexSubscriptionConnections({ signal: controller.signal })
         : Promise.resolve([]),
-      ...(grokEnabled
-        ? [
-            listGrokSubscriptionConnections({
-              signal: controller.signal,
-              refresh: inventoryRetryNonce > 0,
-            }),
-          ]
-        : []),
+      ...(grokEnabled ? [listGrokSubscriptionConnections({ signal: controller.signal })] : []),
     ]
     Promise.allSettled(requests)
       .then(([codexResult, grokResult]) => {
@@ -506,13 +503,15 @@ export function HostWizard({
       return
     }
     setGrantCatalogError('')
+    // A catalog belongs to one connection: drop the previous connection's
+    // models before this load so they can never be offered under this ref.
+    setCodexModels([])
+    setGrokModels([])
     const controller = new AbortController()
+    // The retry nonce only re-runs this load. A catalog recovered after a 429
+    // is already cached; bypassing it would spend a second read in the window.
     if (provider === GROK_SUBSCRIPTION_PROVIDER) {
-      setCodexModels([])
-      void listGrokConnectionModels(connectionRef, {
-        signal: controller.signal,
-        refresh: inventoryRetryNonce > 0,
-      })
+      void listGrokConnectionModels(connectionRef, { signal: controller.signal })
         .then(models => {
           if (!controller.signal.aborted) setGrokModels(offeredCodexModelNames(models))
         })
@@ -527,11 +526,7 @@ export function HostWizard({
         controller.abort()
       }
     }
-    setGrokModels([])
-    void listCodexConnectionModels(connectionRef, {
-      signal: controller.signal,
-      refresh: inventoryRetryNonce > 0,
-    })
+    void listCodexConnectionModels(connectionRef, { signal: controller.signal })
       .then(models => {
         if (!controller.signal.aborted) setCodexModels(offeredCodexModelNames(models))
       })
@@ -552,12 +547,11 @@ export function HostWizard({
   useEffect(() => {
     if (modelsLoading) return
     if (isOauthBrokerProvider(provider)) {
-      const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
-      if (offered.length === 0) return
+      if (brokerModelOptions.length === 0) return
       const grant = (
         provider === GROK_SUBSCRIPTION_PROVIDER ? grokConnections : codexConnections
       ).find(row => row.connectionKey === connectionRef)
-      const next = resolveCodexGrantModel(modelName, offered, grant?.defaultModel)
+      const next = resolveCodexGrantModel(modelName, brokerModelOptions, grant?.defaultModel)
       if (next !== modelName) setModelName(next)
       return
     }
@@ -566,7 +560,7 @@ export function HostWizard({
     }
     // Intentionally omit modelName: this reconciles the picker to the options.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allowedModels, catalogForEditor, modelsLoading, provider, providerModelOptions])
+  }, [brokerModelOptions, modelsLoading, provider, providerModelOptions])
 
   // Auto-derive the new Secret name from the agent name ("this agent's
   // credentials") until the operator edits it, so naming a Kubernetes Secret is
@@ -620,8 +614,7 @@ export function HostWizard({
       provider,
       modelName,
       connectionRef,
-      codexModels,
-      grokModels,
+      brokerModelOptions,
     }),
     [
       hostName,
@@ -634,8 +627,7 @@ export function HostWizard({
       provider,
       modelName,
       connectionRef,
-      codexModels,
-      grokModels,
+      brokerModelOptions,
     ]
   )
 
@@ -959,7 +951,6 @@ export function HostWizard({
       >
         {step === 0 && (
           <div className="cu-form-stack cu-agent-form-stack">
-            <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
             <Field
               description="The name members see. The identifier used in URLs is derived automatically."
               htmlFor="wizard-agent-name"
@@ -1052,6 +1043,8 @@ export function HostWizard({
 
         {step === 1 && (
           <div className="cu-form-stack cu-agent-form-stack">
+            {/* Capability discovery is enabled on this step, so its failure and Retry live here. */}
+            <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
             {grantInventoryLoading ? (
               <p className="cu-muted" role="status">
                 Loading subscription options…

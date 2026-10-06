@@ -8,6 +8,7 @@ import {
   createPluginWorkloadSdkAnonymousPreauthRateLimit,
   createPluginWorkloadSdkAuthenticatedPreauthRateLimit,
   createPluginWorkloadSdkRequestRateLimit,
+  createPluginWorkloadSdkVerificationBudgetRateLimit,
   pluginWorkloadSdkCredentialBucketKey,
 } from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
@@ -629,7 +630,9 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
     '/mcp-host/plugin-workload-sdk',
     // Invalid or missing credentials stay on the anonymous source-IP gate.
     // Verified Host principals use a separate pre-auth allowance, then the
-    // recipe-scoped request bucket after authentication.
+    // recipe-scoped request bucket after authentication. The verification
+    // budget runs first because both pre-auth gates verify to pick a bucket.
+    createPluginWorkloadSdkVerificationBudgetRateLimit(),
     createPluginWorkloadSdkAnonymousPreauthRateLimit(),
     createPluginWorkloadSdkAuthenticatedPreauthRateLimit(),
     requireMcpHostJwt,

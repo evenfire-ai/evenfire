@@ -11,7 +11,7 @@ import {
   listWorkflowGrants,
   searchPluginWorkloadSdkInvocations,
 } from '@lib/api'
-import { listGrokSubscriptionConnections } from '@lib/grokSubscription'
+import { listGrokConnectionModels, listGrokSubscriptionConnections } from '@lib/grokSubscription'
 import PluginWorkloadSdkPage from '../../app/plugin-workload-sdk/page'
 
 const mocks = vi.hoisted(() => ({
@@ -306,6 +306,69 @@ describe('Plugin Workload SDK operator page', () => {
     expect(await within(dialog).findByText(/Grok capability read failed/)).toBeInTheDocument()
     const provider = within(dialog).getByRole('combobox', { name: /target provider/i })
     expect(within(provider).queryByRole('option', { name: /xAI Grok Subscription/i })).toBeNull()
+  })
+
+  it('cannot add one subscription connection model under another connection whose catalog throttles', async () => {
+    grokCapability.enabled = true
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      {
+        connectionKey: 'team-grok',
+        displayName: 'Team Grok',
+        status: 'connected',
+        catalogStatus: 'ready',
+      },
+      {
+        connectionKey: 'team-grok-b',
+        displayName: 'Team Grok B',
+        status: 'connected',
+        catalogStatus: 'ready',
+      },
+    ] as never)
+    const models = vi.mocked(listGrokConnectionModels)
+    const defaultModels = models.getMockImplementation()
+    models.mockImplementation(async connectionRef => {
+      if (connectionRef === 'team-grok-b') {
+        throw Object.assign(new Error('Try again in 8 seconds.'), {
+          status: 429,
+          code: 'rate_limited',
+          retryAfterSeconds: 8,
+        })
+      }
+      return [{ model: 'grok-4.6', enabled: true, stale: false }]
+    })
+    try {
+      render(<PluginWorkloadSdkPage />)
+      const create = await screen.findByRole('button', { name: 'New grant' })
+      await waitFor(() => expect(create).toBeEnabled())
+      fireEvent.click(create)
+      const dialog = screen.getByRole('dialog', { name: 'New SDK grant' })
+      fireEvent.change(within(dialog).getByRole('combobox', { name: /^Capability family\b/ }), {
+        target: { value: 'promptBridge' },
+      })
+      fireEvent.change(within(dialog).getByRole('combobox', { name: 'Target provider' }), {
+        target: { value: 'grok-subscription' },
+      })
+      const connection = await within(dialog).findByRole('combobox', { name: /grok subscription/i })
+      await within(connection).findByRole('option', { name: /Team Grok B/ })
+      const targetModel = within(dialog).getByRole('combobox', { name: /^Target model\b/ })
+      fireEvent.change(connection, { target: { value: 'team-grok' } })
+      expect(
+        await within(targetModel).findByRole('option', { name: 'grok-4.6' })
+      ).toBeInTheDocument()
+      fireEvent.change(targetModel, { target: { value: 'grok-4.6' } })
+      // Witness: A's model is genuinely selected and addable before the switch.
+      expect(targetModel).toHaveValue('grok-4.6')
+      expect(within(dialog).getByRole('button', { name: 'Add target' })).toBeEnabled()
+
+      fireEvent.change(connection, { target: { value: 'team-grok-b' } })
+      // Witness: B's catalog was requested and its throttle is on screen.
+      expect(await within(dialog).findByText('Try again in 8 seconds.')).toBeInTheDocument()
+      expect(models).toHaveBeenCalledWith('team-grok-b', expect.anything())
+      expect(within(targetModel).queryByRole('option', { name: 'grok-4.6' })).toBeNull()
+      expect(within(dialog).getByRole('button', { name: 'Add target' })).toBeDisabled()
+    } finally {
+      models.mockImplementation(defaultModels!)
+    }
   })
 
   it('offers Grok grants in the SDK picker when the Grok flag is on', async () => {

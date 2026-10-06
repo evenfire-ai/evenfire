@@ -32,7 +32,9 @@ export function useSubscriptionCapabilities(
   const enabledRef = useRef(enabled)
   enabledRef.current = enabled
 
-  const load = useCallback(async (refresh: boolean) => {
+  // Retry only re-runs the load. Forcing a refresh would discard a result that
+  // another consumer's recovery already cached and spend a second read.
+  const load = useCallback(async () => {
     if (!enabledRef.current) return
     const controller =
       controllerRef.current && !controllerRef.current.signal.aborted
@@ -43,7 +45,7 @@ export function useSubscriptionCapabilities(
     setLoading(true)
     setError(null)
     try {
-      const next = await loadSubscriptionCapabilities({ refresh, signal: controller.signal })
+      const next = await loadSubscriptionCapabilities({ signal: controller.signal })
       if (controller.signal.aborted || requestRef.current !== requestId) return
       setCapabilities(next)
       recoveryAttemptsRef.current = 0
@@ -64,7 +66,7 @@ export function useSubscriptionCapabilities(
       setLoading(false)
       return
     }
-    void load(retryNonce > 0)
+    void load()
     return () => {
       requestRef.current += 1
       controllerRef.current?.abort()
@@ -82,7 +84,7 @@ export function useSubscriptionCapabilities(
     const delay = Math.max(0, retryAtMs - Date.now())
     const timer = setTimeout(() => {
       recoveryAttemptsRef.current += 1
-      void load(false)
+      void load()
     }, delay)
     return () => clearTimeout(timer)
   }, [enabled, error, load])

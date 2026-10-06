@@ -4,6 +4,7 @@ import { requireInternalControlJwt } from '../../middleware/internalControlJwt.j
 import {
   createPluginWorkloadSdkInternalEdgeRateLimit,
   createPluginWorkloadSdkInternalRateLimit,
+  createPluginWorkloadSdkVerificationBudgetRateLimit,
 } from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import {
   type PluginWorkloadSdkRevocationActor,
@@ -59,6 +60,8 @@ export function createInternalPluginWorkloadSdkRouter(): Router {
   // the prefix so every current/future internal SDK route inherits the guard.
   router.use(
     '/internal/plugin-workload-sdk',
+    // The edge limiter verifies to pick its key; bound that work per IP first.
+    createPluginWorkloadSdkVerificationBudgetRateLimit(),
     createPluginWorkloadSdkInternalEdgeRateLimit(),
     requireInternalControlJwt,
     createPluginWorkloadSdkInternalRateLimit()

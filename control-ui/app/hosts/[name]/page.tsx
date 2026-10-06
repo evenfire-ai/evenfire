@@ -431,21 +431,14 @@ export default function HostDetailsPage() {
     }
     const controller = new AbortController()
     setSubscriptionInventoryLoading(true)
+    // Retry only re-runs this effect. An inventory the shared recovery already
+    // read after a 429 is cached; forcing a refresh would spend a second read
+    // in the same quota window and answer the visible Retry with another 429.
     const requests = [
       codexEnabled
-        ? listCodexSubscriptionConnections({
-            signal: controller.signal,
-            refresh: inventoryRetryNonce > 0,
-          })
+        ? listCodexSubscriptionConnections({ signal: controller.signal })
         : Promise.resolve([]),
-      ...(grokEnabled
-        ? [
-            listGrokSubscriptionConnections({
-              signal: controller.signal,
-              refresh: inventoryRetryNonce > 0,
-            }),
-          ]
-        : []),
+      ...(grokEnabled ? [listGrokSubscriptionConnections({ signal: controller.signal })] : []),
     ]
     Promise.allSettled(requests)
       .then(([codexResult, grokResult]) => {
@@ -490,10 +483,7 @@ export default function HostDetailsPage() {
     const controller = new AbortController()
     setGrantCatalogError('')
     if (providerDraft === GROK_SUBSCRIPTION_PROVIDER) {
-      void listGrokConnectionModels(connectionRefDraft, {
-        signal: controller.signal,
-        refresh: inventoryRetryNonce > 0,
-      })
+      void listGrokConnectionModels(connectionRefDraft, { signal: controller.signal })
         .then(models => {
           if (controller.signal.aborted) return
           setGrantCatalog({
@@ -512,10 +502,7 @@ export default function HostDetailsPage() {
         controller.abort()
       }
     }
-    void listCodexConnectionModels(connectionRefDraft, {
-      signal: controller.signal,
-      refresh: inventoryRetryNonce > 0,
-    })
+    void listCodexConnectionModels(connectionRefDraft, { signal: controller.signal })
       .then(models => {
         if (controller.signal.aborted) return
         setGrantCatalog({

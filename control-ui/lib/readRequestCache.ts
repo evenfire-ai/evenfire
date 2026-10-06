@@ -89,11 +89,20 @@ export function setReadRequestPrincipal(principalId: string, scope: string): voi
   if (wasVerified) channel?.postMessage({ type: 'session-invalidation' })
 }
 
-export function clearReadRequestPrincipal(): void {
+export function clearReadRequestPrincipal(options: { sessionChanged?: boolean } = {}): void {
+  const wasVerified = principal !== null
   principal = null
   clearReadRequestCache()
   invalidationHandler?.()
-  ensureChannel()?.postMessage({ type: 'session-invalidation' })
+  const channel = ensureChannel()
+  // Only a locally verified principal or a committed cookie change is news to
+  // other tabs. A tab already cleared by a remote invalidation answers its /me
+  // 401 here; rebroadcasting that would make logged-out tabs invalidate one
+  // another indefinitely. A peer may have reconfirmed the old cookie while a
+  // login/logout POST was pending, so the committed change always propagates.
+  if (wasVerified || options.sessionChanged) {
+    channel?.postMessage({ type: 'session-invalidation' })
+  }
 }
 
 export function clearReadRequestCache(): void {
