@@ -114,6 +114,11 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      - name: Install External REST contract-test dependencies
+        if: matrix.service == 'control-api'
+        working-directory: external-rest-api
+        run: npm ci
+
       - name: Verify Electron runtime
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app
@@ -278,6 +283,10 @@ jobs:
       - name: Build workflow-runtime-core
         working-directory: packages/workflow-runtime-core
         run: npm run build
+
+      - name: Install External REST contract-test dependencies
+        working-directory: external-rest-api
+        run: npm ci
 
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api

@@ -281,7 +281,9 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     await expect(reservePasswordPace()).rejects.toMatchObject({ status: 429 })
   })
   it('persisted aggregate pacing works across independent Node processes', async () => {
-    const script = `const {reservePasswordPace}=require('./dist/services/auth/passwordCredentialVerification.js');reservePasswordPace().then(()=>{console.log('ALLOWED');process.exit(0)},e=>{console.log('DENIED:'+e.status);process.exit(e.status===429?0:1)})`
+    // The required hosted PostgreSQL lane runs source tests without building Control API.
+    // Reuse its declared ts-node resolver so both processes execute the real producer.
+    const script = `require('ts-node').register({project:'./tsconfig.json',experimentalResolver:true,transpileOnly:true});const {reservePasswordPace}=require('./src/services/auth/passwordCredentialVerification.ts');reservePasswordPace().then(()=>{console.log('ALLOWED');process.exit(0)},e=>{console.log('DENIED:'+e.status);process.exit(e.status===429?0:1)})`
     const run = () =>
       new Promise<string>((resolve, reject) => {
         const child = spawn(process.execPath, ['-e', script], {
