@@ -55,10 +55,10 @@ const apiSendMock = vi.mocked(apiSend)
 const getHostsMock = vi.mocked(getHosts)
 const listLlmHostSecretsMock = vi.mocked(listLlmHostSecrets)
 
-const SECRET = 'chatllm-api-keys'
+const SECRET_NAME = 'chatllm-api-keys'
 
 function seedSecret(keys: string[]) {
-  listLlmHostSecretsMock.mockResolvedValue({ items: [{ name: SECRET, keys }] })
+  listLlmHostSecretsMock.mockResolvedValue({ items: [{ name: SECRET_NAME, keys }] })
 }
 
 function seedHosts(hosts: Array<{ name: string; secretRef?: string; fallbackSlot?: string }> = []) {
@@ -116,7 +116,7 @@ async function resolveRemovalConfirm(action: 'Remove and save' | 'Cancel') {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  navigation.params = { name: SECRET }
+  navigation.params = { name: SECRET_NAME }
   navigation.searchParams = new URLSearchParams()
   apiSendMock.mockResolvedValue(undefined as never)
   seedHosts([])
@@ -131,7 +131,9 @@ describe('Edit LLM secret page — loading', () => {
     seedSecret(['openai-api-key', 'claude-api-key'])
     await renderEditor()
 
-    expect(screen.getByRole('heading', { name: `Edit LLM secret: ${SECRET}` })).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: `Edit LLM secret: ${SECRET_NAME}` })
+    ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Replace OpenAI API key' })).toBeInTheDocument()
     expect(listLlmHostSecretsMock).toHaveBeenCalled()
     expect(getHostsMock).toHaveBeenCalled()
@@ -148,7 +150,7 @@ describe('Edit LLM secret page — loading', () => {
     const panel = container.querySelector('.cu-agent-create-panel--with-header')
     expect(panel).not.toBeNull()
     expect(panel?.querySelector('.cu-agent-create-panel__header')).toContainElement(
-      screen.getByRole('heading', { name: `Edit LLM secret: ${SECRET}` })
+      screen.getByRole('heading', { name: `Edit LLM secret: ${SECRET_NAME}` })
     )
     const form = panel?.querySelector('form.cu-create-content.cu-px-form')
     expect(form).not.toBeNull()
@@ -185,7 +187,7 @@ describe('Edit LLM secret page — loading', () => {
       </ToastProvider>
     )
 
-    expect(await screen.findByText(SECRET, { selector: 'code' })).toBeInTheDocument()
+    expect(await screen.findByText(SECRET_NAME, { selector: 'code' })).toBeInTheDocument()
     expect(screen.getByText(/was not found\./)).toBeInTheDocument()
   })
 })
@@ -231,7 +233,7 @@ describe('Edit LLM secret page — navigation', () => {
 
     await waitFor(() => {
       expect(apiSendMock).toHaveBeenCalledWith('PUT', '/api/v1/admin/secrets', {
-        name: SECRET,
+        name: SECRET_NAME,
         merge: true,
         stringData: { 'openai-api-key': 'sk-live' },
       })
@@ -255,7 +257,7 @@ describe('Edit LLM secret page — update payload', () => {
 
     await waitFor(() => {
       expect(apiSendMock).toHaveBeenCalledWith('PUT', '/api/v1/admin/secrets', {
-        name: SECRET,
+        name: SECRET_NAME,
         merge: true,
         stringData: {},
         removeKeys: ['claude-api-key-fb1'],
@@ -294,7 +296,7 @@ describe('Edit LLM secret page — update payload', () => {
 
     await waitFor(() => {
       expect(apiSendMock).toHaveBeenCalledWith('PUT', '/api/v1/admin/secrets', {
-        name: SECRET,
+        name: SECRET_NAME,
         merge: true,
         stringData: { 'openai-api-key': 'sk-live' },
         removeKeys: ['claude-api-key-fb1'],
@@ -311,7 +313,7 @@ describe('Edit LLM secret page — update payload', () => {
 
     await waitFor(() => {
       expect(apiSendMock).toHaveBeenCalledWith('PUT', '/api/v1/admin/secrets', {
-        name: SECRET,
+        name: SECRET_NAME,
         merge: true,
         stringData: { 'openai-api-key': 'sk-live' },
       })
@@ -340,7 +342,7 @@ describe('Edit LLM secret page — update payload', () => {
 
     await waitFor(() => {
       expect(apiSendMock).toHaveBeenCalledWith('PUT', '/api/v1/admin/secrets', {
-        name: SECRET,
+        name: SECRET_NAME,
         merge: true,
         stringData: { 'claude-api-key-fb1': 'sk-ant-new' },
       })
@@ -397,7 +399,7 @@ describe('Edit LLM secret page — update payload', () => {
 
     await waitFor(() => {
       expect(apiSendMock).toHaveBeenCalledWith('PUT', '/api/v1/admin/secrets', {
-        name: SECRET,
+        name: SECRET_NAME,
         merge: true,
         stringData: { 'openai-api-key': 'sk-live' },
       })
@@ -413,7 +415,7 @@ describe('Edit LLM secret page — fallback credential slot guard', () => {
     // The guard scans every Host, not just the linking surface's: any Host
     // whose secretRef points at this Secret contributes protected slots.
     seedHosts([
-      { name: 'foo', secretRef: SECRET, fallbackSlot },
+      { name: 'foo', secretRef: SECRET_NAME, fallbackSlot },
       { name: 'unrelated', secretRef: 'another-secret' },
     ])
 
@@ -446,7 +448,7 @@ describe('Edit LLM secret page — fallback credential slot guard', () => {
     // guard refuses it with the actionable reason.
     const fallbackSlot = 'claude-api-key-fb1'
     seedSecret(['openai-api-key', fallbackSlot])
-    seedHosts([{ name: 'foo', secretRef: SECRET, fallbackSlot }])
+    seedHosts([{ name: 'foo', secretRef: SECRET_NAME, fallbackSlot }])
 
     await renderEditor()
     const anthropic = sectionFor('Anthropic')
