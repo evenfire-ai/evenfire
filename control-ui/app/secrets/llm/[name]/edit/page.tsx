@@ -4,6 +4,7 @@ import React, { Suspense, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { BodyLoadingSkeleton, FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
+import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { LlmSecretEditor } from '@components/LlmSecretEditor'
@@ -105,38 +106,44 @@ function EditLlmSecretContent() {
   return (
     <AuthGate>
       <DashboardLayout isDetailPage>
-        <CreatePageHeader
-          icon={<IconKey />}
-          title={`Edit LLM secret${secretName ? `: ${secretName}` : ''}`}
-          subtitle="Stored values are never returned by the API. Type a new value to overwrite a key, or remove it to delete that key on save."
-          backLabel="Back to secrets"
-          onBack={goBack}
-        />
-
-        <div className="cu-create-panel">
-          <div className="cu-create-content">
-            {loading ? (
-              <FormSectionsSkeleton
-                label="LLM secret"
-                primaryActionLabel="Update secret"
-                sections={2}
-              />
-            ) : loadError ? (
-              <div className="cu-banner cu-banner--error">{loadError}</div>
-            ) : notFound ? (
-              <div className="cu-banner cu-banner--error">
+        <CreateFlowPanel
+          header={
+            <CreatePageHeader
+              icon={<IconKey />}
+              title={`Edit LLM secret${secretName ? `: ${secretName}` : ''}`}
+              subtitle="Stored values are never returned by the API. Type a new value to overwrite a key, or remove it to delete that key on save."
+              backLabel="Back to secrets"
+              onBack={goBack}
+            />
+          }
+        >
+          {loading ? (
+            <FormSectionsSkeleton
+              label="LLM secret"
+              primaryActionLabel="Update secret"
+              sections={2}
+            />
+          ) : loadError ? (
+            <div className="cu-create-content cu-px-form">
+              <div className="cu-banner cu-banner--error" role="alert">
+                {loadError}
+              </div>
+            </div>
+          ) : notFound ? (
+            <div className="cu-create-content cu-px-form">
+              <div className="cu-banner cu-banner--error" role="alert">
                 LLM secret <code>{secretName}</code> was not found.
               </div>
-            ) : (
-              <LlmSecretEditor
-                secretName={secretName}
-                existingKeys={existingKeys}
-                protectedCredentialSlots={protectedCredentialSlots}
-                onClose={goBack}
-              />
-            )}
-          </div>
-        </div>
+            </div>
+          ) : (
+            <LlmSecretEditor
+              secretName={secretName}
+              existingKeys={existingKeys}
+              protectedCredentialSlots={protectedCredentialSlots}
+              onClose={goBack}
+            />
+          )}
+        </CreateFlowPanel>
       </DashboardLayout>
     </AuthGate>
   )
@@ -151,7 +158,7 @@ export default function EditLlmSecretPage() {
           icon={<IconKey />}
           primaryActionLabel="Update secret"
           sections={2}
-          subtitle="Load the saved key metadata before editing stored values."
+          subtitle="Stored values are never returned by the API. Type a new value to overwrite a key, or remove it to delete that key on save."
           title="Edit LLM secret"
         />
       }

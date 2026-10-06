@@ -86,12 +86,13 @@ function seedHosts(hosts: Array<{ name: string; secretRef?: string; fallbackSlot
 }
 
 async function renderEditor() {
-  rtlRender(
+  const view = rtlRender(
     <ToastProvider>
       <EditLlmSecretPage />
     </ToastProvider>
   )
   await screen.findByRole('button', { name: 'Update secret' })
+  return view
 }
 
 const sectionFor = (label: string) =>
@@ -134,6 +135,28 @@ describe('Edit LLM secret page — loading', () => {
     expect(screen.getByRole('button', { name: 'Replace OpenAI API key' })).toBeInTheDocument()
     expect(listLlmHostSecretsMock).toHaveBeenCalled()
     expect(getHostsMock).toHaveBeenCalled()
+  })
+
+  it('composes the editor inside the shared CreateFlowPanel layout', async () => {
+    // Structural parity with the add-LLM-price / add-allowed-model flows:
+    // header + body live in one cu-agent-create-panel--with-header, the body
+    // is a real form (cu-create-content cu-px-form) with a FormSection and
+    // cu-create-actions footer.
+    seedSecret(['openai-api-key'])
+    const { container } = await renderEditor()
+
+    const panel = container.querySelector('.cu-agent-create-panel--with-header')
+    expect(panel).not.toBeNull()
+    expect(panel?.querySelector('.cu-agent-create-panel__header')).toContainElement(
+      screen.getByRole('heading', { name: `Edit LLM secret: ${SECRET}` })
+    )
+    const form = panel?.querySelector('form.cu-create-content.cu-px-form')
+    expect(form).not.toBeNull()
+    expect(form).toContainElement(screen.getByRole('heading', { name: 'Stored credentials' }))
+    expect(form).toContainElement(
+      screen.getByRole('button', { name: 'Update secret', type: 'submit' })
+    )
+    expect(form).toContainElement(screen.getByRole('button', { name: 'Cancel' }))
   })
 
   it('fails closed with an error banner when the Host read fails', async () => {

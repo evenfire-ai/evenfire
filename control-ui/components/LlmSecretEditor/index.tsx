@@ -1,7 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { Button } from '@components/ui'
+import type { FormEvent } from 'react'
+import { Button, FormSection } from '@components/ui'
 import { apiSend } from '@lib/api'
 import { createEmptyLlmKeyDraft, validateLlmSecretData } from '@lib/llm'
 import { useConfirmDialog } from '../ConfirmDialog'
@@ -34,6 +35,14 @@ export function LlmSecretEditor({
 
   function cancel() {
     if (!saving) onClose()
+  }
+
+  // Same contract as the reference create forms (LlmPriceForm/LlmModelForm):
+  // the primary action is a true submit, pending disables the entry points.
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (saving) return
+    void saveSecret()
   }
 
   async function saveSecret() {
@@ -117,44 +126,40 @@ export function LlmSecretEditor({
 
   return (
     <>
-      <div className="cu-form-stack">
-        <div className="cu-banner cu-banner--info">
-          Stored values are never returned by the API: rows marked <strong>Stored</strong> already
-          have a value — keep it as is or choose <strong>Replace</strong> to overwrite it. Removing
-          an additional credential slot deletes that key on save; slots marked{' '}
-          <strong>fallback-locked</strong> are referenced by an active fallback policy and cannot be
-          removed here. Every other key already stored in this secret is preserved.
-        </div>
-        <LlmCredentialFields
-          draft={keyDraft}
-          onChange={(dataKey, value) => setKeyDraft(prev => ({ ...prev, [dataKey]: value }))}
-          existingKeys={existingKeys}
-          protectedKeys={protectedCredentialSlots}
-          // The editor reports on every change. Keep the parent state
-          // identity-stable so it does not cause an unnecessary rerender.
-          onRemovedKeysChange={next =>
-            setRemovedKeys(prev => (prev.join('\n') === next.join('\n') ? prev : next))
-          }
-          disabled={saving}
-        />
+      <form className="cu-create-content cu-px-form" onSubmit={handleSubmit}>
+        <FormSection
+          title="Stored credentials"
+          description="Stored values are never returned by the API — keep a stored key as is or replace it. Removing an additional credential slot deletes that key on save; slots marked fallback-locked are referenced by an active fallback policy and cannot be removed here. Every other key already stored in this secret is preserved."
+        >
+          <LlmCredentialFields
+            draft={keyDraft}
+            onChange={(dataKey, value) => setKeyDraft(prev => ({ ...prev, [dataKey]: value }))}
+            existingKeys={existingKeys}
+            protectedKeys={protectedCredentialSlots}
+            // The editor reports on every change. Keep the parent state
+            // identity-stable so it does not cause an unnecessary rerender.
+            onRemovedKeysChange={next =>
+              setRemovedKeys(prev => (prev.join('\n') === next.join('\n') ? prev : next))
+            }
+            disabled={saving}
+          />
+        </FormSection>
 
-        {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
+        {error ? (
+          <div className="cu-banner cu-banner--error" role="alert">
+            {error}
+          </div>
+        ) : null}
 
         <div className="cu-create-actions">
           <Button type="button" variant="ghost" size="sm" onClick={cancel} disabled={saving}>
             Cancel
           </Button>
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            onClick={() => void saveSecret()}
-            disabled={saving}
-          >
+          <Button type="submit" variant="primary" size="sm" disabled={saving}>
             {saving ? 'Saving…' : 'Update secret'}
           </Button>
         </div>
-      </div>
+      </form>
       {confirmDialog}
     </>
   )
