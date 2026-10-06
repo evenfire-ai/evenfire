@@ -24,11 +24,7 @@ import { createLogger } from '../observability/logger'
 import type { Logger } from '../observability/logger'
 import { WorkflowRecipeCRD, WorkloadDef } from '../types'
 import { CRD_GROUP, CRD_VERSION } from './crdConstants'
-import {
-  ResourceVanishedAfterConflictError,
-  RetryableReconcileError,
-  getErrorCode,
-} from './k8sErrors'
+import { ResourceVanishedAfterConflictError, getErrorCode } from './k8sErrors'
 import {
   ownerRef,
   resolveWorkloadResourceName,
@@ -1234,13 +1230,9 @@ export async function preDeployMcpServers(
   }
   if (errors.length > 0) {
     const ids = errors.map(e => e.workloadId).join(', ')
-    const message = `Pre-deploy failed for workload(s): ${ids}. Reconciler will retry to ensure all NetworkPolicies are applied before workloads start.`
-    // Retryable only when every failure was (e.g. a Service that vanished after
-    // a create conflict); one permanent failure keeps the error terminal.
-    if (errors.every(e => e.error instanceof RetryableReconcileError)) {
-      throw new RetryableReconcileError(message, { cause: errors[0].error })
-    }
-    throw new Error(message)
+    throw new Error(
+      `Pre-deploy failed for workload(s): ${ids}. Reconciler will retry to ensure all NetworkPolicies are applied before workloads start.`
+    )
   }
 
   // Create (or update) the per-recipe Context CRD immediately after McpServers
@@ -1268,15 +1260,11 @@ export async function preDeployMcpServers(
         recipe.metadata.namespace
       )
     } catch (err) {
-      const message = `Pre-deploy Context allowlist failed for "${recipe.metadata.name}": ${
-        err instanceof Error ? err.message : String(err)
-      }`
-      // Keep a retryable cause retryable, so the reconcile degrades and
-      // requeues instead of latching `failed` (#998 audit).
-      if (err instanceof RetryableReconcileError) {
-        throw new RetryableReconcileError(message, { cause: err })
-      }
-      throw new Error(message)
+      throw new Error(
+        `Pre-deploy Context allowlist failed for "${recipe.metadata.name}": ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
     }
   }
 
