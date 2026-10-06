@@ -5,7 +5,7 @@ import { type HostWakeApiResponse, requestHostWakeFromControlApi } from './contr
 import { forwardHostHealth } from './mcpHostRestService.js'
 
 /** Strip control characters and newlines from user-derived hostRef before log interpolation. */
-function sanitizeHostRefForLog(hostRef: string): string {
+export function sanitizeHostRefForLog(hostRef: string): string {
   return hostRef.replace(/[\r\n\t\x00-\x1f\x7f]/g, '')
 }
 

@@ -1053,3 +1053,99 @@ describe('Host error bodies stay out of rpc-proxy logs', () => {
     }
   })
 })
+
+describe('a hostRef from the URL cannot forge rpc-proxy log lines', () => {
+  // Express decodes route params, so `%0D%0A` reaches the route as CR LF.
+  const ENCODED_HOST_REF = 'chat%0D%0Allm'
+
+  function captureWarnLines() {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    return {
+      lines: () => spy.mock.calls.map(args => args.map(String).join(' ')),
+      restore: () => spy.mockRestore(),
+    }
+  }
+
+  // The message route validates hostRef before any log line, so its two
+  // failure logs can never receive CR or LF; this pins that refusal.
+  it('refuses a CR/LF hostRef on the message route before resolving the Host', async () => {
+    const logs = captureWarnLines()
+    try {
+      const response = await request(makeApp())
+        .post(`/rpc/hosts/${ENCODED_HOST_REF}/messages`)
+        .set('authorization', 'Bearer token')
+        .send({ content: 'hello' })
+
+      // Witness: the hostRef guard answered.
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'Invalid hostRef' })
+      expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+      expect(logs.lines().filter(entry => /[\r\n]/.test(entry))).toEqual([])
+    } finally {
+      logs.restore()
+    }
+  })
+
+  it.each([
+    {
+      site: 'host activity',
+      scopes: ['host:activity:read'],
+      arrange: () =>
+        serviceMock.resolveHostConnectionForUser.mockRejectedValueOnce(new Error('boom')),
+      send: (app: express.Express) =>
+        request(app)
+          .get(`/rpc/hosts/${ENCODED_HOST_REF}/activity`)
+          .set('authorization', 'Bearer token'),
+      line: '[RPC_PROXY] host activity failed host=chatllm error=',
+    },
+    {
+      site: 'host status',
+      scopes: ['host:status:read'],
+      arrange: () =>
+        serviceMock.resolveHostConnectionForUser.mockRejectedValueOnce(new Error('boom')),
+      send: (app: express.Express) =>
+        request(app)
+          .get(`/rpc/hosts/${ENCODED_HOST_REF}/status`)
+          .set('authorization', 'Bearer token'),
+      line: '[RPC_PROXY] host status failed host=chatllm error=',
+    },
+    {
+      site: 'host status malformed',
+      scopes: ['host:status:read'],
+      arrange: () => serviceMock.forwardHostStatus.mockResolvedValueOnce(null),
+      send: (app: express.Express) =>
+        request(app)
+          .get(`/rpc/hosts/${ENCODED_HOST_REF}/status`)
+          .set('authorization', 'Bearer token'),
+      line: '[RPC_PROXY] host status malformed host=chatllm user=',
+    },
+    {
+      site: 'host health',
+      scopes: ['host:health:read'],
+      arrange: () =>
+        serviceMock.resolveHostConnectionForUser.mockRejectedValueOnce(new Error('boom')),
+      send: (app: express.Express) =>
+        request(app)
+          .get(`/rpc/hosts/${ENCODED_HOST_REF}/health`)
+          .set('authorization', 'Bearer token'),
+      line: '[RPC_PROXY] host health failed host=chatllm error=',
+    },
+  ])(
+    'strips CR and LF from the hostRef in the $site log line',
+    async ({ scopes, arrange, send, line }) => {
+      authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS, scopes })
+      arrange()
+      const logs = captureWarnLines()
+      try {
+        await send(makeApp())
+
+        // Witness: the route reached the log site and wrote exactly one line for it.
+        expect(logs.lines().filter(entry => entry.includes(line))).toHaveLength(1)
+        expect(logs.lines().filter(entry => /[\r\n]/.test(entry))).toEqual([])
+      } finally {
+        logs.restore()
+      }
+    }
+  )
+})

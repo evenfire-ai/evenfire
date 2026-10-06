@@ -281,13 +281,13 @@ function findLastUserIndex(messages: ChatMessage[]): number {
 
 function parseNativeAttachmentTextPage(
   content: string
-): { page: AttachmentTextPage; wrapperSanitized: string | null } | null {
+): { page: AttachmentTextPage; wrapperSanitized: boolean | null } | null {
   let candidate = content
-  let wrapperSanitized: string | null = null
+  let wrapperSanitized: boolean | null = null
   const wrapped = WRAPPED_ATTACHMENT_OUTPUT_PATTERN.exec(content)
   if (wrapped) {
     candidate = wrapped[2]!
-    wrapperSanitized = wrapped[1]!
+    wrapperSanitized = wrapped[1] === 'true'
   }
   let parsed: unknown
   try {
@@ -358,7 +358,7 @@ function isAttachmentTextPage(value: unknown): value is AttachmentTextPage {
 
 function buildAttachmentPageStub(parsed: {
   page: AttachmentTextPage
-  wrapperSanitized: string | null
+  wrapperSanitized: boolean | null
 }): string {
   const { page, wrapperSanitized } = parsed
   const stub = JSON.stringify({
@@ -372,7 +372,9 @@ function buildAttachmentPageStub(parsed: {
     text: ATTACHMENT_PAGE_COLLAPSE_MARKER,
   })
   if (wrapperSanitized === null) return stub
-  return `<tool_output name="${ATTACHMENT_READ_TOOL_NAME}" sanitized="${wrapperSanitized}">\n${stub}\n</tool_output>`
+  // The attribute is rebuilt from the parsed flag, never copied from the input.
+  const sanitizedAttribute = wrapperSanitized ? 'true' : 'false'
+  return `<tool_output name="${ATTACHMENT_READ_TOOL_NAME}" sanitized="${sanitizedAttribute}">\n${stub}\n</tool_output>`
 }
 
 // ─── Pass 1 — Dedup tool outputs ────────────────────────────────────────────

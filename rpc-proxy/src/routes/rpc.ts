@@ -44,6 +44,7 @@ import {
   isUpstreamTimeoutError,
   isWakeEligibleHostError,
   respondWithWakeAndHold,
+  sanitizeHostRefForLog,
 } from '../services/wakeAndHold.js'
 import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
@@ -523,7 +524,7 @@ export function createRpcRouter(): Router {
           })
         } catch (error) {
           console.warn(
-            `[RPC_PROXY] host message forward failed host=${hostRef} error=${describeErrorForLog(
+            `[RPC_PROXY] host message forward failed host=${sanitizeHostRefForLog(hostRef)} error=${describeErrorForLog(
               error
             )}`
           )
@@ -567,7 +568,7 @@ export function createRpcRouter(): Router {
           return
         }
         console.warn(
-          `[RPC_PROXY] host message forward failed host=${String(req.params.hostRef || '').trim()} error=${describeErrorForLog(
+          `[RPC_PROXY] host message forward failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
             error
           )}`
         )
@@ -1667,7 +1668,7 @@ export function createRpcRouter(): Router {
         res.status(200).json(activity)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host activity failed host=${String(req.params.hostRef || '').trim()} error=${describeErrorForLog(
+          `[RPC_PROXY] host activity failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
             error
           )}`
         )
@@ -1701,14 +1702,16 @@ export function createRpcRouter(): Router {
 
         const status = await forwardHostStatus(host)
         if (!status) {
-          console.warn(`[RPC_PROXY] host status malformed host=${hostRef} user=${auth.sub}`)
+          console.warn(
+            `[RPC_PROXY] host status malformed host=${sanitizeHostRefForLog(hostRef)} user=${auth.sub}`
+          )
           res.status(502).json({ error: 'Invalid upstream host status response' })
           return
         }
         res.status(200).json(status)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host status failed host=${String(req.params.hostRef || '').trim()} error=${describeErrorForLog(
+          `[RPC_PROXY] host status failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
             error
           )}`
         )
@@ -1744,7 +1747,7 @@ export function createRpcRouter(): Router {
         res.status(200).json(health)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host health failed host=${String(req.params.hostRef || '').trim()} error=${describeErrorForLog(
+          `[RPC_PROXY] host health failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
             error
           )}`
         )
