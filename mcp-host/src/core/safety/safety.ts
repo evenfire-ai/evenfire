@@ -96,55 +96,158 @@ function scanJsonStrings(text: string): {
  * range of the original text behind each of its code units. An original code
  * unit stands for itself; a replacement's code units stand for the union of
  * the ranges it replaced, so a later match that covers part of an earlier
- * replacement covers everything that replacement stands for. Both range ends
- * are non-decreasing along the copy, so a match `[a, b)` stands for
- * `[origStart[a], origEnd[b - 1])`.
+ * replacement covers everything that replacement stands for, and a match
+ * `[a, b)` stands for the range from code unit `a`'s start to code unit
+ * `b - 1`'s end.
+ *
+ * Only the replacements are stored, as segments sorted along the copy: code
+ * units `[textStart, textEnd)` stand for `[origStart, origEnd)`. The code
+ * units between two segments are original and consecutive, and the first one
+ * after a segment stands for that segment's `origEnd`, so a replacement costs
+ * time in the number of segments, not in the length of the text.
  */
 class RedactionReplay {
   text: string
   readonly ranges: RedactionRange[] = []
-  private origStart: Int32Array
-  private origEnd: Int32Array
+  private count = 0
+  private textStart = new Int32Array(0)
+  private textEnd = new Int32Array(0)
+  private origStart = new Int32Array(0)
+  private origEnd = new Int32Array(0)
 
   constructor(content: string) {
     this.text = content
-    this.origStart = new Int32Array(content.length)
-    this.origEnd = new Int32Array(content.length)
-    for (let i = 0; i < content.length; i++) {
-      this.origStart[i] = i
-      this.origEnd[i] = i + 1
-    }
   }
 
-  /** Replaces sorted, non-overlapping, non-empty `matches` of `text`. */
+  /**
+   * Replaces sorted, non-overlapping, non-empty `matches` of `text` with a
+   * non-empty `replacement`.
+   */
   replace(matches: Array<[number, number]>, replacement: string): void {
     if (matches.length === 0) return
-    let length = this.text.length
-    for (const [a, b] of matches) length += replacement.length - (b - a)
-    const nextStart = new Int32Array(length)
-    const nextEnd = new Int32Array(length)
+    if (replacement.length === 0) throw new Error('RedactionReplay: empty replacement')
+    // Each match adds its own segment, and one more when it lies strictly
+    // inside a segment, which it cuts into a part before and a part after it.
+    // Typed arrays drop writes past their end, so the count is checked below.
+    const capacity = this.count + 2 * matches.length
+    const textStart = new Int32Array(capacity)
+    const textEnd = new Int32Array(capacity)
+    const origStart = new Int32Array(capacity)
+    const origEnd = new Int32Array(capacity)
+    let count = 0
     const parts: string[] = []
     let cursor = 0
-    let at = 0
+    let shift = 0
+    let k = 0
+    // The end of the last segment before the current position, in the
+    // current copy and in the original: an original code unit `p` after it
+    // stands for `prevOrigEnd + (p - prevTextEnd)`.
+    let prevTextEnd = 0
+    let prevOrigEnd = 0
     for (const [a, b] of matches) {
-      nextStart.set(this.origStart.subarray(cursor, a), at)
-      nextEnd.set(this.origEnd.subarray(cursor, a), at)
-      at += a - cursor
-      const start = this.origStart[a]
-      const end = this.origEnd[b - 1]
+      while (k < this.count && this.textEnd[k] <= a) {
+        textStart[count] = this.textStart[k] + shift
+        textEnd[count] = this.textEnd[k] + shift
+        origStart[count] = this.origStart[k]
+        origEnd[count] = this.origEnd[k]
+        count++
+        prevTextEnd = this.textEnd[k]
+        prevOrigEnd = this.origEnd[k]
+        k++
+      }
+      let start: number
+      if (k < this.count && this.textStart[k] <= a) {
+        start = this.origStart[k]
+        if (this.textStart[k] < a) {
+          // Keep the part of the segment before the match.
+          textStart[count] = this.textStart[k] + shift
+          textEnd[count] = a + shift
+          origStart[count] = this.origStart[k]
+          origEnd[count] = this.origEnd[k]
+          count++
+        }
+      } else {
+        start = prevOrigEnd + (a - prevTextEnd)
+      }
+      let last = -1
+      while (k < this.count && this.textStart[k] < b) {
+        last = k
+        k++
+      }
+      let end: number
+      if (last !== -1 && this.textEnd[last] > b) {
+        end = this.origEnd[last]
+        // Keep the part of the segment after the match for the next one.
+        k = last
+        this.textStart[last] = b
+      } else {
+        if (last !== -1) {
+          prevTextEnd = this.textEnd[last]
+          prevOrigEnd = this.origEnd[last]
+        }
+        end = prevOrigEnd + (b - prevTextEnd)
+      }
       this.ranges.push({ start, end, replacement })
-      nextStart.fill(start, at, at + replacement.length)
-      nextEnd.fill(end, at, at + replacement.length)
-      at += replacement.length
+      textStart[count] = a + shift
+      textEnd[count] = a + shift + replacement.length
+      origStart[count] = start
+      origEnd[count] = end
+      count++
       parts.push(this.text.slice(cursor, a), replacement)
       cursor = b
+      shift += replacement.length - (b - a)
     }
-    nextStart.set(this.origStart.subarray(cursor), at)
-    nextEnd.set(this.origEnd.subarray(cursor), at)
+    for (; k < this.count; k++) {
+      textStart[count] = this.textStart[k] + shift
+      textEnd[count] = this.textEnd[k] + shift
+      origStart[count] = this.origStart[k]
+      origEnd[count] = this.origEnd[k]
+      count++
+    }
+    if (count > capacity) throw new Error('RedactionReplay: segment capacity exceeded')
     parts.push(this.text.slice(cursor))
     this.text = parts.join('')
-    this.origStart = nextStart
-    this.origEnd = nextEnd
+    this.count = count
+    this.textStart = textStart
+    this.textEnd = textEnd
+    this.origStart = origStart
+    this.origEnd = origEnd
+  }
+}
+
+/**
+ * Whether every code unit of each queried range lies in some range of
+ * `ranges`. Ranges that overlap or touch are joined first, so a queried range
+ * is covered exactly when one joined range holds it.
+ */
+function coverageOf(ranges: RedactionRange[]): (start: number, end: number) => boolean {
+  const sorted = [...ranges].sort((x, y) => x.start - y.start)
+  const starts: number[] = []
+  const ends: number[] = []
+  for (const range of sorted) {
+    const last = ends.length - 1
+    if (last >= 0 && range.start <= ends[last]) {
+      if (range.end > ends[last]) ends[last] = range.end
+    } else {
+      starts.push(range.start)
+      ends.push(range.end)
+    }
+  }
+  return (start, end) => {
+    // The last joined range that starts at or before `start`.
+    let low = 0
+    let high = starts.length - 1
+    let found = -1
+    while (low <= high) {
+      const middle = (low + high) >> 1
+      if (starts[middle] <= start) {
+        found = middle
+        low = middle + 1
+      } else {
+        high = middle - 1
+      }
+    }
+    return found !== -1 && ends[found] >= end
   }
 }
 
@@ -706,9 +809,13 @@ export class BasicSafety implements Safety {
       let found = false
       const original: Array<[number, number]> = []
       for (const find of rule.find) {
+        // Until a rule replaces something, the copy is `content`, so the
+        // matches on `content` are the replay's own, which it covers whole.
+        const untouched = replay.ranges.length === 0
         const matches = find(replay.text)
         if (matches.length > 0) found = true
         replay.replace(matches, rule.replacement)
+        if (untouched) continue
         // A loop, not `push(...)`: spreading one argument per match overflows
         // the call stack at about 120k matches.
         for (const match of find(content)) original.push(match)
@@ -719,26 +826,14 @@ export class BasicSafety implements Safety {
 
     // A match on `content` that the replay already covers adds nothing, and
     // dropping it keeps the result equal to the in-order replacement.
-    // `uncoveredBefore[i]` counts the code units before `i` no replay range
-    // covers.
-    const depth = new Int32Array(content.length + 1)
-    for (const range of replay.ranges) {
-      depth[range.start]++
-      depth[range.end]--
-    }
-    const uncoveredBefore = new Int32Array(content.length + 1)
-    let covering = 0
-    for (let i = 0; i < content.length; i++) {
-      covering += depth[i]
-      uncoveredBefore[i + 1] = uncoveredBefore[i] + (covering === 0 ? 1 : 0)
-    }
+    const covered = coverageOf(replay.ranges)
 
     const ranges = [...replay.ranges]
     const warnings: string[] = []
     rules.forEach((rule, index) => {
       let found = replayed[index]
       for (const [start, end] of direct[index]) {
-        if (uncoveredBefore[end] - uncoveredBefore[start] === 0) continue
+        if (covered(start, end)) continue
         ranges.push({ start, end, replacement: rule.replacement })
         found = true
       }

@@ -658,6 +658,76 @@ describe('BasicSafety', () => {
     }, 60_000)
   })
 
+  describe('a later rule matching inside an earlier replacement', () => {
+    const freeform = (entries: Array<{ name: string; value: string }>, content: string) =>
+      new BasicSafety(() => entries).sanitizeFreeformContent(content, { secretWarning: 'w' })
+    const warned = (...names: string[]) =>
+      names.map(name => `ConfigStore secret value redacted (${name})`)
+
+    it('cuts the replacement in three without losing a part', () => {
+      // `REDA` lies strictly inside `[REDACTED:A]`, so the replacement is
+      // split into a part before the match, the match and a part after it.
+      expect(
+        freeform(
+          [
+            { name: 'A', value: 'abcd' },
+            { name: 'B', value: 'REDA' },
+          ],
+          'abcd'
+        )
+      ).toEqual({ content: '[REDACTED]', was_modified: true, warnings: warned('A', 'B') })
+    })
+
+    it('maps the part before the match to the replaced range', () => {
+      // B cuts `[REDACTED:A]x` at `ED:A`; C then matches `DACT` in the part
+      // before B's match, which stands for `ghij` only, so `x` stays.
+      expect(
+        freeform(
+          [
+            { name: 'A', value: 'ghij' },
+            { name: 'B', value: 'ED:A' },
+            { name: 'C', value: 'DACT' },
+          ],
+          'ghijx'
+        )
+      ).toEqual({ content: '[REDACTED]x', was_modified: true, warnings: warned('A', 'B', 'C') })
+    })
+
+    it('maps the part after the match to the replaced range', () => {
+      // B cuts `[REDACTED:A]` at `DACT`; C then matches `D:A]` in the part
+      // after B's match, which stands for `efgh`, so one marker remains.
+      expect(
+        freeform(
+          [
+            { name: 'A', value: 'efgh' },
+            { name: 'B', value: 'DACT' },
+            { name: 'C', value: 'D:A]' },
+          ],
+          'efgh'
+        )
+      ).toEqual({ content: '[REDACTED]', was_modified: true, warnings: warned('A', 'B', 'C') })
+    })
+
+    it('treats adjacent replacements as covering the text they span', () => {
+      // `abcdef` no longer appears after A, so B is matched on the original
+      // text; C and A together cover it, so B adds nothing and is not reported.
+      expect(
+        freeform(
+          [
+            { name: 'A', value: 'efgh' },
+            { name: 'B', value: 'abcdef' },
+            { name: 'C', value: 'abcd' },
+          ],
+          'abcdefghij'
+        )
+      ).toEqual({
+        content: '[REDACTED:C][REDACTED:A]ij',
+        was_modified: true,
+        warnings: warned('A', 'C'),
+      })
+    })
+  })
+
   describe('redaction patterns that can match nothing', () => {
     it('refuses a filter that matches an empty string', () => {
       const filter = (pattern: RegExp) => ({
