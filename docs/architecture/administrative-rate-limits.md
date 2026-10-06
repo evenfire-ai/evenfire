@@ -70,7 +70,8 @@ only requests that present a bearer token, uses
 CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN (6000) as its limit, and
 denies further tokens from that IP without verifying them. Invalid credentials
 still stop at IP600, and valid callers behind a flooded IP keep passing until
-the IP has spent 6000 verifications in the minute. Verified principals that
+the IP has spent 6000 verifications in the calendar minute, the same window
+the authenticated gate and the internal edge reset on. Verified principals that
 share one source IP share this budget, and the internal SDK edge allowance
 cannot exceed it from one IP.
 
@@ -150,7 +151,8 @@ subscription-read cooldown. Ordinary Agent sections do not fetch optional
 subscription inventory; editor opening loads it when needed.
 
 At most one shared idempotent recovery GET proceeds after a denial deadline.
-Forced refresh respects the same pause. Authentication changes, 401 and
+A denied recovery schedules no further attempt, but it releases its
+reservation, so the next denial in that read family schedules its own. Forced refresh respects the same pause. Authentication changes, 401 and
 cross-tab invalidation fence old awaits and clear identity-bound state.
 Aborting one subscriber does not cancel another subscriber’s shared request.
 SSR does not retain cached/deduplicated results across requests.

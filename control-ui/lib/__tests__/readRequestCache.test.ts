@@ -366,6 +366,55 @@ describe('bounded metadata read reuse', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('schedules one recovery for a later denial after a recovery was itself denied', async () => {
+    const path = '/api/v1/admin/connections'
+    const connections = { metadataRead: 'subscription-connections' } as const
+    fetchMock.mockResolvedValueOnce(throttled(12)).mockResolvedValueOnce(throttled(12))
+    await expect(apiGet(path, {}, connections)).rejects.toMatchObject({ status: 429 })
+    await vi.advanceTimersByTimeAsync(12_000)
+    // The single recovery ran and was denied; it does not schedule another.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    fetchMock
+      .mockResolvedValueOnce(throttled(12))
+      .mockResolvedValueOnce(success({ connections: ['recovered'] }))
+    await expect(apiGet(path, {}, connections)).rejects.toMatchObject({ status: 429 })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(String(fetchMock.mock.calls[3][0])).toContain(path)
+    await expect(apiGet(path, {}, connections)).resolves.toEqual({ connections: ['recovered'] })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('schedules a recovery for a remount after every earlier subscriber left', async () => {
+    const path = '/api/v1/admin/connections'
+    const firstMount = new AbortController()
+    fetchMock.mockResolvedValueOnce(throttled(12))
+    await expect(
+      apiGet(path, {}, { metadataRead: 'subscription-connections', signal: firstMount.signal })
+    ).rejects.toMatchObject({ status: 429 })
+    firstMount.abort()
+    await vi.advanceTimersByTimeAsync(24_000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    const secondMount = new AbortController()
+    fetchMock
+      .mockResolvedValueOnce(throttled(12))
+      .mockResolvedValueOnce(success({ connections: ['remounted'] }))
+    await expect(
+      apiGet(path, {}, { metadataRead: 'subscription-connections', signal: secondMount.signal })
+    ).rejects.toMatchObject({ status: 429 })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    await expect(apiGet(path, {}, { metadataRead: 'subscription-connections' })).resolves.toEqual({
+      connections: ['remounted'],
+    })
+  })
+
   it('clears metadata on an epoch change and broadcasts only a non-sensitive invalidation', async () => {
     const listener = new BroadcastChannel('control-ui-read-metadata-invalidation')
     const received: unknown[] = []

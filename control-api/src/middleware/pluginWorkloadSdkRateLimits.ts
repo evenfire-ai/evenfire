@@ -62,14 +62,18 @@ export function pluginSdkPreauthAssignment(principal: string | null): {
  * verified SDK allowance: invalid credentials still stop at the IP600 ceiling
  * and valid callers behind a flooded IP keep passing until this budget, after
  * which further tokens from that IP are denied without being verified.
+ * It shares the calendar minute of the gates it bounds, so it cannot stay
+ * exhausted after they reset. The key deliberately has no `:ip:` marker,
+ * which would keep CalendarMinuteRateLimitStore on a first-hit window.
  */
 export function createPluginWorkloadSdkVerificationBudgetRateLimit(): RequestHandler {
   return rateLimit({
     windowMs: 60_000,
+    store: new CalendarMinuteRateLimitStore(),
     limit: config.pluginSdkAuthenticatedPreauthRlPerMin,
     skip: req => extractBearerToken(req) === '',
     keyGenerator: req =>
-      `plugin_workload_sdk_verification:ip:${ipKeyGenerator(req.ip || 'unknown')}`,
+      `plugin_workload_sdk_verification:source:${ipKeyGenerator(req.ip || 'unknown')}`,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     message: { error: 'Too Many Requests', retryable: true },

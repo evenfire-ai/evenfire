@@ -98,6 +98,30 @@ describe('Plugin Workload SDK verification budget', () => {
     expect(mcpHostVerificationsOf(valid)).toBe(1)
   })
 
+  it('resets on the same calendar minute as the authenticated gate it bounds', async () => {
+    config.pluginSdkAuthenticatedPreauthRlPerMin = 2
+    config.pluginSdkPreauthRlPerMin = 600
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:50.000Z'))
+      const instance = preauthApp()
+      const valid = signedHost()
+      for (let i = 0; i < 2; i += 1) {
+        await request(instance).get('/sdk-gate').set('Authorization', `Bearer ${valid}`).expect(200)
+      }
+      await request(instance).get('/sdk-gate').set('Authorization', `Bearer ${valid}`).expect(429)
+      expect(mcpHostVerificationsOf(valid)).toBe(2)
+
+      // Ten seconds later the calendar minute has turned: the gate admits the
+      // principal again, and the budget in front of it must not still deny.
+      vi.setSystemTime(new Date('2026-01-01T00:01:00.500Z'))
+      await request(instance).get('/sdk-gate').set('Authorization', `Bearer ${valid}`).expect(200)
+      expect(mcpHostVerificationsOf(valid)).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('does not spend the budget on requests that present no bearer token', async () => {
     config.pluginSdkAuthenticatedPreauthRlPerMin = 1
     config.pluginSdkPreauthRlPerMin = 10

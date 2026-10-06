@@ -22,7 +22,7 @@ type RecoveryEntry = {
   pending: Promise<void>
   resolve: () => void
   reject: (error: unknown) => void
-  state: 'scheduled' | 'running' | 'failed'
+  state: 'scheduled' | 'running'
   removeListeners: () => void
   addSubscribers: (signals: Array<AbortSignal | undefined>) => void
 }
@@ -200,9 +200,7 @@ function disposeRecovery(entry: RecoveryEntry): void {
 
 export function getReadRequestRecovery(key: string): Promise<void> | undefined {
   const recovery = recoveries.get(key)
-  return recovery && recovery.state !== 'failed' && recovery.deadlineMs <= Date.now()
-    ? recovery.pending
-    : undefined
+  return recovery && recovery.deadlineMs <= Date.now() ? recovery.pending : undefined
 }
 
 export function reserveReadRequestRecovery(
@@ -235,9 +233,9 @@ export function reserveReadRequestRecovery(
   const watchedSignals = new Set<AbortSignal>()
   const onAbort = () => {
     if (!Array.from(interests).every(signal => signal?.aborted)) return
-    const entry = recoveries.get(key)
-    if (!entry) return
-    entry.state = 'failed'
+    // Release the reservation so a later mount's denial can schedule its own.
+    if (recoveries.get(key) !== entry) return
+    recoveries.delete(key)
     disposeRecovery(entry)
   }
   const entry: RecoveryEntry = {
@@ -299,9 +297,12 @@ export function completeReadRequestRecovery(key: string): void {
 }
 
 export function failReadRequestRecovery(key: string, error: unknown): void {
+  // Only the running recovery reports its own failure. Its denial could not
+  // reserve another attempt, so releasing the entry keeps one recovery per
+  // denial while letting a later denial in this family schedule its own.
   const recovery = recoveries.get(key)
-  if (!recovery) return
-  recovery.state = 'failed'
+  if (recovery?.state !== 'running') return
+  recoveries.delete(key)
   recovery.removeListeners()
   recovery.reject(error)
 }
