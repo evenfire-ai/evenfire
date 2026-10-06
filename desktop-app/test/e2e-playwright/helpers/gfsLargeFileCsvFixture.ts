@@ -49,16 +49,25 @@ export function hasCsvDataRecordCount(summary: string, count: number): boolean {
 export function csvColumnCountClaims(summary: string): number[] {
   const label = String.raw`(?:columnas|columns)`
   const number = String.raw`(?<![\p{L}\p{N}_\-\u2212])(\d{1,3}(?:[., \t]\d{3})+|\d+)(?![\p{L}\p{N}_]|[.,]\d)`
+  const total = String.raw`(?:total(?:es)?|\([ \t]*total[ \t]*\))`
   // Horizontal spacing cannot mistake the first numbered item below a
   // "Columns:" heading for a count of columns.
   const pattern = new RegExp(
-    String.raw`(?:\b${label}\b\*{0,2}[ \t]*(?:\(|:|es|=|de|son)?[ \t]*\*{0,2}[ \t]*${number}|${number}[ \t*\x60_]{1,12}\b${label}\b)`,
+    String.raw`(?:\b${label}\b\*{0,2}[ \t]*(?:${total}[ \t]*)?(?:\(|:|es|=|de|son)?[ \t]*\*{0,2}[ \t]*${number}|${number}[ \t*\x60_]{1,12}\b${label}\b)`,
     'giu'
   )
-  return [...summary.matchAll(pattern)]
-    .flatMap(match => [match[1], match[2]])
-    .filter((raw): raw is string => Boolean(raw))
-    .map(raw => Number(raw.replace(/[., \t]/g, '')))
+  const claims: number[] = []
+  for (const match of summary.matchAll(pattern)) {
+    const raw = match[1] ?? match[2]
+    if (!raw) continue
+    const explicit = /\btotal(?:es)?\b/iu.test(match[0]) || match[0].includes('(')
+    const tail = summary.slice(match.index + match[0].length)
+    const ordinal = /^[*_\x60]*[.)][ \t]*\S/u.test(tail)
+    const nextLabel = /^[*_\x60]*\.[ \t]*[*_\x60]*\p{L}[\p{L}\p{N}_ \t-]*[*_\x60]*:/u.test(tail)
+    if (match[1] && !explicit && ordinal && !nextLabel) continue
+    claims.push(Number(raw.replace(/[., \t]/g, '')))
+  }
+  return claims
 }
 
 /** Count distinct header mentions without returning private field names. */

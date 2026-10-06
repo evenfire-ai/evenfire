@@ -114,6 +114,15 @@ describe('large-file CSV summary assertions', () => {
     ['Columnas: 78,59', []],
     ['Columnas: -78', []],
     ['Columnas: 78; total: 79 columnas', [78, 79]],
+    ['Columnas: 1. field_0, 2. field_1', []],
+    ['Columnas: 1) field_0, 2) field_1', []],
+    ['Columnas:1.field_0,2.field_1', []],
+    ['Hay 78 columnas. Columnas: 1) field_0, 2) field_1', [78]],
+    ['Columnas totales:79', [79]],
+    ['Columnas(total):79', [79]],
+    ['Columnas (total): 79', [79]],
+    ['Columnas:79. Nombres: field_0, field_1', [79]],
+    ['Columnas (78): 1. field_0, 2. field_1', [78]],
   ] as const)('extracts explicit column-count claims from %j', (summary, claims) => {
     expect(csvColumnCountClaims(summary)).toEqual(claims)
   })
