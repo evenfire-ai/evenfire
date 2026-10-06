@@ -985,6 +985,28 @@ describe('ComposerPanel Codex image budgets', () => {
     expect(expectSinglePreparedImage().name).toBe('next.png')
   })
 
+  it('refuses a new image with a visible error when an attached image holds malformed base64', async () => {
+    // A chip restored from a failed send keeps the stored base64 as it is; one
+    // whose length is not a multiple of four cannot be measured in decoded bytes.
+    const restored = attachedImage('restored', 'restored.png', 8)
+    composerState.composerImageAttachments = [
+      { ...restored, dataBase64: restored.dataBase64.slice(0, -1) },
+    ]
+    const { container } = render(<ComposerPanel inline />)
+
+    fireEvent.change(pickerInput(container), {
+      target: { files: [pngOfSize('next.png', 64, 1)] },
+    })
+
+    // Liveness witness: the refusal reached the user and names the chip at fault.
+    await waitFor(() =>
+      expect(screen.queryByRole('alert')?.textContent).toBe(
+        'restored.png could not be measured against the image limit (Image data is not canonical base64.). Remove it and attach it again.'
+      )
+    )
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+  })
+
   it('refuses an annotation save that would push the decoded images past 16 MiB', () => {
     const already = attachedImage('already', 'already.png', 8 * MIB)
     const editing = attachedImage('editing', 'edit.png', 8 * MIB - 3)

@@ -580,11 +580,23 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       // Non-Codex images keep the #669 base64 ceiling; Codex images are held
       // to the decoded image quota rpc-proxy and mcp-host enforce (#650).
       const totalMeasure = imageBudget.maxTotal.measure
-      let totalImageBytes = composerImageAttachments.reduce(
-        (total, attachment) =>
-          total + composerImageBudgetBytes(attachment.dataBase64, totalMeasure),
-        0
-      )
+      // This callback runs under `void`, so a throw here would be an unhandled
+      // rejection the user never sees. An attached image that cannot be
+      // measured (a chip restored with malformed base64) refuses the whole
+      // gesture with a visible notice: the remaining quota is unknown.
+      let totalImageBytes = 0
+      for (const attachment of composerImageAttachments) {
+        try {
+          totalImageBytes += composerImageBudgetBytes(attachment.dataBase64, totalMeasure)
+        } catch (error) {
+          setComposerAttachmentError(
+            `${attachment.name || 'Image'} could not be measured against the image limit (${
+              error instanceof Error ? error.message : String(error)
+            }). Remove it and attach it again.`
+          )
+          return
+        }
+      }
 
       for (const [index, { file, mimeType }] of selected.entries()) {
         if (composerImageExceedsPerImageBudget(file.size, imageBudget.maxImageBytes)) {

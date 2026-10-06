@@ -368,10 +368,11 @@ async function expectImageSendBlocked(
   await expect(notice).toContainText(messagePattern)
 
   // Enter must not reach the controller either: nothing is delivered, the draft
-  // survives, and the chip is still pending.
+  // survives, and the chip is still pending. `press` focuses the composer itself,
+  // so focus proves nothing here; the witness that the composer's Enter handler
+  // took the key is the unchanged draft below, since a key the handler did not
+  // consume would have inserted a newline.
   await composer(page).press('Enter')
-  // Witness that the key landed where a send would start.
-  await expect(composer(page)).toBeFocused()
   await expect(page.locator('[data-chat-message-id]')).toHaveCount(0)
   await expect(sendButton(page)).toBeDisabled()
   // Liveness witness, after the negatives: the blocked state the refusal had to

@@ -94,7 +94,13 @@ export function playwrightVerdict(report, { lane, configFile }) {
     }
   }
   collect(report.suites)
-  if (titles.length !== stats.expected || titles.some(title => !title.startsWith(grep)))
+  // The counters alone cannot vouch for the run: a truncated or empty suite tree
+  // with the same counters must not pass as the lane's journeys.
+  if (titles.length !== stats.expected)
+    throw new Error(
+      `Playwright report lists ${titles.length} specs for ${stats.expected} expected tests`
+    )
+  if (titles.some(title => !title.startsWith(grep)))
     throw new Error(`Playwright report has specs outside the ${lane} lane`)
   return 'PASS'
 }

@@ -193,6 +193,28 @@ test('the Playwright verdict is PASS only for a complete, clean report from the 
   }
 })
 
+test('the Playwright verdict fails a report whose suites list fewer specs than it counted', () => {
+  const options = { lane: 'image', configFile: laneConfigFile('image') }
+  const titles = ['a', 'b', 'c'].map(name => `image-capabilities fixture: ${name}`)
+  // Witness: the complete report of three expected specs is PASS.
+  assert.equal(playwrightVerdict(playwrightReport({ titles }), options), 'PASS')
+  for (const [label, suites] of [
+    ['empty suites', []],
+    [
+      'truncated suites',
+      [{ title: 'qa-recorder.spec.ts', specs: [{ title: titles[0], ok: true }], suites: [] }],
+    ],
+  ]) {
+    const report = { ...playwrightReport({ titles }), suites }
+    assert.equal(report.stats.expected, 3, label)
+    assert.throws(
+      () => playwrightVerdict(report, options),
+      /Playwright report lists \d specs for 3 expected tests/,
+      label
+    )
+  }
+})
+
 test('requires both exact source revisions and the live derived-base identity', () => {
   assert.deepEqual(proveImages(manifest(), ids, head, profile), { head, profile, images: ids })
   for (const mutate of [
