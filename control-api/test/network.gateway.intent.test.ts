@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { CIMD_PUBLIC_PATH, CIMD_ROUTE_PATH } from '../src/oauth/cimdIdentity.js'
 import {
@@ -415,6 +416,24 @@ describe('network/gateway intent (manifest-level)', () => {
 
     const gatewayRoute = read('../../external-rest-api/src/routes/oauthCallback.ts')
     expect(gatewayRoute).toContain(`const CIMD_PATH = '${CIMD_ROUTE_PATH}'`)
+    // The constant alone is not enough: the route must actually be registered.
+    expect(gatewayRoute).toMatch(/router\.get\(CIMD_PATH,/)
+  })
+
+  it('rolls the profile-control-funnel pods whenever its nginx ConfigMap changes', () => {
+    // The ConfigMap has no generated name suffix and is mounted with subPath, which
+    // never receives updates, so an edited nginx.conf only takes effect after a pod
+    // restart. The pod template therefore carries the config's hash: applying a
+    // changed config changes the template and triggers a rollout. If this fails after
+    // editing the funnel config, set the annotation to the expected value below.
+    const funnelConf = docContaining(
+      yamlDocs(read(`${BASE}/profiles/configmaps.yaml`)),
+      'name: profile-control-funnel-nginx'
+    )
+    const expected = createHash('sha256').update(funnelConf).digest('hex')
+    const deployment = read(`${BASE}/profiles/profile-control-funnel.yaml`)
+    const annotation = deployment.match(/evenfire\.ai\/nginx-config-sha256:\s*"?([0-9a-f]+)"?/)
+    expect(annotation?.[1], 'funnel pod template nginx-config-sha256 annotation').toBe(expected)
   })
 
   it('keeps the GFS v2 part cap chain below the gateway request cap', () => {

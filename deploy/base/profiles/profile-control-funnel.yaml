@@ -18,6 +18,12 @@ spec:
     type: RollingUpdate
   template:
     metadata:
+      annotations:
+        # sha256 of the profile-control-funnel-nginx ConfigMap document. nginx.conf is
+        # mounted with subPath, which never picks up ConfigMap updates, so a changed
+        # config must change this template to roll the pods. Pinned by
+        # control-api/test/network.gateway.intent.test.ts.
+        evenfire.ai/nginx-config-sha256: "5f384142d47677f1612d415ebe92eb0107a4e5cbb5200c3b23a9ef15a67b3366"
       labels:
         app: profile-control-funnel
     spec:
