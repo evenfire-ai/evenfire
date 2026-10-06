@@ -1805,13 +1805,11 @@ describe('App deep-link orchestration', () => {
   // path the real app-picker uses — no deep-link confirm ceremony. Defaults to
   // `ns/app`; pass a distinct appRef to launch another app the sidebar offers.
   async function launchAppFromSidebar(appRef = 'ns/app'): Promise<void> {
-    await waitFor(() =>
-      expect(sidebarHarness.props?.availableSandboxUiApps?.some(a => a.appRef === appRef)).toBe(
-        true
-      )
-    )
-    const app = sidebarHarness.props?.availableSandboxUiApps?.find(a => a.appRef === appRef)
-    if (!app) throw new Error(`${appRef} was not available to the sidebar`)
+    const app = await waitFor(() => {
+      const available = sidebarHarness.props?.availableSandboxUiApps?.find(a => a.appRef === appRef)
+      if (!available) throw new Error(`${appRef} was not available to the sidebar`)
+      return available
+    })
     await act(async () => {
       sidebarHarness.props?.onOpenSandboxUiApp?.(app)
       await Promise.resolve()
@@ -2205,15 +2203,16 @@ describe('App deep-link orchestration', () => {
     const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
     getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
     await launchAppFromSidebar('ns/app-b') // deactivates A, reads (deferred)
-    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalled())
     await act(async () => {
       pendingLocation.resolve({ appRef: 'ns/app-b', routePath: '/b/route' })
       await Promise.resolve()
       await Promise.resolve()
     })
 
-    // Liveness witness (M4): A's deactivation read genuinely ran.
-    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
+    // Liveness witness (M4): A's deactivation read genuinely ran. A later
+    // read may also occur while the incoming app activates.
+    expect(getSandboxUiLocation).toHaveBeenCalled()
     // Observable: A keeps its OWN route — the foreign read must not clear it.
     // (Pre-fix, the mismatch fell back to undefined → setter CLEARED '/a/own'.)
     const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)

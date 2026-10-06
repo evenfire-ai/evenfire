@@ -2410,6 +2410,20 @@ export function GfsBrowser(): React.JSX.Element {
             </div>
           )}
 
+          {!loading && items.length > 0 ? (
+            <p className="cu-gfs-list-count" aria-live="polite">
+              {nextCursor
+                ? `Showing the first ${items.length} ${items.length === 1 ? 'item' : 'items'}.`
+                : `Showing all ${items.length} ${items.length === 1 ? 'item' : 'items'}.`}
+            </p>
+          ) : null}
+
+          {nextCursor && !loading ? (
+            <p className="cu-gfs-list-count cu-gfs-list-count--truncated">
+              The listing is truncated at the page cap — Load more fetches the next page.
+            </p>
+          ) : null}
+
           {nextCursor && !loading ? (
             <Button
               className="cu-gfs__load-more"

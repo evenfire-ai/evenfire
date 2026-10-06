@@ -28,6 +28,9 @@ minikube_test_fixture_repo_init() {
   MINIKUBE_TEST_PROJECT_DIR="$(cd -- "${repo}" && pwd -P)"
   MINIKUBE_TEST_BRANCH="$(git -C "${MINIKUBE_TEST_PROJECT_DIR}" branch --show-current)"
   MINIKUBE_TEST_HEAD="$(git -C "${MINIKUBE_TEST_PROJECT_DIR}" rev-parse --verify HEAD)"
+  # The origin/dev a T2 lease owner pins: hand-written owner.env fixtures record
+  # it as ORIGIN_DEV and lease children inherit it as T2_PINNED_ORIGIN_DEV.
+  MINIKUBE_TEST_ORIGIN_DEV="$(git -C "${MINIKUBE_TEST_PROJECT_DIR}" rev-parse --verify origin/dev)"
   MINIKUBE_TEST_WORKTREE_ID="$(printf '%s' "${MINIKUBE_TEST_PROJECT_DIR}" | shasum | awk '{print $1}')"
   MINIKUBE_TEST_LOCK_KEY="$(printf '%s\0%s\0%s\0%s\0%s' \
     "${MINIKUBE_TEST_PROJECT_DIR}" "${MINIKUBE_TEST_BRANCH}" \
@@ -38,7 +41,7 @@ minikube_test_fixture_repo_init() {
   export MINIKUBE_TEST_HOST_ROOT MINIKUBE_TEST_HOST_HEAD
   export MINIKUBE_TEST_HOST_BRANCH MINIKUBE_TEST_HOST_STATUS_HASH
   export MINIKUBE_TEST_PROJECT_DIR MINIKUBE_TEST_BRANCH MINIKUBE_TEST_HEAD
-  export MINIKUBE_TEST_WORKTREE_ID MINIKUBE_TEST_LOCK_KEY
+  export MINIKUBE_TEST_WORKTREE_ID MINIKUBE_TEST_LOCK_KEY MINIKUBE_TEST_ORIGIN_DEV
 }
 
 minikube_test_assert_host_unchanged() {

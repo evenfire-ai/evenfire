@@ -28,14 +28,17 @@ import type { K8sGateway } from '../src/k8s.js'
 import { buildCimdDocument } from '../src/oauth/cimd.js'
 import { type DiscoveryResult, discoverRemoteOAuth } from '../src/oauth/discovery.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
+import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import { bootstrapSharedOAuthGrant, getOAuthGrant } from '../src/oauth/store.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { runProactiveRefreshSweep } from '../src/services/oauthProactiveRefreshCron.js'
 import {
+  DROPBOX_PILOT,
   PILOTS,
   type PilotFixture,
   makeDiscoveryTransport,
 } from './fixtures/remoteOAuthDiscovery.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 const VALIDATED_IP = '93.184.216.34'
@@ -121,15 +124,18 @@ describeRealPostgres('proactive refresh sweep — installation identity (real Po
   })
 
   afterAll(async () => {
-    await dbPool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 
@@ -264,6 +270,98 @@ describeRealPostgres('proactive refresh sweep — installation identity (real Po
         WHERE recipe_name = 'cron-legacy'`
     )
     expect(rows).toEqual([{ has_rt: true, cr_uid: null }])
+  })
+
+  // A per-server CR (no RFC 9207) holding the platform CIMD client, or with AS endpoints
+  // off the issuer's site, is refused at consent. A grant it already holds is sealed to
+  // its uid and its endpoints are immutable, so the refresh returns to the token
+  // endpoint that issued it: the sweep keeps refreshing it instead of stranding it.
+  it('keeps refreshing grants of per-server CRs that consent refuses (CIMD without iss, cross-site)', async () => {
+    await dbPool.query('DELETE FROM oauth_grants')
+    const gateway = new MockGateway(NS)
+
+    // Notion (real): CIMD without RFC 9207 — `discovery` of this suite.
+    expect(discovery.issForCallback).toBeUndefined()
+    const cimdNoIss = buildRemoteOAuthSpec(discovery, {
+      clientMode: 'public',
+      grantScope: 'context',
+      cimdClientId: oauthId(),
+    })
+    // Dropbox (real): discovery accepts its cross-site AS only with RFC 9207, so the
+    // per-server shape is that output without `issForCallback` (a direct write).
+    const dropbox9207: PilotFixture = {
+      ...DROPBOX_PILOT,
+      as: {
+        ...DROPBOX_PILOT.as,
+        json: JSON.stringify({
+          ...JSON.parse(DROPBOX_PILOT.as.json),
+          authorization_response_iss_parameter_supported: true,
+        }),
+      },
+    }
+    const dropboxOutcome = await discoverRemoteOAuth(dropbox9207.mcpUrl, {
+      transport: makeDiscoveryTransport(dropbox9207),
+      resolveDns: async () => [VALIDATED_IP],
+    })
+    if (!dropboxOutcome.ok)
+      throw new Error(`fixture discovery failed: ${dropboxOutcome.error.kind}`)
+    const crossSite = buildRemoteOAuthSpec(dropboxOutcome.result, {
+      clientMode: 'public',
+      grantScope: 'context',
+      dynamicClientId: 'dyn-dropbox-public',
+    })
+    delete crossSite.issForCallback
+
+    const cases = [
+      { name: 'cron-cimd-noiss', oauth: cimdNoIss, reason: 'cimd_without_issuer_binding' },
+      { name: 'cron-cross-site', oauth: crossSite, reason: 'as_endpoints_cross_site' },
+    ]
+    for (const c of cases) {
+      await gateway.createResource(
+        'mcpservers',
+        {
+          metadata: { name: c.name },
+          spec: { contextRef: CONTEXT, auth: { type: 'oauth' }, oauth: c.oauth },
+        },
+        NS
+      )
+      const cr = (await gateway.getResource('mcpservers', c.name, NS)) as {
+        metadata: { uid: string }
+        spec: Record<string, unknown>
+      }
+      // Consent refuses it (the other half of the invariant).
+      let consentError: { reason?: unknown } | undefined
+      try {
+        resolveServerOAuthSubject(cr, 'consent')
+      } catch (err) {
+        consentError = err as { reason?: unknown }
+      }
+      expect(consentError?.reason).toBe(c.reason)
+      const { inserted } = await bootstrapSharedOAuthGrant(db, KEY, {
+        ownerKind: 'mcpserver',
+        recipeNamespace: NS,
+        recipeName: c.name,
+        contextId: CONTEXT,
+        oauthClientId: c.oauth.id as string,
+        bootstrappedByUserId: 'user-1',
+        provider: 'remote',
+        accessToken: `AT-${c.name}`,
+        refreshToken: `RT-${c.name}`,
+        accessTokenExpiresInSec: IN_WINDOW_SEC,
+        crUid: cr.metadata.uid,
+      })
+      expect(inserted).toBe(true)
+    }
+
+    tokenEndpoint.posts.length = 0
+    const summary = await sweep(gateway)
+
+    expect(summary.candidates).toBe(2)
+    expect(summary.outcomes.ok).toBe(2)
+    expect(summary.outcomes.error).toBe(0)
+    expect(tokenEndpoint.posts.map(p => p.url).sort()).toEqual(
+      [cimdNoIss.tokenEndpoint, crossSite.tokenEndpoint].sort()
+    )
   })
 
   // Invariant 8: a remote CR the CRD now rejects (public + secret refs, or

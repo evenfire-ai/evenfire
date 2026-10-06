@@ -36,6 +36,7 @@ import {
 } from '../src/oauth/store.js'
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
 import { type McpServerResource, normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -69,20 +70,25 @@ describeRealPostgres('oauth reactive refresh — row-lock serialization (real Po
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE "${database.replace(/"/g, '""')}"`)
     dbPool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
+    // pg-pool can resolve end() before its clients' asynchronous socket closes.
+    // Register physical closure before initDb creates the first connection.
     await initDb({ connect: () => dbPool.connect() })
     db = { query: (text, values) => dbPool.query(text, values) }
   })
 
   afterAll(async () => {
-    await dbPool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-          WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 
