@@ -429,6 +429,55 @@ describe('createGfsFolderZip', () => {
     expect(stopStream.abortedJobs).toHaveLength(1)
   })
 
+  it('validates the FINAL name after collision suffixing, not the pre-collision path (R1-M2)', async () => {
+    // A path at 65533 encoded bytes fits the 16-bit field; a colliding twin
+    // whose ` (2)` suffix pushes it to 65537 must be a visible skip, never a
+    // truncated header. Built with legal 1000-byte segments (each under the
+    // 1024-byte segment cap) down a 65-deep chain.
+    const chainName = 'f'.repeat(1000)
+    const depth = 65
+    const leafName = 'x'.repeat(65533 - 2 - depth * 1001)
+    const pages: Record<string, Array<{ items: GfsZipChildItem[]; nextCursor: null }>> = {}
+    pages.root = [
+      {
+        items: [folder({ resourceId: 'n0', name: chainName, kind: 'directory' })],
+        nextCursor: null,
+      },
+    ]
+    for (let index = 0; index < depth - 1; index += 1) {
+      pages[`n${index}`] = [
+        {
+          items: [folder({ resourceId: `n${index + 1}`, name: chainName, kind: 'directory' })],
+          nextCursor: null,
+        },
+      ]
+    }
+    // The deepest folder holds TWO children with the same near-limit name.
+    pages[`n${depth - 1}`] = [
+      {
+        items: [
+          folder({ resourceId: 'twin-a', name: leafName }),
+          folder({ resourceId: 'twin-b', name: leafName }),
+        ],
+        nextCursor: null,
+      },
+    ]
+    const deps = depsFor(pages)
+
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'D' },
+      { deps }
+    )
+
+    const written = streamEntryNames(deps.zipStreamRecord)
+    expect(written).toHaveLength(1)
+    expect(new TextEncoder().encode(written[0]!).length).toBeLessThan(65535)
+    expect(result.fileCount).toBe(1)
+    expect(result.skipped).toEqual([
+      { path: expect.stringContaining('…'), reason: 'Path too long' },
+    ])
+  })
+
   it('skips entries whose complete path would overflow the 16-bit ZIP name field (R1-M2)', async () => {
     // A 110-deep chain of 700-byte segment names crosses 65535 assembled
     // bytes around depth ~93: the overlong child is skipped (visible notice,
