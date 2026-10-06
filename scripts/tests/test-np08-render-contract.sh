@@ -114,18 +114,94 @@ for rendered in "$@"; do
     policy_types_include_egress = lambda do |policy|
       Array(policy.dig("spec", "policyTypes")).include?("Egress")
     end
-    exact_pod_selector = lambda do |policy, expected_labels|
+    # HCC also labels execution Pods clerum.io/managed-by=host-context-controller.
+    # NetworkPolicies are additive, so every static Host grant must exclude them
+    # with exactly this expression; any other narrowing of the Host selector fails.
+    host_execution_exclusion = [
+      { "key" => "clerum.io/role", "operator" => "NotIn", "values" => ["host-execution"] }
+    ]
+    static_host_pod_selector = lambda do |policy|
       selector = policy.dig("spec", "podSelector")
-      selector.is_a?(Hash) && selector.keys.sort == ["matchLabels"] &&
-        selector["matchLabels"] == expected_labels && Array(selector["matchExpressions"]).empty?
+      selector.is_a?(Hash) && selector.keys.sort == ["matchExpressions", "matchLabels"] &&
+        selector["matchLabels"] == { "clerum.io/managed-by" => "host-context-controller" } &&
+        selector["matchExpressions"] == host_execution_exclusion
     end
     default_deny = policies.find { |policy| policy.dig("metadata", "name") == "deny-all-mcp-host" }
     abort("mcp-host default-deny must select every pod and enforce Egress") unless
       default_deny && default_deny.dig("spec", "podSelector") == {} && policy_types_include_egress.call(default_deny)
     managed_host_policy = policies.find { |policy| policy.dig("metadata", "name") == "mcp-host" }
     abort("mcp-host allow policy must select HCC-managed Host pods and enforce Egress") unless
-      managed_host_policy && exact_pod_selector.call(managed_host_policy, { "clerum.io/managed-by" => "host-context-controller" }) &&
+      managed_host_policy && static_host_pod_selector.call(managed_host_policy) &&
       policy_types_include_egress.call(managed_host_policy)
+    %w[allow-dns-egress-mcp-host allow-k8s-api-egress-mcp-host].each do |name|
+      policy = policies.find { |candidate| candidate.dig("metadata", "name") == name }
+      abort("#{name} must select HCC-managed Host pods except execution Pods and enforce Egress") unless
+        policy && static_host_pod_selector.call(policy) && policy_types_include_egress.call(policy)
+    end
+
+    execution_policy = policies.find { |policy| policy.dig("metadata", "name") == "host-execution-private" }
+    expected_execution_spec = {
+      "podSelector" => {
+        "matchLabels" => {
+          "clerum.io/managed-by" => "host-context-controller",
+          "clerum.io/role" => "host-execution"
+        }
+      },
+      "policyTypes" => ["Ingress", "Egress"],
+      "ingress" => [
+        {
+          "from" => [
+            {
+              "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => "control-plane" } },
+              "podSelector" => { "matchLabels" => { "app" => "host-context-controller" } }
+            }
+          ],
+          "ports" => [{ "port" => 9300, "protocol" => "TCP" }, { "port" => 9301, "protocol" => "TCP" }]
+        }
+      ],
+      "egress" => []
+    }
+    abort("host-execution-private must admit only HCC on 9300/9301 and grant no egress") unless
+      execution_policy && execution_policy["spec"] == expected_execution_spec
+
+    # Any other mcp-host policy that grants traffic must not be able to select an
+    # execution Pod. Operation and Host UID label values are per Pod, so a selector
+    # keyed on them is treated as possibly matching.
+    execution_static_labels = {
+      "clerum.io/managed-by" => "host-context-controller",
+      "clerum.io/role" => "host-execution"
+    }
+    execution_dynamic_labels = %w[clerum.io/operation clerum.io/host-uid]
+    selects_execution_pod = lambda do |selector|
+      next false unless selector.is_a?(Hash)
+      labels_match = (selector["matchLabels"] || {}).all? do |key, value|
+        execution_dynamic_labels.include?(key) || execution_static_labels[key] == value
+      end
+      expressions_match = Array(selector["matchExpressions"]).all? do |expression|
+        key = expression["key"]
+        values = Array(expression["values"])
+        if execution_dynamic_labels.include?(key)
+          expression["operator"] != "DoesNotExist"
+        else
+          present = execution_static_labels.key?(key)
+          case expression["operator"]
+          when "In" then present && values.include?(execution_static_labels[key])
+          when "NotIn" then !present || !values.include?(execution_static_labels[key])
+          when "Exists" then present
+          when "DoesNotExist" then !present
+          else abort("mcp-host policy uses an unknown selector operator")
+          end
+        end
+      end
+      labels_match && expressions_match
+    end
+    execution_grants = policies.select do |policy|
+      next false if policy.dig("metadata", "name") == "host-execution-private"
+      grants = !Array(policy.dig("spec", "ingress")).empty? || !Array(policy.dig("spec", "egress")).empty?
+      grants && selects_execution_pod.call(policy.dig("spec", "podSelector"))
+    end
+    abort("execution Pods must not inherit mcp-host grants: #{execution_grants.map { |policy| policy.dig("metadata", "name") }.join(",")}") unless
+      execution_grants.empty?
     context_allow_policies = policies.select do |policy|
       policy.dig("metadata", "labels", "clerum.io/policy-type") == "context-allow"
     end
@@ -274,7 +350,7 @@ for rendered in "$@"; do
 
     hcc_lane = policies.any? do |policy|
       next false unless policy_types_include_egress.call(policy) &&
-        exact_pod_selector.call(policy, { "clerum.io/managed-by" => "host-context-controller" })
+        static_host_pod_selector.call(policy)
       Array(policy.dig("spec", "egress")).any? do |rule|
         ports = Array(rule["ports"])
         peers = Array(rule["to"])

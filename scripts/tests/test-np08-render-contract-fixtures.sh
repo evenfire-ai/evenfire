@@ -185,6 +185,54 @@ when 'host-secret-authenticated-group-grant'
     },
     'subjects' => [{ 'kind' => 'Group', 'name' => 'system:authenticated' }],
   }
+when 'dns-without-execution-exclusion', 'k8s-api-wrong-execution-exclusion',
+     'execution-egress', 'execution-ingress-widened'
+  name = {
+    'dns-without-execution-exclusion' => 'allow-dns-egress-mcp-host',
+    'k8s-api-wrong-execution-exclusion' => 'allow-k8s-api-egress-mcp-host',
+    'execution-egress' => 'host-execution-private',
+    'execution-ingress-widened' => 'host-execution-private',
+  }.fetch(mutation)
+  policy = documents.find do |document|
+    document['kind'] == 'NetworkPolicy' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == name
+  end
+  abort("fixture source is missing mcp-host NetworkPolicy #{name}") unless policy
+  case mutation
+  when 'dns-without-execution-exclusion'
+    policy['spec']['podSelector'].delete('matchExpressions')
+  when 'k8s-api-wrong-execution-exclusion'
+    policy['spec']['podSelector']['matchExpressions'][0]['values'] = ['other']
+  when 'execution-egress'
+    policy['spec']['egress'] = [{
+      'to' => [{ 'namespaceSelector' => { 'matchLabels' => { 'kubernetes.io/metadata.name' => 'kube-system' } } }],
+      'ports' => [{ 'port' => 53, 'protocol' => 'UDP' }],
+    }]
+  when 'execution-ingress-widened'
+    policy['spec']['ingress'][0]['from'] << {
+      'namespaceSelector' => { 'matchLabels' => { 'kubernetes.io/metadata.name' => 'mcp-server' } },
+    }
+  end
+when 'execution-grant-by-role', 'execution-grant-by-operation'
+  pod_selector = if mutation == 'execution-grant-by-role'
+    { 'matchExpressions' => [{ 'key' => 'clerum.io/role', 'operator' => 'In', 'values' => ['host-execution'] }] }
+  else
+    { 'matchLabels' => { 'clerum.io/operation' => 'fixture-operation' } }
+  end
+  documents << {
+    'apiVersion' => 'networking.k8s.io/v1',
+    'kind' => 'NetworkPolicy',
+    'metadata' => { 'name' => "fixture-#{mutation}", 'namespace' => 'mcp-host' },
+    'spec' => {
+      'podSelector' => pod_selector,
+      'policyTypes' => ['Ingress'],
+      'ingress' => [{
+        'from' => [{ 'namespaceSelector' => { 'matchLabels' => { 'kubernetes.io/metadata.name' => 'mcp-server' } } }],
+        'ports' => [{ 'port' => 9300, 'protocol' => 'TCP' }],
+      }],
+    },
+  }
 else
   abort("unknown fixture mutation: #{mutation}")
 end
@@ -282,3 +330,35 @@ assert_rejected \
   "${host_secret_authenticated_group}" \
   'mcp-host identities must not receive MCP Secret read grants' \
   'mcp-host MCP Secret system:authenticated grant'
+
+dns_without_execution_exclusion="${tmpdir}/dns-without-execution-exclusion.yaml"
+mutate_render dns-without-execution-exclusion "${dns_without_execution_exclusion}"
+assert_rejected \
+  "${dns_without_execution_exclusion}" \
+  'allow-dns-egress-mcp-host must select HCC-managed Host pods except execution Pods and enforce Egress' \
+  'DNS egress inherited by execution Pods'
+
+k8s_api_wrong_execution_exclusion="${tmpdir}/k8s-api-wrong-execution-exclusion.yaml"
+mutate_render k8s-api-wrong-execution-exclusion "${k8s_api_wrong_execution_exclusion}"
+assert_rejected \
+  "${k8s_api_wrong_execution_exclusion}" \
+  'allow-k8s-api-egress-mcp-host must select HCC-managed Host pods except execution Pods and enforce Egress' \
+  'k8s API egress exclusion naming another role'
+
+for execution_change in execution-egress execution-ingress-widened; do
+  execution_private="${tmpdir}/${execution_change}.yaml"
+  mutate_render "${execution_change}" "${execution_private}"
+  assert_rejected \
+    "${execution_private}" \
+    'host-execution-private must admit only HCC on 9300/9301 and grant no egress' \
+    "private execution policy with ${execution_change}"
+done
+
+for execution_selector in role operation; do
+  execution_grant="${tmpdir}/execution-grant-by-${execution_selector}.yaml"
+  mutate_render "execution-grant-by-${execution_selector}" "${execution_grant}"
+  assert_rejected \
+    "${execution_grant}" \
+    "execution Pods must not inherit mcp-host grants: fixture-execution-grant-by-${execution_selector}" \
+    "mcp-host grant selecting execution Pods by ${execution_selector}"
+done
