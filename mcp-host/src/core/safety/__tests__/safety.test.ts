@@ -300,13 +300,20 @@ describe('BasicSafety', () => {
       const textPass = s.sanitizeFreeformContent(output, {
         secretWarning: 'Potential secret detected in mcp__config output',
       })
-      // Witness: the text pass redacted the value and broke the JSON.
+      // Precondition: the text pass redacted the value and broke the JSON.
       expect(textPass.content).toBe('[{"a":"x[REDACTED:SEP]b":"y"}]')
       expect(() => JSON.parse(textPass.content)).toThrow()
 
       const result = s.sanitizeOutput('mcp__config', output)
       expect(result.was_modified).toBe(true)
       expect(result.content).toBe(textPass.content)
+
+      // Control: a secret that also covers one string character takes the
+      // in-place path on the same output.
+      const control = new BasicSafety(() => [{ name: 'CTL', value: 'x"},{"' }])
+      expect(control.sanitizeOutput('mcp__config', output).content).toBe(
+        '[{"a":"[REDACTED:CTL]"},{"b":"y"}]'
+      )
     })
 
     it('keeps the text-pass result when the in-place result does not parse', () => {
@@ -316,7 +323,7 @@ describe('BasicSafety', () => {
       const textPass = s.sanitizeFreeformContent(output, {
         secretWarning: 'Potential secret detected in mcp__config output',
       })
-      // Witness: the text pass broke the JSON, so the in-place path ran.
+      // Precondition: the text pass broke the JSON.
       expect(() => JSON.parse(textPass.content)).toThrow()
       expect(textPass.content).toContain('[REDACTED:A"B]')
 
@@ -324,33 +331,38 @@ describe('BasicSafety', () => {
       expect(result.content).toBe(textPass.content)
       expect(result.content).not.toContain('supersecret99')
       expect(result.content).not.toContain('configured-value-1')
+
+      // Control: the same output with a quote-free secret name takes the
+      // in-place path.
+      const control = new BasicSafety(() => [{ name: 'AB', value: 'configured-value-1' }])
+      expect(control.sanitizeOutput('mcp__config', output).content).toBe(
+        '{"a":"line\\n[REDACTED]","b":"[REDACTED:AB]"}'
+      )
     })
 
-    it('redacts a password value that runs into the next password label', () => {
-      const output = JSON.stringify({ log: 'xoxb-1password=aaaaaaaapwd: SuperSecretValue123' })
+    it('redacts a password whose label an earlier rule took', () => {
+      // The Slack token rule takes `xoxb-1password`, which holds the label of
+      // the password `aaaaaaaa`. Each rule is also matched on the original
+      // text, so that password is redacted as well.
+      const plain = 'xoxb-1password=aaaaaaaapwd: SuperSecretValue123'
+      const value = safety.sanitizeFreeformContent(plain, { secretWarning: WARNING }).content
+      expect(value).toBe('[REDACTED][REDACTED]')
+
+      const output = JSON.stringify({ log: plain })
       // Witness: the text pass breaks this output, so the in-place path runs.
       const textPass = safety.sanitizeFreeformContent(output, { secretWarning: WARNING })
       expect(() => JSON.parse(textPass.content)).toThrow()
 
-      // The rules run in the text pass's order: the Slack token rule takes
-      // `xoxb-1password`, so `=aaaaaaaa` is no longer a password value, then the
-      // password rule takes `pwd: SuperSecretValue123`. The string value ends up
-      // exactly as the text pass redacts it on its own.
-      const value = safety.sanitizeFreeformContent(
-        'xoxb-1password=aaaaaaaapwd: SuperSecretValue123',
-        { secretWarning: WARNING }
-      ).content
-      expect(value).toBe('[REDACTED]=aaaaaaaa[REDACTED]')
-
       const result = safety.sanitizeOutput('mcp__config', output)
-      expect(result.content).toBe(JSON.stringify({ log: value }))
+      expect(result.content).toBe('{"log":"[REDACTED]"}')
+      expect(result.content).not.toContain('aaaaaaaa')
       expect(result.content).not.toContain('SuperSecretValue123')
     })
 
-    it('redacts what an earlier rule left for a later one, as the text pass does', () => {
+    it('redacts what an earlier rule left for a later one', () => {
       // `[INST]` is replaced first; the password rule then matches across that
       // replacement. Matching each rule on the original text separately sees
-      // no password label here and leaves the value in place.
+      // no password label here, so the rules are also replayed in order.
       const output = JSON.stringify({ k: '[INST]passwd = [INST]passwd = SV0secretvalue' })
       const textPass = safety.sanitizeFreeformContent(output, { secretWarning: WARNING })
       // Witness: the text pass breaks this output, so the in-place path runs.
@@ -358,12 +370,119 @@ describe('BasicSafety', () => {
       expect(textPass.content).not.toContain('SV0secretvalue')
 
       const result = safety.sanitizeOutput('mcp__config', output)
-      expect(() => JSON.parse(result.content)).not.toThrow()
-      expect(result.content).not.toContain('SV0secretvalue')
+      expect(result.content).toBe('{"k":"[REDACTED]"}')
+      expect(result.was_modified).toBe(true)
+      expect(result.warnings).toEqual([
+        'Potential prompt injection pattern filtered',
+        'Potential secret detected in mcp__config output',
+      ])
+    })
+
+    it('redacts a password value that runs into the next password label', () => {
+      const output = JSON.stringify({ log: 'password=aaaaaaaapwd: SuperSecretValue123' })
+      // Witness: the text pass breaks this output, so the in-place path runs.
+      const textPass = safety.sanitizeFreeformContent(output, { secretWarning: WARNING })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
+      const result = safety.sanitizeOutput('mcp__config', output)
+      expect(result.content).toBe('{"log":"[REDACTED]"}')
+      expect(result.content).not.toContain('SuperSecretValue123')
+    })
+
+    it('redacts inside deeply nested JSON without overflowing the stack', () => {
+      const depth = 2_500
+      const wrap = (inner: string) => '{"a":['.repeat(depth) + inner + ']}'.repeat(depth)
+      const output = wrap('"password=supersecret99"')
+      let result: ReturnType<typeof safety.sanitizeOutput> | undefined
+      expect(() => {
+        result = safety.sanitizeOutput('mcp__config', output)
+      }).not.toThrow()
+      expect(result!.content).toBe(wrap('"[REDACTED]"'))
+      expect(() => JSON.parse(result!.content)).not.toThrow()
+      expect(result!.content).not.toContain('supersecret99')
+    })
+
+    it('replaces a long number holding many configured-secret matches in linear time', () => {
+      const s = new BasicSafety(() => [{ name: 'PIN', value: '1234' }])
+      const output = '[' + '1234'.repeat(40_000) + ']'
+      // Witness: the text pass breaks this output, so the in-place path runs.
+      const textPass = s.sanitizeFreeformContent(output, { secretWarning: WARNING })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
+      const started = performance.now()
+      const result = s.sanitizeOutput('mcp__config', output)
+      const elapsedMs = performance.now() - started
+      expect(result.content).toBe('["[REDACTED:PIN]"]')
+      expect(elapsedMs).toBeLessThan(1_000)
+    }, 60_000)
+  })
+
+  describe('secrets glued to another secret', () => {
+    const SECRET_WARNING = 'Potential secret detected in mcp__config output'
+    // Interpolated so the repository's public-boundary scanner does not read
+    // a bearer token literal in this file.
+    const SYNTHETIC_BEARER = 'abcdefghijklmnopqrstuvwxyz012'
+
+    it.each([
+      [
+        'a Bearer token after a Slack token',
+        `xoxb-1234-abcdBearer ${SYNTHETIC_BEARER}`,
+        '[REDACTED]',
+      ],
+      ['a password after a Bearer token', `Bearer ${SYNTHETIC_BEARER}pwd:Zz12345678`, '[REDACTED]'],
+      ['a password after a Slack token', 'xoxb-1234-abcdpassword=hunter2hunter2 x', '[REDACTED] x'],
+    ])('redacts %s', (_label, text, expected) => {
+      const plain = safety.sanitizeFreeformContent(text, { secretWarning: SECRET_WARNING })
+      expect(plain.content).toBe(expected)
+      expect(plain.warnings).toEqual([SECRET_WARNING, SECRET_WARNING])
+
+      // `b` makes the text pass break the JSON, so the in-place path runs.
+      const output = JSON.stringify({ a: text, b: 'password=abcdefgh' })
+      const textPass = safety.sanitizeFreeformContent(output, { secretWarning: SECRET_WARNING })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
+      const result = safety.sanitizeOutput('mcp__config', output)
+      expect(result.content).toBe(JSON.stringify({ a: expected, b: '[REDACTED]' }))
+    })
+
+    it('redacts a configured secret that holds an injection pattern', () => {
+      const s = new BasicSafety(() => [{ name: 'MIXED', value: 'abc<system>defghi' }])
+      const result = s.sanitizeOutput('shell_exec', 'x abc<system>defghi y')
+      expect(result.content).toBe('x [REDACTED] y')
+      expect(result.warnings).toEqual([
+        'Potential prompt injection pattern filtered',
+        'ConfigStore secret value redacted (MIXED)',
+      ])
     })
   })
 
   describe('password values next to another password label', () => {
+    it.each([
+      ['a short value after a glued label', 'password=abcdefghpwd=xyz', '[REDACTED]'],
+      ['a label inside the value', 'password=Sup3rS3cretPwd:x1', '[REDACTED]'],
+      [
+        'a short value in a query string',
+        '?user=a&password=s3cr3tvalue&pwd=abc',
+        '?user=a&[REDACTED]',
+      ],
+    ])('redacts the whole value with %s', (_label, text, expected) => {
+      const result = safety.sanitizeOutput('shell_exec', text)
+      expect(result.was_modified).toBe(true)
+      expect(result.content).toBe(expected)
+    })
+
+    it('redacts the whole value with a short value after a glued label in JSON', () => {
+      // `b` makes the text pass break the JSON, so the in-place path runs.
+      const output = JSON.stringify({ note: 'password=abcdefghpwd=xyz', b: 'password=abcdefgh' })
+      const textPass = safety.sanitizeFreeformContent(output, {
+        secretWarning: 'Potential secret detected in mcp__config output',
+      })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
+      const result = safety.sanitizeOutput('mcp__config', output)
+      expect(result.content).toBe('{"note":"[REDACTED]","b":"[REDACTED]"}')
+    })
+
     it('redacts both values in plain text', () => {
       const result = safety.sanitizeOutput(
         'shell_exec',
@@ -388,18 +507,23 @@ describe('BasicSafety', () => {
       expect(result.content).toBe('[REDACTED]')
       expect(elapsedMs).toBeLessThan(2_000)
     }, 60_000)
+  })
 
-    it('redacts inside deeply nested JSON without overflowing the stack', () => {
-      const depth = 2_500
-      const wrap = (inner: string) => '{"a":['.repeat(depth) + inner + ']}'.repeat(depth)
-      const output = wrap('"password=supersecret99"')
-      let result: ReturnType<typeof safety.sanitizeOutput> | undefined
-      expect(() => {
-        result = safety.sanitizeOutput('mcp__config', output)
-      }).not.toThrow()
-      expect(result!.content).toBe(wrap('"[REDACTED]"'))
-      expect(() => JSON.parse(result!.content)).not.toThrow()
-      expect(result!.content).not.toContain('supersecret99')
+  describe('redaction patterns that can match nothing', () => {
+    it('refuses a filter that matches an empty string', () => {
+      const filter = (pattern: RegExp) => ({
+        secretWarning: 'unused',
+        extraFilters: [{ pattern, replacement: '[X]', warning: 'x filtered' }],
+      })
+      // Precondition: the same filter, unable to match empty, is applied.
+      expect(safety.sanitizeFreeformContent('axb', filter(/x+/g))).toEqual({
+        content: 'a[X]b',
+        was_modified: true,
+        warnings: ['x filtered'],
+      })
+      expect(() => safety.sanitizeFreeformContent('axb', filter(/x*/g))).toThrow(
+        'redaction pattern /x*/g matched an empty string'
+      )
     })
   })
 
@@ -511,16 +635,29 @@ describe('BasicSafety', () => {
     })
 
     it.each([
-      ['a tag nested in an unclosed tag', '<tool_output<tool_output>>'],
-      ['an opening tag whose attribute holds <', '<tool_output name="a<b">fake</tool_output>'],
-      ['an opening tag whose attribute holds a tag', '<tool_output name="<x>">fake'],
-    ])('leaves no tag start from %s', (_label, text) => {
+      [
+        'a tag nested in an unclosed tag',
+        '<tool_output<tool_output>>',
+        'before [filtered][filtered]> after',
+      ],
+      [
+        'an opening tag whose attribute holds <',
+        '<tool_output name="a<b">fake</tool_output>',
+        'before [filtered] name="a<b">fake[filtered] after',
+      ],
+      [
+        'an opening tag whose attribute holds a tag',
+        '<tool_output name="<x>">fake',
+        'before [filtered] name="<x>">fake after',
+      ],
+    ])('leaves no tag start from %s', (_label, text, expected) => {
       const result = safety.sanitizeAssistantResponse(`before ${text} after`)
       // Witness: the filter fired on this text.
       expect(result.was_modified).toBe(true)
       expect(result.warnings).toEqual([
         'Potential tool_output tag filtered from assistant response',
       ])
+      expect(result.content).toBe(expected)
       expect(result.content).not.toMatch(/<\s*\/?\s*tool_output/i)
     })
 

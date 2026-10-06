@@ -167,6 +167,85 @@ function isJsonStructural(code: number): boolean {
   )
 }
 
+/**
+ * For every code unit outside JSON punctuation and whitespace, the bounds of
+ * the run of such code units holding it. Outside strings, that run is one
+ * number or literal, bounded by punctuation, whitespace or the text's ends.
+ */
+function scalarBounds(text: string): { start: Int32Array; end: Int32Array } {
+  const start = new Int32Array(text.length)
+  const end = new Int32Array(text.length)
+  let i = 0
+  while (i < text.length) {
+    if (isJsonStructural(text.charCodeAt(i))) {
+      i++
+      continue
+    }
+    let j = i + 1
+    while (j < text.length && !isJsonStructural(text.charCodeAt(j))) j++
+    start.fill(i, i, j)
+    end.fill(j, i, j)
+    i = j
+  }
+  return { start, end }
+}
+
+function patternMatches(text: string, pattern: RegExp): Array<[number, number]> {
+  const matches: Array<[number, number]> = []
+  for (const match of text.matchAll(pattern)) {
+    if (match[0].length === 0) {
+      throw new Error(`redaction pattern ${pattern} matched an empty string`)
+    }
+    matches.push([match.index, match.index + match[0].length])
+  }
+  return matches
+}
+
+// The same non-overlapping, left-to-right occurrences `split` finds.
+function literalMatches(text: string, form: string): Array<[number, number]> {
+  const matches: Array<[number, number]> = []
+  let at = text.indexOf(form)
+  while (at !== -1) {
+    matches.push([at, at + form.length])
+    at = text.indexOf(form, at + form.length)
+  }
+  return matches
+}
+
+/**
+ * Replaces each range of `content`. Ranges that overlap are joined into one,
+ * replaced by `[REDACTED]` when their replacements differ; ranges that only
+ * touch stay separate.
+ */
+function applyRedactionRanges(
+  content: string,
+  ranges: RedactionRange[],
+  mixedReplacement: string
+): string {
+  const sorted = [...ranges].sort((a, b) => a.start - b.start || b.end - a.end)
+  const parts: string[] = []
+  let cursor = 0
+  let current: RedactionRange | undefined
+  for (const range of sorted) {
+    if (current && range.start < current.end) {
+      if (range.end > current.end) current.end = range.end
+      if (range.replacement !== current.replacement) current.replacement = mixedReplacement
+      continue
+    }
+    if (current) {
+      parts.push(content.slice(cursor, current.start), current.replacement)
+      cursor = current.end
+    }
+    current = { ...range }
+  }
+  if (current) {
+    parts.push(content.slice(cursor, current.start), current.replacement)
+    cursor = current.end
+  }
+  parts.push(content.slice(cursor))
+  return parts.join('')
+}
+
 export class BasicSafety implements Safety {
   /**
    * Optional callback that returns ConfigStore-managed secret values. When
@@ -195,10 +274,10 @@ export class BasicSafety implements Safety {
     /(?:xox[bprs])-[a-zA-Z0-9-]+/g,
     /Bearer\s+[a-zA-Z0-9._~+\/=-]{20,}/gi,
     /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
-    // The value stops before the next password label, so that label's own
-    // value is matched too. A value shorter than 8 characters up to that label
-    // is matched whole, as before.
-    /(?:password|passwd|pwd)\s*[:=]\s*(?:(?:(?!(?:password|passwd|pwd)\s*[:=])[^\s,;]){8,}|[^\s,;]{8,})/gi,
+    // The value stops before the next password label only when that label's
+    // own value is at least 8 characters, so the next match starts there and
+    // covers the rest. Otherwise the whole run is matched, as before.
+    /(?:password|passwd|pwd)\s*[:=]\s*(?:(?:(?!(?:password|passwd|pwd)\s*[:=])[^\s,;]){8,}(?=(?:password|passwd|pwd)\s*[:=]\s*[^\s,;]{8})|[^\s,;]{8,})/gi,
     // AWS access keys
     /AKIA[0-9A-Z]{16}/g,
     // Slack webhook URLs
@@ -440,10 +519,9 @@ export class BasicSafety implements Safety {
    * Otherwise the redaction is redone in place on the original text:
    * 1. One iterative scan records the inner span of every string token, keys
    *    and values alike, with escapes still encoded.
-   * 2. The text pass's rules (injection patterns, secret patterns, configured
-   *    secret forms) are replayed in its order, and each replacement is
-   *    mapped back to the range of the original text it covers
-   *    (`redactionRanges`).
+   * 2. The ranges are the ones the text pass applies (`redactionPlan`): every
+   *    rule's matches on the replayed working copy, mapped back to the
+   *    original text, plus its matches on the original text itself.
    * 3. Each match is clipped to every string it covers and widened to whole
    *    escape sequences. A number or literal (`true`, `false`, `null`) the
    *    match covers in part or whole is replaced whole by the replacement as
@@ -456,14 +534,17 @@ export class BasicSafety implements Safety {
    * The warnings are always the text pass's.
    */
   private sanitizeToolOutputContent(toolName: string, content: string): SanitizedOutput {
-    const options = { secretWarning: `Potential secret detected in ${toolName} output` }
-    const textPass = this.sanitizeFreeformContent(content, options)
+    const plan = this.redactionPlan(content, {
+      secretWarning: `Potential secret detected in ${toolName} output`,
+    })
+    const textPass = this.applyRedactionPlan(content, plan)
     if (!textPass.was_modified || parsesAsJson(textPass.content) || !parsesAsJson(content)) {
       return textPass
     }
     const { tokens, tokenOf, escapeOffset } = scanJsonStrings(content)
+    let scalars: { start: Int32Array; end: Int32Array } | undefined
     const pieces: RedactionPiece[] = []
-    for (const range of this.redactionRanges(content)) {
+    for (const range of plan.ranges) {
       let touched = false
       let i = range.start
       while (i < range.end) {
@@ -474,12 +555,16 @@ export class BasicSafety implements Safety {
             continue
           }
           // Outside strings, a run of non-structural bytes is one number or
-          // literal; it is bounded by punctuation or whitespace on both sides.
-          let start = i
-          while (start > 0 && !isJsonStructural(content.charCodeAt(start - 1))) start--
-          let end = i + 1
-          while (end < content.length && !isJsonStructural(content.charCodeAt(end))) end++
-          pieces.push({ start, end, replacement: range.replacement, scalar: true })
+          // literal. Its bounds are computed once, so many matches inside one
+          // long number cost one pass over it.
+          scalars ??= scalarBounds(content)
+          const end = scalars.end[i]
+          pieces.push({
+            start: scalars.start[i],
+            end,
+            replacement: range.replacement,
+            scalar: true,
+          })
           touched = true
           i = end
           continue
@@ -529,41 +614,112 @@ export class BasicSafety implements Safety {
   }
 
   /**
-   * The range of `content` behind every replacement the text pass makes on
-   * tool output. The rules are replayed in the text pass's order on a working
-   * copy, so each rule sees the earlier replacements exactly as the text pass
-   * does, and every range covers at least what the text pass replaced.
+   * The ranges of `content` to redact and the warnings to report. Each rule
+   * (injection patterns, extra filters, secret patterns, configured secret
+   * forms, in that order) is matched twice:
+   * - on a working copy where the earlier rules' matches are already
+   *   replaced, so a rule can match across an earlier replacement
+   *   (`[INST]passwd = [INST]passwd = value`); each such match is mapped back
+   *   to the range of `content` it covers (`RedactionReplay`);
+   * - on `content` itself, so a secret whose label or prefix an earlier
+   *   rule's match swallowed is still found (`xoxb-1234-abcdBearer <token>`);
+   *   a match the replay ranges already cover whole is dropped.
+   * A rule's warning is reported when the replay matching finds something or
+   * a match on `content` is kept.
    */
-  private redactionRanges(content: string): RedactionRange[] {
-    const replay = new RedactionReplay(content)
-    const replaceMatches = (pattern: RegExp, replacement: string) => {
-      const matches: Array<[number, number]> = []
-      for (const match of replay.text.matchAll(pattern)) {
-        if (match[0].length === 0) continue
-        matches.push([match.index, match.index + match[0].length])
-      }
-      replay.replace(matches, replacement)
+  private redactionPlan(
+    content: string,
+    options: {
+      secretWarning: string
+      extraFilters?: Array<{ pattern: RegExp; replacement: string; warning: string }>
     }
+  ): { ranges: RedactionRange[]; warnings: string[] } {
+    const rules: Array<{
+      replacement: string
+      warning: string
+      find: Array<(text: string) => Array<[number, number]>>
+    }> = []
     for (const pattern of BasicSafety.INJECTION_PATTERNS) {
-      replaceMatches(pattern, BasicSafety.INJECTION_REPLACEMENT)
+      rules.push({
+        replacement: BasicSafety.INJECTION_REPLACEMENT,
+        warning: 'Potential prompt injection pattern filtered',
+        find: [text => patternMatches(text, pattern)],
+      })
+    }
+    for (const filter of options.extraFilters ?? []) {
+      rules.push({
+        replacement: filter.replacement,
+        warning: filter.warning,
+        find: [text => patternMatches(text, filter.pattern)],
+      })
     }
     for (const pattern of BasicSafety.SECRET_PATTERNS) {
-      replaceMatches(pattern, BasicSafety.SECRET_REPLACEMENT)
+      rules.push({
+        replacement: BasicSafety.SECRET_REPLACEMENT,
+        warning: options.secretWarning,
+        find: [text => patternMatches(text, pattern)],
+      })
     }
     for (const secret of this.configuredSecretForms()) {
-      const replacement = `[REDACTED:${secret.name}]`
-      for (const form of secret.forms) {
-        // The same non-overlapping, left-to-right occurrences `split` finds.
-        const matches: Array<[number, number]> = []
-        let at = replay.text.indexOf(form)
-        while (at !== -1) {
-          matches.push([at, at + form.length])
-          at = replay.text.indexOf(form, at + form.length)
-        }
-        replay.replace(matches, replacement)
-      }
+      rules.push({
+        replacement: `[REDACTED:${secret.name}]`,
+        warning: `ConfigStore secret value redacted (${secret.name})`,
+        find: secret.forms.map(form => (text: string) => literalMatches(text, form)),
+      })
     }
-    return replay.ranges
+
+    const replay = new RedactionReplay(content)
+    const replayed: boolean[] = []
+    const direct: Array<Array<[number, number]>> = []
+    for (const rule of rules) {
+      let found = false
+      const original: Array<[number, number]> = []
+      for (const find of rule.find) {
+        const matches = find(replay.text)
+        if (matches.length > 0) found = true
+        replay.replace(matches, rule.replacement)
+        original.push(...find(content))
+      }
+      replayed.push(found)
+      direct.push(original)
+    }
+
+    // A match on `content` that the replay already covers adds nothing, and
+    // dropping it keeps the result equal to the in-order replacement.
+    // `uncoveredBefore[i]` counts the code units before `i` no replay range
+    // covers.
+    const depth = new Int32Array(content.length + 1)
+    for (const range of replay.ranges) {
+      depth[range.start]++
+      depth[range.end]--
+    }
+    const uncoveredBefore = new Int32Array(content.length + 1)
+    let covering = 0
+    for (let i = 0; i < content.length; i++) {
+      covering += depth[i]
+      uncoveredBefore[i + 1] = uncoveredBefore[i] + (covering === 0 ? 1 : 0)
+    }
+
+    const ranges = [...replay.ranges]
+    const warnings: string[] = []
+    rules.forEach((rule, index) => {
+      let found = replayed[index]
+      for (const [start, end] of direct[index]) {
+        if (uncoveredBefore[end] - uncoveredBefore[start] === 0) continue
+        ranges.push({ start, end, replacement: rule.replacement })
+        found = true
+      }
+      if (found) warnings.push(rule.warning)
+    })
+    return { ranges, warnings }
+  }
+
+  private applyRedactionPlan(
+    content: string,
+    plan: { ranges: RedactionRange[]; warnings: string[] }
+  ): SanitizedOutput {
+    const sanitized = applyRedactionRanges(content, plan.ranges, BasicSafety.SECRET_REPLACEMENT)
+    return { content: sanitized, was_modified: sanitized !== content, warnings: plan.warnings }
   }
 
   /**
@@ -600,56 +756,12 @@ export class BasicSafety implements Safety {
       extraFilters?: Array<{ pattern: RegExp; replacement: string; warning: string }>
     }
   ): SanitizedOutput {
-    let sanitized = content
-    const warnings: string[] = []
-
-    for (const pattern of BasicSafety.INJECTION_PATTERNS) {
-      const before = sanitized
-      sanitized = sanitized.replace(pattern, BasicSafety.INJECTION_REPLACEMENT)
-      if (sanitized !== before) {
-        warnings.push('Potential prompt injection pattern filtered')
-      }
-    }
-
-    for (const filter of options.extraFilters ?? []) {
-      const before = sanitized
-      sanitized = sanitized.replace(filter.pattern, filter.replacement)
-      if (sanitized !== before) {
-        warnings.push(filter.warning)
-      }
-    }
-
-    for (const pattern of BasicSafety.SECRET_PATTERNS) {
-      const before = sanitized
-      sanitized = sanitized.replace(pattern, BasicSafety.SECRET_REPLACEMENT)
-      if (sanitized !== before) {
-        warnings.push(options.secretWarning)
-      }
-    }
-
-    // Defense-in-depth: redact ConfigStore-managed secret values by literal
-    // substring match, in plain and JSON-encoded form. Catches values that
-    // don't fit the regex shapes above — operator-supplied integration
-    // tokens, the LLM key, etc. Entries are traversed in provider order;
-    // ConfigStore sorts them by descending length, so a longer secret
-    // containing a shorter one is masked before the shorter pass would erase
-    // its anchor.
-    for (const secret of this.configuredSecretForms()) {
-      const before = sanitized
-      for (const form of secret.forms) {
-        if (sanitized.includes(form)) {
-          sanitized = sanitized.split(form).join(`[REDACTED:${secret.name}]`)
-        }
-      }
-      if (sanitized !== before) {
-        warnings.push(`ConfigStore secret value redacted (${secret.name})`)
-      }
-    }
-
-    return {
-      content: sanitized,
-      was_modified: sanitized !== content,
-      warnings,
-    }
+    // ConfigStore-managed secret values are redacted by literal match, in
+    // plain and JSON-encoded form: defense-in-depth for values that don't fit
+    // the regex shapes (operator-supplied integration tokens, the LLM key,
+    // etc.). Entries are traversed in provider order; ConfigStore sorts them
+    // by descending length, so a longer secret containing a shorter one is
+    // masked before the shorter pass would erase its anchor.
+    return this.applyRedactionPlan(content, this.redactionPlan(content, options))
   }
 }
