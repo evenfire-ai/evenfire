@@ -343,10 +343,11 @@ describe('BasicSafety', () => {
     it('redacts a password whose label an earlier rule took', () => {
       // The Slack token rule takes `xoxb-1password`, which holds the label of
       // the password `aaaaaaaa`. Each rule is also matched on the original
-      // text, so that password is redacted as well.
+      // text, so that password is redacted as well; the match that runs to
+      // the next separator joins it to the second value.
       const plain = 'xoxb-1password=aaaaaaaapwd: SuperSecretValue123'
       const value = safety.sanitizeFreeformContent(plain, { secretWarning: WARNING }).content
-      expect(value).toBe('[REDACTED][REDACTED]')
+      expect(value).toBe('[REDACTED]')
 
       const output = JSON.stringify({ log: plain })
       // Witness: the text pass breaks this output, so the in-place path runs.
@@ -454,6 +455,69 @@ describe('BasicSafety', () => {
         'ConfigStore secret value redacted (MIXED)',
       ])
     })
+
+    it('redacts a configured secret that holds an injection pattern in JSON', () => {
+      const s = new BasicSafety(() => [{ name: 'MIXED', value: 'abc<system>defghi' }])
+      // `b` makes the text pass break the JSON, so the in-place path runs.
+      const output = JSON.stringify({ a: 'x abc<system>defghi y', b: 'password=abcdefgh' })
+      const textPass = s.sanitizeFreeformContent(output, { secretWarning: SECRET_WARNING })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
+      const result = s.sanitizeOutput('mcp__config', output)
+      expect(result.content).toBe(JSON.stringify({ a: 'x [REDACTED] y', b: '[REDACTED]' }))
+      expect(result.warnings).toEqual([
+        'Potential prompt injection pattern filtered',
+        SECRET_WARNING,
+        'ConfigStore secret value redacted (MIXED)',
+      ])
+    })
+
+    it('reports no warning for a rule whose every match an earlier rule already redacted', () => {
+      // The configured value lies inside the Bearer token, which the secret
+      // rule replaces first, so the configured rule redacts nothing of its own.
+      const s = new BasicSafety(() => [{ name: 'INNER', value: 'ghijklmn' }])
+      const result = s.sanitizeOutput('shell_exec', `x Bearer ${SYNTHETIC_BEARER} y`)
+      expect(result.content).toBe('x [REDACTED] y')
+      expect(result.was_modified).toBe(true)
+      expect(result.warnings).toEqual(['Potential secret detected in shell_exec output'])
+    })
+  })
+
+  describe('a configured secret made only of JSON punctuation', () => {
+    it('keeps the text-pass result after a password whose match ends inside it', () => {
+      // Only the match on the original text finds the value, since the
+      // password match swallowed part of it. The value cannot be removed
+      // without breaking the JSON structure, so the redacted text pass is
+      // returned rather than leaving the value.
+      const output = '[{"a":"pwd=abcdefgh"},{"b":1}]'
+      const s = new BasicSafety(() => [{ name: 'S', value: '"},{"' }])
+      const textPass = s.sanitizeFreeformContent(output, {
+        secretWarning: 'Potential secret detected in mcp__config output',
+      })
+      const result = s.sanitizeOutput('mcp__config', output)
+      // Witness: the configured rule matched.
+      expect(result.warnings).toContain('ConfigStore secret value redacted (S)')
+      expect(result.content).toBe(textPass.content)
+      expect(result.content).not.toContain('"},{"')
+    })
+  })
+
+  describe('was_modified', () => {
+    it('is false when every replacement equals the text it replaces', () => {
+      const s = new BasicSafety(() => [{ name: 'TOK', value: '[REDACTED:TOK]' }])
+      const result = s.sanitizeOutput('shell_exec', 'x [REDACTED:TOK] y')
+      expect(result.content).toBe('x [REDACTED:TOK] y')
+      // Witness: the configured rule matched.
+      expect(result.warnings).toEqual(['ConfigStore secret value redacted (TOK)'])
+      expect(result.was_modified).toBe(false)
+    })
+
+    it('is true when a replacement changes the text', () => {
+      const s = new BasicSafety(() => [{ name: 'TOK', value: 'tok-value-1234' }])
+      const result = s.sanitizeOutput('shell_exec', 'x tok-value-1234 y')
+      expect(result.content).toBe('x [REDACTED:TOK] y')
+      expect(result.was_modified).toBe(true)
+    })
   })
 
   describe('password values next to another password label', () => {
@@ -499,6 +563,43 @@ describe('BasicSafety', () => {
       expect(result.content).not.toContain('abc')
     })
 
+    it.each([
+      ['a label whose short value is the next label', 'pwd=AAAAAAAApwd=pwd= S3cretValue1'],
+      [
+        'a label with spaces around its separator',
+        'password=hunter2hunter2password=pwd : S3cretValue1',
+      ],
+    ])('redacts the last value after %s', (_label, text) => {
+      const result = safety.sanitizeOutput('shell_exec', text)
+      expect(result.was_modified).toBe(true)
+      expect(result.content).not.toContain('S3cretValue1')
+
+      const output = JSON.stringify({ log: text })
+      const inJson = safety.sanitizeOutput('mcp__config', output)
+      expect(inJson.was_modified).toBe(true)
+      expect(inJson.content).not.toContain('S3cretValue1')
+    })
+
+    it.each([
+      // `PASSWORD:` has a short value, so the value of `pwd :` that runs to
+      // the next separator swallows `passwd =`, whose value starts with a
+      // label of its own.
+      ['starts with a label', 'PASSWORD:pwd :Zq8Lm2Xvpasswd =pwd=Ab3x tail', 'Ab3x'],
+      ['starts with a label and a colon', 'PASSWORD:pwd :Zq8Lm2Xvpasswd =Pwd:7Kq2', '7Kq2'],
+    ])(
+      'redacts the value of a label inside an earlier value when it %s',
+      (_label, text, secret) => {
+        const result = safety.sanitizeOutput('shell_exec', text)
+        expect(result.was_modified).toBe(true)
+        expect(result.content).not.toContain(secret)
+
+        const output = JSON.stringify({ log: text })
+        const inJson = safety.sanitizeOutput('mcp__config', output)
+        expect(inJson.was_modified).toBe(true)
+        expect(inJson.content).not.toContain(secret)
+      }
+    )
+
     it('matches a long run of labels in linear time', () => {
       const content = 'pwd:'.repeat(250_000)
       const started = performance.now()
@@ -506,6 +607,18 @@ describe('BasicSafety', () => {
       const elapsedMs = performance.now() - started
       expect(result.content).toBe('[REDACTED]')
       expect(elapsedMs).toBeLessThan(2_000)
+    }, 60_000)
+  })
+
+  describe('a rule with many matches', () => {
+    it('redacts 200,000 injection markers without exceeding the call stack', () => {
+      const content = '[INST] '.repeat(200_000)
+      let result: ReturnType<BasicSafety['sanitizeOutput']> | undefined
+      expect(() => {
+        result = safety.sanitizeOutput('shell_exec', content)
+      }).not.toThrow()
+      expect(result?.content).toBe('[filtered] '.repeat(200_000))
+      expect(result?.warnings).toEqual(['Potential prompt injection pattern filtered'])
     }, 60_000)
   })
 

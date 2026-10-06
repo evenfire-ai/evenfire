@@ -201,6 +201,34 @@ function patternMatches(text: string, pattern: RegExp): Array<[number, number]> 
   return matches
 }
 
+type MatchFinder = (text: string) => Array<[number, number]>
+
+/**
+ * Each password label with its value, which runs to the next whitespace, `,`
+ * or `;` and must be at least 8 code units long; values that overlap are
+ * joined. Unlike one global regex, a label inside an earlier label's value
+ * still starts a value of its own (`pwd :abcdefghpasswd =pwd=Ab3x`).
+ */
+function passwordValueMatches(text: string): Array<[number, number]> {
+  const matches: Array<[number, number]> = []
+  const separatorPattern = /[\s,;]/g
+  let separator = 0
+  for (const label of text.matchAll(/(?:password|passwd|pwd)\s*[:=]\s*/gi)) {
+    const valueStart = label.index + label[0].length
+    // Value starts only grow, so a separator found for an earlier value is
+    // still the next one when it is not before this value's start.
+    if (separator < valueStart) {
+      separatorPattern.lastIndex = valueStart
+      separator = separatorPattern.exec(text)?.index ?? text.length
+    }
+    if (separator - valueStart < 8) continue
+    const last = matches[matches.length - 1]
+    if (last && label.index < last[1]) last[1] = separator
+    else matches.push([label.index, separator])
+  }
+  return matches
+}
+
 // The same non-overlapping, left-to-right occurrences `split` finds.
 function literalMatches(text: string, form: string): Array<[number, number]> {
   const matches: Array<[number, number]> = []
@@ -268,16 +296,23 @@ export class BasicSafety implements Safety {
     /<<\/SYS>>/gi,
   ]
 
-  private static readonly SECRET_PATTERNS: RegExp[] = [
+  // Each entry is one rule; an array entry is one rule matched with each of
+  // its patterns or finders, so its warning is reported once.
+  private static readonly SECRET_PATTERNS: Array<RegExp | Array<RegExp | MatchFinder>> = [
     /(?:sk|pk|api)[_-](?:live|test|prod)[_-][a-zA-Z0-9]{16,}/g,
     /(?:ghp|gho|ghs|ghr)_[a-zA-Z0-9]{36,}/g,
     /(?:xox[bprs])-[a-zA-Z0-9-]+/g,
     /Bearer\s+[a-zA-Z0-9._~+\/=-]{20,}/gi,
     /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
-    // The value stops before the next password label only when that label's
-    // own value is at least 8 characters, so the next match starts there and
-    // covers the rest. Otherwise the whole run is matched, as before.
-    /(?:password|passwd|pwd)\s*[:=]\s*(?:(?:(?!(?:password|passwd|pwd)\s*[:=])[^\s,;]){8,}(?=(?:password|passwd|pwd)\s*[:=]\s*[^\s,;]{8})|[^\s,;]{8,})/gi,
+    // Password values, matched twice so the coverage is the union of both:
+    // - stopping before the next password label, so a label glued to the
+    //   value still starts a match of its own (`password=Sup3rS3cretPwd:x1`);
+    // - running to the next separator from every label, so a value that
+    //   holds a label (`password=abc=pwd=defghijk`) is covered whole.
+    [
+      /(?:password|passwd|pwd)\s*[:=]\s*(?:(?!(?:password|passwd|pwd)\s*[:=])[^\s,;]){8,}/gi,
+      passwordValueMatches,
+    ],
     // AWS access keys
     /AKIA[0-9A-Z]{16}/g,
     // Slack webhook URLs
@@ -637,7 +672,7 @@ export class BasicSafety implements Safety {
     const rules: Array<{
       replacement: string
       warning: string
-      find: Array<(text: string) => Array<[number, number]>>
+      find: MatchFinder[]
     }> = []
     for (const pattern of BasicSafety.INJECTION_PATTERNS) {
       rules.push({
@@ -653,11 +688,14 @@ export class BasicSafety implements Safety {
         find: [text => patternMatches(text, filter.pattern)],
       })
     }
-    for (const pattern of BasicSafety.SECRET_PATTERNS) {
+    for (const entry of BasicSafety.SECRET_PATTERNS) {
+      const patterns = Array.isArray(entry) ? entry : [entry]
       rules.push({
         replacement: BasicSafety.SECRET_REPLACEMENT,
         warning: options.secretWarning,
-        find: [text => patternMatches(text, pattern)],
+        find: patterns.map(pattern =>
+          typeof pattern === 'function' ? pattern : (text: string) => patternMatches(text, pattern)
+        ),
       })
     }
     for (const secret of this.configuredSecretForms()) {
@@ -678,7 +716,9 @@ export class BasicSafety implements Safety {
         const matches = find(replay.text)
         if (matches.length > 0) found = true
         replay.replace(matches, rule.replacement)
-        original.push(...find(content))
+        // A loop, not `push(...)`: spreading one argument per match overflows
+        // the call stack at about 120k matches.
+        for (const match of find(content)) original.push(match)
       }
       replayed.push(found)
       direct.push(original)
