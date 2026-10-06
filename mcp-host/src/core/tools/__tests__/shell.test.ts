@@ -84,6 +84,8 @@ describe('ShellTool', () => {
     const resolverBase = JSON.parse(
       description.match(/createRequire\(("(?:[^"\\]|\\.)*")\)/)![1]
     ) as string
+    expect(description).toContain('load fast-csv through that resolver and use parseStream')
+    expect(description).toContain('exceljs.csv is not available')
     await writeFile(
       join(workspacePath, 'input.csv'),
       'id,"label,name",notes\r\n' +

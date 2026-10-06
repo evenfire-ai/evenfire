@@ -4,6 +4,7 @@ import type { GfsImageSource, MemoryReservation, VisualInputBudget } from '../vi
 export const GFS_LOCAL_PROCESSING_GUIDANCE =
   'Use the Node executable and installed-library resolver advertised by shell_exec; verify any other executable or library instead of assuming Python or additional packages are installed. ' +
   'Prefer an installed streaming parser for the actual file format and keep memory and output bounded. ' +
+  'For CSV, load fast-csv through that resolver and use its parseStream API; this installation does not expose exceljs.csv. ' +
   'Count logical records and parse fields according to that format: CSV can contain quoted delimiters, escaped quotes and embedded newlines, so splitting on commas or counting physical lines is not a CSV parser. ' +
   'Have the script compute and label every reported quantity, including field counts; do not estimate or recount an array in your reply. ' +
   'Return all requested metadata names within the output budget. A brief summary must still answer every requested part; do not defer an already requested list to another message. ' +

@@ -104,7 +104,7 @@ export class ShellTool implements Tool {
       'Supports full shell syntax (pipes, redirects, &&, etc.). ' +
       'Commands run with a timeout and restricted environment. ' +
       `Node.js executable: ${JSON.stringify(process.execPath)}. ` +
-      `Resolve installed Host libraries with require('node:module').createRequire(${JSON.stringify(require.resolve('exceljs'))}); the existing exceljs dependency includes fast-csv for streaming CSV parsing. ` +
+      `Resolve installed Host libraries with require('node:module').createRequire(${JSON.stringify(require.resolve('exceljs'))}); load fast-csv through that resolver and use parseStream for streaming CSV parsing (exceljs.csv is not available). ` +
       'Verify any other executable or library before using it. ' +
       'This tool requires approval before execution.'
     )
