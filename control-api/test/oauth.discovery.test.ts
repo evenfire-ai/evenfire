@@ -29,16 +29,20 @@ function deps(transport: PinnedTransport, resolveDns = publicDns()): DiscoveryDe
   return { transport, resolveDns }
 }
 
-describe('discoverRemoteOAuth — 4 CIMD pilots (T1 real fixtures)', () => {
+describe('discoverRemoteOAuth — 4 CIMD-capable pilots (T1 real fixtures)', () => {
+  // All 4 advertise CIMD + `none`, but CIMD is only offered when the AS also returns
+  // `iss` (RFC 9207): Linear and Sentry do; Notion and Canva do not and fall back to
+  // their registration endpoint (DCR).
+  const expectedMode = { notion: 'dcr', linear: 'cimd', sentry: 'cimd', canva: 'dcr' } as const
   for (const key of ['notion', 'linear', 'sentry', 'canva'] as const) {
     const pilot = PILOTS[key]
-    it(`${key}: resolves PRM→AS, selects CIMD, pins endpoints`, async () => {
+    it(`${key}: resolves PRM→AS, selects ${expectedMode[key]}, pins endpoints`, async () => {
       const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(makeDiscoveryTransport(pilot)))
       expect(outcome.ok).toBe(true)
       if (!outcome.ok) return
       const r = outcome.result
-      // D-3: all 4 pilots resolve to CIMD (cimd_supported + `none`).
-      expect(r.registrationMode).toBe('cimd')
+      expect(r.registrationMode).toBe(expectedMode[key])
+      expect(r.issForCallback !== undefined).toBe(expectedMode[key] === 'cimd')
       // RFC 8707: resource is the PRM resource verbatim.
       expect(r.resource).toBe(JSON.parse(pilot.prm.json).resource)
       // Endpoints pinned from the AS metadata.
@@ -52,12 +56,18 @@ describe('discoverRemoteOAuth — 4 CIMD pilots (T1 real fixtures)', () => {
     })
   }
 
-  it('sentry: exposes issForCallback (RFC 9207); others do not', async () => {
+  it('sentry and linear expose issForCallback (RFC 9207); notion does not', async () => {
     const sentry = await discoverRemoteOAuth(
       PILOTS.sentry.mcpUrl,
       deps(makeDiscoveryTransport(PILOTS.sentry))
     )
     expect(sentry.ok && sentry.result.issForCallback).toBe('https://mcp.sentry.dev')
+
+    const linear = await discoverRemoteOAuth(
+      PILOTS.linear.mcpUrl,
+      deps(makeDiscoveryTransport(PILOTS.linear))
+    )
+    expect(linear.ok && linear.result.issForCallback).toBe('https://mcp.linear.app')
 
     const notion = await discoverRemoteOAuth(
       PILOTS.notion.mcpUrl,

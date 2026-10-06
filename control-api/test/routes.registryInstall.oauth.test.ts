@@ -722,7 +722,7 @@ describe('generic carril install (S3-B4)', () => {
     await expect(gw.getSecret('my-idp-oauth-client', 'mcp-server')).rejects.toThrow()
 
     // inv.3: the resolver (real producer→consumer) reads the CR back as public generic.
-    const subject = resolveServerOAuthSubject({ spec: server.spec })
+    const subject = resolveServerOAuthSubject({ spec: server.spec }, 'consent')
     expect(subject?.decl.provider).toBe('generic')
     expect(subject?.decl.secretSource).toEqual({ kind: 'public' })
   })
@@ -761,7 +761,7 @@ describe('generic carril install (S3-B4)', () => {
     }
     expect(Object.keys(secret.data ?? {}).sort()).toEqual(['client_id', 'client_secret'])
 
-    const subject = resolveServerOAuthSubject({ spec: server.spec })
+    const subject = resolveServerOAuthSubject({ spec: server.spec }, 'consent')
     expect(subject?.decl.secretSource).toEqual({
       kind: 'k8s-secret',
       clientIdRef: { name: 'my-idp-oauth-client', key: 'client_id' },

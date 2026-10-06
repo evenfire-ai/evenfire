@@ -1,0 +1,14 @@
+{
+  "status": 201,
+  "body": {
+    "serverName": "linear-pre",
+    "namespace": "mcp-server",
+    "contextRef": "research",
+    "contextUpdated": true,
+    "clientMode": "confidential",
+    "registrationMode": "pre-registered",
+    "callbackVariant": "shared",
+    "redirectUri": "https://control.example.com/api/v1/oauth-callback/remote",
+    "clientSecretName": "linear-pre-oauth-client"
+  }
+}
