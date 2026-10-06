@@ -1,6 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
-import { cancellableInvoke } from './gfs/cancellableInvoke.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   EntityChangeStreamEvent,
@@ -47,22 +46,27 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
 ])
 
 /**
- * Producer-side cancellation wiring (folder-zip Stop, R1-M1): see
- * gfs/cancellableInvoke.ts — a cancellable invoke carries a requestId; if the
- * caller's signal aborts, main aborts the in-flight request. An already-
- * aborted signal never starts producer work at all (R2-L3).
+ * Producer-side cancellation wiring (folder-zip Stop, R1-M1): a cancellable
+ * invoke carries a requestId; if the caller's signal aborts, main aborts the
+ * in-flight request. An already-aborted signal never starts producer work —
+ * no invoke, no gfs:abort event (R2-L3). Kept INLINE: the sandboxed preload
+ * must stay free of relative value imports (self-containment contract).
  */
 function cancellableGfsInvoke<T>(
   channel: string,
   payload: Record<string, unknown>,
   signal?: AbortSignal
 ): Promise<T> {
-  return cancellableInvoke<T>(
-    { invoke: (c, p) => ipcRenderer.invoke(c, p), send: (c, p) => ipcRenderer.send(c, p) },
-    channel,
-    payload,
-    signal
-  )
+  if (!signal) return ipcRenderer.invoke(channel, payload) as Promise<T>
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('Request was stopped before it started.', 'AbortError'))
+  }
+  const requestId = crypto.randomUUID()
+  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
+  signal.addEventListener('abort', onAbort, { once: true })
+  return ipcRenderer
+    .invoke(channel, { ...payload, requestId })
+    .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
 }
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {

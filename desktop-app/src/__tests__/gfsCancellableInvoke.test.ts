@@ -1,65 +1,109 @@
 /**
- * R2-L3 — an already-aborted signal must start NO producer work: the invoke is
- * never sent and no gfs:abort event fires. Also pins the mid-flight contract:
- * requestId on the invoke, exactly one gfs:abort on abort, listener cleanup on
- * settle.
+ * R2-L3/R1-M6 — the REAL preload's cancellable GFS bridge, exercised through
+ * a mocked Electron boundary. The preload is the sandboxed security surface,
+ * so its behavior is tested directly (no extracted helper): an already-aborted
+ * signal starts no producer work; a mid-flight abort fires gfs:abort exactly
+ * once with the invoke's requestId; a signal-less call is a plain invoke.
  */
-import { describe, expect, it, vi } from 'vitest'
-import { cancellableInvoke } from '../gfs/cancellableInvoke.js'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
-function bridge() {
+const electron = vi.hoisted(() => {
+  const exposed = new Map<string, unknown>()
   return {
-    invoke: vi.fn(() => new Promise(() => undefined)),
-    send: vi.fn(),
+    exposed,
+    ipcRenderer: {
+      invoke: vi.fn(() => new Promise(() => undefined)),
+      send: vi.fn(),
+      on: vi.fn(),
+      removeAllListeners: vi.fn(),
+    },
+  }
+})
+
+vi.mock('electron', () => ({
+  contextBridge: {
+    exposeInMainWorld: vi.fn((name: string, value: unknown) => {
+      electron.exposed.set(name, value)
+    }),
+  },
+  ipcRenderer: electron.ipcRenderer,
+  webUtils: { getPathForFile: vi.fn() },
+}))
+
+type ClerumBridge = {
+  gfs: {
+    listChildren: (
+      resourceId: string,
+      drive?: string,
+      cursor?: string,
+      options?: { signal?: AbortSignal }
+    ) => Promise<unknown>
+    download: (
+      uri: string,
+      options?: { maxBytes?: number; signal?: AbortSignal }
+    ) => Promise<unknown>
   }
 }
 
-describe('cancellableInvoke (R2-L3)', () => {
+let bridge: ClerumBridge
+
+beforeAll(async () => {
+  await import('../preload.js')
+  bridge = electron.exposed.get('clerum') as ClerumBridge
+})
+
+afterEach(() => {
+  vi.clearAllMocks()
+})
+
+describe('preload cancellable GFS bridge (R2-L3)', () => {
   it('starts no IPC or producer work for an already-aborted signal', async () => {
-    const mockBridge = bridge()
     const controller = new AbortController()
     controller.abort()
 
     await expect(
-      cancellableInvoke(mockBridge, 'gfs:listChildren', { resourceId: 'r' }, controller.signal)
+      bridge.gfs.listChildren('folder-1', 'main', undefined, { signal: controller.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(
+      bridge.gfs.download('gfs://main/x', { signal: controller.signal })
     ).rejects.toMatchObject({ name: 'AbortError' })
 
-    expect(mockBridge.invoke).not.toHaveBeenCalled()
-    expect(mockBridge.send).not.toHaveBeenCalled()
+    expect(electron.ipcRenderer.invoke).not.toHaveBeenCalled()
+    expect(electron.ipcRenderer.send).not.toHaveBeenCalled()
   })
 
-  it('sends the requestId, fires gfs:abort exactly once on mid-flight abort, and detaches on settle', async () => {
-    const mockBridge = bridge()
+  it('carries a requestId, fires gfs:abort once on abort, and detaches on settle', async () => {
     const controller = new AbortController()
+    const pending = bridge.gfs.listChildren('folder-1', 'main', undefined, {
+      signal: controller.signal,
+    })
+    pending.catch(() => undefined)
 
-    const pending = cancellableInvoke(
-      mockBridge,
-      'gfs:download',
-      { uri: 'gfs://main/x', maxBytes: 10 },
-      controller.signal
-    )
-    expect(mockBridge.invoke).toHaveBeenCalledTimes(1)
-    const payload = mockBridge.invoke.mock.calls[0]?.[1] as { requestId?: string }
+    expect(electron.ipcRenderer.invoke).toHaveBeenCalledTimes(1)
+    const [channel, payload] = electron.ipcRenderer.invoke.mock.calls[0] as [
+      string,
+      { requestId?: string },
+    ]
+    expect(channel).toBe('gfs:listChildren')
     expect(typeof payload.requestId).toBe('string')
 
     controller.abort()
-    expect(mockBridge.send).toHaveBeenCalledTimes(1)
-    expect(mockBridge.send).toHaveBeenCalledWith('gfs:abort', { requestId: payload.requestId })
-    // A second abort event (late listener) must not re-send after cleanup.
+    expect(electron.ipcRenderer.send).toHaveBeenCalledTimes(1)
+    expect(electron.ipcRenderer.send).toHaveBeenCalledWith('gfs:abort', {
+      requestId: payload.requestId,
+    })
+    // A late synthetic abort event must not re-send after cleanup.
     controller.signal.dispatchEvent(new Event('abort'))
-    pending.catch(() => undefined)
-    await Promise.resolve()
-    expect(mockBridge.send).toHaveBeenCalledTimes(1)
+    expect(electron.ipcRenderer.send).toHaveBeenCalledTimes(1)
   })
 
-  it('invokes without a signal exactly as a plain pass-through', async () => {
-    const mockBridge = bridge()
-    mockBridge.invoke.mockReturnValue(Promise.resolve({ ok: true }))
-    const result = await cancellableInvoke<{ ok: boolean }>(mockBridge, 'gfs:resolve', {
+  it('forwards the download bound and passes a signal-less call through untouched', async () => {
+    electron.ipcRenderer.invoke.mockReturnValueOnce(Promise.resolve({ ok: true }))
+    bridge.gfs.download('gfs://main/x', { maxBytes: 512 })
+    expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith('gfs:download', {
       uri: 'gfs://main/x',
+      maxBytes: 512,
+      requestId: undefined,
     })
-    expect(result).toEqual({ ok: true })
-    expect(mockBridge.invoke).toHaveBeenCalledWith('gfs:resolve', { uri: 'gfs://main/x' })
-    expect(mockBridge.send).not.toHaveBeenCalled()
   })
 })
