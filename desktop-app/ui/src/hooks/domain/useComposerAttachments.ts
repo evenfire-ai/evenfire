@@ -31,7 +31,10 @@ export function mergeComposerImageAttachments(
   let kept = 0
   let duplicates = 0
   for (const attachment of incoming) {
-    if (accepted.length >= COMPOSER_MAX_IMAGE_ATTACHMENTS) break
+    // Dedupe BEFORE capacity (R2-L1): a byte-identical copy of an attachment
+    // the composer already holds is not "dropped at the cap" — nothing is
+    // lost, it is already there — so it must never consume the drop count (or
+    // a slot) even when the composer is full.
     const duplicate = accepted.some(
       candidate =>
         candidate.mimeType === attachment.mimeType &&
@@ -42,6 +45,7 @@ export function mergeComposerImageAttachments(
       duplicates += 1
       continue
     }
+    if (accepted.length >= COMPOSER_MAX_IMAGE_ATTACHMENTS) break
     accepted.push(
       attachment.addedOrder != null ? attachment : { ...attachment, addedOrder: nextOrder() }
     )

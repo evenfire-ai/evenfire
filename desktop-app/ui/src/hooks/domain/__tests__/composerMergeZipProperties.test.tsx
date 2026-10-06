@@ -43,6 +43,28 @@ const referenceArbitrary = fc
   }))
 
 describe('composer merge invariants (R1-M6)', () => {
+  it('counts a cap-time duplicate as a duplicate, not a drop (R2-L1)', () => {
+    // Composer already at the cap; the restore payload is byte-identical to
+    // what is held. Nothing is lost — reporting a drop would be a lie.
+    const held = Array.from({ length: COMPOSER_MAX_IMAGE_ATTACHMENTS }, (_, index) => ({
+      ...({} as ComposerImageAttachment),
+      id: `held-${index}`,
+      name: `held-${index}.png`,
+      mimeType: 'image/png' as const,
+      dataBase64: `aGVsZA-${index}`,
+      sizeBytes: 4,
+      previewDataUrl: `data:image/png;base64,aGVsZA-${index}`,
+    }))
+    const restore = [held[3]!, held[7]!]
+    const outcome = mergeComposerImageAttachments(held, restore)
+    expect(outcome.duplicates).toBe(2)
+    expect(outcome.dropped).toBe(0)
+    expect(outcome.kept).toBe(0)
+    expect(outcome.next).toHaveLength(COMPOSER_MAX_IMAGE_ATTACHMENTS)
+    // The exact same set survives: restoring dropped nothing new.
+    expect(outcome.next).toEqual(held)
+  })
+
   it('image merge: cap, count conservation, and existing-set stability', () => {
     fc.assert(
       fc.property(
