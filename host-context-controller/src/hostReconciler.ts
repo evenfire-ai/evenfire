@@ -504,6 +504,7 @@ type HostSecretValidationResult =
 type BootstrapOptions = {
   forceFreshForWake?: boolean
   targetSuspended?: boolean
+  prepareForResourceChange?: boolean
   refreshGfsOnly?: boolean
   preserveDeploymentTemplateOnWake?: boolean
 }
@@ -1561,6 +1562,40 @@ export class HostReconciler {
     return (deployment?.status?.readyReplicas ?? 0) > 0
   }
 
+  /** Bootstrap acknowledgement requires Ready replicas from the applied generation. */
+  private static deploymentBootstrapConverged(deployment: k8s.V1Deployment | null): boolean {
+    const generation = deployment?.metadata?.generation
+    const replicas = deployment?.spec?.replicas ?? 1
+    const status = deployment?.status
+    return (
+      generation !== undefined &&
+      generation > 0 &&
+      (status?.observedGeneration ?? 0) >= generation &&
+      replicas > 0 &&
+      status?.updatedReplicas === replicas &&
+      status?.readyReplicas === replicas &&
+      status?.replicas === replicas
+    )
+  }
+
+  private static deploymentResourcesMatchHost(
+    deployment: k8s.V1Deployment,
+    host: HostCRD
+  ): boolean {
+    const resources = deployment.spec?.template.spec?.containers.find(
+      container => container.name === 'mcp-host'
+    )?.resources
+    const desired =
+      host.spec.desktop?.browser || host.spec.desktop?.x11
+        ? config.desktopResources
+        : config.hostResources
+    // Match the Deployment comparator's exact quantity values, ignoring map order only.
+    return isDeepStrictEqual(
+      canonicalizeValue({ requests: resources?.requests, limits: resources?.limits }),
+      canonicalizeValue(desired)
+    )
+  }
+
   /**
    * The binding covers the Deployment UID and its runtime-token-revision
    * annotation only. It does not bind the rest of the pod template, so a
@@ -1940,7 +1975,7 @@ export class HostReconciler {
                 HostReconciler.deploymentRuntimeTokenRevision(deployment) === existingRevision))
           ) {
             const appliedRevision = HostReconciler.deploymentRuntimeTokenRevision(deployment)
-            if (HostReconciler.deploymentReady(deployment)) {
+            if (HostReconciler.deploymentBootstrapConverged(deployment)) {
               await this.coreApi.replaceNamespacedSecret({
                 name,
                 namespace: host.namespace,
@@ -2090,6 +2125,31 @@ export class HostReconciler {
             }
           }
 
+          if (
+            existingRevision &&
+            !decided.refresh &&
+            options.prepareForResourceChange &&
+            HostReconciler.deploymentBelongsToHost(deployment, host) &&
+            HostReconciler.deploymentBootstrapConverged(deployment) &&
+            !HostReconciler.deploymentResourcesMatchHost(deployment!, host) &&
+            !(
+              bootstrapIsFresh &&
+              existing?.metadata?.annotations?.[RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION] ===
+                'true' &&
+              HostReconciler.deploymentRuntimeTokenRevision(deployment) !== existingRevision
+            )
+          ) {
+            // A resource edit replaces the Ready pod and loses its rotated
+            // in-memory lineage. Persist usable bootstrap before that replace.
+            // A valid fresh pending revision already prepares the same retry;
+            // scope, identity and expiry still pass the decision above.
+            decided = {
+              refresh: true,
+              rolloutRequired: true,
+              reason: 'fresh_mint_for_resource_change',
+            }
+          }
+
           // Revoked-on-wake guard: the mcp-host runtime refresh token is
           // single-use-rotating (control-api revokes the prior JTI on every
           // refresh). A pod that is about to boot -- wake (scale 0->1), missing
@@ -2231,14 +2291,17 @@ export class HostReconciler {
           ) {
             annotationUpdates[GFS_TOKEN_HOST_GENERATION_ANNOTATION] = String(host.generation)
           }
-          if (bootstrapPendingForAppliedDeployment && HostReconciler.deploymentReady(deployment)) {
+          if (
+            bootstrapPendingForAppliedDeployment &&
+            HostReconciler.deploymentBootstrapConverged(deployment)
+          ) {
             annotationUpdates[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] =
               RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED
             annotationUpdates[RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION] = 'false'
           }
           if (
             bootstrapIsFresh &&
-            HostReconciler.deploymentReady(deployment) &&
+            HostReconciler.deploymentBootstrapConverged(deployment) &&
             deploymentRevision === existingRevision
           ) {
             annotationUpdates[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] =
@@ -5432,6 +5495,7 @@ export class HostReconciler {
     let runtimeTokenProvision = await this.provisionRuntimeTokenRevision(host, {
       forceFreshForWake,
       targetSuspended: lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
+      prepareForResourceChange: lifecycle.effective.state === 'active',
     })
     if (!runtimeTokenProvision) {
       const liveDeployment = await this.readHostDeploymentOrNull(host)
@@ -5481,6 +5545,7 @@ export class HostReconciler {
           forceFreshForWake: false,
           targetSuspended:
             lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
+          prepareForResourceChange: lifecycle.effective.state === 'active',
         })
         if (!runtimeTokenProvision) {
           const error = new Error('Waiting for authoritative scope observation')

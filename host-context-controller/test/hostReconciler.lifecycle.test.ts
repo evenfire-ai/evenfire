@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { asApiserverDeployment } from '../src/__tests__/asApiserverDeployment'
 import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
 import { config } from '../src/config'
 import { mintHostGfsToken } from '../src/gfsHostBinding'
@@ -268,6 +269,7 @@ function trustedRuntimeDeployment(
     ...deployment.metadata,
     uid: `deployment-${host.name}`,
     resourceVersion: '91',
+    generation: 1,
     labels: {
       ...(deployment.metadata?.labels ?? {}),
       'clerum.io/managed-by': 'host-context-controller',
@@ -281,7 +283,12 @@ function trustedRuntimeDeployment(
   if (deployment.spec) {
     deployment.spec.replicas = options.replicas ?? 1
   }
-  deployment.status = { readyReplicas: options.readyReplicas ?? 1 }
+  deployment.status = {
+    observedGeneration: deployment.metadata.generation,
+    replicas: deployment.spec?.replicas ?? 1,
+    updatedReplicas: deployment.spec?.replicas ?? 1,
+    readyReplicas: options.readyReplicas ?? 1,
+  }
   return deployment
 }
 
@@ -292,6 +299,7 @@ function markPersistedRuntimeTrusted(
 ): k8s.V1Deployment {
   deployment.metadata = {
     ...deployment.metadata,
+    generation: deployment.metadata?.generation ?? 1,
     labels: {
       ...(deployment.metadata?.labels ?? {}),
       'clerum.io/managed-by': 'host-context-controller',
@@ -522,6 +530,384 @@ function rejectedCondition(status: HostCrdStatus) {
   }
   return cond
 }
+
+describe('HostReconciler resource rollout bootstrap', () => {
+  const initialResources = structuredClone(config.hostResources)
+  const initialDesktopResources = structuredClone(config.desktopResources)
+  const issue = vi.mocked(issueMcpHostRuntimeTokens)
+  const initialIssue = issue.getMockImplementation()!
+  const BOOTSTRAP = 'clerum.io/runtime-token-bootstrap-state'
+  const SECRET_REVISION = 'clerum.io/runtime-token-secret-revision'
+  const APPLIED_REVISION = 'clerum.io/runtime-token-revision'
+  const ROLLOUT = 'clerum.io/runtime-token-rollout-required'
+  const fixtures: HostReconciler[] = []
+
+  afterEach(() => {
+    config.hostResources = structuredClone(initialResources)
+    config.desktopResources = structuredClone(initialDesktopResources)
+    issue.mockImplementation(initialIssue)
+    vi.useRealTimers()
+    // Full reconciles schedule readiness polls; keep their timers inside this fixture.
+    for (const reconciler of fixtures.splice(0)) {
+      for (const timer of (reconciler as any).readinessTimers.values()) clearTimeout(timer)
+    }
+  })
+
+  async function runtime(
+    options: { desktop?: boolean; stateless?: boolean; consumed?: boolean } = {}
+  ) {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-03T00:00:00.000Z'))
+    const host = makeHost({
+      generation: 1,
+      ...(options.stateless
+        ? makeStatelessHost({
+            status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+          })
+        : {}),
+      ...(options.desktop ? { spec: { ...makeHost().spec, desktop: { browser: true } } } : {}),
+    })
+    let cacheSynced = true
+    const apis = createReconciler({ isCommunicationChannelCacheSynced: () => cacheSynced })
+    const { reconciler, appsApi, coreApi, customApi } = apis
+    fixtures.push(reconciler)
+    reconciler.setHostFrontsOAuthServer(async () => false)
+    const readHost = customApi.getNamespacedCustomObject.getMockImplementation()!
+    customApi.getNamespacedCustomObject.mockImplementation(async request =>
+      request.plural === 'hosts'
+        ? {
+            ...hostApiObject(host),
+            metadata: { ...hostApiObject(host).metadata, generation: host.generation },
+          }
+        : readHost(request)
+    )
+
+    let issuance = 0
+    const events: string[] = []
+    // Only the issuer boundary is simulated. Distinct synthetic emissions and
+    // decodable future refresh expiries exercise the real persistence/reuse path.
+    issue.mockImplementation(async (...args) => {
+      events.push('issue')
+      const emission = ++issuance
+      return {
+        ...(await initialIssue(...args)),
+        accessToken: `synthetic-access-${emission}`,
+        refreshToken: encodedRuntimeRefreshMaterial(Date.now() + 3_600_000 + emission * 1000),
+        mcpHostControlToken: `synthetic-control-${emission}`,
+      }
+    })
+    let secret: k8s.V1Secret | null = null
+    let deployment: k8s.V1Deployment | null = null
+    let secretVersion = 0
+    let deploymentVersion = 0
+    let replacementFailures: number[] = []
+    let secretConflict = false
+    const readSecret = coreApi.readNamespacedSecret.getMockImplementation()!
+    const writeSecret = (body: k8s.V1Secret): k8s.V1Secret => {
+      secret = structuredClone(body)
+      secret.data = {
+        ...secret.data,
+        ...Object.fromEntries(
+          Object.entries(secret.stringData ?? {}).map(([key, value]) => [
+            key,
+            Buffer.from(value).toString('base64'),
+          ])
+        ),
+      }
+      delete secret.stringData
+      secret.metadata = {
+        ...secret.metadata,
+        uid: 'runtime-secret-uid',
+        resourceVersion: String(++secretVersion),
+      }
+      events.push('persist-secret')
+      return structuredClone(secret)
+    }
+    coreApi.readNamespacedSecret.mockImplementation(async request => {
+      if (request.name !== `host-${host.name}-mcp-host-runtime-tokens`) return readSecret(request)
+      if (!secret) throw { code: 404 }
+      return structuredClone(secret)
+    })
+    const createSecret = coreApi.createNamespacedSecret.getMockImplementation()!
+    coreApi.createNamespacedSecret.mockImplementation(async request => {
+      const { body } = request
+      if (body.metadata?.name !== `host-${host.name}-mcp-host-runtime-tokens`)
+        return createSecret(request)
+      if (secret) throw { code: 409 }
+      return writeSecret(body)
+    })
+    const replaceSecret = coreApi.replaceNamespacedSecret.getMockImplementation()!
+    coreApi.replaceNamespacedSecret.mockImplementation(async request => {
+      const { body } = request
+      if (request.name !== `host-${host.name}-mcp-host-runtime-tokens`)
+        return replaceSecret(request)
+      if (!secret || body.metadata?.resourceVersion !== secret.metadata?.resourceVersion)
+        throw { code: 409 }
+      if (secretConflict) {
+        secretConflict = false
+        // An unrelated writer won CAS. The next read must see its new version.
+        secret.metadata!.resourceVersion = String(++secretVersion)
+        throw { code: 409 }
+      }
+      return writeSecret(body)
+    })
+
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(async request => {
+      if (request.name !== host.name) return readDeployment(request)
+      if (!deployment) throw { code: 404 }
+      return structuredClone(deployment)
+    })
+    const createDeployment = appsApi.createNamespacedDeployment.getMockImplementation()!
+    appsApi.createNamespacedDeployment.mockImplementation(async request => {
+      const { body } = request
+      if (body.metadata?.name !== host.name) return createDeployment(request)
+      if (deployment) throw { code: 409 }
+      deployment = asApiserverDeployment(body)
+      deployment.metadata = {
+        ...deployment.metadata,
+        uid: 'runtime-deployment-uid',
+        resourceVersion: String(++deploymentVersion),
+        generation: 1,
+      }
+      events.push('create-deployment')
+      return structuredClone(deployment)
+    })
+    const replaceDeployment = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+    appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+      const { body } = request
+      if (request.name !== host.name) return replaceDeployment(request)
+      if (!deployment || body.metadata?.resourceVersion !== deployment.metadata?.resourceVersion)
+        throw { code: 409 }
+      const failure = replacementFailures.shift()
+      if (failure) {
+        if (failure === 409) deployment.metadata!.resourceVersion = String(++deploymentVersion)
+        events.push(`replace-${failure}`)
+        throw { code: failure }
+      }
+      const previous = deployment
+      deployment = asApiserverDeployment(body)
+      deployment.metadata = {
+        ...deployment.metadata,
+        uid: previous.metadata!.uid,
+        resourceVersion: String(++deploymentVersion),
+        generation: previous.metadata!.generation! + 1,
+      }
+      // Kubernetes status belongs to the prior generation until advance() is called.
+      deployment.status = structuredClone(previous.status)
+      events.push('replace-deployment')
+      return structuredClone(deployment)
+    })
+    const advance = (status: Partial<k8s.V1DeploymentStatus> = {}) => {
+      if (!deployment) throw new Error('No persisted Deployment')
+      const replicas = deployment.spec!.replicas ?? 1
+      deployment.status = {
+        observedGeneration: deployment.metadata!.generation,
+        replicas,
+        updatedReplicas: replicas,
+        readyReplicas: replicas,
+        availableReplicas: replicas,
+        unavailableReplicas: 0,
+        ...status,
+      }
+      deployment.metadata!.resourceVersion = String(++deploymentVersion)
+    }
+    await reconciler.reconcile(host)
+    advance()
+    if (options.consumed !== false) {
+      await reconciler.reconcile(host)
+      expect(secret!.metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+    }
+    events.length = 0
+    issue.mockClear()
+    return {
+      ...apis,
+      host,
+      events,
+      advance,
+      secret: () => secret!,
+      deployment: () => deployment!,
+      reconcile: () => reconciler.reconcile(host),
+      failReplacements: (...codes: number[]) => {
+        replacementFailures = codes
+      },
+      conflictSecret: () => {
+        secretConflict = true
+      },
+      setCacheSynced: (value: boolean) => {
+        cacheSynced = value
+      },
+    }
+  }
+
+  it.each([
+    ['CPU request', 'requests', 'cpu', '25m'],
+    ['memory request', 'requests', 'memory', '192Mi'],
+    ['CPU limit', 'limits', 'cpu', '750m'],
+    ['memory limit', 'limits', 'memory', '768Mi'],
+  ] as const)(
+    'persists usable bootstrap before replacing a Ready runtime for a %s change',
+    async (_label, kind, resource, value) => {
+      const fixture = await runtime()
+      const before = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      config.hostResources[kind][resource] = value
+
+      await fixture.reconcile()
+
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      expect(issue).toHaveBeenCalledOnce()
+      const revision = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      expect(revision).not.toBe(before)
+      expect(fixture.secret().metadata!.annotations).toMatchObject({
+        [BOOTSTRAP]: 'fresh',
+        [ROLLOUT]: 'true',
+      })
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        revision
+      )
+      expect(
+        fixture.deployment().spec!.template.spec!.containers[0].resources![kind]![resource]
+      ).toBe(value)
+      expect(fixture.deployment().metadata).toMatchObject({
+        uid: 'runtime-deployment-uid',
+        generation: 2,
+      })
+
+      await fixture.reconcile() // Ready from generation 1 must not acknowledge generation 2.
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+      fixture.advance({ updatedReplicas: 0, readyReplicas: 0, availableReplicas: 0 })
+      await fixture.reconcile() // A starting rollout must not issue or replace again.
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+      fixture.advance()
+      await fixture.reconcile()
+      expect(fixture.secret().metadata!.annotations).toMatchObject({
+        [BOOTSTRAP]: 'consumed',
+        [ROLLOUT]: 'false',
+      })
+      await fixture.reconcile()
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.events.filter(event => event === 'replace-deployment')).toHaveLength(1)
+      expect(fixture.secret().metadata!.annotations![SECRET_REVISION]).toBe(revision)
+    }
+  )
+
+  it.each([409, 503])('reuses persisted preparation after a Deployment %s failure', async code => {
+    const fixture = await runtime()
+    config.hostResources.requests.cpu = '25m'
+    fixture.failReplacements(...(code === 409 ? [409, 409, 409] : [503]))
+    await expect(fixture.reconcile()).rejects.toMatchObject({ code })
+    const revision = fixture.secret().metadata!.annotations![SECRET_REVISION]
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    expect(fixture.deployment().metadata!.generation).toBe(1)
+
+    await fixture.reconcile()
+    await fixture.reconcile()
+    fixture.advance()
+    await fixture.reconcile()
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.secret().metadata!.annotations![SECRET_REVISION]).toBe(revision)
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+    expect(fixture.events.filter(event => event === 'replace-deployment')).toHaveLength(1)
+  })
+
+  it('rereads CAS after a Secret conflict and persists before any Deployment replacement', async () => {
+    const fixture = await runtime()
+    config.hostResources.requests.cpu = '25m'
+    fixture.conflictSecret()
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      fixture.secret().metadata!.annotations![SECRET_REVISION]
+    )
+  })
+
+  it.each([
+    { observedGeneration: 0 },
+    { updatedReplicas: 0 },
+    { replicas: 2, readyReplicas: 2 },
+    { readyReplicas: 0, availableReplicas: 0 },
+  ])('does not consume fresh bootstrap before current-generation convergence: %j', async status => {
+    const fixture = await runtime({ consumed: false })
+    fixture.advance(status)
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    expect(issue).not.toHaveBeenCalled()
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it('keeps an API-defaulted Ready no-op stable, including metadata-only resource policy reordering', async () => {
+    const fixture = await runtime()
+    config.hostResources = {
+      limits: { cpu: initialResources.limits.cpu, memory: initialResources.limits.memory },
+      requests: { cpu: initialResources.requests.cpu, memory: initialResources.requests.memory },
+    }
+    await fixture.reconcile()
+    await fixture.reconcile()
+    expect(fixture.events).toEqual([])
+    expect(issue).not.toHaveBeenCalled()
+  })
+
+  it('leaves an unchanged Desktop runtime stable when Host resources change', async () => {
+    const fixture = await runtime({ desktop: true })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual([])
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources).toEqual(
+      initialDesktopResources
+    )
+  })
+
+  it('prepares bootstrap for a change to the selected Desktop resource policy', async () => {
+    const fixture = await runtime({ desktop: true })
+    config.desktopResources.limits.memory = '5Gi'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources).toEqual(
+      config.desktopResources
+    )
+  })
+
+  it('preserves a held template despite a resource policy change', async () => {
+    const fixture = await runtime({ stateless: true })
+    fixture.setCacheSynced(false)
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual([])
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources).toEqual(
+      initialResources
+    )
+  })
+
+  it('does not consume a resource rollout through GFS-only renewal with old-generation Ready status', async () => {
+    const fixture = await runtime({ stateless: true })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    fixture.setCacheSynced(false)
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.events.filter(event => event === 'replace-deployment')).toHaveLength(1)
+  })
+
+  it('retains consumed-bootstrap NotReady recovery', async () => {
+    const fixture = await runtime()
+    fixture.advance({ readyReplicas: 0, availableReplicas: 0 })
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+  })
+})
 
 describe('HostReconciler stateless lifecycle — buildDeployment replicas', () => {
   it('pins replicas=1 and maxSurge=0 for a non-stateless host', () => {
@@ -2789,7 +3175,12 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       )
     ).toHaveLength(0)
 
-    live().status = { readyReplicas: 1 }
+    live().status = {
+      observedGeneration: live().metadata!.generation,
+      replicas: 1,
+      updatedReplicas: 1,
+      readyReplicas: 1,
+    }
     coreApi.replaceNamespacedSecret.mockClear()
     await reconciler.reconcile(host)
 

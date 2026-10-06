@@ -184,7 +184,7 @@ function deploymentWithRevision(
   replicas = 1
 ): k8s.V1Deployment {
   return {
-    metadata: { name: 'team-mission', namespace: 'mcp-host' },
+    metadata: { name: 'team-mission', namespace: 'mcp-host', generation: 1 },
     spec: {
       replicas,
       template: {
@@ -194,7 +194,7 @@ function deploymentWithRevision(
         spec: { containers: [] },
       },
     },
-    status: { readyReplicas },
+    status: { observedGeneration: 1, replicas, updatedReplicas: replicas, readyReplicas },
   } as unknown as k8s.V1Deployment
 }
 
