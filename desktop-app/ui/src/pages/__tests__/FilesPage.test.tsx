@@ -3313,16 +3313,23 @@ describe('FilesPage', () => {
     )
     const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3, 4]).buffer }))
     const pushToast = vi.fn()
-    const createObjectURL = vi.fn(() => 'blob:folder-zip')
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
-    Object.defineProperty(URL, 'revokeObjectURL', {
-      configurable: true,
-      value: vi.fn(),
-    })
+    const appendedNames: string[] = []
+    const zipStream = {
+      start: vi.fn(async () => ({ jobId: 'job-1' })),
+      append: vi.fn(async (_jobId: string, name: string) => {
+        appendedNames.push(name)
+      }),
+      finish: vi.fn(async (_jobId: string, suggestedName: string) => ({
+        saved: true,
+        filePath: `/saved/${suggestedName}`,
+        entryCount: appendedNames.length,
+      })),
+      abort: vi.fn(async () => ({ aborted: true })),
+    }
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren, download } },
+      value: { gfs: { listChildren, download, zipStream } },
     })
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -3371,10 +3378,12 @@ describe('FilesPage', () => {
       maxBytes: 512 * 1024 * 1024,
       signal: expect.any(AbortSignal),
     })
-    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
-    expect(click).toHaveBeenCalled()
-    const savedName = (click.mock.instances[0] as HTMLAnchorElement | undefined)?.download
-    expect(savedName).toBe('Assets.zip')
+    // The streamed save path: the entry reached the main-process writer and
+    // finish saved the archive — no renderer anchor download for zips.
+    expect(appendedNames).toEqual(['Assets/plan.md'])
+    expect(zipStream.finish).toHaveBeenCalledWith('job-1', 'Assets.zip')
+    expect(zipStream.abort).not.toHaveBeenCalled()
+    expect(click).not.toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith('Downloaded Assets.zip (1 file)', 'success')
     expect(pushToast).toHaveBeenCalledWith(
       'Skipped 1 entry: Assets/secret.txt (No access)',
@@ -3508,9 +3517,15 @@ describe('FilesPage', () => {
     const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3, 4]).buffer }))
     const pushToast = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const zipStream = {
+      start: vi.fn(async () => ({ jobId: 'job-1' })),
+      append: vi.fn(async () => undefined),
+      finish: vi.fn(async () => ({ saved: true, filePath: '/saved/x.zip', entryCount: 1 })),
+      abort: vi.fn(async () => ({ aborted: true })),
+    }
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren, download } },
+      value: { gfs: { listChildren, download, zipStream } },
     })
     const folderRow = {
       resourceId: 'folder-1',
@@ -3558,6 +3573,9 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Stopped preparing Assets.zip.', 'info')
     expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Downloaded'), 'success')
     expect(click).not.toHaveBeenCalled()
+    // Stopping also tells the main process to drop the temp archive.
+    expect(zipStream.abort).toHaveBeenCalledWith('job-1')
+    expect(zipStream.finish).not.toHaveBeenCalled()
 
     // A replacement walk starts cleanly once the stopped one has settled —
     // one job at a time, no overlap (R1-M1).

@@ -10,8 +10,8 @@ import fc from 'fast-check'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
 import { GFS_ZIP_MAX_SEGMENT_NAME_BYTES, sanitizeZipSegment } from '@lib/gfsFolderZip'
-import { createZipWriter } from '@lib/zipWriter'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '@/uiTypes'
+import { entryNameFitsZipFields, finalizeEntryName } from '../../../../../src/gfs/zipEntryName'
 import {
   mergeComposerImageAttachments,
   mergeComposerReferenceAttachments,
@@ -125,37 +125,25 @@ describe('zip path normalization invariants (R1-M6)', () => {
     )
   })
 
-  it('built archives never contain case-folded duplicate entry names', () => {
+  it('finalized entry names never collide case-folded and always fit the 16-bit fields', () => {
     fc.assert(
       fc.property(
         fc.array(fc.string({ minLength: 1, maxLength: 24 }), { maxLength: 30 }),
         names => {
-          const writer = createZipWriter()
-          for (const [index, name] of names.entries()) writer.addFile(name, new Uint8Array([index]))
-          const written = archiveEntryNames(writer.build())
+          const usedFolded = new Set<string>()
+          const written: string[] = []
+          for (const name of names) {
+            const finalized = finalizeEntryName(name, usedFolded)
+            usedFolded.add(finalized.folded)
+            written.push(finalized.name)
+          }
           const folded = new Set(written.map(name => name.toLowerCase()))
           expect(folded.size).toBe(written.length)
           expect(written).toHaveLength(names.length)
+          for (const name of written) expect(entryNameFitsZipFields(name)).toBe(true)
         }
       ),
       { numRuns: 60 }
     )
   })
 })
-
-/** Minimal central-directory reader (name column only). */
-function archiveEntryNames(archive: Uint8Array): string[] {
-  const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength)
-  const decoder = new TextDecoder()
-  const eocdOffset = archive.length - 22
-  const entryCount = view.getUint16(eocdOffset + 10, true)
-  const centralDirectoryOffset = view.getUint32(eocdOffset + 16, true)
-  const names: string[] = []
-  let cursor = centralDirectoryOffset
-  for (let index = 0; index < entryCount; index += 1) {
-    const nameLength = view.getUint16(cursor + 28, true)
-    names.push(decoder.decode(archive.subarray(cursor + 46, cursor + 46 + nameLength)))
-    cursor += 46 + nameLength
-  }
-  return names
-}

@@ -52,13 +52,58 @@ function folder(
   }
 }
 
+export interface RecordedZipStream {
+  appended: Array<{ name: string; bytes: ArrayBuffer }>
+  finishedWith: Array<{ suggestedName: string }>
+  abortedJobs: string[]
+  deps: import('../gfsFolderZip').GfsZipStreamDeps
+}
+
+/** File-backed stream fake: records appends, finishes "saved" to a path. */
+function recordedZipStream(options: { saved?: boolean } = {}): RecordedZipStream {
+  const appended: Array<{ name: string; bytes: ArrayBuffer }> = []
+  const finishedWith: Array<{ suggestedName: string }> = []
+  const abortedJobs: string[] = []
+  let jobCounter = 0
+  return {
+    appended,
+    finishedWith,
+    abortedJobs,
+    deps: {
+      start: vi.fn(async () => ({ jobId: `job-${++jobCounter}` })),
+      append: vi.fn(async (jobId: string, name: string, bytes: ArrayBuffer) => {
+        void jobId
+        appended.push({ name, bytes })
+      }),
+      finish: vi.fn(async (jobId: string, suggestedName: string) => {
+        void jobId
+        finishedWith.push({ suggestedName })
+        return {
+          saved: options.saved ?? true,
+          filePath: options.saved === false ? null : `/saved/${suggestedName}`,
+          entryCount: appended.length,
+        }
+      }),
+      abort: vi.fn(async (jobId: string) => {
+        abortedJobs.push(jobId)
+      }),
+    },
+  }
+}
+
+function streamEntryNames(stream: RecordedZipStream): string[] {
+  return stream.appended.map(entry => entry.name)
+}
+
 function depsFor(
   pages: Record<string, Array<{ items: GfsZipChildItem[]; nextCursor: string | null }>>,
   downloads: Record<
     string,
     (uri: string, options?: { maxBytes?: number }) => Promise<{ bytes: ArrayBuffer }>
-  > = {}
-): GfsFolderZipDeps {
+  > = {},
+  streamOptions: { saved?: boolean } = {}
+): GfsFolderZipDeps & { zipStreamRecord: RecordedZipStream } {
+  const stream = recordedZipStream(streamOptions)
   return {
     listChildren: vi.fn(async (resourceId: string, _drive: string, cursor?: string) => {
       const pageList = pages[resourceId]
@@ -73,10 +118,12 @@ function depsFor(
       if (produce) return produce(uri, options)
       return { bytes: bytesOf(uri) }
     }),
+    zipStream: stream.deps,
     // Spacing itself has a dedicated manual-clock test below the walk; here it
     // is a no-op so the orchestration tests run instantly.
     throttle: { acquire: async () => undefined },
     sleep: async () => undefined,
+    zipStreamRecord: stream,
   }
 }
 
@@ -143,8 +190,11 @@ describe('createGfsFolderZip', () => {
     })
     expect(deps.listChildren).toHaveBeenCalledWith('sub', 'main', undefined, { signal: undefined })
 
-    const names = zipEntryNames(result.bytes)
-    expect(names.sort()).toEqual(['Docs/a.txt', 'Docs/b.png', 'Docs/sub/c.md'].sort())
+    expect(result.saved).toBe(true)
+    expect(result.savedPath).toBe('/saved/Docs.zip')
+    expect(streamEntryNames(deps.zipStreamRecord).sort()).toEqual(
+      ['Docs/a.txt', 'Docs/b.png', 'Docs/sub/c.md'].sort()
+    )
     expect(progress.map(value => value.phase)).toContain('downloading')
     expect(progress.at(-1)?.phase).toBe('assembling')
     // The "downloading N of M" copy is 1-based: file 1 reports filesAdded 1.
@@ -192,7 +242,7 @@ describe('createGfsFolderZip', () => {
       { path: 'Mixed/hidden.txt', reason: 'No access' },
       { path: 'Mixed/denied.txt', reason: 'Permission denied' },
     ])
-    expect(zipEntryNames(result.bytes)).toEqual(['Mixed/ok.txt'])
+    expect(streamEntryNames(deps.zipStreamRecord)).toEqual(['Mixed/ok.txt'])
   })
 
   it('skips a subfolder whose listing itself is denied and continues the walk', async () => {
@@ -208,6 +258,7 @@ describe('createGfsFolderZip', () => {
       download: async () => ({ bytes: bytesOf('x') }),
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
+      zipStream: recordedZipStream().deps,
     }
 
     const result = await createGfsFolderZip(
@@ -330,6 +381,52 @@ describe('createGfsFolderZip', () => {
     } finally {
       ;(window as { clerum?: unknown }).clerum = previousClerum
     }
+  })
+
+  it('aborts the stream job on any failure path so no temp file survives (R1-H2)', async () => {
+    const stream = recordedZipStream()
+    const deps: GfsFolderZipDeps = {
+      listChildren: vi.fn(async () => ({
+        items: [folder({ resourceId: 'doomed', name: 'doomed.txt' })],
+        nextCursor: null,
+      })),
+      download: async () => {
+        throw new Error('gfs download failed: 500 httpStatus=500')
+      },
+      zipStream: stream.deps,
+      throttle: { acquire: async () => undefined },
+      sleep: async () => undefined,
+    }
+    await expect(
+      createGfsFolderZip({ resourceId: 'root', drive: 'main', name: 'Broken' }, { deps })
+    ).rejects.toThrow(/500/)
+    // The job was started, nothing was appended, and the temp file was told
+    // to clean up through the abort channel.
+    expect(stream.deps.start).toHaveBeenCalledTimes(1)
+    expect(stream.appended).toHaveLength(0)
+    expect(stream.abortedJobs).toHaveLength(1)
+
+    // Stop mid-walk takes the same cleanup path.
+    const stopStream = recordedZipStream()
+    const controller = new AbortController()
+    const stopDeps: GfsFolderZipDeps = {
+      listChildren: vi.fn(async () => ({
+        items: [folder({ resourceId: 'first', name: 'first.txt' })],
+        nextCursor: null,
+      })),
+      download: () => new Promise<{ bytes: ArrayBuffer }>(() => undefined),
+      zipStream: stopStream.deps,
+      throttle: { acquire: async () => undefined },
+      sleep: async () => undefined,
+    }
+    const walk = createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Stopped' },
+      { deps: stopDeps, signal: controller.signal }
+    )
+    const rejection = expect(walk).rejects.toMatchObject({ name: 'AbortError' })
+    controller.abort()
+    await rejection
+    expect(stopStream.abortedJobs).toHaveLength(1)
   })
 
   it('skips entries whose complete path would overflow the 16-bit ZIP name field (R1-M2)', async () => {
@@ -485,7 +582,7 @@ describe('createGfsFolderZip', () => {
       { path: 'Exact/after-a.bin', reason: 'Zip byte limit reached' },
       { path: 'Exact/after-b.bin', reason: 'Zip byte limit reached' },
     ])
-    expect(zipEntryNames(result.bytes)).toEqual(['Exact/fill.bin'])
+    expect(streamEntryNames(deps.zipStreamRecord)).toEqual(['Exact/fill.bin'])
   })
 
   it('carries a near-limit folder through download, zip and save-sized output (R1-H2)', async () => {
@@ -522,8 +619,8 @@ describe('createGfsFolderZip', () => {
     )
     expect(result.fileCount).toBe(2)
     expect(seenMaxBytes).toEqual([1024, 512])
-    // The archive itself exists and parses back.
-    expect(zipEntryNames(result.bytes).length).toBe(2)
+    expect(result.saved).toBe(true)
+    expect(streamEntryNames(deps.zipStreamRecord)).toHaveLength(2)
   })
 
   it('backs off once on a 429 using the server-provided retry hint', async () => {
@@ -538,6 +635,7 @@ describe('createGfsFolderZip', () => {
       download: async () => ({ bytes: new ArrayBuffer(0) }),
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
+      zipStream: recordedZipStream().deps,
     }
 
     // The retry succeeds but finds nothing archivable → empty short-circuit.
@@ -553,6 +651,7 @@ describe('createGfsFolderZip', () => {
     const deps: GfsFolderZipDeps = {
       listChildren,
       download: async () => ({ bytes: new ArrayBuffer(0) }),
+      zipStream: recordedZipStream().deps,
       // The first slot never frees: the walk parks here until the stop lands.
       throttle: { acquire: () => new Promise<void>(() => undefined) },
       sleep: async () => undefined,
@@ -578,6 +677,7 @@ describe('createGfsFolderZip', () => {
       download: () => new Promise<{ bytes: ArrayBuffer }>(() => undefined),
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
+      zipStream: recordedZipStream().deps,
     }
 
     const walk = createGfsFolderZip(
@@ -604,6 +704,7 @@ describe('createGfsFolderZip', () => {
       download: async () => ({ bytes: new ArrayBuffer(0) }),
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
+      zipStream: recordedZipStream().deps,
     }
 
     const walk = createGfsFolderZip(
@@ -630,6 +731,7 @@ describe('createGfsFolderZip', () => {
       },
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
+      zipStream: recordedZipStream().deps,
     }
 
     await expect(
@@ -662,7 +764,7 @@ describe('createGfsFolderZip', () => {
       { resourceId: 'root', drive: 'main', name: 'Weird/Name:' },
       { deps }
     )
-    expect(zipEntryNames(result.bytes).sort()).toEqual(
+    expect(streamEntryNames(deps.zipStreamRecord).sort()).toEqual(
       [
         'Weird_Name_/.._escape.txt',
         'Weird_Name_/a_b.txt',
@@ -695,12 +797,11 @@ describe('createGfsFolderZip', () => {
     )
 
     expect(result.fileCount).toBe(1)
-    const names = zipEntryNames(result.bytes)
+    const names = streamEntryNames(deps.zipStreamRecord)
     expect(names).toHaveLength(1)
     const written = names[0]!
-    // The archive parses back (zipEntryNames reads the real central
-    // directory); the written name is well inside the uint16 field and the
-    // SEGMENT was cut under the documented ceiling.
+    // The name handed to the streaming writer is well inside the uint16 field
+    // and the SEGMENT was cut under the documented ceiling.
     expect(written.startsWith('Long/')).toBe(true)
     expect(new TextEncoder().encode(written).length).toBeLessThan(65536)
     expect(new TextEncoder().encode(written.slice('Long/'.length)).length).toBeLessThanOrEqual(1024)
@@ -718,7 +819,7 @@ describe('createGfsFolderZip', () => {
       { resourceId: 'root', drive: 'main', name: 'Emoji' },
       { deps: emojiDeps }
     )
-    const emojiName = zipEntryNames(emojiResult.bytes)[0]!
+    const emojiName = streamEntryNames(emojiDeps.zipStreamRecord)[0]!
     expect(emojiName.endsWith('\uFFFD')).toBe(false)
     expect(new TextEncoder().encode(emojiName.slice('Emoji/'.length)).length).toBeLessThanOrEqual(
       1024
@@ -782,6 +883,7 @@ describe('createGfsFolderZip', () => {
         return { items: [], nextCursor: null }
       }),
       download: async () => ({ bytes: new ArrayBuffer(0) }),
+      zipStream: recordedZipStream().deps,
       throttle: { acquire },
       sleep: async () => undefined,
     }
@@ -822,20 +924,3 @@ describe('createGfsFolderZip', () => {
     ])
   })
 })
-
-/** Minimal central-directory name reader for assertions. */
-function zipEntryNames(archive: Uint8Array): string[] {
-  const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength)
-  const decoder = new TextDecoder()
-  const eocdOffset = archive.length - 22
-  const entryCount = view.getUint16(eocdOffset + 10, true)
-  const centralDirectoryOffset = view.getUint32(eocdOffset + 16, true)
-  const names: string[] = []
-  let cursor = centralDirectoryOffset
-  for (let index = 0; index < entryCount; index += 1) {
-    const nameLength = view.getUint16(cursor + 28, true)
-    names.push(decoder.decode(archive.subarray(cursor + 46, cursor + 46 + nameLength)))
-    cursor += 46 + nameLength
-  }
-  return names
-}

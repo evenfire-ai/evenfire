@@ -225,6 +225,15 @@ declare global {
           grantableBits: string[]
           canCreateShare: boolean
         }>
+        zipStream: {
+          start: () => Promise<{ jobId: string }>
+          append: (jobId: string, name: string, bytes: ArrayBuffer) => Promise<{ name: string }>
+          finish: (
+            jobId: string,
+            suggestedName: string
+          ) => Promise<{ saved: boolean; filePath: string | null; entryCount: number }>
+          abort: (jobId: string) => Promise<{ aborted: boolean }>
+        }
         createFolder: (
           parentResourceId: string,
           name: string,

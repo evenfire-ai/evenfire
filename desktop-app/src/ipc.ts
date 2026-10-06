@@ -19,6 +19,7 @@ import {
 } from './chatStoreBinding.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import { abortZipJob, appendZipEntry, finishZipJob, startZipJob } from './gfs/zipStream.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   PLUGIN_SDK_CAPABILITIES_CHANNEL,
@@ -577,6 +578,42 @@ export function registerIpcHandlers(service: AppService): void {
       return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
     }
   )
+  // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
+  // main-process temp file, finish saves through a native dialog. All four
+  // channels trust-check; append validates the entry name before any header is
+  // written (R1-M2 defense in depth).
+  ipcMain.handle('gfs:zipStream:start', async event => {
+    assertTrustedSender(event)
+    return { jobId: await startZipJob() }
+  })
+  ipcMain.handle(
+    'gfs:zipStream:append',
+    async (event, payload: { jobId: string; name: string; bytes: ArrayBuffer }) => {
+      assertTrustedSender(event)
+      const name = sanitizeString(payload?.name)
+      if (!name) throw new Error('zipStream append requires an entry name')
+      if (!(payload?.bytes instanceof ArrayBuffer)) {
+        throw new Error('zipStream append requires entry bytes')
+      }
+      if (payload.bytes.byteLength > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('zip entry exceeds the allowed maximum')
+      }
+      const writtenName = await appendZipEntry(sanitizeString(payload.jobId), name, payload.bytes)
+      return { name: writtenName }
+    }
+  )
+  ipcMain.handle(
+    'gfs:zipStream:finish',
+    async (event, payload: { jobId: string; suggestedName: string }) => {
+      assertTrustedSender(event)
+      return finishZipJob(sanitizeString(payload.jobId), sanitizeString(payload.suggestedName))
+    }
+  )
+  ipcMain.handle('gfs:zipStream:abort', async (event, payload: { jobId: string }) => {
+    assertTrustedSender(event)
+    await abortZipJob(sanitizeString(payload.jobId))
+    return { aborted: true }
+  })
   ipcMain.handle(
     'gfs:createFolder',
     async (event, payload: { parentResourceId: string; name: string; drive?: string }) => {

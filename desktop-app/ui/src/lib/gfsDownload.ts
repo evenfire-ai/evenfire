@@ -9,11 +9,6 @@
  */
 export async function saveGfsFileToDisk(uri: string, name: string): Promise<void> {
   const { bytes } = await window.clerum.gfs.download(uri)
-  saveBytesToDisk(bytes, name)
-}
-
-/** Anchor-save already downloaded bytes (used by the in-memory zip assembly). */
-export function saveBytesToDisk(bytes: BlobPart, name: string): void {
   const url = URL.createObjectURL(new Blob([bytes]))
   const anchor = document.createElement('a')
   anchor.href = url

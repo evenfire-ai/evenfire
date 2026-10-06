@@ -41,7 +41,7 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
-import { saveBytesToDisk, saveGfsFileToDisk } from '@lib/gfsDownload'
+import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import {
   GfsFolderZipEmptyError,
@@ -867,11 +867,16 @@ export function FilesPage({
           signal: abortController.signal,
         }
       )
-      saveBytesToDisk(result.bytes, result.fileName)
-      pushToast?.(
-        `Downloaded ${result.fileName} (${result.fileCount} ${result.fileCount === 1 ? 'file' : 'files'})`,
-        'success'
-      )
+      if (result.saved) {
+        pushToast?.(
+          `Downloaded ${result.fileName} (${result.fileCount} ${result.fileCount === 1 ? 'file' : 'files'})`,
+          'success'
+        )
+      } else {
+        // The native save dialog was canceled: the temp archive is already
+        // deleted by the stream's finish path — nothing was saved, by choice.
+        pushToast?.(`${folder.name}.zip was not saved — the save dialog was canceled.`, 'info')
+      }
       if (result.skipped.length) {
         pushToast?.(describeZipSkips(result.skipped), 'warn', { durationMs: 10_000 })
       }

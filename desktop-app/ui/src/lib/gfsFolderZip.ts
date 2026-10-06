@@ -1,6 +1,10 @@
 /**
- * BUG-175 — recursive "Download as zip" for a GFS folder, assembled fully in
- * the renderer from the existing `window.clerum.gfs` read plane.
+ * BUG-175 — recursive "Download as zip" for a GFS folder. The walk runs in the
+ * renderer over the existing `window.clerum.gfs` read plane; the ARCHIVE is
+ * assembled streamed in the main process (temp file + native save dialog, see
+ * gfs/zipStream.ts), so the renderer never holds archive bytes and its peak
+ * memory is one in-flight transfer, independent of folder size (R1-H2, spec:
+ * round-2 extensions).
  *
  * Budget contract: the producer meters this walk's request classes per actor —
  * resource reads (children, affordances, resolve) and proxy reads (downloads)
@@ -17,7 +21,11 @@
  * archive.
  */
 import { isRateLimited, parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
-import { createZipWriter } from '@lib/zipWriter'
+import {
+  entryNameFitsZipFields,
+  finalizeEntryName,
+  foldEntryName,
+} from '../../../src/gfs/zipEntryName'
 
 /**
  * Client-side pacing for the walk, a deliberate conservative margin: the
@@ -27,11 +35,10 @@ import { createZipWriter } from '@lib/zipWriter'
  */
 export const GFS_ZIP_READS_PER_MINUTE = 120
 /**
- * Refuse before buffering: total bytes across the folder. 512 MiB is the
- * documented end-to-end bound (spec: ZIP budget model): with the producer-side
- * per-transfer maxBytes and the single pre-sized archive buffer, peak renderer
- * memory at the ceiling is ~2x this cap (archive + save-time Blob) plus one
- * bounded in-flight transfer.
+ * Refuse before buffering: total bytes across the folder. 512 MiB bounds the
+ * streamed archive's temp-file size and each transfer's producer-side bound;
+ * renderer peak memory is ONE in-flight transfer (≤ this cap), independent of
+ * folder size (spec: round-2 extensions, streamed assembly).
  */
 export const GFS_ZIP_MAX_TOTAL_BYTES = 512 * 1024 * 1024
 /** Refuse before buffering: total file entries across the folder. */
@@ -52,7 +59,9 @@ export interface GfsFolderZipProgress {
 }
 
 export interface GfsFolderZipResult {
-  bytes: Uint8Array<ArrayBuffer>
+  /** False when the user canceled the native save dialog (temp file deleted). */
+  saved: boolean
+  savedPath: string | null
   fileName: string
   fileCount: number
   skipped: GfsZipSkippedEntry[]
@@ -119,6 +128,16 @@ export interface GfsZipChildrenPage {
   nextCursor: string | null
 }
 
+export interface GfsZipStreamDeps {
+  start(): Promise<{ jobId: string }>
+  append(jobId: string, name: string, bytes: ArrayBuffer): Promise<unknown>
+  finish(
+    jobId: string,
+    suggestedName: string
+  ): Promise<{ saved: boolean; filePath: string | null; entryCount: number }>
+  abort(jobId: string): Promise<unknown>
+}
+
 export interface GfsFolderZipDeps {
   /**
    * Lists one folder page. `options.signal` propagates the walk's stop to the
@@ -139,6 +158,12 @@ export interface GfsFolderZipDeps {
     uri: string,
     options?: { maxBytes?: number; signal?: AbortSignal }
   ): Promise<{ bytes: ArrayBuffer }>
+  /**
+   * Streamed, file-backed archive assembly in the main process (R1-H2): one
+   * append per downloaded file, one finish at the end, abort cleans the temp
+   * file on any failure path.
+   */
+  zipStream: GfsZipStreamDeps
   throttle: GfsReadThrottle
   sleep: (ms: number) => Promise<void>
 }
@@ -273,6 +298,14 @@ export async function createGfsFolderZip(
         maxBytes: requestOptions?.maxBytes,
         signal: requestOptions?.signal ?? options.signal,
       }))
+  // Default lazily reaches the bridge so a walk that never appends (aborted
+  // early, refused at planning) does not require window.clerum to exist.
+  const zipStream: GfsFolderZipDeps['zipStream'] = options.deps?.zipStream ?? {
+    start: () => window.clerum.gfs.zipStream.start(),
+    append: (jobId, name, bytes) => window.clerum.gfs.zipStream.append(jobId, name, bytes),
+    finish: (jobId, suggestedName) => window.clerum.gfs.zipStream.finish(jobId, suggestedName),
+    abort: jobId => window.clerum.gfs.zipStream.abort(jobId),
+  }
   const sleep =
     options.deps?.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
   const throttle = options.deps?.throttle ?? createGfsReadThrottle()
@@ -409,93 +442,110 @@ export async function createGfsFolderZip(
   // can still explain why nothing was archivable.
   if (files.length === 0) throw new GfsFolderZipEmptyError(folder.name, skipped)
 
-  // Pre-size the single archive buffer (M2): local header (30) + payload +
-  // central record (46), each carrying the UTF-8 name, plus the 22-byte EOCD.
-  // With server-provided sizes this allocates once; without them the writer
-  // falls back to doubling.
-  const nameEncoder = new TextEncoder()
-  const estimatedArchiveBytes =
-    plannedBytes +
-    files.reduce((sum, file) => sum + 76 + 2 * nameEncoder.encode(file.path).length, 22)
-  const writer = createZipWriter({ initialCapacityBytes: estimatedArchiveBytes })
-
-  // ── Phase 2: throttled downloads, skipping per-resource denials. ──
+  // ── Phase 2: throttled downloads streamed into the main-process archive. ──
+  // The renderer holds ONE in-flight transfer at a time (R1-H2); any failure
+  // aborts the stream job so the temp file never outlives the walk.
+  const { jobId } = await zipStream.start()
+  let archivedCount = 0
+  const usedFoldedNames = new Set<string>()
   let addedBytes = 0
-  for (const [index, file] of files.entries()) {
-    throwIfAborted()
-    // R2-L2 — exact budget exhaustion: stop BEFORE the next transfer so a
-    // zero-or-negative bound is never requested; the un-fetched files are
-    // reported as visible skips and the archive finishes cleanly with what it
-    // holds (spec: round-2 extensions).
-    const remainingBytes = maxTotalBytes - addedBytes
-    if (remainingBytes <= 0) {
-      for (const remainingFile of files.slice(index)) {
-        skipped.push({ path: remainingFile.path, reason: 'Zip byte limit reached' })
+  try {
+    for (const [index, file] of files.entries()) {
+      throwIfAborted()
+      // R2-L2 — exact budget exhaustion: stop BEFORE the next transfer so a
+      // zero-or-negative bound is never requested; the un-fetched files are
+      // reported as visible skips and the archive finishes cleanly with what
+      // it holds (spec: round-2 extensions).
+      const remainingBytes = maxTotalBytes - addedBytes
+      if (remainingBytes <= 0) {
+        for (const remainingFile of files.slice(index)) {
+          skipped.push({ path: remainingFile.path, reason: 'Zip byte limit reached' })
+        }
+        break
       }
-      break
+      // 1-based: the copy says "downloading N of M" while file N is fetched.
+      report({
+        phase: 'downloading',
+        filesFound: files.length,
+        filesAdded: index + 1,
+        currentPath: file.path,
+      })
+      await withAbort(throttle.acquire())
+      let bytes: ArrayBuffer
+      try {
+        // R1-H2: bound the transfer producer-side by the remaining budget so
+        // an over-limit body (dishonest or missing declared size) is rejected
+        // before it materializes in the renderer; the receipt check below
+        // stays as the backstop.
+        bytes = (await withRateLimitRetry(() => download(file.uri, { maxBytes: remainingBytes })))
+          .bytes
+      } catch (error) {
+        if (isFolderZipAbortError(error)) throw error
+        const message = toMessage(error)
+        if (parseHttpStatus(message) === 413) {
+          // The remaining budget cannot hold this body: skip it visibly and
+          // let the walk terminate cleanly (later files hit remaining-0).
+          skipped.push({ path: file.path, reason: 'Zip byte limit reached' })
+          continue
+        }
+        if (isAccessDenied(message)) {
+          skipped.push({ path: file.path, reason: 'Permission denied' })
+          continue
+        }
+        throw error
+      }
+      const data = new Uint8Array(bytes)
+      addedBytes += data.length
+      if (addedBytes > maxTotalBytes) {
+        // Defensive backstop: the producer-side bound makes this unreachable
+        // unless the bound itself was ignored — fail loudly, not silently.
+        throw new GfsFolderZipLimitError(
+          `"${folder.name}" exceeded the ${formatZipBytes(maxTotalBytes)} folder-zip limit while downloading. Download smaller subfolders individually.`
+        )
+      }
+      // Finalize the entry name HERE (case-insensitive collision suffix) and
+      // validate the FINALIZED name against the 16-bit ZIP fields before any
+      // header is written: a name that only overflows after suffixing is a
+      // visible skip, never a truncated header (R1-M2, spec: round-2).
+      const finalized = finalizeEntryName(file.path, usedFoldedNames)
+      if (!entryNameFitsZipFields(finalized.name)) {
+        skipped.push({ path: shortenForNotice(file.path), reason: 'Path too long' })
+        continue
+      }
+      usedFoldedNames.add(finalized.folded)
+      await zipStream.append(jobId, finalized.name, bytes)
+      archivedCount += 1
     }
-    // 1-based: the copy says "downloading N of M" while file N is fetched.
+
+    // Downloads can skip every file (permissions, exhausted budget): the
+    // empty short-circuit applies to the archived result, not only the
+    // planned list.
+    if (archivedCount === 0) throw new GfsFolderZipEmptyError(folder.name, skipped)
+
+    // ── Phase 3: finalize and save through the native dialog. ──
     report({
-      phase: 'downloading',
+      phase: 'assembling',
       filesFound: files.length,
-      filesAdded: index + 1,
-      currentPath: file.path,
+      filesAdded: archivedCount,
+      currentPath: null,
     })
-    await withAbort(throttle.acquire())
-    let bytes: ArrayBuffer
-    try {
-      // R1-H2: bound the transfer producer-side by the remaining budget so an
-      // over-limit body (dishonest or missing declared size) is rejected
-      // before it materializes in the renderer; the receipt check below stays
-      // as the backstop.
-      bytes = (await withRateLimitRetry(() => download(file.uri, { maxBytes: remainingBytes })))
-        .bytes
-    } catch (error) {
-      if (isFolderZipAbortError(error)) throw error
-      const message = toMessage(error)
-      if (parseHttpStatus(message) === 413) {
-        // The remaining budget cannot hold this body: skip it visibly and let
-        // the walk terminate cleanly (later files hit the remaining-0 rule).
-        skipped.push({ path: file.path, reason: 'Zip byte limit reached' })
-        continue
-      }
-      if (isAccessDenied(message)) {
-        skipped.push({ path: file.path, reason: 'Permission denied' })
-        continue
-      }
-      throw error
+    const fileName = `${sanitizeFileName(folder.name)}.zip`
+    const saved = await zipStream.finish(jobId, fileName)
+    return {
+      saved: saved.saved,
+      savedPath: saved.filePath,
+      fileName,
+      fileCount: saved.entryCount,
+      skipped,
     }
-    const data = new Uint8Array(bytes)
-    addedBytes += data.length
-    if (addedBytes > maxTotalBytes) {
-      // Defensive backstop: the producer-side bound makes this unreachable
-      // unless the bound itself was ignored — fail loudly, not silently.
-      throw new GfsFolderZipLimitError(
-        `"${folder.name}" exceeded the ${formatZipBytes(maxTotalBytes)} folder-zip limit while downloading. Download smaller subfolders individually.`
-      )
-    }
-    writer.addFile(file.path, data)
-  }
-
-  // Downloads can skip every file (permissions, exhausted budget): the empty
-  // short-circuit applies to the archived result, not only the planned list.
-  if (writer.entryCount() === 0) throw new GfsFolderZipEmptyError(folder.name, skipped)
-
-  // ── Phase 3: assemble the archive. ──
-  report({
-    phase: 'assembling',
-    filesFound: files.length,
-    filesAdded: writer.entryCount(),
-    currentPath: null,
-  })
-  const archive = writer.build()
-  return {
-    bytes: archive,
-    fileName: `${sanitizeFileName(folder.name)}.zip`,
-    fileCount: writer.entryCount(),
-    skipped,
+  } catch (error) {
+    // Any failure (abort included) must not leave a temp file behind.
+    await zipStream.abort(jobId).catch(() => undefined)
+    throw error
   }
 }
+
+export { foldEntryName }
 
 function formatZipBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${Math.round(bytes / (1024 * 1024 * 1024))} GiB`

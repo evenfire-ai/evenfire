@@ -177,6 +177,14 @@ const clerum = Object.freeze({
     ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
     affordances: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
+    zipStream: {
+      start: () => ipcRenderer.invoke('gfs:zipStream:start'),
+      append: (jobId: string, name: string, bytes: ArrayBuffer) =>
+        ipcRenderer.invoke('gfs:zipStream:append', { jobId, name, bytes }),
+      finish: (jobId: string, suggestedName: string) =>
+        ipcRenderer.invoke('gfs:zipStream:finish', { jobId, suggestedName }),
+      abort: (jobId: string) => ipcRenderer.invoke('gfs:zipStream:abort', { jobId }),
+    },
     createFolder: (parentResourceId: string, name: string, drive?: string) =>
       ipcRenderer.invoke('gfs:createFolder', { parentResourceId, name, drive }),
     createFile: (parentResourceId: string, name: string, encodedData: string, drive?: string) =>
