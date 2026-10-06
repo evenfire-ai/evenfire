@@ -11,6 +11,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ClaudeProvider } from '../../../llm/claude'
 import { CodexSubscriptionProvider } from '../../../llm/codexSubscription'
+import { GrokSubscriptionProvider } from '../../../llm/grokSubscription'
 import { OpenAIProvider } from '../../../llm/openai'
 import type { ChatMessage } from '../../types'
 import { isLoopInjectedMessage, loopInjectedUserMessage } from '../toolUseLoopMessages'
@@ -70,6 +71,35 @@ describe('LM1 the loopInjected marker never reaches a provider request body', ()
     })
     const stream = vi.fn().mockResolvedValue({ text: 'ok', toolCalls: [], outcome: 'success' })
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', {
+      authorizer: { authorize },
+      proxy: { stream },
+      attemptContext: () => ({ policyRevision: 1, policyHash: 'b'.repeat(64), hostRef: 'chatllm' }),
+    } as never)
+
+    await provider.completeSingleTurnWithTools(conversation(), TOOLS)
+
+    expect(authorize).toHaveBeenCalledTimes(1)
+    expect(stream).toHaveBeenCalledTimes(1)
+    const authorized = authorize.mock.calls[0]![0] as { request: { messages: unknown[] } }
+    expect(authorized.request.messages).toEqual([
+      { role: 'user', content: GENUINE_TEXT },
+      { role: 'assistant', content: ASSISTANT_TEXT },
+      { role: 'user', content: INJECTED_TEXT },
+    ])
+    expectNoMarker(authorized)
+    const { signal: _signal, ...streamed } = stream.mock.calls[0]![0] as Record<string, unknown>
+    expectNoMarker(streamed)
+  })
+
+  it('Grok subscription authorize request and proxy stream request', async () => {
+    const authorize = vi.fn().mockResolvedValue({
+      providerAttemptId: 'attempt-1',
+      requestHash: 'a'.repeat(64),
+      executionTicket: 'ticket-123456',
+      expiresAt: '2026-08-20T10:00:00.000Z',
+    })
+    const stream = vi.fn().mockResolvedValue({ text: 'ok', toolCalls: [], outcome: 'success' })
+    const provider = new GrokSubscriptionProvider('grok-4.6', {
       authorizer: { authorize },
       proxy: { stream },
       attemptContext: () => ({ policyRevision: 1, policyHash: 'b'.repeat(64), hostRef: 'chatllm' }),

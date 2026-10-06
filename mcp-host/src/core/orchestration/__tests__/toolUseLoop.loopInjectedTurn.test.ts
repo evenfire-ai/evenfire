@@ -5,7 +5,9 @@
  * The loop runs for real: a page is read, the loop injects a `role: 'user'`
  * message, a second page is read, and the context manager applies `prePrune`
  * under qualifying pressure on every iteration. Both pages belong to the same
- * user turn, so neither may be collapsed before the model answers.
+ * user turn, so neither may be collapsed before the model answers. A page read
+ * in an earlier user turn is collapsed in the same run, which shows the pass
+ * was active.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
@@ -162,7 +164,17 @@ async function runScenario(scenario: Scenario) {
     contextManager: { manage },
   })
 
+  // An earlier user turn already read a page. It is the collapse candidate the
+  // pass must act on in this same run, under the same pressure.
   const outcome = await runToolUseLoop(config, [
+    { role: 'user', content: 'Read the start of the attached file.' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'tc_p0', name: READ_TOOL, arguments: { attachmentId: 'att_1' } }],
+    },
+    { role: 'tool', name: READ_TOOL, tool_call_id: 'tc_p0', content: nativePage(0) },
+    { role: 'assistant', content: 'Read the first page.' },
     { role: 'user', content: 'Summarize the attached file.' },
   ])
   return { outcome, sent, manage, collapseRuns }
@@ -174,7 +186,7 @@ describe('LM1 loop-injected user messages keep the current turn for page collaps
     ['a nudge from onTextRejected', nudgeScenario],
   ])('keeps both same-turn pages across %s under pressure', async (_, build) => {
     const scenario = build()
-    const { outcome, sent, manage } = await runScenario(scenario)
+    const { outcome, sent, manage, collapseRuns } = await runScenario(scenario)
 
     // Witnesses: the loop ran the whole script, the context manager ran on
     // every iteration, and the injected user message sits between the pages.
@@ -182,6 +194,13 @@ describe('LM1 loop-injected user messages keep the current turn for page collaps
     expect(sent).toHaveLength(4)
     expect(manage.mock.calls.length).toBeGreaterThanOrEqual(4)
     const final = sent[3]!
+
+    // Witness that the collapse pass ran in this run: the earlier turn's page
+    // reached the model collapsed.
+    expect(collapseRuns.flat()).toContain('attachment_page_collapse')
+    const earlierPage = final.findIndex(m => m.role === 'tool' && m.tool_call_id === 'tc_p0')
+    expect(earlierPage).toBeGreaterThan(0)
+    expect(pageText(final[earlierPage]!)).toBe(COLLAPSE_MARKER)
     const firstPage = final.findIndex(m => m.role === 'tool' && m.tool_call_id === 'tc_p1')
     const injected = final.findIndex(m => m.role === 'user' && m.content === scenario.injected)
     const secondPage = final.findIndex(m => m.role === 'tool' && m.tool_call_id === 'tc_p2')
