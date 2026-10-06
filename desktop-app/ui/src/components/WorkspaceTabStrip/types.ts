@@ -9,6 +9,8 @@ export type WorkspaceTabStripProps = {
   loadingTabId?: string | null
   /** Chat tab whose Host access check failed and can be retried. */
   unavailableTabId?: string | null
+  /** Why the unavailable chat tab cannot currently be opened. */
+  unavailableReason?: 'access' | 'conversation'
   onSelect: (id: string) => void
   onClose: (id: string) => void
   /** Move a tab to `toIndex` (its desired FINAL array index; see reorderWorkspaceTab). */

@@ -20,6 +20,7 @@ export function ChatSwitcher({
   pendingTabId = null,
   loadingTabId = null,
   unavailableTabId = null,
+  unavailableReason = 'access',
   onSelect,
   onNewChat,
   focusRequestId = 0,
@@ -107,7 +108,9 @@ export function ChatSwitcher({
             : activeLoading
               ? 'Loading conversation'
               : activeUnavailable
-                ? 'Could not verify host access. Select to retry.'
+                ? unavailableReason === 'conversation'
+                  ? 'Conversation unavailable. Close this tab or select to retry.'
+                  : 'Could not verify host access. Select to retry.'
                 : undefined
         }
         variant="soft"
@@ -146,7 +149,9 @@ export function ChatSwitcher({
                       : loading
                         ? `${tab.title}, loading conversation`
                         : unavailable
-                          ? `${tab.title}, access check failed`
+                          ? unavailableReason === 'conversation'
+                            ? `${tab.title}, conversation unavailable`
+                            : `${tab.title}, access check failed`
                           : undefined
                   }
                   aria-busy={pending || loading || undefined}
@@ -164,7 +169,9 @@ export function ChatSwitcher({
                       : loading
                         ? 'Loading conversation'
                         : unavailable
-                          ? 'Could not verify host access. Select to retry.'
+                          ? unavailableReason === 'conversation'
+                            ? 'Conversation unavailable. Close this tab or select to retry.'
+                            : 'Could not verify host access. Select to retry.'
                           : undefined
                   }
                   variant="ghost"

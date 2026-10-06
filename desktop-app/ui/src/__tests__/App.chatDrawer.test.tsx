@@ -263,6 +263,16 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     (agentName: string, options: { chatId?: string; keepNavItem?: boolean } = {}) => {
       beginNavigationIntent()
       controller.selectedAgent = agentName
+      if (options.chatId && controller.isChatDeleted(agentName, options.chatId)) {
+        if (!options.keepNavItem) {
+          clearAppsPicker()
+          setWorkspaceTabs((state: WorkspaceState) =>
+            activateChatState(state, agentName, options.chatId ?? null, nextWorkspaceTabId())
+          )
+        }
+        forceControllerRender()
+        return
+      }
       controller.activeChatId = options.chatId ?? null
       if (!options.keepNavItem) {
         clearAppsPicker()
@@ -363,6 +373,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     handleEnsureTeamContext: vi.fn(async () => false),
     getCurrentTeamId: vi.fn(() => 'team-a'),
     isHostAccessBlocked: vi.fn(() => false),
+    isChatDeleted: vi.fn(() => false),
     verifyHostAccess: vi.fn(async () => true),
     beginNavigationIntent,
     isNavigationIntentCurrent,
@@ -604,6 +615,163 @@ describe('App workspace chat tabs with held Host access', () => {
     ).toBe('true')
     expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
       'chat-a'
+    )
+  })
+
+  it('shows an unavailable state when the controller declines a deleted chat tab', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'Conversation A',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-a',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    let hostAccessBlocked = true
+    const verification = deferredBoolean()
+    currentController = makeController({
+      workspaceTabs: selectWorkspaceTab(chatB, 'chat-a'),
+      // A held Host can clear the selected agent while leaving the displayed
+      // conversation id in place. The deleted-chat fence then declines B.
+      selectedAgent: null,
+      activeChatId: 'chat-a',
+      chatList: [CHAT_TAB_A],
+      latestChatSessions: [],
+      hostAuthorityRevision: 0,
+      isChatDeleted: vi.fn(
+        (agentRef: string, chatId: string) => agentRef === 'agent-a' && chatId === 'chat-b'
+      ),
+      isHostAccessBlocked: vi.fn((agentRef: string) => agentRef === 'agent-a' && hostAccessBlocked),
+      verifyHostAccess: vi.fn(() =>
+        verification.promise.then(verified => {
+          if (verified) {
+            hostAccessBlocked = false
+            currentController.hostAuthorityRevision += 1
+          }
+          return verified
+        })
+      ),
+    } as Partial<AppController>)
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation unavailable' }))
+    expect(
+      screen
+        .getByRole('button', { name: 'Conversation unavailable, checking access' })
+        .getAttribute('aria-pressed')
+    ).toBe('true')
+
+    await act(async () => verification.resolve(true))
+
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith(
+      'agent-a',
+      expect.objectContaining({ chatId: 'chat-b', selectLatest: false })
+    )
+    const unavailableTab = screen.getByRole('button', {
+      name: 'Conversation B, conversation unavailable',
+    })
+    expect(unavailableTab.getAttribute('aria-pressed')).toBe('true')
+    expect(unavailableTab.getAttribute('aria-busy')).toBeNull()
+    expect(unavailableTab.getAttribute('title')).toBe(
+      'Conversation unavailable. Close this tab or select to retry.'
+    )
+    expect(
+      screen.getByText(
+        'This conversation is no longer available. Close this tab or select it to retry.'
+      )
+    ).toBeTruthy()
+    expect(screen.queryByText('Loading conversation…')).toBeNull()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    act(() => {
+      currentController.chatList = [{ ...CHAT_TAB_A, title: 'Renamed A' }]
+      forceControllerRender()
+    })
+
+    expect(
+      screen
+        .getByRole('button', { name: 'Conversation B, conversation unavailable' })
+        .getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(
+      screen.getByText(
+        'This conversation is no longer available. Close this tab or select it to retry.'
+      )
+    ).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
+  it('keeps a verified same-agent tab selected during chat-list reconciliation', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'Conversation A',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-a',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    let hostAccessBlocked = true
+    const verification = deferredBoolean()
+    currentController = makeController({
+      workspaceTabs: selectWorkspaceTab(chatB, 'chat-a'),
+      // A held Host clears the selected agent while retaining the displayed chat.
+      selectedAgent: null,
+      activeChatId: 'chat-a',
+      chatList: CHAT_TAB_ACCESS_LIST,
+      latestChatSessions: [{ ...CHAT_TAB_B, agentRef: 'agent-a' }],
+      hostAuthorityRevision: 0,
+      isHostAccessBlocked: vi.fn((agentRef: string) => agentRef === 'agent-a' && hostAccessBlocked),
+      verifyHostAccess: vi.fn(() =>
+        verification.promise.then(verified => {
+          if (verified) {
+            hostAccessBlocked = false
+            currentController.hostAuthorityRevision += 1
+          }
+          return verified
+        })
+      ),
+    } as Partial<AppController>)
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation unavailable' }))
+    expect(
+      screen
+        .getByRole('button', { name: 'Conversation unavailable, checking access' })
+        .getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    await act(async () => verification.resolve(true))
+
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith(
+      'agent-a',
+      expect.objectContaining({ chatId: 'chat-b', selectLatest: false })
+    )
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-b'
+    )
+
+    act(() => {
+      currentController.chatList = [CHAT_TAB_A, { ...CHAT_TAB_B, title: 'Renamed B' }]
+      forceControllerRender()
+    })
+
+    expect(currentController.workspaceTabs.tabs.find(tab => tab.id === 'chat-b')?.title).toBe(
+      'Renamed B'
+    )
+    expect(screen.getByRole('button', { name: 'Renamed B' }).getAttribute('aria-pressed')).toBe(
+      'true'
+    )
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-b'
     )
   })
 

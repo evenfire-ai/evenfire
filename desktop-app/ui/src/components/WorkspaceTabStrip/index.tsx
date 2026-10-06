@@ -34,6 +34,7 @@ export function WorkspaceTabStrip({
   pendingTabId = null,
   loadingTabId = null,
   unavailableTabId = null,
+  unavailableReason = 'access',
   onSelect,
   onClose,
   onReorder,
@@ -168,7 +169,9 @@ export function WorkspaceTabStrip({
                       : loading
                         ? `${tab.title}, loading conversation`
                         : unavailable
-                          ? `${tab.title}, access check failed`
+                          ? unavailableReason === 'conversation'
+                            ? `${tab.title}, conversation unavailable`
+                            : `${tab.title}, access check failed`
                           : tab.title
                   }
                   aria-busy={pending || loading || undefined}
@@ -184,7 +187,9 @@ export function WorkspaceTabStrip({
                       : loading
                         ? 'Loading conversation'
                         : unavailable
-                          ? 'Could not verify host access. Select to retry.'
+                          ? unavailableReason === 'conversation'
+                            ? 'Conversation unavailable. Close this tab or select to retry.'
+                            : 'Could not verify host access. Select to retry.'
                           : undefined
                   }
                   variant="ghost"

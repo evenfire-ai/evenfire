@@ -1480,6 +1480,7 @@ export function useAppController() {
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
+    isChatDeleted: chat.isChatDeleted,
     verifyHostAccess,
     beginNavigationIntent,
     isNavigationIntentCurrent,

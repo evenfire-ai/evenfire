@@ -317,6 +317,9 @@ export function App() {
   const [unavailableWorkspaceTabId, setUnavailableWorkspaceTabId] = React.useState<string | null>(
     null
   )
+  const [unavailableWorkspaceTabReason, setUnavailableWorkspaceTabReason] = React.useState<
+    'access' | 'conversation'
+  >('access')
   const [requestedDrawerChatTabId, setRequestedDrawerChatTabId] = React.useState<string | null>(
     null
   )
@@ -357,6 +360,7 @@ export function App() {
     tabId: string
     selectionIntent: number
     navigationIntent: number
+    phase: 'checking' | 'switching' | 'unavailable'
   } | null>(null)
   const clearPendingWorkspaceTabSelection = React.useCallback((selectionIntent?: number) => {
     const pending = pendingWorkspaceTabSelectionRef.current
@@ -364,6 +368,7 @@ export function App() {
     pendingWorkspaceTabSelectionRef.current = null
     setPendingWorkspaceTabId(null)
     setUnavailableWorkspaceTabId(null)
+    setUnavailableWorkspaceTabReason('access')
     setRequestedDrawerChatTabId(null)
   }, [])
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
@@ -534,12 +539,30 @@ export function App() {
         vm.clearAppsPicker()
         setWorkspaceTabs(state => selectWorkspaceTab(state, id))
       }
-      if (!agentRef || !vm.isHostAccessBlocked(agentRef)) {
+      const chatId = tab.kind === 'chat' ? tab.chat?.chatId : undefined
+      const hostAccessBlocked = Boolean(agentRef && vm.isHostAccessBlocked(agentRef))
+      if (agentRef && chatId && !hostAccessBlocked && vm.isChatDeleted(agentRef, chatId)) {
+        pendingWorkspaceTabSelectionRef.current = {
+          tabId: id,
+          selectionIntent,
+          navigationIntent,
+          phase: 'unavailable',
+        }
+        setUnavailableWorkspaceTabId(id)
+        setUnavailableWorkspaceTabReason('conversation')
+        return
+      }
+      if (!agentRef || !hostAccessBlocked) {
         revealWorkspaceTab(tab, inDrawer)
         return
       }
 
-      pendingWorkspaceTabSelectionRef.current = { tabId: id, selectionIntent, navigationIntent }
+      pendingWorkspaceTabSelectionRef.current = {
+        tabId: id,
+        selectionIntent,
+        navigationIntent,
+        phase: 'checking',
+      }
       setPendingWorkspaceTabId(id)
       void vm.verifyHostAccess(agentRef).then(verified => {
         if (selectionIntent !== workspaceTabSelectionIntentRef.current) return
@@ -548,15 +571,31 @@ export function App() {
           return
         }
         if (verified) {
-          pendingWorkspaceTabSelectionRef.current = null
+          const pending = pendingWorkspaceTabSelectionRef.current
+          if (pending?.selectionIntent === selectionIntent) {
+            pendingWorkspaceTabSelectionRef.current = { ...pending, phase: 'switching' }
+          }
           setPendingWorkspaceTabId(null)
           setUnavailableWorkspaceTabId(null)
           if (!inDrawer) setRequestedDrawerChatTabId(null)
           revealWorkspaceTab(tab, inDrawer)
+          // The controller begins its own navigation intent while dispatching
+          // the conversation switch. Start the transition guard afterward so
+          // its own action does not invalidate the guard, while later navigation
+          // can still supersede it.
+          const switchNavigationIntent = vm.beginNavigationIntent()
+          const currentPending = pendingWorkspaceTabSelectionRef.current
+          if (currentPending?.selectionIntent === selectionIntent) {
+            pendingWorkspaceTabSelectionRef.current = {
+              ...currentPending,
+              navigationIntent: switchNavigationIntent,
+            }
+          }
           return
         }
         setPendingWorkspaceTabId(null)
         setUnavailableWorkspaceTabId(id)
+        setUnavailableWorkspaceTabReason('access')
       })
     },
     [
@@ -565,6 +604,7 @@ export function App() {
       setWorkspaceTabs,
       vm.beginNavigationIntent,
       vm.clearAppsPicker,
+      vm.isChatDeleted,
       vm.isHostAccessBlocked,
       vm.isNavigationIntentCurrent,
       vm.verifyHostAccess,
@@ -2038,12 +2078,47 @@ export function App() {
   // paths and never drives a chat switch itself.
   React.useEffect(() => {
     const pendingSelection = pendingWorkspaceTabSelectionRef.current
+    const pendingTab = pendingSelection
+      ? workspaceTabsRef.current.tabs.find(tab => tab.id === pendingSelection.tabId)
+      : undefined
     const pendingSelectionIsCurrent = Boolean(
       pendingSelection &&
       pendingSelection.selectionIntent === workspaceTabSelectionIntentRef.current &&
       vm.isNavigationIntentCurrent(pendingSelection.navigationIntent)
     )
-    if (pendingSelection && !pendingSelectionIsCurrent) {
+    const pendingConversationIsDisplayed = Boolean(
+      pendingSelection?.phase === 'switching' &&
+      pendingTab?.kind === 'chat' &&
+      (pendingTab.chat?.agentRef ?? null) === (vm.selectedAgent ?? null) &&
+      (pendingTab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
+    )
+    const pendingConversationIsUnavailable = Boolean(
+      pendingSelection?.phase === 'switching' &&
+      pendingTab?.kind === 'chat' &&
+      pendingTab.chat?.agentRef &&
+      pendingTab.chat?.chatId &&
+      (vm.isChatDeleted(pendingTab.chat.agentRef, pendingTab.chat.chatId) ||
+        vm.isHostAccessBlocked(pendingTab.chat.agentRef))
+    )
+    if (pendingConversationIsUnavailable && pendingSelection) {
+      pendingWorkspaceTabSelectionRef.current = { ...pendingSelection, phase: 'unavailable' }
+      setPendingWorkspaceTabId(null)
+      setUnavailableWorkspaceTabId(pendingSelection.tabId)
+      setUnavailableWorkspaceTabReason(
+        pendingTab?.kind === 'chat' &&
+          pendingTab.chat?.agentRef &&
+          pendingTab.chat?.chatId &&
+          vm.isChatDeleted(pendingTab.chat.agentRef, pendingTab.chat.chatId)
+          ? 'conversation'
+          : 'access'
+      )
+    }
+    if (
+      pendingSelection &&
+      (!pendingSelectionIsCurrent ||
+        (pendingConversationIsDisplayed && !pendingConversationIsUnavailable) ||
+        !pendingTab)
+    ) {
       clearPendingWorkspaceTabSelection(pendingSelection.selectionIntent)
     }
     if ((vm.navItem !== DESKTOP_ROUTES.chat && !chatDrawerVisible) || !vm.selectedAgent) return
@@ -2062,8 +2137,8 @@ export function App() {
     setWorkspaceTabs(state => {
       const reconciled = reconcileWorkspaceChatTab(state, active, id)
       if (reconciled === state) return state
-      // Keep reconciling chat metadata while Host access is pending, but don't
-      // let the displayed conversation reactivate a tab over the user's request.
+      // Keep reconciling chat metadata while a requested tab is authoritative,
+      // but don't let the old displayed conversation reactivate it mid-switch.
       const pendingSelectionStillCurrent = Boolean(
         pendingSelectionIsCurrent &&
         pendingSelection &&
@@ -2100,6 +2175,9 @@ export function App() {
     setWorkspaceTabs,
     vm.activeChatId,
     vm.chatList,
+    vm.hostAuthorityRevision,
+    vm.isChatDeleted,
+    vm.isHostAccessBlocked,
     vm.isNavigationIntentCurrent,
     vm.latestChatSessions,
     vm.navItem,
@@ -2901,10 +2979,15 @@ export function App() {
     (drawerChatAccessPhase === 'loading' || (!drawerChatAccessPhase && vm.chatMessagesLoading))
       ? drawerActiveChatTab.id
       : null
-  const renderChatTabAccessState = (phase: 'checking' | 'loading' | 'unavailable') => {
+  const renderChatTabAccessState = (
+    phase: 'checking' | 'loading' | 'unavailable',
+    unavailableReason: 'access' | 'conversation' = 'access'
+  ) => {
     const unavailable = phase === 'unavailable'
     const message = unavailable
-      ? 'Could not verify access. Select this tab to retry.'
+      ? unavailableReason === 'conversation'
+        ? 'This conversation is no longer available. Close this tab or select it to retry.'
+        : 'Could not verify access. Select this tab to retry.'
       : phase === 'checking'
         ? 'Checking access to conversation…'
         : 'Loading conversation…'
@@ -3044,6 +3127,7 @@ export function App() {
                                     pendingTabId={pendingWorkspaceTabId}
                                     loadingTabId={fullScreenLoadingTabId}
                                     unavailableTabId={unavailableWorkspaceTabId}
+                                    unavailableReason={unavailableWorkspaceTabReason}
                                     activeTabId={
                                       vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                     }
@@ -3086,7 +3170,10 @@ export function App() {
                                       surfaceId="chat-view-panel"
                                     >
                                       {fullScreenChatAccessPhase ? (
-                                        renderChatTabAccessState(fullScreenChatAccessPhase)
+                                        renderChatTabAccessState(
+                                          fullScreenChatAccessPhase,
+                                          unavailableWorkspaceTabReason
+                                        )
                                       ) : (
                                         <ChatPage scrollContainerRef={contentPanelRef} />
                                       )}
@@ -3194,6 +3281,7 @@ export function App() {
                                         pendingTabId={pendingWorkspaceTabId}
                                         loadingTabId={drawerLoadingTabId}
                                         unavailableTabId={unavailableWorkspaceTabId}
+                                        unavailableReason={unavailableWorkspaceTabReason}
                                         onSelect={handleSelectDrawerChatTab}
                                         onNewChat={handleNewWorkspaceChatTab}
                                         focusRequestId={chatSwitcherFocusRequestId}
@@ -3212,7 +3300,10 @@ export function App() {
                                     resizing={chatDrawerResize.isResizing}
                                   >
                                     {drawerChatAccessPhase ? (
-                                      renderChatTabAccessState(drawerChatAccessPhase)
+                                      renderChatTabAccessState(
+                                        drawerChatAccessPhase,
+                                        unavailableWorkspaceTabReason
+                                      )
                                     ) : (
                                       <ChatPage scrollContainerRef={chatDrawerRef} />
                                     )}
