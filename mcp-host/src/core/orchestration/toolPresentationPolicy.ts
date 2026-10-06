@@ -16,6 +16,20 @@ export function parseCodexToolDiscoveryBytes(raw: string | undefined): number {
   return Number(raw)
 }
 
+/**
+ * Per-native-tool serialized-definition budget. A single native tool whose
+ * full definition exceeds this budget is presented through discovery (search +
+ * describe + bridge call) instead of `tools[]`. `0` disables native deferral
+ * while keeping MCP deferral untouched. Small core tools stay advertised.
+ */
+export function parseNativeToolDiscoveryBytes(raw: string | undefined): number {
+  if (raw === undefined) return 2_048
+  if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    throw new Error('CLERUM_NATIVE_TOOL_DISCOVERY_BYTES must be a non-negative safe integer')
+  }
+  return Number(raw)
+}
+
 export function resolveToolPresentation(
   provider: string,
   config: { dynamicToolsEnabled: boolean; codexToolPresentation?: CodexToolPresentation },

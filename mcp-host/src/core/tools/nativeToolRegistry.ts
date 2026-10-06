@@ -15,6 +15,7 @@ import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClien
 import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
+import type { McpTool } from '../../types'
 import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
@@ -377,8 +378,9 @@ export class NativeToolRegistry implements ToolRegistry {
     )
 
     // F2/F3/F4 (dynamic-tool-loading): read-only discovery meta-tools + the
-    // execution bridge. They query the live MCP catalog (McpManager.getAllTools())
-    // on demand and never put schemas into the announced tools[] array.
+    // execution bridge. They query the live catalog (MCP tools plus every
+    // native definition, #1003) on demand and never put schemas into the
+    // announced tools[] array.
     // Gated on BOTH an McpManager being wired (chat path via taskExecutor; the
     // tool-name listing registry in main.ts and tests omit it) AND the static
     // feature flag (LOCKED #5: default OFF, opt-in, small hosts untouched). When
@@ -386,7 +388,19 @@ export class NativeToolRegistry implements ToolRegistry {
     // byte-identical to today and the presence-gated discovery guidance is not
     // emitted by either prompt path.
     if (mcpManager && dynamicToolsEnabled) {
-      const getCatalog = () => mcpManager.getAllTools()
+      // #1003 — deferred native tools must be searchable and describable exactly
+      // like deferred MCP tools. Native definitions are projected into the
+      // catalog shape with serverName "native"; advertised natives appear too so
+      // the index stays complete and stable across presentation changes.
+      const getCatalog = (): McpTool[] => [
+        ...mcpManager.getAllTools(),
+        ...this.listDefinitions().map(def => ({
+          name: def.name,
+          description: def.description,
+          inputSchema: def.parameters,
+          serverName: 'native',
+        })),
+      ]
       this.register(
         new InternalToolAdapter(
           createToolSearchTool(getCatalog),

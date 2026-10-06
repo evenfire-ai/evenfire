@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   parseCodexToolDiscoveryBytes,
   parseCodexToolPresentation,
+  parseNativeToolDiscoveryBytes,
   resolveToolPresentation,
 } from '../toolPresentationPolicy'
 
@@ -39,6 +40,20 @@ describe('tool presentation configuration', () => {
     'rejects invalid optimization bytes %j',
     value => {
       expect(() => parseCodexToolDiscoveryBytes(value)).toThrow('CODEX_TOOL_DISCOVERY_BYTES')
+    }
+  )
+  it('defaults the native per-tool discovery budget to 2048 bytes', () => {
+    expect(parseNativeToolDiscoveryBytes(undefined)).toBe(2_048)
+  })
+  it.each(['0', '1024', '65536'])('accepts non-negative safe integer %j', value => {
+    expect(parseNativeToolDiscoveryBytes(value)).toBe(Number(value))
+  })
+  it.each(['', '-1', '1.5', '2kb', '9007199254740992'])(
+    'rejects invalid native discovery bytes %j',
+    value => {
+      expect(() => parseNativeToolDiscoveryBytes(value)).toThrow(
+        'CLERUM_NATIVE_TOOL_DISCOVERY_BYTES'
+      )
     }
   )
   it.each([false, true])('preserves other providers flag %s', enabled => {

@@ -237,6 +237,7 @@ describe('Codex presentation without access limits', () => {
           mcpCount: 1,
           presentedCount: all.length,
           deferredCount: 0,
+          nativeDeferredCount: 0,
         },
         'Tool presentation selected'
       )
@@ -253,6 +254,7 @@ describe('Codex presentation without access limits', () => {
           mcpCount: 0,
           presentedCount: native.length,
           deferredCount: 0,
+          nativeDeferredCount: 0,
         },
         'Tool presentation selected'
       )
@@ -327,5 +329,67 @@ describe('Codex presentation without access limits', () => {
     expect(await controller('auto', latch).refreshTools(all)).toEqual(all)
     expect(await controller('discovery', latch).refreshTools(all)).toEqual(native)
     expect(latch.get()).toBe(true)
+  })
+})
+
+describe('#1003 — native tool deferral by serialized size', () => {
+  const BRIDGES = ['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call']
+  const small = tool('shell_exec')
+  const oversized = { ...tool('clerum__generate_docx'), description: 'x'.repeat(4096) }
+  const nativeNames = new Set([...BRIDGES, small.name, oversized.name])
+
+  function controller(
+    mode: 'auto' | 'direct' | 'discovery',
+    nativeToolDiscoveryBytes?: number,
+    legacy = false
+  ) {
+    return new DeferrableToolController(
+      new DefaultLoopController(),
+      nativeNames,
+      legacy
+        ? { dynamicToolsEnabled: true, dynamicToolsThreshold: 5 }
+        : {
+            dynamicToolsEnabled: true,
+            dynamicToolsThreshold: 60,
+            codexMode: mode,
+            nativeToolDiscoveryBytes,
+          },
+      makeLatch()
+    )
+  }
+
+  it('discovery defers the oversized native but keeps small natives and bridges', async () => {
+    const upstream = [small, oversized, ...BRIDGES.map(tool)]
+    const out = await controller('discovery', 2048).refreshTools(upstream)
+    expect(out.map(t => t.name).sort()).toEqual([...BRIDGES, small.name].sort())
+    expect(out.some(t => t.name === oversized.name)).toBe(false)
+  })
+
+  it('direct retains the oversized native — no bridge tools means no deferral path', async () => {
+    const upstream = [small, oversized]
+    expect(await controller('direct', 2048).refreshTools(upstream)).toEqual(upstream)
+  })
+
+  it('auto engages from a single oversized native even with zero MCP tools', async () => {
+    expect(await controller('auto', 2048).refreshTools([small, oversized])).toEqual([small])
+  })
+
+  it('a zero budget disables native deferral without touching MCP policy', async () => {
+    const upstream = [small, oversized]
+    expect(await controller('discovery', 0).refreshTools(upstream)).toEqual(upstream)
+  })
+
+  it('bridge tools stay advertised even when their definition exceeds the budget', async () => {
+    const hugeBridge = { ...tool('clerum__tool_call'), description: 'y'.repeat(8192) }
+    const upstream = [small, oversized, hugeBridge]
+    const out = await controller('discovery', 2048).refreshTools(upstream)
+    expect(out.map(t => t.name)).toContain('clerum__tool_call')
+    expect(out.some(t => t.name === oversized.name)).toBe(false)
+  })
+
+  it('the legacy latched bridge also defers the oversized native', async () => {
+    const ctl = controller('discovery', undefined, true)
+    const out = await ctl.refreshTools([small, oversized, ...mcpTools(10)])
+    expect(out.map(t => t.name)).toEqual([small.name])
   })
 })

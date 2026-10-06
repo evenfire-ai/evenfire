@@ -2162,6 +2162,7 @@ export class TaskExecutor {
         dynamicToolsEnabled: presentation.bridgeEnabled,
         codexMode: presentation.codexMode,
         codexToolDiscoveryBytes: appConfig.codexToolDiscoveryBytes,
+        nativeToolDiscoveryBytes: appConfig.nativeToolDiscoveryBytes,
         dynamicToolsThreshold: appConfig.dynamicToolsThreshold,
       },
       {

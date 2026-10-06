@@ -148,6 +148,26 @@ async function setup(count = 83, reverse = false) {
   return { manager, native, registry, config, conversation, nativeNames }
 }
 
+/** #1003 — mirror the controller's size-driven native deferral rule so the
+ * integration expectations track the real registry instead of hard-coding
+ * which generators are oversized. */
+function oversizedNativeNames(
+  definitions: Array<{ name: string }>,
+  nativeNames: Set<string>
+): Set<string> {
+  const bridges = new Set(['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call'])
+  return new Set(
+    definitions
+      .filter(
+        tool =>
+          nativeNames.has(tool.name) &&
+          !bridges.has(tool.name) &&
+          Buffer.byteLength(JSON.stringify(tool), 'utf8') > 2_048
+      )
+      .map(tool => tool.name)
+  )
+}
+
 afterEach(async () => {
   await Promise.all(managers.splice(0).map(manager => manager.close()))
   remote.catalogs.clear()
@@ -197,8 +217,14 @@ describe('approved catalog across presentation and lifecycle', () => {
         return { presented, parts }
       }
       const direct = await buildPrompts()
-      expect(direct.presented).toEqual(registry.listDefinitions())
-      expect(direct.presented.some(tool => tool.name === 'alpha__record__read_000')).toBe(true)
+      const oversized = oversizedNativeNames(registry.listDefinitions(), nativeNames)
+      expect(oversized.size).toBeGreaterThan(0)
+      expect(direct.presented).toEqual(
+        registry
+          .listDefinitions()
+          .filter(tool => nativeNames.has(tool.name) && !oversized.has(tool.name))
+      )
+      expect(direct.presented.some(tool => tool.name === 'alpha__record__read_000')).toBe(false)
 
       remote.catalogs.set(
         'late',
@@ -239,8 +265,11 @@ describe('approved catalog across presentation and lifecycle', () => {
           }
         )
         const presented = await controller.refreshTools(registry.listDefinitions())
-        expect(presented).toHaveLength(mode === 'direct' ? count + 36 : 36)
-        expect(presented.filter(tool => nativeNames.has(tool.name))).toHaveLength(36)
+        const oversized = oversizedNativeNames(registry.listDefinitions(), nativeNames)
+        expect(presented).toHaveLength(mode === 'direct' ? count + 36 : 36 - oversized.size)
+        expect(presented.filter(tool => nativeNames.has(tool.name))).toHaveLength(
+          mode === 'direct' ? 36 : 36 - oversized.size
+        )
         const target = `alpha__record__read_${String(count % 2 ? count - 1 : count - 2).padStart(3, '0')}`
         expect(registry.get(target)).not.toBeNull()
         const call =
@@ -289,7 +318,8 @@ describe('approved catalog across presentation and lifecycle', () => {
       latch
     )
     const cold = await auto.refreshTools(registry.listDefinitions())
-    expect(cold).toHaveLength(36)
+    const oversized = oversizedNativeNames(registry.listDefinitions(), nativeNames)
+    expect(cold).toHaveLength(36 - oversized.size)
     remote.catalogs.set(
       'alpha',
       Array.from({ length: 250 }, (_, i) => ({

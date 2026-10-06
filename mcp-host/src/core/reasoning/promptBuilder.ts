@@ -119,8 +119,8 @@ export const MCP_SERVER_SELECTION_TEXT =
 export const TOOL_DISCOVERY_TEXT =
   'Use directly listed tools when available. For additional approved tools, ' +
   'use `clerum__tool_search` to find them by keyword, `clerum__tool_describe` to ' +
-  "see one's schema, and `clerum__tool_call` to invoke it. Native tools are " +
-  'already available directly. Search narrowly for the current task; refine or page ' +
+  "see one's schema, and `clerum__tool_call` to invoke it. This also covers " +
+  'internal tools that are not listed directly. Search narrowly for the current task; refine or page ' +
   'only when needed rather than loading the whole catalog. Describe only the chosen ' +
   'tool and reuse its schema from the conversation when available. Each invocation ' +
   'still checks current permissions and arguments. Do not call tools for tasks that ' +

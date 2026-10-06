@@ -22,6 +22,14 @@ import type { InternalToolDefinition, InternalToolResult } from '../workflow/typ
  */
 export type CatalogProvider = () => McpTool[]
 
+/** The 3 dynamic-tool-loading bridge tools. They are native and must never be
+ * the TARGET of `clerum__tool_call` (LOCKED #11 — no bridge recursion). */
+export const BRIDGE_TOOL_NAMES = new Set([
+  'clerum__tool_search',
+  'clerum__tool_describe',
+  'clerum__tool_call',
+])
+
 /** Default cap for tool_search results. The model asks for one schema at a
  * time via tool_describe, so the search result stays a small, schema-free
  * index even with a 290-tool catalog. */
@@ -344,7 +352,8 @@ export function createToolCallTool(): InternalToolDefinition {
     description:
       'Invoke a tool discovered via `clerum__tool_search` / `clerum__tool_describe` ' +
       'by its exact name. Pass the target tool name and its arguments. Use this ' +
-      'for tools that are not listed directly; native tools are called directly.',
+      'for tools that are not listed directly, including deferred internal tools. ' +
+      'Tools already listed in `tools[]` are called directly by their own name.',
     parameters: {
       type: 'object',
       properties: {

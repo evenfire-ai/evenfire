@@ -3,9 +3,11 @@
  * dynamic-tool-loading "stable bridge" design (Phase F3.1).
  *
  * When active, it removes all deferrable MCP tools from the advertised
- * `tools[]` array, leaving only the native tools (which include the 3 bridge
- * tools `clerum__tool_search` / `clerum__tool_describe` / `clerum__tool_call`).
- * Deferred MCP tools are reached exclusively through `clerum__tool_call`.
+ * `tools[]` array, plus native tools whose serialized definition exceeds the
+ * per-tool native discovery budget (#1003 — the document generators dominate
+ * per-call token cost). Small native tools and the 3 bridge tools
+ * (`clerum__tool_search` / `clerum__tool_describe` / `clerum__tool_call`)
+ * always stay advertised; deferred tools are reached through the bridge.
  *
  * Why a decorator (delegate-first composition): the inner chain
  * (`ApprovalController → UnifiedApprovalGateController` for interactive tasks,
@@ -19,6 +21,7 @@
  * `isNative` membership is decided by the exact `nativeNames` set (Critical:
  * `clerum__*` tools contain `__` but are native), NEVER by a string heuristic.
  */
+import { BRIDGE_TOOL_NAMES } from '../../capabilities/toolCatalogTools'
 import { logger } from '../../logger'
 import { LoopController } from '../interfaces'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
@@ -42,6 +45,7 @@ export class DeferrableToolController implements LoopController {
   private readonly latch: LatchStore
   private readonly codexMode?: CodexToolPresentation
   private readonly discoveryBytes: number
+  private readonly nativeDiscoveryBytes: number
   private lastPresentation: string | undefined
 
   constructor(
@@ -52,6 +56,7 @@ export class DeferrableToolController implements LoopController {
       dynamicToolsThreshold: number
       codexMode?: CodexToolPresentation
       codexToolDiscoveryBytes?: number
+      nativeToolDiscoveryBytes?: number
     },
     latch: LatchStore
   ) {
@@ -62,6 +67,7 @@ export class DeferrableToolController implements LoopController {
     this.latch = latch
     this.codexMode = config.codexMode
     this.discoveryBytes = config.codexToolDiscoveryBytes ?? 32_768
+    this.nativeDiscoveryBytes = config.nativeToolDiscoveryBytes ?? 2_048
   }
 
   shouldAccept(content: string, iteration: number): boolean {
@@ -92,12 +98,18 @@ export class DeferrableToolController implements LoopController {
     // switches. Never reuse another provider's session latch or promote schemas.
     if (this.codexMode) {
       const deferred = upstream.filter(t => !this.nativeNames.has(t.name))
+      const deferrableNatives = upstream.filter(t => this.isDeferrableNative(t))
+      const deferredNames = new Set([
+        ...deferred.map(t => t.name),
+        ...deferrableNatives.map(t => t.name),
+      ])
       const discover =
         this.codexMode !== 'direct' &&
         (this.codexMode === 'discovery' ||
           deferred.length > this.threshold ||
-          Buffer.byteLength(JSON.stringify(deferred), 'utf8') > this.discoveryBytes)
-      const presented = discover ? upstream.filter(t => this.nativeNames.has(t.name)) : upstream
+          Buffer.byteLength(JSON.stringify(deferred), 'utf8') > this.discoveryBytes ||
+          deferrableNatives.length > 0)
+      const presented = discover ? upstream.filter(t => !deferredNames.has(t.name)) : upstream
       const measurement = {
         mode: this.codexMode,
         strategy: discover ? 'discovery' : 'direct',
@@ -105,6 +117,7 @@ export class DeferrableToolController implements LoopController {
         mcpCount: deferred.length,
         presentedCount: presented.length,
         deferredCount: discover ? deferred.length : 0,
+        nativeDeferredCount: discover ? deferrableNatives.length : 0,
       }
       const key = JSON.stringify(measurement)
       if (key !== this.lastPresentation) {
@@ -139,8 +152,24 @@ export class DeferrableToolController implements LoopController {
     // Passthrough — identical to today's behavior (flag off / under threshold).
     if (!bridgeActive) return upstream
 
-    // STABLE SWAP: advertise ONLY natives (which include the 3 bridge tools).
-    // Deterministic and session-invariant → `tools[]` byte-stable → cache-safe.
-    return upstream.filter(t => this.nativeNames.has(t.name))
+    // STABLE SWAP: advertise small natives (which include the 3 bridge tools)
+    // and defer oversized natives alongside MCP tools. Deterministic and
+    // session-invariant → `tools[]` byte-stable → cache-safe.
+    return upstream.filter(t => this.nativeNames.has(t.name) && !this.isDeferrableNative(t))
+  }
+
+  /**
+   * #1003 — a native tool is deferrable when its FULL serialized definition
+   * (name + description + parameters — exactly what `tools[]` costs) exceeds
+   * the per-tool budget. The decision is size-driven, never name-driven, so
+   * core tools stay advertised and no generator is special-cased. The 3
+   * bridge tools are exempt regardless of size: they are the access path for
+   * everything the swap defers. A budget of 0 disables native deferral.
+   */
+  private isDeferrableNative(tool: ToolDefinition): boolean {
+    if (this.nativeDiscoveryBytes <= 0) return false
+    if (BRIDGE_TOOL_NAMES.has(tool.name)) return false
+    if (!this.nativeNames.has(tool.name)) return false
+    return Buffer.byteLength(JSON.stringify(tool), 'utf8') > this.nativeDiscoveryBytes
   }
 }

@@ -9,6 +9,7 @@ import {
   type CodexToolPresentation,
   parseCodexToolDiscoveryBytes,
   parseCodexToolPresentation,
+  parseNativeToolDiscoveryBytes,
 } from './core/orchestration/toolPresentationPolicy'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import type { McpCatalogBootstrapConfig } from './mcp/grantProbe'
@@ -176,6 +177,9 @@ export interface Config {
   // Codex presentation is independent of the legacy bridge opt-in.
   codexToolPresentation: CodexToolPresentation
   codexToolDiscoveryBytes: number
+  // #1003 — Per-native-tool serialized-definition budget; tools above it are
+  // presented through discovery while small core tools stay in `tools[]`.
+  nativeToolDiscoveryBytes: number
   // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
   // OFF; set true per-host to enable; see
   // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
@@ -935,6 +939,9 @@ export const config: Config = {
   // Codex optimization is independent of the legacy dynamic-tools opt-in.
   codexToolPresentation: parseCodexToolPresentation(process.env.CODEX_TOOL_PRESENTATION),
   codexToolDiscoveryBytes: parseCodexToolDiscoveryBytes(process.env.CODEX_TOOL_DISCOVERY_BYTES),
+  nativeToolDiscoveryBytes: parseNativeToolDiscoveryBytes(
+    process.env.CLERUM_NATIVE_TOOL_DISCOVERY_BYTES
+  ),
   // Legacy dynamic tools remain opt-in for other providers.
   dynamicToolsEnabled: getEnvBool('CLERUM_DYNAMIC_TOOLS_ENABLED', false),
   // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which

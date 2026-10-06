@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { BRIDGE_TOOL_NAMES } from '../../capabilities/toolCatalogTools'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
 import {
   buildConnectRequiredApproval,
@@ -49,14 +50,6 @@ function buildGuardrailSuspension(
   return { type: 'suspend', approval }
 }
 
-/** The 3 dynamic-tool-loading bridge tools. They are native and must never be
- * the TARGET of `clerum__tool_call` (LOCKED #11 — no recursion). */
-const BRIDGE_TOOL_NAMES = new Set([
-  'clerum__tool_search',
-  'clerum__tool_describe',
-  'clerum__tool_call',
-])
-
 function bridgeError(call: ToolCall, message: string): ToolResult {
   // Preserve the original `call.id`/name so the provider pairs the result with
   // the model's `clerum__tool_call` tool_use block (LOCKED #9).
@@ -77,6 +70,10 @@ function bridgeError(call: ToolCall, message: string): ToolResult {
  *     then rewrite to a synthetic `{ id: call.id, name, arguments }` so the
  *     normal gate runs against the REAL tool (Critical #12 validates inner args
  *     against the real schema; LOCKED #10 keys approval on the real name).
+ *     Native targets are valid destinations (#1003 amendment of LOCKED #11):
+ *     deferred native tools exist only in the native registry, so membership in
+ *     `nativeNames` is their scope gate; recursion into a bridge tool stays
+ *     forbidden.
  *
  *  2. Direct call to a deferred MCP tool (Critical #9, auto-recover) — a
  *     non-bridge call naming an MCP tool that is currently un-advertised. It is
@@ -123,16 +120,31 @@ function resolveBridgeCall(
       return 'handled'
     }
 
-    // Reject recursion / native targets (LOCKED #11): the bridge targets
-    // DEFERRABLE MCP tools only.
-    if (BRIDGE_TOOL_NAMES.has(name) || bridge.nativeNames.has(name)) {
+    // Reject recursion (LOCKED #11): a bridge tool must never target another
+    // bridge tool, whatever its size or presentation.
+    if (BRIDGE_TOOL_NAMES.has(name)) {
       toolResults.push(
         bridgeError(
           call,
-          `clerum__tool_call cannot target "${name}": native and bridge tools are called directly, not through the bridge.`
+          `clerum__tool_call cannot target "${name}": bridge tools cannot invoke one another.`
         )
       )
       return 'handled'
+    }
+
+    // #1003 — native target. Deferred native tools are absent from the MCP
+    // catalog, so their scope gate is existence in the native registry
+    // (`nativeNames`). Rewrite to the real name; the normal gate below then
+    // validates and approves the REAL native tool, exactly as a direct call
+    // would. Whether the native is currently advertised is irrelevant here —
+    // the bridge is just a slower envelope for an advertised tool, never a
+    // permission bypass.
+    if (bridge.nativeNames.has(name)) {
+      return {
+        id: call.id,
+        name,
+        arguments: (innerArgs as Record<string, unknown>) ?? {},
+      }
     }
 
     // Scope gate (LOCKED #7, Critical #7): the target must exist in the session's
