@@ -144,7 +144,9 @@ const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
 // stored route untouched — the caller must NOT invoke the setter, because
 // passing `undefined` to it would erase A's previously-saved route.
 type OutgoingRouteDecision =
-  { action: 'set'; routePath: string } | { action: 'clear' } | { action: 'preserve' }
+  | { action: 'set'; routePath: string }
+  | { action: 'clear' }
+  | { action: 'preserve' }
 
 async function readOutgoingRouteDecision(
   outgoingAppRef: string | undefined
@@ -535,6 +537,22 @@ export function App() {
       }
       const agentRef = tab.chat?.agentRef ?? null
       const chatId = tab.chat?.chatId ?? null
+      if (agentRef && chatId) {
+        const identity = JSON.stringify([agentRef, chatId])
+        if (
+          staleTeamContextChatIdentitiesRef.current.has(identity) &&
+          !vm.isConversationAccessVerifiedForCurrentTeam(agentRef, chatId)
+        ) {
+          // A team switch invalidates the previous team's local transcript. Keep
+          // the selected tab in an unavailable state until exact access succeeds;
+          // replaying it here would read user-scoped cached messages.
+          setPendingWorkspaceTabId(null)
+          setUnavailableWorkspaceTabId(tab.id)
+          setUnavailableWorkspaceTabReason('team-context')
+          setRequestedDrawerChatTabId(null)
+          return
+        }
+      }
       if (inDrawer) {
         // Swap the shared <ChatPage>'s conversation in place, keeping the live
         // app mounted and the `apps` route active. A blank tab with no agent
@@ -566,7 +584,13 @@ export function App() {
         vm.handleNavSelect(DESKTOP_ROUTES.chat)
       }
     },
-    [availableSandboxUiApps, leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
+    [
+      availableSandboxUiApps,
+      leaveSandboxForChat,
+      vm.handleNavSelect,
+      vm.handleSelectChatAgent,
+      vm.isConversationAccessVerifiedForCurrentTeam,
+    ]
   )
 
   // Focus the requested tab immediately. When access is held, keep its surface
@@ -2667,6 +2691,50 @@ export function App() {
           }
         }
       }
+    }
+
+    const activeTeamStaleTab = activeWorkspaceTab(workspaceTabsRef.current)
+    const activeTeamStaleChat =
+      activeTeamStaleTab?.kind === 'chat' &&
+      activeTeamStaleTab.chat?.agentRef &&
+      activeTeamStaleTab.chat.chatId
+        ? {
+            tab: activeTeamStaleTab,
+            agentRef: activeTeamStaleTab.chat.agentRef,
+            chatId: activeTeamStaleTab.chat.chatId,
+          }
+        : null
+    const activeTeamStaleIdentity = activeTeamStaleChat
+      ? JSON.stringify([activeTeamStaleChat.agentRef, activeTeamStaleChat.chatId])
+      : null
+    const activeTeamRetryPending = Boolean(
+      activeTeamStaleChat &&
+      pendingSelectionIsCurrent &&
+      pendingSelection?.tabId === activeTeamStaleChat.tab.id
+    )
+    const displayedConversationAuthorized = Boolean(
+      vm.selectedAgent &&
+      vm.activeChatId &&
+      vm.isConversationAccessVerifiedForCurrentTeam(vm.selectedAgent, vm.activeChatId)
+    )
+    if (
+      activeTeamStaleChat &&
+      activeTeamStaleIdentity &&
+      staleTeamContextChatIdentitiesRef.current.has(activeTeamStaleIdentity) &&
+      !vm.isConversationAccessVerifiedForCurrentTeam(
+        activeTeamStaleChat.agentRef,
+        activeTeamStaleChat.chatId
+      ) &&
+      !displayedConversationAuthorized &&
+      !activeTeamRetryPending
+    ) {
+      // resetChat is teardown, not a signal to reconcile the still-selected
+      // conversation from the controller's now-empty identity. Keep its tab
+      // selected and wait for an explicit exact-access retry.
+      setPendingWorkspaceTabId(null)
+      setUnavailableWorkspaceTabId(activeTeamStaleChat.tab.id)
+      setUnavailableWorkspaceTabReason('team-context')
+      return
     }
 
     if ((vm.navItem !== DESKTOP_ROUTES.chat && !chatDrawerVisible) || !vm.selectedAgent) return

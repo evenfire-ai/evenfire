@@ -825,6 +825,104 @@ describe('App workspace chat tabs with held Host access', () => {
     })
   })
 
+  it('does not restore local chat history after a team reset before exact access succeeds', async () => {
+    const chats: Array<[string, string]> = [['agent-x', 'chat-1']]
+    const { clerum, handle, live } = await mountProductionApp({ chats })
+    act(() => live.handleSelectChatAgent('agent-x', { chatId: 'chat-1' }))
+    await waitFor(() => expect(live.activeChatId).toBe('chat-1'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    await waitFor(() =>
+      expect(
+        live.workspaceTabs.tabs.some(tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-1')
+      ).toBe(true)
+    )
+    const selectedTabId = live.workspaceTabs.activeTabId
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-1'
+    )
+
+    const exactAccess = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    const localReadsInTeam2: Array<{
+      chatId: string
+      teamContextRevision: number
+      activeChatId: string | null
+    }> = []
+    const originalLocalLoad = clerum.chat.loadMessages.getMockImplementation()!
+    clerum.chat.loadMessages.mockImplementation(async (...args) => {
+      if (live.getCurrentTeamId() === 'team-2') {
+        localReadsInTeam2.push({
+          chatId: args[1],
+          teamContextRevision: live.teamContextRevision,
+          activeChatId: live.activeChatId ?? null,
+        })
+      }
+      return originalLocalLoad(...args)
+    })
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (args[2] === 'chat-1') return exactAccess.promise
+      return originalLoad(...args)
+    })
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+
+    expect(localReadsInTeam2).toEqual([])
+    expect(live.activeChatId).toBeNull()
+    expect(live.workspaceTabs.activeTabId).toBe(selectedTabId)
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    const tabIndex = live.workspaceTabs.tabs.findIndex(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-1'
+    )
+    fireEvent.click(document.querySelectorAll('.chat-view-tab__select')[tabIndex]!)
+    await waitFor(() =>
+      expect(
+        clerum.rpc.loadSessionMessages.mock.calls.some(
+          ([agentRef, query, chatId]) =>
+            agentRef === 'agent-x' && query === 'agent-x' && chatId === 'chat-1'
+        )
+      ).toBe(true)
+    )
+    await waitFor(() => expect(screen.getByText('Checking access to conversation…')).toBeTruthy())
+    expect(localReadsInTeam2).toEqual([])
+
+    await act(async () => exactAccess.resolve({ agent: 'agent-x', chatId: 'chat-1', turns: [] }))
+    await waitFor(() => expect(localReadsInTeam2.some(read => read.chatId === 'chat-1')).toBe(true))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-1'
+    )
+  })
+
+  it('keeps latest-chat selection available after a team reset from a blank chat', async () => {
+    const chats: Array<[string, string]> = [['agent-x', 'chat-1']]
+    const { handle, live } = await mountProductionApp({ chats })
+    act(() => live.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    await waitFor(() => {
+      expect(live.activeChatId).toBeNull()
+      const activeTab = activeWorkspaceTab(live.workspaceTabs)
+      expect(activeTab?.kind).toBe('chat')
+      if (activeTab?.kind === 'chat') expect(activeTab.chat?.chatId ?? null).toBeNull()
+    })
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
+    })
+
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+    await waitFor(() => expect(live.activeChatId).toBe('chat-1'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    const activeTab = activeWorkspaceTab(live.workspaceTabs)
+    expect(activeTab?.kind).toBe('chat')
+    if (activeTab?.kind === 'chat') expect(activeTab.chat?.chatId).toBe('chat-1')
+  })
+
   it('drops explicit chat selection authority when the team context changes', async () => {
     const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
       id: 'chat-a',
@@ -880,12 +978,20 @@ describe('App workspace chat tabs with held Host access', () => {
     const { clerum, handle, live } = await mountProductionApp({ chats })
     await addProductionChatTabs(live, chats)
     await clickProductionChatTab(live, 'chat-1')
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    const localReadsInTeam2: string[] = []
+    const originalLocalLoad = clerum.chat.loadMessages.getMockImplementation()!
+    clerum.chat.loadMessages.mockImplementation(async (...args) => {
+      if (live.getCurrentTeamId() === 'team-2') localReadsInTeam2.push(args[1])
+      return originalLocalLoad(...args)
+    })
 
     handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
     await act(async () => {
       await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
     })
     await waitFor(() => expect(live.teamContextRevision).toBeGreaterThan(0))
+    expect(localReadsInTeam2).not.toContain('chat-1')
     const denied = await ipcGenericForbidden('rpc:loadSessionMessages')
     const exactChatCheck =
       makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
@@ -912,6 +1018,7 @@ describe('App workspace chat tabs with held Host access', () => {
     )
     expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
     expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+    expect(localReadsInTeam2).not.toContain('chat-1')
 
     fireEvent.click(document.querySelectorAll('.chat-view-tab__select')[tabIndex]!)
     await waitFor(() => expect(exactChatCallCount()).toBeGreaterThanOrEqual(2))
@@ -973,6 +1080,64 @@ describe('App workspace chat tabs with held Host access', () => {
         )
       ).toBeTruthy()
     )
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
+  it('does not auto-select the previous agent while another agent tab awaits access', async () => {
+    const chats: Array<[string, string]> = [
+      ['agent-x', 'chat-1'],
+      ['agent-y', 'chat-2'],
+    ]
+    const { clerum, handle, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-1')
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+
+    const localReadsInTeam3: Array<{ agentRef: string; chatId: string }> = []
+    const originalLocalLoad = clerum.chat.loadMessages.getMockImplementation()!
+    clerum.chat.loadMessages.mockImplementation(async (...args) => {
+      if (live.getCurrentTeamId() === 'team-3') {
+        localReadsInTeam3.push({ agentRef: args[0], chatId: args[1] })
+      }
+      return originalLocalLoad(...args)
+    })
+
+    const authorization = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (args[2] === 'chat-2') return authorization.promise
+      return originalLoad(...args)
+    })
+    await clickProductionChatTab(live, 'chat-2')
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-y', 'agent-y', 'chat-2')
+    )
+    expect(live.selectedAgent).toBe('agent-x')
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-3' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-3', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBe(2))
+    expect(localReadsInTeam3).toEqual([])
+    expect(live.workspaceTabs.activeTabId).toBe('tab-chat-2')
+
+    await act(async () => authorization.resolve({ agent: 'agent-y', chatId: 'chat-2', turns: [] }))
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'The team changed while this conversation was opening. Select this tab to retry.'
+        )
+      ).toBeTruthy()
+    )
+    expect(localReadsInTeam3).toEqual([])
     expect(screen.queryByTestId('chat-page-surface')).toBeNull()
   })
 
@@ -1079,6 +1244,7 @@ describe('App workspace chat tabs with held Host access', () => {
     const { clerum, handle, live } = await mountProductionApp({ chats })
     await addProductionChatTabs(live, chats)
     await clickProductionChatTab(live, 'chat-1')
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
 
     handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
     const authorization = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
@@ -1107,9 +1273,9 @@ describe('App workspace chat tabs with held Host access', () => {
     await waitFor(() =>
       expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-2')
     )
-    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).not.toBe(
-      'chat-2'
-    )
+    expect(
+      screen.queryByTestId('chat-page-surface')?.getAttribute('data-active-chat-id') ?? null
+    ).not.toBe('chat-2')
 
     await act(async () => {
       authorization.resolve({ agent: 'agent-x', chatId: 'chat-2', turns: [] })
@@ -3064,7 +3230,8 @@ describe('App app-tab title — live document.title (mini-spec 06 §2)', () => {
 describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3)', () => {
   let currentController: AppController
   let openGfsResourceCb:
-    ((resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void) | null
+    | ((resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void)
+    | null
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -3144,7 +3311,8 @@ describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3
 describe('App plugin previewable handoff — routes through resolveGfsPreview (R1-H3)', () => {
   let currentController: AppController
   let openGfsResourceCb:
-    ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void) | null
+    | ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void)
+    | null
 
   beforeEach(() => {
     vi.clearAllMocks()

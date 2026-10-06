@@ -478,7 +478,6 @@ export function useAppController() {
     hostAuthorityRevision,
     chatAuthorityTeamId: principalTeamId,
   })
-
   // §4.7.4: the ONE central approval-decision function, bound to the chat
   // controller's FSM store. All four surfaces (desktop notification, in-app bell,
   // in-chat gate, in-flight placeholder) funnel through it so the badge converges
@@ -780,7 +779,24 @@ export function useAppController() {
         }
         const previousTeamId = currentTeamIdRef.current
         const nextTeamId = sessionState.me.teamId || teamId
-        if (nextTeamId !== previousTeamId) {
+        const teamContextChanged = nextTeamId !== previousTeamId
+        const activeChatTab =
+          nav.activeTab?.kind === 'chat' &&
+          nav.activeTab.chat?.agentRef &&
+          nav.activeTab.chat.chatId
+            ? nav.activeTab
+            : null
+        const agentsToSuppress = new Set<string>()
+        if (teamContextChanged && activeChatTab?.kind === 'chat' && activeChatTab.chat?.agentRef) {
+          agentsToSuppress.add(activeChatTab.chat.agentRef)
+          if (nav.selectedAgent) agentsToSuppress.add(nav.selectedAgent)
+        } else if (teamContextChanged && chat.activeChatId && nav.selectedAgent) {
+          // The chat drawer keeps its app workspace tab active while its chat is
+          // displayed, so use the controller identity when no concrete workspace
+          // chat tab is active.
+          agentsToSuppress.add(nav.selectedAgent)
+        }
+        if (teamContextChanged) {
           const nextRevision = teamContextRevisionRef.current + 1
           teamContextRevisionRef.current = nextRevision
           conversationAccessProofByChatRef.current.clear()
@@ -796,6 +812,13 @@ export function useAppController() {
         // team's tasks stay alive server-side and converge on return via reconcile.
         // Main-process stream teardown is Fase 4.
         chat.resetChat()
+        // resetChat clears the active conversation before the new team context
+        // can render. Preserve a concrete chat selection's no-auto-select intent
+        // in the same transition so the controller cannot load that team's latest
+        // conversation until the user retries with exact access verification.
+        for (const agentRef of agentsToSuppress) {
+          chat.setPendingChatSelection(agentRef, null, { suppressAutoSelect: true })
+        }
         // The connectors panel key is identity-unscoped, and its payload carries
         // per-connector OAuth authorization state — drop it here (before the
         // refresh below repopulates) so the previous team's grants cannot show,
@@ -828,9 +851,13 @@ export function useAppController() {
       auth.setEmail,
       auth.setIsAuthenticated,
       auth.setMe,
+      chat.activeChatId,
       chat.resetChat,
+      chat.setPendingChatSelection,
       connectorsData.reset,
       fullSetStatus,
+      nav.activeTab,
+      nav.selectedAgent,
       refreshAuthenticatedData,
       setTeamContextRevision,
       setPostPaintDataReady,
@@ -1284,18 +1311,14 @@ export function useAppController() {
           return
         }
 
-        // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
-        // leaves no pending selection, so it only survives while the route (and
-        // hence the agent-selection effect's deps) does not change. Opening a
-        // notification from the Apps embed / a workspace / settings flips
-        // `navItem` below, re-running that effect into its reset branch — the
-        // conversation would blank to the "new chat" empty state and then land on
-        // the most recent chat instead of the notification's. From another route
-        // we fall through to the pending-selection path, which replays the
-        // requested chat across the re-run.
+        // On the chat route, switch directly once any required cross-team exact
+        // access proof above has succeeded. A team reset may already have consumed
+        // its explicit empty-selection intent, and setting a new pending selection
+        // will not rerun the agent effect when its route and agent stay unchanged.
+        // From another route, keep the pending path so the selection survives the
+        // route change and is replayed by the effect.
         if (
           targetChatId &&
-          !requiresTeamSwitch &&
           nav.selectedAgent === targetAgent &&
           nav.navItem === DESKTOP_ROUTES.chat
         ) {
