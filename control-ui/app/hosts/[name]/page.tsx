@@ -36,6 +36,7 @@ import {
   updateContext,
 } from '../../../lib/api'
 import type { ContextResource, ContextSpec, HostSecretResource } from '../../../lib/api'
+import type { ApiRequestError } from '../../../lib/api.types'
 import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexSubscriptionConnectionView,
@@ -78,6 +79,7 @@ import {
   validateLlmPolicy,
 } from '../../../lib/llm'
 import { credentialSelectValue, parseCredentialSelect } from '../../../lib/llmCredentialSelect'
+import { scheduleReadRequestRetry } from '../../../lib/readRequestCache'
 import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
@@ -269,6 +271,9 @@ export default function HostDetailsPage() {
   const [subscriptionInventoryError, setSubscriptionInventoryError] = useState('')
   const [subscriptionInventoryLoading, setSubscriptionInventoryLoading] = useState(false)
   const [inventoryRetryNonce, setInventoryRetryNonce] = useState(0)
+  const [subscriptionInventoryThrottle, setSubscriptionInventoryThrottle] =
+    useState<ApiRequestError | null>(null)
+  const inventoryAutoRetryUsedRef = useRef(false)
   const catalogForEditor = useMemo(() => {
     if (providerDraft === 'codex-subscription') {
       const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
@@ -426,6 +431,7 @@ export default function HostDetailsPage() {
   useEffect(() => {
     if (!editingModel || !subscriptionCapabilities.capabilities) {
       setSubscriptionInventoryError('')
+      setSubscriptionInventoryThrottle(null)
       setSubscriptionInventoryLoading(false)
       return
     }
@@ -447,11 +453,15 @@ export default function HostDetailsPage() {
           setCodexConnections(codexResult.value)
           setCodexInventoryLoaded(codexEnabled)
         }
+        if (codexResult.status === 'fulfilled' && grokResult?.status !== 'rejected') {
+          inventoryAutoRetryUsedRef.current = false
+        }
         if (grokResult?.status === 'fulfilled') {
           setGrokConnections(grokResult.value)
           setGrokInventoryLoaded(true)
         }
         setSubscriptionInventoryError('')
+        setSubscriptionInventoryThrottle(null)
         const failure = [codexResult, grokResult].find(
           result => result?.status === 'rejected' && !isDisabledCapabilityError(result.reason)
         )
@@ -460,6 +470,8 @@ export default function HostDetailsPage() {
       .catch(err => {
         if (controller.signal.aborted || isDisabledCapabilityError(err)) return
         setSubscriptionInventoryError(subscriptionInventoryMessage(err, 'subscription'))
+        const denied = err as ApiRequestError
+        setSubscriptionInventoryThrottle(denied?.status === 429 ? denied : null)
       })
       .finally(() => {
         if (!controller.signal.aborted) setSubscriptionInventoryLoading(false)
@@ -472,6 +484,19 @@ export default function HostDetailsPage() {
     inventoryRetryNonce,
     subscriptionCapabilities.capabilities,
   ])
+
+  // The family's shared recovery rereads a denied inventory once Retry-After
+  // passes. Re-run the load once at that time: it waits for the recovery and
+  // shows its cached result without a click or a second read. A denial on that
+  // run leaves the visible Retry; a success or a manual Retry restores the
+  // automatic attempt for the next denial.
+  useEffect(() => {
+    if (!subscriptionInventoryThrottle || inventoryAutoRetryUsedRef.current) return
+    return scheduleReadRequestRetry(subscriptionInventoryThrottle, () => {
+      inventoryAutoRetryUsedRef.current = true
+      setInventoryRetryNonce(value => value + 1)
+    })
+  }, [subscriptionInventoryThrottle])
 
   useEffect(() => {
     if (!editingModel) return
@@ -1519,7 +1544,10 @@ export default function HostDetailsPage() {
                     <button
                       type="button"
                       className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => setInventoryRetryNonce(value => value + 1)}
+                      onClick={() => {
+                        inventoryAutoRetryUsedRef.current = false
+                        setInventoryRetryNonce(value => value + 1)
+                      }}
                     >
                       Retry
                     </button>

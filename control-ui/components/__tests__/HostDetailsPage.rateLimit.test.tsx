@@ -278,7 +278,7 @@ describe('HostDetailsPage optional subscription throttling', () => {
     expect(api.apiSend).not.toHaveBeenCalled()
   })
 
-  it('answers the visible Retry from the background recovery without spending another read in its window', async () => {
+  it('clears the error once the background recovery rereads the inventory, without a click or another read', async () => {
     vi.useFakeTimers()
     // The server's shared subscription-read quota: two reads per twelve-second window.
     const windowMs = 12_000
@@ -316,20 +316,17 @@ describe('HostDetailsPage optional subscription throttling', () => {
     expect(alert).toHaveTextContent('Try again in 12 seconds.')
     expect(reads.map(read => read.status)).toEqual([200, 200, 429])
 
-    // The shared recovery reads the denied inventory once the deadline passes.
+    // The shared recovery reads the denied inventory once the deadline passes,
+    // and the editor shows that result without a click or a read of its own.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(windowMs)
     })
-    const afterDeadline = () => reads.filter(read => read.window >= 1)
-    expect(afterDeadline()).toHaveLength(1)
-    expect(afterDeadline()[0]?.status).toBe(200)
-
-    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
     await flush()
-    // Witness: the visible error cleared through the Retry.
+    const afterDeadline = reads.filter(read => read.window >= 1)
+    expect(afterDeadline).toHaveLength(1)
+    expect(afterDeadline[0]?.status).toBe(200)
     expect(within(dialog).queryByRole('alert')).toBeNull()
-    expect(afterDeadline().map(read => read.status)).not.toContain(429)
-    expect(afterDeadline().length).toBeLessThanOrEqual(2)
+    expect(screen.queryByText('Loading subscription options…')).toBeNull()
     expect(api.apiSend).not.toHaveBeenCalled()
   })
 

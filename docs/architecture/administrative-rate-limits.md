@@ -153,16 +153,27 @@ subscription inventory; editor opening loads it when needed.
 One shared recovery runs per read family after a denial deadline. It rereads,
 once each and one at a time, every URL the server denied while it was
 scheduled (for example the Codex and Grok inventories loaded together), and
-stops at the first reread that is denied again. A denied recovery schedules no
+stops at the first reread that is denied again. A consumer waiting on it
+receives its own URL's result when that URL was reread before the denial, and
+the denial otherwise. A member read successfully outside the recovery (its
+timer can fire late in a background tab) drops out of it; a success for a URL
+that is not a member leaves it scheduled. A denied recovery schedules no
 further attempt, but it releases its reservation, so the next denial in that
-read family schedules its own. A consumer refused by the cooldown, or waiting
-on the recovery after its deadline, joins it as an interest without sending a
-request or changing its deadline, members or budget, so the recovery is
-cancelled only when every
-registered consumer has left; a consumer without an abort signal is not
-registered. Capability consumers follow the confirmed principal: when it
-changes they drop the previous session's result and error and load for the
-new session, and with no confirmed principal they wait for one. Forced refresh respects the same pause. Authentication changes, 401 and
+read family schedules its own. A later denial that extends the family deadline
+also moves the retry time of the denials already shown, so automatic retries
+wait for the extended deadline instead of firing into the cooldown.
+
+A consumer refused by the cooldown, or waiting on the recovery after its
+deadline, joins it as an interest without sending a request or changing its
+deadline, members or budget, so the recovery is cancelled only when every
+registered consumer has left. A consumer without an abort signal is not
+registered; when the recovery it waits on is cancelled that way, it reads for
+itself. Capability consumers and the Agent model editor retry automatically
+once at the deadline, which waits for the recovery and shows its cached result.
+Capability consumers follow the confirmed principal: when it changes they drop
+the previous session's result, error and automatic attempt and load for the
+new session, and with no confirmed principal (before the first /me, or after a
+session ended) they wait for one. Forced refresh respects the same pause. Authentication changes, 401 and
 cross-tab invalidation fence old awaits and clear identity-bound state.
 Aborting one subscriber does not cancel another subscriber’s shared request.
 SSR does not retain cached/deduplicated results across requests.

@@ -458,7 +458,23 @@ async function apiRead(
       const recovery = getReadRequestRecovery(familyKey)
       if (recovery) {
         joinReadRequestRecovery(familyKey, options.signal)
-        await waitForRead(recovery, options.signal)
+        try {
+          await waitForRead(recovery, options.signal)
+        } catch (error) {
+          assertCurrent()
+          // The recovery rejects with its first failing member. Members reread
+          // before that failure are cached; their waiters get their own result,
+          // not a sibling's denial.
+          const own = metadataKey ? getReadRequestCacheEntry(metadataKey) : undefined
+          if (own !== undefined) return own
+          // Every registered interest left and the recovery was cancelled. A
+          // waiter without a signal cannot be registered, yet it still wants
+          // the result: read for itself now that the deadline has passed.
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            return apiRead(path, query, options)
+          }
+          throw error
+        }
         assertCurrent()
         return apiRead(path, query, options)
       }
@@ -550,10 +566,13 @@ async function apiRead(
           error.retryAtMs = Date.now() + seconds * 1000
         }
         if (familyKey && res.status === 429) {
-          const delayMs = setReadRequestCooldown(familyKey, error, seconds)
+          // One clock reading, so the recovery deadline equals the cooldown's
+          // retry time and a consumer released by one is never refused by the other.
+          const deniedAtMs = Date.now()
+          const delayMs = setReadRequestCooldown(familyKey, error, seconds, deniedAtMs)
           reserveReadRequestRecovery(
             familyKey,
-            Date.now() + delayMs,
+            deniedAtMs + delayMs,
             metadataKey ?? url,
             signal =>
               sameReadContext(requestEpoch, requestPrincipalKey)
@@ -567,7 +586,9 @@ async function apiRead(
       const parsed = await parseJsonResponse(res)
       assertNetworkCurrent()
       if (metadataKey) setReadRequestCacheEntry(metadataKey, parsed, METADATA_READ_TTL_MS)
-      if (familyKey && !getReadRequestCooldown(familyKey)) completeReadRequestRecovery(familyKey)
+      if (familyKey && metadataKey && !getReadRequestCooldown(familyKey)) {
+        completeReadRequestRecovery(familyKey, metadataKey)
+      }
       return parsed
     } catch (error) {
       assertNetworkCurrent()

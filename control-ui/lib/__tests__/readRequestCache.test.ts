@@ -13,8 +13,13 @@ import {
   __resetReadRequestCacheForTests,
   getReadRequestCacheEntry,
   getReadRequestPrincipal,
+  getReadRequestSessionIdentity,
   invalidateReadRequestCache,
+  invalidateReadRequestCacheEntry,
+  reserveReadRequestRecovery,
+  scheduleReadRequestRetry,
   setReadRequestCacheEntry,
+  setReadRequestCooldown,
 } from '../readRequestCache'
 
 const metadataOptions = { metadataRead: 'subscription-capabilities' } as const
@@ -430,6 +435,198 @@ describe('bounded metadata read reuse', () => {
     expect(String(fetchMock.mock.calls[0][0])).toMatch(/codex-subscription\/connections$/)
     await vi.advanceTimersByTimeAsync(24_000)
     expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('never sends the remaining members into the cooldown restored by a member denied again', async () => {
+    // Drives the recovery directly: through apiGet the second member would be
+    // refused locally by the restored cooldown and send nothing either way.
+    const familyKey = 'family-under-test'
+    const denial = Object.assign(new Error('denied again'), { status: 429 })
+    const firstMember = vi.fn(() => Promise.reject(denial))
+    const secondMember = vi.fn(() => Promise.resolve(undefined))
+    const interest = new AbortController()
+    const deadlineMs = Date.now() + 1_000
+    expect(
+      reserveReadRequestRecovery(familyKey, deadlineMs, 'first', firstMember, [interest.signal])
+    ).toBe(true)
+    expect(
+      reserveReadRequestRecovery(familyKey, deadlineMs, 'second', secondMember, [interest.signal])
+    ).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    // Witness: the recovery ran and reread the first member.
+    expect(firstMember).toHaveBeenCalledOnce()
+    expect(secondMember).not.toHaveBeenCalled()
+    // The denied attempt released its reservation for the next denial.
+    expect(
+      reserveReadRequestRecovery(familyKey, Date.now() + 1_000, 'first', firstMember, [
+        interest.signal,
+      ])
+    ).toBe(true)
+  })
+
+  it('gives a waiter its own recovered result when a later member is denied again', async () => {
+    const codexUrl = '/api/v1/admin/codex-subscription/connections'
+    const grokUrl = '/api/v1/admin/grok-subscription/connections'
+    const connectionOptions = { metadataRead: 'subscription-connections' } as const
+    const pending: Array<(response: Response) => void> = []
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>(resolve => {
+          pending.push(resolve)
+        })
+    )
+    const codexConsumer = new AbortController()
+    const grokConsumer = new AbortController()
+    const codex = apiGet(codexUrl, {}, { ...connectionOptions, signal: codexConsumer.signal })
+    const grok = apiGet(grokUrl, {}, { ...connectionOptions, signal: grokConsumer.signal })
+    await vi.advanceTimersByTimeAsync(0)
+    pending.splice(0).forEach(resolve => resolve(throttled(12)))
+    await expect(codex).rejects.toMatchObject({ status: 429 })
+    await expect(grok).rejects.toMatchObject({ status: 429 })
+
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(pending).toHaveLength(1)
+    const codexWaiter = apiGet(codexUrl, {}, { ...connectionOptions, signal: codexConsumer.signal })
+    const grokWaiter = apiGet(grokUrl, {}, { ...connectionOptions, signal: grokConsumer.signal })
+    const codexOutcome = codexWaiter.then(
+      value => ({ value }),
+      reason => ({ reason })
+    )
+    const grokOutcome = grokWaiter.then(
+      value => ({ value }),
+      reason => ({ reason })
+    )
+    pending.shift()?.(success({ from: 'codex' }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(pending).toHaveLength(1)
+    pending.shift()?.(throttled(12))
+
+    // Codex was reread before Grok's denial and receives its own result; Grok's
+    // waiter receives the denial that ended the recovery.
+    expect(await codexOutcome).toEqual({ value: { from: 'codex' } })
+    expect(await grokOutcome).toMatchObject({ reason: { status: 429 } })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('reads for a waiter without a signal when every registered interest cancels the recovery', async () => {
+    const pending: Array<(response: Response) => void> = []
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>(resolve => {
+          pending.push(resolve)
+        })
+    )
+    const mounted = new AbortController()
+    const first = apiGet(
+      '/api/v1/admin/metadata',
+      {},
+      { ...metadataOptions, signal: mounted.signal }
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    pending.shift()?.(throttled(2))
+    await expect(first).rejects.toMatchObject({ status: 429 })
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(pending).toHaveLength(1)
+    // A consumer such as the feature probes has no signal and cannot be
+    // registered as an interest.
+    const unsignalled = apiGet('/api/v1/admin/metadata', {}, metadataOptions)
+    const outcome = unsignalled.then(
+      value => ({ value }),
+      reason => ({ reason })
+    )
+    mounted.abort()
+    await vi.advanceTimersByTimeAsync(0)
+    // The cancelled recovery leaves it a read of its own.
+    expect(pending).toHaveLength(2)
+    pending[1](success({ value: 'own read' }))
+    expect(await outcome).toEqual({ value: { value: 'own read' } })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps a late recovery scheduled when a URL outside it succeeds', async () => {
+    const codexUrl = '/api/v1/admin/codex-subscription/connections'
+    const grokUrl = '/api/v1/admin/grok-subscription/connections'
+    const connectionOptions = { metadataRead: 'subscription-connections' } as const
+    const pending = new Map<string, (response: Response) => void>()
+    fetchMock.mockImplementation(
+      (input: RequestInfo | URL) =>
+        new Promise<Response>(resolve => {
+          pending.set(String(input).includes('grok') ? 'grok' : 'codex', resolve)
+        })
+    )
+    const codex = apiGet(codexUrl, {}, connectionOptions)
+    const grok = apiGet(grokUrl, {}, connectionOptions)
+    await vi.advanceTimersByTimeAsync(0)
+    pending.get('codex')?.(throttled(12))
+    await expect(codex).rejects.toMatchObject({ status: 429 })
+
+    // A background tab runs the recovery timer late: the clock passes the
+    // deadline before the timer fires, and the slow Grok read succeeds first.
+    vi.setSystemTime(Date.now() + 13_000)
+    fetchMock.mockImplementation(() => Promise.resolve(success({ from: 'codex' })))
+    pending.get('grok')?.(success({ from: 'grok' }))
+    await expect(grok).resolves.toEqual({ from: 'grok' })
+    // Fake timers keep their own clock, so the delayed timer fires only now.
+    await vi.advanceTimersByTimeAsync(12_000)
+
+    // The Codex member is still reread.
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(String(fetchMock.mock.calls[2][0])).toMatch(/codex-subscription\/connections$/)
+    await expect(apiGet(codexUrl, {}, connectionOptions)).resolves.toEqual({ from: 'codex' })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('moves the retry time of every earlier denial when a later one extends the cooldown', () => {
+    const familyKey = 'family-under-test'
+    const startedAt = Date.now()
+    const earlier = Object.assign(new Error('earlier'), { status: 429 })
+    const later = Object.assign(new Error('later'), { status: 429 })
+    expect(setReadRequestCooldown(familyKey, earlier, 12, startedAt)).toBe(12_000)
+    expect(setReadRequestCooldown(familyKey, later, 12, startedAt + 500)).toBe(12_000)
+    expect(later.retryAtMs).toBe(startedAt + 12_500)
+    expect(earlier.retryAtMs).toBe(startedAt + 12_500)
+
+    // A denial after the cooldown expired starts a new window and leaves the
+    // errors of the expired one alone.
+    const next = Object.assign(new Error('next'), { status: 429 })
+    setReadRequestCooldown(familyKey, next, 12, startedAt + 20_000)
+    expect(next.retryAtMs).toBe(startedAt + 32_000)
+    expect(earlier.retryAtMs).toBe(startedAt + 12_500)
+  })
+
+  it('schedules a retry at the extended time instead of the time first issued', async () => {
+    const familyKey = 'family-under-test'
+    const startedAt = Date.now()
+    const earlier = Object.assign(new Error('earlier'), { status: 429 })
+    setReadRequestCooldown(familyKey, earlier, 12, startedAt)
+    const retry = vi.fn()
+    scheduleReadRequestRetry(earlier, retry)
+    await vi.advanceTimersByTimeAsync(500)
+    setReadRequestCooldown(
+      familyKey,
+      Object.assign(new Error('later'), { status: 429 }),
+      12,
+      startedAt + 500
+    )
+    await vi.advanceTimersByTimeAsync(11_500)
+    expect(retry).not.toHaveBeenCalled()
+    // Witness: the retry runs once the extended time is reached.
+    await vi.advanceTimersByTimeAsync(500)
+    expect(retry).toHaveBeenCalledOnce()
+  })
+
+  it('changes the session identity only when the confirmed principal changes', () => {
+    const start = getReadRequestSessionIdentity()
+    setReadRequestCacheEntry('entry', { value: 1 }, 30_000)
+    invalidateReadRequestCache()
+    invalidateReadRequestCacheEntry('entry')
+    setControlUIReadPrincipal('admin-one', 'admin')
+    expect(getReadRequestSessionIdentity()).toBe(start)
+    // Witness: a different principal does change it.
+    setControlUIReadPrincipal('admin-two', 'admin')
+    expect(getReadRequestSessionIdentity()).toBe(start + 1)
   })
 
   it('makes only one recovery when throttle timing is unavailable', async () => {

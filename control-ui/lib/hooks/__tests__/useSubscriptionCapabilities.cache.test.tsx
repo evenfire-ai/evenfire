@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
-import { clearAdminAuthToken, setControlUIReadPrincipal } from '../../api'
+import { apiGet, clearAdminAuthToken, setControlUIReadPrincipal } from '../../api'
 import { __resetReadRequestCacheForTests } from '../../readRequestCache'
 import { SUBSCRIPTION_CAPABILITIES_API_PATH } from '../../subscriptionCapabilities'
 import { useSubscriptionCapabilities } from '../useSubscriptionCapabilities'
@@ -59,6 +59,121 @@ describe('useSubscriptionCapabilities with the real read cache', () => {
     await waitFor(() => expect(failed.result.current.capabilities).toEqual(capabilitiesBody))
     expect(failed.result.current.error).toBeNull()
     expect(capabilityReads(fetchMock)).toBe(2)
+  })
+
+  describe('automatic throttle recovery', () => {
+    function throttledResponse(retryAfterSeconds: number): Response {
+      return new Response(JSON.stringify({ error: 'Too Many Requests', message: 'limited' }), {
+        status: 429,
+        statusText: '',
+        headers: { 'content-type': 'application/json', 'retry-after': String(retryAfterSeconds) },
+      })
+    }
+
+    function okResponse(body: unknown): Response {
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const flush = (ms = 0) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms)
+      })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('waits for a sibling denial that extends the family deadline and then shows the recovered result', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-01-01T00:00:48.000Z'))
+      const pending = new Map<string, (response: Response) => void>()
+      fetchMock.mockImplementation(
+        (input: RequestInfo | URL) =>
+          new Promise<Response>(resolve => {
+            pending.set(
+              String(input).includes('capabilities') ? 'capabilities' : 'inventory',
+              resolve
+            )
+          })
+      )
+      const inventory = new AbortController()
+      const sibling = apiGet(
+        '/api/v1/admin/codex-subscription/connections',
+        {},
+        { metadataRead: 'subscription-connections', signal: inventory.signal }
+      ).catch(reason => reason)
+      const consumer = renderHook(() => useSubscriptionCapabilities())
+      await flush()
+      pending.get('capabilities')?.(throttledResponse(12))
+      await flush()
+      expect(consumer.result.current.error?.status).toBe(429)
+      // Half a second later the in-flight sibling is denied too, which moves
+      // the family deadline from :60.0 to :60.5.
+      await flush(500)
+      pending.get('inventory')?.(throttledResponse(12))
+      await flush()
+      expect(await sibling).toMatchObject({ status: 429 })
+
+      fetchMock.mockImplementation((input: RequestInfo | URL) =>
+        Promise.resolve(
+          String(input).includes('capabilities')
+            ? okResponse(capabilitiesBody)
+            : okResponse({ items: [] })
+        )
+      )
+      await flush(20_000)
+      // The recovery read capabilities once and the consumer shows that result
+      // without a manual Retry.
+      expect(capabilityReads(fetchMock)).toBe(2)
+      expect(consumer.result.current.capabilities).toEqual(capabilitiesBody)
+      expect(consumer.result.current.error).toBeNull()
+    })
+
+    it('gives a new session its own automatic attempt after the previous one spent it', async () => {
+      vi.useFakeTimers()
+      fetchMock.mockImplementation(() => Promise.resolve(throttledResponse(2)))
+      const consumer = renderHook(() => useSubscriptionCapabilities())
+      await flush()
+      expect(consumer.result.current.error?.status).toBe(429)
+      // The automatic attempt is denied again; none is left for this session.
+      await flush(2_000)
+      await flush(10_000)
+      const firstSessionReads = capabilityReads(fetchMock)
+      expect(consumer.result.current.error?.status).toBe(429)
+
+      act(() => setControlUIReadPrincipal('admin-two', 'admin'))
+      await flush()
+      expect(capabilityReads(fetchMock)).toBe(firstSessionReads + 1)
+      expect(consumer.result.current.error?.status).toBe(429)
+      fetchMock.mockImplementation(() => Promise.resolve(okResponse(capabilitiesBody)))
+      await flush(2_000)
+      // Witness: the new session's automatic attempt ran and recovered.
+      expect(consumer.result.current.capabilities).toEqual(capabilitiesBody)
+    })
+  })
+
+  it('reads nothing before the first principal is confirmed and loads once it is', async () => {
+    __resetReadRequestCacheForTests()
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify(capabilitiesBody), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    const consumer = renderHook(() => useSubscriptionCapabilities())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(consumer.result.current.loading).toBe(true)
+    expect(capabilityReads(fetchMock)).toBe(0)
+
+    act(() => setControlUIReadPrincipal('admin-one', 'admin'))
+    // Witness: the confirmed session loads, once.
+    await waitFor(() => expect(consumer.result.current.capabilities).toEqual(capabilitiesBody))
+    expect(capabilityReads(fetchMock)).toBe(1)
   })
 
   describe('when the confirmed principal changes while the consumer stays mounted', () => {

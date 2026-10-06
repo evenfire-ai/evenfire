@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
+import { __resetReadRequestCacheForTests, setReadRequestPrincipal } from '../../readRequestCache'
 import { useSubscriptionCapabilities } from '../useSubscriptionCapabilities'
+
+// Capability consumers load only for a principal confirmed by /me (AuthContext).
+beforeEach(() => {
+  setReadRequestPrincipal('admin-one', 'admin')
+})
+afterEach(() => {
+  __resetReadRequestCacheForTests()
+})
 
 const load = vi.hoisted(() => vi.fn())
 

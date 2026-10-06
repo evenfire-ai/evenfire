@@ -19,7 +19,19 @@ import {
   listGrokConnectionModels,
   listGrokSubscriptionConnections,
 } from '../../lib/grokSubscription'
+import {
+  __resetReadRequestCacheForTests,
+  setReadRequestPrincipal,
+} from '../../lib/readRequestCache'
 import { ToastProvider } from '../Toast'
+
+// Capability consumers load only for a principal confirmed by /me (AuthContext).
+beforeEach(() => {
+  setReadRequestPrincipal('admin-one', 'admin')
+})
+afterEach(() => {
+  __resetReadRequestCacheForTests()
+})
 
 const replaceMock = vi.fn()
 const pushMock = vi.fn()

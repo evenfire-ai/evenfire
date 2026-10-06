@@ -13,6 +13,10 @@ type CacheEntry = {
 type CooldownEntry = {
   error: ApiRequestError
   retryAtMs: number
+  // Every denial issued while this cooldown was active. A later denial can
+  // extend the window; each consumer still holding an earlier error must see
+  // the extended retry time, or its own timer fires into the cooldown.
+  issued: Set<ApiRequestError>
 }
 
 type RecoveryEntry = {
@@ -208,14 +212,18 @@ export function setReadRequestCooldown(
   if (!isBrowser()) return 0
   const delayMs =
     retryAfterSeconds !== undefined ? retryAfterSeconds * 1000 : METADATA_READ_UNTIMED_COOLDOWN_MS
-  const retryAtMs = Math.max(nowMs + delayMs, cooldowns.get(key)?.retryAtMs ?? 0)
-  error.retryAtMs = retryAtMs
+  const active = cooldowns.get(key)
+  const current = active && active.retryAtMs > nowMs ? active : undefined
+  const retryAtMs = Math.max(nowMs + delayMs, current?.retryAtMs ?? 0)
+  const issued = current?.issued ?? new Set<ApiRequestError>()
+  issued.add(error)
+  for (const denied of issued) denied.retryAtMs = retryAtMs
   while (cooldowns.size >= METADATA_READ_CACHE_MAX_ENTRIES && !cooldowns.has(key)) {
     const oldest = cooldowns.keys().next().value
     if (oldest === undefined) break
     cooldowns.delete(oldest)
   }
-  cooldowns.set(key, { error, retryAtMs })
+  cooldowns.set(key, { error, retryAtMs, issued })
   return retryAtMs - nowMs
 }
 
@@ -363,14 +371,43 @@ async function runRecovery(key: string, entry: RecoveryEntry): Promise<void> {
   entry.resolve()
 }
 
-export function completeReadRequestRecovery(key: string): void {
+/**
+ * A member URL read successfully outside the recovery (its timer can fire late
+ * in a background tab) no longer needs its reread. The recovery settles once
+ * no member is left; a success for a URL that is not a member changes nothing.
+ */
+export function completeReadRequestRecovery(key: string, memberKey: string): void {
   const recovery = recoveries.get(key)
   // A running recovery settles itself once every member has been reread.
   if (!recovery || recovery.state === 'running') return
+  if (!recovery.members.delete(memberKey) || recovery.members.size > 0) return
   if (recovery.timer) clearTimeout(recovery.timer)
   recovery.removeListeners()
   recovery.resolve()
   recoveries.delete(key)
+}
+
+/**
+ * Run `retry` once a denial's retry time has passed. A later denial in the same
+ * family can extend that time on the error itself (setReadRequestCooldown), so
+ * the timer re-arms until the extended time is reached instead of firing into
+ * the cooldown. Returns the cancel function.
+ */
+export function scheduleReadRequestRetry(error: ApiRequestError, retry: () => void): () => void {
+  const untimedRetryAtMs = Date.now() + METADATA_READ_UNTIMED_COOLDOWN_MS
+  let timer: ReturnType<typeof setTimeout>
+  const arm = () => {
+    const delayMs = (error.retryAtMs ?? untimedRetryAtMs) - Date.now()
+    timer = setTimeout(
+      () => {
+        if (Date.now() < (error.retryAtMs ?? untimedRetryAtMs)) arm()
+        else retry()
+      },
+      Math.min(2_147_483_647, Math.max(0, delayMs))
+    )
+  }
+  arm()
+  return () => clearTimeout(timer)
 }
 
 export function __resetReadRequestCacheForTests(): void {

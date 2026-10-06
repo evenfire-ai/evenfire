@@ -1,14 +1,12 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import {
-  METADATA_READ_MAX_RECOVERY_ATTEMPTS,
-  METADATA_READ_UNTIMED_COOLDOWN_MS,
-} from '@constants/readRequests'
+import { METADATA_READ_MAX_RECOVERY_ATTEMPTS } from '@constants/readRequests'
 import type { ApiRequestError } from '../api.types'
 import {
   getReadRequestPrincipal,
   getReadRequestSessionIdentity,
+  scheduleReadRequestRetry,
   subscribeReadRequestSessionIdentity,
 } from '../readRequestCache'
 import {
@@ -65,17 +63,16 @@ export function useSubscriptionCapabilities(
   }, [])
 
   // The confirmed principal. When it changes, the previous session's result,
-  // error and recovery budget are dropped and the new session loads its own;
-  // with no confirmed principal the hook waits, loading, for /me to confirm one.
+  // error and recovery budget are dropped and the new session loads its own.
+  // With no confirmed principal (before the first /me, or after a session
+  // ended) the hook waits, loading, for /me to confirm one: an unconfirmed
+  // read could neither be cached nor share the family's quota coordination.
   const sessionIdentity = useSyncExternalStore(
     subscribeReadRequestSessionIdentity,
     getReadRequestSessionIdentity,
     () => 0
   )
   const sessionIdentityRef = useRef(sessionIdentity)
-  // Set when the session this consumer loaded for ended without a successor;
-  // Retry cannot load for an unconfirmed session, only /me can end the wait.
-  const sessionEndedRef = useRef(false)
 
   useEffect(() => {
     if (sessionIdentityRef.current !== sessionIdentity) {
@@ -83,7 +80,6 @@ export function useSubscriptionCapabilities(
       setCapabilities(null)
       setError(null)
       recoveryAttemptsRef.current = 0
-      sessionEndedRef.current = getReadRequestPrincipal() === null
     }
     if (!enabled) {
       requestRef.current += 1
@@ -91,7 +87,8 @@ export function useSubscriptionCapabilities(
       setLoading(false)
       return
     }
-    if (sessionEndedRef.current) {
+    // Retry cannot load for an unconfirmed session; only /me can end the wait.
+    if (getReadRequestPrincipal() === null) {
       requestRef.current += 1
       controllerRef.current?.abort()
       setLoading(true)
@@ -111,13 +108,10 @@ export function useSubscriptionCapabilities(
       recoveryAttemptsRef.current >= METADATA_READ_MAX_RECOVERY_ATTEMPTS
     )
       return
-    const retryAtMs = error.retryAtMs ?? Date.now() + METADATA_READ_UNTIMED_COOLDOWN_MS
-    const delay = Math.max(0, retryAtMs - Date.now())
-    const timer = setTimeout(() => {
+    return scheduleReadRequestRetry(error, () => {
       recoveryAttemptsRef.current += 1
       void load()
-    }, delay)
-    return () => clearTimeout(timer)
+    })
   }, [enabled, error, load])
 
   const retry = useCallback(() => {
