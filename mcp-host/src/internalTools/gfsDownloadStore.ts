@@ -467,6 +467,7 @@ export class GfsDownloadStore {
       }
       if (input.retentionOwnerId !== undefined)
         this.assertReceiptOwner(input.retentionOwnerId, input.callerIdentity)
+      await this.assertPhysicalCapacity(input.sizeBytes)
       await this.reclaimForAdmission(input.callerIdentity, input.sizeBytes)
       const denial = this.quotaDenial(input.callerIdentity, input.sizeBytes)
       if (denial) {
@@ -475,25 +476,24 @@ export class GfsDownloadStore {
           denial.scope === 'host' ? 'host_quota_exceeded' : 'caller_quota_exceeded'
         )
       }
-      const space = await fs.statfs(this.storeRoot, { bigint: true })
-      if (space.bavail * space.bsize < BigInt(input.sizeBytes + 16 * 1024 * 1024)) {
-        recordGfsDownloadQuota('host', 'free_space')
-        throw new GfsDownloadStoreError('host_quota_exceeded')
-      }
+      await this.assertPhysicalCapacity(input.sizeBytes)
 
       const previousOwner =
         input.retentionOwnerId === undefined
           ? undefined
           : this.ledger.retentionOwners?.[input.retentionOwnerId]
+      const previousLeases = this.ledger.processingLeases
       try {
         if (input.retentionOwnerId !== undefined)
           this.retainReceiptRecord(record, input.retentionOwnerId)
         this.ledger.records[id] = record
+        this.protectFutureRecord(record)
         await this.persist()
       } catch (error) {
         // No filesystem transfer or worker has been exposed. In-memory
         // admission rolls back; an uncertain durable write stays fail-closed.
         delete this.ledger.records[id]
+        this.ledger.processingLeases = previousLeases
         if (input.retentionOwnerId !== undefined) {
           if (previousOwner) this.ledger.retentionOwners![input.retentionOwnerId] = previousOwner
           else delete this.ledger.retentionOwners![input.retentionOwnerId]
@@ -529,9 +529,17 @@ export class GfsDownloadStore {
     } catch (error) {
       try {
         await this.serialize(async () => {
+          // Other already-running commands can observe this new path too.
+          // Producer settlement releases its active slot, never their protection.
+          record.state = 'cleanup_failed'
+          // The producer's new pin has never exposed a transfer or receipt.
+          // With no executor protection, proven absence can roll it back too.
+          if (this.hasProcessingLease(id)) {
+            await this.persist()
+            return
+          }
           // Delete/prove absence before releasing the durable reservation.
           if (!(await this.removeRecordDirectory(record))) {
-            record.state = 'cleanup_failed'
             await this.persist()
             throw new GfsDownloadStoreError('storage_write_failed')
           }
@@ -700,27 +708,36 @@ export class GfsDownloadStore {
   }
 
   async fail(id: string, callerIdentity: string): Promise<void> {
-    this.assertInitialized()
     const record = this.record(id)
     if (record.callerIdentity !== callerIdentity) throw new GfsDownloadStoreError('caller_mismatch')
-    if (!this.activeIds.has(id) || this.hasProcessingLease(id))
+    if (!this.activeIds.has(id) && record.state !== 'cleanup_failed')
       throw new GfsDownloadStoreError('download_busy')
     try {
+      this.assertInitialized()
       await this.serialize(async () => {
+        this.assertInitialized()
         if (record.callerIdentity !== callerIdentity)
           throw new GfsDownloadStoreError('caller_mismatch')
-        // Publication and lease admission may have settled while this operation
-        // waited. Only this writer's still-active failed transfer can be removed.
-        if (!this.activeIds.has(id) || record.state === 'completed' || this.hasProcessingLease(id))
+        // Publication or another admission may have settled while this waited.
+        if (
+          (!this.activeIds.has(id) && record.state !== 'cleanup_failed') ||
+          record.state === 'completed'
+        )
           throw new GfsDownloadStoreError('download_busy')
+        record.state = 'cleanup_failed'
+        if (this.hasProcessingLease(id) || this.hasReceiptOwner(id)) {
+          await this.persist()
+          return
+        }
         if (!(await this.removeRecordDirectory(record))) {
-          record.state = 'cleanup_failed'
           await this.persist()
           throw new GfsDownloadStoreError('storage_write_failed')
         }
         await this.releaseRecordCharge(record)
       })
     } finally {
+      // The caller invokes failure only after its stream/descriptor is settled.
+      // Uncertain bytes stay charged; an older executor has its separate lease.
       this.releaseActive(record)
     }
   }
@@ -901,7 +918,7 @@ export class GfsDownloadStore {
       const lease: GfsProcessingLeaseRecord = {
         leaseId,
         callerIdentity,
-        recordIds: candidates.map(record => record.id),
+        recordIds: retained.map(record => record.id),
         acquiredAt: new Date(admittedAt).toISOString(),
         expiresAt,
         writerSessionId: this.writerSessionId,
@@ -967,6 +984,7 @@ export class GfsDownloadStore {
         throw error
       }
       this.liveProcessingLeases.delete(lease.leaseId)
+      await this.cleanupSettledFailedTransfers(callerIdentity)
     })
   }
 
@@ -985,6 +1003,7 @@ export class GfsDownloadStore {
         this.ledger.retentionOwners![ownerId] = owner
         throw error
       }
+      await this.cleanupSettledFailedTransfers(callerIdentity)
     })
   }
 
@@ -1159,6 +1178,61 @@ export class GfsDownloadStore {
     }
   }
 
+  private protectFutureRecord(record: GfsDownloadRecord): void {
+    const next = { ...this.ledger.processingLeases }
+    for (const [leaseId, lease] of Object.entries(next)) {
+      if (
+        lease.callerIdentity !== record.callerIdentity ||
+        lease.writerSessionId !== this.writerSessionId ||
+        !this.liveProcessingLeases.has(leaseId)
+      )
+        continue
+      next[leaseId] = { ...lease, recordIds: [...new Set([...lease.recordIds, record.id])] }
+    }
+    // Committed atomically with the reservation, before its path is exposed.
+    this.ledger.processingLeases = next
+  }
+
+  private async cleanupSettledFailedTransfers(callerIdentity: string): Promise<void> {
+    for (const record of Object.values(this.ledger.records)) {
+      if (
+        record.callerIdentity !== callerIdentity ||
+        record.state !== 'cleanup_failed' ||
+        this.activeIds.has(record.id) ||
+        this.hasProcessingLease(record.id) ||
+        this.hasReceiptOwner(record.id)
+      )
+        continue
+      if (await this.removeRecordDirectory(record)) await this.releaseRecordCharge(record)
+    }
+  }
+
+  private async assertPhysicalCapacity(sizeBytes: number): Promise<void> {
+    const space = await fs.statfs(this.storeRoot, { bigint: true })
+    if (space.bsize <= 0n || space.bavail < 0n) {
+      recordGfsDownloadQuota('host', 'free_space')
+      throw new GfsDownloadStoreError('host_quota_exceeded')
+    }
+    const reserve = (bytes: number): bigint => {
+      const amount = BigInt(bytes)
+      return ((amount + space.bsize - 1n) / space.bsize) * space.bsize
+    }
+    let required = reserve(sizeBytes) + 16n * 1024n * 1024n
+    for (const id of this.activeIds) {
+      const record = this.ledger.records[id]
+      // Use the full outstanding reservation rather than optimistically
+      // crediting sparse, shared or concurrently written physical allocation.
+      if (record && record.state !== 'completed') required += reserve(record.sizeBytes)
+    }
+    // Allocated/apparent cache bytes are not proven freeable bytes on shared,
+    // reflink or snapshot filesystems. Require currently verified free capacity
+    // before any destructive quota reclaim, then measure it again afterward.
+    if (space.bavail * space.bsize < required) {
+      recordGfsDownloadQuota('host', 'free_space')
+      throw new GfsDownloadStoreError('host_quota_exceeded')
+    }
+  }
+
   private quotaDenial(
     callerIdentity: string,
     sizeBytes: number,
@@ -1216,6 +1290,7 @@ export class GfsDownloadStore {
       remaining.delete(next.id)
       plan.push(next)
     }
+    await this.assertPhysicalCapacity(sizeBytes)
     for (const record of plan) {
       if (!(await this.removeRecordDirectory(record))) continue
       await this.releaseRecordCharge(record)

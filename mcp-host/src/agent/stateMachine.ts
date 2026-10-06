@@ -53,6 +53,7 @@ import { SessionProcessor, serializeSessionKey } from '../session'
 import { parseSessionKey } from '../session/types'
 import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClient.js'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
+import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
 import { CronScheduler } from './cronScheduler'
 import { TaskExecutor, resolveTaskSessionKey } from './taskExecutor'
@@ -1514,14 +1515,28 @@ export class AgentStateMachine extends EventEmitter {
   ): TaskExecutor {
     if (!this.llmProvider) throw new Error('LLM provider not initialized')
 
+    const gfsCallerRoot = this.gfsDownloadStore
+      ? resolveCallerRootBinding(this.gfsWorkspaceProvider, task.sourceMessage)
+      : {}
+    if (gfsCallerRoot.failureCode) {
+      logger.warn(
+        {
+          component: 'Agent',
+          event: 'gfs_caller_root_unavailable',
+          code: gfsCallerRoot.failureCode,
+          taskId: task.id,
+        },
+        'Managed GFS caller root unavailable; managed file and shell tools fail closed'
+      )
+    }
+
     return new TaskExecutor(task, {
       conversationManager: this.conversationManager,
       llmProvider: effective?.provider ?? this.llmProvider,
       mcpManager: this.mcpManager,
       workspaceService: this.workspaceProvider?.forSource(task.sourceMessage),
       gfsDownloadStore: this.gfsDownloadStore,
-      gfsCallerWorkspacePath: this.gfsWorkspaceProvider?.forSource(task.sourceMessage)
-        ?.userRootPath,
+      gfsCallerWorkspacePath: gfsCallerRoot.root,
       config: this.config,
       modelName: effective?.model ?? this.modelName,
       contextWindowTokens: effective?.contextWindowTokens,

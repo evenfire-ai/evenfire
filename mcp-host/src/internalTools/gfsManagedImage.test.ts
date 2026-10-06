@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { crc32, deflateSync } from 'node:zlib'
@@ -91,6 +91,7 @@ function scenario(
     readManaged?: () => Promise<Buffer>
   } = {}
 ) {
+  const retentionOwnerId = randomUUID()
   const budget = options.budget ?? new VisualInputBudget()
   const receipt = {
     id: 'managed-image',
@@ -110,7 +111,10 @@ function scenario(
     stat: vi.fn(),
     resolve: vi.fn(),
     readMetadata: vi.fn(async () => ({ source, size: receipt.sizeBytes })),
-    download: vi.fn(async () => receipt),
+    download: vi.fn<NonNullable<GfscReadClient['download']>>(async (_target, options) => {
+      expect(options.retentionOwnerId).toBe(retentionOwnerId)
+      return receipt
+    }),
     read: vi.fn(async () => {
       const reservation = budget.reserve(bytes.byteLength)
       budget.consumeRead(bytes.byteLength)
@@ -129,6 +133,7 @@ function scenario(
     downloadStore: store as unknown as GfsDownloadStore,
     callerIdentity: 'caller-a',
     callerWorkspacePath: '/tmp/managed-image-caller',
+    retentionOwnerId,
   }).find(item => item.name === 'clerum__gfs_read')!
 
   return {

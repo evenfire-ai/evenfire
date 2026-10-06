@@ -22,6 +22,18 @@ describe('protected workspace paths', () => {
     fs.writeFileSync(path.join(downloadDir, 'source.md'), 'xylophone quixotic zenith', 'utf-8')
     fs.writeFileSync(path.join(root, 'note.md'), 'public-token', 'utf-8')
     fs.symlinkSync(path.join(downloadDir, 'source.md'), path.join(root, 'alias.md'))
+    const storeAccounting = path.join(root, '.gfs-download-store')
+    fs.mkdirSync(storeAccounting, { recursive: true })
+    for (const name of [
+      'ledger-v1.json',
+      'writer-v2.sqlite',
+      'writer-v2.sqlite-journal',
+      'writer.lock',
+    ]) {
+      fs.writeFileSync(path.join(storeAccounting, name), 'accounting-sentinel', 'utf-8')
+    }
+    fs.writeFileSync(path.join(storeAccounting, 'ledger-v1.json.tmp-1'), 'journal', 'utf-8')
+    fs.symlinkSync(storeAccounting, path.join(root, 'store-alias'))
   })
 
   afterEach(() => {
@@ -40,6 +52,25 @@ describe('protected workspace paths', () => {
     )
     await expect(workspace.search('xylophone quixotic zenith')).resolves.toEqual([])
     await expect(workspace.search('public-token')).resolves.toHaveLength(1)
+  })
+
+  it('blocks the whole GFS accounting namespace and all of its artifacts', async () => {
+    const workspace = new WorkspaceService(root)
+    const paths = [
+      '.gfs-download-store/ledger-v1.json',
+      '.gfs-download-store/writer-v2.sqlite',
+      '.gfs-download-store/writer-v2.sqlite-journal',
+      '.gfs-download-store/writer.lock',
+      '.gfs-download-store/ledger-v1.json.tmp-1',
+      'store-alias/ledger-v1.json',
+    ]
+    for (const relativePath of paths) {
+      await expect(workspace.read(relativePath)).rejects.toBeInstanceOf(GfsDownloadPathError)
+    }
+    await expect(workspace.list()).resolves.not.toContainEqual(
+      expect.objectContaining({ name: '.gfs-download-store' })
+    )
+    await expect(workspace.search('accounting-sentinel')).resolves.toEqual([])
   })
 
   it('blocks direct and symlinked access through file tools', async () => {

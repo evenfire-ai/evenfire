@@ -190,6 +190,7 @@ import {
   stopRuntimeAuthProactiveRefresh,
 } from './workflow/runtimeAuthRefreshScheduler'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from './workflow/userApprovalRequester'
+import { resolveCallerRootBinding } from './workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from './workspace/scopedWorkspace'
 
 // Global state
@@ -2050,7 +2051,18 @@ const prepareIncomingMessage = createIncomingAdmission({
   dispatch: dispatchIncomingMessage,
   fileReferenceGfs: fileReferenceGfsGate,
   gfsSurfaceRuntimeCapability: message => {
-    const callerWorkspacePath = gfsWorkspaceProvider?.forSource(message)?.userRootPath
+    const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
+    if (callerRootBinding.failureCode) {
+      logger.warn(
+        {
+          component: 'gfs-runtime',
+          event: 'gfs_caller_root_unavailable',
+          code: callerRootBinding.failureCode,
+        },
+        'GFS caller workspace unavailable; managed delivery and shell stay disabled'
+      )
+    }
+    const callerWorkspacePath = callerRootBinding.root
     const shellApprovalEnabled =
       (currentHost?.spec.approval || config.approvalConfig)?.tools?.shell_exec !== false
     const workspaceFile = Boolean(

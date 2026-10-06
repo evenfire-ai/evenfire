@@ -37,7 +37,8 @@ export function gfsReference(source: GfsImageSource) {
   }
 }
 
-function projectReceipt(
+/** Demote transient pixels while preserving a source-bound workspace receipt. */
+export function projectGfsReceipt(
   content: string,
   source: GfsImageSource,
   reason: GfsReferenceReason
@@ -102,7 +103,7 @@ export function projectGfsMessages(
   return messages.map(message => {
     if (message.role === 'tool' && message.name === 'clerum__gfs_read' && message.tool_call_id) {
       const source = selectedByCall.get(message.tool_call_id)
-      const content = source ? projectReceipt(message.content, source, reason) : undefined
+      const content = source ? projectGfsReceipt(message.content, source, reason) : undefined
       if (content !== undefined) {
         const {
           spillover_ref: _spillover,

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { randomUUID } from 'node:crypto'
 import { logger } from '../logger'
 import { VisualInputError } from '../visualInput/policy'
 import { type GfscReadClient, buildGfsReadTools } from './gfs'
@@ -13,6 +14,7 @@ const privateDetail =
   'unit-only-server-detail /unit-only/storage.csv https://unit-only.invalid/body'
 
 function harness() {
+  const retentionOwnerId = randomUUID()
   const download = vi.fn<NonNullable<GfscReadClient['download']>>()
   const client = {
     accessible: vi.fn(),
@@ -28,8 +30,9 @@ function harness() {
     downloadStore: new GfsDownloadStore('/unit-only-host-workspace'),
     callerIdentity: 'unit-only-caller',
     callerWorkspacePath: '/unit-only-host-workspace/caller',
+    retentionOwnerId,
   }).find(item => item.name === 'clerum__gfs_download')!
-  return { tool, download }
+  return { tool, download, retentionOwnerId }
 }
 
 beforeEach(() => {
@@ -42,7 +45,7 @@ afterEach(() => {
 
 describe('GFS download failure diagnostics', () => {
   it('logs only the normalized public target and HTTP prefix, preserving the redacted failure', async () => {
-    const { tool, download } = harness()
+    const { tool, download, retentionOwnerId } = harness()
     const error = Object.assign(new Error(`gfsc 403: ${privateDetail}`), {
       name: 'unit-only-private-error-name',
       code: 'unit-only-private-error-code',
@@ -63,6 +66,13 @@ describe('GFS download failure diagnostics', () => {
     )
 
     expect(result).toEqual({ success: false, error: 'GFS read failed (gfsc 403: forbidden)' })
+    expect(download).toHaveBeenCalledWith(
+      expect.objectContaining({
+        drive: 'main_1',
+        resourceId: 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA',
+      }),
+      expect.objectContaining({ retentionOwnerId, callerIdentity: 'unit-only-caller' })
+    )
     expect(vi.mocked(logger.warn).mock.calls).toEqual([
       [
         {

@@ -2,6 +2,7 @@ import * as path from 'path'
 
 export const PROTECTED_WORKSPACE_DIRS: ReadonlySet<string> = new Set([
   '.clerum-state',
+  '.gfs-download-store',
   '.gfs-downloads',
 ])
 
@@ -50,7 +51,7 @@ export function isGfsDownloadPath(relativePath: string): boolean {
   const segments = normalizeWorkspacePath(relativePath)
     .split('/')
     .filter(segment => segment.length > 0 && segment !== '.')
-  return segments.some(segment => segment === '.gfs-downloads')
+  return segments.some(segment => segment === '.gfs-downloads' || segment === '.gfs-download-store')
 }
 
 export function stateDbProtectedMessage(filename: string): string {
@@ -74,7 +75,7 @@ export class StateDbPathError extends ProtectedWorkspacePathError {
 export class GfsDownloadPathError extends ProtectedWorkspacePathError {
   constructor(filename: string) {
     super(
-      `${filename} is a governed GFS download and cannot be accessed through workspace file tools.`
+      `${filename} is a governed GFS download/accounting artifact and cannot be accessed through workspace file tools.`
     )
     this.name = 'GfsDownloadPathError'
   }

@@ -76,8 +76,13 @@ describe('per-attempt GFS receipt projection', () => {
     })
   })
 
-  it('does not relabel a receipt from another resource version', () => {
-    const original = messages(JSON.stringify({ ...receipt, source: { ...source, version: 8 } }))
+  it.each([
+    { drive: 'other' },
+    { resourceId: 'b'.repeat(32) },
+    { gfsUri: `gfs://main/${'b'.repeat(32)}` },
+    { version: 8 },
+  ])('does not relabel a receipt from another source: %j', changed => {
+    const original = messages(JSON.stringify({ ...receipt, source: { ...source, ...changed } }))
     const before = structuredClone(original)
     expect(() =>
       projectGfsMessages(

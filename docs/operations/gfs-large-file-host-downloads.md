@@ -158,6 +158,14 @@ Generic workspace tools reject direct and symlink-resolved access to `.gfs-downl
   impossible or invalid request cannot evict another caller's files. Active,
   pinned, inherited, corrupt and ambiguous entries are never pressure victims.
   Quota limits still reject a request when no safe complete plan exists.
+- Before pressure effects, current verified filesystem capacity must cover the
+  incoming block-rounded reservation, the 16 MiB safety margin and pending
+  active reservations. Apparent file length and allocated blocks do not prove
+  how much a reflink or snapshot deletion will release. This generic policy does
+  not credit hypothetical physical reclamation; insufficient current capacity
+  rejects without deleting pressure victims. Quota eviction can still proceed
+  when current physical capacity is sufficient. Capacity is checked again after
+  settlement and before admission because external filesystem changes can race.
 - Only positively identified expired or pressure-evictable entries are deleted.
   Quota charges are released only after positive filesystem absence. A cleanup
   failure remains charged and is observable for recovery.
@@ -193,6 +201,18 @@ operation cannot overlap another or be lost from the shutdown join. Cleanup
 starts after successful acquisition, including acquisition after retry.
 Shutdown cancels scheduling, joins outstanding work and closes held writer
 ownership even when delivery is unavailable.
+
+Lease admission verifies the checksum of every retained completed caller copy
+under store serialization. Its cost grows with retained caller bytes; the
+default caller budget is 256 MiB. This correctness check has not been benchmarked
+on every supported PVC. Stage 2 must measure concurrency and evaluate verified
+descriptor/state revalidation outside the mutex before changing that contract.
+
+A pending task pin can survive a Host restart and protect bytes beyond TTL.
+If the task never resumes, use the operator inventory and exact terminal-owner
+recovery protocol. A time limit or cache pressure cannot prove that owner is
+unused. Monitor bounded counts and retained bytes; do not label metrics with
+owner or caller IDs.
 
 Execution safety binding is independent of delivery eligibility. Cron,
 internal and approval-disabled tasks associated with this store cannot obtain

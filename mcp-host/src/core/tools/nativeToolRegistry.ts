@@ -201,16 +201,17 @@ export class NativeToolRegistry implements ToolRegistry {
       retentionOwnerId?: string
     }
   ) {
-    // file_read/file_write are scoped to the per-user root when a ScopedWorkspace
-    // is wired (F1c) — they operate on a raw path string, not the Workspace
-    // interface, so we read the per-user root off it explicitly. Falls back to
-    // the shared root when there is no user context (e.g. the tool-name listing
-    // registry in main.ts). ShellTool uses the caller root when governed local
-    // processing is enabled. Its cwd/HOME boundary does not contain absolute-path
-    // access — shell isolation remains a documented residual.
+    // A Host-owned GFS store establishes a trusted caller binding even when
+    // memory is disabled. In that mode file tools never fall back to the shared
+    // Host root; if the caller root cannot be verified they are omitted.
+    // Without that Host store, preserve the legacy memory/shared-root behavior.
     const fileToolsRoot =
-      workspace instanceof ScopedWorkspace ? workspace.userRootPath : config.workspacePath
-    this.register(new FileReadTool(fileToolsRoot))
+      gfsDownload !== undefined
+        ? gfsDownload.callerWorkspacePath
+        : workspace instanceof ScopedWorkspace
+          ? workspace.userRootPath
+          : config.workspacePath
+    if (fileToolsRoot !== undefined) this.register(new FileReadTool(fileToolsRoot))
     // NOTE (residual): FileWriteTool writes via raw fs and bypasses
     // WorkspaceService.write → scanWriteContent. So a `file_write` to
     // `daily/*` / `MEMORY.md` is NOT injection-scanned. It is scoped to the
@@ -219,7 +220,7 @@ export class NativeToolRegistry implements ToolRegistry {
     // radius is self-injection of the user's own daily snapshot (low). Closing
     // it (route memory/daily-class file_write through WorkspaceService) is future
     // hardening, independent of F5.
-    this.register(new FileWriteTool(fileToolsRoot))
+    if (fileToolsRoot !== undefined) this.register(new FileWriteTool(fileToolsRoot))
     this.register(
       new ShellTool(
         gfsDownload ? gfsDownload.callerWorkspacePath : config.workspacePath,
