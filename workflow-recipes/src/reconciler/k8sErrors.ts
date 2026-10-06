@@ -196,13 +196,20 @@ export class RetryableReconcileError extends Error {
 }
 
 /**
- * A read-first apply read 404, its POST got a 409, and the re-read of the
- * object that won the race is a 404 again. There is nothing to replace and no
- * live object to judge, so the pass stops and asks for a fresh reconciliation
+ * A write got a 409 and the re-read of the conflicting object is a 404. After
+ * a create conflict (`after: 'create'`, the default) a read-first apply read
+ * 404, its POST got a 409, and the object that won the race is gone again.
+ * After a replace conflict (`after: 'replace'`) the object read before the
+ * PUT was deleted before the retry could read it. Either way there is no live
+ * object to judge, so the pass stops and asks for a fresh reconciliation
  * instead of guessing with a second POST or a PUT that can only 404.
  */
 export class ResourceVanishedAfterConflictError extends RetryableReconcileError {
-  constructor(label: string, options?: { cause?: unknown }) {
-    super(`${label} disappeared after create conflict; a fresh reconciliation is required`, options)
+  constructor(label: string, options?: { cause?: unknown; after?: 'create' | 'replace' }) {
+    const after = options?.after ?? 'create'
+    super(
+      `${label} disappeared after ${after} conflict; a fresh reconciliation is required`,
+      options && 'cause' in options ? { cause: options.cause } : undefined
+    )
   }
 }
