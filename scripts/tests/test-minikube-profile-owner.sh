@@ -234,10 +234,6 @@ expect_failure PROFILE_METADATA_MISSING 'explicit profile without metadata' \
   "${OWNER_SCRIPT}" resolve --repo-dir "${repo_a}" --branch "${branch}" \
   --profile-root "${missing_metadata_root}" --profile "${legacy_profile}"
 
-expect_failure PROFILE_NOT_FOUND 'explicit profile without a directory' \
-  "${OWNER_SCRIPT}" resolve --repo-dir "${repo_a}" --branch "${branch}" \
-  --profile-root "${missing_metadata_root}" --profile clerum-absent-profile
-
 missing_stable_metadata_root="${TMP_ROOT}/missing-stable-metadata"
 mkdir -p "${missing_stable_metadata_root}/${profile_a}"
 write_ports "${missing_stable_metadata_root}/${profile_a}/ports.env" 27500

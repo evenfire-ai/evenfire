@@ -261,7 +261,7 @@ apply_resolution() {
 }
 
 resolve_profile() {
-  local output status=0 identity_output
+  local output status=0 identity_output explicit_never_created=false
   local -a resolve_args=(
     resolve
     --repo-dir "${REPO_DIR}"
@@ -277,15 +277,26 @@ resolve_profile() {
     apply_resolution "${output}"
     return 0
   fi
+  # profile-owner.sh reports an explicit profile without profile.env as
+  # PROFILE_METADATA_MISSING whether or not its directory exists. A profile
+  # that was never created has no directory: it takes the derived creation
+  # path below, provided the explicit name is this branch's derived profile
+  # (#1001).
+  if [[ "${output}" == *PROFILE_METADATA_MISSING:* && -n "${EXPLICIT_PROFILE}" &&
+        "${EXPLICIT_PROFILE}" =~ ^clerum-[a-z0-9][a-z0-9._-]*$ &&
+        ! -e "${CACHE_ROOT}/${EXPLICIT_PROFILE}" && ! -L "${CACHE_ROOT}/${EXPLICIT_PROFILE}" ]]; then
+    explicit_never_created=true
+  fi
   # Missing metadata for an existing profile directory has one safe next step.
   # branch-profile-start only creates metadata when the directory does not
   # exist, so pointing at it here would send the operator into this refusal
   # again, or, without the explicit selection, into a brand-new profile.
-  if [[ "${output}" == *PROFILE_METADATA_MISSING:* ]]; then
+  if [[ "${output}" == *PROFILE_METADATA_MISSING:* && "${explicit_never_created}" != true ]]; then
     printf '%s\n' "${output}" >&2
     die "PROFILE_METADATA_MISSING: profile metadata for ${EXPLICIT_PROFILE:-this branch} is missing or unreadable; restore profile.env from a backup or stop and ask. branch-profile-start only creates metadata when the profile directory does not exist and never regenerates it for an existing one"
   fi
-  if [[ ${status} -ne 3 || "${output}" != *PROFILE_NOT_FOUND:* ]]; then
+  if [[ "${explicit_never_created}" != true ]] &&
+     [[ -n "${EXPLICIT_PROFILE}" || ${status} -ne 3 || "${output}" != *PROFILE_NOT_FOUND:* ]]; then
     printf '%s\n' "${output}" >&2
     die 'profile ownership resolution failed closed'
   fi
@@ -300,14 +311,11 @@ resolve_profile() {
   PROFILE="$(record_value "${identity_output}" PROFILE)"
   [[ "${PROFILE_SCHEMA_VERSION}" == 2 && "${CREATED_HEAD}" == "${HEAD}" ]] ||
     die 'stable identity output is incomplete'
+  if [[ "${explicit_never_created}" == true && "${PROFILE}" != "${EXPLICIT_PROFILE}" ]]; then
+    die "PROFILE_NOT_FOUND: explicit profile ${EXPLICIT_PROFILE} was never created and is not this branch's profile (${PROFILE}); run branch-profile-start without MINIKUBE_PROFILE to create ${PROFILE}"
+  fi
   [[ "${WORKTREE_ID}" =~ ^[0-9a-f]{40}$ && "${OWNER_ID}" =~ ^[0-9a-f]{40}$ ]] ||
     die 'stable identity output is malformed'
-  # An explicit selection of a profile that does not exist is created only
-  # under the name this worktree and branch derive, exactly as without the
-  # selection. Any other name is refused with the name that would be created.
-  if [[ -n "${EXPLICIT_PROFILE}" && "${EXPLICIT_PROFILE}" != "${PROFILE}" ]]; then
-    die "PROFILE_NOT_FOUND: no profile named ${EXPLICIT_PROFILE} exists. This worktree and branch derive ${PROFILE}: unset MINIKUBE_PROFILE or set it to that name to create it"
-  fi
   validate_profile_name
   set_profile_paths
   if [[ -e "${CACHE_DIR}" || -L "${CACHE_DIR}" ]]; then
