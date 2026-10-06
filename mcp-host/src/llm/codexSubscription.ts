@@ -22,7 +22,7 @@ import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
 import { IMAGE_SOURCE_INVALID, canonicalRefusalCode, projectMessage } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
-import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
+import { authorizeRetryDelayMs, rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
@@ -528,12 +528,17 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       // after that delay, under a new authorize: a redeemed ticket cannot be
       // reused. The 429 may come from the proxy or from control-api's
       // authorize limiter (G1-11). A caller that pins the attempt index owns
-      // its own retries.
+      // its own retries. control-api's authorize_capacity_exceeded, refused
+      // before any read, is retried once the same way (M-A, review
+      // 5426789128); a proxy error of that name is not.
       const waitMs =
-        context.providerAttemptIndex === undefined &&
-        (err instanceof CodexProxyError || err instanceof CodexAuthorizeError)
-          ? rateLimitRetryDelayMs(err.code, err.retryAfterMs)
-          : undefined
+        context.providerAttemptIndex !== undefined
+          ? undefined
+          : err instanceof CodexAuthorizeError
+            ? authorizeRetryDelayMs(err.code, err.retryAfterMs)
+            : err instanceof CodexProxyError
+              ? rateLimitRetryDelayMs(err.code, err.retryAfterMs)
+              : undefined
       if (waitMs === undefined) throw err
       await waitBeforeRetry(waitMs, options?.signal)
       // The wait stops watching the signal once its timer fires: an abort in

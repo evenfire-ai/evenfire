@@ -1888,6 +1888,174 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
   })
 
+  // M-A (review 5426789128): control-api's capacity refusal is answered
+  // before any read and carries Retry-After. The provider retries it once in
+  // place; the second refusal is terminal, with no failover or cooldown.
+  const capacityRefusal = (seconds?: number) =>
+    Response.json(
+      { error: 'authorize_capacity_exceeded' },
+      seconds === undefined
+        ? { status: 503 }
+        : { status: 503, headers: { 'retry-after': String(seconds) } }
+    )
+
+  it('M-A1: a capacity refusal on authorize is retried once after its Retry-After', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn), stream: vi.fn().mockResolvedValue(ok) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    await vi.advanceTimersByTimeAsync(9999)
+    // Witness: the first authorize ran; nothing was dispatched on its refusal.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(turn).resolves.toMatchObject({ content: 'after the wait' })
+
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    const [first, second] = fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string))
+    expect(second.invocationId).toBe(first.invocationId)
+    expect([first.providerAttemptIndex, second.providerAttemptIndex]).toEqual([1, 2])
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream.mock.calls[0][0].executionTicket).toBe('ticket-second')
+  })
+
+  it('M-A2: a second capacity refusal is terminal and never fails over', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const caught = turn.then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await caught
+
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'authorize_capacity_exceeded', retryAfterMs: 10_000 })
+    const classified = provider.classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    // Exactly two authorizes: the retry ran once and the third answer was never asked for.
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
+  it('M-A3: a capacity refusal without Retry-After is not retried', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal())
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const caught = turn.then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await caught
+
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'authorize_capacity_exceeded' })
+    expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+    // Witness: the first authorize ran; the negative is that no second one did.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
+  it('M-A4: a capacity refusal on a caller-pinned attempt index is not retried', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn) })
+    wired.attemptContext = vi.fn(() => ({
+      policyRevision: 1,
+      policyHash: 'b'.repeat(64),
+      hostRef: 'chatllm',
+      providerAttemptIndex: 3,
+    }))
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const caught = turn.then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await caught
+
+    expect(err).toMatchObject({ code: 'authorize_capacity_exceeded', retryAfterMs: 10_000 })
+    // Witness: the pinned authorize ran; the negative is that no second one did.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body as string).providerAttemptIndex).toBe(3)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
+  it('M-A5: a proxy error named authorize_capacity_exceeded is not retried', async () => {
+    vi.useFakeTimers()
+    const err = new GrokProxyError('authorize_capacity_exceeded', 'proxy refused', {
+      retryAfterMs: 1000,
+    })
+    const wired = deps({
+      authorize: authorizeTwice(),
+      stream: vi.fn().mockRejectedValueOnce(err).mockResolvedValueOnce(ok),
+    })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const settled = expect(turn).rejects.toBe(err)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settled
+    // Witness: the attempt was dispatched once; the negative is that no retry followed.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('M-A6: an abort during the capacity wait rejects with the abort reason and sends nothing more', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const reason = new Error('caller gave up')
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn), stream: vi.fn().mockResolvedValue(ok) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }], {
+      signal: controller.signal,
+    })
+    const settled = expect(turn).rejects.toBe(reason)
+    await vi.advanceTimersByTimeAsync(5000)
+    // Witness: the first authorize ran and the wait is pending.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    controller.abort(reason)
+    await settled
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
   it('G1-12: an abort after the wait resolves and before the second authorize sends nothing more', async () => {
     vi.useFakeTimers()
     const controller = new AbortController()

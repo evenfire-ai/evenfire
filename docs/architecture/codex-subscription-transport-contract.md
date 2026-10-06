@@ -123,11 +123,17 @@ control-api's authorize route has two local outcomes of its own, also
 closed wire identities read only from the `error` field: 503
 `authorize_capacity_exceeded` (the retained-body admission is full, or a
 queued request waited past its bound) and 503 `authorize_timeout` (authorize
-work outlived its 30 s deadline). Both classify as non-retryable
-`LLM_API_CALL_FAILED`, do not fail over or install a cooldown, and send
-nothing to the provider. A capacity refusal is answered before the body is
-read, with `Connection: close`, so no attempt is recorded. Only the retained
-path takes a unit. A request whose declared `Content-Length` is at or below
+work outlived its 30 s deadline). Neither sends anything to the provider,
+fails over or installs a cooldown. A capacity refusal is answered before the
+body is read, with `Connection: close` and `Retry-After: 10`, so no attempt is
+recorded. The Host retries it once in the same provider after that delay, with
+the next attempt index, and re-uploads the body. A second refusal, or a
+refusal without `Retry-After` (an older control-api), is terminal: a
+non-retryable `LLM_API_CALL_FAILED`. A caller-pinned attempt index is never
+retried. The retry adds at most 50 s (a 40 s queue refusal plus the 10 s wait)
+before the second attempt's own 80 s. `authorize_timeout` carries no
+`Retry-After` and is terminal at once. Only the retained path takes a unit. A
+request whose declared `Content-Length` is at or below
 the text authorize envelope (`maxRequestBodyBytes` +
 `ENVELOPE_ALLOWANCE_BYTES`, 8404992 bytes, the larger of the two contracts)
 is parsed with that limit and never queues. A larger declared length, a

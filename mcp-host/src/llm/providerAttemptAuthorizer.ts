@@ -221,7 +221,15 @@ export class ProviderAttemptAuthorizer {
             : code === 'authorize_timeout'
               ? 'Request authorization timed out. Wait for active requests to finish, then try again.'
               : `authorize failed with ${response.status}`,
-        { retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined }
+        // Retry-After is read on a 429 and on control-api's capacity refusal,
+        // which the provider retries once after it (M-A).
+        {
+          retryAfterMs:
+            response.status === 429 ||
+            (response.status === 503 && code === 'authorize_capacity_exceeded')
+              ? retryAfterMs(response)
+              : undefined,
+        }
       )
     }
     for (const key of LEAK_KEYS) {

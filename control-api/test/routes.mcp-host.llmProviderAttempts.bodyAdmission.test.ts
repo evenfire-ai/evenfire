@@ -274,6 +274,9 @@ describe('createApp retained authorize-body ownership', () => {
           expect(blocked.status).toBe(503)
           expect(JSON.parse(blocked.body)).toEqual({ error: 'authorize_capacity_exceeded' })
           expect(blocked.headers.connection).toBe('close')
+          expect(blocked.headers['retry-after']).toBe(
+            String(LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.retryAfterSeconds)
+          )
           expect(otherApp.observations[0]).toMatchObject({
             bodyDataSubscriptions: 0,
             readBytesBeforeResponse: 0,
@@ -602,6 +605,7 @@ describe('createApp retained authorize-body ownership', () => {
           expect(expired.status).toBe(503)
           expect(JSON.parse(expired.body)).toEqual({ error: 'authorize_capacity_exceeded' })
           expect(expired.headers.connection).toBe('close')
+          expect(expired.headers['retry-after']).toBe('10')
           expect(app.observations[1]).toMatchObject({
             bodyDataSubscriptions: 0,
             readBytesBeforeResponse: 0,
@@ -863,6 +867,8 @@ describe('createApp retained authorize-body ownership', () => {
         const response = await outcome
         expect(response.status).toBe(503)
         expect(JSON.parse(response.body)).toEqual({ error: 'authorize_timeout' })
+        // Work may have run: only a capacity refusal invites a retry.
+        expect(response.headers['retry-after']).toBeUndefined()
         expect((app.observations[0].request as Request).body).toBeUndefined()
         const recovered = await send(app.url, headers('after-timeout-host'), '{}').response
         expect(recovered.status).toBe(200)

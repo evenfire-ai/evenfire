@@ -8,6 +8,11 @@ import { CodexLlmProxyClient } from '../../codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../../codexSubscription'
 import { GrokLlmProxyClient } from '../../grokLlmProxyClient'
 import { GrokSubscriptionProvider } from '../../grokSubscription'
+import {
+  CodexAuthorizeError,
+  ProviderAttemptAuthorizer,
+  resolveCodexAuthorizeUrl,
+} from '../../providerAttemptAuthorizer'
 import { type ClassifiedLike, FailoverEngine } from '../engine'
 import type { FailoverTarget, ModelPair } from '../types'
 
@@ -354,5 +359,48 @@ describe.each(['grok', 'codex'] as const)(
         expect(f.engine.servedBy()).toEqual({ ...f.primary, fallback: false })
       }
     )
+
+    // M-A (review 5426789128): control-api's capacity refusal with
+    // Retry-After is retried once in place; the second refusal is terminal and
+    // the turn never leaves the primary or installs a cooldown.
+    it('a repeated authorize capacity refusal retries once on primary without failover', async () => {
+      const f = await fixture(variant)
+      const authorizeFetch = vi.fn(async () =>
+        Response.json(
+          { error: 'authorize_capacity_exceeded' },
+          { status: 503, headers: { 'retry-after': '1' } }
+        )
+      )
+      const authorizer = new ProviderAttemptAuthorizer({
+        authorizeUrl: resolveCodexAuthorizeUrl('http://gateway:8092'),
+        readPlatformJwt: () => 'platform-jwt',
+        fetchFn: authorizeFetch as unknown as typeof fetch,
+      })
+      f.authorize.mockImplementation(((body: never, options: never) =>
+        authorizer.authorize(body, options)) as never)
+
+      const err = await f.run('bounded text').then(
+        () => undefined,
+        (e: unknown) => e
+      )
+
+      expect(err).toBeInstanceOf(CodexAuthorizeError)
+      expect(err).toMatchObject({ code: 'authorize_capacity_exceeded', retryAfterMs: 1000 })
+      expect(f.classified()).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        providerCode: 'authorize_capacity_exceeded',
+        providerDispatched: false,
+      })
+      // Witness: authorize ran exactly twice, the attempt and its one retry.
+      expect(f.authorize).toHaveBeenCalledTimes(2)
+      expect(authorizeFetch).toHaveBeenCalledTimes(2)
+      expect(f.hostFetch).not.toHaveBeenCalled()
+      expect(f.built.map(target => target.kind)).toEqual(['primary'])
+      expect(f.fallback).not.toHaveBeenCalled()
+      expect(f.onSwitch).not.toHaveBeenCalled()
+      expect(f.metricInc).not.toHaveBeenCalled()
+      expect(f.engine.planTargets(f.primary)[0]?.kind).toBe('primary')
+    })
   }
 )

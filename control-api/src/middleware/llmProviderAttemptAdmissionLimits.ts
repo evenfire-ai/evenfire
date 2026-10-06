@@ -15,6 +15,11 @@ import type { AuthorizeBodyAdmissionPolicy } from './llmProviderAttemptBodyAdmis
 // share stops one principal holding all three positions. queueWaitMs is the
 // longest a healthy holder can keep the unit (its read deadline plus its work
 // deadline), so a waiter is refused only when the holder outlives both.
+//
+// retryAfterSeconds is the Retry-After on a capacity refusal. The Host retries
+// once in the same provider after it, re-uploading the body, and the second
+// refusal is terminal. It equals the read deadline, the bound on a slow
+// upload, and stays below the Host's 30 s retry ceiling. Uncertified (#813).
 const READ_DEADLINE_MS = 10_000
 const WORK_DEADLINE_MS = 30_000
 
@@ -26,4 +31,5 @@ export const LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY: AuthorizeBodyAdmissionPolicy
   readDeadlineMs: READ_DEADLINE_MS,
   workDeadlineMs: WORK_DEADLINE_MS,
   closeGraceMs: 250,
+  retryAfterSeconds: READ_DEADLINE_MS / 1000,
 })

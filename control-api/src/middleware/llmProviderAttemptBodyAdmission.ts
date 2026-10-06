@@ -10,6 +10,8 @@ export type AuthorizeBodyAdmissionPolicy = Readonly<{
   readDeadlineMs: number
   workDeadlineMs: number
   closeGraceMs: number
+  /** `Retry-After` on a capacity refusal; the Host retries once after it. */
+  retryAfterSeconds: number
 }>
 
 // The route supplies these claims only after requireMcpHostJwt succeeds.
@@ -75,6 +77,14 @@ export class AuthorizeBodyAdmission {
         throw new TypeError('authorize timers must be positive signed-32-bit integers')
       }
     }
+    // The Host honours 1-3600 s (mcp-host `retryAfter.ts`).
+    if (
+      !Number.isSafeInteger(policy.retryAfterSeconds) ||
+      policy.retryAfterSeconds <= 0 ||
+      policy.retryAfterSeconds > 3600
+    ) {
+      throw new TypeError('retryAfterSeconds must be an integer from 1 to 3600')
+    }
     this.policy = Object.freeze({
       maxInFlight: policy.maxInFlight,
       maxQueued: policy.maxQueued,
@@ -83,6 +93,7 @@ export class AuthorizeBodyAdmission {
       readDeadlineMs: policy.readDeadlineMs,
       workDeadlineMs: policy.workDeadlineMs,
       closeGraceMs: policy.closeGraceMs,
+      retryAfterSeconds: policy.retryAfterSeconds,
     })
   }
 
@@ -311,6 +322,9 @@ export class AuthorizeBodyAdmission {
     res.once('finish', stopRejectedBody)
     res.once('close', stopRejectedBody)
     res.setHeader('Connection', 'close')
+    // Nothing was read or recorded, so the Host may retry the same attempt
+    // once after this delay (same provider, no failover).
+    res.setHeader('Retry-After', String(this.policy.retryAfterSeconds))
     requestLog(req).warn(
       {
         event: 'llm_provider_attempt_admission_refused',

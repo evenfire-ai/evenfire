@@ -152,6 +152,7 @@ describe('AuthorizeBodyAdmission policy and idempotence', () => {
       readDeadlineMs: 20,
       workDeadlineMs: 20,
       closeGraceMs: 5,
+      retryAfterSeconds: 1,
     }
     const gate = new AuthorizeBodyAdmission(valid)
     expect(() => {
@@ -183,6 +184,13 @@ describe('AuthorizeBodyAdmission policy and idempotence', () => {
         TypeError
       )
     }
+    // The Host only honours a Retry-After of 1-3600 whole seconds.
+    expect(() => new AuthorizeBodyAdmission({ ...valid, retryAfterSeconds: 3600 })).not.toThrow()
+    for (const value of [0, 1.5, 3601]) {
+      expect(() => new AuthorizeBodyAdmission({ ...valid, retryAfterSeconds: value })).toThrow(
+        TypeError
+      )
+    }
   })
 
   it('an old release cannot free the slot occupied by a newer request', () => {
@@ -194,6 +202,7 @@ describe('AuthorizeBodyAdmission policy and idempotence', () => {
       readDeadlineMs: 100,
       workDeadlineMs: 100,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const releaseA = gate.tryAcquire(PRINCIPAL)
     expect(releaseA).not.toBeNull()
@@ -218,6 +227,7 @@ describe('AuthorizeBodyAdmission policy and idempotence', () => {
       readDeadlineMs: 100,
       workDeadlineMs: 100,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const req = fakeRequest()
     const res = fakeResponse()
@@ -248,6 +258,7 @@ describe('AuthorizeBodyAdmission FIFO and verified-principal share', () => {
       readDeadlineMs: 1000,
       workDeadlineMs: 1000,
       closeGraceMs: 5,
+      retryAfterSeconds: 1,
       ...overrides,
     })
   }
@@ -334,6 +345,7 @@ describe('AuthorizeBodyAdmission FIFO and verified-principal share', () => {
       }
     )
     expect(fullRes.body).toEqual({ error: 'authorize_capacity_exceeded' })
+    expect(fullRes.setHeader).toHaveBeenCalledWith('Retry-After', '1')
     expect(fullParser).not.toHaveBeenCalled()
     await refused
     fullRes.emit('finish')
@@ -385,6 +397,8 @@ describe('AuthorizeBodyAdmission FIFO and verified-principal share', () => {
       { sub: 'same-sub', hostRefs: ['host-b', 'host-a'] }
     )
     expect(rejectedRes.body).toEqual({ error: 'authorize_capacity_exceeded' })
+    // principal_share invites the Host's single retry like every capacity refusal.
+    expect(rejectedRes.setHeader).toHaveBeenCalledWith('Retry-After', '1')
     expect(rejectedParser).not.toHaveBeenCalled()
     await rejected
     rejectedRes.emit('finish')
@@ -834,6 +848,7 @@ describe('AuthorizeBodyAdmission parser lifecycle', () => {
       readDeadlineMs: 100,
       workDeadlineMs: 100,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const req = fakeRequest()
     const res = fakeResponse()
@@ -865,6 +880,7 @@ describe('AuthorizeBodyAdmission parser lifecycle', () => {
       readDeadlineMs: 15,
       workDeadlineMs: 100,
       closeGraceMs: 5,
+      retryAfterSeconds: 1,
     })
     const req = fakeRequest()
     const requestLogger = fakeRequestLogger()
@@ -907,6 +923,7 @@ describe('AuthorizeBodyAdmission parser lifecycle', () => {
       readDeadlineMs: 100,
       workDeadlineMs: 100,
       closeGraceMs: 5,
+      retryAfterSeconds: 1,
     })
     const holder = gate.tryAcquire(PRINCIPAL)
     expect(holder).not.toBeNull()
@@ -957,6 +974,7 @@ describe('AuthorizeBodyAdmission parser lifecycle', () => {
       readDeadlineMs: 100,
       workDeadlineMs: 100,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const req = fakeRequest()
     const res = fakeResponse()
@@ -986,6 +1004,7 @@ describe('AuthorizeBodyAdmission work cancellation', () => {
       readDeadlineMs: 100,
       workDeadlineMs: 15,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const req = fakeRequest()
     const res = fakeResponse()
@@ -1016,6 +1035,7 @@ describe('AuthorizeBodyAdmission work cancellation', () => {
       readDeadlineMs: 1000,
       workDeadlineMs: 5000,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const req = fakeRequest()
     const res = fakeResponse()
@@ -1075,6 +1095,7 @@ describe('AuthorizeBodyAdmission HTTP fixture', () => {
       readDeadlineMs: 1000,
       workDeadlineMs: 1000,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const parser = express.json({ limit: '1kb', inflate: false })
     const work = vi.fn(async (req: express.Request, res: Response, _signal: AbortSignal) => {
@@ -1112,6 +1133,7 @@ describe('AuthorizeBodyAdmission HTTP fixture', () => {
       readDeadlineMs: 1000,
       workDeadlineMs: 5000,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const parser = express.json({ limit: '1kb', inflate: false })
     const workStarted = deferred()
@@ -1175,6 +1197,7 @@ describe('AuthorizeBodyAdmission HTTP fixture', () => {
       expect(refused.status).toBe(503)
       expect(JSON.parse(refused.body)).toEqual({ error: 'authorize_capacity_exceeded' })
       expect(refused.headers.toLowerCase()).toContain('connection: close')
+      expect(refused.headers.toLowerCase()).toMatch(/\r\nretry-after: 1(\r\n|$)/)
       expect(work).toHaveBeenCalledOnce()
 
       first.destroy()
@@ -1214,6 +1237,7 @@ describe('AuthorizeBodyAdmission HTTP fixture', () => {
       readDeadlineMs: 5000,
       workDeadlineMs: 1000,
       closeGraceMs: 10,
+      retryAfterSeconds: 1,
     })
     const parser = express.json({ limit: '1kb', inflate: false })
     const parserStarted = deferred()

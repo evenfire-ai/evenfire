@@ -619,6 +619,53 @@ describe('ProviderAttemptAuthorizer', () => {
     }
   )
 
+  // M-A (review 5426789128): control-api's capacity refusal carries
+  // Retry-After, and only that coded 503 has it read.
+  it.each([
+    [
+      'a capacity refusal with Retry-After',
+      () =>
+        Response.json(
+          { error: 'authorize_capacity_exceeded' },
+          { status: 503, headers: { 'retry-after': '10' } }
+        ),
+      'authorize_capacity_exceeded',
+      10_000,
+    ],
+    [
+      'a capacity refusal without Retry-After',
+      () => Response.json({ error: 'authorize_capacity_exceeded' }, { status: 503 }),
+      'authorize_capacity_exceeded',
+      undefined,
+    ],
+    [
+      'an authorize_timeout with Retry-After',
+      () =>
+        Response.json(
+          { error: 'authorize_timeout' },
+          { status: 503, headers: { 'retry-after': '10' } }
+        ),
+      'authorize_timeout',
+      undefined,
+    ],
+    [
+      'an uncoded 503 with Retry-After',
+      () =>
+        new Response('<html>503 Service Temporarily Unavailable</html>', {
+          status: 503,
+          headers: { 'content-type': 'text/html', 'retry-after': '10' },
+        }),
+      'provider_unavailable',
+      undefined,
+    ],
+  ] as const)('M-A reads Retry-After for %s', async (_label, response, code, retryAfter) => {
+    const { err, fetchFn } = await authorizeFailure(response())
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code })
+    expect((err as CodexAuthorizeError).retryAfterMs).toBe(retryAfter)
+  })
+
   // G1-6 (#720): a limiter in front of control-api can answer 429 with no JSON
   // code. It is a rate limit, not a provider outage.
   it('G1-6d reads an HTML 429 from the gateway as rate_limited', async () => {
