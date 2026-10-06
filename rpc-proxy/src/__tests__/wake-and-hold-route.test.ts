@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import express from 'express'
+import express, { type Response as ExpressResponse } from 'express'
 import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
-import { createRpcRouter } from '../routes/rpc.js'
+import { createRpcRouter, respondUpstreamUnavailable } from '../routes/rpc.js'
 import {
+  UpstreamHostError,
+  forwardHostActivity,
+  forwardHostHealth,
   forwardHostMessageToHost,
   forwardHostStatus,
   forwardTaskResultFromHost,
@@ -872,6 +875,176 @@ describe('Host error bodies stay out of rpc-proxy logs', () => {
       expect(failureLines).toHaveLength(1)
       expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
       expect(failureLines[0]).toContain('error=UpstreamHostError status=500')
+    } finally {
+      logs.restore()
+    }
+  })
+
+  it.each([
+    {
+      site: 'host activity',
+      scope: 'host:activity:read',
+      path: '/rpc/hosts/chatllm/activity',
+      prefix: '[RPC_PROXY] host activity failed host=chatllm',
+      useRealForwarder: () =>
+        serviceMock.forwardHostActivity.mockImplementation(
+          forwardHostActivity as typeof serviceMock.forwardHostActivity
+        ),
+    },
+    {
+      site: 'host health',
+      scope: 'host:health:read',
+      path: '/rpc/hosts/chatllm/health',
+      prefix: '[RPC_PROXY] host health failed host=chatllm',
+      useRealForwarder: () =>
+        serviceMock.forwardHostHealth.mockImplementation(
+          forwardHostHealth as typeof serviceMock.forwardHostHealth
+        ),
+    },
+  ])(
+    'logs the status of a $site read failure without the Host body',
+    async ({ scope, path, prefix, useRealForwarder }) => {
+      const marker = userContentMarker()
+      authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS, scopes: [scope] })
+      useRealForwarder()
+      const logs = captureConsole()
+      try {
+        await withScriptedHost(
+          [{ status: 500, body: { error: 'boom', detail: marker } }],
+          async hostHits => {
+            const response = await request(makeApp()).get(path).set('authorization', 'Bearer token')
+
+            expect(hostHits()).toBe(1)
+            // The route hands the error to the app error handler, which answers 500.
+            expect(response.status).toBe(500)
+          }
+        )
+        const failureLines = logs.warnLines().filter(line => line.includes(prefix))
+        // Witness: the failure path ran and logged exactly once.
+        expect(failureLines).toHaveLength(1)
+        expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
+        expect(failureLines[0]).toContain('error=UpstreamHostError status=500')
+      } finally {
+        logs.restore()
+      }
+    }
+  )
+
+  // Built exactly as the real Host REST forwarders build it: the message embeds
+  // up to 300 characters of the Host body, so printing `error.message` would
+  // print the marker.
+  function hostErrorCarrying(marker: string): UpstreamHostError {
+    const error = new UpstreamHostError(
+      500,
+      JSON.stringify({ error: 'boom', detail: marker }).slice(0, 300)
+    )
+    // Precondition: a log line printing the message would leak the marker.
+    expect(error.message).toContain(marker)
+    return error
+  }
+
+  // The real forwardCancelToHost relays a Host non-2xx as a status/body pair
+  // instead of throwing, so the forwarder rejects here with the Host error type
+  // the cancel route's inner catch has to log without its body.
+  it('logs the status of a cancel forward Host failure without the Host body', async () => {
+    const marker = userContentMarker()
+    serviceMock.forwardCancelToHost.mockRejectedValueOnce(hostErrorCarrying(marker))
+    const logs = captureConsole()
+    try {
+      const response = await request(makeApp())
+        .post('/rpc/hosts/chatllm/tasks/t-9/cancel')
+        .set('authorization', 'Bearer token')
+
+      expect(serviceMock.forwardCancelToHost).toHaveBeenCalledTimes(1)
+      expect(response.status).toBe(502)
+      const failureLines = logs
+        .warnLines()
+        .filter(line => line.includes('[RPC_PROXY] cancel forward failed'))
+      // Witness: the inner catch ran and logged exactly once (the outer catch,
+      // which logs the same prefix, did not run).
+      expect(failureLines).toHaveLength(1)
+      expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
+      expect(failureLines[0]).toContain('error=UpstreamHostError status=500')
+    } finally {
+      logs.restore()
+    }
+  })
+
+  // An outer catch logs whatever escapes before the inner Host forward; host
+  // resolution is the step a route test can make reject.
+  it.each([
+    {
+      site: 'host message',
+      send: (app: express.Express) => postMessage(app),
+      forwarder: serviceMock.forwardHostMessageToHost,
+      prefix: '[RPC_PROXY] host message forward failed host=chatllm',
+    },
+    {
+      site: 'task result',
+      send: (app: express.Express) =>
+        request(app)
+          .get('/rpc/hosts/chatllm/tasks/t-9/result')
+          .set('authorization', 'Bearer token'),
+      forwarder: serviceMock.forwardTaskResultFromHost,
+      prefix: '[RPC_PROXY] task result forward failed',
+    },
+    {
+      site: 'cancel',
+      send: (app: express.Express) =>
+        request(app)
+          .post('/rpc/hosts/chatllm/tasks/t-9/cancel')
+          .set('authorization', 'Bearer token'),
+      forwarder: serviceMock.forwardCancelToHost,
+      prefix: '[RPC_PROXY] cancel forward failed',
+    },
+  ])(
+    'logs the status of an error reaching the $site outer catch without the Host body',
+    async ({ send, forwarder, prefix }) => {
+      const marker = userContentMarker()
+      serviceMock.resolveHostConnectionForUser.mockRejectedValueOnce(hostErrorCarrying(marker))
+      const logs = captureConsole()
+      try {
+        const response = await send(makeApp())
+
+        expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
+        expect(response.status).toBe(502)
+        // The inner forward never ran, so the line below comes from the outer catch.
+        expect(forwarder).not.toHaveBeenCalled()
+        const failureLines = logs.warnLines().filter(line => line.includes(prefix))
+        // Witness: the outer catch ran and logged exactly once.
+        expect(failureLines).toHaveLength(1)
+        expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
+        expect(failureLines[0]).toContain('error=UpstreamHostError status=500')
+      } finally {
+        logs.restore()
+      }
+    }
+  )
+
+  // No route reaches respondUpstreamUnavailable with a committed response: that
+  // takes an Express write that throws after committing, which a route test can
+  // only produce by replacing Express's response methods. The responder is
+  // exported, so the duplicate-suppression branch is driven directly.
+  it('logs the status of a Host failure on a committed response without the Host body', () => {
+    const marker = userContentMarker()
+    const status = vi.fn()
+    const committed = { headersSent: true, status } as unknown as ExpressResponse
+    const logs = captureConsole()
+    try {
+      respondUpstreamUnavailable(committed, hostErrorCarrying(marker))
+
+      const suppressionLines = logs
+        .warnLines()
+        .filter(line =>
+          line.includes(
+            '[RPC_PROXY] suppressing duplicate terminal response (upstream-unavailable)'
+          )
+        )
+      // Witness: the duplicate-suppression branch ran and logged exactly once.
+      expect(suppressionLines).toHaveLength(1)
+      expect(status).not.toHaveBeenCalled()
+      expect(markerFragmentsIn(logs.allLines(), marker)).toEqual([])
+      expect(suppressionLines[0]).toContain('UpstreamHostError status=500')
     } finally {
       logs.restore()
     }
