@@ -30,6 +30,47 @@ function isFunctionLike(node: ts.Node): node is ts.FunctionLikeDeclaration {
   )
 }
 
+/** Assignment operators: plain, compound, and logical forms. */
+function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
+  return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment
+}
+
+/** Every expression `root` writes to, including leaves nested in
+ * destructuring patterns (`[a.managed] = xs`, `({ b: a.managed } = o)`).
+ * Receivers and computed keys are reads, so the walk stops at member
+ * targets instead of descending into them. */
+function collectWriteTargets(root: ts.Node): ts.Node[] {
+  const targets: ts.Node[] = []
+  function scan(node: ts.Node): void {
+    if (
+      ts.isIdentifier(node) ||
+      ts.isPropertyAccessExpression(node) ||
+      ts.isElementAccessExpression(node)
+    ) {
+      targets.push(node)
+      return
+    }
+    if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
+      // Destructuring defaults (`[target = fallback] = xs`) write only the left side.
+      scan(node.left)
+      return
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      // Object destructuring: values are nested targets, keys are reads.
+      for (const property of node.properties) {
+        if (ts.isPropertyAssignment(property)) scan(property.initializer)
+        else if (ts.isShorthandPropertyAssignment(property)) targets.push(property.name)
+        else if (ts.isSpreadAssignment(property)) scan(property.expression)
+      }
+      return
+    }
+    // Array destructuring patterns and any other nesting scan every child.
+    ts.forEachChild(node, scan)
+  }
+  scan(root)
+  return targets
+}
+
 /** Standard globals the producer scope may use directly; everything else it
  * references resolves to a permissive stub. */
 const SCOPE_GLOBAL_WHITELIST = new Set([
@@ -96,11 +137,24 @@ function createScopeStub(): unknown {
  * so managed-write detection no longer depends on enumerating syntaxes.
  * Handler-level returns are neutralized (their side effects kept) so every
  * statement still executes, and awaits are stripped because every awaited
- * callee resolves to a stub. Fails closed, naming the failure, when the
- * scope throws or references a binding even a stub cannot satisfy. */
+ * callee resolves to a stub.
+ *
+ * Stubs cannot model outer data faithfully (an outer array stays a stub,
+ * so `Array.isArray` guards take the false branch and stubbed collection
+ * methods never invoke their callbacks), so executed coverage is recorded
+ * per statement and per expression-bodied arrow: after execution, every
+ * skipped statement and never-invoked arrow is statically re-scanned with
+ * the write-target walker under a strict predicate — in code that never
+ * ran, nothing about the bindings is provable, so ANY computed write, any
+ * `.managed` member write, and any spec-targeted reflection reject the
+ * producer shape. The fixture never silently returns a value when skipped
+ * producer logic could have mutated `managed`. Fails closed, naming the
+ * failure, when the scope throws or references a binding even a stub
+ * cannot satisfy. */
 function executeRegistrySpecScope(
   specDeclaration: ts.VariableDeclaration,
-  source: ts.SourceFile
+  source: ts.SourceFile,
+  specIdentifiers: Set<string>
 ): void {
   const initializer = specDeclaration.initializer
   if (!initializer) return
@@ -115,8 +169,19 @@ function executeRegistrySpecScope(
 
   const start = body.statements[declIndex].getStart(source)
   const end = body.statements[body.statements.length - 1].end
-  type Edit = { pos: number; end: number; text: string | null }
-  const edits: Edit[] = [{ pos: initializer.pos, end: initializer.end, text: null }]
+  type Edit = {
+    pos: number
+    end: number
+    insert?: string
+    replace?: string
+    prefix?: string
+    suffix?: string
+  }
+  const edits: Edit[] = [
+    { pos: initializer.pos, end: initializer.end, prefix: '__specProxy(', suffix: ')' },
+  ]
+  const markedStatements: ts.Node[] = []
+  const markedArrows: ts.Node[] = []
 
   const declaredNames = new Set<string>()
   const referencedNames = new Set<string>()
@@ -131,7 +196,63 @@ function executeRegistrySpecScope(
       name.elements.forEach(element => collectBindingNames(element.name))
   }
 
+  function isStatementElement(node: ts.Node): boolean {
+    const parent = node.parent
+    if (!parent) return false
+    if (ts.isBlock(parent)) return parent.statements.includes(node as ts.Statement)
+    if (ts.isCaseClause(parent) || ts.isDefaultClause(parent))
+      return (parent as ts.CaseClause).statements.includes(node as ts.Statement)
+    return false
+  }
+
+  function isUnguardedBody(node: ts.Node): boolean {
+    const parent = node.parent
+    if (!parent) return false
+    if (ts.isIfStatement(parent))
+      return parent.thenStatement === node || parent.elseStatement === node
+    if (
+      ts.isForStatement(parent) ||
+      ts.isForOfStatement(parent) ||
+      ts.isForInStatement(parent) ||
+      ts.isWhileStatement(parent) ||
+      ts.isDoStatement(parent) ||
+      ts.isLabeledStatement(parent)
+    ) {
+      return parent.statement === node
+    }
+    return false
+  }
+
   function collect(node: ts.Node, depth: number): void {
+    // Coverage markers: every statement that can be skipped records its
+    // execution; expression-bodied arrows get a body they can mark, since
+    // they contain no statements of their own.
+    if (!ts.isBlock(node) && (isStatementElement(node) || isUnguardedBody(node))) {
+      const id = markedStatements.push(node) - 1
+      if (isUnguardedBody(node)) {
+        edits.push({
+          pos: node.getStart(source),
+          end: node.end,
+          prefix: `{ __stmt(${id}); `,
+          suffix: ` }`,
+        })
+      } else {
+        edits.push({
+          pos: node.getStart(source),
+          end: node.getStart(source),
+          insert: `__stmt(${id}); `,
+        })
+      }
+    }
+    if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) {
+      const id = markedArrows.push(node) - 1
+      edits.push({
+        pos: node.body.getStart(source),
+        end: node.body.end,
+        prefix: `{ __stmt(${id}); return (`,
+        suffix: `) }`,
+      })
+    }
     if (ts.isVariableDeclaration(node)) collectBindingNames(node.name)
     if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
       declaredNames.add(node.name.text)
@@ -165,17 +286,21 @@ function executeRegistrySpecScope(
     }
     if (ts.isAwaitExpression(node)) {
       // Strip the `await` keyword, keeping the operand.
-      edits.push({ pos: node.getStart(source), end: node.expression.getStart(source), text: '' })
+      edits.push({
+        pos: node.getStart(source),
+        end: node.expression.getStart(source),
+        replace: '',
+      })
     }
     if (ts.isReturnStatement(node) && depth === 0) {
       if (node.expression) {
         edits.push({
           pos: node.getStart(source),
           end: node.expression.getStart(source),
-          text: 'void ',
+          replace: 'void ',
         })
       } else {
-        edits.push({ pos: node.getStart(source), end: node.end, text: ';void 0;' })
+        edits.push({ pos: node.getStart(source), end: node.end, replace: ';void 0;' })
       }
     }
     const nextDepth = isFunctionLike(node) ? depth + 1 : depth
@@ -183,18 +308,25 @@ function executeRegistrySpecScope(
   }
   for (const statement of body.statements.slice(declIndex)) collect(statement, 0)
 
-  edits.sort((a, b) => b.pos - a.pos)
+  // Descending application keeps nested edits (an arrow rewrite containing
+  // a stripped await, a marker inside a rewritten span) composable; at equal
+  // positions the wider span applies first so markers land before statements.
+  edits.sort((a, b) => b.pos - a.pos || b.end - a.end)
   let code = source.text.slice(start, end)
   for (const edit of edits) {
-    if (edit.text === null) {
-      code =
-        code.slice(0, edit.pos - start) +
-        '__specProxy(' +
-        source.text.slice(edit.pos, edit.end) +
-        ')' +
-        code.slice(edit.end - start)
+    const p = edit.pos - start
+    const e = edit.end - start
+    if (edit.insert !== undefined) {
+      code = code.slice(0, p) + edit.insert + code.slice(p)
+    } else if (edit.replace !== undefined) {
+      code = code.slice(0, p) + edit.replace + code.slice(e)
     } else {
-      code = code.slice(0, edit.pos - start) + edit.text + code.slice(edit.end - start)
+      code =
+        code.slice(0, p) +
+        (edit.prefix ?? '') +
+        code.slice(p, e) +
+        (edit.suffix ?? '') +
+        code.slice(e)
     }
   }
 
@@ -223,13 +355,21 @@ function executeRegistrySpecScope(
   const compiledScope = ts.transpileModule(code, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText
+  const executedMarkers = new Set<number>()
   try {
     const runner = new Function(
       '__specProxy',
+      '__stmt',
       ...envNames,
       `return (() => {\n${compiledScope}\n})()`
     )
-    runner(specProxy, ...envNames.map(() => createScopeStub()))
+    runner(
+      specProxy,
+      (id: number) => {
+        executedMarkers.add(id)
+      },
+      ...envNames.map(() => createScopeStub())
+    )
   } catch (err) {
     throw new Error(
       `Registry producer scope execution failed: ${err instanceof Error ? err.message : String(err)}`
@@ -241,6 +381,68 @@ function executeRegistrySpecScope(
         managedMutation.value
       )}`
     )
+  }
+
+  /** Nothing is provable inside code that never ran: any binding may hold
+   * the spec, so every computed write and every `.managed` member write
+   * rejects, and only tracked spec identifiers count for whole-binding
+   * writes. */
+  function skippedTargetTouchesManaged(target: ts.Node): boolean {
+    if (ts.isIdentifier(target)) return specIdentifiers.has(target.getText(source))
+    if (ts.isPropertyAccessExpression(target)) return target.name.getText(source) === 'managed'
+    return ts.isElementAccessExpression(target)
+  }
+
+  function findSkippedManagedWrite(root: ts.Node): ts.Node | undefined {
+    let found: ts.Node | undefined
+    function scan(node: ts.Node): void {
+      if (found) return
+      if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
+        if (collectWriteTargets(node.left).some(skippedTargetTouchesManaged)) found = node
+      } else if (ts.isForInStatement(node) || ts.isForOfStatement(node)) {
+        if (collectWriteTargets(node.initializer).some(skippedTargetTouchesManaged)) found = node
+      } else if (
+        (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken ||
+          node.operator === ts.SyntaxKind.MinusMinusToken)
+      ) {
+        if (collectWriteTargets(node.operand).some(skippedTargetTouchesManaged)) found = node
+      } else if (ts.isDeleteExpression(node)) {
+        if (collectWriteTargets(node.expression).some(skippedTargetTouchesManaged)) found = node
+      } else if (
+        ts.isCallExpression(node) &&
+        node.arguments.length > 0 &&
+        [
+          'Object.assign',
+          'Object.defineProperty',
+          'Object.defineProperties',
+          'Reflect.set',
+          'Reflect.defineProperty',
+        ].includes(node.expression.getText(source)) &&
+        !ts.isObjectLiteralExpression(node.arguments[0])
+      ) {
+        found = node
+      }
+      if (!found) ts.forEachChild(node, scan)
+    }
+    scan(root)
+    return found
+  }
+
+  const skippedNodes = [
+    ...markedStatements.filter((_, id) => !executedMarkers.has(id)),
+    ...markedArrows.filter((_, id) => !executedMarkers.has(id)),
+  ]
+  for (const skippedNode of skippedNodes) {
+    const write = findSkippedManagedWrite(skippedNode)
+    if (write) {
+      const line = source.getLineAndCharacterOfPosition(write.getStart(source)).line + 1
+      throw new Error(
+        `Unsupported registry managed write in skipped producer code at ${path.basename(
+          REGISTRY_PATH
+        )}:${line}: ${write.getText(source)}`
+      )
+    }
   }
 }
 
@@ -266,47 +468,6 @@ function registrySecretFactory(registrySource?: string): {
   const registryResourceMetadata: ts.Expression[] = []
   let catalogAnnotations: ts.FunctionDeclaration | undefined
   let specDeclaration: ts.VariableDeclaration | undefined
-
-  /** Assignment operators: plain, compound, and logical forms. */
-  function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
-    return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment
-  }
-
-  /** Every expression `root` writes to, including leaves nested in
-   * destructuring patterns (`[a.managed] = xs`, `({ b: a.managed } = o)`).
-   * Receivers and computed keys are reads, so the walk stops at member
-   * targets instead of descending into them. */
-  function collectWriteTargets(root: ts.Node): ts.Node[] {
-    const targets: ts.Node[] = []
-    function scan(node: ts.Node): void {
-      if (
-        ts.isIdentifier(node) ||
-        ts.isPropertyAccessExpression(node) ||
-        ts.isElementAccessExpression(node)
-      ) {
-        targets.push(node)
-        return
-      }
-      if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
-        // Destructuring defaults (`[target = fallback] = xs`) write only the left side.
-        scan(node.left)
-        return
-      }
-      if (ts.isObjectLiteralExpression(node)) {
-        // Object destructuring: values are nested targets, keys are reads.
-        for (const property of node.properties) {
-          if (ts.isPropertyAssignment(property)) scan(property.initializer)
-          else if (ts.isShorthandPropertyAssignment(property)) targets.push(property.name)
-          else if (ts.isSpreadAssignment(property)) scan(property.expression)
-        }
-        return
-      }
-      // Array destructuring patterns and any other nesting scan every child.
-      ts.forEachChild(node, scan)
-    }
-    scan(root)
-    return targets
-  }
 
   /** Identifiers that can reference the spec object at the create call: the
    * producer binding plus every local copy through an identifier chain
@@ -537,7 +698,7 @@ function registrySecretFactory(registrySource?: string): {
     .at(-1)
   if (!labels) throw new Error('Registry labels producer changed; rederive the frontend fixture')
   // Execution semantics: total managed-write detection for the spec scope.
-  executeRegistrySpecScope(specDeclaration, source)
+  executeRegistrySpecScope(specDeclaration, source, specObjectIdentifiers)
   const gatewaySource = ts.createSourceFile(
     GATEWAY_PATH,
     readFileSync(GATEWAY_PATH, 'utf8'),

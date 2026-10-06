@@ -50,7 +50,21 @@ it('rejects a managed write through a spec alias in the registry producer', () =
   )
 
   expect(() => registryMcpServerManaged(changedSource)).toThrow(
-    /unsupported registry managed write.*specAlias\['managed'\] = false/i
+    /unsupported registry managed write/i
+  )
+})
+
+it('rejects a guarded callback managed write skipped by scope execution', () => {
+  const source = readFileSync(REGISTRY_PATH, 'utf8')
+  const marker = '        // Stdio servers may need a custom command'
+  expect(source).toContain(marker)
+  const changedSource = source.replace(
+    marker,
+    `        if (Array.isArray(registrationHooks)) {\n          registrationHooks.forEach(hook => { hook['managed'] = false })\n        }\n\n${marker}`
+  )
+
+  expect(() => registryMcpServerManaged(changedSource)).toThrow(
+    /unsupported registry managed write/i
   )
 })
 
