@@ -6,7 +6,7 @@ import { Pool } from 'pg'
 import request from 'supertest'
 import { initDb } from '../src/db.js'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
-import { passwordLoginData, verifyUserPassword } from '../src/services/directory/login.js'
+import { verifyUserPassword } from '../src/services/directory/login.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
