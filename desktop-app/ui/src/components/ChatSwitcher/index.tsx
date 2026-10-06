@@ -110,7 +110,9 @@ export function ChatSwitcher({
               : activeUnavailable
                 ? unavailableReason === 'conversation'
                   ? 'Conversation unavailable. Close this tab or select to retry.'
-                  : 'Could not verify host access. Select to retry.'
+                  : unavailableReason === 'team-context'
+                    ? 'Team changed while this conversation was opening. Select to retry.'
+                    : 'Could not verify host access. Select to retry.'
                 : undefined
         }
         variant="soft"
@@ -151,7 +153,9 @@ export function ChatSwitcher({
                         : unavailable
                           ? unavailableReason === 'conversation'
                             ? `${tab.title}, conversation unavailable`
-                            : `${tab.title}, access check failed`
+                            : unavailableReason === 'team-context'
+                              ? `${tab.title}, team changed`
+                              : `${tab.title}, access check failed`
                           : undefined
                   }
                   aria-busy={pending || loading || undefined}
@@ -171,7 +175,9 @@ export function ChatSwitcher({
                         : unavailable
                           ? unavailableReason === 'conversation'
                             ? 'Conversation unavailable. Close this tab or select to retry.'
-                            : 'Could not verify host access. Select to retry.'
+                            : unavailableReason === 'team-context'
+                              ? 'Team changed while this conversation was opening. Select to retry.'
+                              : 'Could not verify host access. Select to retry.'
                           : undefined
                   }
                   variant="ghost"

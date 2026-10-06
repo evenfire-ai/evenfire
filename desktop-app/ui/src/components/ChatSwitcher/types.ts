@@ -17,7 +17,7 @@ export type ChatSwitcherProps = {
   /** Chat tab whose Host access check failed and can be retried. */
   unavailableTabId?: string | null
   /** Why the unavailable chat tab cannot currently be opened. */
-  unavailableReason?: 'access' | 'conversation'
+  unavailableReason?: 'access' | 'conversation' | 'team-context'
   onSelect: (id: string) => void
   onNewChat: () => void
   /**

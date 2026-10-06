@@ -1,16 +1,24 @@
 // @vitest-environment jsdom
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { QueryClientProvider, useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
+import { deferred as makeDeferred } from '@hooks/domain/__tests__/__fixtures__/catalogFixtures'
+import { ipcGenericForbidden } from '@hooks/domain/__tests__/__fixtures__/ipcErrors'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
+  createEmptyWorkspaceTabsState,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
@@ -27,7 +35,8 @@ import {
   resolveDeniedMessage,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
-import type { AppNotification } from '@/uiTypes'
+import type { AppNotification, NavItem } from '@/uiTypes'
+import { ChatStore } from '../../../src/chatStore'
 
 // The universal tab store now lives inside the controller (single writer;
 // `navItem` derives from the active tab). These tests mock the controller, so
@@ -76,6 +85,7 @@ function activateChatState(
 const sidebarHarness = vi.hoisted(() => ({
   props: null as null | {
     onOpenSandboxUiApp?: (app: { appRef: string; label: string; defaultPath: string }) => void
+    onSelect?: (item: NavItem) => void
   },
 }))
 const sandboxUiPageHarness = vi.hoisted(() => ({
@@ -104,6 +114,9 @@ const appHeaderHarness = vi.hoisted(() => ({
   openNotification: null as null | ((notification: AppNotification) => Promise<void>),
   notifications: [] as AppNotification[],
   unreadNotificationCount: 0,
+}))
+const navigationHarness = vi.hoisted(() => ({
+  selectChatAgent: null as null | ((agentRef: string, options?: { chatId?: string }) => void),
 }))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
@@ -139,9 +152,11 @@ vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 // than hand-written controller state.
 vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
+  const { useNavigationContext } = await import('@contexts/NavigationContext')
   return {
     ChatPage: () => {
       const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
+      navigationHarness.selectChatAgent = useNavigationContext().handleSelectChatAgent
       return (
         <div
           data-testid="chat-page-surface"
@@ -232,27 +247,55 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   })
   // Faithful to the real controller: nav is a store action. `navItem` is derived
   // (useReactiveController), so these drive the store — never set navItem.
-  const handleNavSelect = vi.fn((item: AppController['navItem']) => {
-    beginNavigationIntent()
-    if (item === DESKTOP_ROUTES.chat) {
-      controller.selectedAgent = null
-      clearAppsPicker()
-      setWorkspaceTabs((state: WorkspaceState) => focusChatState(state, nextWorkspaceTabId()))
-    } else if (item === DESKTOP_ROUTES.apps) {
-      showAppsPicker()
-    } else if (item === DESKTOP_ROUTES.files) {
-      clearAppsPicker()
-      setWorkspaceTabs((state: WorkspaceState) => openFilesTab(state, { id: nextWorkspaceTabId() }))
-    } else {
-      const section = settingsSectionForRoute(item)
-      if (section) {
-        if (section === 'agents') controller.selectedAgent = null
+  const handleNavSelect = vi.fn(
+    (
+      item: AppController['navItem'],
+      options?: {
+        onFocusedChat?: (focusedChat: { agentRef: string; chatId: string }) => boolean
+      }
+    ) => {
+      beginNavigationIntent()
+      if (item === DESKTOP_ROUTES.chat) {
+        controller.selectedAgent = null
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) => focusChatState(state, nextWorkspaceTabId()))
+        const focused = activeWorkspaceTab(controller.workspaceTabs)
+        if (focused?.kind === 'chat' && focused.chat?.agentRef && focused.chat.chatId) {
+          const identity = { agentRef: focused.chat.agentRef, chatId: focused.chat.chatId }
+          if (options?.onFocusedChat?.(identity) !== true) {
+            controller.handleSelectChatAgent(identity.agentRef, {
+              chatId: identity.chatId,
+              selectLatest: false,
+            })
+          }
+        }
+      } else if (item === DESKTOP_ROUTES.apps) {
+        showAppsPicker()
+      } else if (item === DESKTOP_ROUTES.files) {
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
-          openSettingsTab(state, { id: nextWorkspaceTabId(), section })
+          openFilesTab(state, { id: nextWorkspaceTabId() })
         )
+      } else {
+        const section = settingsSectionForRoute(item)
+        if (section) {
+          if (section === 'agents') controller.selectedAgent = null
+          clearAppsPicker()
+          setWorkspaceTabs((state: WorkspaceState) =>
+            openSettingsTab(state, { id: nextWorkspaceTabId(), section })
+          )
+        }
       }
+      forceControllerRender()
     }
+  )
+  const setSelectedAgent = vi.fn((agent: string | null) => {
+    controller.selectedAgent = agent
+    forceControllerRender()
+  })
+  const clearActiveChat = vi.fn(() => {
+    controller.activeChatId = null
+    controller.activeMessages = []
     forceControllerRender()
   })
   // Faithful to the real vm: selecting an agent/chat moves the primary
@@ -288,10 +331,11 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // otherwise it ejects to the full-screen chat route.
   const handleOpenNotification = vi.fn(
     (
-      notification: { kind?: string; agentName?: string; chatId?: string },
+      notification: { id?: string; kind?: string; agentName?: string; chatId?: string },
       options: { keepNavItem?: boolean } = {}
     ) => {
       beginNavigationIntent()
+      if (notification.id) controller.markNotificationRead(notification.id)
       // Faithful routing: workflow notifications navigate to the plugins section;
       // sdk notifications navigate away without touching the agent chat state.
       if (notification.kind === 'workflow_completed') {
@@ -330,6 +374,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',
+    teamContextRevision: 0,
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
     selectedAgentRoute: null,
@@ -351,6 +396,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     latestChatSessions: [],
     notifications: [],
     toasts: [],
+    markNotificationRead: vi.fn(),
     pendingApprovals: [],
     composerImageAttachments: [],
     composerReferenceAttachments: [],
@@ -375,6 +421,18 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     isHostAccessBlocked: vi.fn(() => false),
     isChatDeleted: vi.fn(() => false),
     verifyHostAccess: vi.fn(async () => true),
+    verifyConversationAccess: vi.fn(async () => ({
+      authorityScope: 'test-scope',
+      teamContextRevision: controller.teamContextRevision,
+      hostAuthorityEpoch: 0,
+    })),
+    isConversationAccessProofCurrent: vi.fn(
+      (_agentRef: string, _chatId: string, proof: { teamContextRevision: number }) =>
+        proof.teamContextRevision === controller.teamContextRevision
+    ),
+    isConversationAccessVerifiedForCurrentTeam: vi.fn(() => false),
+    setSelectedAgent,
+    clearActiveChat,
     beginNavigationIntent,
     isNavigationIntentCurrent,
     handleSelectChatAgent,
@@ -524,7 +582,1190 @@ describe('App workspace chat tabs with held Host access', () => {
 
   afterEach(() => {
     cleanup()
+    navigationHarness.selectChatAgent = null
     delete (window as { clerum?: unknown }).clerum
+  })
+
+  async function mountProductionApp(
+    options: {
+      agentNames?: string[]
+      chats?: Array<[agentRef: string, chatId: string]>
+      holdTeamDirectory?: boolean
+      nullSessionTeam?: boolean
+      onLoadSessionMessages?: (
+        chatId: string,
+        args: Parameters<typeof window.clerum.rpc.loadSessionMessages>,
+        load: typeof window.clerum.rpc.loadSessionMessages
+      ) => ReturnType<typeof window.clerum.rpc.loadSessionMessages>
+    } = {}
+  ) {
+    const originalBridge = window.clerum
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: options.agentNames ?? ['agent-x'],
+    })
+    const directory = makeDeferred<{ items: []; currentTeamId: string }>()
+    if (options.nullSessionTeam) {
+      handle.getSessionState.mockResolvedValue({
+        authenticated: true,
+        me: {
+          id: 'user-1',
+          email: 'test@clerum.io',
+          name: 'Test User',
+          teamId: null,
+          teamName: null,
+          role: null,
+        },
+      })
+    }
+    if (options.holdTeamDirectory) {
+      handle.teamDirectory.mockImplementation(() => directory.promise)
+    }
+    for (const [agentRef, chatId] of options.chats ?? []) {
+      await clerum.chat.create(agentRef, chatId)
+      await clerum.chat.upsertMessages(agentRef, chatId, [
+        {
+          id: `${chatId}-message`,
+          role: 'user',
+          content: `${chatId} cached content`,
+          timestamp: 1,
+        },
+      ])
+    }
+    clerum.chat.getIndex.mockImplementation(agentRef => clerum.readIndex(agentRef))
+    if (options.onLoadSessionMessages) {
+      const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+      clerum.rpc.loadSessionMessages.mockImplementation((...args) =>
+        options.onLoadSessionMessages!(
+          String(args[2]),
+          args as Parameters<typeof window.clerum.rpc.loadSessionMessages>,
+          originalLoad
+        )
+      )
+    }
+    Object.assign(window.clerum, {
+      app: originalBridge.app,
+      shortcuts: originalBridge.shortcuts,
+      sandboxUi: originalBridge.sandboxUi,
+    })
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    let currentLive!: AppController
+    const live = new Proxy({} as AppController, {
+      get: (_target, property) => currentLive[property as keyof AppController],
+      set: (_target, property, value) => {
+        ;(currentLive as unknown as Record<PropertyKey, unknown>)[property] = value
+        return true
+      },
+    })
+    vi.mocked(useAppController).mockImplementation(() => {
+      currentLive = actual.useAppController()
+      return live
+    })
+    desktopQueryClient.clear()
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(live.initialExperienceLoading).toBe(false))
+    return {
+      clerum,
+      handle,
+      directory,
+      get live() {
+        return live
+      },
+    }
+  }
+
+  async function addProductionChatTabs(
+    live: AppController,
+    chats: Array<[agentRef: string, chatId: string]>
+  ) {
+    act(() => {
+      live.setWorkspaceTabs(state =>
+        chats.reduce(
+          (next, [agentRef, chatId]) =>
+            openChatTab(next, {
+              id: `tab-${chatId}`,
+              agentRef,
+              chatId,
+              title: chatId,
+            }),
+          state
+        )
+      )
+    })
+    await waitFor(() =>
+      expect(live.workspaceTabs.tabs.filter(tab => tab.kind === 'chat')).toHaveLength(chats.length)
+    )
+  }
+
+  async function clickProductionChatTab(live: AppController, chatId: string) {
+    const tabIndex = live.workspaceTabs.tabs.findIndex(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === chatId
+    )
+    expect(tabIndex).toBeGreaterThanOrEqual(0)
+    fireEvent.click(document.querySelectorAll('.chat-view-tab__select')[tabIndex]!)
+    await waitFor(() =>
+      expect(
+        live.workspaceTabs.tabs.find(tab => tab.id === live.workspaceTabs.activeTabId)?.chat?.chatId
+      ).toBe(chatId)
+    )
+  }
+
+  async function selectProductionChatTab(live: AppController, chatId: string) {
+    const tabIndex = live.workspaceTabs.tabs.findIndex(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === chatId
+    )
+    expect(tabIndex).toBeGreaterThanOrEqual(0)
+    const buttons = document.querySelectorAll('.chat-view-tab__select')
+    fireEvent.click(buttons[tabIndex]!)
+    await waitFor(() => expect(live.activeChatId).toBe(chatId))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+  }
+
+  it('keeps a failed selected tab focused when an unrelated tab closes', async () => {
+    currentController.workspaceTabs = openChatTab(currentController.workspaceTabs, {
+      id: 'chat-d',
+      agentRef: 'agent-a',
+      chatId: 'chat-d',
+      title: 'Conversation D',
+    })
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation unavailable' }))
+    await act(async () => verificationChecks[0]!.resolve(false))
+    expect(
+      currentController.workspaceTabs.tabs.find(
+        tab => tab.id === currentController.workspaceTabs.activeTabId
+      )?.id
+    ).toBe('chat-b')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Conversation D' }))
+    act(() => {
+      currentController.chatList = [{ ...CHAT_TAB_A, title: 'Renamed A' }, CHAT_TAB_B]
+      forceControllerRender()
+    })
+
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-b')
+    expect(
+      screen
+        .getByRole('button', { name: 'Conversation unavailable, access check failed' })
+        .getAttribute('aria-pressed')
+    ).toBe('true')
+  })
+
+  it('keeps the last selected conversation through a delayed team-directory update', async () => {
+    const chats: Array<[string, string]> = [
+      ['agent-x', 'chat-1'],
+      ['agent-x', 'chat-2'],
+      ['agent-x', 'chat-3'],
+      ['agent-x', 'chat-4'],
+      ['agent-x', 'chat-5'],
+    ]
+    const { clerum, directory, live } = await mountProductionApp({
+      holdTeamDirectory: true,
+      nullSessionTeam: true,
+      chats,
+    })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-4')
+    await waitFor(() => expect(live.activeChatId).toBe('chat-4'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-4'
+    )
+
+    await act(async () => directory.resolve({ items: [], currentTeamId: 'team-1' }))
+    await waitFor(() => expect(live.getCurrentTeamId()).toBe('team-1'))
+    expect(live.teamContextRevision).toBe(0)
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+
+    expect(live.activeChatId).toBe('chat-4')
+    expect(
+      live.workspaceTabs.tabs.find(tab => tab.id === live.workspaceTabs.activeTabId)?.chat?.chatId
+    ).toBe('chat-4')
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-4'
+    )
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalled()
+  })
+
+  it('advances the team-context revision after a confirmed team switch', async () => {
+    const { handle, live } = await mountProductionApp({ nullSessionTeam: true })
+    await waitFor(() => expect(live.getCurrentTeamId()).toBe('team-1'))
+    const initialRevision = live.teamContextRevision ?? 0
+
+    // Keep the session's team null so the directory supplies the current team
+    // both before and after this confirmed switch.
+    handle.switchTeam.mockImplementation(async teamId => {
+      handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: teamId })
+      return {
+        authenticated: true,
+        me: {
+          id: 'user-1',
+          email: 'test@clerum.io',
+          name: 'Test User',
+          teamId: null,
+          teamName: null,
+          role: null,
+        },
+      }
+    })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2' })
+    })
+
+    await waitFor(() => {
+      expect(live.getCurrentTeamId()).toBe('team-2')
+      expect(live.teamContextRevision).toBeGreaterThan(initialRevision)
+    })
+  })
+
+  it('drops explicit chat selection authority when the team context changes', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'Conversation A',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-b',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    currentController = makeController({
+      workspaceTabs: selectWorkspaceTab(chatB, 'chat-a'),
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-a',
+      chatList: CHAT_TAB_ACCESS_LIST,
+      latestChatSessions: [CHAT_TAB_B_LATEST],
+      isHostAccessBlocked: vi.fn(() => false),
+      verifyHostAccess: vi.fn(async () => true),
+    } as Partial<AppController>)
+    render(<App />)
+
+    const selectChatAgent = vi.spyOn(currentController, 'handleSelectChatAgent')
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation B' }))
+    await waitFor(() => expect(currentController.activeChatId).toBe('chat-b'))
+    const selectionCallCount = selectChatAgent.mock.calls.length
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-b')
+
+    act(() => {
+      currentController.activeChatId = null
+      currentController.selectedAgent = null
+      currentController.teamContextRevision += 1
+      forceControllerRender()
+    })
+
+    expect(currentController.activeChatId).toBeNull()
+    expect(selectChatAgent).toHaveBeenCalledTimes(selectionCallCount)
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-b')
+    expect(
+      screen.getByRole('button', { name: 'Conversation B, team changed' }).getAttribute('title')
+    ).toBe('Team changed while this conversation was opening. Select to retry.')
+    expect(
+      screen.getByText(
+        'The team changed while this conversation was opening. Select this tab to retry.'
+      )
+    ).toBeTruthy()
+  })
+
+  it('checks the exact chat in the new team before revealing its cached transcript', async () => {
+    const chats: Array<[string, string]> = [['agent-x', 'chat-1']]
+    const { clerum, handle, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-1')
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBeGreaterThan(0))
+    const denied = await ipcGenericForbidden('rpc:loadSessionMessages')
+    const exactChatCheck =
+      makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (args[2] === 'chat-1') {
+        await exactChatCheck.promise
+        throw denied
+      }
+      return originalLoad(...args)
+    })
+
+    const tabIndex = live.workspaceTabs.tabs.findIndex(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-1'
+    )
+    fireEvent.click(document.querySelectorAll('.chat-view-tab__select')[tabIndex]!)
+    const exactChatCallCount = () =>
+      clerum.rpc.loadSessionMessages.mock.calls.filter(
+        args => args[0] === 'agent-x' && args[1] === 'agent-x' && args[2] === 'chat-1'
+      ).length
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1')
+    )
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    fireEvent.click(document.querySelectorAll('.chat-view-tab__select')[tabIndex]!)
+    await waitFor(() => expect(exactChatCallCount()).toBeGreaterThanOrEqual(2))
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    await act(async () => exactChatCheck.resolve({ agent: 'agent-x', chatId: 'chat-1', turns: [] }))
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'The team changed while this conversation was opening. Select this tab to retry.'
+        )
+      ).toBeTruthy()
+    )
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    fireEvent.click(document.querySelectorAll('.chat-view-tab__select')[tabIndex]!)
+    await waitFor(() => expect(exactChatCallCount()).toBeGreaterThanOrEqual(3))
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
+  it('discards an exact-chat authorization if the team changes again while it is pending', async () => {
+    const chats: Array<[string, string]> = [['agent-x', 'chat-1']]
+    const { clerum, handle, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-1')
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+
+    const authorization = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (args[2] === 'chat-1') return authorization.promise
+      return originalLoad(...args)
+    })
+    const tabIndex = live.workspaceTabs.tabs.findIndex(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-1'
+    )
+    fireEvent.click(document.querySelectorAll('.chat-view-tab__select')[tabIndex]!)
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1')
+    )
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-3' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-3', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBe(2))
+    await act(async () => authorization.resolve({ agent: 'agent-x', chatId: 'chat-1', turns: [] }))
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'The team changed while this conversation was opening. Select this tab to retry.'
+        )
+      ).toBeTruthy()
+    )
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
+  it('rechecks an older chat tab after switching away across team contexts', async () => {
+    const chats: Array<[string, string]> = [
+      ['agent-x', 'chat-1'],
+      ['agent-x', 'chat-2'],
+    ]
+    const { clerum, handle, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    act(() => live.handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(live.navItem).toBe(DESKTOP_ROUTES.files))
+    await clickProductionChatTab(live, 'chat-1')
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+    await waitFor(() => expect(live.navItem).toBe(DESKTOP_ROUTES.files))
+
+    const authorization = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (args[2] === 'chat-2') return authorization.promise
+      return originalLoad(...args)
+    })
+    await clickProductionChatTab(live, 'chat-2')
+
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-2')
+    )
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    await act(async () => authorization.resolve({ agent: 'agent-x', chatId: 'chat-2', turns: [] }))
+    await waitFor(() => expect(live.activeChatId).toBe('chat-2'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-2'
+    )
+  })
+
+  it('verifies access before restoring a stale chat into the drawer', async () => {
+    const chats: Array<[string, string]> = [['agent-x', 'chat-1']]
+    const { clerum, handle, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-1')
+    await waitFor(() => expect(live.activeChatId).toBe('chat-1'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+
+    const denied = await ipcGenericForbidden('rpc:loadSessionMessages')
+    const authorization = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (args[2] === 'chat-1') {
+        await authorization.promise
+        throw denied
+      }
+      return originalLoad(...args)
+    })
+
+    act(() => live.handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(live.navItem).toBe(DESKTOP_ROUTES.files))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    await waitFor(() =>
+      expect(
+        clerum.rpc.loadSessionMessages.mock.calls.some(
+          args => args[0] === 'agent-x' && args[1] === 'agent-x' && args[2] === 'chat-1'
+        )
+      ).toBe(true)
+    )
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    await act(async () => authorization.resolve({ agent: 'agent-x', chatId: 'chat-1', turns: [] }))
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'The team changed while this conversation was opening. Select this tab to retry.'
+        )
+      ).toBeTruthy()
+    )
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
+  it('waits for exact chat access before opening a cross-team notification', async () => {
+    const chats: Array<[string, string]> = [
+      ['agent-x', 'chat-1'],
+      ['agent-x', 'chat-2'],
+    ]
+    const { clerum, handle, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-1')
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    const authorization = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (args[2] === 'chat-2') return authorization.promise
+      return originalLoad(...args)
+    })
+
+    let opening!: Promise<void>
+    act(() => {
+      opening = appHeaderHarness.openNotification!({
+        id: 'cross-team-chat-open',
+        kind: 'assistant_reply',
+        agentName: 'agent-x',
+        chatId: 'chat-2',
+        teamId: 'team-2',
+        text: 'new-team reply',
+        timestamp: Date.now(),
+        read: false,
+      } as AppNotification)
+    })
+
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-2')
+    )
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).not.toBe(
+      'chat-2'
+    )
+
+    await act(async () => {
+      authorization.resolve({ agent: 'agent-x', chatId: 'chat-2', turns: [] })
+      await opening
+    })
+    await waitFor(() => expect(live.activeChatId).toBe('chat-2'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-2'
+    )
+  })
+
+  it('keeps a same-team notification on its requested tab while stale access is checked', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-1', 'alpha'), {
+      id: 'chat-1',
+      agentRef: 'alpha',
+      chatId: 'chat-1',
+      title: 'First chat',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-2',
+      agentRef: 'alpha',
+      chatId: 'chat-2',
+      title: 'Second chat',
+    })
+    const authorization =
+      makeDeferred<Awaited<ReturnType<AppController['verifyConversationAccess']>>>()
+    currentController = makeController({
+      workspaceTabs: selectWorkspaceTab(chatB, 'chat-1'),
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      chatList: CHAT_LIST,
+      verifyConversationAccess: vi.fn(() => authorization.promise),
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => {
+      currentController.teamContextRevision += 1
+      currentController.setWorkspaceTabs(state => ({ ...state }))
+    })
+
+    await act(async () => {
+      await appHeaderHarness.openNotification!({
+        id: 'same-team-stale-chat-open',
+        kind: 'assistant_reply',
+        agentName: 'alpha',
+        chatId: 'chat-2',
+        teamId: 'team-a',
+        text: 'reply',
+        timestamp: Date.now(),
+        read: false,
+      } as AppNotification)
+    })
+
+    expect(currentController.verifyConversationAccess).toHaveBeenCalledWith('alpha', 'chat-2')
+    expect(currentController.handleOpenNotification).not.toHaveBeenCalled()
+    expect(currentController.markNotificationRead).toHaveBeenCalledWith('same-team-stale-chat-open')
+    expect(currentController.activeWorkspaceTab?.id).toBe('chat-2')
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    await act(async () => authorization.resolve(null))
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'The team changed while this conversation was opening. Select this tab to retry.'
+        )
+      ).toBeTruthy()
+    )
+    expect(currentController.activeWorkspaceTab?.id).toBe('chat-2')
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
+  it('checks a stale active chat before composer.focus reveals it', async () => {
+    let commandHandler: Parameters<typeof window.clerum.shortcuts.onCommand>[0] | null = null
+    const currentBridge = window.clerum
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        ...currentBridge,
+        shortcuts: {
+          ...currentBridge.shortcuts,
+          onCommand: vi.fn((callback: typeof commandHandler) => {
+            commandHandler = callback
+            return vi.fn()
+          }),
+        },
+      },
+    })
+
+    const chat = openChatTab(createWorkspaceTabsState('chat-1', 'alpha'), {
+      id: 'chat-1',
+      agentRef: 'alpha',
+      chatId: 'chat-1',
+      title: 'First chat',
+    })
+    const authorization =
+      makeDeferred<Awaited<ReturnType<AppController['verifyConversationAccess']>>>()
+    currentController = makeController({
+      workspaceTabs: chat,
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      chatList: CHAT_LIST,
+      verifyConversationAccess: vi.fn(() => authorization.promise),
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => {
+      currentController.teamContextRevision += 1
+      currentController.setWorkspaceTabs(state => ({ ...state }))
+    })
+
+    act(() => commandHandler?.('composer.focus', 'host'))
+    expect(currentController.verifyConversationAccess).toHaveBeenCalledWith('alpha', 'chat-1')
+    expect(currentController.activeWorkspaceTab?.id).toBe('chat-1')
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    await act(async () => authorization.resolve(null))
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'The team changed while this conversation was opening. Select this tab to retry.'
+        )
+      ).toBeTruthy()
+    )
+    expect(currentController.activeWorkspaceTab?.id).toBe('chat-1')
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
+  it('routes sidebar Chats focus through exact access verification for a stale chat', async () => {
+    const chat = openChatTab(createWorkspaceTabsState('chat-1', 'alpha'), {
+      id: 'chat-1',
+      agentRef: 'alpha',
+      chatId: 'chat-1',
+      title: 'First chat',
+    })
+    const settings = openSettingsTab(chat, { id: 'settings-1', section: 'settings' })
+    const authorization =
+      makeDeferred<Awaited<ReturnType<AppController['verifyConversationAccess']>>>()
+    currentController = makeController({
+      workspaceTabs: settings,
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      chatList: CHAT_LIST,
+      verifyConversationAccess: vi.fn(() => authorization.promise),
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => {
+      currentController.teamContextRevision += 1
+      currentController.setWorkspaceTabs(state => ({ ...state }))
+    })
+
+    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.chat))
+
+    expect(currentController.verifyConversationAccess).toHaveBeenCalledWith('alpha', 'chat-1')
+    expect(currentController.handleSelectChatAgent).not.toHaveBeenCalled()
+    expect(currentController.activeWorkspaceTab?.id).toBe('chat-1')
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    await act(async () =>
+      authorization.resolve({
+        authorityScope: 'test-scope',
+        teamContextRevision: currentController.teamContextRevision,
+        hostAuthorityEpoch: 0,
+      })
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+        'chat-1'
+      )
+    )
+  })
+
+  it('checks a stale focused chat before the sidebar Chats route reveals it', async () => {
+    const chats: Array<[string, string]> = [['agent-x', 'chat-1']]
+    const { clerum, handle, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-1')
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      await live.handleEnsureTeamContext({ teamId: 'team-2', announce: false })
+    })
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+
+    act(() => live.handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(live.navItem).toBe(DESKTOP_ROUTES.files))
+
+    const authorization = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (args[2] === 'chat-1') return authorization.promise
+      return originalLoad(...args)
+    })
+
+    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.chat))
+
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1')
+    )
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+    expect(live.activeWorkspaceTab?.chat?.chatId).toBe('chat-1')
+
+    await act(async () => authorization.resolve({ agent: 'agent-x', chatId: 'chat-1', turns: [] }))
+    await waitFor(() => expect(live.activeChatId).toBe('chat-1'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-1'
+    )
+  })
+
+  it('rejects an exact-chat proof that is stale at the reveal boundary', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'Conversation A',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-b',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    currentController = makeController({
+      workspaceTabs: selectWorkspaceTab(chatB, 'chat-a'),
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-a',
+      chatList: CHAT_TAB_ACCESS_LIST,
+      verifyConversationAccess: vi.fn(async () => ({
+        authorityScope: 'old-scope',
+        teamContextRevision: 1,
+        hostAuthorityEpoch: 0,
+      })),
+      isConversationAccessProofCurrent: vi.fn(() => false),
+      isConversationAccessVerifiedForCurrentTeam: vi.fn(() => false),
+      isNavigationIntentCurrent: vi.fn(() => true),
+    } as Partial<AppController>)
+    render(<App />)
+
+    act(() => {
+      currentController.teamContextRevision = 1
+      currentController.activeChatId = null
+      currentController.selectedAgent = null
+      forceControllerRender()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation B' }))
+
+    await waitFor(() =>
+      expect(currentController.verifyConversationAccess).toHaveBeenCalledWith('agent-b', 'chat-b')
+    )
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'The team changed while this conversation was opening. Select this tab to retry.'
+        )
+      ).toBeTruthy()
+    )
+    expect(currentController.isConversationAccessProofCurrent).toHaveBeenCalledWith(
+      'agent-b',
+      'chat-b',
+      expect.objectContaining({ teamContextRevision: 1 })
+    )
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
+  it('keeps the newest tab focused when an older cross-team notification finishes switching teams', async () => {
+    const chats: Array<[string, string]> = [
+      ['agent-x', 'chat-1'],
+      ['agent-x', 'chat-2'],
+      ['agent-x', 'chat-3'],
+    ]
+    const { handle, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-1')
+    const switchResult = makeDeferred<{
+      authenticated: true
+      me: {
+        id: string
+        email: string
+        name: string
+        teamId: string
+        teamName: string
+        role: string
+      }
+    }>()
+    handle.switchTeam.mockReturnValue(switchResult.promise)
+
+    let opening!: Promise<void>
+    act(() => {
+      opening = appHeaderHarness.openNotification!({
+        id: 'old-team-open',
+        kind: 'assistant_reply',
+        agentName: 'agent-x',
+        chatId: 'chat-2',
+        teamId: 'team-2',
+        text: 'older notification',
+        timestamp: Date.now(),
+        read: false,
+      } as AppNotification)
+    })
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenCalledWith('team-2'))
+
+    await clickProductionChatTab(live, 'chat-3')
+    expect(live.activeChatId).toBe('chat-3')
+    const initialRevision = live.teamContextRevision ?? 0
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      switchResult.resolve({
+        authenticated: true,
+        me: {
+          id: 'user-1',
+          email: 'test@clerum.io',
+          name: 'Test User',
+          teamId: 'team-2',
+          teamName: 'Team 2',
+          role: 'member',
+        },
+      })
+      await opening
+    })
+
+    expect(
+      live.workspaceTabs.tabs.find(tab => tab.id === live.workspaceTabs.activeTabId)?.chat?.chatId
+    ).toBe('chat-3')
+    const selectedTab = live.workspaceTabs.tabs.find(
+      tab => tab.id === live.workspaceTabs.activeTabId
+    )!
+    expect(
+      screen
+        .getByRole('button', { name: `${selectedTab.title}, team changed` })
+        .getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(
+      screen.getByText(
+        'The team changed while this conversation was opening. Select this tab to retry.'
+      )
+    ).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+    await waitFor(() => expect(live.teamContextRevision).toBeGreaterThan(initialRevision))
+  })
+
+  it('selects a neighboring drawer chat when closing the displayed conversation', () => {
+    const chatOne = openChatTab(createWorkspaceTabsState('chat-one', 'alpha'), {
+      id: 'tab-chat-1',
+      agentRef: 'alpha',
+      chatId: 'chat-1',
+      title: 'First chat',
+    })
+    const chatTwo = openChatTab(chatOne, {
+      id: 'tab-chat-2',
+      agentRef: 'alpha',
+      chatId: 'chat-2',
+      title: 'Second chat',
+    })
+    currentController = makeController({
+      workspaceTabs: openFilesTab(chatTwo, { id: 'files-tab' }),
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-2',
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Close Second chat' }))
+
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(currentController.activeChatId).toBe('chat-1')
+    expect(
+      currentController.workspaceTabs.tabs.some(
+        tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-2'
+      )
+    ).toBe(false)
+  })
+
+  it('clears the displayed conversation when closing the final full-screen chat tab', () => {
+    const tabs = openChatTab(createWorkspaceTabsState('last-chat', 'agent-x'), {
+      id: 'last-chat-tab',
+      agentRef: 'agent-x',
+      chatId: 'last-chat',
+      title: 'Last chat',
+    })
+    currentController = makeController({
+      workspaceTabs: tabs,
+      selectedAgent: 'agent-x',
+      activeChatId: 'last-chat',
+    } as Partial<AppController>)
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Last chat' }))
+
+    expect(currentController.workspaceTabs.tabs).toHaveLength(0)
+    expect(currentController.selectedAgent).toBeNull()
+    expect(currentController.activeChatId).toBeNull()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+    expect(screen.getByText('Nothing open')).toBeTruthy()
+  })
+
+  it('clears a closed active chat when a non-chat workspace tab becomes active', () => {
+    const chat = openChatTab(createEmptyWorkspaceTabsState(), {
+      id: 'closed-chat-tab',
+      agentRef: 'agent-x',
+      chatId: 'closed-chat',
+      title: 'Closed chat',
+    })
+    const tabs = selectWorkspaceTab(openFilesTab(chat, { id: 'files-tab' }), 'closed-chat-tab')
+    currentController = makeController({
+      workspaceTabs: tabs,
+      selectedAgent: 'agent-x',
+      activeChatId: 'closed-chat',
+    } as Partial<AppController>)
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Closed chat' }))
+
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('files')
+    expect(currentController.selectedAgent).toBeNull()
+    expect(currentController.activeChatId).toBeNull()
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(screen.getByRole('button', { name: 'Open chats' })).toBeTruthy()
+    expect(
+      currentController.workspaceTabs.tabs.some(
+        tab => tab.kind === 'chat' && tab.chat?.chatId === 'closed-chat'
+      )
+    ).toBe(false)
+  })
+
+  it('restores a launch-origin chat after its last drawer tab was closed', () => {
+    const tabs = openChatTab(createWorkspaceTabsState('origin-chat', 'alpha'), {
+      id: 'origin-chat-tab',
+      agentRef: 'alpha',
+      chatId: 'origin-chat',
+      title: 'Origin chat',
+    })
+    currentController = makeController({
+      workspaceTabs: tabs,
+      selectedAgent: 'alpha',
+      activeChatId: 'origin-chat',
+    } as Partial<AppController>)
+    render(<App />)
+
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Close Origin chat' }))
+    expect(
+      currentController.workspaceTabs.tabs.some(
+        tab => tab.kind === 'chat' && tab.chat?.chatId === 'origin-chat'
+      )
+    ).toBe(false)
+
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    expect(
+      currentController.workspaceTabs.tabs.some(
+        tab => tab.kind === 'chat' && tab.chat?.chatId === 'origin-chat'
+      )
+    ).toBe(true)
+  })
+
+  it('keeps a pending drawer selection when closing the previously displayed chat', async () => {
+    const drawerB = openChatTab(createWorkspaceTabsState('seed-chat', 'agent-a'), {
+      id: 'drawer-chat-b',
+      agentRef: 'agent-a',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    const chatC = openChatTab(drawerB, {
+      id: 'drawer-chat-c',
+      agentRef: 'agent-b',
+      chatId: 'chat-c',
+      title: 'Conversation C',
+    })
+    currentController.workspaceTabs = openFilesTab(chatC, { id: 'files-tab' })
+    currentController.selectedAgent = 'agent-a'
+    currentController.activeChatId = 'chat-b'
+    currentController.chatList = [
+      ...CHAT_TAB_ACCESS_LIST,
+      { ...CHAT_TAB_B, id: 'chat-c', title: 'Conversation C' },
+    ]
+    forceControllerRender()
+    render(<App />)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(
+      screen
+        .getAllByRole('option', { name: 'Conversation unavailable' })
+        .find(option => option.getAttribute('aria-selected') === 'false')!
+    )
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open chats' }).getAttribute('aria-busy')).toBe(
+      'true'
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Conversation B' }))
+    act(() => {
+      currentController.chatList = [
+        { ...CHAT_TAB_A, title: 'Renamed A' },
+        { ...CHAT_TAB_B, id: 'chat-c', title: 'Renamed C' },
+      ]
+      forceControllerRender()
+    })
+
+    expect(currentController.workspaceTabs.activeTabId).toBe('files-tab')
+    expect(currentController.workspaceTabs.tabs.some(tab => tab.id === 'chat-b')).toBe(false)
+    expect(
+      currentController.workspaceTabs.tabs.some(
+        tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-b'
+      )
+    ).toBe(false)
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain(
+      'Conversation unavailable'
+    )
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+
+    await act(async () => verificationChecks[0]!.resolve(false))
+    expect(screen.getByText('Could not verify access. Select this tab to retry.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain(
+      'Conversation unavailable'
+    )
+  })
+
+  it('shows terminal access failure after an older conversation load succeeds', async () => {
+    const chats: Array<[string, string]> = [
+      ['agent-a', 'chat-1'],
+      ['agent-b', 'chat-2'],
+      ['agent-c', 'chat-3'],
+      ['agent-a', 'chat-4'],
+      ['agent-b', 'chat-5'],
+    ]
+    const { clerum, live } = await mountProductionApp({
+      agentNames: ['agent-a', 'agent-b', 'agent-c'],
+      chats,
+    })
+    await addProductionChatTabs(live, chats)
+
+    const lateOne = makeDeferred<void>(),
+      lateTwo = makeDeferred<void>()
+    const originalLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    const denied = await ipcGenericForbidden('rpc:loadSessionMessages')
+    let firstOne = true,
+      firstTwo = true
+    clerum.rpc.loadSessionMessages.mockClear()
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      const chatId = String(args[2])
+      if (chatId === 'chat-1' && firstOne) {
+        firstOne = false
+        await lateOne.promise
+      }
+      if (chatId === 'chat-2' && firstTwo) {
+        firstTwo = false
+        await lateTwo.promise
+      }
+      if (chatId === 'chat-3') throw denied
+      return originalLoad(...args)
+    })
+
+    for (const chatId of ['chat-1', 'chat-2']) {
+      await clickProductionChatTab(live, chatId)
+      await waitFor(() =>
+        expect(clerum.rpc.loadSessionMessages.mock.calls.some(args => args[2] === chatId)).toBe(
+          true
+        )
+      )
+    }
+    await clickProductionChatTab(live, 'chat-3')
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages.mock.calls.some(args => args[2] === 'chat-3')).toBe(
+        true
+      )
+    )
+    await act(async () => {
+      lateTwo.resolve()
+      lateOne.resolve()
+      await Promise.resolve()
+    })
+
+    expect(
+      live.workspaceTabs.tabs.find(tab => tab.id === live.workspaceTabs.activeTabId)?.chat?.chatId
+    ).toBe('chat-3')
+    expect(screen.queryByText('Loading conversation…')).toBeNull()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+    expect(screen.getByText('Could not verify access. Select this tab to retry.')).toBeTruthy()
+  })
+
+  it('ignores a failed old notification open after the user selects another tab', async () => {
+    const chats = Array.from(
+      { length: 5 },
+      (_, index) => ['agent-x', `chat-${index + 1}`] as [string, string]
+    )
+    const { clerum, live } = await mountProductionApp({ chats })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-5')
+    await waitFor(() => expect(live.activeChatId).toBe('chat-5'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+
+    const tempRoot = await mkdtemp(join(tmpdir(), 'desktop-chat-selection-'))
+    const blockedStorePath = join(tempRoot, 'not-a-directory')
+    await writeFile(blockedStorePath, 'fixture file blocks ChatStore directory creation')
+    const blockedStore = new ChatStore(blockedStorePath)
+    const pendingWrite = makeDeferred<void>()
+    let firstA = true
+    clerum.chat.setLastActive.mockClear()
+    clerum.chat.setLastActive.mockImplementation(async (agentRef, chatId) => {
+      if (chatId === 'chat-1' && firstA) {
+        firstA = false
+        await pendingWrite.promise
+        await blockedStore.setLastActiveChatId(agentRef, chatId)
+      }
+    })
+    try {
+      let opening!: Promise<void>
+      act(() => {
+        opening = appHeaderHarness.openNotification!({
+          id: 'old-open',
+          kind: 'assistant_reply',
+          agentName: 'agent-x',
+          chatId: 'chat-1',
+          text: 'reply',
+          timestamp: Date.now(),
+          read: false,
+        } as AppNotification)
+      })
+      await waitFor(() =>
+        expect(clerum.chat.setLastActive.mock.calls.some(([, chatId]) => chatId === 'chat-1')).toBe(
+          true
+        )
+      )
+      await clickProductionChatTab(live, 'chat-2')
+      await clickProductionChatTab(live, 'chat-3')
+      await waitFor(() => expect(live.activeChatId).toBe('chat-3'))
+      await act(async () => {
+        pendingWrite.resolve()
+        await opening
+      })
+
+      expect(live.activeChatId).toBe('chat-3')
+      expect(
+        live.workspaceTabs.tabs.find(tab => tab.id === live.workspaceTabs.activeTabId)?.chat?.chatId
+      ).toBe('chat-3')
+      expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+        'chat-3'
+      )
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
   })
 
   it('focuses a held chat immediately and keeps it focused through denial and reconciliation', async () => {
@@ -705,6 +1946,59 @@ describe('App workspace chat tabs with held Host access', () => {
     expect(screen.queryByTestId('chat-page-surface')).toBeNull()
   })
 
+  it('does not replay a selected conversation after it is marked deleted', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'Conversation A',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-a',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    let deleted = false
+    currentController = makeController({
+      workspaceTabs: selectWorkspaceTab(chatB, 'chat-a'),
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-a',
+      chatList: [CHAT_TAB_A, { ...CHAT_TAB_A, id: 'chat-b', title: 'Conversation B' }],
+      isChatDeleted: vi.fn(
+        (agentRef: string, chatId: string) =>
+          deleted && agentRef === 'agent-a' && chatId === 'chat-b'
+      ),
+    } as Partial<AppController>)
+    render(<App />)
+
+    const selectChatAgent = vi.spyOn(currentController, 'handleSelectChatAgent')
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation B' }))
+    await waitFor(() => expect(currentController.activeChatId).toBe('chat-b'))
+    const selectionCallCount = selectChatAgent.mock.calls.length
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-b')
+
+    act(() => {
+      deleted = true
+      currentController.activeChatId = 'chat-a'
+      forceControllerRender()
+    })
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Conversation B, conversation unavailable' })
+      ).toBeTruthy()
+    )
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-b')
+    expect(selectChatAgent).toHaveBeenCalledTimes(selectionCallCount)
+    expect(
+      screen.getByText(
+        'This conversation is no longer available. Close this tab or select it to retry.'
+      )
+    ).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+  })
+
   it('keeps a verified same-agent tab selected during chat-list reconciliation', async () => {
     const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
       id: 'chat-a',
@@ -852,6 +2146,151 @@ describe('App workspace chat tabs with held Host access', () => {
       'chat-b'
     )
   })
+
+  it('clears a stale unavailable drawer selection when a notification opens another chat', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'First chat',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-b',
+      chatId: 'chat-b',
+      title: 'Second chat',
+    })
+    const settings = openSettingsTab(chatB, { id: 'settings-1', section: 'settings' })
+    currentController = makeController({
+      workspaceTabs: settings,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-a',
+      chatList: CHAT_TAB_ACCESS_LIST,
+      isHostAccessBlocked: vi.fn((agentRef: string) => agentRef === 'agent-b'),
+      verifyHostAccess: vi.fn(async () => false),
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Conversation unavailable' }))
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Conversation unavailable, access check failed' })
+      ).toBeTruthy()
+    )
+
+    await act(async () => {
+      await appHeaderHarness.openNotification!({
+        id: 'new-chat-open',
+        kind: 'assistant_reply',
+        agentName: 'agent-a',
+        chatId: 'chat-a',
+        text: 'reply',
+        timestamp: Date.now(),
+        read: false,
+      } as AppNotification)
+    })
+
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain(
+      'Conversation A'
+    )
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).not.toContain(
+      'Conversation unavailable'
+    )
+  })
+
+  it('clears a stale unavailable drawer selection when chat navigation selects another chat', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'First chat',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-b',
+      chatId: 'chat-b',
+      title: 'Second chat',
+    })
+    const settings = openSettingsTab(chatB, { id: 'settings-1', section: 'settings' })
+    currentController = makeController({
+      workspaceTabs: settings,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-a',
+      chatList: CHAT_TAB_ACCESS_LIST,
+      isHostAccessBlocked: vi.fn((agentRef: string) => agentRef === 'agent-b'),
+      verifyHostAccess: vi.fn(async () => false),
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(navigationHarness.selectChatAgent).toBeTypeOf('function')
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Conversation unavailable' }))
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Conversation unavailable, access check failed' })
+      ).toBeTruthy()
+    )
+
+    act(() => navigationHarness.selectChatAgent?.('agent-a', { chatId: 'chat-a' }))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+        'chat-a'
+      )
+    )
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain(
+      'Conversation A'
+    )
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).not.toContain(
+      'Conversation unavailable'
+    )
+  })
+
+  it('clears the stale unavailable selection when creating a new drawer chat', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'Conversation A',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-b',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    const settings = openSettingsTab(chatB, { id: 'settings-1', section: 'settings' })
+    currentController = makeController({
+      workspaceTabs: settings,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-a',
+      verifyConversationAccess: vi.fn(async () => null),
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    act(() => {
+      currentController.teamContextRevision += 1
+      currentController.activeChatId = null
+      currentController.selectedAgent = null
+      forceControllerRender()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Conversation B' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Conversation B, team changed' })).toBeTruthy()
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ New chat' }))
+
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).not.toContain(
+      'Conversation B'
+    )
+    expect(screen.queryByRole('button', { name: 'Conversation B, team changed' })).toBeNull()
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe('')
+  })
 })
 
 describe('App chat drawer — reopen preserves the last-viewed chat', () => {
@@ -935,6 +2374,51 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  it('closing the displayed drawer chat selects an open neighboring conversation', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { rerender } = render(<App />)
+
+    // Open both chats, return to chat-1, then launch the app with its drawer.
+    act(() => {
+      currentController.activeChatId = 'chat-2'
+      rerender(<App />)
+    })
+    act(() => {
+      currentController.activeChatId = 'chat-1'
+      rerender(<App />)
+    })
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+
+    // A notification or ChatPage session-list action selects chat-2 outside the
+    // drawer tab handler, so the controller identity is the only selection hint.
+    act(() => {
+      currentController.activeChatId = 'chat-2'
+      rerender(<App />)
+    })
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Second chat' }))
+
+    expect(currentController.activeChatId).toBe('chat-1')
+    expect(currentController.workspaceTabs.tabs.some(tab => tab.id === 'chat-2')).toBe(false)
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
+    expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith(
+      'alpha',
+      expect.objectContaining({ chatId: 'chat-1', keepNavItem: true })
+    )
   })
 
   it('hides already-delivered notifications after a Host is revoked', () => {
@@ -1580,8 +3064,7 @@ describe('App app-tab title — live document.title (mini-spec 06 §2)', () => {
 describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3)', () => {
   let currentController: AppController
   let openGfsResourceCb:
-    | ((resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void)
-    | null
+    ((resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void) | null
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -1661,8 +3144,7 @@ describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3
 describe('App plugin previewable handoff — routes through resolveGfsPreview (R1-H3)', () => {
   let currentController: AppController
   let openGfsResourceCb:
-    | ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void)
-    | null
+    ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void) | null
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -2546,6 +4028,41 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
 
     // Still exactly one blank chat tab — the toggles never stacked new ones.
     expect(blankChatCount()).toBe(1)
+  })
+
+  it('allows a new blank chat after closing the drawer’s final blank tab', async () => {
+    const tabs = openFilesTab(createWorkspaceTabsState('blank-chat', 'alpha'), {
+      id: 'files-tab',
+    })
+    currentController = makeController({
+      workspaceTabs: tabs,
+      selectedAgent: 'alpha',
+      activeChatId: null,
+    } as Partial<AppController>)
+    render(<App />)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close New chat' }))
+    expect(
+      currentController.workspaceTabs.tabs.some(
+        tab => tab.kind === 'chat' && tab.chat?.agentRef === 'alpha' && !tab.chat.chatId
+      )
+    ).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ New chat' }))
+
+    expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith(
+      'alpha',
+      expect.objectContaining({ selectLatest: false, keepNavItem: true })
+    )
+    await waitFor(() =>
+      expect(
+        currentController.workspaceTabs.tabs.some(
+          tab => tab.kind === 'chat' && tab.chat?.agentRef === 'alpha' && !tab.chat.chatId
+        )
+      ).toBe(true)
+    )
   })
 
   // R5 + DEC-2: the drawer is global; switching between non-chat kinds keeps it

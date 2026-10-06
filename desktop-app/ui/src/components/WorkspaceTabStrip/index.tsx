@@ -171,7 +171,9 @@ export function WorkspaceTabStrip({
                         : unavailable
                           ? unavailableReason === 'conversation'
                             ? `${tab.title}, conversation unavailable`
-                            : `${tab.title}, access check failed`
+                            : unavailableReason === 'team-context'
+                              ? `${tab.title}, team changed`
+                              : `${tab.title}, access check failed`
                           : tab.title
                   }
                   aria-busy={pending || loading || undefined}
@@ -189,7 +191,9 @@ export function WorkspaceTabStrip({
                         : unavailable
                           ? unavailableReason === 'conversation'
                             ? 'Conversation unavailable. Close this tab or select to retry.'
-                            : 'Could not verify host access. Select to retry.'
+                            : unavailableReason === 'team-context'
+                              ? 'Team changed while this conversation was opening. Select to retry.'
+                              : 'Could not verify host access. Select to retry.'
                           : undefined
                   }
                   variant="ghost"
