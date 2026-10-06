@@ -9,10 +9,15 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
+import { listHostSecrets } from '../../../control-api/src/routes/admin/hostSecrets'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
 import { materializeHostResource } from '../../test/fixtures/contextResource'
 import { ToastProvider } from '../Toast'
+
+vi.mock('../../../control-api/src/config', () => ({
+  config: { hostSecretLabelKey: 'clerum.io/host-secret', hostSecretLabelValue: 'true' },
+}))
 
 const replaceMock = vi.fn()
 const pushMock = vi.fn()
@@ -148,6 +153,22 @@ function detailBundle(bundleHost: TestHost, secrets = defaultSecretResources) {
     agentUsers: [],
     agentTeams: [],
   }
+}
+
+function produceHostSecretResources(name: string, keys: string[]) {
+  return listHostSecrets({
+    listSecrets: async () => [
+      {
+        metadata: {
+          name,
+          labels: {
+            'clerum.io/host-secret': 'true',
+          },
+        },
+        keys,
+      },
+    ],
+  } as Parameters<typeof listHostSecrets>[0])
 }
 
 function setupApiMocks(
@@ -673,6 +694,105 @@ describe('HostDetailsPage current model and credential flow', () => {
     expect(
       screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
     ).toHaveTextContent('gpt-5.4-mini')
+  })
+
+  it('preserves a Grok provider and model when selecting a provider-less Secret', async () => {
+    const grokModel = { provider: 'grok-subscription', name: 'grok-4.6' }
+    const brokerHost = materializeHostResource(
+      {
+        metadata: { name: 'foo' },
+        spec: {
+          host: 'foo-display',
+          contextRef: 'ctx',
+          secretRef: '',
+          channels: [],
+          model: Object.assign(grokModel, { connectionRef: 'team-grok' }),
+        },
+      },
+      { metadata: { resourceVersion: 'rv-form-load' } }
+    )
+    const brokerSecretResources = await produceHostSecretResources('custom-secret', [
+      'some-custom-key',
+    ])
+    vi.mocked(api.apiGet).mockImplementation(async path => {
+      if (path.endsWith('/connections/team-grok/models')) {
+        return { models: [{ model: 'grok-4.6', enabled: true, stale: false }] }
+      }
+      if (path.includes('/grok-subscription/connections')) {
+        return {
+          connections: [
+            {
+              connectionKey: 'team-grok',
+              displayName: 'Team Grok',
+              status: 'connected',
+              credentialRevision: 1,
+              catalogRevision: 1,
+              accountFingerprint: 'account-fingerprint',
+              catalogStatus: 'ready',
+              catalogSyncedAt: '2026-09-01T00:00:00.000Z',
+              lastRefreshAt: '2026-09-01T00:00:00.000Z',
+              lastAuthAt: '2026-09-01T00:00:00.000Z',
+              refreshLockHeld: false,
+              defaultModel: 'grok-4.6',
+            },
+          ],
+        }
+      }
+      return { rows: [] }
+    })
+    vi.mocked(api.getLlmModels).mockResolvedValue({
+      rows: [
+        {
+          id: 'grok-grok-4-6',
+          provider: 'grok-subscription',
+          model: 'grok-4.6',
+          vendor: 'xAI',
+          display_name: null,
+          context_window_tokens: null,
+          enabled: true,
+          source: 'manual',
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+        ...modelCatalogRows,
+      ],
+    })
+    setupApiMocks(brokerHost, brokerHost, brokerSecretResources)
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Credential' }))
+    expect(
+      screen
+        .getByLabelText('Provider', { selector: '#llm-primary-provider' })
+        .querySelector('[data-provider]')
+    ).toHaveAttribute('data-provider', 'grok-subscription')
+    fireEvent.click(screen.getByRole('option', { name: /custom-secret/ }))
+
+    expect(
+      screen
+        .getByLabelText('Provider', { selector: '#llm-primary-provider' })
+        .querySelector('[data-provider]')
+    ).toHaveAttribute('data-provider', 'grok-subscription')
+    expect(
+      screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent('grok-4.6')
+
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+    const payload = findHostPutPayload() as { spec: Record<string, unknown> }
+    expect(payload.spec.model).toEqual({
+      provider: 'grok-subscription',
+      name: 'grok-4.6',
+      connectionRef: 'team-grok',
+    })
   })
 
   it('routes the secret editor to the credential picked in the dialog, not the saved one', async () => {

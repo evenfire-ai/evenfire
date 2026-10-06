@@ -922,10 +922,6 @@ export default function HostDetailsPage() {
       return
     }
     setSecretRefDraft(parsed.name)
-    setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-    setCodexModels([])
-    setGrokModels([])
-    setGrantCatalogError('')
     // Secret → provider sync (mirrors HostWizard.handleExistingSecretChange and
     // an explicit provider switch): when the picked secret carries provider
     // credentials (the same metadata that renders the option's provider icons),
@@ -939,6 +935,10 @@ export default function HostDetailsPage() {
       .map(provider => normalizeProvider(provider.id))
       .filter(provider => !isOauthBrokerProvider(provider))
     if (pickedProviders.length > 0) {
+      setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+      setCodexModels([])
+      setGrokModels([])
+      setGrantCatalogError('')
       if (!pickedProviders.includes(providerDraft)) {
         const nextProvider = pickedProviders[0]
         setProviderDraft(nextProvider)
@@ -949,9 +949,6 @@ export default function HostDetailsPage() {
           )
         )
       }
-    } else if (isOauthBrokerProvider(providerDraft)) {
-      setProviderDraft('openai')
-      setModelNameDraft(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
     }
   }
 
