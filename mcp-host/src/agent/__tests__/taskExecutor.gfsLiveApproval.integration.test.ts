@@ -1,16 +1,24 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { spawn } from 'child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
+import {
+  type StoreHandle,
+  makeSqliteStore,
+} from '../../core/conversation/persistence/__tests__/testHelpers'
+import { SqliteConversationStore } from '../../core/conversation/persistence/sqliteConversationStore'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
+import { MessageQueue } from '../../queue'
 import type { Task } from '../../queue/types'
+import { CronScheduler } from '../cronScheduler'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 
 // Observe process admission while retaining the real shell, registry, approval
@@ -28,6 +36,7 @@ const savedConfig = {
 }
 const stores: GfsDownloadStore[] = []
 const roots: string[] = []
+const sqliteHandles: StoreHandle[] = []
 
 beforeEach(() => {
   Object.assign(appConfig, {
@@ -40,9 +49,11 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  for (const handle of sqliteHandles.splice(0)) await handle.shutdown()
   for (const store of stores.splice(0)) await store.close()
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
   Object.assign(appConfig, savedConfig)
+  vi.unstubAllGlobals()
 })
 
 function shellCall(id: string, command: string): ToolCall {
@@ -54,7 +65,17 @@ const failingCommand = `${firstCommand}; exit 127`
 // Use the verified test runtime; no assumption about Python or an ambient Node.
 const secondCommand = `'${process.execPath.replace(/'/g, "'\\''")}' -e 'process.stdout.write("second-approved-result")'`
 
-async function scenario(calls: ToolCall[], guardrailAsk = false) {
+function riskyFollowUp(name: 'http_request' | 'cron_manage'): ToolCall {
+  if (name === 'http_request')
+    return { id: `${name}-follow-up`, name, arguments: { url: 'https://example.test/' } }
+  return { id: `${name}-follow-up`, name, arguments: { action: 'list' } }
+}
+
+async function scenario(
+  calls: ToolCall[],
+  guardrailAsk = false,
+  conversationManager = new ConversationManager()
+) {
   const root = await mkdtemp(join(tmpdir(), 'gfs-live-approval-'))
   roots.push(root)
   const callerWorkspace = join(root, 'caller')
@@ -62,6 +83,7 @@ async function scenario(calls: ToolCall[], guardrailAsk = false) {
   const store = new GfsDownloadStore(root)
   stores.push(store)
   await store.initialize()
+  const releaseReceiptOwner = vi.spyOn(store, 'releaseReceiptOwner')
   const processingLeases = store.processingLeaseProvider('gfs-caller')
   const acquireLease = vi.spyOn(processingLeases, 'acquireProcessingLease')
   const releaseLease = vi.spyOn(processingLeases, 'releaseProcessingLease')
@@ -89,7 +111,7 @@ async function scenario(calls: ToolCall[], guardrailAsk = false) {
   }
 
   const task: Task = {
-    id: 'gfs-live-shell-approval',
+    id: randomUUID(),
     source: 'channel',
     status: 'pending',
     priority: 'normal',
@@ -109,7 +131,6 @@ async function scenario(calls: ToolCall[], guardrailAsk = false) {
     responseCallback: vi.fn(async () => undefined),
   }
 
-  const conversationManager = new ConversationManager()
   const sessionKey = resolveTaskSessionKey(task)
   const conversation = await conversationManager.getOrCreate(sessionKey, {
     userId: task.sourceMessage!.sender,
@@ -152,7 +173,7 @@ async function scenario(calls: ToolCall[], guardrailAsk = false) {
       approvalTimeout: 30_000,
     },
     coreEvents: new SimpleEventEmitter(),
-    cronScheduler: null,
+    cronScheduler: new CronScheduler(new MessageQueue()),
     taskLifecycle: lifecycle,
     onApprovalNeeded,
     onComplete,
@@ -169,6 +190,7 @@ async function scenario(calls: ToolCall[], guardrailAsk = false) {
     providerCalls,
     acquireLease,
     releaseLease,
+    releaseReceiptOwner,
     onApprovalNeeded,
     onComplete,
     onFail,
@@ -187,10 +209,108 @@ it('requires live shell approval despite persistent shell auto-approval', async 
     tool_call_id: call.id,
     parameters: call.arguments,
   })
+
   expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
   expect(s.providerCalls).toHaveLength(1)
   expect(spawn).not.toHaveBeenCalled()
   expect(s.acquireLease).not.toHaveBeenCalled()
+})
+
+it.each(['http_request', 'cron_manage'] as const)(
+  'does not turn an exact GFS shell approval into turn-wide consent for %s',
+  async toolName => {
+    const fetchMock = vi.fn(async () => new Response('untrusted follow-up body', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const s = await scenario([shellCall('gfs-shell', firstCommand), riskyFollowUp(toolName)])
+    await s.executor.run()
+
+    expect(s.executor.pendingApproval).toMatchObject({
+      tool_name: 'shell_exec',
+      authorization_scope: 'exact_invocation',
+    })
+    await s.executor.resumeAfterApproval(false)
+
+    expect(s.onFail).not.toHaveBeenCalled()
+    expect(s.executor.executorState).toBe('waiting_approval')
+    expect(s.executor.pendingApproval).toMatchObject({ tool_name: toolName })
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(2)
+    expect(s.releaseReceiptOwner).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  }
+)
+
+it.each(['http_request', 'cron_manage'] as const)(
+  'cold-resumes SQLite NULL shell scope without granting the next %s from an old wildcard',
+  async followUp => {
+    const handle = makeSqliteStore()
+    sqliteHandles.push(handle)
+    const manager = new ConversationManager(handle.store)
+    const s = await scenario(
+      [shellCall('legacy-shell', firstCommand), riskyFollowUp(followUp)],
+      false,
+      manager
+    )
+    const listJobs = vi.spyOn(s.deps.cronScheduler!, 'getAllJobs')
+    const fetchMock = vi.fn(async () => new Response('Unexpected remote result'))
+    vi.stubGlobal('fetch', fetchMock)
+    await s.executor.run()
+    const saved = s.executor.pendingApproval!
+    // Model the migration's actual legacy column value on a row produced by the
+    // real persistSuspend path. A new cache forces the real select/reconstructor.
+    handle.worker.db
+      .prepare('UPDATE pending_approvals SET authorization_scope = NULL WHERE request_id = ?')
+      .run(saved.request_id)
+    s.conversation.auto_approved_tools.add('*')
+    const coldManager = new ConversationManager(
+      new SqliteConversationStore(handle.persistQueue, { cacheSize: 8 })
+    )
+    const coldConversation = await coldManager.getOrCreate(s.sessionKey)
+    expect(coldConversation).not.toBe(s.conversation)
+    expect(coldConversation.pending_approval?.authorization_scope).toBeUndefined()
+    expect(coldConversation.auto_approved_tools.size).toBe(0)
+    // A compatibility cache can also retain the old wildcard. Rehydration and
+    // resolution both fence it while preserving separately explicit grants.
+    coldConversation.auto_approved_tools = new Set(['*', 'trusted-server'])
+    const cold = new TaskExecutor(s.task, { ...s.deps, conversationManager: coldManager })
+    await cold.rehydrateWaitingApproval(s.sessionKey, coldConversation.pending_approval!)
+    await cold.resumeAfterApproval(true)
+
+    expect(s.onFail).not.toHaveBeenCalled()
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(cold.executorState).toBe('waiting_approval')
+    expect(cold.pendingApproval?.tool_name).toBe(followUp)
+    expect(coldConversation.auto_approved_tools).toEqual(new Set(['trusted-server']))
+    expect(listJobs).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  }
+)
+
+it('preserves separately explicit cron consent after a legacy SQLite shell resume', async () => {
+  const handle = makeSqliteStore()
+  sqliteHandles.push(handle)
+  const s = await scenario(
+    [shellCall('legacy-shell', firstCommand), riskyFollowUp('cron_manage')],
+    false,
+    new ConversationManager(handle.store)
+  )
+  await s.executor.run()
+  handle.worker.db
+    .prepare('UPDATE pending_approvals SET authorization_scope = NULL WHERE request_id = ?')
+    .run(s.executor.pendingApproval!.request_id)
+  const coldManager = new ConversationManager(
+    new SqliteConversationStore(handle.persistQueue, { cacheSize: 8 })
+  )
+  const coldConversation = await coldManager.getOrCreate(s.sessionKey)
+  coldConversation.auto_approved_tools = new Set(['*', 'cron_manage'])
+  const listJobs = vi.spyOn(s.deps.cronScheduler!, 'getAllJobs')
+  const cold = new TaskExecutor(s.task, { ...s.deps, conversationManager: coldManager })
+  await cold.rehydrateWaitingApproval(s.sessionKey, coldConversation.pending_approval!)
+  await cold.resumeAfterApproval(false)
+
+  expect(s.onFail).not.toHaveBeenCalled()
+  expect(cold.executorState).toBe('completed')
+  expect(listJobs).toHaveBeenCalledOnce()
+  expect(coldConversation.auto_approved_tools).toEqual(new Set(['cron_manage']))
 })
 
 const resumeCases = [
@@ -240,9 +360,9 @@ it.each(resumeCases)(
     if (firstExit === 127) expect(firstResult?.content).toContain('exit code 127')
     else expect(firstResult?.content).not.toContain('Command failed')
 
-    // Neither the residual pending snapshot nor the real wildcard/individual
-    // approvals authorize a new call, even with identical command text.
-    expect(s.conversation.auto_approved_tools).toEqual(new Set(['*', 'shell_exec']))
+    // Neither the residual pending snapshot nor the original persistent entry
+    // authorizes a new live call; exact consent creates no wildcard or new grant.
+    expect(s.conversation.auto_approved_tools).toEqual(new Set(['shell_exec']))
     expect(executor.executorState).toBe('waiting_approval')
     expect(executor.pendingApproval).toMatchObject({
       tool_name: secondCall.name,

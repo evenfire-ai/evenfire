@@ -64,7 +64,16 @@ export class ApprovalController implements LoopController {
     // Every model-generated live call needs a new delegate decision; retained
     // snapshot data and persistent approvals cannot authorize another invocation.
     if (this.liveApprovalTools.has(toolName)) {
-      return this.delegate.beforeTool(toolName, params)
+      const decision = this.delegate.beforeTool(toolName, params)
+      return typeof decision === 'object'
+        ? {
+            ...decision,
+            approval: {
+              ...decision.approval,
+              authorization_scope: 'exact_invocation',
+            },
+          }
+        : decision
     }
 
     // "Approve once, run all" — user approved any tool in this turn, auto-approve rest

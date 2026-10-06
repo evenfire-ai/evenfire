@@ -8,8 +8,7 @@ import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { NoopSafety } from '../../core/safety/__tests__/noopSafety'
 import { SpilloverStorage } from '../../core/spillover/storage'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
-import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
-import type { GfsProcessingLeaseProvider } from '../../internalTools/gfsProcessingLease'
+import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { SseProgressReporter, progressReporterRegistry } from '../../progress/sseProgressReporter'
@@ -27,17 +26,12 @@ const savedConfig = {
 }
 
 let callerWorkspace: string
+let store: GfsDownloadStore
 
-const processingLeases: GfsProcessingLeaseProvider = {
-  acquireProcessingLease: async () => ({
-    leaseId: 'gfs-output-bounds-lease',
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
-  }),
-  releaseProcessingLease: async () => undefined,
-}
-
-beforeEach(() => {
+beforeEach(async () => {
   callerWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-output-bounds-'))
+  store = new GfsDownloadStore(callerWorkspace)
+  await store.initialize()
   Object.assign(appConfig, {
     enableApproval: true,
     codexToolPresentation: 'direct',
@@ -46,7 +40,8 @@ beforeEach(() => {
   })
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await store.close()
   Object.assign(appConfig, savedConfig)
   fs.rmSync(callerWorkspace, { recursive: true, force: true })
 })
@@ -141,9 +136,9 @@ function makeScenario(options: {
     llmProvider: provider,
     mcpManager: null,
     workspaceService: undefined,
-    gfsDownloadStore: {} as GfsDownloadStore,
+    gfsDownloadStore: store,
     gfsCallerWorkspacePath: callerWorkspace,
-    gfsProcessingLeaseProvider: processingLeases,
+    gfsProcessingLeaseProvider: store.processingLeaseProvider('gfs-caller'),
     modelName: 'fixture-model',
     approvalConfig: {
       defaultPolicy: 'channel_users',

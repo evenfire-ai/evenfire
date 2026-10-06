@@ -80,7 +80,7 @@ export class ShellTool implements Tool {
    * subprocess shell expand them — mcp-host never substitutes in JS.
    */
   constructor(
-    private readonly workspacePath: string,
+    private readonly workspacePath: string | undefined,
     private readonly timeout: number,
     private readonly envAllowlist: string[],
     private readonly dynamicEnvProvider: () => Record<string, string> = () => ({}),
@@ -140,11 +140,23 @@ export class ShellTool implements Tool {
     return ShellTool.SIGKILL_GRACE_MS + 1000
   }
 
+  joinsAbortSettlement(): boolean {
+    return true
+  }
+
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     context?.signal?.throwIfAborted()
     const timeout = Math.min(this.timeout, context?.timeoutMs ?? this.timeout)
     const startTime = Date.now()
     const command = params.command as string
+    if (!this.workspacePath) {
+      return {
+        content:
+          'Managed shell unavailable: no verified caller workspace is available for this Host runtime.',
+        duration_ms: Date.now() - startTime,
+        is_error: true,
+      }
+    }
 
     if (STATE_DB_COMMAND_PATTERN.test(command)) {
       return {

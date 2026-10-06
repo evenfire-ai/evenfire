@@ -102,6 +102,7 @@ describe('GFS large-file tool routing', () => {
       downloadStore: store,
       callerIdentity: 'caller-a',
       callerWorkspacePath: callerWorkspace,
+      retentionOwnerId: 'large-file-task-owner',
     }).find(item => item.name === 'clerum__gfs_read')!
 
     const { outcome, parsed } = await result(tool, target)
@@ -150,6 +151,7 @@ describe('GFS large-file tool routing', () => {
       downloadStore: store,
       callerIdentity: 'caller-a',
       callerWorkspacePath: callerWorkspace,
+      retentionOwnerId: 'large-file-task-owner',
     }).find(item => item.name === 'clerum__gfs_read')!
 
     const { outcome } = await result(tool, target)
@@ -184,6 +186,7 @@ describe('GFS large-file tool routing', () => {
       downloadStore: store,
       callerIdentity: 'caller-a',
       callerWorkspacePath: '/tmp/caller-a',
+      retentionOwnerId: 'large-file-task-owner',
     }).find(item => item.name === 'clerum__gfs_download')!
 
     const { parsed } = await result(tool, target)
@@ -212,6 +215,7 @@ describe('GFS large-file tool routing', () => {
       downloadStore: store as unknown as GfsDownloadStore,
       callerIdentity: 'caller-a',
       callerWorkspacePath: callerWorkspace,
+      retentionOwnerId: 'large-file-task-owner',
     }).find(item => item.name === 'clerum__gfs_download')!
     const properties = tool.parameters.properties as {
       resourceId: { pattern?: string }
@@ -265,6 +269,7 @@ describe('GFS large-file tool routing', () => {
       downloadStore: store as unknown as GfsDownloadStore,
       callerIdentity: 'caller-a',
       callerWorkspacePath: callerWorkspace,
+      retentionOwnerId: 'large-file-task-owner',
     }).find(item => item.name === 'clerum__gfs_download')!
 
     const { outcome } = await result(tool, { drive: target.drive, resourceId: dashed })
@@ -300,6 +305,7 @@ describe('GFS large-file tool routing', () => {
         downloadStore: store,
         callerIdentity: 'caller-a',
         callerWorkspacePath: callerWorkspace,
+        retentionOwnerId: 'large-file-task-owner',
       }).find(item => item.name === 'clerum__gfs_read')!
 
       const { outcome, parsed } = await result(tool, target)
@@ -356,6 +362,7 @@ describe('GFS large-file tool routing', () => {
       downloadStore: fakeDownloadStore(),
       callerIdentity: 'caller-a',
       callerWorkspacePath: callerWorkspace,
+      retentionOwnerId: 'large-file-task-owner',
     }).find(item => item.name === 'clerum__gfs_read')!
 
     const { outcome, parsed } = await result(tool, target)
@@ -390,6 +397,7 @@ describe('GFS large-file tool routing', () => {
       downloadStore: store,
       callerIdentity: 'caller-a',
       callerWorkspacePath: callerWorkspace,
+      retentionOwnerId: 'large-file-task-owner',
     }).find(item => item.name === 'clerum__gfs_read')!
 
     const { parsed } = await result(tool, target)
@@ -416,6 +424,7 @@ describe('GFS large-file tool routing', () => {
       downloadStore: store,
       callerIdentity: 'caller-a',
       callerWorkspacePath: '/tmp/caller-a',
+      retentionOwnerId: 'large-file-task-owner',
     }).find(item => item.name === 'clerum__gfs_download')!
 
     const { parsed } = await result(tool, { ...target, expectedVersion: 7 })

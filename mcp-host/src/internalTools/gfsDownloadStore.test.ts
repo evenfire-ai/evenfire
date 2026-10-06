@@ -30,7 +30,12 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks()
-  await store.close().catch(() => undefined)
+  await store.close(0).catch(async () => {
+    // Fixture consumers are settled by test teardown, even for negative paths.
+    await (
+      store as unknown as { writerLease?: { release(): Promise<void> } }
+    ).writerLease?.release()
+  })
   await fs.rm(hostRoot, { recursive: true, force: true })
 })
 
@@ -141,6 +146,7 @@ describe('GFS download store', () => {
         source,
         sizeBytes: 1024,
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        retentionOwnerId: 'quota-fixture-task',
       })
       await fs.writeFile(path.join(callerRoot, transfer.partialPath), bytes)
       await store.publish(transfer.id, 'caller-a', createHash('sha256').update(bytes).digest('hex'))
@@ -161,6 +167,7 @@ describe('GFS download store', () => {
       callerBytes: { 'caller-a': GFS_FILE_LIMITS.callerRetainedFiles * 1024 },
       callerFiles: { 'caller-a': GFS_FILE_LIMITS.callerRetainedFiles },
     })
+    await store.releaseReceiptOwner('quota-fixture-task', 'caller-a')
   })
 
   it('reconstructs completed charges after process restart', async () => {
@@ -559,21 +566,20 @@ describe('GFS download store', () => {
     const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
     await probe.close()
     let grown = false
-    const originalStat = prototype.stat
-    vi.spyOn(prototype, 'stat').mockImplementation(async function (this: fs.FileHandle) {
-      const info = await originalStat.call(this)
-      if (!grown && info.isFile() && info.size === 7) {
-        grown = true
-        await fs.appendFile(path.join(callerRoot, receipt.path), 'X'.repeat(64))
-      }
-      return info
-    })
+    const sourceInfo = await fs.stat(path.join(callerRoot, receipt.path))
     let readBytes = 0
     const originalRead = prototype.read
     vi.spyOn(prototype, 'read').mockImplementation(async function (
       this: fs.FileHandle,
       ...values: unknown[]
     ) {
+      const info = await this.stat()
+      if (!grown && info.isFile() && info.ino === sourceInfo.ino) {
+        grown = true
+        // Mutate immediately after the reader admitted the original size, so
+        // the bounded EOF probe must detect growth before returning its bytes.
+        await fs.appendFile(path.join(callerRoot, receipt.path), 'X'.repeat(64))
+      }
       const result = await originalRead.apply(this, values as never)
       readBytes += result.bytesRead
       return result

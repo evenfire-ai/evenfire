@@ -115,6 +115,12 @@ export interface Tool {
   supportsProgressOutput?(): boolean
   /** Local implementation-owned bounded cleanup after execution is stopped. */
   timeoutCleanupMs?(): number
+  /**
+   * True when the concrete producer owns abort/timeout settlement and callers
+   * must await that promise instead of racing cancellation cleanup. Used by
+   * physical-execution tools whose late effects must be fenced before release.
+   */
+  joinsAbortSettlement?(): boolean
 }
 
 // ─── Channel ────────────────────────────────────────────────

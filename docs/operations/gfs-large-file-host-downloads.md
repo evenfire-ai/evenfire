@@ -77,6 +77,9 @@ parser through its existing `exceljs` dependency; no additional package or
 format-specific MCP tool is installed. Scripts must respect logical records,
 quoted delimiters, escaped quotes and embedded newlines, and report parse or
 execution failures instead of inferring a result from physical line counts.
+Programs compute and label the numeric quantities they report. Replies include
+every requested metadata name within the output budget, rather than estimating
+array lengths or offering the already requested list in a later message.
 
 If a surface has no caller-bound workspace/download capability, an admitted source is reported as `workspace_delivery_unavailable`; MCP Host does not fall back to returning an oversized body.
 
@@ -84,8 +87,10 @@ If a surface has no caller-bound workspace/download capability, an admitted sour
 
 For an available GFS file reference above 8 KiB, the Host prepares the workspace
 copy after the durable turn starts and before its first model request. It uses
-the same caller-bound `clerum__gfs_download` and effective approval controller as
-the interactive tool flow. If download approval is required, no copy is prepared
+the same caller-bound `clerum__gfs_download`, parameter validation, tool-lane
+guardrails, doom-loop accounting, decision events, result transformation and
+effective approval controller as the interactive tool flow. If policy denies the
+operation or download approval is required, no copy is prepared
 and the model receives a fixed unavailable code so the normal tool flow can
 request that approval. Human-entered paths still require GFS discovery before
 their pinned resource can be downloaded.
@@ -98,17 +103,39 @@ signal and remaining execution duration.
 Repeated preparation first reauthorizes the remote metadata, then verifies the
 retained caller, resource version, size, expiry, private file and checksum. A
 valid copy keeps its download ID, path and expiry without another content
-transfer or quota reservation. A missing or corrupt copy remains charged and
-unavailable until recovery; a replacement needs fresh GFS authorization.
+transfer or quota reservation. Preparation and downloads pin receipts to a
+trusted task owner while its model, pending approval or execution can still use
+them. Reuse adds an owner without replacing another task's pin. A terminal task
+releases its pin only after its executions settle. A positively absent copy may
+release its charge; corrupt or ambiguous copies remain charged until recovery.
+A replacement needs fresh GFS authorization.
+
+After a clean v2 writer restart with no unknown inherited execution, pins alone
+do not disable delivery. Fresh remote authorization and source version, size,
+checksum and caller validation can rebind the exact restored task owner to the
+new writer session. Other tasks keep their pins. A task ID alone is insufficient
+to recover access.
 
 `shell_exec` remains the trust boundary:
 
 - The working directory and `HOME` are the caller workspace. A supplied allowlisted or dynamic `HOME` cannot relocate execution outside it.
-- Each command requires live user approval.
+- Each command on this managed workspace surface requires fresh live user
+  approval. Consent authorizes the exact frozen invocation. It does not grant
+  `*`, another tool, an entire MCP server, a future shell call or unattended
+  execution. Deliberately turn-wide approvals on other surfaces retain their
+  proven scope. Persisted approvals without a scope are treated as individual
+  invocations.
 - Combined retained command output is bounded to 1 MiB. Live progress is bounded to 64 KiB. Exceeding the output bound terminates the process group and returns a truthful `output_limit_exceeded` result.
 - A processing lease is acquired after approval and before the child process is created. Integrity checks precede its processing budget, and file expiry, lease expiry and shutdown are rechecked after durable admission. If admission becomes unavailable, it is rolled back and no process starts.
 - The lease is released only after process-group termination and output settlement. A live execution protects its copy even if the durable deadline has elapsed; a timer alone does not prove physical termination. If release fails, the result is an error and cleanup protection remains.
-- Recovery without a live owner conservatively retains leases until their bounded deadline rather than assuming that a child died with the Host. A failed admission rollback retains its durable reservation until that deadline without registering an execution that never started.
+- Every execution lease is durable, including a command admitted before any
+  download exists. Recovery retains inherited executions and their protected
+  copies until physical settlement is proved. Neither a deadline, a PID probe
+  nor acquisition of the writer lock proves that a detached child terminated.
+  Unknown inherited executors disable managed downloads and execution for the
+  whole Host because Stage 1 executors share one UID. A failed admission rollback
+  remains charged when persistence is uncertain; it does not invent a running
+  execution.
 
 Unix directory modes and random directory names do not provide cross-caller OS isolation when a Host shares one UID. Approved arbitrary shell access remains a documented Stage 1 residual; stronger executor isolation is separate Stage 2 work.
 
@@ -118,15 +145,61 @@ Generic workspace tools reject direct and symlink-resolved access to `.gfs-downl
 
 ## Retention, quotas, and recovery
 
-- Completed copies expire after the configured TTL, seven days by default.
+- Completed copies have a configured maximum retention time, seven days by
+  default. Active executions and task receipt pins protect a copy past its TTL
+  until the consumer physically settles.
 - Host and caller quotas account for partial and completed files. Unknown or corrupt accounting fails closed rather than reporting zero usage.
 - A new store publishes an atomic schema-1 ledger before accepting transfers. Every existing ledger is parsed, including empty content; invalid record or lease maps are rejected.
 - A pre-existing store directory with a missing ledger is unknown accounting, including an interrupted first initialization before ledger publication. Startup rejects it and preserves retained bytes for operator recovery instead of silently resetting quota. This can require recovery after a bootstrap interruption.
 - Startup does not reconstruct an accounting directory deleted in its entirety while caller copies remain. Approved shell commands share the Host UID and can destroy this state; whole-store deletion remains outside the recovery guarantee and requires operator inventory of retained copies.
-- Only positively identified expired entries are deleted. A cleanup failure remains charged and is observable for recovery.
+- Admission may evict the oldest verified completed copies that have no active
+  transfer, execution lease or task receipt owner. The complete eviction plan
+  must satisfy both Host and caller quotas before any copy is removed. An
+  impossible or invalid request cannot evict another caller's files. Active,
+  pinned, inherited, corrupt and ambiguous entries are never pressure victims.
+  Quota limits still reject a request when no safe complete plan exists.
+- Only positively identified expired or pressure-evictable entries are deleted.
+  Quota charges are released only after positive filesystem absence. A cleanup
+  failure remains charged and is observable for recovery.
 - Startup reconciles the ledger and partial files before the capability is advertised.
 - Shutdown stops new admission, drains active work where possible, and leaves unproven lease/recovery state protected.
 - Pending and queued admission rechecks shutdown after asynchronous validation and persistence. Shutdown rechecks active ownership before releasing the writer lease.
+
+Writer exclusion uses the existing SQLite dependency with a kernel-held
+exclusive transaction. Its database inode and permanent versioned
+`writer.lock` fence remain in place across restart. Process death releases the
+kernel lock; it does not authorize deleting the fence or database. A second
+writer is refused even when Pods overlap on a single-node ReadWriteOnce PVC.
+Missing or changed ownership objects require operator recovery.
+Kubernetes permits multiple Pods on one node to use a ReadWriteOnce volume;
+the access mode does not provide writer exclusion. See
+[persistent-volume access modes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes).
+
+The store restores only the expected fsGroup expansion of an owned private
+inode, through an open descriptor, then revalidates its device, inode and path.
+It retains private 0700 directories and 0600 files. Unexpected permissions,
+owners, groups, symlinks and hard links remain errors.
+
+A store initialization failure leaves safe RPC capabilities running and records
+a recovery-required download state. Caller workspace binding remains in force.
+Managed shell execution fails before spawning a process; it cannot fall back to
+the Host's shared workspace or omit the processing lease.
+
+Verified contention with an active v2 writer and a valid unchanged ledger is a
+temporary state. The runtime retries that case up to 60 times at two-second
+intervals. Missing, legacy, corrupt or changed ownership is not a transient
+retry condition. Retry and cleanup use one supervised lifecycle, so a slow
+operation cannot overlap another or be lost from the shutdown join. Cleanup
+starts after successful acquisition, including acquisition after retry.
+Shutdown cancels scheduling, joins outstanding work and closes held writer
+ownership even when delivery is unavailable.
+
+Execution safety binding is independent of delivery eligibility. Cron,
+internal and approval-disabled tasks associated with this store cannot obtain
+an unleased shared-root shell during recovery. Trusted system tasks use the
+existing system workspace contract; a missing verified root denies spawning.
+Healthy unattended execution keeps its existing policy, while large workspace
+delivery still requires its attended caller and approval capability.
 
 ## Metrics
 
@@ -146,8 +219,72 @@ Labels contain bounded enums only. Caller, resource, download, command, path, co
 
 1. Apply the ConfigMap environment values through the supported HCC rollout. Updating a ConfigMap alone does not update an existing Pod.
 2. Verify the new values and `/metrics` endpoints from newly created Hosts.
-3. Before a writer-policy transition, disable new downloads, drain transfers and leases, and prove old Host/child processes cannot mutate the store.
-4. To roll back, restore the prior image/config without deleting `.gfs-downloads`. A rollback-compatible Host preserves the ledger and quota charges.
+3. Before a writer-policy transition, hold the owned runtime mutation lease,
+   stop the old Host and its executors, and prove they cannot mutate the store
+   for the entire transition. An absent legacy `writer.lock` is insufficient:
+   old empty-file execution leases were not durable. Existing legacy stores
+   therefore require an explicit operator transition; a genuinely new empty
+   store may initialize directly.
+4. To roll back, retain the versioned writer fence and database, ledger and
+   `.gfs-downloads`. An older image that does not understand the fence must
+   refuse writing. Removing that protection to run an older image requires the
+   same explicit physical fence and reviewed inventory; an image rollback
+   alone does not authorize the ownership transition.
 5. Cleanup or compaction during rollback requires separate operator authorization and a usage receipt. Do not treat an image rollback as permission to erase retained copies.
 
 If limits are lowered, existing retained copies remain charged and new admissions are rejected until usage falls below the new policy.
+
+## Explicit operator recovery protocol
+
+The local operator module exports `inspectGfsStoreRecovery` and
+`recoverGfsStoreUnderPhysicalFence`. It is not a Host RPC or model tool.
+Inspection returns reviewed ledger, writer-fence and source-inventory SHA-256
+values, counts and bounded opaque selection IDs. It does not return source
+contents, filenames, caller identities, commands or credentials.
+
+1. Resolve the exact Host workspace PVC, immutable workload identities, runtime
+   context and mutation-lease owner. Inventory every consumer of that PVC,
+   including terminating workloads and executors whose original Pod metadata
+   may have disappeared.
+2. Establish physical executor and writer settlement under an exclusive runtime
+   fence. Replica count, API Pod absence, PID reuse, time limits and SQLite lock
+   acquisition alone cannot establish it. Keep that fence active through the
+   whole operation and recheck it before filesystem effects.
+3. Inspect and review the three hashes and exact selection IDs. Unknown or
+   unjournaled caches fail inventory even with an empty ledger. Select only
+   executions proved settled, task owners proved terminal, and explicitly
+   approved unused partial copies. The default preserves copies and charges.
+4. Call `recoverGfsStoreUnderPhysicalFence` with those expected hashes,
+   `settledProcessingLeaseIds`, optional `terminalReceiptOwnerIds` and
+   `removeSettledTransferIds`, and the real `withPhysicalFence` provider.
+   A constant successful callback or an environment flag is not a provider.
+5. Verify the returned before/after receipt and preserved published copies.
+   Only an exact verified partial directory can be removed; its charge is
+   released after positive absence. A published `source` remains protected even
+   when a crash left its ledger entry without a completed state or checksum.
+   Verified copies with their original checksum can become reusable after all
+   unknown executions settle; corrupt copies remain charged and quarantined.
+6. Reopen the Host on the same retained PVC. Prove availability, authenticated
+   reuse, source/version equality and quotas before restoring ordinary traffic.
+   On interruption, preserve the last receipt and accounting objects, obtain a
+   new inventory and repeat the physical proof. Do not blindly remove the
+   sentinel, database or remaining copies.
+
+An inherited v2 store can be delivery-disabled while still holding its kernel
+writer lock. Its old main process must settle before an operator maintenance
+executor can acquire that writer. A legacy early-initialization failure does
+not hold the new lock. These are different transitions.
+
+For an owned single-node Minikube profile, a contained node stop/start can be
+part of the proof only after every prior PVC consumer is proved unable to escape
+the node PID namespace and restarted consumers are certified to run the new
+recovery-disabled code. Preserve the profile and PVC, use the supported
+`branch-profile-stop`/`branch-profile-start` entry points, and verify immutable
+node-container termination and restarted workload identities. Stopping and
+restarting alone is insufficient. The generic module does not provide an
+automatic Kubernetes fencing implementation; source tests do not certify this
+live runtime proof.
+The conditional containment argument uses Linux's termination of a PID
+namespace when its init exits; it still requires evidence that the old
+executors could not escape that namespace. See
+[PID namespaces](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).

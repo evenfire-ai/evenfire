@@ -44,6 +44,8 @@ export interface GfsDownloadOptions {
   store: GfsDownloadStore
   callerIdentity: string
   callerWorkspacePath: string
+  /** Host-derived task identity that pins retained bytes across approval waits. */
+  retentionOwnerId?: string
   signal?: AbortSignal
   timeoutMs?: number
   deadlineMs?: number
@@ -152,7 +154,7 @@ export async function downloadGfsContent(
       options.callerIdentity,
       source,
       sizeBytes,
-      { signal, deadlineMs }
+      { signal, deadlineMs, retentionOwnerId: options.retentionOwnerId }
     )
     if (retained) {
       assertPublicationOpen()
@@ -165,6 +167,7 @@ export async function downloadGfsContent(
       source,
       sizeBytes,
       expiresAt: new Date(Date.now() + GFS_FILE_LIMITS.retentionMs).toISOString(),
+      retentionOwnerId: options.retentionOwnerId,
     })
     const partialPath = path.join(options.callerWorkspacePath, transfer.partialPath)
     destination = await fs.open(partialPath, constants.O_WRONLY | constants.O_NOFOLLOW)

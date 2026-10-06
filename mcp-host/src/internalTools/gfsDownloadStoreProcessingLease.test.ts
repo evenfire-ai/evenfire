@@ -27,12 +27,21 @@ describe('GfsDownloadStore processing leases', () => {
     store = new GfsDownloadStore(hostRoot)
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks()
+    await store.close(0).catch(async () => {
+      // No fixture executor survives teardown; release the test-owned kernel lock.
+      await (
+        store as unknown as { writerLease?: { release(): Promise<void> } }
+      ).writerLease?.release()
+    })
     fs.rmSync(hostRoot, { recursive: true, force: true })
   })
 
-  async function publishFixture(expiresAt = new Date(Date.now() + 60_000).toISOString()) {
+  async function publishFixture(
+    expiresAt = new Date(Date.now() + 60_000).toISOString(),
+    retentionOwnerId?: string
+  ) {
     await store.initialize()
     const bytes = Buffer.from('fixture')
     const transfer = await store.createTransfer({
@@ -41,6 +50,7 @@ describe('GfsDownloadStore processing leases', () => {
       source,
       sizeBytes: bytes.byteLength,
       expiresAt,
+      retentionOwnerId,
     })
     fs.writeFileSync(path.join(callerRoot, transfer.partialPath), bytes)
     return store.publish(transfer.id, 'caller-a', createHash('sha256').update(bytes).digest('hex'))
@@ -65,21 +75,26 @@ describe('GfsDownloadStore processing leases', () => {
     ).rejects.toMatchObject({ code: 'caller_mismatch' })
   })
 
-  it('rejects a new lease for an expired retained file before cleanup', async () => {
-    const receipt = await publishFixture()
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(receipt.expiresAt))
-
-    await expect(
-      store.processingLeaseProvider('caller-a').acquireProcessingLease()
-    ).rejects.toMatchObject({ code: 'download_expired' })
-    expect(fs.existsSync(path.join(callerRoot, receipt.path))).toBe(true)
-    expect(store.debugRecord(receipt.id)).toBeDefined()
-
-    await store.cleanupExpired()
-    const lease = await store.processingLeaseProvider('caller-a').acquireProcessingLease()
-    await store.processingLeaseProvider('caller-a').releaseProcessingLease(lease)
-    await store.close()
-  })
+  it.each(['completed', 'missing-directory', 'empty-directory'] as const)(
+    'settles an expired unconsumed copy before ordinary shell admission (%s)',
+    async kind => {
+      const receipt = await publishFixture()
+      if (kind === 'missing-directory')
+        fs.rmSync(path.join(callerRoot, path.dirname(receipt.path)), {
+          recursive: true,
+          force: true,
+        })
+      if (kind === 'empty-directory') fs.unlinkSync(path.join(callerRoot, receipt.path))
+      vi.spyOn(Date, 'now').mockReturnValue(Date.parse(receipt.expiresAt))
+      const provider = store.processingLeaseProvider('caller-a')
+      const lease = await provider.acquireProcessingLease()
+      expect(store.debugRecord(receipt.id)).toBeUndefined()
+      expect(store.debugUsage().bytes).toBe(0)
+      expect(fs.existsSync(path.join(callerRoot, receipt.path))).toBe(false)
+      await provider.releaseProcessingLease(lease)
+      await store.close()
+    }
+  )
 
   it('rejects a new lease after expiry while preserving an admitted execution', async () => {
     const receipt = await publishFixture()
@@ -185,7 +200,7 @@ describe('GfsDownloadStore processing leases', () => {
     await store.close()
   })
 
-  it('retains a failed admission rollback until its durable deadline without a live execution', async () => {
+  it('retains a failed admission rollback after its deadline when durable release is unknown', async () => {
     const receipt = await publishFixture()
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now())
     const persistedStore = store as unknown as { persist: () => Promise<void> }
@@ -209,7 +224,8 @@ describe('GfsDownloadStore processing leases', () => {
 
     clock.mockReturnValue(Date.parse(reservations[0]!.expiresAt) + 1)
     await store.cleanupExpired()
-    expect(store.debugRecord(receipt.id)).toBeUndefined()
+    expect(store.debugRecord(receipt.id)).toBeDefined()
+    expect(store.debugUsage().bytes).toBe(7)
     await store.close()
   })
 
@@ -311,24 +327,16 @@ describe('GfsDownloadStore processing leases', () => {
     await restarted.close()
   })
 
-  it('recovers admission when an expired record has no directory left to clean', async () => {
-    const receipt = await publishFixture()
-    // Crash-after-rm analogue: the directory is gone while the ledger entry and
-    // its charge remain. Cleanup must reconcile them, not strand them.
-    fs.rmSync(path.join(callerRoot, path.dirname(receipt.path)), { recursive: true, force: true })
+  it('preserves an expired receipt in use during ordinary shell admission', async () => {
+    const receipt = await publishFixture(undefined, 'waiting-approval-task')
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse(receipt.expiresAt) + 1)
-
     await expect(
       store.processingLeaseProvider('caller-a').acquireProcessingLease()
     ).rejects.toMatchObject({ code: 'download_expired' })
-
+    expect(store.debugRecord(receipt.id)).toBeDefined()
+    expect(fs.existsSync(path.join(callerRoot, receipt.path))).toBe(true)
+    await store.releaseReceiptOwner('waiting-approval-task', 'caller-a')
     await store.cleanupExpired()
-
-    expect(store.debugRecord(receipt.id)).toBeUndefined()
-    expect(store.debugUsage()).toEqual({ bytes: 0, files: 0, callerBytes: {}, callerFiles: {} })
-
-    const lease = await store.processingLeaseProvider('caller-a').acquireProcessingLease()
-    await store.processingLeaseProvider('caller-a').releaseProcessingLease(lease)
     await store.close()
   })
 
@@ -351,13 +359,64 @@ describe('GfsDownloadStore processing leases', () => {
     )
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse(expired.expiresAt) + 1)
 
-    await expect(
-      store.processingLeaseProvider('caller-a').acquireProcessingLease()
-    ).rejects.toMatchObject({ code: 'download_expired' })
+    const providerA = store.processingLeaseProvider('caller-a')
+    const leaseA = await providerA.acquireProcessingLease()
+    await providerA.releaseProcessingLease(leaseA)
+    expect(store.debugRecord(expired.id)).toBeUndefined()
 
     const providerB = store.processingLeaseProvider('caller-b')
     const leaseB = await providerB.acquireProcessingLease()
     await providerB.releaseProcessingLease(leaseB)
+    await store.close()
+  })
+
+  it('rechecks failed-transfer ownership after a queued publication and lease admission', async () => {
+    await store.initialize()
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    fs.writeFileSync(path.join(callerRoot, transfer.partialPath), 'fixture')
+    const persistedStore = store as unknown as { persist: () => Promise<void> }
+    const persist = persistedStore.persist.bind(store)
+    let resume!: () => void
+    let entered!: () => void
+    const barrier = new Promise<void>(resolve => {
+      resume = resolve
+    })
+    const waiting = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    vi.spyOn(persistedStore, 'persist').mockImplementationOnce(async () => {
+      await persist()
+      entered()
+      await barrier
+    })
+    const published = store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    await waiting
+    const provider = store.processingLeaseProvider('caller-a')
+    const admission = provider.acquireProcessingLease()
+    const failed = expect(store.fail(transfer.id, 'caller-a')).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    resume()
+    const receipt = await published
+    const lease = await admission
+    await failed
+    expect(store.debugRecord(receipt.id)).toMatchObject({ state: 'completed' })
+    expect(fs.readFileSync(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
+    const ledger = JSON.parse(
+      fs.readFileSync(path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json'), 'utf8')
+    )
+    expect(ledger.processingLeases[lease.leaseId].recordIds).toContain(receipt.id)
+    await provider.releaseProcessingLease(lease)
     await store.close()
   })
 
@@ -393,7 +452,7 @@ describe('GfsDownloadStore processing leases', () => {
   })
 
   it('recovers a lease conservatively after a store restart', async () => {
-    const receipt = await publishFixture(new Date(Date.now() + 250).toISOString())
+    const receipt = await publishFixture(new Date(Date.now() + 60_000).toISOString())
     const lease = await store
       .processingLeaseProvider('caller-a')
       .acquireProcessingLease({ durationMs: 1_000 })
@@ -404,16 +463,18 @@ describe('GfsDownloadStore processing leases', () => {
       }
     ).liveProcessingLeases.delete(lease.leaseId)
     await store.close()
-    await new Promise(resolve => setTimeout(resolve, 300))
 
     const restarted = new GfsDownloadStore(hostRoot)
     await restarted.initialize()
     await restarted.cleanupExpired(Date.parse(receipt.expiresAt) + 1)
     expect(restarted.debugRecord(receipt.id)).toBeDefined()
 
-    await new Promise(resolve => setTimeout(resolve, 1_000))
     await restarted.cleanupExpired(Date.parse(lease.expiresAt) + 1)
-    expect(restarted.debugRecord(receipt.id)).toBeUndefined()
+    expect(restarted.debugRecord(receipt.id)).toMatchObject({ state: 'quarantined' })
+    expect(fs.existsSync(path.join(callerRoot, receipt.path))).toBe(true)
+    await expect(
+      restarted.processingLeaseProvider('caller-a').releaseProcessingLease(lease)
+    ).rejects.toMatchObject({ code: 'download_busy' })
     await restarted.close()
   })
 

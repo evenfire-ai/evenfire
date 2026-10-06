@@ -79,6 +79,10 @@ class InternalToolAdapter implements Tool {
   traceDescriptor() {
     return { kind: 'internal_tool' as const, sourceRef: 'mcp-host' }
   }
+
+  joinsAbortSettlement(): boolean {
+    return this.def.name === 'clerum__gfs_download' || this.def.name === 'clerum__gfs_read'
+  }
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
     try {
@@ -187,10 +191,14 @@ export class NativeToolRegistry implements ToolRegistry {
     // existing positional call sites stay valid; only taskExecutor passes it.
     activeLlmProvider?: LlmProvider,
     gfsDownload?: {
-      store: GfsDownloadStore
+      /** Omitted when the durable store is recovery-required; delivery then fails closed. */
+      store?: GfsDownloadStore
+      /** True only for attended, policy-eligible, healthy workspace delivery. */
+      deliveryAvailable: boolean
       callerIdentity: string
-      callerWorkspacePath: string
-      processingLeaseProvider?: GfsProcessingLeaseProvider
+      callerWorkspacePath?: string
+      processingLeaseProvider: GfsProcessingLeaseProvider
+      retentionOwnerId?: string
     }
   ) {
     // file_read/file_write are scoped to the per-user root when a ScopedWorkspace
@@ -214,7 +222,7 @@ export class NativeToolRegistry implements ToolRegistry {
     this.register(new FileWriteTool(fileToolsRoot))
     this.register(
       new ShellTool(
-        gfsDownload?.callerWorkspacePath ?? config.workspacePath,
+        gfsDownload ? gfsDownload.callerWorkspacePath : config.workspacePath,
         config.shellTimeout,
         config.envAllowlist,
         dynamicEnvProvider,
@@ -250,9 +258,10 @@ export class NativeToolRegistry implements ToolRegistry {
         ...(gfsScopes.has('gfs.read')
           ? buildGfsReadTools(gfsClient, {
               referencedFiles: referencedFilePins(sourceMessage?.fileReferenceResolutions),
-              downloadStore: gfsDownload?.store,
+              downloadStore: gfsDownload?.deliveryAvailable ? gfsDownload.store : undefined,
               callerIdentity: gfsDownload?.callerIdentity,
               callerWorkspacePath: gfsDownload?.callerWorkspacePath,
+              retentionOwnerId: gfsDownload?.retentionOwnerId,
             })
           : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),

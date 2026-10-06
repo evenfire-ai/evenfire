@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
+import type { GuardrailsConfig } from '../../core/guardrails'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import type { PreparedGfsFile } from '../../core/orchestration/turnContext'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
@@ -82,10 +83,12 @@ async function scenario(
     metadataVersion?: number
     startTurnFailure?: boolean
     requireDownloadApproval?: boolean
-    mode?: 'inspect' | 'script' | 'download-again'
+    mode?: 'inspect' | 'script' | 'download-again' | 'read-large'
     includeReference?: boolean
     sender?: string
     stallMetadata?: boolean
+    stallContent?: boolean
+    guardrails?: GuardrailsConfig
   } = {}
 ) {
   const root = await fs.mkdtemp(join(tmpdir(), 'gfs-preparation-task-'))
@@ -95,6 +98,8 @@ async function scenario(
   const store = new GfsDownloadStore(root)
   await store.initialize()
   stores.push(store)
+  const createTransfer = vi.spyOn(store, 'createTransfer')
+  const releaseReceiptOwner = vi.spyOn(store, 'releaseReceiptOwner')
   const { createGfscClient } = await vi.importActual<
     typeof import('../../internalTools/gfsClient')
   >('../../internalTools/gfsClient')
@@ -104,9 +109,30 @@ async function scenario(
   const metadataEntered = new Promise<void>(resolve => {
     enteredMetadata = resolve
   })
+  let enteredContent!: () => void
+  const contentEntered = new Promise<void>(resolve => {
+    enteredContent = resolve
+  })
   const gfsFetch = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.includes('/content?')) {
       contentRequests++
+      enteredContent()
+      if (options.stallContent)
+        return new Promise<Response>(resolve => {
+          const response = () =>
+            resolve(
+              new Response(new Uint8Array(bytes), {
+                headers: {
+                  'content-type': 'application/octet-stream',
+                  'content-length': String(bytes.byteLength),
+                  'x-gfs-uri': uri,
+                  'x-gfs-version': '7',
+                },
+              })
+            )
+          if (init?.signal?.aborted) response()
+          else init?.signal?.addEventListener('abort', response, { once: true })
+        })
       return new Response(new Uint8Array(bytes), {
         headers: {
           'content-type': 'application/octet-stream',
@@ -212,7 +238,17 @@ async function scenario(
                   expectedVersion: 7,
                 },
               }
-            : scriptCall
+            : options.mode === 'read-large'
+              ? {
+                  id: 'unit-read-large',
+                  name: 'clerum__gfs_read',
+                  arguments: {
+                    drive: 'main',
+                    resourceId: rid,
+                    expectedVersion: 7,
+                  },
+                }
+              : scriptCall
         if (call)
           return {
             content: null,
@@ -230,7 +266,7 @@ async function scenario(
     },
   }
   const task: Task = {
-    id: 'unit-preparation-task',
+    id: '11111111-1111-4111-8111-111111111111',
     source: 'channel',
     status: 'pending',
     priority: 'normal',
@@ -281,6 +317,7 @@ async function scenario(
     workspaceService: undefined,
     gfsDownloadStore: store,
     gfsCallerWorkspacePath: callerRoot,
+    guardrailsConfig: options.guardrails,
     modelName: 'fixture-model',
     approvalConfig: {
       defaultPolicy: 'channel_users',
@@ -310,8 +347,12 @@ async function scenario(
     onApprovalNeeded,
     callerRoot,
     metadataEntered,
+    contentEntered,
     task,
     lifecycle,
+    createTransfer,
+    releaseReceiptOwner,
+    store,
     sessionKey: resolveTaskSessionKey(task),
     createCold: () => new TaskExecutor(task, deps),
     get contentRequests() {
@@ -343,6 +384,84 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(clientFactory).toHaveBeenCalledTimes(1)
   })
 
+  it('pins the prepared receipt to the task owner and releases it at terminal settlement', async () => {
+    const test = await scenario()
+    await test.executor.run()
+
+    expect(test.onFail).not.toHaveBeenCalled()
+    expect(test.createTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ retentionOwnerId: test.task.id })
+    )
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+  })
+
+  it('keeps graceful-shutdown completion pending until the real owner release settles', async () => {
+    const test = await scenario()
+    let entered!: () => void
+    const releaseEntered = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    let continueRelease!: () => void
+    const releaseAllowed = new Promise<void>(resolve => {
+      continueRelease = resolve
+    })
+    test.releaseReceiptOwner.mockImplementation(async (...args) => {
+      entered()
+      await releaseAllowed
+      await GfsDownloadStore.prototype.releaseReceiptOwner.call(test.store, ...args)
+    })
+    let completionSettled = false
+    const completion = test.executor.waitForCompletion().then(() => {
+      completionSettled = true
+    })
+    const run = test.executor.run()
+    await releaseEntered
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(completionSettled).toBe(false)
+    } finally {
+      continueRelease()
+    }
+    await Promise.all([run, completion])
+
+    expect(completionSettled).toBe(true)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledOnce()
+    expect(test.onFail).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['deny', 'policy_denied'],
+    ['ask', 'approval_required'],
+    ['allow', 'ready'],
+  ] as const)('routes preparation through a real %s guardrail decision', async (action, status) => {
+    const test = await scenario({
+      guardrails: {
+        rules: [
+          {
+            id: `preparation-${action}`,
+            action,
+            match: { tool: { provenance: 'native', name: 'clerum__gfs_download' } },
+          },
+        ],
+      },
+    })
+    expect(test.store.isAvailable()).toBe(true)
+    await test.executor.run()
+
+    expect(test.observedReceipts).toMatchObject([
+      action === 'allow' ? { status: 'ready' } : { status: 'unavailable', code: status },
+    ])
+    if (action === 'deny') {
+      expect(test.contentRequests).toBe(0)
+    } else if (action === 'ask') {
+      expect(test.metadataRequests).toBe(0)
+      expect(test.contentRequests).toBe(0)
+    } else {
+      expect(test.metadataRequests).toBe(1)
+      expect(test.contentRequests).toBe(1)
+    }
+  })
+
   it('keeps a fresh shell approval and then reads the exact checksum and row count from the prepared path', async () => {
     const test = await scenario({ mode: 'script' })
     await test.executor.run()
@@ -350,6 +469,8 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.executor.executorState).toBe('waiting_approval')
     expect(test.onApprovalNeeded).toHaveBeenCalledTimes(1)
     expect(test.requests).toHaveLength(1)
+    expect(test.store.debugUsage().files).toBe(1)
+    expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
     expect(JSON.stringify(test.executor.pendingApproval)).not.toContain(bytes.toString())
     expect(JSON.stringify(test.executor.pendingApproval)).not.toContain(bytes.toString('base64'))
     await test.executor.resumeAfterApproval(false)
@@ -402,6 +523,36 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.metadataRequests).toBe(1)
   })
 
+  it('releases the retained owner when an awaiting approval is denied', async () => {
+    const test = await scenario({ mode: 'script' })
+    await test.executor.run()
+
+    expect(test.executor.executorState).toBe('waiting_approval')
+    await test.executor.deny()
+
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect(test.onApprovalNeeded).toHaveBeenCalledExactlyOnceWith(
+      test.executor.pendingApproval?.request_id ?? expect.any(String),
+      test.task.id,
+      expect.anything()
+    )
+  })
+
+  it('releases a suspended owner exactly once when cancellation ends the task', async () => {
+    const test = await scenario({ mode: 'script' })
+    await test.executor.run()
+    expect(test.executor.executorState).toBe('waiting_approval')
+    expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
+
+    test.executor.abort()
+    test.executor.abort()
+    await test.executor.waitForCompletion()
+
+    expect(test.releaseReceiptOwner).toHaveBeenCalledExactlyOnceWith(test.task.id, 'unit-caller')
+    expect(test.contentRequests).toBe(1)
+    expect(test.lifecycle.getStatus(test.task.id)).toBe('cancelled')
+  })
+
   it('cancels metadata preparation through the task signal before any content or provider request', async () => {
     const test = await scenario({ stallMetadata: true })
     const run = test.executor.run()
@@ -411,6 +562,118 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.requests).toEqual([])
     expect(test.contentRequests).toBe(0)
     expect(test.lifecycle.getStatus(test.task.id)).toBe('cancelled')
+  })
+
+  it('joins a cancelled transfer cleanup before terminal retention-owner release', async () => {
+    const test = await scenario({ stallContent: true })
+    const run = test.executor.run()
+    await test.contentEntered
+    test.executor.abort()
+    await run
+
+    expect(test.contentRequests).toBe(1)
+    expect(test.requests).toEqual([])
+    expect(test.store.debugUsage().files).toBe(0)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+  })
+
+  it('joins a cancelled large clerum__gfs_read producer before terminal release', async () => {
+    const test = await scenario({
+      mode: 'read-large',
+      includeReference: false,
+      stallContent: true,
+    })
+    const run = test.executor.run()
+    await test.contentEntered
+    test.executor.abort()
+    await run
+
+    expect(test.contentRequests).toBe(1)
+    expect(test.requests).toHaveLength(1)
+    expect(test.store.debugUsage().files).toBe(0)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+  })
+
+  it.each([
+    ['preparation', { mode: 'inspect' as const }],
+    ['clerum__gfs_download', { mode: 'download-again' as const, includeReference: false }],
+    ['clerum__gfs_read', { mode: 'read-large' as const, includeReference: false }],
+  ])('joins late %s admission before releasing its task owner', async (_label, options) => {
+    const test = await scenario(options)
+    let admitted!: () => void
+    const admissionEntered = new Promise<void>(resolve => {
+      admitted = resolve
+    })
+    let continueAdmission!: () => void
+    const admissionReleased = new Promise<void>(resolve => {
+      continueAdmission = resolve
+    })
+    const order: string[] = []
+    const releaseOwner = GfsDownloadStore.prototype.releaseReceiptOwner.bind(test.store)
+    test.releaseReceiptOwner.mockImplementation(async (...args) => {
+      order.push('owner-release')
+      await releaseOwner(...args)
+    })
+    test.createTransfer.mockImplementation(async input => {
+      admitted()
+      await admissionReleased
+      const result = await GfsDownloadStore.prototype.createTransfer.call(test.store, input)
+      order.push('admission-settled')
+      return result
+    })
+    let runSettled = false
+    const run = test.executor.run().then(() => {
+      runSettled = true
+    })
+    await admissionEntered
+    test.executor.abort()
+    try {
+      // One event-loop turn drains the abort race without guessing at producer
+      // completion: its explicit admission promise is still held above.
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(runSettled).toBe(false)
+      expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
+    } finally {
+      continueAdmission()
+    }
+    await run
+
+    expect(order).toEqual(['admission-settled', 'owner-release'])
+    expect(test.store.debugUsage().files).toBe(0)
+    expect(test.onFail).not.toHaveBeenCalled()
+    expect(test.lifecycle.getStatus(test.task.id)).toBe('cancelled')
+  })
+
+  it('joins a deferred publication and refuses an aborted receipt before terminal release', async () => {
+    const test = await scenario()
+    const publish = test.store.publish.bind(test.store)
+    let entered!: () => void
+    const publicationEntered = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    let continuePublication!: () => void
+    const publicationReleased = new Promise<void>(resolve => {
+      continuePublication = resolve
+    })
+    vi.spyOn(test.store, 'publish').mockImplementation(async (...args) => {
+      entered()
+      await publicationReleased
+      return publish(...args)
+    })
+    const run = test.executor.run()
+    await publicationEntered
+    test.executor.abort()
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
+    } finally {
+      continuePublication()
+    }
+    await run
+
+    expect(test.requests).toEqual([])
+    expect(test.store.debugUsage().files).toBe(0)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
   })
 
   it.each([

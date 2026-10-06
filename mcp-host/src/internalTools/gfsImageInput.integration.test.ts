@@ -20,6 +20,7 @@ import type { SingleTurnProvider } from '../llm/types'
 import { VisualInputBudget } from '../visualInput/policy'
 import { projectGfsApproval } from '../visualInput/suspension'
 import { GfsDownloadStore } from './gfsDownloadStore'
+import type { GfsProcessingLeaseProvider } from './gfsProcessingLease'
 
 const { sdkCreate, clientFactory } = vi.hoisted(() => ({
   sdkCreate: vi.fn(),
@@ -184,7 +185,14 @@ async function setup(
     imageInputResolver
   )
   let managed:
-    | { store: GfsDownloadStore; callerIdentity: string; callerWorkspacePath: string }
+    | {
+        store: GfsDownloadStore
+        deliveryAvailable: boolean
+        callerIdentity: string
+        callerWorkspacePath: string
+        processingLeaseProvider: GfsProcessingLeaseProvider
+        retentionOwnerId: string
+      }
     | undefined
   if (options.managed) {
     const root = await fs.mkdtemp(join(tmpdir(), 'gfs-image-wire-'))
@@ -194,7 +202,14 @@ async function setup(
     const store = new GfsDownloadStore(root)
     await store.initialize()
     stores.push(store)
-    managed = { store, callerWorkspacePath, callerIdentity: 'unit-caller' }
+    managed = {
+      store,
+      deliveryAvailable: true,
+      callerWorkspacePath,
+      callerIdentity: 'unit-caller',
+      processingLeaseProvider: store.processingLeaseProvider('unit-caller'),
+      retentionOwnerId: 'gfs-image-integration-task',
+    }
   }
   const tool = new NativeToolRegistry(
     config,
@@ -252,7 +267,12 @@ async function setup(
 }
 
 afterEach(async () => {
-  for (const store of stores.splice(0)) await store.close()
+  for (const store of stores.splice(0)) {
+    await store
+      .releaseReceiptOwner('gfs-image-integration-task', 'unit-caller')
+      .catch(() => undefined)
+    await store.close()
+  }
   for (const root of temporaryRoots.splice(0)) await fs.rm(root, { recursive: true, force: true })
   vi.unstubAllGlobals()
   vi.clearAllMocks()

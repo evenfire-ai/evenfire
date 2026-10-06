@@ -119,7 +119,11 @@ import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkfl
 import type { Workspace } from '../workspace/service'
 import type { CronScheduler } from './cronScheduler'
 import { referencedFilesForTurnContext } from './fileReferenceResolver'
-import { gfsWorkspaceExecutionEnabled } from './gfsExecutionCapability'
+import {
+  GFS_SYSTEM_CALLER_IDENTITY,
+  gfsManagedWorkspaceExecution,
+  gfsWorkspaceExecutionEnabled,
+} from './gfsExecutionCapability'
 import { hasLargeAvailableGfsReferences, prepareGfsFiles } from './gfsFilePreparation'
 import {
   type ProviderWorkflowAccessDenialReason,
@@ -315,6 +319,7 @@ export class TaskExecutor {
   private workflowAccessDeniedResponse: string | null = null
   private workflowAccessDeniedReason: ProviderWorkflowAccessDenialReason | null = null
   private currentTurnToolNames = new Set<string>()
+  private gfsRetentionOwnerSettlement: Promise<void> | undefined
   /**
    * Latency attribution (stateless-agents): per-turn phase timing. Created at
    * run() start; emits one [TurnTiming] info line when the task completes.
@@ -403,6 +408,11 @@ export class TaskExecutor {
     if (approval.task_budget !== undefined) this.executionBudget.restore(approval.task_budget)
     else if (approval.legacy_budget === true) this.legacyApprovalBudget = true
     else throw new Error('Pending approval has no verifiable execution budget')
+    if (approval.authorization_scope !== 'turn_tools') {
+      // Legacy rows predate consent provenance. A wildcard retained by an old
+      // process must not authorize a different risky tool after cold resume.
+      this.conversation.auto_approved_tools.delete('*')
+    }
     this.task.traceContext = approval.traceContext ?? this.conversation.traceContext ?? null
     this.state = 'waiting_approval'
   }
@@ -522,22 +532,19 @@ export class TaskExecutor {
       // or visual projection are requested by this generic preparation stage.
       const references = this.task.sourceMessage?.fileReferenceResolutions
       if (hasLargeAvailableGfsReferences(references)) {
-        const { nativeRegistry, loopController } = await withAbort(
-          () => this.buildToolRegistry(),
+        const preparationLoopConfig = await withAbort(
+          () => this.buildLoopConfig({ skipContextManager: true }),
           this.abortController.signal
         )
-        this.preparedGfsFiles = await withAbort(
-          () =>
-            prepareGfsFiles(references!, {
-              registry: nativeRegistry,
-              controller: loopController,
-              callerIdentity: this.task.sourceMessage?.sender,
-              signal: this.abortController.signal,
-              toolTimeoutMs: appConfig.nativeTool.toolTimeout,
-              budget: this.executionBudget,
-            }),
-          this.abortController.signal
-        )
+        // Await the transfer itself; withAbort would release the task while a
+        // signal-ignoring producer could still settle. The shared execution path
+        // carries the signal and cleanup must finish before terminal settlement.
+        this.preparedGfsFiles = await prepareGfsFiles(references!, {
+          config: preparationLoopConfig,
+          callerIdentity: this.task.sourceMessage?.sender,
+          toolTimeoutMs: appConfig.nativeTool.toolTimeout,
+          budget: this.executionBudget,
+        })
         this.executionBudget.assertTime()
       }
 
@@ -556,10 +563,8 @@ export class TaskExecutor {
         logger.info({ taskId: this.taskId }, 'Task completed')
         this.turnTiming?.emit(this.taskId)
         this.deps.onComplete(this.task)
-        this.resolveCompletion?.()
       } else if (this.abortController.signal.aborted) {
         logger.info({ taskId: this.taskId }, 'Task cancelled')
-        this.resolveCompletion?.()
       }
     } catch (error) {
       if (
@@ -568,7 +573,6 @@ export class TaskExecutor {
       ) {
         if (this.conversation)
           await this.handleLoopResult({ type: 'cancelled', reason: 'signal_aborted' })
-        this.resolveCompletion?.()
         return
       }
       if (this.abortController.signal.reason instanceof TaskLimitError)
@@ -598,9 +602,11 @@ export class TaskExecutor {
       } else {
         this.deps.onFail(this.task, taskError)
       }
-      this.resolveCompletion?.()
     } finally {
+      await this.settleGfsRetentionOwner()
       this.executionBudget.pause()
+      if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
+        this.resolveCompletion?.()
     }
   }
 
@@ -622,7 +628,6 @@ export class TaskExecutor {
       // Just clean up our own execution state. (PR-186 review M2; Invariant I1)
       if (this.abortController.signal.aborted) {
         logger.info({ taskId: this.taskId }, 'Resume cancelled: already aborted')
-        this.resolveCompletion?.()
         return
       }
 
@@ -673,10 +678,8 @@ export class TaskExecutor {
         ) {
           this.state = 'completed'
           this.deps.onComplete(this.task)
-          this.resolveCompletion?.()
         } else if (this.abortController.signal.aborted) {
           logger.info({ taskId: this.taskId }, 'Task cancelled')
-          this.resolveCompletion?.()
         }
         return
       }
@@ -724,7 +727,6 @@ export class TaskExecutor {
             retryable: false,
             provider: this.deps.llmProvider.getProviderType(),
           })
-          this.resolveCompletion?.()
           return
         }
         throw error
@@ -819,10 +821,8 @@ export class TaskExecutor {
           this.state = 'completed'
           this.turnTiming?.emit(this.taskId)
           this.deps.onComplete(this.task)
-          this.resolveCompletion?.()
         } else if (this.abortController.signal.aborted) {
           logger.info({ taskId: this.taskId }, 'Task cancelled')
-          this.resolveCompletion?.()
         }
         return
       }
@@ -879,10 +879,8 @@ export class TaskExecutor {
         this.state = 'completed'
         this.turnTiming?.emit(this.taskId)
         this.deps.onComplete(this.task)
-        this.resolveCompletion?.()
       } else if (this.abortController.signal.aborted) {
         logger.info({ taskId: this.taskId }, 'Task cancelled')
-        this.resolveCompletion?.()
       }
     } catch (error) {
       if (
@@ -906,7 +904,6 @@ export class TaskExecutor {
       ) {
         if (this.conversation)
           await this.handleLoopResult({ type: 'cancelled', reason: 'signal_aborted' })
-        this.resolveCompletion?.()
         return
       }
       if (this.abortController.signal.reason instanceof TaskLimitError)
@@ -936,9 +933,11 @@ export class TaskExecutor {
       } else {
         this.deps.onFail(this.task, taskError)
       }
-      this.resolveCompletion?.()
     } finally {
+      await this.settleGfsRetentionOwner()
       this.executionBudget.pause()
+      if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
+        this.resolveCompletion?.()
     }
   }
 
@@ -998,6 +997,7 @@ export class TaskExecutor {
     }
 
     this.state = 'completed'
+    await this.settleGfsRetentionOwner()
     this.deps.onComplete(this.task)
     this.resolveCompletion?.()
   }
@@ -1017,8 +1017,14 @@ export class TaskExecutor {
    * task state (Invariant I1 preserved). PR-193 review #1.
    */
   abort(): void {
+    const suspended = this.state === 'waiting_approval'
     this.deps.taskLifecycle.transition(this.task.id, 'cancelled', 'user_requested')
     this.abortController.abort()
+    if (suspended) {
+      // A suspended run has already returned, so its finally block will not
+      // re-enter. Its producers have settled; join owner release explicitly.
+      void this.settleGfsRetentionOwner().then(() => this.resolveCompletion?.())
+    }
   }
 
   // ── Private helpers ───────────────────────────────────────────────
@@ -1031,6 +1037,31 @@ export class TaskExecutor {
   private captureTaskTokenBaseline(): void {
     if (!this.hasTaskBudgetCap() || !this.conversation) return
     this.taskTokenBaseline = snapshotTaskTokenBaseline(this.conversation)
+  }
+
+  /**
+   * A retention owner spans preparation, an approval suspension, and cold resume.
+   * Release happens only after this executor reaches a terminal state; inherited
+   * owners are deliberately left quarantined by the store when release is denied.
+   */
+  private settleGfsRetentionOwner(): Promise<void> {
+    if (this.state === 'waiting_approval' && !this.abortController.signal.aborted)
+      return Promise.resolve()
+    if (this.gfsRetentionOwnerSettlement) return this.gfsRetentionOwnerSettlement
+    this.gfsRetentionOwnerSettlement = (async () => {
+      const callerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
+      const store = this.deps.gfsDownloadStore
+      if (!callerIdentity || !store?.isAvailable()) return
+      try {
+        await store.releaseReceiptOwner(this.taskId, callerIdentity)
+      } catch (error) {
+        logger.error(
+          { taskId: this.taskId, callerIdentity, err: error },
+          'GFS retention owner release failed; retained records remain protected'
+        )
+      }
+    })()
+    return this.gfsRetentionOwnerSettlement
   }
 
   /** True when the P1 budget verdict carried a per-task cap (tokens or cost). */
@@ -1395,7 +1426,6 @@ export class TaskExecutor {
     this.state = 'completed'
     logger.info({ taskId: this.taskId }, 'Completed with static response')
     this.deps.onComplete(this.task)
-    this.resolveCompletion?.()
   }
 
   private ensureProgressReporter(): SseProgressReporter {
@@ -2100,13 +2130,13 @@ export class TaskExecutor {
       appConfig,
       this.deps.failover?.policy.fallbacks
     )
-    const gfsCallerIdentity = this.task.sourceMessage?.sender
+    const gfsCallerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
     const gfsProcessingLeaseProvider =
       this.deps.gfsProcessingLeaseProvider ??
       (this.deps.gfsDownloadStore && gfsCallerIdentity
         ? this.deps.gfsDownloadStore.processingLeaseProvider(gfsCallerIdentity)
         : undefined)
-    const gfsDownload = gfsWorkspaceExecutionEnabled({
+    const gfsWorkspace = gfsManagedWorkspaceExecution({
       approvalEnabled: appConfig.enableApproval,
       source: this.task.source,
       callerIdentity: gfsCallerIdentity,
@@ -2114,14 +2144,20 @@ export class TaskExecutor {
       callerWorkspacePath: this.deps.gfsCallerWorkspacePath,
       processingLeaseProvider: gfsProcessingLeaseProvider,
       approvalConfig: this.deps.approvalConfig,
+      retentionOwnerId: this.taskId,
     })
-      ? {
-          store: this.deps.gfsDownloadStore!,
-          callerIdentity: gfsCallerIdentity!,
-          callerWorkspacePath: this.deps.gfsCallerWorkspacePath!,
-          processingLeaseProvider: gfsProcessingLeaseProvider!,
-        }
-      : undefined
+    const gfsDeliveryEligible = gfsWorkspace
+      ? gfsWorkspaceExecutionEnabled({
+          approvalEnabled: appConfig.enableApproval,
+          source: this.task.source,
+          callerIdentity: this.task.sourceMessage?.sender,
+          store: gfsWorkspace.store,
+          callerWorkspacePath: gfsWorkspace.callerWorkspacePath,
+          processingLeaseProvider: gfsWorkspace.processingLeaseProvider,
+          approvalConfig: this.deps.approvalConfig,
+          retentionOwnerId: this.taskId,
+        })
+      : false
     const nativeRegistry = new NativeToolRegistry(
       // The spillover threshold is a top-level setting; clerum__attachment_read
       // states it in its description (#666).
@@ -2149,7 +2185,7 @@ export class TaskExecutor {
       // §13 (stateless agents): the active provider's credential slot is the
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
-      gfsDownload
+      gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is
@@ -2212,7 +2248,12 @@ export class TaskExecutor {
       ? new ApprovalController(
           this.conversation!,
           baseController,
-          gfsDownload ? new Set(['shell_exec']) : undefined
+          gfsWorkspace &&
+            appConfig.enableApproval &&
+            this.task.source === 'channel' &&
+            this.deps.approvalConfig?.tools?.shell_exec !== false
+            ? new Set(['shell_exec', 'clerum__gfs_download'])
+            : undefined
         )
       : baseController
 

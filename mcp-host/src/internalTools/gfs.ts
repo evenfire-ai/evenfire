@@ -348,22 +348,36 @@ export interface GfsReadToolOptions {
   callerIdentity?: string
   /** Caller workspace root derived by the Host, never tool arguments. */
   callerWorkspacePath?: string
+  /** Trusted task lifetime identity; never accepted from model arguments. */
+  retentionOwnerId?: string
 }
 
 /** The five read tools, bound to a gfsc client. */
 export function buildGfsReadTools(
   client: GfscReadClient,
-  { referencedFiles, downloadStore, callerIdentity, callerWorkspacePath }: GfsReadToolOptions
+  {
+    referencedFiles,
+    downloadStore,
+    callerIdentity,
+    callerWorkspacePath,
+    retentionOwnerId,
+  }: GfsReadToolOptions
 ): InternalToolDefinition[] {
   const canDownload = Boolean(
-    downloadStore && client.download && callerIdentity && callerWorkspacePath
+    downloadStore && client.download && callerIdentity && callerWorkspacePath && retentionOwnerId
   )
   const transferToWorkspace = async (
     target: { drive: string; resourceId: string },
     expectedVersion: number | undefined,
     context?: InternalToolExecutionOptions
   ): Promise<GfsDownloadResult> => {
-    if (!downloadStore || !client.download || !callerIdentity || !callerWorkspacePath)
+    if (
+      !downloadStore ||
+      !client.download ||
+      !callerIdentity ||
+      !callerWorkspacePath ||
+      !retentionOwnerId
+    )
       throw new GfsDownloadStoreError('workspace_unavailable')
     const transferStartedAt = Date.now()
     enterGfsDownloadTransfer()
@@ -372,6 +386,7 @@ export function buildGfsReadTools(
         store: downloadStore,
         callerIdentity,
         callerWorkspacePath,
+        retentionOwnerId,
         ...callOptions(context),
         timeoutMs: context?.timeoutMs,
         ...(expectedVersion === undefined ? {} : { expectedVersion }),

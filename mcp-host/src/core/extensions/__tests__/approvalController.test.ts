@@ -79,7 +79,10 @@ describe('ApprovalController', () => {
     const controller = new ApprovalController(conv, customDelegate, new Set(['shell_exec']))
 
     const result = controller.beforeTool('shell_exec', { command: 'process-file' })
-    expect(result).toEqual({ type: 'suspend', approval: pendingApproval })
+    expect(result).toEqual({
+      type: 'suspend',
+      approval: { ...pendingApproval, authorization_scope: 'exact_invocation' },
+    })
     expect(customDelegate.beforeTool).toHaveBeenCalledWith('shell_exec', {
       command: 'process-file',
     })
@@ -118,7 +121,7 @@ describe('ApprovalController', () => {
 
       expect(controller.beforeTool('shell_exec', { command })).toEqual({
         type: 'suspend',
-        approval: nextApproval,
+        approval: { ...nextApproval, authorization_scope: 'exact_invocation' },
       })
       expect(customDelegate.beforeTool).toHaveBeenCalledExactlyOnceWith('shell_exec', { command })
       expect(conv.pending_approval).toBe(pendingApproval)

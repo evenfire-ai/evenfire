@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto'
 import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
 import { UnifiedApprovalGateController } from '../../core/extensions/mcpApprovalGateController'
 import type { Tool, ToolRegistry } from '../../core/interfaces'
+import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import type { LoopConfig } from '../../core/orchestration/loopConfig'
+import { BasicSafety } from '../../core/safety/safety'
+import type { Conversation } from '../../core/types'
 import type { ToolOutput } from '../../core/types'
 import { GFS_FILE_LIMITS } from '../../internalTools/gfsFilePolicy'
 import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../internalTools/gfsReadTypes'
@@ -90,15 +94,33 @@ function subject(
     listDefinitions: () => [],
   }
   const signal = new AbortController().signal
+  const loopController = new UnifiedApprovalGateController(registry, undefined, registry)
+  const config: LoopConfig = {
+    reasoning: {} as never,
+    toolRegistry: registry,
+    safety: new BasicSafety(),
+    events: new SimpleEventEmitter(),
+    conversation: {
+      auto_approved_tools: new Set<string>(),
+    } as Conversation,
+    loopController,
+    contextManager: {} as never,
+    toolOutputProcessor: {
+      beforeExecution: () => ({ is_valid: true, errors: [] }),
+      afterExecution: (_name, output) => output.content,
+    },
+    maxIterations: 10,
+    toolTimeout: 1000,
+    toolProgressInterval: 0,
+    abortSignal: signal,
+  }
   const context = {
-    registry,
-    controller: new UnifiedApprovalGateController(registry, undefined, registry),
-    signal,
+    config,
     callerIdentity: 'unit-caller',
     toolTimeoutMs: 1000,
     budget: { assertTime: () => {}, remainingDurationMs: 500 },
   }
-  return { context, registry, execute, signal }
+  return { context, config, registry, execute, signal }
 }
 
 describe('GFS file preparation', () => {
@@ -123,7 +145,7 @@ describe('GFS file preparation', () => {
     expect(execute).toHaveBeenCalledWith(
       { drive: 'main', resourceId: 'a'.repeat(32), expectedVersion: 7 },
       {
-        signal: test.signal,
+        signal: expect.any(AbortSignal),
         timeoutMs: 500,
         onOutput: expect.any(Function),
       }
@@ -134,7 +156,7 @@ describe('GFS file preparation', () => {
 
   it('does not bypass an effective policy requiring approval', async () => {
     const test = subject()
-    test.context.controller = new UnifiedApprovalGateController(
+    test.config.loopController = new UnifiedApprovalGateController(
       test.registry,
       {
         defaultPolicy: 'channel_users',
@@ -148,6 +170,89 @@ describe('GFS file preparation', () => {
       { referenceId: resolution().reference.id, status: 'unavailable', code: 'approval_required' },
     ])
     expect(test.execute).not.toHaveBeenCalled()
+  })
+
+  it('shares input validation with the regular tool path before any preparation effect', async () => {
+    const test = subject()
+    test.config.toolOutputProcessor.beforeExecution = () => ({
+      is_valid: false,
+      errors: ['invalid drive'],
+    })
+
+    expect(await prepareGfsFiles([resolution()], test.context)).toMatchObject([
+      { status: 'unavailable', code: 'policy_denied' },
+    ])
+    expect(test.execute).not.toHaveBeenCalled()
+  })
+
+  it('validates guardrail-transformed values at the concrete execution boundary', async () => {
+    const test = subject()
+    const tool = test.registry.get('clerum__gfs_download')!
+    tool.validateParams = async params => ({
+      is_valid: params.expectedVersion === 7,
+      errors: params.expectedVersion === 7 ? [] : ['version outside the pinned contract'],
+    })
+    test.config.guardrails = {
+      async decide(_identity, params) {
+        return {
+          decision: 'allow',
+          reasonCode: 'transformed',
+          source: 'host_rule',
+          effectiveInput: { ...params, expectedVersion: 8 },
+        }
+      },
+    }
+
+    expect(await prepareGfsFiles([resolution()], test.context)).toMatchObject([
+      { status: 'unavailable', code: 'download_failed' },
+    ])
+    expect(test.execute).not.toHaveBeenCalled()
+  })
+
+  it('executes allowed effective input and then consumes the guardrail result view', async () => {
+    const test = subject()
+    const transformResult = vi.fn(async () => ({ content: '[policy redacted]', isError: false }))
+    test.config.guardrails = {
+      async decide(_identity, params) {
+        return {
+          decision: 'allow',
+          reasonCode: 'transformed',
+          source: 'host_rule',
+          effectiveInput: { ...params, expectedVersion: 8 },
+        }
+      },
+      transformResult,
+    }
+
+    expect(await prepareGfsFiles([resolution()], test.context)).toMatchObject([
+      { status: 'unavailable', code: 'invalid_response' },
+    ])
+    expect(test.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedVersion: 8 }),
+      expect.anything()
+    )
+    expect(transformResult).toHaveBeenCalledOnce()
+  })
+
+  it('shares the conversation doom-loop state across repeated preparation calls', async () => {
+    const test = subject()
+    test.config.guardrails = {
+      async decide(_identity, params) {
+        return {
+          decision: 'allow',
+          reasonCode: 'allowed',
+          effectiveInput: params,
+          source: 'host_rule',
+        }
+      },
+    }
+
+    await prepareGfsFiles([resolution()], test.context)
+    await prepareGfsFiles([resolution()], test.context)
+    expect(await prepareGfsFiles([resolution()], test.context)).toMatchObject([
+      { status: 'unavailable', code: 'policy_denied' },
+    ])
+    expect(test.execute).toHaveBeenCalledTimes(2)
   })
 
   it.each(['denied', 'stale', 'not_found'] as const)(

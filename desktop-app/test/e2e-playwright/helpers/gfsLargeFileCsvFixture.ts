@@ -214,7 +214,8 @@ export function resolveGfsLargeCsvFixture(): GfsLargeCsvFixture {
     )
 
   return {
-    fileName: path.basename(explicitPath),
+    // The upload UI canonicalizes resource names; filesystem path/bytes stay untouched.
+    fileName: path.basename(explicitPath).normalize('NFC'),
     sourcePath: explicitPath,
     buffer,
     ...parseCsvMetadata(buffer),

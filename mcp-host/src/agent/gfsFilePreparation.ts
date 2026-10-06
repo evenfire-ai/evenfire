@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
-import type { LoopController, ToolRegistry } from '../core/interfaces'
+import type { LoopConfig } from '../core/orchestration/loopConfig'
+import { admitToolCall, executeAdmittedTool } from '../core/orchestration/toolCallPolicy'
 import type {
   GfsPreparationFailure,
   PreparedGfsFile,
@@ -164,10 +166,8 @@ function checkedPreparation(
 export async function prepareGfsFiles(
   resolutions: readonly FileReferenceResolution[],
   context: {
-    registry: ToolRegistry
-    controller: Pick<LoopController, 'beforeTool'>
+    config: LoopConfig
     callerIdentity?: string
-    signal: AbortSignal
     toolTimeoutMs: number
     budget: Pick<TaskExecutionBudget, 'assertTime' | 'remainingDurationMs'>
   }
@@ -182,14 +182,14 @@ export async function prepareGfsFiles(
       reference.byteLength <= GFS_FILE_LIMITS.inlineTextBytes
     )
       continue
-    context.signal.throwIfAborted()
+    context.config.abortSignal?.throwIfAborted()
     context.budget.assertTime()
     const unavailable = (code: GfsPreparationFailure): PreparedGfsFile => ({
       referenceId: reference.id,
       status: 'unavailable',
       code,
     })
-    const tool = context.registry.get(DOWNLOAD_TOOL)
+    const tool = context.config.toolRegistry.get(DOWNLOAD_TOOL)
     if (!context.callerIdentity || surfaces?.workspace !== true || !tool) {
       prepared.push(unavailable('workspace_unavailable'))
       continue
@@ -199,22 +199,34 @@ export async function prepareGfsFiles(
       resourceId: reference.source.resourceId,
       expectedVersion: reference.source.version,
     }
-    const gate = context.controller.beforeTool(DOWNLOAD_TOOL, params)
-    if (gate !== 'proceed') {
-      prepared.push(unavailable(gate === 'skip' ? 'policy_denied' : 'approval_required'))
-      continue
-    }
     const timeoutMs = Math.max(
       1,
       Math.floor(Math.min(context.toolTimeoutMs, context.budget.remainingDurationMs))
     )
     try {
-      const output = await tool.execute(params, {
-        signal: context.signal,
-        timeoutMs,
-        onOutput: () => {},
-      })
-      context.signal.throwIfAborted()
+      const admission = await admitToolCall(
+        { id: randomUUID(), name: DOWNLOAD_TOOL, arguments: params },
+        context.config,
+        0
+      )
+      if (admission.kind !== 'execute') {
+        prepared.push(
+          unavailable(admission.kind === 'result' ? 'policy_denied' : 'approval_required')
+        )
+        continue
+      }
+      const boundedConfig: LoopConfig = {
+        ...context.config,
+        toolTimeout: Math.min(context.config.toolTimeout, timeoutMs),
+      }
+      const toolResult = await executeAdmittedTool(admission, boundedConfig, 0)
+      const output: ToolOutput = {
+        content: toolResult.content,
+        duration_ms: 0,
+        is_error: toolResult.is_error ?? false,
+        attachments: toolResult.attachments,
+      }
+      context.config.abortSignal?.throwIfAborted()
       context.budget.assertTime()
       prepared.push(
         output.is_error
@@ -222,7 +234,7 @@ export async function prepareGfsFiles(
           : (checkedPreparation(output, reference) ?? unavailable('invalid_response'))
       )
     } catch {
-      context.signal.throwIfAborted()
+      context.config.abortSignal?.throwIfAborted()
       context.budget.assertTime()
       prepared.push(unavailable('download_failed'))
     }

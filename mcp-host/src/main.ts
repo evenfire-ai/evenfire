@@ -58,6 +58,7 @@ import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
+import { bootstrapGfsRuntime } from './gfsRuntime'
 import {
   resolveGuardrailHookDescriptors,
   withResolvedHookDescriptors,
@@ -235,7 +236,7 @@ let activityHub: HostActivityHub | null = null
 let workspaceProvider: ScopedWorkspaceProvider | null = null
 let gfsWorkspaceProvider: ScopedWorkspaceProvider | null = null
 let gfsDownloadStore: GfsDownloadStore | null = null
-let gfsDownloadCleanupTimer: NodeJS.Timeout | null = null
+let gfsRuntimeStop: (() => Promise<void>) | null = null
 let spilloverStorage: SpilloverStorage | null = null
 let conversationStoreHandle: ConversationStoreHandle | null = null
 let promptCache: PromptCache | null = null
@@ -1727,20 +1728,12 @@ async function initializeAgent(): Promise<void> {
   agent.setDynamicEnvProvider(() => agentToolEnvProvider(configStore))
   agent.setSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
 
-  gfsWorkspaceProvider = new ScopedWorkspaceProvider(config.nativeTool.workspacePath)
-  gfsDownloadStore = new GfsDownloadStore(config.nativeTool.workspacePath)
-  await gfsDownloadStore.initialize()
+  const gfsRuntime = await bootstrapGfsRuntime(config.nativeTool.workspacePath)
+  gfsWorkspaceProvider = gfsRuntime.workspaceProvider
+  gfsDownloadStore = gfsRuntime.store
+  gfsRuntimeStop = () => gfsRuntime.stop()
   agent.setGfsWorkspaceProvider(gfsWorkspaceProvider)
   agent.setGfsDownloadStore(gfsDownloadStore)
-  gfsDownloadCleanupTimer = setInterval(
-    () => {
-      void gfsDownloadStore?.cleanupExpired().catch(err => {
-        logger.warn({ err: err }, '[Main] GFS download cleanup failed:')
-      })
-    },
-    60 * 60 * 1000
-  )
-  gfsDownloadCleanupTimer.unref?.()
 
   // Phase 7–8: Create WorkspaceService when memory is enabled
   const memoryCfg = currentHost?.spec.memory || config.memory
@@ -2063,7 +2056,7 @@ const prepareIncomingMessage = createIncomingAdmission({
     const workspaceFile = Boolean(
       config.enableApproval &&
       message.sender &&
-      gfsDownloadStore &&
+      gfsDownloadStore?.isAvailable() &&
       callerWorkspacePath &&
       shellApprovalEnabled
     )
@@ -3091,12 +3084,13 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  if (gfsDownloadStore) {
-    if (gfsDownloadCleanupTimer) clearInterval(gfsDownloadCleanupTimer)
+  if (gfsRuntimeStop) {
     try {
-      await gfsDownloadStore.close()
+      await gfsRuntimeStop()
     } catch (err) {
       logger.warn({ err: err }, '[Main] GFS download store shutdown raised:')
+    } finally {
+      gfsRuntimeStop = null
     }
   }
 

@@ -17,10 +17,12 @@
 import { type Locator, type Page, expect, test } from '@playwright/test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { getGfsChildResourceSummary, getGfsGrantSummary } from '../../../tests/e2e/gfsUiFixtures'
 import { exactNameFilter } from './helpers/agentLocators'
 import { getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
+import { createGfsApprovalReview } from './helpers/gfsApprovalReview'
 import { assertGfsInfraHealthy } from './helpers/gfsFixtures'
 import {
   type AgentGfsLargeFileFixtures,
@@ -42,6 +44,11 @@ const RESPONSE_TIMEOUT_MS = 420_000
 const PROGRESS_TIMEOUT_MS = 45_000
 // A 16 KiB ceiling bounds header/count metadata well below the 3.8 MB input.
 const CSV_SUMMARY_MAX_BYTES = 16_384
+
+// This spec owns its Electron trace below instead of the runner's generic trace.
+// Actual customer bytes must not enter a trace through file-chooser inputs,
+// uploads or later reads. Synthetic fixture diagnostics remain available.
+test.use({ trace: 'off' })
 
 async function enterAgentChat(page: Page, agentName: string): Promise<void> {
   await openAgentsPage(page)
@@ -69,7 +76,8 @@ async function sendTaskAndWaitForReviewedShell(
   page: Page,
   prompt: string,
   resourceId: string,
-  sourceMode: 'path' | 'reference'
+  sourceMode: 'path' | 'reference',
+  reviewer?: Awaited<ReturnType<typeof createGfsApprovalReview>>
 ): Promise<{ response: Locator; expandButton: Locator }> {
   const response = page.getByTestId('agent-response')
   const approval = page.getByTestId('approval-approve-btn')
@@ -144,6 +152,9 @@ async function sendTaskAndWaitForReviewedShell(
     contentType: 'text/plain',
     body: 'Review each complete command and referenced script, verify read-only access to this receipt and bounded summary output, then approve each request individually in the owned Desktop window.',
   })
+  // Local control becomes actionable only after this test verifies the initial
+  // receipt and unexecuted shell. Every decision still clicks the visible UI.
+  reviewer?.activate()
   await expect(page.getByTestId('progress-stepper')).toHaveClass(/\bstatus-completed\b/, {
     timeout: RESPONSE_TIMEOUT_MS,
   })
@@ -224,10 +235,30 @@ test.describe('GFS large-file business analysis with attended approval', () => {
       const { app, page } = await launchAndLogin(OWNER_EMAIL)
       const desktopContext = app.context()
       let ownedTraceStarted = false
+      let reviewer: Awaited<ReturnType<typeof createGfsApprovalReview>> | undefined
+      let businessVerdict: 'passed' | 'failed' = 'failed'
+      let visibleResponse: string | undefined
       let sourceBefore: NonNullable<ReturnType<typeof getGfsChildResourceSummary>>
       try {
-        await desktopContext.tracing.start({ screenshots: true, snapshots: true, sources: false })
-        ownedTraceStarted = true
+        if (process.env.E2E_GFS_REVIEW_CONTROL === '1') {
+          reviewer = await createGfsApprovalReview(
+            app,
+            page,
+            pathToFileURL(resolve(__dirname, '../../ui-dist/index.html')).href
+          )
+          console.info(
+            'GFS_APPROVAL_REVIEW_READY',
+            JSON.stringify({
+              socketPath: reviewer.socketPath,
+              sourceMode,
+              pid: app.process().pid,
+            })
+          )
+        }
+        if (csv.source === 'synthetic') {
+          await desktopContext.tracing.start({ screenshots: true, snapshots: true, sources: false })
+          ownedTraceStarted = true
+        }
         await test.step('user uploads the exact CSV through Files', async () => {
           await openResourcesNavItem(page, 'nav-files')
           await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible()
@@ -287,13 +318,25 @@ test.describe('GFS large-file business analysis with attended approval', () => {
           await enterAgentChat(page, agentLabel)
           if (sourceMode === 'reference') {
             await page.getByRole('button', { name: 'Add context' }).click()
-            await expect(page.getByRole('menuitem', { name: 'Global File System' })).toBeVisible()
-            await page.getByRole('menuitem', { name: 'Global File System' }).click()
+            await expect(
+              page.getByRole('menuitem', { name: 'EvenDrive', exact: true })
+            ).toBeVisible()
+            await page.getByRole('menuitem', { name: 'EvenDrive', exact: true }).click()
             const picker = page.getByRole('dialog', { name: 'Choose files for this message' })
             await expect(picker).toBeVisible()
+            const grantedFolder = picker.getByRole('button').filter({
+              has: page.getByText(fixtures.granted.name, { exact: true }),
+            })
+            await expect(grantedFolder).toHaveCount(1, { timeout: 20_000 })
+            await grantedFolder.click()
+            await expect(
+              picker
+                .getByRole('navigation', { name: 'Global file path' })
+                .getByRole('button', { name: fixtures.granted.name, exact: true })
+            ).toBeVisible()
             const fileRow = picker
               .locator('.composer-global-files-row--file')
-              .filter({ hasText: csv.fileName })
+              .filter({ has: page.getByText(csv.fileName, { exact: true }) })
             await expect(fileRow).toHaveCount(1, { timeout: 20_000 })
             await fileRow.getByRole('checkbox').check()
             await picker.getByRole('button', { name: 'Attach 1', exact: true }).click()
@@ -315,7 +358,8 @@ test.describe('GFS large-file business analysis with attended approval', () => {
             page,
             prompt,
             sourceBefore.resourceId,
-            sourceMode
+            sourceMode,
+            reviewer
           )
           expandButton = result.expandButton
           response = result.response
@@ -339,6 +383,10 @@ test.describe('GFS large-file business analysis with attended approval', () => {
           // The turn is complete. Tool previews cap each line and show only
           // the tail, so business metadata belongs to the final response.
           const responseSummary = await response.innerText()
+          // Capture the visible result before navigation, including a failed
+          // business oracle. The local reviewer never reads a private result API.
+          if (Buffer.byteLength(responseSummary, 'utf8') <= CSV_SUMMARY_MAX_BYTES)
+            visibleResponse = responseSummary
           expect(
             Buffer.byteLength(responseSummary, 'utf8'),
             'The response must remain a bounded CSV summary'
@@ -378,6 +426,7 @@ test.describe('GFS large-file business analysis with attended approval', () => {
             })
           ).toEqual(sourceBefore)
         })
+        businessVerdict = 'passed'
       } catch (error) {
         // Capture the owned test window while it is still alive. Automatic
         // post-test screenshots cannot recover a window already closed here.
@@ -398,6 +447,13 @@ test.describe('GFS large-file business analysis with attended approval', () => {
         throw error
       } finally {
         try {
+          if (reviewer) {
+            try {
+              await reviewer.observeResult(businessVerdict, visibleResponse)
+            } finally {
+              await reviewer.close()
+            }
+          }
           if (ownedTraceStarted) {
             try {
               await desktopContext.tracing.stop({
