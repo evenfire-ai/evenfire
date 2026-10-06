@@ -457,6 +457,7 @@ async function apiRead(
     if (!recoveringFamily) {
       const recovery = getReadRequestRecovery(familyKey)
       if (recovery) {
+        joinReadRequestRecovery(familyKey, options.signal)
         await waitForRead(recovery, options.signal)
         assertCurrent()
         return apiRead(path, query, options)

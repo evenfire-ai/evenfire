@@ -227,17 +227,17 @@ function disposeRecovery(entry: RecoveryEntry): void {
 }
 
 /**
- * Register a consumer that the family cooldown refused as an interest in the
- * scheduled recovery, so another consumer unmounting cannot cancel it while
- * this one is still mounted. It sends nothing and leaves the deadline, the
- * reread members and the attempt budget unchanged. A consumer without a
- * signal has no lifecycle to observe and is not registered, so it can never
- * hold a recovery alive on its own.
+ * Register a consumer as an interest in the family's recovery, so another
+ * consumer unmounting cannot cancel it while this one is still mounted: one
+ * refused by the cooldown while the recovery is scheduled, or one waiting on
+ * it after the deadline. It sends nothing and leaves the deadline, the reread
+ * members and the attempt budget unchanged. A consumer without a signal has no
+ * lifecycle to observe and is not registered, so it can never hold a recovery
+ * alive on its own.
  */
 export function joinReadRequestRecovery(key: string, signal: AbortSignal | undefined): void {
   if (!signal || signal.aborted) return
-  const recovery = recoveries.get(key)
-  if (recovery?.state === 'scheduled') recovery.addSubscribers([signal])
+  recoveries.get(key)?.addSubscribers([signal])
 }
 
 export function getReadRequestRecovery(key: string): Promise<void> | undefined {

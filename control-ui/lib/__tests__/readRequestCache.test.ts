@@ -516,8 +516,13 @@ describe('bounded metadata read reuse', () => {
       await expect(
         apiGet(models, {}, { metadataRead: 'subscription-model-catalog', signal: second.signal })
       ).rejects.toMatchObject({ status: 429 })
+      // Witness: the denial scheduled the recovery, so "no reread" below
+      // means it was cancelled, not that it never existed.
+      expect(vi.getTimerCount()).toBe(1)
       first.abort()
+      expect(vi.getTimerCount()).toBe(1)
       second.abort()
+      expect(vi.getTimerCount()).toBe(0)
       await vi.advanceTimersByTimeAsync(60_000)
       expect(fetchMock).toHaveBeenCalledOnce()
     })
@@ -529,10 +534,43 @@ describe('bounded metadata read reuse', () => {
         apiGet(models, {}, { metadataRead: 'subscription-model-catalog' })
       ).rejects.toMatchObject({ status: 429 })
       expect(fetchMock).toHaveBeenCalledOnce()
+      // Witness: the recovery was scheduled before the only registered
+      // consumer left.
+      expect(vi.getTimerCount()).toBe(1)
       first.abort()
+      expect(vi.getTimerCount()).toBe(0)
       await vi.advanceTimersByTimeAsync(60_000)
       expect(fetchMock).toHaveBeenCalledOnce()
     })
+  })
+
+  it('keeps a running recovery alive for a consumer waiting on it after the deadline', async () => {
+    const path = '/api/v1/admin/connections'
+    const connectionOptions = { metadataRead: 'subscription-connections' } as const
+    const first = new AbortController()
+    const waiter = new AbortController()
+    fetchMock.mockResolvedValueOnce(throttled(2))
+    await expect(
+      apiGet(path, {}, { ...connectionOptions, signal: first.signal })
+    ).rejects.toMatchObject({ status: 429 })
+    let finishReread!: (response: Response) => void
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>(resolve => {
+          finishReread = resolve
+        })
+    )
+    await vi.advanceTimersByTimeAsync(2_000)
+    // The recovery is running: its reread is in flight.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    const waiting = apiGet(path, {}, { ...connectionOptions, signal: waiter.signal })
+    await vi.advanceTimersByTimeAsync(0)
+    // The consumer that scheduled the recovery leaves while another waits on it.
+    first.abort()
+    finishReread(success({ connections: ['recovered'] }))
+    await expect(waiting).resolves.toEqual({ connections: ['recovered'] })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('schedules a recovery for a remount after every earlier subscriber left', async () => {
