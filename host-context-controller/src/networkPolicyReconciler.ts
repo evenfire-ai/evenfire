@@ -433,10 +433,7 @@ export function isPublicDnsHostname(host: string): boolean {
 
 function hccApiEgressPodSelector(namespace: string): k8s.V1LabelSelector {
   if (namespace === config.hostNamespace) {
-    return {
-      matchLabels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE },
-      matchExpressions: [{ key: 'clerum.io/role', operator: 'NotIn', values: ['host-execution'] }],
-    }
+    return { matchLabels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE } }
   }
   if (namespace === config.namespace) {
     return { matchLabels: { app: 'mcp-proxy' } }
@@ -452,10 +449,7 @@ function hccApiEgressPodSelector(namespace: string): k8s.V1LabelSelector {
 
 function k8sApiEgressPodSelector(namespace: string): k8s.V1LabelSelector {
   if (namespace === config.hostNamespace) {
-    return {
-      matchLabels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE },
-      matchExpressions: [{ key: 'clerum.io/role', operator: 'NotIn', values: ['host-execution'] }],
-    }
+    return { matchLabels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE } }
   }
 
   // Runtime workload namespaces are deny-by-default for apiserver access. A
@@ -729,14 +723,7 @@ export class NetworkPolicyReconciler {
         },
       },
       spec: {
-        podSelector:
-          namespace === config.hostNamespace
-            ? {
-                matchExpressions: [
-                  { key: 'clerum.io/role', operator: 'NotIn', values: ['host-execution'] },
-                ],
-              }
-            : {},
+        podSelector: {},
         policyTypes: ['Egress'],
         egress,
       },

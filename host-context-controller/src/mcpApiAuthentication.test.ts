@@ -71,31 +71,6 @@ describe('McpApiAuthenticator', () => {
     expect(authenticate(sign({}, HCC_MCP_AUDIENCE)).audiences).toEqual([HCC_MCP_AUDIENCE])
   })
 
-  it('delegates native execution only when the verified Host token explicitly carries its scope', () => {
-    expect(authenticate(sign({ workflowControlScopes: ['host:tools:execute'] }))).toHaveProperty(
-      'nativeExecutionAllowed',
-      true
-    )
-    expect(authenticate(sign())).not.toHaveProperty('nativeExecutionAllowed')
-    expect(
-      authenticator.authenticate({
-        authorization: `Bearer ${sign()}`,
-        'x-clerum-native-execution': 'true',
-      })
-    ).not.toHaveProperty('nativeExecutionAllowed')
-  })
-
-  it.each([
-    'host:tools:execute',
-    ['host:tools:execute', 'host:tools:execute'],
-    ['host:tools:execute', null],
-    [' host:tools:execute'],
-  ])('does not promote a malformed signed scope list into execution authority', scopes => {
-    expect(authenticate(sign({ workflowControlScopes: scopes }))).not.toHaveProperty(
-      'nativeExecutionAllowed'
-    )
-  })
-
   it.each([
     [WORKFLOW_APPROVAL_AUDIENCE],
     [[HCC_MCP_AUDIENCE, WORKFLOW_APPROVAL_AUDIENCE, 'third-resource']],

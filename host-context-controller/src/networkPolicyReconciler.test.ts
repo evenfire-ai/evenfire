@@ -535,28 +535,6 @@ describe('NetworkPolicyReconciler', () => {
   // ─── L1: Infrastructure Policies ───────────────────────────────────
 
   describe('L1 — ensureInfrastructurePolicies', () => {
-    it('keeps trusted Host infrastructure access while excluding isolated execution Pods', async () => {
-      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
-      await reconciler.ensureDefaultPolicies()
-      const emitted = mockApi.createNamespacedNetworkPolicy.mock.calls.map(
-        (call: unknown[]) => (call[0] as { body: k8s.V1NetworkPolicy }).body
-      )
-      const exclusion = [{ key: 'clerum.io/role', operator: 'NotIn', values: ['host-execution'] }]
-      for (const kind of ['dns', 'hcc-api', 'k8s-api']) {
-        const selector = emitted.find(p => p.metadata?.name === `allow-${kind}-egress-mcp-host`)
-          ?.spec?.podSelector
-        expect(selector).toEqual({
-          ...(kind === 'dns' ? {} : { matchLabels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE } }),
-          matchExpressions: exclusion,
-        })
-      }
-      expect(
-        emitted.find(p => p.metadata?.name === 'deny-all-mcp-host')?.spec?.podSelector
-      ).toEqual({})
-      expect(
-        emitted.find(p => p.metadata?.name === 'allow-dns-egress-mcp-server')?.spec?.podSelector
-      ).toEqual({})
-    })
     it.each([
       ['deny-all-mcp-server', 'default-deny'],
       ['allow-dns-egress-mcp-server', 'infrastructure'],

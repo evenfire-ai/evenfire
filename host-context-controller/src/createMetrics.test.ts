@@ -74,7 +74,7 @@ describe('Kubernetes create instrumentation', () => {
       }
       visit(file)
     }
-    expect(kinds).toHaveLength(25)
+    expect(kinds).toHaveLength(24)
     expect([...new Set(kinds)].sort()).toEqual([...CREATE_KINDS].sort())
   })
 
