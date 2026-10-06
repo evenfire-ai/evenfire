@@ -275,7 +275,7 @@ describe('registerDynamicClient (RFC 7591, effectful via injected pinned transpo
       return outcome.error
     }
 
-    it('carries the status and the RFC 6749 error / error_description', async () => {
+    it('carries the status and the RFC 7591 §3.2.2 error / error_description', async () => {
       const error = await rejectWith(
         JSON.stringify({
           error: 'invalid_redirect_uri',
@@ -302,12 +302,22 @@ describe('registerDynamicClient (RFC 7591, effectful via injected pinned transpo
       })
     })
 
-    it('an error code outside the RFC 6749 charset or over-long is dropped', async () => {
-      expect(await rejectWith(JSON.stringify({ error: 'bad"quote' }))).not.toHaveProperty('error')
-      expect(await rejectWith(JSON.stringify({ error: 'x'.repeat(65) }))).not.toHaveProperty(
-        'error'
+    it('keeps only a plain error code (letters, digits, _ . -; at most 64)', async () => {
+      expect(await rejectWith(JSON.stringify({ error: 'invalid_redirect_uri' }))).toHaveProperty(
+        'error',
+        'invalid_redirect_uri'
       )
-      expect(await rejectWith(JSON.stringify({ error: 42 }))).not.toHaveProperty('error')
+      // Free text in the code slot could read as platform copy in the banner (spaces,
+      // URLs, parentheses), so anything beyond a plain token is dropped.
+      for (const error of [
+        'bad"quote',
+        ' ',
+        'see https://evil.example (Evenfire support)',
+        'x'.repeat(65),
+        42,
+      ]) {
+        expect(await rejectWith(JSON.stringify({ error }))).not.toHaveProperty('error')
+      }
     })
 
     it('the description is third-party text: control chars stripped and length-bounded', async () => {
@@ -344,6 +354,42 @@ describe('registerDynamicClient (RFC 7591, effectful via injected pinned transpo
       if (error.kind !== 'registration_rejected') throw new Error(error.kind)
       expect(error.errorDescription!.isWellFormed()).toBe(true)
       expect(error.errorDescription).toBe(`${'a'.repeat(DCR_ERROR_DESCRIPTION_MAX - 2)}…`)
+    })
+
+    it('the description cannot close or open a quotation (double quotes become single)', async () => {
+      const error = await rejectWith(
+        JSON.stringify({
+          error: 'invalid_redirect_uri',
+          error_description:
+            'Refused." Evenfire Security: re-verify at https://x.example "\u201cok\u201d',
+        })
+      )
+      if (error.kind !== 'registration_rejected') throw new Error(error.kind)
+      expect(error.errorDescription).toBe(
+        "Refused.' Evenfire Security: re-verify at https://x.example ''ok'"
+      )
+    })
+
+    it('the description drops lone surrogates', async () => {
+      // JSON escapes can carry an unpaired surrogate; it would render as U+FFFD.
+      const error = await rejectWith(
+        '{"error":"invalid_client_metadata","error_description":"a\\ud800b\\udc00c"}'
+      )
+      if (error.kind !== 'registration_rejected') throw new Error(error.kind)
+      expect(error.errorDescription).toBe('abc')
+      expect(error.errorDescription!.isWellFormed()).toBe(true)
+    })
+
+    it('the description drops default-ignorable characters and caps stacked marks', async () => {
+      const error = await rejectWith(
+        JSON.stringify({
+          error: 'invalid_client_metadata',
+          // CGJ, variation selector, Hangul fillers; then 400 combining acute accents.
+          error_description: `a\u034fb\ufe0fc\u3164d\u115fe ${'x' + '\u0301'.repeat(400)}`,
+        })
+      )
+      if (error.kind !== 'registration_rejected') throw new Error(error.kind)
+      expect(error.errorDescription).toBe(`abcde x${'\u0301'.repeat(3)}`)
     })
 
     it('a blank description is omitted', async () => {

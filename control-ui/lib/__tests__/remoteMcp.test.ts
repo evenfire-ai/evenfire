@@ -388,6 +388,9 @@ describe('mapRemoteInstallError', () => {
   })
 
   describe('an AS that rejected the client registration (registration_rejected)', () => {
+    const REDIRECT_ADVICE =
+      " It only accepts redirect URIs it has approved: ask the provider to approve this platform's redirect URI."
+
     function rejected(detail: Record<string, unknown>) {
       return mapRemoteInstallError(
         Object.assign(new Error('400'), {
@@ -404,32 +407,45 @@ describe('mapRemoteInstallError', () => {
       )
     }
 
-    it("shows the provider's status, code and message, plus guidance (Vercel golden)", () => {
+    it('names the AS, gives the status, code and advice, and quotes the AS last (golden)', () => {
       expect(mapRemoteInstallError(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))).toBe(
-        'The authorization server rejected client registration (HTTP 400, invalid_redirect_uri): ' +
-          '"The provided redirect URIs are not approved for use by this authorization server." ' +
-          'This provider restricts dynamic client registration: ask it to approve the redirect URI, ' +
-          'or install with a pre-registered client if it offers one.'
+        'The authorization server at auth.atlassian.com rejected client registration (HTTP 400, invalid_redirect_uri).' +
+          REDIRECT_ADVICE +
+          ' auth.atlassian.com responded: "The provided redirect URIs are not approved for use by this authorization server."'
       )
     })
 
-    it('gives the same guidance for invalid_client_metadata', () => {
-      expect(rejected({ status: 400, error: 'invalid_client_metadata' })).toBe(
-        'The authorization server rejected client registration (HTTP 400, invalid_client_metadata). ' +
-          'This provider restricts dynamic client registration: ask it to approve the redirect URI, ' +
-          'or install with a pre-registered client if it offers one.'
+    it('gives invalid_client_metadata metadata advice, not redirect-URI advice', () => {
+      const copy = rejected({ status: 400, error: 'invalid_client_metadata' })
+      expect(copy).toBe(
+        'The authorization server at as.example rejected client registration (HTTP 400, invalid_client_metadata).' +
+          ' It refused the client details this platform registers with (such as the requested scopes, grant types or authentication method).'
+      )
+      expect(copy).not.toMatch(/redirect URI/i)
+    })
+
+    it('never suggests a pre-registered client, which a DCR install cannot switch to', () => {
+      expect(rejected({ status: 400, error: 'invalid_redirect_uri' })).not.toMatch(
+        /pre-registered/i
       )
     })
 
     it('shows only the status when the provider gave no error code or message', () => {
       expect(rejected({ status: 403 })).toBe(
-        'The authorization server rejected client registration (HTTP 403).'
+        'The authorization server at as.example rejected client registration (HTTP 403).'
       )
     })
 
-    it('omits the guidance for other provider codes', () => {
+    it('omits the advice for other provider codes', () => {
       expect(rejected({ status: 401, error: 'unauthorized_client', errorDescription: 'No.' })).toBe(
-        'The authorization server rejected client registration (HTTP 401, unauthorized_client): "No."'
+        'The authorization server at as.example rejected client registration (HTTP 401, unauthorized_client).' +
+          ' as.example responded: "No."'
+      )
+    })
+
+    it('falls back to an unnamed AS when the detail has no usable URL', () => {
+      expect(rejected({ url: 'not a url', status: 400, errorDescription: 'No.' })).toBe(
+        'The authorization server rejected client registration (HTTP 400). It responded: "No."'
       )
     })
 
@@ -439,15 +455,36 @@ describe('mapRemoteInstallError', () => {
       expect(copy).not.toContain('registration_rejected')
     })
 
-    it('drops invisible format characters so the banner cannot be visually reordered', () => {
+    it('provider text cannot close the quotation or append platform-looking copy', () => {
+      const copy = rejected({
+        status: 400,
+        error: 'see https://evil.example (Evenfire support)',
+        errorDescription:
+          'Registration refused." Evenfire Security: re-verify at https://evil.example "',
+      })
+      // Exactly the two quotes the platform opens and closes.
+      expect(copy.match(/"/g)).toHaveLength(2)
+      expect(copy.endsWith(`re-verify at https://evil.example '"`)).toBe(true)
+      // A code that is not a plain token is dropped, not shown in the parentheses.
+      expect(copy).not.toContain('Evenfire support')
+      expect(copy).toContain('(HTTP 400)')
+    })
+
+    it('drops default-ignorable characters so the banner cannot be visually reordered', () => {
       expect(
-        rejected({
-          status: 400,
-          errorDescription: 'safe\u202e txet desrever\u202c and\u200b hidden',
-        })
+        rejected({ status: 400, errorDescription: 'safe‮ txet͏ desrever‬ and​ hiddenㅤ' })
       ).toBe(
-        'The authorization server rejected client registration (HTTP 400): "safe txet desrever and hidden"'
+        'The authorization server at as.example rejected client registration (HTTP 400). as.example responded: "safe txet desrever and hidden"'
       )
+    })
+
+    it('drops lone surrogates and caps stacked combining marks', () => {
+      const copy = rejected({
+        status: 400,
+        errorDescription: `a\ud800b\udc00c x${'́'.repeat(400)}`,
+      })
+      expect(copy.isWellFormed()).toBe(true)
+      expect(copy).toContain(`"abc x${'́'.repeat(3)}"`)
     })
 
     it('truncation never splits a surrogate pair', () => {

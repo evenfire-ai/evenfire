@@ -320,47 +320,79 @@ function describeDcrRejection(kind: RemoteDcrRejectionKind): string {
   }
 }
 
-// Provider codes meaning the AS only registers clients it has approved (e.g. Vercel's
-// allow-listed redirect URIs), so retrying the same install cannot succeed.
-const RESTRICTED_REGISTRATION_CODES: readonly string[] = [
-  'invalid_redirect_uri',
-  'invalid_client_metadata',
-]
-// control-api already bounds both fields; re-bound here because this is third-party
-// text rendered to the operator.
-const PROVIDER_CODE_MAX = 64
-const PROVIDER_DESCRIPTION_MAX = 300
+// Advice for the RFC 7591 §3.2.2 codes whose cause we know. Others get none, rather
+// than advice that names the wrong part of the registration.
+const REGISTRATION_ERROR_ADVICE: Readonly<Record<string, string>> = {
+  invalid_redirect_uri:
+    "It only accepts redirect URIs it has approved: ask the provider to approve this platform's redirect URI.",
+  invalid_client_metadata:
+    'It refused the client details this platform registers with (such as the requested scopes, grant types or authentication method).',
+}
 
+// Provider text bounds. control-api applies the same ones (DCR_ERROR_DESCRIPTION_MAX
+// and PROVIDER_ERROR_CODE_RE in control-api/src/oauth/dcr.ts); they are re-applied
+// here because this is third-party text rendered to the operator.
+const PROVIDER_ERROR_CODE_RE = /^[A-Za-z0-9_.-]{1,64}$/
+const PROVIDER_DESCRIPTION_MAX = 300
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+// Provider text must not be able to close the quotation it is shown in.
+const DOUBLE_QUOTES_RE = /["“”„‟«»]/g
+const STACKED_MARKS_RE = /(\p{M}{3})\p{M}+/gu
+
+/**
+ * Third-party text bounded for display: lone surrogates and default-ignorable
+ * characters (bidi overrides, zero-width, fillers, variation selectors) are dropped,
+ * control characters become spaces, double quotes become single quotes, combining
+ * mark runs are capped, and the result is cut without splitting a surrogate pair.
+ */
 function boundedProviderText(value: unknown, max: number): string {
   if (typeof value !== 'string') return ''
-  // Drop invisible format characters (bidi overrides, zero-width) that could reorder
-  // the banner; control characters become spaces so line breaks still separate words.
   const text = value
-    .replace(/\p{Cf}/gu, '')
+    .replace(LONE_SURROGATE_RE, '')
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
     .replace(/\p{Cc}/gu, ' ')
+    .replace(DOUBLE_QUOTES_RE, "'")
+    .replace(STACKED_MARKS_RE, '$1')
     .replace(/\s+/g, ' ')
     .trim()
   if (text.length <= max) return text
-  // Never cut between the two halves of a surrogate pair.
   let cut = text.slice(0, max - 1)
   if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1)
   return `${cut.trimEnd()}…`
 }
 
+function hostOf(url: unknown): string {
+  if (typeof url !== 'string') return ''
+  try {
+    return new URL(url).host
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Names the AS by host and quotes its own message last, so nothing written by the
+ * platform follows provider text and the operator can tell the two apart.
+ */
 function describeRegistrationRejected(
   detail: Partial<RemoteDcrRegistrationRejectedDetail> | undefined
 ): string {
+  const host = hostOf(detail?.url)
   const status = typeof detail?.status === 'number' ? `HTTP ${detail.status}` : ''
-  const rawCode = boundedProviderText(detail?.error, PROVIDER_CODE_MAX + 1)
-  const code = rawCode.length <= PROVIDER_CODE_MAX ? rawCode : ''
+  const code =
+    typeof detail?.error === 'string' && PROVIDER_ERROR_CODE_RE.test(detail.error)
+      ? detail.error
+      : ''
   const description = boundedProviderText(detail?.errorDescription, PROVIDER_DESCRIPTION_MAX)
   const facts = [status, code].filter(Boolean).join(', ')
-  let copy = `The authorization server rejected client registration${facts ? ` (${facts})` : ''}`
-  copy += description ? `: "${description}"` : '.'
-  if (RESTRICTED_REGISTRATION_CODES.includes(code)) {
-    copy +=
-      ' This provider restricts dynamic client registration: ask it to approve the redirect URI, or install with a pre-registered client if it offers one.'
-  }
+  let copy = `The authorization server${host ? ` at ${host}` : ''} rejected client registration${
+    facts ? ` (${facts})` : ''
+  }.`
+  const advice = Object.hasOwn(REGISTRATION_ERROR_ADVICE, code)
+    ? REGISTRATION_ERROR_ADVICE[code]
+    : ''
+  if (advice) copy += ` ${advice}`
+  if (description) copy += ` ${host || 'It'} responded: "${description}"`
   return copy
 }
 
