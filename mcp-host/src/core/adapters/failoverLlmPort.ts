@@ -95,7 +95,9 @@ class FailoverLlmPort implements LlmPort {
     const counters = [this.getTokenCounter()]
     // File pages remain in the request when a later round changes provider.
     // Construct each configured adapter once so measurement uses its actual
-    // model counter, without making a completion or countTokens request.
+    // model counter, without making a completion or countTokens request. An
+    // unconstructible entry (null port) is never dispatched to, so it has
+    // nothing to measure; a constructible one without a counter is a wiring bug.
     for (const [index, entry] of this.o.policy.fallbacks.entries()) {
       const port = this.portFor({
         kind: 'fallback',
@@ -103,8 +105,14 @@ class FailoverLlmPort implements LlmPort {
         provider: entry.provider,
         model: entry.model,
       })
-      const counter = port?.getTokenCounter?.()
-      if (counter) counters.push(counter)
+      if (!port) continue
+      const counter = port.getTokenCounter?.()
+      if (!counter) {
+        throw new Error(
+          `[FailoverLlmPort] fallback ${index} (${entry.provider}/${entry.model}) has no token counter — wiring bug`
+        )
+      }
+      counters.push(counter)
     }
     return counters
   }

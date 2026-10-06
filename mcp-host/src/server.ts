@@ -11,6 +11,7 @@ import { register } from 'prom-client'
 import { readOpenedArtifactBuffer, redactArtifactForDelivery } from './artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from './artifacts/artifactRedaction'
 import type { RuntimeLifecycleGate } from './lifecycle/statelessHeartbeat'
+import { logger } from './logger'
 import './mcp/catalogBootstrapMetrics'
 import './mcp/statusHeartbeatMetrics'
 import './observability/processMetrics'
@@ -137,7 +138,8 @@ export type {
  * one source without a new package. Both copies must change together.
  *
  *   - MAX_CHAT_BODY_BYTES stays 24MiB so one exceptional 16MiB 2048 PNG
- *     (~21.3MiB base64) plus the 1MiB non-image share still fits. Every other
+ *     (~21.3MiB base64) still fits with ~2.7MiB left for the rest of the body;
+ *     that remainder also counts against the 6MiB non-image share. Every other
  *     route keeps the 10mb ordinary JSON cap (see the parsers below).
  *   - MAX_NON_IMAGE_BODY_BYTES bounds that same body MINUS credited image
  *     base64 (16MiB per image, at most 20 images / 16MiB total) and MINUS
@@ -978,12 +980,12 @@ export class RPCServer {
       this.server = this.app.listen(this.port)
 
       this.server.on('error', err => {
-        console.error('[Server] Error:', err)
+        logger.error({ component: 'Server', err }, 'RPC server error')
         reject(err)
       })
 
       this.server.on('listening', () => {
-        console.log(`[Server] RPC server listening on port ${this.port}`)
+        logger.info({ component: 'Server', port: this.port }, 'RPC server listening')
         resolve()
       })
     })
@@ -996,7 +998,7 @@ export class RPCServer {
         return
       }
       this.server.close(() => {
-        console.log('[Server] RPC server stopped')
+        logger.info({ component: 'Server' }, 'RPC server stopped')
         resolve()
       })
     })

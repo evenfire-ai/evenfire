@@ -21,9 +21,10 @@ import type { TaskError } from '../queue/types'
  * Per-image bytes stay on the channel `attachmentMaxBytes` (issue #654 / PR
  * #669) — this module must not clamp general inbound traffic to the Codex
  * `VISUAL_LIMITS`. The Codex chat hop is a separate 24 MiB parser with a
- * 16 MiB credited image budget and a 16 MiB credited file budget. Per-file
- * bytes use `attachmentFileMaxBytes` (issue #666, 11 MiB by default per issue
- * #678). This count is the fail-loud admission cap.
+ * credited budget of 16 MiB of decoded image bytes and another of 16 MiB of
+ * file base64 (about 12 MiB decoded). Per-file bytes use
+ * `attachmentFileMaxBytes` (issue #666, 11 MiB by default per issue #678).
+ * This count is the fail-loud admission cap.
  */
 export const INCOMING_ATTACHMENT_MAX_COUNT = 20
 

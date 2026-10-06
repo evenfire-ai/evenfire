@@ -21,6 +21,7 @@ import { createHash } from 'crypto'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { Counter, Gauge, Histogram } from 'prom-client'
+import { logger } from '../../logger'
 import { buildSpilloverRef, parseSpilloverRef } from './refResolver'
 import { generateStructureHint, inferContentType } from './structureHints'
 import type {
@@ -366,7 +367,7 @@ export class SpilloverStorage {
     if (this.gcTimer) return
     this.gcTimer = setInterval(() => {
       this.sweep().catch(err => {
-        console.error('[SpilloverStorage] GC sweep failed:', err)
+        logger.error({ component: 'SpilloverStorage', err }, 'GC sweep failed')
       })
     }, this.opts.gcIntervalMs)
     // Don't keep the process alive just for the sweep.

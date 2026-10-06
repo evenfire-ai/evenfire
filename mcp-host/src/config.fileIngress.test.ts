@@ -108,6 +108,19 @@ describe('#666 file ingress configuration', () => {
     expect(config.attachmentFileMaxBytes).toBe(3_145_728)
   })
 
+  it('ignores the attachment retention variables, which have no store to configure', async () => {
+    vi.resetModules()
+    // Each value stopped the Host at load while the retention limits were parsed.
+    vi.stubEnv('CLERUM_ATTACHMENT_STORE_TTL_HOURS', '0')
+    vi.stubEnv('CLERUM_ATTACHMENT_STORE_SESSION_MAX_BYTES', '11534335')
+    vi.stubEnv('CLERUM_ATTACHMENT_STORE_HOST_MAX_BYTES', '1')
+    vi.stubEnv('CLERUM_ATTACHMENT_FILE_MAX_BYTES', '3145728')
+    const loaded = import('./config').then(({ config }) => config)
+    // Witness: the per-file limit is still read from its own variable.
+    await expect(loaded).resolves.toMatchObject({ attachmentFileMaxBytes: 3_145_728 })
+    expect(Object.keys(await loaded).filter(key => key.startsWith('attachmentStore'))).toEqual([])
+  })
+
   it('loads an explicit spillover threshold', async () => {
     vi.resetModules()
     vi.stubEnv(SPILLOVER, '16384')

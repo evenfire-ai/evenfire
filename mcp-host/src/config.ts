@@ -249,11 +249,6 @@ export interface Config {
   attachmentFileMaxBytes: number
   /** Bytes one `clerum__attachment_read` call may return (issue #666). */
   attachmentTextReadMaxBytes: number
-  /** Absolute retention duration; reads never extend it. */
-  attachmentStoreTtlMs: number
-  /** Committed, reserved and pending-cleanup bytes share these quotas. */
-  attachmentStoreSessionMaxBytes: number
-  attachmentStoreHostMaxBytes: number
   /**
    * Structured file references one incoming message may carry (issue #666).
    * The shared contract constant the Desktop composer also enforces; not
@@ -470,7 +465,11 @@ function parseDevHostConfig(): HostSpec | undefined {
     )
     return parsed
   } catch (error) {
-    logger.error({ component: 'Config', err: error }, 'Failed to parse dev Host configuration')
+    // A JSON.parse SyntaxError quotes a slice of the input; log its name only.
+    logger.error(
+      { component: 'Config', errorName: (error as SyntaxError).name },
+      'Failed to parse dev Host configuration'
+    )
     return undefined
   }
 }
@@ -525,34 +524,6 @@ const attachmentFileMaxBytes = getExecutionLimit(
   false,
   11_534_336
 )
-const attachmentStoreTtlHours = getExecutionLimit(
-  'CLERUM_ATTACHMENT_STORE_TTL_HOURS',
-  168,
-  false,
-  // Date's absolute limit is stricter than the safe-integer limit. Admission
-  // must also check its trusted timestamp before adding this duration.
-  Math.floor((8_640_000_000_000_000 - Date.now()) / 3_600_000)
-)
-const attachmentStoreSessionMaxBytes = getExecutionLimit(
-  'CLERUM_ATTACHMENT_STORE_SESSION_MAX_BYTES',
-  67_108_864,
-  false,
-  Number.MAX_SAFE_INTEGER
-)
-const attachmentStoreHostMaxBytes = getExecutionLimit(
-  'CLERUM_ATTACHMENT_STORE_HOST_MAX_BYTES',
-  1_073_741_824,
-  false,
-  Number.MAX_SAFE_INTEGER
-)
-if (
-  attachmentStoreSessionMaxBytes < attachmentFileMaxBytes ||
-  attachmentStoreSessionMaxBytes > attachmentStoreHostMaxBytes
-) {
-  throw new Error(
-    'CLERUM_ATTACHMENT_STORE_SESSION_MAX_BYTES must accommodate one admitted file and not exceed CLERUM_ATTACHMENT_STORE_HOST_MAX_BYTES'
-  )
-}
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
   workflowEnabled: configuredWorkflowEnabled,
@@ -687,7 +658,10 @@ function parseDevMcpServers(): McpServerInfo[] | undefined {
     logger.info({ component: 'Config', serverCount: parsed.length }, 'Parsed dev MCP servers')
     return parsed
   } catch (error) {
-    logger.error({ component: 'Config', err: error }, 'Failed to parse dev MCP servers')
+    logger.error(
+      { component: 'Config', errorName: (error as SyntaxError).name },
+      'Failed to parse dev MCP servers'
+    )
     return undefined
   }
 }
@@ -708,7 +682,10 @@ function parseGuardrailsConfig(): GuardrailsConfig | undefined {
     )
     return parsed
   } catch (error) {
-    logger.error({ component: 'Config', err: error }, 'Failed to parse guardrails configuration')
+    logger.error(
+      { component: 'Config', errorName: (error as SyntaxError).name },
+      'Failed to parse guardrails configuration'
+    )
     return undefined
   }
 }
@@ -727,7 +704,10 @@ function parseApprovalConfig(): ApprovalConfig | undefined {
     )
     return parsed
   } catch (error) {
-    logger.error({ component: 'Config', err: error }, 'Failed to parse approval configuration')
+    logger.error(
+      { component: 'Config', errorName: (error as SyntaxError).name },
+      'Failed to parse approval configuration'
+    )
     return undefined
   }
 }
@@ -1086,9 +1066,6 @@ export const config: Config = {
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
   attachmentFileMaxBytes,
   attachmentTextReadMaxBytes,
-  attachmentStoreTtlMs: attachmentStoreTtlHours * 3_600_000,
-  attachmentStoreSessionMaxBytes,
-  attachmentStoreHostMaxBytes,
   fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
   activityMaxEventBytes: parseInt(getEnv('MCP_HOST_ACTIVITY_MAX_EVENT_BYTES', '2048')!, 10),
