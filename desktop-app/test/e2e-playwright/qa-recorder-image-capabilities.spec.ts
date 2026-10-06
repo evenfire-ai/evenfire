@@ -370,10 +370,20 @@ async function expectImageSendBlocked(
   // Enter must not reach the controller either: nothing is delivered, the draft
   // survives, and the chip is still pending.
   await composer(page).press('Enter')
+  // Witness that the key landed where a send would start.
+  await expect(composer(page)).toBeFocused()
   await expect(page.locator('[data-chat-message-id]')).toHaveCount(0)
+  await expect(sendButton(page)).toBeDisabled()
+  // Liveness witness, after the negatives: the blocked state the refusal had to
+  // leave behind is still on screen, so the empty thread is not an unmounted chat.
+  await expect(modelChip(page)).toHaveAttribute('data-model-id', model)
   await expect(composer(page)).toHaveValue(draft)
   await expect(attachmentChips(page).filter({ hasText: attachmentName })).toBeVisible()
-  await expect(sendButton(page)).toBeDisabled()
+  await expect(notice).toBeVisible()
+  await expect(notice).toContainText(model)
+  await expect(notice).toContainText(messagePattern)
+  // The witnesses above took real time; a late delivery would show up here.
+  await expect(page.locator('[data-chat-message-id]')).toHaveCount(0)
 }
 
 /** Exactly one exchange in this chat, and the answer is not empty. */

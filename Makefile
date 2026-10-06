@@ -311,6 +311,7 @@ minikube-build-image-capabilities-fixture-body:
 minikube-run-image-capabilities: ## Run the visible image journey with an isolated external-provider fixture and restore the Host
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		IMAGE_CAPABILITIES_LANE=image \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
 
 .PHONY: minikube-run-document-upload

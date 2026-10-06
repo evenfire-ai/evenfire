@@ -32,7 +32,11 @@
  * carries the tool result, and the answer is `DOCUMENT_FIXTURE_SHA256:` plus the
  * first 16 hex characters of the SHA-256 of the delivered text. A run whose
  * document never reached the provider cannot produce that digest. Document rows
- * add `documentSha256` (the digest of the delivered text, never the text).
+ * add `documentSha256` (the digest of the delivered text, never the text); the
+ * answer row also records the page the Host delivered (`byteRange` and
+ * `truncated`), so the oracle hashes that exact slice of the file. Rejected rows
+ * add a `reason` drawn from `FIXTURE_REJECTION_REASONS`, a closed set of fixed
+ * strings that never carries request content.
  *
  * Determinism and sanitation. Responses carry a synthetic completion id derived
  * from the run id, a fixed test usage block, and `finish_reason: 'stop'` (or
@@ -130,6 +134,33 @@ const TILE_PALETTE = [
 const TILE_COLOR_NAMES = new Map(
   TILE_PALETTE.map(([name, red, green, blue]) => [`${red},${green},${blue}`, name])
 )
+
+/**
+ * Every reason a rejected ledger row may carry. Each is a fixed string chosen by
+ * the fixture, so a rejected row can never echo a header, prompt or payload.
+ */
+export const FIXTURE_REJECTION_REASONS = Object.freeze([
+  'provider-request-form-unsupported',
+  'provider-path-not-captured',
+  'provider-method-unsupported',
+  'provider-auth-mismatch',
+  'provider-body-unsupported',
+  'provider-body-invalid',
+  'unsupported-model',
+  'text-model-image-incompatible',
+  'image-not-png-data-uri',
+  'image-part-count',
+  'image-png-malformed',
+  'image-png-unsupported-form',
+  'image-tile-grid-mismatch',
+  'image-pixel-not-a-tile-color',
+  'document-byte-length-malformed',
+  'document-tool-result-count',
+  'document-tool-output-malformed',
+  'document-tool-output-unreadable',
+  'document-page-range-malformed',
+  'document-stream-unsupported',
+])
 
 /** A refusal with a stable machine-readable reason code for the evidence tally. */
 class FixtureImageError extends Error {
@@ -459,8 +490,29 @@ function classifyDocumentTurn(body) {
       'document-tool-output-unreadable',
       'the tool result does not carry the document text'
     )
-  return { stage: 'answer', text: result.text }
+  const range = result.byteRange
+  if (
+    !range ||
+    typeof range !== 'object' ||
+    Array.isArray(range) ||
+    !isByteCount(range.offset) ||
+    !isByteCount(range.length) ||
+    typeof result.truncated !== 'boolean'
+  )
+    throw new FixtureDocumentError(
+      'document-page-range-malformed',
+      'the tool result does not carry a readable byteRange and truncated flag'
+    )
+  // Only the two integers and the flag are copied: the ledger never holds text.
+  return {
+    stage: 'answer',
+    text: result.text,
+    byteRange: { offset: range.offset, length: range.length },
+    truncated: result.truncated,
+  }
 }
+
+const isByteCount = value => Number.isSafeInteger(value) && value >= 0
 
 const INTERNAL_HOST_SUFFIXES = [
   '.svc.cluster.local',
@@ -720,18 +772,17 @@ export function createImageFixtureFetch(
    * request was refused before its body was parsed, and `imageSha256` is null
    * whenever the attempt carried no usable image.
    */
-  const recordCall = (model, imageSha256, responseKind, documentSha256, documentByteLength) => {
-    // Only document rows carry `documentSha256`, and only the read row carries
-    // `documentByteLength`, so the image rows keep the exact shape they always had.
-    const row =
-      documentSha256 === undefined
-        ? { model, imageSha256, responseKind }
-        : { model, imageSha256, responseKind, documentSha256 }
-    state.attempts.push(documentByteLength === undefined ? row : { ...row, documentByteLength })
+  const recordCall = (model, imageSha256, responseKind, fields = {}) => {
+    // Only document rows carry document fields and only rejected rows carry a
+    // `reason`, so the image rows keep the exact shape they always had.
+    state.attempts.push({ model, imageSha256, responseKind, ...fields })
   }
   const refuse = (model, reason, { status = 400, code = reason, imageSha256 = null } = {}) => {
+    // The ledger records a fixed string from the closed set, never request text.
+    if (!FIXTURE_REJECTION_REASONS.includes(reason))
+      throw new Error(`Fixture rejection reason is not in the closed set: ${reason}`)
     state.counters.rejectedAttempts += 1
-    recordCall(model, imageSha256, 'rejected')
+    recordCall(model, imageSha256, 'rejected', { reason })
     publish()
     return fixtureErrorResponse(status, code, reason)
   }
@@ -739,11 +790,11 @@ export function createImageFixtureFetch(
     model,
     content,
     responseKind,
-    { imageSha256 = null, documentSha256, stream = false } = {}
+    { imageSha256 = null, document, stream = false } = {}
   ) => {
     sequence += 1
     const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
-    recordCall(model, imageSha256, responseKind, documentSha256)
+    recordCall(model, imageSha256, responseKind, document)
     publish()
     return stream
       ? streamResponse(completionId, model, content)
@@ -831,7 +882,10 @@ export function createImageFixtureFetch(
           state.counters.documentReadRequests += 1
           sequence += 1
           const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
-          recordCall(model, null, 'document-read-requested', null, documentTurn.byteLength)
+          recordCall(model, null, 'document-read-requested', {
+            documentSha256: null,
+            documentByteLength: documentTurn.byteLength,
+          })
           publish()
           return jsonResponse(
             toolCallCompletionBody(completionId, model, ATTACHMENT_READ_TOOL, {
@@ -847,7 +901,14 @@ export function createImageFixtureFetch(
           model,
           `${DOCUMENT_ANSWER_PREFIX}${documentSha256.slice(0, DOCUMENT_ANSWER_DIGEST_CHARS)}`,
           'document-answer',
-          { documentSha256 }
+          {
+            // The page the Host delivered, so the oracle hashes that exact slice.
+            document: {
+              documentSha256,
+              byteRange: documentTurn.byteRange,
+              truncated: documentTurn.truncated,
+            },
+          }
         )
       }
       state.counters.textOnlyResponses += 1

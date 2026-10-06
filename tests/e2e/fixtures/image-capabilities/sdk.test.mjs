@@ -150,6 +150,8 @@ test('the production ZAI serializer and pinned SDK complete an attachment read a
       imageSha256: null,
       responseKind: 'document-answer',
       documentSha256: digest,
+      byteRange: { offset: 0, length: Buffer.byteLength(documentText) },
+      truncated: false,
     },
   ])
 })

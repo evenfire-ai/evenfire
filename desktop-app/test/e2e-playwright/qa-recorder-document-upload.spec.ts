@@ -157,9 +157,12 @@ function fileChips(page: Page) {
   return page.getByTestId('composer-file-chip')
 }
 
-/** The attachment list a sent user message renders (`MessageAttachmentList`). */
+/**
+ * The attachment items a sent message renders (`MessageAttachmentList`). The
+ * items are counted, not the list container, so a second file in one list fails.
+ */
 function sentMessageAttachments(page: Page) {
-  return page.getByLabel('Message attachments')
+  return page.getByLabel('Message attachments').locator('.message-attachment-chip')
 }
 
 /**
@@ -178,10 +181,14 @@ const LARGE_DOCUMENT_BYTES = 6 * 1024 * 1024
 /**
  * Default page `clerum__attachment_read` returns
  * (`CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES`). The fixture digests the text of
- * the first page it receives, so a larger document is identified by the digest
- * of its first page.
+ * the page it receives and records that page's `byteRange`, so the oracle
+ * hashes exactly that slice of the file. This value is only the upper bound a
+ * first page may have; the slice itself comes from the ledger.
  */
 const ATTACHMENT_READ_PAGE_BYTES = 65_536
+
+/** How much of the file the Host's read tool must deliver on the first read. */
+type ExpectedRead = 'whole-file' | 'first-page'
 
 /** Start a blank chat and prove the thread is empty before anything is sent. */
 async function startBlankChat(page: Page) {
@@ -274,23 +281,34 @@ async function attachDocument(
  * which may treat intraword underscores as emphasis; the ledger below pins the
  * exact digest regardless.
  */
+const DOCUMENT_ANSWER_PREFIX_PATTERN = FIXTURE_DOCUMENT_ANSWER_PREFIX.replace(/_/g, '[_-]?')
+
 function documentAnswerRegex(documentSha: string): RegExp {
-  const prefix = FIXTURE_DOCUMENT_ANSWER_PREFIX.replace(/_/g, '[_-]?')
-  return new RegExp(`${prefix}${documentSha.slice(0, FIXTURE_DOCUMENT_ANSWER_DIGEST_CHARS)}`, 'i')
+  return new RegExp(
+    `${DOCUMENT_ANSWER_PREFIX_PATTERN}${documentSha.slice(0, FIXTURE_DOCUMENT_ANSWER_DIGEST_CHARS)}`,
+    'i'
+  )
 }
+
+/** Any fixture document answer: proves the turn finished before the ledger is read. */
+const ANY_DOCUMENT_ANSWER = new RegExp(
+  `${DOCUMENT_ANSWER_PREFIX_PATTERN}[a-f0-9]{${FIXTURE_DOCUMENT_ANSWER_DIGEST_CHARS}}`,
+  'i'
+)
 
 /**
  * Sends the composer's single ready document and proves the round trip: the
- * sent bubble lists the file, the answer carries the digest of the text the
- * read tool returned, and the fixture ledger shows one read request carrying
- * the byte length the Host verified and one answer carrying that digest.
+ * sent bubble lists the file, the fixture ledger shows one read request
+ * carrying the byte length the Host verified and one answer carrying the page
+ * the read tool delivered, and the answer carries the digest of exactly that
+ * slice of the attached bytes.
  */
 async function sendDocumentAndVerifyAnswer(
   page: Page,
   env: ReturnType<typeof requireImageCapabilitiesFixtureEnv>,
   assertBinding: () => Promise<void>,
   document: { fileName: string; buffer: Buffer },
-  readTextSha: string
+  expectedRead: ExpectedRead
 ) {
   const before = readImageCapabilityEvidence(env)
   await assertBinding()
@@ -304,8 +322,7 @@ async function sendDocumentAndVerifyAnswer(
   await expect(sentMessageAttachments(page)).toContainText(document.fileName)
   const response = page.getByTestId('agent-response').locator('.message-block.markdown-content')
   await expect(response).toHaveCount(1, { timeout: 120_000 })
-  await expect(response).toContainText(documentAnswerRegex(readTextSha), { timeout: 120_000 })
-  await observeCompletedTask(page, env.hostRef, documentAnswerRegex(readTextSha))
+  await expect(response).toContainText(ANY_DOCUMENT_ANSWER, { timeout: 120_000 })
 
   const after = readImageCapabilityEvidence(env)
   const appended = appendedAttempts(before, after)
@@ -322,10 +339,30 @@ async function sendDocumentAndVerifyAnswer(
   expect(readRows[0]?.documentSha256).toBeNull()
   // The Host announced the whole file: the byte length it verified on admission.
   expect(readRows[0]?.documentByteLength).toBe(document.buffer.length)
-  // Turn 2: the tool result reached the wire carrying exactly the attached bytes.
+  // Turn 2: the tool result reached the wire carrying exactly the attached bytes
+  // of the page the Host reports it delivered.
   expect(answerRows).toHaveLength(1)
-  expect(answerRows[0]?.model).toBe(IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
-  expect(answerRows[0]?.documentSha256).toBe(readTextSha)
+  const answer = answerRows[0]
+  expect(answer?.model).toBe(IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
+  const range = answer?.byteRange
+  if (!range || answer?.truncated === undefined) {
+    throw new Error('[document-upload] the answer row carries no delivered page')
+  }
+  expect(range.offset).toBe(0)
+  if (expectedRead === 'whole-file') {
+    expect(answer.truncated).toBe(false)
+    expect(range.length).toBe(document.buffer.length)
+  } else {
+    expect(answer.truncated).toBe(true)
+    expect(range.length).toBeGreaterThan(0)
+    expect(range.length).toBeLessThanOrEqual(ATTACHMENT_READ_PAGE_BYTES)
+    expect(range.length).toBeLessThan(document.buffer.length)
+  }
+  const pageSha = sha256Hex(document.buffer.subarray(range.offset, range.offset + range.length))
+  expect(answer.documentSha256).toBe(pageSha)
+  // The visible answer and the recorded task name that same digest.
+  await expect(response).toContainText(documentAnswerRegex(pageSha))
+  await observeCompletedTask(page, env.hostRef, documentAnswerRegex(pageSha))
 
   // A document is never an image: no pixels moved, and the fixture refused nothing.
   expect(appended.filter(row => row.imageSha256 !== null)).toHaveLength(0)
@@ -359,7 +396,6 @@ test('document-upload fixture: an attached text file reaches the model through t
     mimeType: 'text/plain',
     buffer: Buffer.from(`document-upload ${randomBytes(6).toString('hex')}\nsecond line\n`, 'utf8'),
   }
-  const documentSha = sha256Hex(document.buffer)
 
   // Run-unique ASCII (hex of random bytes): its first page differs from every
   // other run's, and in ASCII the byte cut and the text cut of a page coincide.
@@ -369,12 +405,6 @@ test('document-upload fixture: an attached text file reaches the model through t
     buffer: Buffer.from(randomBytes(LARGE_DOCUMENT_BYTES / 2).toString('hex'), 'ascii'),
   }
   expect(largeDocument.buffer.length).toBe(LARGE_DOCUMENT_BYTES)
-  const largeDocumentPageSha = sha256Hex(
-    largeDocument.buffer.subarray(0, ATTACHMENT_READ_PAGE_BYTES)
-  )
-
-  fs.mkdirSync(testInfo.outputPath(), { recursive: true })
-  fs.writeFileSync(testInfo.outputPath(document.fileName), document.buffer)
 
   let app: ElectronApplication | undefined
   let recordedPage: Page | undefined
@@ -441,7 +471,7 @@ test('document-upload fixture: an attached text file reaches the model through t
     })
 
     await test.step('the answer carries the digest of the delivered text and the ledger shows both provider turns', async () => {
-      await sendDocumentAndVerifyAnswer(page, env, assertBinding, document, documentSha)
+      await sendDocumentAndVerifyAnswer(page, env, assertBinding, document, 'whole-file')
     })
 
     await test.step('a 6 MiB document above the old text share is admitted as a ready chip', async () => {
@@ -475,13 +505,7 @@ test('document-upload fixture: an attached text file reaches the model through t
     })
 
     await test.step('the 6 MiB document is sent, read inline and answered with the digest of its first page', async () => {
-      await sendDocumentAndVerifyAnswer(
-        page,
-        env,
-        assertBinding,
-        largeDocument,
-        largeDocumentPageSha
-      )
+      await sendDocumentAndVerifyAnswer(page, env, assertBinding, largeDocument, 'first-page')
     })
 
     await screenshotAndLog(page, testInfo, 'desktop-document-upload-fixture')

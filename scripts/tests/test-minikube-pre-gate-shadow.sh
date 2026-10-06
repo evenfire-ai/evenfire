@@ -451,11 +451,16 @@ STUB
   cleanup_fixture "$d"
 }
 
-# minikube-verify-images only reads the manifest and the daemon; its recipe has
-# no lock wrapper, so T2_SKIP_LOCK / T2_LOCK_TOKEN on that call do nothing and
-# read as if it needed the lease. It is called without them. If the recipe ever
-# gains a lock wrapper, the Makefile check below fails first and the call must
-# pass the lease like the build and pull calls above.
+# The minikube-verify-images recipe runs `build-images.sh --verify-only` with no
+# mutation-lock wrapper, and build-images.sh returns from
+# require_inherited_mutation_lease before any lease check when --verify-only is
+# set. T2_SKIP_LOCK / T2_LOCK_TOKEN on that call would therefore be ignored and
+# would read as if it needed the lease, so it is called without them. This test
+# checks the call sites and the Makefile recipe text only (the --verify-only
+# flag is present and no mutation-lock wrapper is); it does not run
+# build-images.sh, so the script-side skip is not asserted here. If the recipe
+# ever gains a lock wrapper, the recipe check below fails and the call must pass
+# the lease like the build and pull calls above.
 assert_verify_images_is_called_without_the_lock_lease() {
   local d out_local out_ghcr rc_local rc_ghcr verify_calls bare_calls recipe
   recipe="$(awk '/^minikube-verify-images:/{f=1;next} f&&/^[^\t]/{exit} f' "$REPO_ROOT/Makefile")"

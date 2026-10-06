@@ -59,6 +59,34 @@ export const FIXTURE_RESPONSE_KIND = {
   documentAnswer: 'document-answer',
 } as const
 
+/**
+ * Reasons a rejected row may carry: fixed strings, never request content.
+ * Declared independently of the fixture for the same reason as the response
+ * kinds; `test/imageCapabilityEvidence.test.ts` checks the two lists agree.
+ */
+export const FIXTURE_REJECTION_REASONS: readonly string[] = Object.freeze([
+  'provider-request-form-unsupported',
+  'provider-path-not-captured',
+  'provider-method-unsupported',
+  'provider-auth-mismatch',
+  'provider-body-unsupported',
+  'provider-body-invalid',
+  'unsupported-model',
+  'text-model-image-incompatible',
+  'image-not-png-data-uri',
+  'image-part-count',
+  'image-png-malformed',
+  'image-png-unsupported-form',
+  'image-tile-grid-mismatch',
+  'image-pixel-not-a-tile-color',
+  'document-byte-length-malformed',
+  'document-tool-result-count',
+  'document-tool-output-malformed',
+  'document-tool-output-unreadable',
+  'document-page-range-malformed',
+  'document-stream-unsupported',
+])
+
 /** The fixture's text-only answer. It names no image and no color. */
 export const FIXTURE_TEXT_ONLY_CONTENT = 'IMAGE_FIXTURE_TEXT_OK'
 
@@ -275,6 +303,15 @@ export interface FixtureProviderAttempt {
    * Present only on the read-request row.
    */
   documentByteLength?: number
+  /**
+   * The page of the file the Host's read tool delivered. Present only on the
+   * answer row, so the oracle can hash exactly that slice of the file.
+   */
+  byteRange?: { offset: number; length: number }
+  /** Whether the Host delivered less than the whole file. Answer row only. */
+  truncated?: boolean
+  /** One of {@link FIXTURE_REJECTION_REASONS}. Present only on rejected rows. */
+  reason?: string
 }
 
 export interface FixtureEvidenceCounters {
@@ -355,6 +392,48 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
     )
   }
 
+  const row: FixtureProviderAttempt = { model, imageSha256, responseKind }
+
+  // Present on every rejected row and on no other row.
+  if (responseKind === FIXTURE_RESPONSE_KIND.rejected) {
+    const reason = value.reason
+    if (typeof reason !== 'string' || !FIXTURE_REJECTION_REASONS.includes(reason)) {
+      throw new Error(
+        `${source}: attempts[${index}].reason must be one of ${FIXTURE_REJECTION_REASONS.join(', ')} ` +
+          `on a ${FIXTURE_RESPONSE_KIND.rejected} row`
+      )
+    }
+    row.reason = reason
+  } else if ('reason' in value) {
+    throw new Error(
+      `${source}: attempts[${index}].reason is only valid on a ${FIXTURE_RESPONSE_KIND.rejected} row`
+    )
+  }
+
+  // Present on every answer row and on no other row.
+  if (responseKind === FIXTURE_RESPONSE_KIND.documentAnswer) {
+    const byteRange = value.byteRange
+    if (!isRecord(byteRange) || !isByteCount(byteRange.offset) || !isByteCount(byteRange.length)) {
+      throw new Error(
+        `${source}: attempts[${index}].byteRange must be { offset, length } of non-negative ` +
+          `integers on a ${FIXTURE_RESPONSE_KIND.documentAnswer} row`
+      )
+    }
+    if (typeof value.truncated !== 'boolean') {
+      throw new Error(
+        `${source}: attempts[${index}].truncated must be a boolean on a ` +
+          `${FIXTURE_RESPONSE_KIND.documentAnswer} row`
+      )
+    }
+    row.byteRange = { offset: byteRange.offset, length: byteRange.length }
+    row.truncated = value.truncated
+  } else if ('byteRange' in value || 'truncated' in value) {
+    throw new Error(
+      `${source}: attempts[${index}].byteRange and truncated are only valid on a ` +
+        `${FIXTURE_RESPONSE_KIND.documentAnswer} row`
+    )
+  }
+
   // Present only on document rows; an image row must not grow the field.
   if ('documentSha256' in value) {
     const documentSha256 = value.documentSha256
@@ -366,6 +445,7 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
         `${source}: attempts[${index}].documentSha256 must be a sha256 hex digest or null`
       )
     }
+    row.documentSha256 = documentSha256
     // Present only on the read-request row.
     if ('documentByteLength' in value) {
       const documentByteLength = value.documentByteLength
@@ -380,9 +460,9 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
             `${FIXTURE_RESPONSE_KIND.documentReadRequested} row`
         )
       }
-      return { model, imageSha256, responseKind, documentSha256, documentByteLength }
+      row.documentByteLength = documentByteLength
     }
-    return { model, imageSha256, responseKind, documentSha256 }
+    return row
   }
   if ('documentByteLength' in value) {
     throw new Error(
@@ -390,11 +470,15 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
     )
   }
 
-  return { model, imageSha256, responseKind }
+  return row
+}
+
+function isByteCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 /** Parses and validates the ledger; fixture fields this lane does not use are ignored. */
-function parseEvidenceSnapshot(
+export function parseEvidenceSnapshot(
   rawText: string,
   source: string,
   expected: { runId: string; profile: string }
@@ -535,7 +619,11 @@ export function appendedAttempts(
       current.imageSha256 !== row.imageSha256 ||
       current.responseKind !== row.responseKind ||
       current.documentSha256 !== row.documentSha256 ||
-      current.documentByteLength !== row.documentByteLength
+      current.documentByteLength !== row.documentByteLength ||
+      current.reason !== row.reason ||
+      current.byteRange?.offset !== row.byteRange?.offset ||
+      current.byteRange?.length !== row.byteRange?.length ||
+      current.truncated !== row.truncated
     ) {
       throw new Error(
         `[image-capabilities] ledger row ${index} changed between reads; the ledger must be append-only.`

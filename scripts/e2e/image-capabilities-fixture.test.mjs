@@ -1,17 +1,42 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   baseImage,
   fixtureImage,
+  fixturePassLine,
   installSignalRestore,
   modelInputs,
   playwrightLaneConfig,
+  playwrightVerdict,
   proveImages,
   requireOwnedResource,
   runAnnotation,
   sanitizeFixtureReport,
+  selectFixtureAction,
 } from './image-capabilities-fixture.mjs'
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+const laneConfigFile = lane =>
+  path.join(repoRoot, playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane }).config)
+function playwrightReport({ lane = 'image', stats = {}, errors = [], titles } = {}) {
+  const { grep } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
+  const specTitles = titles ?? [`${grep}a journey`]
+  return {
+    config: { configFile: laneConfigFile(lane) },
+    suites: [
+      {
+        title: 'qa-recorder.spec.ts',
+        specs: specTitles.map(title => ({ title, ok: true })),
+        suites: [],
+      },
+    ],
+    errors,
+    stats: { expected: specTitles.length, skipped: 0, unexpected: 0, flaky: 0, ...stats },
+  }
+}
 
 const head = 'a'.repeat(40)
 const profile = 'clerum-image-fixture-12345678'
@@ -30,11 +55,13 @@ test('the Playwright lane defaults to the image journey and accepts only known l
     lane: 'image',
     config: 'desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
     label: 'image-capabilities-playwright',
+    grep: 'image-capabilities fixture: ',
   })
   assert.deepEqual(playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'document-upload' }), {
     lane: 'document-upload',
     config: 'desktop-app/test/e2e-playwright/playwright.document-upload.config.ts',
     label: 'document-upload-playwright',
+    grep: 'document-upload fixture: ',
   })
   for (const lane of ['', 'documents', '../evil.config.ts', '__proto__', 'toString']) {
     assert.throws(
@@ -42,6 +69,127 @@ test('the Playwright lane defaults to the image journey and accepts only known l
       /IMAGE_CAPABILITIES_LANE must be one of image, document-upload/,
       lane
     )
+  }
+})
+
+test('restore never resolves the Playwright lane, so a stale or invalid lane cannot block restoration', () => {
+  for (const lane of [undefined, 'image', 'typo', '', '__proto__', '../evil.config.ts']) {
+    const env = lane === undefined ? {} : { IMAGE_CAPABILITIES_LANE: lane }
+    // Witness: the restore path was selected, and it carries no lane at all.
+    assert.deepEqual(selectFixtureAction('restore', env), { action: 'restore' }, String(lane))
+  }
+})
+
+test('run still resolves and validates the Playwright lane', () => {
+  assert.deepEqual(selectFixtureAction(undefined, {}), {
+    action: 'run',
+    ...playwrightLaneConfig({}),
+  })
+  assert.deepEqual(selectFixtureAction('run', { IMAGE_CAPABILITIES_LANE: 'document-upload' }), {
+    action: 'run',
+    ...playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'document-upload' }),
+  })
+  for (const lane of ['typo', '', '__proto__']) {
+    assert.throws(
+      () => selectFixtureAction('run', { IMAGE_CAPABILITIES_LANE: lane }),
+      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload/,
+      lane
+    )
+  }
+  assert.throws(() => selectFixtureAction('cleanup', {}), /Expected run or restore/)
+})
+
+test('the PASS line names the lane only when the persisted state was produced by that lane', () => {
+  const evidence = '/runs/image-capabilities-0123456789ab'
+  const state = { lane: 'document-upload', playwright: 'PASS', restored: true }
+  // Witness: a state written by the requested lane yields the lane-bearing PASS line.
+  assert.equal(
+    fixturePassLine(state, { lane: 'document-upload', evidence }),
+    `IMAGE_CAPABILITIES_E2E_PASS lane=document-upload evidence=${evidence}\n`
+  )
+  for (const [label, mutated] of [
+    ['other lane', { ...state, lane: 'image' }],
+    ['missing lane', { playwright: 'PASS', restored: true }],
+    [
+      'inherited lane',
+      Object.assign(Object.create({ lane: 'document-upload' }), {
+        playwright: 'PASS',
+        restored: true,
+      }),
+    ],
+  ]) {
+    assert.throws(
+      () => fixturePassLine(mutated, { lane: 'document-upload', evidence }),
+      /Run state lane mismatch/,
+      label
+    )
+  }
+  assert.throws(
+    () =>
+      fixturePassLine({ ...state, playwright: undefined }, { lane: 'document-upload', evidence }),
+    /Run state has no Playwright PASS/
+  )
+  assert.throws(
+    () => fixturePassLine({ ...state, restored: false }, { lane: 'document-upload', evidence }),
+    /Run state was not restored/
+  )
+})
+
+test('the Playwright verdict is PASS only for a complete, clean report from the lane config', () => {
+  // Witness: a clean run of the requested lane is PASS.
+  assert.equal(
+    playwrightVerdict(playwrightReport(), { lane: 'image', configFile: laneConfigFile('image') }),
+    'PASS'
+  )
+  assert.equal(
+    playwrightVerdict(playwrightReport({ lane: 'document-upload' }), {
+      lane: 'document-upload',
+      configFile: laneConfigFile('document-upload'),
+    }),
+    'PASS'
+  )
+  const options = { lane: 'image', configFile: laneConfigFile('image') }
+  for (const [label, report, pattern] of [
+    ['zero tests', playwrightReport({ titles: [] }), /Playwright ran no expected tests/],
+    [
+      'all skipped',
+      playwrightReport({ stats: { expected: 0, skipped: 1 } }),
+      /Playwright ran no expected tests/,
+    ],
+    ['one skipped', playwrightReport({ stats: { skipped: 1 } }), /skipped=1/],
+    ['one unexpected', playwrightReport({ stats: { unexpected: 1 } }), /unexpected=1/],
+    ['one flaky', playwrightReport({ stats: { flaky: 1 } }), /flaky=1/],
+    [
+      'non-integer count',
+      playwrightReport({ stats: { expected: '1' } }),
+      /Playwright ran no expected tests/,
+    ],
+    [
+      'missing stats',
+      { ...playwrightReport(), stats: undefined },
+      /Playwright ran no expected tests/,
+    ],
+    ['global error', playwrightReport({ errors: [{ message: 'boom' }] }), /global errors/],
+    [
+      'other lane config',
+      { ...playwrightReport(), config: { configFile: laneConfigFile('document-upload') } },
+      /config mismatch/,
+    ],
+    ['missing config', { ...playwrightReport(), config: {} }, /config mismatch/],
+    [
+      'spec outside the lane selection',
+      playwrightReport({
+        titles: ['image-capabilities fixture: a journey', 'optional QA recorder: real'],
+      }),
+      /outside the image lane/,
+    ],
+    [
+      'malformed suites',
+      { ...playwrightReport(), suites: undefined },
+      /Incomplete Playwright suites/,
+    ],
+  ]) {
+    assert.throws(() => playwrightVerdict(report, options), pattern, label)
   }
 })
 
