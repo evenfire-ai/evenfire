@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
@@ -2198,6 +2198,13 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
   const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
   const COMPLETIONS = '/internal/runtime/v1/codex/completions'
 
+  // The visual gate is module state shared by every test here. A test that
+  // leaves a slot or a waiter behind fails the next test by name here, instead
+  // of letting it queue behind the leftover until its timeout.
+  beforeEach(() => {
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+  })
+
   async function until(condition: () => boolean, what: string): Promise<void> {
     const deadline = performance.now() + 5_000
     while (!condition()) {
@@ -2509,12 +2516,16 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
     const warn = vi.spyOn(logger, 'warn')
     const held: Array<() => void> = []
     const waiting: Array<Promise<() => void>> = []
+    // The gate grants a freed slot to whichever waiter polls first, not in
+    // queue order. Cleanup therefore aborts every waiter before it frees the
+    // held slots, so no waiter can take a slot that cleanup would then wait on.
+    const drain = new AbortController()
     try {
       for (let i = 0; i < VISUAL_STREAM_LIMITS.maxConcurrentStreams; i += 1) {
         held.push(await visualStreamGate.acquire())
       }
       for (let i = 0; i < VISUAL_STREAM_LIMITS.maxQueuedRequests; i += 1) {
-        const acquired = visualStreamGate.acquire()
+        const acquired = visualStreamGate.acquire(drain.signal)
         acquired.catch(() => {})
         waiting.push(acquired)
       }
@@ -2544,11 +2555,9 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
         queued: VISUAL_STREAM_LIMITS.maxQueuedRequests,
       })
     } finally {
+      drain.abort()
+      await Promise.allSettled(waiting)
       for (const release of held.splice(0)) release()
-      for (const acquired of waiting) {
-        const release = await acquired.catch(() => undefined)
-        release?.()
-      }
       warn.mockRestore()
     }
   }, 30_000)

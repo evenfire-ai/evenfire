@@ -419,7 +419,9 @@ describe('StreamGate', () => {
     expect(gate.snapshot()).toEqual({ running: 1, queued: 4 })
     await expect(gate.acquire()).rejects.toBeInstanceOf(RequestLimitError)
     held()
-    for (const waiter of queued) (await waiter)()
+    // The gate grants a freed slot to whichever waiter polls first, so each
+    // waiter releases its slot as soon as it gets one, in any order.
+    await Promise.all(queued.map(async waiter => (await waiter)()))
     expect(gate.snapshot()).toEqual({ running: 0, queued: 0 })
   })
 
@@ -437,7 +439,9 @@ describe('StreamGate', () => {
     // Queue capacity: the caller after maxQueuedRequests is refused.
     await expect(visualStreamGate.acquire()).rejects.toMatchObject({ kind: 'queue_full' })
     for (const release of held) release()
-    for (const waiter of queued) (await waiter)()
+    // The gate grants a freed slot to whichever waiter polls first, so each
+    // waiter releases its slot as soon as it gets one, in any order.
+    await Promise.all(queued.map(async waiter => (await waiter)()))
     expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
   })
 })
