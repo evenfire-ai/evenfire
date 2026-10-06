@@ -90,7 +90,9 @@ async function sendTaskAndWaitForReviewedShell(
 
   await expect(approval).toHaveCount(1, { timeout: RESPONSE_TIMEOUT_MS })
   await expect(approval).toBeVisible({ timeout: 10_000 })
-  const stepper = page.getByTestId('progress-stepper').filter({ has: approval })
+  // This is a new chat and the test asserted above that no prior stepper exists.
+  // Keep the same stable turn locator after the approval button disappears.
+  const stepper = page.getByTestId('progress-stepper')
   await expect(stepper).toBeVisible({ timeout: 10_000 })
   await expect(stepper).toContainText('Shell requires approval')
   const commandPreview = stepper.getByTestId('approval-input-preview')
@@ -98,8 +100,13 @@ async function sendTaskAndWaitForReviewedShell(
   await expect(commandPreview).toContainText('.gfs-downloads/')
   await expect(stepper.getByRole('note')).toHaveCount(0)
   const details = stepper.getByRole('button', { name: /More details/ })
-  await expect(details).toBeVisible()
-  await details.click()
+  // Path requests must show discovery and transfer evidence. An attached
+  // reference is prepared before the first model turn, so its approval card can
+  // legitimately contain only the reviewed shell call.
+  if (sourceMode === 'path') {
+    await expect(details).toBeVisible()
+    await details.click()
+  }
   const downloaded = completedToolStepRow(page, /gfs_download|gfs_read/)
   let receiptPath: string | undefined
   if (sourceMode === 'path') {
@@ -155,9 +162,35 @@ async function sendTaskAndWaitForReviewedShell(
   // Local control becomes actionable only after this test verifies the initial
   // receipt and unexecuted shell. Every decision still clicks the visible UI.
   reviewer?.activate()
-  await expect(page.getByTestId('progress-stepper')).toHaveClass(/\bstatus-completed\b/, {
-    timeout: RESPONSE_TIMEOUT_MS,
-  })
+  const responseDeadline = Date.now() + RESPONSE_TIMEOUT_MS
+  let stepperClass = ''
+  let lastReviewState = 'not started'
+  while (Date.now() < responseDeadline) {
+    if (reviewer) {
+      const clicked = await reviewer.reviewAndApproveVisible(receiptPath!)
+      lastReviewState = clicked ? 'clicked visible approval' : 'no actionable approval'
+    }
+    stepperClass = (await stepper.getAttribute('class')) ?? ''
+    if (/\bstatus-completed\b/.test(stepperClass)) break
+    await page.waitForFunction(
+      () => {
+        const currentStepper = document.querySelector('[data-testid="progress-stepper"]')
+        const approve = document.querySelector<HTMLButtonElement>(
+          '[data-testid="approval-approve-btn"]'
+        )
+        return (
+          currentStepper?.classList.contains('status-completed') === true ||
+          approve?.disabled === false
+        )
+      },
+      undefined,
+      { timeout: Math.max(1, responseDeadline - Date.now()), polling: 'raf' }
+    )
+  }
+  expect(
+    stepperClass,
+    `Governed turn did not complete; last review state: ${lastReviewState}`
+  ).toMatch(/\bstatus-completed\b/)
   await expect(approval).toHaveCount(0, { timeout: RESPONSE_TIMEOUT_MS })
   await expect(response).toBeVisible({ timeout: RESPONSE_TIMEOUT_MS })
   const expandButton = page.getByTestId('progress-expand-btn')
