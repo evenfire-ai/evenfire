@@ -919,6 +919,10 @@ export async function deleteTransportDelegation(
  * The Context has an ownerReference to the WorkflowRecipe so K8s GC handles
  * deletion automatically. Belt-and-suspenders explicit delete in cleanupDelegation.
  *
+ * Read-first, like ensureTransportService (#760): GET the Context; create it
+ * only on a 404; a 409 on that create re-reads and compares. A POST against an
+ * existing Context is a rejected write that the audit log still counts.
+ *
  * Returns the per-recipe context name.
  */
 export async function ensureRecipeContext(
@@ -969,15 +973,43 @@ export async function ensureRecipeContext(
     },
   }
 
-  const replaceExistingContext = async (): Promise<{ wrote: boolean }> => {
+  const readContext = async (): Promise<ExistingContextSnapshot> =>
+    (await deps.customApi.getNamespacedCustomObject({
+      group: CRD_GROUP,
+      version: CRD_VERSION,
+      namespace,
+      plural: CONTEXT_PLURAL,
+      name: contextName,
+    })) as ExistingContextSnapshot
+
+  // Every read in here runs after a conflict (create or replace), so the
+  // object is known to have existed; a 404 asks for a fresh reconciliation.
+  const rereadContext = async (after: 'create' | 'replace'): Promise<ExistingContextSnapshot> => {
+    try {
+      return await readContext()
+    } catch (error) {
+      if (getErrorCode(error) === 404) {
+        throw new ResourceVanishedAfterConflictError(`Context "${contextName}" in ${namespace}`, {
+          cause: error,
+          after,
+        })
+      }
+      throw error
+    }
+  }
+
+  // `initial` is the snapshot the caller already read; attempt 1 compares
+  // against it instead of reading again.
+  const replaceExistingContext = async (
+    initial?: ExistingContextSnapshot
+  ): Promise<{ wrote: boolean }> => {
     for (let attempt = 1; attempt <= CONTEXT_REPLACE_CONFLICT_RETRIES; attempt += 1) {
-      const existing = (await deps.customApi.getNamespacedCustomObject({
-        group: CRD_GROUP,
-        version: CRD_VERSION,
-        namespace,
-        plural: CONTEXT_PLURAL,
-        name: contextName,
-      })) as ExistingContextSnapshot
+      // Without a snapshot, attempt 1 follows a create conflict; every later
+      // attempt follows a replace conflict.
+      const existing =
+        attempt === 1 && initial
+          ? initial
+          : await rereadContext(attempt === 1 ? 'create' : 'replace')
 
       // Semantic post-merge equality. Do not stamp clerum.io/spec-hash on a
       // shared Context: N recipe writers would flap the annotation the same
@@ -1055,30 +1087,46 @@ export async function ensureRecipeContext(
   // One mechanism for all three outcomes of this one decision (#568 review, R1-L5).
   const log = createLogger('wrc', recipeName)
 
+  // Read first (#760): a POST against an existing Context is a rejected write
+  // that the audit log still counts, and this runs twice per reconcile.
+  let initial: ExistingContextSnapshot | null
   try {
-    await deps.customApi.createNamespacedCustomObject({
-      group: CRD_GROUP,
-      version: CRD_VERSION,
-      namespace,
-      plural: CONTEXT_PLURAL,
-      body: contextBody,
-    })
-    log.info('Created per-recipe Context', { contextName, servers: serverNames.length })
+    initial = await readContext()
   } catch (error) {
-    if (getErrorCode(error) === 409) {
-      const { wrote } = await replaceExistingContext()
-      if (wrote) {
-        log.info('Updated per-recipe Context', { contextName, servers: serverNames.length })
-      } else {
-        // DEBUG, not INFO. This is the steady state: it fires on every reconcile
-        // pass for every recipe, which at the current cadence is the log volume
-        // #492 exists about. The writes above are the events worth an INFO line;
-        // "nothing happened" is not (#568 review, jozer-rami minors).
-        log.debug('Context unchanged; skipping update', { contextName })
+    if (getErrorCode(error) !== 404) throw error
+    initial = null
+  }
+
+  let wrote: boolean
+  if (initial !== null) {
+    ;({ wrote } = await replaceExistingContext(initial))
+  } else {
+    try {
+      await deps.customApi.createNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace,
+        plural: CONTEXT_PLURAL,
+        body: contextBody,
+      })
+      log.info('Created per-recipe Context', { contextName, servers: serverNames.length })
+      return contextName
+    } catch (error) {
+      if (getErrorCode(error) !== 409) {
+        throw error
       }
-    } else {
-      throw error
+      // Another writer created it between our read and this POST.
+      ;({ wrote } = await replaceExistingContext())
     }
+  }
+  if (wrote) {
+    log.info('Updated per-recipe Context', { contextName, servers: serverNames.length })
+  } else {
+    // DEBUG, not INFO. This is the steady state: it fires on every reconcile
+    // pass for every recipe, which at the current cadence is the log volume
+    // #492 exists about. The writes above are the events worth an INFO line;
+    // "nothing happened" is not (#568 review, jozer-rami minors).
+    log.debug('Context unchanged; skipping update', { contextName })
   }
   return contextName
 }
@@ -1190,8 +1238,9 @@ export async function preDeployMcpServers(
   // Create (or update) the per-recipe Context CRD immediately after McpServers
   // are pre-deployed. This makes the allowlist visible to E2E tests and downstream
   // watchers in ~2-3s, well before waitForNetworkReady completes (~30s for stdio).
-  // delegateTransportWorkloads (Step 9a) will call ensureRecipeContext again
-  // idempotently after the network handshake completes.
+  // delegateTransportWorkloads (Step 9a) calls ensureRecipeContext again after
+  // the network handshake completes. In steady state that second call is one
+  // GET and no write, because the writer reads before it creates (#760).
   if (preDeployed.length > 0) {
     const recipeOwnerRef = {
       apiVersion: `${CRD_GROUP}/${CRD_VERSION}` as const,
