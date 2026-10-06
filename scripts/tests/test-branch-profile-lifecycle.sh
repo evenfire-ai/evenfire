@@ -1177,6 +1177,42 @@ assert_log_has 'kubectl config get-contexts -o name' 'start of a brand-new profi
 assert_log_lacks 'minikube profile list' 'start of a brand-new profile must not need minikube profile list'
 assert_log_has "minikube start -p ${profile} --keep-context" 'start of a brand-new profile ran minikube start'
 
+# An explicit MINIKUBE_PROFILE that names this branch's derived profile before
+# that profile was ever created takes the same creation path as the derived
+# selection (#1001). The profile directory is set aside so it does not exist.
+mv "${profile_dir}" "${tmp}/branch-profile-aside"
+reset_state
+write_kube_contexts '' ''
+write_minikube_profiles
+bp explicit-new-profile-start start "MINIKUBE_PROFILE=${profile}"
+assert_rc 0 'explicit start of the never-created branch profile'
+assert_output_lacks 'PROFILE_METADATA_MISSING' 'explicit start of the never-created branch profile is not refused'
+# Witnesses: the metadata was created and minikube started the named profile.
+assert_file "${profile_dir}/profile.env" 'explicit start of the never-created branch profile writes profile.env'
+assert_file "${profile_dir}/ports.env" 'explicit start of the never-created branch profile writes ports.env'
+assert_log_has "minikube start -p ${profile} --keep-context" \
+  'explicit start of the never-created branch profile ran minikube start'
+rm -rf "${profile_dir:?}"
+
+# An explicit name that was never created and is not this branch's derived
+# profile has no owner to prove, so it is refused before minikube or kubectl.
+other_profile=clerum-not-this-branch-0123abcd
+reset_state
+write_kube_contexts '' ''
+write_minikube_profiles
+bp explicit-foreign-new-profile-start start "MINIKUBE_PROFILE=${other_profile}"
+assert_rc 1 'explicit start of a never-created profile that is not this branch'
+# Witness: the refusal names both profiles.
+assert_output_has "PROFILE_NOT_FOUND: explicit profile ${other_profile} was never created and is not this branch's profile (${profile})" \
+  'explicit start of a never-created foreign profile names the derived profile'
+assert_output_lacks 'restore profile.env from a backup' \
+  'a never-created foreign profile is not told to restore a backup'
+assert_no_file "${cache_root}/${other_profile}" 'a never-created foreign profile is not created'
+assert_no_file "${profile_dir}" 'a never-created foreign profile does not create the branch profile'
+assert_log_lacks 'minikube' 'a never-created foreign profile must not reach minikube'
+assert_log_lacks 'kubectl --context=' 'a never-created foreign profile must not address a cluster'
+mv "${tmp}/branch-profile-aside" "${profile_dir}"
+
 # A stopped profile minikube knows is started, after the profile list read.
 reset_state
 printf '{"invalid":[],"valid":[{"Name":"%s","Status":"Stopped"}]}\n' "${profile}" \
