@@ -105,9 +105,33 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED protected-branch protected-branch \
   env "${repo_env[@]}" bash -c 'git -C "$T2_PROJECT_DIR" switch -q main; source "$1"; t2_repo_metadata' bash "$COMMON"
 git -C "$repo" switch -q feat/scenario
 
+# Every t2_profile_scope refusal below runs t2_repo_metadata first. Without it
+# the branch is unset and every case is refused earlier, with the same code,
+# as "branch is empty or malformed"; each case therefore also asserts its own
+# message.
+# The profile directory exists without profile.env: restore it or stop and ask.
 missing_profile_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/missing-profile.env")
 expect_code PROFILE_OWNERSHIP_MISMATCH missing-profile missing-profile \
-  env "${missing_profile_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+  env "${missing_profile_env[@]}" bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+grep -Fq 'next: restore profile.env from a backup or stop and ask' "$tmp/missing-profile" ||
+  { cat "$tmp/missing-profile" >&2; fail 'missing profile.env in an existing directory did not name the restore step'; }
+
+# A profile that was never created has no directory, so there is nothing to
+# restore: the next step is to create it (#1001).
+never_created_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/profiles/never-created/profile.env"
+  T2_PORTS_ENV="$tmp/profiles/never-created/ports.env")
+expect_code PROFILE_OWNERSHIP_MISMATCH never-created-profile never-created-profile \
+  env "${never_created_env[@]}" bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+grep -Fq 'next: the profile was never created; run make -f scripts/minikube-profiles/branch.mk branch-profile-start, then retry' \
+  "$tmp/never-created-profile" ||
+  { cat "$tmp/never-created-profile" >&2; fail 'a never-created profile did not name branch-profile-start as the next step'; }
+# Witness for the negative assertion below: the refusal came from the
+# profile.env check, not from an earlier one.
+grep -Fq 'PROFILE_OWNERSHIP_MISMATCH: profile.env' "$tmp/never-created-profile" ||
+  { cat "$tmp/never-created-profile" >&2; fail 'the never-created refusal did not come from the profile.env check'; }
+if grep -Fq 'restore profile.env' "$tmp/never-created-profile"; then
+  fail 'a never-created profile was told to restore profile.env'
+fi
 
 expect_code DEVELOPMENT_SCOPE_REQUIRED shared-profile shared-profile \
   env "${repo_env[@]}" MINIKUBE_PROFILE=default CONTROL_API_REAL_PG_CONTEXT=default \
@@ -180,10 +204,13 @@ expect_code PROFILE_UNHEALTHY incomplete-profile-status incomplete-profile-statu
   env T2_PROJECT_DIR="$repo" MINIKUBE_PROFILE="$profile" T2_CONTEXT="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" T2_PROFILE_ROOT="$tmp/profiles" T2_PROFILE_ENV="$profile_root/profile.env" T2_PORTS_ENV="$profile_root/ports.env" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader T2_BRANCH=feat/scenario T2_HEAD="$feature_sha" T2_LOCK_ROOT="$tmp/locks" T2_EVIDENCE_ROOT="$tmp/evidence" bash -c 'source "$1"; t2_mk(){ printf "%s" "host: Running\nkubelet: Unknown\napiserver: Running"; return 1; }; t2_profile_status' bash "$COMMON"
 
 ownership_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/ownership.env")
+mkdir -p "$tmp/other"
 printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
   "$profile" "$(git -C "$repo" rev-parse --short=8 HEAD)" "$tmp/other" >"$tmp/ownership.env"
 expect_code PROFILE_OWNERSHIP_MISMATCH profile-ownership profile-ownership \
-  env "${ownership_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+  env "${ownership_env[@]}" bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+grep -Fq 'PROFILE_OWNERSHIP_MISMATCH: profile metadata belongs to another worktree' "$tmp/profile-ownership" ||
+  { cat "$tmp/profile-ownership" >&2; fail 'profile metadata from another worktree was not refused as such'; }
 
 stale_profile_env="$tmp/stale-profile.env"
 printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=deadbeef\nDIRTY=false\nREPO_DIR=%s\n' \
