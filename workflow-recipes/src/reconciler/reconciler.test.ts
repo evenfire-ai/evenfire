@@ -7981,6 +7981,41 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.workloadStatuses).toEqual([])
   })
 
+  it('R.6.4b — a Context that vanishes after a create conflict in pre-deploy degrades the recipe', async () => {
+    // GET 404, POST 409, re-read 404: the Context writer raises
+    // ResourceVanishedAfterConflictError. The pre-deploy caller wraps every
+    // pre-deploy error as retryable, so the recipe degrades (#998 review).
+    mockCustomApi.createNamespacedCustomObject.mockImplementation(
+      ({ plural }: { plural?: string }) =>
+        plural === 'contexts' ? Promise.reject({ code: 409 }) : Promise.resolve({})
+    )
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [
+          {
+            id: 'mcp',
+            type: 'deployment',
+            image: 'mcp:latest',
+            port: 3000,
+            transport: { type: 'streamableHttp' },
+          },
+        ],
+      },
+    })
+    const result = await reconciler.reconcile(recipe)
+    expect(result.phase).toBe('degraded')
+    expect(result.message).toContain('Pre-deploy failed for WorkflowRecipe "test-recipe"')
+    expect(result.message).toContain('Pre-deploy Context allowlist failed')
+    expect(result.message).toContain('disappeared after create conflict')
+    // Witness: the writer read, created, then re-read the Context.
+    const contextReads = mockCustomApi.getNamespacedCustomObject.mock.calls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>)?.plural === 'contexts'
+    )
+    expect(contextReads).toHaveLength(2)
+    expect(result.workloadStatuses).toEqual([])
+  })
+
   it('R.6.5 — reconcileDelete calls delegation cleanup for transport workloads', async () => {
     const recipe = makeRecipe({
       spec: {
@@ -10732,6 +10767,57 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('degraded')
     expect(result.message).toContain('Pre-deploy failed for workflow "test-recipe"')
     expect(result.message).toContain('child McpServers')
+    expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  it('degrades a workflow whose pre-deploy Context vanishes after a create conflict', async () => {
+    // Same vanish as R.6.4b, on the workflow deploy path (#998 review).
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'deploying',
+      message: 'Workflow infrastructure created',
+      workflowPhase: 'initializing',
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+    mockCustomApi.createNamespacedCustomObject.mockImplementation(
+      ({ plural }: { plural?: string }) =>
+        plural === 'contexts' ? Promise.reject({ code: 409 }) : Promise.resolve({})
+    )
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          steps: [{ id: 'research', instruction: 'search', mcpServers: ['web-search'] }],
+          workloads: [
+            {
+              id: 'web-search',
+              type: 'deployment',
+              image: 'clerum/web-search:test',
+              port: 3000,
+              transport: { type: 'streamableHttp', path: '/mcp' },
+            },
+          ],
+        },
+        status: { phase: 'candidate' },
+      })
+    )
+
+    expect(result.phase).toBe('degraded')
+    expect(result.message).toContain('Pre-deploy failed for workflow "test-recipe"')
+    expect(result.message).toContain('Pre-deploy Context allowlist failed')
+    expect(result.message).toContain('disappeared after create conflict')
+    // Witness: the writer read, created, then re-read the Context.
+    const contextReads = mockCustomApi.getNamespacedCustomObject.mock.calls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>)?.plural === 'contexts'
+    )
+    expect(contextReads).toHaveLength(2)
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
