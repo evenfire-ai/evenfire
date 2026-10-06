@@ -285,7 +285,7 @@ resolve_profile() {
     printf '%s\n' "${output}" >&2
     die "PROFILE_METADATA_MISSING: profile metadata for ${EXPLICIT_PROFILE:-this branch} is missing or unreadable; restore profile.env from a backup or stop and ask. branch-profile-start only creates metadata when the profile directory does not exist and never regenerates it for an existing one"
   fi
-  if [[ -n "${EXPLICIT_PROFILE}" || ${status} -ne 3 || "${output}" != *PROFILE_NOT_FOUND:* ]]; then
+  if [[ ${status} -ne 3 || "${output}" != *PROFILE_NOT_FOUND:* ]]; then
     printf '%s\n' "${output}" >&2
     die 'profile ownership resolution failed closed'
   fi
@@ -302,6 +302,12 @@ resolve_profile() {
     die 'stable identity output is incomplete'
   [[ "${WORKTREE_ID}" =~ ^[0-9a-f]{40}$ && "${OWNER_ID}" =~ ^[0-9a-f]{40}$ ]] ||
     die 'stable identity output is malformed'
+  # An explicit selection of a profile that does not exist is created only
+  # under the name this worktree and branch derive, exactly as without the
+  # selection. Any other name is refused with the name that would be created.
+  if [[ -n "${EXPLICIT_PROFILE}" && "${EXPLICIT_PROFILE}" != "${PROFILE}" ]]; then
+    die "PROFILE_NOT_FOUND: no profile named ${EXPLICIT_PROFILE} exists. This worktree and branch derive ${PROFILE}: unset MINIKUBE_PROFILE or set it to that name to create it"
+  fi
   validate_profile_name
   set_profile_paths
   if [[ -e "${CACHE_DIR}" || -L "${CACHE_DIR}" ]]; then

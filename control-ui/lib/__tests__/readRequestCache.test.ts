@@ -345,14 +345,91 @@ describe('bounded metadata read reuse', () => {
       ).catch(() => undefined),
     ])
     firstController.abort()
-    fetchMock.mockResolvedValueOnce(success({ recovered: true }))
+    fetchMock
+      .mockResolvedValueOnce(success({ recovered: true }))
+      .mockResolvedValueOnce(success({ connections: ['recovered'] }))
     await vi.advanceTimersByTimeAsync(12_000)
     expect(fetchMock).toHaveBeenCalledTimes(2)
+    // Both URLs were denied, so the one recovery rereads each of them once.
     await vi.advanceTimersByTimeAsync(8_000)
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
     await expect(apiGet('/api/v1/admin/capabilities', {}, metadataOptions)).resolves.toEqual({
       recovered: true,
     })
+    await expect(
+      apiGet('/api/v1/admin/connections', {}, { metadataRead: 'subscription-connections' })
+    ).resolves.toEqual({ connections: ['recovered'] })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('rereads every URL the server denied while the family recovery was scheduled', async () => {
+    const codexUrl = '/api/v1/admin/codex-subscription/connections'
+    const grokUrl = '/api/v1/admin/grok-subscription/connections'
+    const connectionOptions = { metadataRead: 'subscription-connections' } as const
+    const pending: Array<(response: Response) => void> = []
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>(resolve => {
+          pending.push(resolve)
+        })
+    )
+    // Both inventories are in flight before either denial arrives, as when an
+    // Agent page loads its Codex and Grok connections together.
+    const codex = apiGet(codexUrl, {}, connectionOptions).catch(reason => reason)
+    const grok = apiGet(grokUrl, {}, connectionOptions).catch(reason => reason)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(pending).toHaveLength(2)
+    pending[0](throttled(12))
+    pending[1](throttled(12))
+    expect(await codex).toMatchObject({ status: 429 })
+    expect(await grok).toMatchObject({ status: 429 })
+
+    fetchMock.mockReset()
+    fetchMock.mockImplementation((url: string) =>
+      Promise.resolve(success({ from: url.includes('grok') ? 'grok' : 'codex' }))
+    )
+    await vi.advanceTimersByTimeAsync(12_000)
+    const recoveredUrls = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(recoveredUrls).toHaveLength(2)
+    expect(recoveredUrls.filter(url => url.endsWith(codexUrl))).toHaveLength(1)
+    expect(recoveredUrls.filter(url => url.endsWith(grokUrl))).toHaveLength(1)
+
+    // A Retry after the recovery is served from the recovered entries, so it
+    // cannot spend a third read in the same window.
+    await expect(apiGet(codexUrl, {}, connectionOptions)).resolves.toEqual({ from: 'codex' })
+    await expect(apiGet(grokUrl, {}, connectionOptions)).resolves.toEqual({ from: 'grok' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops the family recovery at the first member the server denies again', async () => {
+    const codexUrl = '/api/v1/admin/codex-subscription/connections'
+    const grokUrl = '/api/v1/admin/grok-subscription/connections'
+    const connectionOptions = { metadataRead: 'subscription-connections' } as const
+    const pending: Array<(response: Response) => void> = []
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>(resolve => {
+          pending.push(resolve)
+        })
+    )
+    const codex = apiGet(codexUrl, {}, connectionOptions).catch(reason => reason)
+    const grok = apiGet(grokUrl, {}, connectionOptions).catch(reason => reason)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(pending).toHaveLength(2)
+    pending[0](throttled(12))
+    pending[1](throttled(12))
+    expect(await codex).toMatchObject({ status: 429 })
+    expect(await grok).toMatchObject({ status: 429 })
+
+    fetchMock.mockReset()
+    fetchMock.mockImplementation(() => Promise.resolve(throttled(12)))
+    await vi.advanceTimersByTimeAsync(12_000)
+    // The first reread is denied, which restores the family cooldown; the
+    // second member is not sent into it, and no further attempt is scheduled.
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/codex-subscription\/connections$/)
+    await vi.advanceTimersByTimeAsync(24_000)
+    expect(fetchMock).toHaveBeenCalledOnce()
   })
 
   it('makes only one recovery when throttle timing is unavailable', async () => {

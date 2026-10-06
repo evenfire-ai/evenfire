@@ -23,6 +23,9 @@ type RecoveryEntry = {
   resolve: () => void
   reject: (error: unknown) => void
   state: 'scheduled' | 'running'
+  // Every URL whose own read was denied while this recovery was scheduled,
+  // in denial order. Each is reread once at the deadline.
+  members: Map<string, (signal: AbortSignal) => Promise<unknown>>
   removeListeners: () => void
   addSubscribers: (signals: Array<AbortSignal | undefined>) => void
 }
@@ -203,10 +206,16 @@ export function getReadRequestRecovery(key: string): Promise<void> | undefined {
   return recovery && recovery.deadlineMs <= Date.now() ? recovery.pending : undefined
 }
 
+/**
+ * Reserve the family's single recovery, or join the scheduled one. A denied
+ * URL that joins adds its own reread, so concurrently denied siblings are all
+ * recovered by the same attempt instead of only the URL that reserved it.
+ */
 export function reserveReadRequestRecovery(
   key: string,
   deadlineMs: number,
-  recover: (signal: AbortSignal) => void,
+  memberKey: string,
+  recover: (signal: AbortSignal) => Promise<unknown>,
   signals: Array<AbortSignal | undefined> = [undefined]
 ): boolean {
   if (!isBrowser() || METADATA_READ_MAX_RECOVERY_ATTEMPTS < 1) return false
@@ -215,6 +224,7 @@ export function reserveReadRequestRecovery(
     if (existing.state === 'scheduled') {
       existing.deadlineMs = Math.max(existing.deadlineMs, deadlineMs)
       existing.addSubscribers(signals)
+      if (!existing.members.has(memberKey)) existing.members.set(memberKey, recover)
     }
     return false
   }
@@ -245,6 +255,7 @@ export function reserveReadRequestRecovery(
     resolve,
     reject,
     state: 'scheduled',
+    members: new Map([[memberKey, recover]]),
     removeListeners: () =>
       watchedSignals.forEach(signal => signal.removeEventListener('abort', onAbort)),
     addSubscribers: addedSignals => {
@@ -279,7 +290,7 @@ export function reserveReadRequestRecovery(
         }
         entry.timer = undefined
         entry.state = 'running'
-        recover(controller.signal)
+        void runRecovery(key, entry)
       },
       Math.min(2_147_483_647, Math.max(0, entry.deadlineMs - Date.now()))
     )
@@ -288,23 +299,39 @@ export function reserveReadRequestRecovery(
   return true
 }
 
-export function completeReadRequestRecovery(key: string): void {
-  const recovery = recoveries.get(key)
-  if (recovery?.timer) clearTimeout(recovery.timer)
-  recovery?.removeListeners()
-  recovery?.resolve()
+/**
+ * Reread the members one at a time. The first failure ends the attempt: a
+ * fresh denial has already set the family cooldown, so the remaining members
+ * would only be refused locally. Either outcome releases the entry, which keeps
+ * one recovery per denial while letting a later denial schedule its own.
+ */
+async function runRecovery(key: string, entry: RecoveryEntry): Promise<void> {
+  try {
+    for (const recover of entry.members.values()) {
+      if (recoveries.get(key) !== entry || entry.controller.signal.aborted) return
+      await recover(entry.controller.signal)
+    }
+  } catch (error) {
+    if (recoveries.get(key) !== entry) return
+    recoveries.delete(key)
+    entry.removeListeners()
+    entry.reject(error)
+    return
+  }
+  if (recoveries.get(key) !== entry) return
   recoveries.delete(key)
+  entry.removeListeners()
+  entry.resolve()
 }
 
-export function failReadRequestRecovery(key: string, error: unknown): void {
-  // Only the running recovery reports its own failure. Its denial could not
-  // reserve another attempt, so releasing the entry keeps one recovery per
-  // denial while letting a later denial in this family schedule its own.
+export function completeReadRequestRecovery(key: string): void {
   const recovery = recoveries.get(key)
-  if (recovery?.state !== 'running') return
-  recoveries.delete(key)
+  // A running recovery settles itself once every member has been reread.
+  if (!recovery || recovery.state === 'running') return
+  if (recovery.timer) clearTimeout(recovery.timer)
   recovery.removeListeners()
-  recovery.reject(error)
+  recovery.resolve()
+  recoveries.delete(key)
 }
 
 export function __resetReadRequestCacheForTests(): void {

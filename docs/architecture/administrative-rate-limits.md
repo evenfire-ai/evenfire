@@ -150,9 +150,12 @@ maximum 128 entries, origin/principal/scope/session-epoch binding and a shared
 subscription-read cooldown. Ordinary Agent sections do not fetch optional
 subscription inventory; editor opening loads it when needed.
 
-At most one shared idempotent recovery GET proceeds after a denial deadline.
-A denied recovery schedules no further attempt, but it releases its
-reservation, so the next denial in that read family schedules its own. Forced refresh respects the same pause. Authentication changes, 401 and
+One shared recovery runs per read family after a denial deadline. It rereads,
+once each and one at a time, every URL the server denied while it was
+scheduled (for example the Codex and Grok inventories loaded together), and
+stops at the first reread that is denied again. A denied recovery schedules no
+further attempt, but it releases its reservation, so the next denial in that
+read family schedules its own. Forced refresh respects the same pause. Authentication changes, 401 and
 cross-tab invalidation fence old awaits and clear identity-bound state.
 Aborting one subscriber does not cancel another subscriber’s shared request.
 SSR does not retain cached/deduplicated results across requests.

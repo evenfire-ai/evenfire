@@ -15,7 +15,6 @@ import type {
 import {
   clearReadRequestPrincipal,
   completeReadRequestRecovery,
-  failReadRequestRecovery,
   getReadRequestCacheEntry,
   getReadRequestCacheGeneration,
   getReadRequestCooldown,
@@ -550,13 +549,11 @@ async function apiRead(
           reserveReadRequestRecovery(
             familyKey,
             Date.now() + delayMs,
-            signal => {
-              if (!sameReadContext(requestEpoch, requestPrincipalKey)) return
-              void apiRead(path, query, { ...options, signal, refresh: false }, true).then(
-                () => completeReadRequestRecovery(familyKey),
-                reason => failReadRequestRecovery(familyKey, reason)
-              )
-            },
+            metadataKey ?? url,
+            signal =>
+              sameReadContext(requestEpoch, requestPrincipalKey)
+                ? apiRead(path, query, { ...options, signal, refresh: false }, true)
+                : Promise.reject(new AuthExpiredError()),
             metadataKey ? Array.from(consumers, consumer => consumer.signal) : [options.signal]
           )
         }

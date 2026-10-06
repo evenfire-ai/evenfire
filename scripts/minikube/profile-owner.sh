@@ -359,6 +359,14 @@ profile_owner_resolve() {
   if [[ -n "${explicit_profile_env}" || -n "${explicit_profile}" ]]; then
     if [[ -z "${explicit_profile_env}" ]]; then
       profile_env="${profile_root}/${explicit_profile}/profile.env"
+      # A selected name with no directory is an absent profile, not a profile
+      # whose metadata was lost; report it as such so the caller can say so.
+      if [[ -n "${explicit_profile}" && ! -e "${profile_root}/${explicit_profile}" &&
+        ! -L "${profile_root}/${explicit_profile}" ]]; then
+        profile_owner_error PROFILE_NOT_FOUND \
+          "selected profile has no directory: ${profile_root}/${explicit_profile}"
+        return 3
+      fi
     else
       profile_env="${explicit_profile_env}"
     fi

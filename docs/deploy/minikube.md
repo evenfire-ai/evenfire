@@ -280,6 +280,7 @@ An unreadable list is a refusal, never an empty list.
 | `HOST must be 127.0.0.1` | branch-profile forwards bind only `127.0.0.1` |
 | `CACHE_ROOT ...` | the profile cache root is unscoped, a symlink, not a directory, or contains a control character |
 | `PROFILE_METADATA_MISSING` | `profile.env` of an existing profile is missing or unreadable; it is never regenerated |
+| `PROFILE_NOT_FOUND: no profile named <name> exists` | `MINIKUBE_PROFILE` names a profile with no directory; the message names the profile this worktree and branch derive, which is the only name `branch-profile-start` creates |
 | `PROFILE_PORTS_MISSING`, `PROFILE_PORTS_INVALID` | `ports.env` is missing or disagrees with its port base and `HOST` |
 | `BRANCH_PROFILE_KUBECONFIG_UNREADABLE` | the kubeconfig contexts cannot be read |
 | `BRANCH_PROFILE_CONTEXT_DANGLING` | the profile's context has no resolvable cluster or no server |
