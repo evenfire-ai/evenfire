@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest'
+import { afterEach, expect, it } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -13,6 +13,20 @@ function executionContext(chunks: string[]): ExecutionContext {
     },
   }
 }
+
+const managedHosts: string[] = []
+
+function managedWorkspace(prefix: string): string {
+  const host = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  managedHosts.push(host)
+  const workspace = path.join(host, 'users', 'caller')
+  fs.mkdirSync(workspace, { recursive: true })
+  return workspace
+}
+
+afterEach(() => {
+  for (const host of managedHosts.splice(0)) fs.rmSync(host, { recursive: true, force: true })
+})
 
 it('bounds retained shell output and live progress independently', async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-output-bounds-'))
@@ -50,7 +64,7 @@ it('resets HOME to the caller workspace after environment merging', async () => 
 })
 
 it('does not spawn when processing lease acquisition fails', async () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-lease-denied-'))
+  const workspace = managedWorkspace('shell-lease-denied-')
   const marker = path.join(workspace, 'started')
   const leases: GfsProcessingLeaseProvider = {
     acquireProcessingLease: async () => {
@@ -66,12 +80,12 @@ it('does not spawn when processing lease acquisition fails', async () => {
     expect(result.content).toContain('download expired')
     expect(fs.existsSync(marker)).toBe(false)
   } finally {
-    fs.rmSync(workspace, { recursive: true, force: true })
+    expect(fs.existsSync(marker)).toBe(false)
   }
 })
 
 it('releases the processing lease after command completion', async () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-lease-release-'))
+  const workspace = managedWorkspace('shell-lease-release-')
   const events: string[] = []
   const leases: GfsProcessingLeaseProvider = {
     acquireProcessingLease: async () => {
@@ -89,12 +103,12 @@ it('releases the processing lease after command completion', async () => {
     expect(result.is_error).toBe(false)
     expect(events).toEqual(['acquire', 'release'])
   } finally {
-    fs.rmSync(workspace, { recursive: true, force: true })
+    expect(events).toEqual(['acquire', 'release'])
   }
 })
 
 it('does not report success when processing lease release fails', async () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-lease-failed-release-'))
+  const workspace = managedWorkspace('shell-lease-failed-release-')
   const leases: GfsProcessingLeaseProvider = {
     acquireProcessingLease: async () => ({
       leaseId: 'lease-1',
@@ -111,12 +125,13 @@ it('does not report success when processing lease release fails', async () => {
     expect(result.is_error).toBe(true)
     expect(result.content).toContain('processing_lease_release_failed')
   } finally {
-    fs.rmSync(workspace, { recursive: true, force: true })
+    // Cleanup is centralized by managedHosts; keep the operation under try for
+    // symmetrical failure reporting without duplicating the result assertion.
   }
 })
 
 it('releases the processing lease only after process-group termination', async () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-group-lease-'))
+  const workspace = managedWorkspace('shell-group-lease-')
   const marker = path.join(workspace, 'group-settled')
   const script = path.join(workspace, 'spawn-group-child.js')
   const releaseSawSettledMarker: boolean[] = []
@@ -149,6 +164,6 @@ it('releases the processing lease only after process-group termination', async (
     expect(fs.readFileSync(marker, 'utf8')).toBe('yes')
     expect(releaseSawSettledMarker).toEqual([true])
   } finally {
-    fs.rmSync(workspace, { recursive: true, force: true })
+    expect(fs.existsSync(marker)).toBe(true)
   }
 })

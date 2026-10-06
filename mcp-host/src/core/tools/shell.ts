@@ -6,6 +6,7 @@ import type {
   GfsProcessingLeaseProvider,
 } from '../../internalTools/gfsProcessingLease'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../llm/registryCore'
+import { verifyManagedCallerRootPath } from '../../workspace/callerRootBinding'
 import { ToolError, ToolErrorCode } from '../errors'
 import { ExecutionContext, Tool } from '../interfaces'
 import { ToolOutput } from '../types'
@@ -149,6 +150,11 @@ export class ShellTool implements Tool {
     const timeout = Math.min(this.timeout, context?.timeoutMs ?? this.timeout)
     const startTime = Date.now()
     const command = params.command as string
+    if (this.processingLeases && this.workspacePath) {
+      if (verifyManagedCallerRootPath(this.workspacePath) === undefined) {
+        return this.managedRootUnavailable(startTime)
+      }
+    }
     if (!this.workspacePath) {
       return {
         content:
@@ -452,5 +458,14 @@ export class ShellTool implements Tool {
         })
       })
     })
+  }
+
+  private managedRootUnavailable(startTime: number): ToolOutput {
+    return {
+      content:
+        'Managed shell unavailable: the verified caller workspace root is no longer canonical.',
+      duration_ms: Date.now() - startTime,
+      is_error: true,
+    }
   }
 }

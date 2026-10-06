@@ -91,11 +91,32 @@ export function protectedWorkspacePathMessage(relativePath: string): string {
 }
 
 /**
+ * Check a resolved absolute path independently of a workspace anchor. This
+ * protects the case where a stale workspace root itself was replaced by a
+ * platform-owned directory; path.relative would otherwise turn its children
+ * into apparently harmless relative paths.
+ */
+function isProtectedAbsoluteRealPath(realPath: string): boolean {
+  if (!path.isAbsolute(realPath)) return false
+  const segments = realPath.split(path.sep).filter(segment => segment.length > 0)
+  if (segments.some(segment => PROTECTED_WORKSPACE_DIRS.has(segment))) return true
+  const base = segments[segments.length - 1]
+  return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
+}
+
+export function isProtectedGfsRealPath(realPath: string): boolean {
+  if (!path.isAbsolute(realPath)) return false
+  const segments = realPath.split(path.sep).filter(segment => segment.length > 0)
+  return segments.some(segment => segment === '.gfs-download-store' || segment === '.gfs-downloads')
+}
+
+/**
  * Check a fully resolved path against the real workspace root. This catches
  * aliases whose lexical path looks harmless but whose symlink target is a
  * protected platform directory or database lateral.
  */
 export function isProtectedRealPath(realPath: string, realWorkspaceRoot: string): boolean {
+  if (isProtectedAbsoluteRealPath(realPath)) return true
   const relative = path.relative(realWorkspaceRoot, realPath)
   if (relative.startsWith('..') || path.isAbsolute(relative) || relative === '') return false
   const segments = relative.split(path.sep).filter(segment => segment.length > 0)

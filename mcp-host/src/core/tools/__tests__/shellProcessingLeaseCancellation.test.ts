@@ -1,5 +1,7 @@
-import { beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import * as fs from 'node:fs'
 import * as os from 'node:os'
+import * as path from 'node:path'
 import type {
   GfsProcessingLease,
   GfsProcessingLeaseProvider,
@@ -12,6 +14,20 @@ const mocks = vi.hoisted(() => ({ spawn: vi.fn() }))
 vi.mock('child_process', () => ({ spawn: mocks.spawn }))
 
 beforeEach(() => vi.clearAllMocks())
+
+const managedHosts: string[] = []
+
+function managedWorkspace(): string {
+  const host = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-managed-cancellation-'))
+  managedHosts.push(host)
+  const workspace = path.join(host, 'users', 'caller')
+  fs.mkdirSync(workspace, { recursive: true })
+  return workspace
+}
+
+afterEach(() => {
+  for (const host of managedHosts.splice(0)) fs.rmSync(host, { recursive: true, force: true })
+})
 
 function delayedLease() {
   let finishAcquisition!: (lease: GfsProcessingLease) => void
@@ -33,7 +49,7 @@ it('does not spawn and releases a lease acquired after cancellation', async () =
   const { provider, lease, finishAcquisition } = delayedLease()
   const controller = new AbortController()
   const reason = new Error('cancelled during processing lease acquisition')
-  const tool = new ShellTool(os.tmpdir(), 5_000, [], () => ({}), undefined, provider)
+  const tool = new ShellTool(managedWorkspace(), 5_000, [], () => ({}), undefined, provider)
   const execution = tool.execute(
     { command: 'printf done' },
     { signal: controller.signal, onOutput: vi.fn() }
@@ -52,7 +68,7 @@ it('keeps cancellation before spawn when releasing the admitted lease fails', as
   const { provider, lease, finishAcquisition } = delayedLease()
   vi.mocked(provider.releaseProcessingLease).mockRejectedValueOnce(new Error('ledger unavailable'))
   const controller = new AbortController()
-  const tool = new ShellTool(os.tmpdir(), 5_000, [], () => ({}), undefined, provider)
+  const tool = new ShellTool(managedWorkspace(), 5_000, [], () => ({}), undefined, provider)
   const execution = tool.execute(
     { command: 'printf done' },
     { signal: controller.signal, onOutput: vi.fn() }
@@ -72,7 +88,7 @@ it('joins the actual late shell lease through the outer cancellation boundary', 
   const { provider, lease, finishAcquisition } = delayedLease()
   const controller = new AbortController()
   const reason = new Error('cancelled while acquiring the shell lease')
-  const tool = new ShellTool(os.tmpdir(), 5_000, [], () => ({}), undefined, provider)
+  const tool = new ShellTool(managedWorkspace(), 5_000, [], () => ({}), undefined, provider)
   let completed = false
   const execution = executeWithTimeout(
     tool,

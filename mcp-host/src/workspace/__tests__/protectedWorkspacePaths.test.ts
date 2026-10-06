@@ -73,6 +73,33 @@ describe('protected workspace paths', () => {
     await expect(workspace.search('accounting-sentinel')).resolves.toEqual([])
   })
 
+  it('rejects a workspace root that itself resolves into GFS accounting', async () => {
+    const accountingRoot = path.join(root, '.gfs-download-store')
+    fs.writeFileSync(path.join(accountingRoot, 'MEMORY.md'), 'accounting-sentinel', 'utf-8')
+    const aliasedWorkspace = new WorkspaceService(accountingRoot)
+    const memoryRead = new PersistentMemoryReadTool(aliasedWorkspace)
+    const memoryWrite = new PersistentMemoryWriteTool(aliasedWorkspace)
+
+    await expect(aliasedWorkspace.read('ledger-v1.json')).rejects.toBeInstanceOf(
+      GfsDownloadPathError
+    )
+    await expect(aliasedWorkspace.list()).rejects.toBeInstanceOf(GfsDownloadPathError)
+    await expect(aliasedWorkspace.search('accounting-sentinel')).resolves.toEqual([])
+    await expect(memoryRead.execute({ path: 'MEMORY.md' })).resolves.toMatchObject({
+      is_error: true,
+      content: expect.stringContaining('governed GFS'),
+    })
+    await expect(
+      memoryWrite.execute({ target: 'MEMORY.md', content: 'replacement' })
+    ).resolves.toMatchObject({
+      is_error: true,
+      content: expect.stringContaining('governed GFS'),
+    })
+    expect(fs.readFileSync(path.join(accountingRoot, 'MEMORY.md'), 'utf-8')).toBe(
+      'accounting-sentinel'
+    )
+  })
+
   it('blocks direct and symlinked access through file tools', async () => {
     const read = new FileReadTool(root)
     const direct = await read.execute({ path: '.gfs-downloads/input-1/source.md' })

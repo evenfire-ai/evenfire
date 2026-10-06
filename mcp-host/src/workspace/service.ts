@@ -9,6 +9,8 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import type { PersonalizationConfig } from '../types'
 import {
+  GfsDownloadPathError,
+  isProtectedGfsRealPath,
   isProtectedRealPath,
   isProtectedWorkspacePath,
   protectedWorkspacePathError,
@@ -163,7 +165,9 @@ export class WorkspaceService implements Workspace {
           throw new Error('Path resolves outside workspace')
         }
         if (isProtectedRealPath(realPath, realWorkspaceRoot)) {
-          throw protectedWorkspacePathError(path.relative(realWorkspaceRoot, realPath))
+          throw isProtectedGfsRealPath(realPath)
+            ? new GfsDownloadPathError(path.relative(realWorkspaceRoot, realPath))
+            : protectedWorkspacePathError(path.relative(realWorkspaceRoot, realPath))
         }
         break
       } catch (err) {
@@ -283,7 +287,18 @@ export class WorkspaceService implements Workspace {
   // ── Directory listing ──────────────────────────────────────────────────────
 
   async list(directory: string = ''): Promise<WorkspaceEntry[]> {
-    const resolved = directory ? await this.resolveAccessiblePath(directory) : this.workspacePath
+    let resolved: string
+    if (directory) {
+      resolved = await this.resolveAccessiblePath(directory)
+    } else {
+      const realRoot = await fs.realpath(this.workspacePath)
+      if (isProtectedRealPath(realRoot, realRoot)) {
+        throw isProtectedGfsRealPath(realRoot)
+          ? new GfsDownloadPathError(path.basename(realRoot))
+          : protectedWorkspacePathError(path.basename(realRoot))
+      }
+      resolved = this.workspacePath
+    }
     let entries: { name: string; isDirectory(): boolean }[]
     try {
       entries = await fs.readdir(resolved, { withFileTypes: true })

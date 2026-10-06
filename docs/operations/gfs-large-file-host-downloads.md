@@ -141,7 +141,21 @@ Unix directory modes and random directory names do not provide cross-caller OS i
 
 Shell cleanup signals and waits for the detached process group before releasing a processing lease. Operating systems may reuse a process-group identifier after the original leader has been reaped; Stage 1 narrows that window by signaling immediately on leader close, but stronger executor identity is required to eliminate it.
 
-Generic workspace tools reject direct and symlink-resolved access to `.gfs-downloads` through `file_read`, `file_write`, memory read/write, list/tree, and search. This prevents accidental dumps; it does not revoke access from an explicitly approved shell command.
+Generic workspace tools reject direct and symlink-resolved access to
+`.gfs-downloads` and the complete `.gfs-download-store` accounting namespace
+through `file_read`, `file_write`, memory read/write, list/tree, and search.
+The protected absolute target is checked before relativizing it against a
+workspace root, including when that root itself was replaced by an alias.
+
+Caller binding canonicalizes the configured Host base, then verifies real
+`users` and caller directories. The `users` parent is checked before creating a
+caller child. Redirected caller namespaces produce unavailable bindings;
+ordinary text tasks continue while managed tools remain denied. A legitimate
+platform alias on the configured Host base is retained. Managed shell also
+revalidates its actual canonical root before lease acquisition and spawning.
+These checks prevent a known redirected root from granting generic tool access
+to accounting. They do not provide FD-anchored executor isolation against all
+shared-UID filesystem races; that remains the Stage 2 boundary.
 
 ## Retention, quotas, and recovery
 
