@@ -85,3 +85,61 @@ the global `FILE_REFERENCE_MAX_COUNT` (10) cap — a restored set may not push
 the composer past the send-time limit, because a restore that creates an
 unsendable composer is not a restore. Overflow of either kind is reported in
 the kept-attachments toast (kept/dropped counts per kind).
+
+## Round-2 extensions
+
+### Cancellation settling after a chat switch: PRESERVATION
+
+Round 1 made a skipped restore release the retained snapshot, which turned a
+context switch into data loss: cancel in chat A, answer lands while chat B is
+viewed → A's attachments were gone forever. The invariant is STORY-38's — the
+kept attachments must survive within the session. Decision:
+
+| When the cancel answer (or 404) lands     | Behavior                                                                                                                                                                                                                                                                               |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Originating agent AND chat still active   | Restore now (atomic merge), toast bound to that agent+chat                                                                                                                                                                                                                             |
+| Different agent or chat active            | PARK the restoration (images with regenerated preview URLs + references) under the `(agentRef, chatId)` identity, then release the task snapshot. The parked payload lives in memory only, with the same lifetime as composer state (cleared per agent switch/logout, never persisted) |
+| The originating chat becomes active again | Apply the parked restoration through the same atomic merge (caps reported), show the kept-attachments toast bound to that agent+chat                                                                                                                                                   |
+
+The Discard-all binding is unchanged: agent AND chat. Parking replaces the
+round-1 "release and lose" row above wherever they conflict.
+
+### Exact download-budget exhaustion
+
+The per-transfer bound must never produce an invalid request:
+
+| Walk state                                                                 | Behavior                                                                                                                                                                                                      |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `remaining = ceiling − runningActual` is 0 (or negative) before a transfer | Stop before the next IPC call — `maxBytes` is never sent as 0 or negative. Un-downloaded files are reported as skips with reason "Zip byte limit reached" and the archive finishes cleanly with what it holds |
+| A transfer is refused producer-side (413) mid-walk                         | Skip that file with the same visible reason and continue; subsequent files hit the remaining-0 rule, so the walk always terminates with a saved, valid archive plus per-file notices                          |
+| Declared sizes exceed the ceiling at planning                              | Refuse before any transfer (unchanged)                                                                                                                                                                        |
+
+### Final archive name length after collision handling
+
+Length validation runs on the FINAL committed name — after case-insensitive
+collision suffixing — at the point of commitment, not on the pre-collision
+path. The walk finalizes names (fold-aware dedupe + ` (n)` suffix) and
+validates the finished encoded name against the 65535-byte ZIP field bound
+before sending it to the writer; a name that only overflows after suffixing is
+skipped with the visible "Path too long" notice. The main-process writer
+re-validates every received name before writing headers (defense in depth: it
+never writes a name whose encoded length would truncate a 16-bit field).
+
+### Memory model: streamed, file-backed assembly
+
+The in-renderer archive buffer is replaced by a streamed main-process save:
+
+- The renderer downloads one file at a time (strictly sequential transfers)
+  and hands each entry to `zipStream:append`; it retains no archive bytes.
+- The main process appends each entry's local header + payload to a temp file,
+  keeping only central-directory metadata in memory (~76 + name bytes per
+  entry), then finalizes (central directory + EOCD appended in place) and
+  moves the temp file to the user-chosen save location (`zipStream:finish`,
+  save dialog; `zipStream:abort` deletes the temp file).
+- Peak memory: renderer = one in-flight transfer (bounded by the remaining
+  budget, ≤ the 512 MiB ceiling) + its transient IPC copy; main = directory
+  metadata + one chunk; disk = the temp archive (≤ ceiling + per-entry
+  overhead). Peak renderer memory is independent of folder size.
+- The 512 MiB total ceiling and all four accounting points (planning,
+  per-transfer producer bound, receipt, finish) are unchanged; the save path
+  no longer contributes a full-size Blob copy.
