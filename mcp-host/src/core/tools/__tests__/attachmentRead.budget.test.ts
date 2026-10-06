@@ -6,10 +6,11 @@
  * fitter. Every test drives the real execute -> finalize contract once.
  */
 import { describe, expect, it } from 'vitest'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import type { IncomingMessage } from '../../../server'
-import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
+import { AttachmentReadLedger, attachmentReadBudgets } from '../../attachments/attachmentReadBudget'
+import { toolMessageBudgetTokens } from '../../extensions/contextManager'
 import { BasicSafety } from '../../safety/safety'
 import type { Attachment, ToolResult } from '../../types'
 import { AttachmentReadTool } from '../attachmentRead'
@@ -196,11 +197,16 @@ describe('C16 page fitting', () => {
 
     let offset = 0
     const limits: string[] = []
-    for (let page = 0; page < 3; page++) {
+    for (let page = 0; page < 32; page++) {
       const { outputBody } = await runRead(tool, { attachmentId: 'file-turn', offset })
+      if (outputBody.kind !== 'text') {
+        expect(outputBody.kind).toBe('read_budget_exhausted')
+        break
+      }
       limits.push(outputBody.limit as string)
       offset += (outputBody.byteRange as { length: number }).length
     }
+    expect(limits.length).toBeGreaterThanOrEqual(2)
     expect(limits[0]).toBe('page_budget')
     expect(limits[limits.length - 1]).toBe('turn_budget')
     expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(Math.floor(WINDOW_TOKENS * 0.3))
@@ -243,6 +249,111 @@ describe('C16 read count and exhaustion', () => {
     expect(missing.outputBody.error).toBe('attachment_not_found')
     expect(ledger.snapshot().reads).toBe(before.reads + 2)
     expect(ledger.snapshot().spentTokens).toBeGreaterThan(before.spentTokens)
+  })
+})
+
+describe('C16 small context windows under the production tool-message measurement', () => {
+  const SMALL_WINDOW = 8_192
+  const CALL_ID = 'toolu_01AbCdEfGhIjKlMnOpQrStUv'
+  // The Host's own measurement: rendered content inside a complete tool message.
+  const measureMessage = (content: string): number =>
+    toolMessageBudgetTokens(
+      { role: 'tool', name: TOOL_NAME, tool_call_id: CALL_ID, content },
+      undefined,
+      false
+    )
+
+  async function runMeasured(tool: AttachmentReadTool, params: Record<string, unknown>) {
+    const output = await tool.execute(params, {
+      onOutput: () => {},
+      measureResult: raw => measureMessage(renderContent(raw)),
+    })
+    const content = renderContent(output.content)
+    const finalized = tool.finalizeResult!(
+      {
+        tool_call_id: CALL_ID,
+        name: TOOL_NAME,
+        content,
+        is_error: output.is_error,
+        metadata: output.metadata,
+        rawContent: output.content,
+        emittedMessageCost: measureMessage(content),
+      },
+      { measureContent: measureMessage, renderContent }
+    )
+    return {
+      finalized,
+      body: JSON.parse(finalized.rawContent as string) as Record<string, unknown>,
+    }
+  }
+
+  it('returns an 11-byte file on an 8192-token window instead of an exhausted notice', async () => {
+    const id = randomUUID()
+    const [file] = admitted([rawFile(id, 'hello.txt', 'text/plain', Buffer.from('hello world'))])
+    const { tool, ledger } = toolFor([file!], { windowTokens: SMALL_WINDOW })
+
+    const { finalized, body } = await runMeasured(tool, { attachmentId: id })
+    expect(body.kind).toBe('text')
+    expect(body.text).toBe('hello world')
+    expect(finalized.is_error).toBe(false)
+    expect(ledger.snapshot().bytesRead).toBe(11)
+    expect(ledger.snapshot().spentTokens).toBe(finalized.emittedMessageCost)
+  })
+
+  it('pages, then answers with reserved notices, then stops the turn at the fence', async () => {
+    const id = randomUUID()
+    const [file] = admitted([rawFile(id, 'long.txt', 'text/plain', Buffer.alloc(400_000, 'q'))])
+    const { tool, ledger } = toolFor([file!], { windowTokens: SMALL_WINDOW })
+    const { turnTokens } = attachmentReadBudgets(SMALL_WINDOW)
+
+    const kinds: string[] = []
+    let offset = 0
+    let stop: unknown = null
+    for (let call = 0; call < 200 && stop === null; call++) {
+      const before = ledger.snapshot().spentTokens
+      try {
+        const { body } = await runMeasured(tool, { attachmentId: id, offset })
+        kinds.push(body.kind as string)
+        if (body.kind === 'text') offset += (body.byteRange as { length: number }).length
+        // Every emitted message is charged, and the turn envelope is never crossed.
+        expect(ledger.snapshot().spentTokens).toBeGreaterThan(before)
+        expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(turnTokens)
+      } catch (error) {
+        stop = error
+      }
+    }
+    expect(kinds[0]).toBe('text')
+    const firstNotice = kinds.indexOf('read_budget_exhausted')
+    expect(firstNotice).toBeGreaterThan(0)
+    expect(kinds.slice(firstNotice).every(kind => kind === 'read_budget_exhausted')).toBe(true)
+    expect(kinds.length - firstNotice).toBeGreaterThanOrEqual(2)
+    expect(String(stop)).toMatch(/notice cannot fit/)
+  })
+
+  it('keeps error and binary results no larger than the exhausted notice (regression guard)', async () => {
+    const textId = randomUUID()
+    const binaryId = randomUUID()
+    const [textFile, binaryFile] = admitted([
+      rawFile(textId, 'aé.txt', 'text/plain', Buffer.from('aé!')),
+      rawFile(binaryId, 'blob.bin', 'application/octet-stream', Buffer.alloc(64, 0)),
+    ])
+    const ledger = new AttachmentReadLedger()
+    const { tool } = toolFor([textFile!, binaryFile!], { windowTokens: 100_000, ledger })
+
+    const invalid = await runMeasured(tool, { attachmentId: textId, offset: 2 })
+    const binary = await runMeasured(tool, { attachmentId: binaryId })
+    ledger.restore({ reads: 32, spentTokens: ledger.snapshot().spentTokens, bytesRead: 0 })
+    const notice = await runMeasured(tool, { attachmentId: textId, offset: 11_534_336 })
+
+    expect(invalid.body.error).toBe('range_invalid')
+    expect(binary.body.kind).toBe('binary')
+    expect(notice.body.kind).toBe('read_budget_exhausted')
+    expect(invalid.finalized.emittedMessageCost).toBeLessThanOrEqual(
+      notice.finalized.emittedMessageCost!
+    )
+    expect(binary.finalized.emittedMessageCost).toBeLessThanOrEqual(
+      notice.finalized.emittedMessageCost!
+    )
   })
 })
 

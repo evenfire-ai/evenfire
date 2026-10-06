@@ -98,10 +98,22 @@ export class AttachmentReadLedger {
   }
 
   pageAllowance(windowTokens: number, noticeCost: number): number {
-    if (!boundedCount(noticeCost)) throw new Error('Invalid attachment notice cost')
+    if (!boundedCount(noticeCost) || noticeCost === 0) {
+      throw new Error('Invalid attachment notice cost')
+    }
     const limits = attachmentReadBudgets(windowTokens)
-    // Leave one notice for every remaining call and the first exhausted call.
-    const reserve = (MAX_ATTACHMENT_READS_PER_TURN - this.state.reads + 1) * noticeCost
+    // Leave one notice for every remaining call and the first exhausted call,
+    // but never more than half of the turn: on a small window 33 notices would
+    // exceed the whole turn and no page could ever be emitted. Once the
+    // reserved notices are spent, the finalize fence stops the turn.
+    const affordableNotices = Math.floor(Math.floor(limits.turnTokens / 2) / noticeCost)
+    if (affordableNotices < 1) {
+      throw new Error(
+        `Attachment read context window of ${windowTokens} tokens is too small to reserve a ${noticeCost}-token budget notice`
+      )
+    }
+    const reserve =
+      Math.min(MAX_ATTACHMENT_READS_PER_TURN - this.state.reads + 1, affordableNotices) * noticeCost
     return Math.max(
       0,
       Math.min(limits.pageTokens, limits.turnTokens - this.state.spentTokens - reserve)

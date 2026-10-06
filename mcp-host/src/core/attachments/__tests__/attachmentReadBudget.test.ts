@@ -17,11 +17,49 @@ describe('attachment turn ledger', () => {
   })
   it('limits calls to 32 and reserves complete-message notices', () => {
     const ledger = new AttachmentReadLedger()
-    expect(ledger.pageAllowance(10_000, 80)).toBe(360)
+    // 33 notices of 80 tokens exceed half of the 3_000-token turn, so the
+    // reserve is capped at floor(1_500 / 80) = 18 notices; the page cap binds.
+    expect(ledger.pageAllowance(10_000, 80)).toBe(1_000)
+    ledger.restore({ reads: 0, spentTokens: 1_000, bytesRead: 0 })
+    expect(ledger.pageAllowance(10_000, 80)).toBe(3_000 - 1_000 - 18 * 80)
+    ledger.reset()
     for (let i = 0; i < 32; i++) expect(ledger.beginRead()).toBe(true)
     expect(ledger.beginRead()).toBe(false)
     expect(ledger.snapshot().reads).toBe(32)
     expect(ledger.pageAllowance(10_000, 80)).toBe(1_000)
+  })
+  it('leaves a first page on an 8192-token window with a measured 219-token notice', () => {
+    const ledger = new AttachmentReadLedger()
+    expect(ledger.beginRead()).toBe(true)
+    // turn 2_457, reserve min(32, floor(1_228 / 219) = 5) * 219 = 1_095.
+    expect(ledger.pageAllowance(8_192, 219)).toBe(819)
+  })
+  it('never reserves more than half of the turn budget for notices', () => {
+    for (const windowTokens of [4_096, 8_192, 16_384, 32_768, 128_000, 1_000_000]) {
+      const { pageTokens, turnTokens } = attachmentReadBudgets(windowTokens)
+      for (const noticeCost of [1, 80, 219, 339]) {
+        if (noticeCost > Math.floor(turnTokens / 2)) continue
+        for (const reads of [0, 1, 16, 31, 32]) {
+          const ledger = new AttachmentReadLedger()
+          ledger.restore({ reads, spentTokens: 0, bytesRead: 0 })
+          // At most half of the turn is held back for notices.
+          expect(ledger.pageAllowance(windowTokens, noticeCost)).toBeGreaterThanOrEqual(
+            Math.min(pageTokens, turnTokens - Math.floor(turnTokens / 2))
+          )
+          // At least one notice is always held back.
+          ledger.restore({ reads, spentTokens: turnTokens - noticeCost, bytesRead: 0 })
+          expect(ledger.pageAllowance(windowTokens, noticeCost)).toBe(0)
+        }
+      }
+    }
+  })
+  it('refuses a window too small to reserve one notice, with a clear message', () => {
+    const ledger = new AttachmentReadLedger()
+    // turn 30, half 15: a 16-token notice cannot be reserved even once.
+    expect(() => ledger.pageAllowance(100, 16)).toThrow(/too small to reserve/i)
+    expect(() => ledger.pageAllowance(100, 0)).toThrow(/notice cost/i)
+    // Witness: the same window with a notice that fits half the turn returns a page.
+    expect(ledger.pageAllowance(100, 15)).toBe(10)
   })
   it('charges successful emissions and refuses an over-budget debit without mutation', () => {
     const ledger = new AttachmentReadLedger()
