@@ -3,6 +3,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { applyAdminSubscriptionRateLimitNamespace } from '../src/services/adminSubscriptionRateLimitMigration.js'
 import { checkAndIncrementWithQuery } from '../src/services/rateLimiterService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.ts'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -41,9 +43,10 @@ describeRealPostgres('administrative subscription counter namespace migration', 
   afterAll(async () => {
     try {
       client?.release()
-      await pool?.end()
+      await endPoolAndWaitForClients(pool)
       if (!adminPool) return
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`)
+      await waitForDatabaseConnectionsToClose(adminPool, database)
+      await adminPool.query(`DROP DATABASE IF EXISTS "${database}"`)
     } finally {
       await adminPool?.end()
     }
