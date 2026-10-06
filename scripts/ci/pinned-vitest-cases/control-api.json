@@ -153,7 +153,15 @@
   },
   {
     "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
-    "fullName": "createApp retained authorize-body ownership returns terminal authorize_timeout after the real work clock aborts, without publishing late success"
+    "fullName": "createApp retained authorize-body ownership returns terminal authorize_timeout when the real work clock aborts an uncommitted authorize"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership answers a committed authorize with 200 after the real work clock aborted"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership writes nothing for a committed authorize whose client already disconnected"
   },
   {
     "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
