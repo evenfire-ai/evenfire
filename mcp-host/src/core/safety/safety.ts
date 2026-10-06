@@ -408,8 +408,8 @@ export class BasicSafety implements Safety {
     /Bearer\s+[a-zA-Z0-9._~+\/=-]{20,}/gi,
     /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
     // Password values, from every password label to the next separator, so
-    // a value that holds a label (`password=abc=pwd=defghijk`) is covered
-    // whole.
+    // a value that itself holds another label (a `pwd` label inside a
+    // `password` value) is covered whole.
     passwordValueMatches,
     // AWS access keys
     /AKIA[0-9A-Z]{16}/g,
