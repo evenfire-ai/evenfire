@@ -314,6 +314,12 @@ export function App() {
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
   const [pendingWorkspaceTabId, setPendingWorkspaceTabId] = React.useState<string | null>(null)
+  const [unavailableWorkspaceTabId, setUnavailableWorkspaceTabId] = React.useState<string | null>(
+    null
+  )
+  const [requestedDrawerChatTabId, setRequestedDrawerChatTabId] = React.useState<string | null>(
+    null
+  )
   // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
   // drawer follows the app content down when the sandbox-ui header wraps (narrow
   // window). 0 means "not measured yet" -> the CSS fallback (64px) applies.
@@ -357,6 +363,8 @@ export function App() {
     if (selectionIntent !== undefined && pending?.selectionIntent !== selectionIntent) return
     pendingWorkspaceTabSelectionRef.current = null
     setPendingWorkspaceTabId(null)
+    setUnavailableWorkspaceTabId(null)
+    setRequestedDrawerChatTabId(null)
   }, [])
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
   // Mirrors `chatDrawerVisible` so the chat-tab handlers (which run from stable
@@ -506,8 +514,9 @@ export function App() {
     [availableSandboxUiApps, leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
   )
 
-  // Both workspace and drawer selection wait on Host access before revealing a
-  // held chat. The drawer keeps its app tab active while switching its chat.
+  // Focus the requested tab immediately. When access is held, keep its surface
+  // on an explicit checking state until verification allows the conversation to
+  // load; the previous transcript must never appear under the new tab.
   const requestWorkspaceTabSelection = React.useCallback(
     (id: string, inDrawer: boolean) => {
       const tab = workspaceTabsRef.current.tabs.find(
@@ -519,15 +528,14 @@ export function App() {
       const navigationIntent = vm.beginNavigationIntent()
       clearPendingWorkspaceTabSelection()
       const agentRef = tab.kind === 'chat' ? tab.chat?.agentRef : undefined
-      const activate = () => {
-        if (!inDrawer) {
-          vm.clearAppsPicker()
-          setWorkspaceTabs(state => selectWorkspaceTab(state, id))
-        }
-        revealWorkspaceTab(tab, inDrawer)
+      if (inDrawer) {
+        setRequestedDrawerChatTabId(id)
+      } else {
+        vm.clearAppsPicker()
+        setWorkspaceTabs(state => selectWorkspaceTab(state, id))
       }
       if (!agentRef || !vm.isHostAccessBlocked(agentRef)) {
-        activate()
+        revealWorkspaceTab(tab, inDrawer)
         return
       }
 
@@ -535,8 +543,20 @@ export function App() {
       setPendingWorkspaceTabId(id)
       void vm.verifyHostAccess(agentRef).then(verified => {
         if (selectionIntent !== workspaceTabSelectionIntentRef.current) return
-        clearPendingWorkspaceTabSelection(selectionIntent)
-        if (verified && vm.isNavigationIntentCurrent(navigationIntent)) activate()
+        if (!vm.isNavigationIntentCurrent(navigationIntent)) {
+          clearPendingWorkspaceTabSelection(selectionIntent)
+          return
+        }
+        if (verified) {
+          pendingWorkspaceTabSelectionRef.current = null
+          setPendingWorkspaceTabId(null)
+          setUnavailableWorkspaceTabId(null)
+          if (!inDrawer) setRequestedDrawerChatTabId(null)
+          revealWorkspaceTab(tab, inDrawer)
+          return
+        }
+        setPendingWorkspaceTabId(null)
+        setUnavailableWorkspaceTabId(id)
       })
     },
     [
@@ -2821,18 +2841,111 @@ export function App() {
     />
   ) : null
   // The drawer switcher is chat-only: the chat sub-slice of the universal store.
-  // Its "current" chat is the controller's (selectedAgent, activeChatId) — NOT
-  // the store's active tab, which is the app tab while the drawer is open.
+  // Its current chat follows selectedAgent/activeChatId, temporarily overridden
+  // by a requested chat selection while the drawer is open.
   const chatWorkspaceTabs = React.useMemo(
     () => visibleWorkspaceTabs.filter((tab): tab is WorkspaceTab => tab.kind === 'chat'),
     [visibleWorkspaceTabs]
   )
-  const drawerActiveChatTabId =
+  const controllerActiveDrawerTabId =
     chatWorkspaceTabs.find(
       tab =>
         (tab.chat?.agentRef ?? null) === vm.selectedAgent &&
         (tab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
     )?.id ?? null
+  const drawerActiveChatTabId =
+    requestedDrawerChatTabId ??
+    pendingWorkspaceTabId ??
+    unavailableWorkspaceTabId ??
+    controllerActiveDrawerTabId
+  const activeWorkspaceTabForChat = activeWorkspaceTab(workspaceTabs)
+  const fullScreenChatTabNeedsLoad = Boolean(
+    activeWorkspaceTabForChat?.kind === 'chat' &&
+    activeWorkspaceTabForChat.chat?.agentRef &&
+    ((activeWorkspaceTabForChat.chat.agentRef ?? null) !== (vm.selectedAgent ?? null) ||
+      (activeWorkspaceTabForChat.chat.chatId ?? null) !== (vm.activeChatId ?? null))
+  )
+  const fullScreenChatAccessPhase =
+    activeWorkspaceTabForChat?.kind === 'chat' &&
+    pendingWorkspaceTabId === activeWorkspaceTabForChat.id
+      ? 'checking'
+      : activeWorkspaceTabForChat?.kind === 'chat' &&
+          unavailableWorkspaceTabId === activeWorkspaceTabForChat.id
+        ? 'unavailable'
+        : fullScreenChatTabNeedsLoad
+          ? 'loading'
+          : null
+  const fullScreenLoadingTabId =
+    activeWorkspaceTabForChat?.kind === 'chat' &&
+    (fullScreenChatAccessPhase === 'loading' ||
+      (!fullScreenChatAccessPhase && vm.chatMessagesLoading))
+      ? activeWorkspaceTabForChat.id
+      : null
+  const drawerActiveChatTab = chatWorkspaceTabs.find(tab => tab.id === drawerActiveChatTabId)
+  const drawerChatTabNeedsLoad = Boolean(
+    requestedDrawerChatTabId &&
+    drawerActiveChatTab?.chat?.agentRef &&
+    ((drawerActiveChatTab.chat.agentRef ?? null) !== (vm.selectedAgent ?? null) ||
+      (drawerActiveChatTab.chat.chatId ?? null) !== (vm.activeChatId ?? null))
+  )
+  const drawerChatAccessPhase =
+    drawerActiveChatTab && pendingWorkspaceTabId === drawerActiveChatTab.id
+      ? 'checking'
+      : drawerActiveChatTab && unavailableWorkspaceTabId === drawerActiveChatTab.id
+        ? 'unavailable'
+        : drawerChatTabNeedsLoad
+          ? 'loading'
+          : null
+  const drawerLoadingTabId =
+    drawerActiveChatTab?.kind === 'chat' &&
+    (drawerChatAccessPhase === 'loading' || (!drawerChatAccessPhase && vm.chatMessagesLoading))
+      ? drawerActiveChatTab.id
+      : null
+  const renderChatTabAccessState = (phase: 'checking' | 'loading' | 'unavailable') => {
+    const unavailable = phase === 'unavailable'
+    const message = unavailable
+      ? 'Could not verify access. Select this tab to retry.'
+      : phase === 'checking'
+        ? 'Checking access to conversation…'
+        : 'Loading conversation…'
+    return (
+      <section
+        aria-busy={unavailable ? undefined : 'true'}
+        aria-live={unavailable ? 'assertive' : 'polite'}
+        className="chat-tab-access-state"
+        role={unavailable ? 'alert' : 'status'}
+      >
+        {unavailable ? (
+          <span aria-hidden="true" className="chat-view-tab__access-error" />
+        ) : (
+          <span aria-hidden="true" className="notification-inline-spinner" />
+        )}
+        <span>{message}</span>
+      </section>
+    )
+  }
+
+  React.useEffect(() => {
+    if (!requestedDrawerChatTabId || pendingWorkspaceTabId || unavailableWorkspaceTabId) return
+    const requestedTab = chatWorkspaceTabs.find(tab => tab.id === requestedDrawerChatTabId)
+    if (!requestedTab) {
+      setRequestedDrawerChatTabId(null)
+      return
+    }
+    if (
+      (requestedTab.chat?.agentRef ?? null) === (vm.selectedAgent ?? null) &&
+      (requestedTab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
+    ) {
+      setRequestedDrawerChatTabId(null)
+    }
+  }, [
+    chatWorkspaceTabs,
+    pendingWorkspaceTabId,
+    requestedDrawerChatTabId,
+    unavailableWorkspaceTabId,
+    vm.activeChatId,
+    vm.selectedAgent,
+  ])
 
   const desktopUpdateRequiredDialog =
     vm.isAuthenticated && vm.desktopReleaseStatus?.updateRequired ? (
@@ -2929,6 +3042,8 @@ export function App() {
                                   <WorkspaceTabStrip
                                     tabs={visibleWorkspaceTabs}
                                     pendingTabId={pendingWorkspaceTabId}
+                                    loadingTabId={fullScreenLoadingTabId}
+                                    unavailableTabId={unavailableWorkspaceTabId}
                                     activeTabId={
                                       vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                     }
@@ -2970,7 +3085,11 @@ export function App() {
                                       }
                                       surfaceId="chat-view-panel"
                                     >
-                                      <ChatPage scrollContainerRef={contentPanelRef} />
+                                      {fullScreenChatAccessPhase ? (
+                                        renderChatTabAccessState(fullScreenChatAccessPhase)
+                                      ) : (
+                                        <ChatPage scrollContainerRef={contentPanelRef} />
+                                      )}
                                     </ChatViewWorkspace>
                                   ))}
                                 {vm.navItem === DESKTOP_ROUTES.agents && (
@@ -3072,6 +3191,9 @@ export function App() {
                                       <ChatSwitcher
                                         tabs={chatWorkspaceTabs}
                                         activeTabId={drawerActiveChatTabId}
+                                        pendingTabId={pendingWorkspaceTabId}
+                                        loadingTabId={drawerLoadingTabId}
+                                        unavailableTabId={unavailableWorkspaceTabId}
                                         onSelect={handleSelectDrawerChatTab}
                                         onNewChat={handleNewWorkspaceChatTab}
                                         focusRequestId={chatSwitcherFocusRequestId}
@@ -3089,7 +3211,11 @@ export function App() {
                                     width={chatDrawerResize.width}
                                     resizing={chatDrawerResize.isResizing}
                                   >
-                                    <ChatPage scrollContainerRef={chatDrawerRef} />
+                                    {drawerChatAccessPhase ? (
+                                      renderChatTabAccessState(drawerChatAccessPhase)
+                                    ) : (
+                                      <ChatPage scrollContainerRef={chatDrawerRef} />
+                                    )}
                                   </ChatDrawer>
                                 </RightRailShell>
                               )}

@@ -17152,6 +17152,15 @@ pre {
   margin-left: var(--space-2);
 }
 
+.chat-view-tab__access-error {
+  background: var(--danger);
+  border-radius: 50%;
+  flex: 0 0 var(--space-2);
+  height: var(--space-2);
+  margin-left: var(--space-2);
+  width: var(--space-2);
+}
+
 @keyframes chat-view-tab-pending {
   to {
     transform: rotate(360deg);
@@ -17246,6 +17255,23 @@ pre {
   min-height: 0;
   min-width: 0;
   width: 100%;
+}
+
+.chat-tab-access-state {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  flex: 1 1 0;
+  gap: var(--space-2);
+  justify-content: center;
+  min-height: 0;
+  min-width: 0;
+  padding: var(--space-4);
+  text-align: center;
+}
+
+.chat-tab-access-state .notification-inline-spinner {
+  flex: 0 0 auto;
 }
 
 .content-panel:has(.agent-page) > .chat-view-workspace,

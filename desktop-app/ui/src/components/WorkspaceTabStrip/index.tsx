@@ -32,6 +32,8 @@ export function WorkspaceTabStrip({
   tabs,
   activeTabId,
   pendingTabId = null,
+  loadingTabId = null,
+  unavailableTabId = null,
   onSelect,
   onClose,
   onReorder,
@@ -120,6 +122,8 @@ export function WorkspaceTabStrip({
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId
             const pending = tab.id === pendingTabId
+            const loading = tab.id === loadingTabId
+            const unavailable = tab.id === unavailableTabId
             const sessionState =
               tab.kind === 'chat' && tab.chat?.agentRef && tab.chat?.chatId
                 ? chatList?.sessionStateByChatKey[makeTaskKey(tab.chat.agentRef, tab.chat.chatId)]
@@ -158,21 +162,43 @@ export function WorkspaceTabStrip({
                 <Button
                   align="start"
                   aria-controls={active ? panelId : undefined}
-                  aria-label={pending ? `${tab.title}, checking access` : tab.title}
-                  aria-busy={pending || undefined}
+                  aria-label={
+                    pending
+                      ? `${tab.title}, checking access`
+                      : loading
+                        ? `${tab.title}, loading conversation`
+                        : unavailable
+                          ? `${tab.title}, access check failed`
+                          : tab.title
+                  }
+                  aria-busy={pending || loading || undefined}
                   aria-pressed={active}
                   className="chat-view-tab__select"
                   color="neutral"
                   onClick={() => onSelect(tab.id)}
                   onKeyDown={event => handleSelectKeyDown(event, tab, index)}
                   size="sm"
+                  title={
+                    pending
+                      ? 'Checking host access to this conversation'
+                      : loading
+                        ? 'Loading conversation'
+                        : unavailable
+                          ? 'Could not verify host access. Select to retry.'
+                          : undefined
+                  }
                   variant="ghost"
                 >
                   {tab.kind === 'chat' && (
                     <ChatStateBadge sessionState={sessionState} unreadTerminal={false} />
                   )}
                   <span className="chat-view-tab__label">{tab.title}</span>
-                  {pending && <span className="chat-view-tab__pending" aria-hidden="true" />}
+                  {(pending || loading) && (
+                    <span className="chat-view-tab__pending" aria-hidden="true" />
+                  )}
+                  {unavailable && (
+                    <span className="chat-view-tab__access-error" aria-hidden="true" />
+                  )}
                 </Button>
                 <Button
                   aria-label={`Close ${tab.title}`}

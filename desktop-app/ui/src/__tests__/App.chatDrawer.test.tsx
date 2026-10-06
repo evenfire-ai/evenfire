@@ -516,25 +516,31 @@ describe('App workspace chat tabs with held Host access', () => {
     delete (window as { clerum?: unknown }).clerum
   })
 
-  it('keeps the current chat active through denial and list reconciliation, then switches on retry', async () => {
+  it('focuses a held chat immediately and keeps it focused through denial and reconciliation', async () => {
     render(<App />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Conversation unavailable' }))
 
     expect(
-      screen.getByRole('button', { name: 'Conversation A' }).getAttribute('aria-pressed')
+      screen
+        .getByRole('button', { name: 'Conversation unavailable, checking access' })
+        .getAttribute('aria-pressed')
     ).toBe('true')
     expect(
       screen
         .getByRole('button', { name: 'Conversation unavailable, checking access' })
         .getAttribute('aria-busy')
     ).toBe('true')
-    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
-      'chat-a'
-    )
+    expect(
+      screen
+        .getByRole('button', { name: 'Conversation unavailable, checking access' })
+        .getAttribute('title')
+    ).toBe('Checking host access to this conversation')
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
 
     // Updating the controller input runs App's production reconciliation effect:
-    // it must update A's title without replacing the requested pending tab.
+    // it must update A's title without replacing the immediately focused tab.
     act(() => {
       currentController.chatList = [{ ...CHAT_TAB_A, title: 'Renamed A' }, CHAT_TAB_B]
       forceControllerRender()
@@ -542,26 +548,42 @@ describe('App workspace chat tabs with held Host access', () => {
     expect(currentController.workspaceTabs.tabs.find(tab => tab.id === 'chat-a')?.title).toBe(
       'Renamed A'
     )
-    expect(screen.getByRole('button', { name: 'Renamed A' }).getAttribute('aria-pressed')).toBe(
-      'true'
-    )
-    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
-      'chat-a'
-    )
+    expect(
+      screen
+        .getByRole('button', { name: 'Conversation unavailable, checking access' })
+        .getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
 
     await act(async () => verificationChecks[0]!.resolve(false))
-    expect(screen.getByRole('button', { name: 'Renamed A' }).getAttribute('aria-pressed')).toBe(
-      'true'
-    )
-    expect(screen.getByRole('button', { name: 'Conversation unavailable' })).toBeTruthy()
+    const failedTab = screen.getByRole('button', {
+      name: 'Conversation unavailable, access check failed',
+    })
+    expect(failedTab.getAttribute('aria-pressed')).toBe('true')
+    expect(failedTab.getAttribute('title')).toBe('Could not verify host access. Select to retry.')
+    expect(screen.getByText('Could not verify access. Select this tab to retry.')).toBeTruthy()
     expect(currentController.handleSelectChatAgent).not.toHaveBeenCalledWith(
       'agent-b',
       expect.anything()
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Conversation unavailable' }))
+    fireEvent.click(failedTab)
+    currentController.chatMessagesLoading = true
     await act(async () => verificationChecks[1]!.resolve(true))
 
+    const loadingTab = screen.getByRole('button', {
+      name: 'Conversation B, loading conversation',
+    })
+    expect(loadingTab.getAttribute('aria-busy')).toBe('true')
+    expect(loadingTab.getAttribute('title')).toBe('Loading conversation')
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-b'
+    )
+
+    act(() => {
+      currentController.chatMessagesLoading = false
+      forceControllerRender()
+    })
     expect(
       screen.getByRole('button', { name: 'Conversation B' }).getAttribute('aria-pressed')
     ).toBe('true')
@@ -585,7 +607,7 @@ describe('App workspace chat tabs with held Host access', () => {
     )
   })
 
-  it('keeps a held drawer chat inactive until access verification succeeds', async () => {
+  it('focuses a held drawer chat immediately and hides the prior conversation until verified', async () => {
     const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
       id: 'chat-a',
       agentRef: 'agent-a',
@@ -628,20 +650,35 @@ describe('App workspace chat tabs with held Host access', () => {
       'agent-b',
       expect.anything()
     )
-    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
-      'chat-a'
+    expect(screen.getByRole('button', { name: /Open chats/ }).textContent).toContain(
+      'Conversation unavailable'
     )
+    expect(screen.getByRole('button', { name: /Open chats/ }).getAttribute('aria-busy')).toBe(
+      'true'
+    )
+    expect(screen.getByRole('button', { name: /Open chats/ }).getAttribute('title')).toBe(
+      'Checking host access to this conversation'
+    )
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
     expect(
       screen
         .getByRole('button', { name: 'Conversation unavailable, checking access' })
         .getAttribute('aria-busy')
     ).toBe('true')
 
+    currentController.chatMessagesLoading = true
     await act(async () => verificationChecks[0]!.resolve(true))
 
     expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith(
       'agent-b',
       expect.objectContaining({ chatId: 'chat-b', keepNavItem: true })
+    )
+    expect(screen.getByRole('button', { name: /Open chats/ }).getAttribute('aria-busy')).toBe(
+      'true'
+    )
+    expect(screen.getByRole('button', { name: /Open chats/ }).getAttribute('title')).toBe(
+      'Loading conversation'
     )
     expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
       'chat-b'

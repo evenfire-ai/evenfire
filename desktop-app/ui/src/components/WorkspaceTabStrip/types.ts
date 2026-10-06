@@ -5,6 +5,10 @@ export type WorkspaceTabStripProps = {
   activeTabId: string | null
   /** Chat tab currently waiting for Host access verification. */
   pendingTabId?: string | null
+  /** Chat tab whose verified conversation is still loading. */
+  loadingTabId?: string | null
+  /** Chat tab whose Host access check failed and can be retried. */
+  unavailableTabId?: string | null
   onSelect: (id: string) => void
   onClose: (id: string) => void
   /** Move a tab to `toIndex` (its desired FINAL array index; see reorderWorkspaceTab). */
