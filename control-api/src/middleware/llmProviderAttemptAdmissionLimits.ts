@@ -6,8 +6,12 @@ import type { AuthorizeBodyAdmissionPolicy } from './llmProviderAttemptBodyAdmis
 // The policy is process-wide; every Node worker needs its own measured budget.
 //
 // It governs only the retained path: bodies declared above the text authorize
-// envelope, chunked bodies and unparseable lengths. Text-only authorizes are
-// bounded by their own parser limit and never take a unit (see the route).
+// envelope, chunked bodies and unparseable lengths. Bodies declared at or below
+// the envelope are bounded by their own parser limit and never take a unit (see
+// the route). The split is by declared length, not by content: a V2 text-only
+// body carries each text part twice (content and contentParts) and can exceed
+// the envelope while inside the non-image budget; it then takes the unit like
+// an image body.
 //
 // maxQueued, maxPerPrincipal and queueWaitMs bound latency and fairness, not
 // memory: queued requests are paused before any body read. Two waiters allow

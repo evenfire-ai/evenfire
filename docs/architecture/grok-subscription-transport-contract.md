@@ -261,8 +261,12 @@ Errors:
   the text authorize envelope (`maxRequestBodyBytes` +
   `ENVELOPE_ALLOWANCE_BYTES`, 8404992 bytes, the larger of the two contracts)
   is parsed with that limit and never queues. A larger declared length, a
-  chunked body or a length that is not plain digits takes the unit. The
-  retained path parses one body at a time and queues at most two, in FIFO
+  chunked body or a length that is not plain digits takes the unit. The split
+  is by declared length, not by content: a V2 text-only body carries each text
+  part twice (`content` and `contentParts`), so it can exceed the envelope
+  while inside the non-image budget, and it then takes the unit like an image
+  body. The retained path parses one body at a time and queues at most two, in
+  FIFO
   order, paused before any read. One principal (JWT `sub` plus its sorted
   `hostRefs`) holds at most two positions, running or queued. A waiter is
   refused after 40 s, the holder's read deadline (10 s) plus its work deadline
@@ -877,10 +881,18 @@ transport now raises it for a contract size refusal.
 Anything outside the table is recorded as `other`, because a control-api error
 body is not bounded by the proxy. The raw code stays in the
 `grok_proxy_attempt_finished` log line.
-A request the proxy refuses on its own request limits (stream queue full,
-queue wait exceeded, invalid deadline) reaches the Host as
-`provider_unavailable`. The metric labels it `request_limit` to keep it apart
-from upstream outages, and the log line carries the limit's fixed `reason`.
+A request the proxy refuses on its own request limits reaches the Host with a
+proxy-owned code. A full or waited-out ordinary stream queue, or a full
+body-admission queue, answers 503 `proxy_capacity_exceeded`. A full or
+waited-out visual queue answers 503 `visual_gate`, and a full principal share
+answers 503 `visual_host_share`. An invalid deadline, a caller deadline that
+ends the wait first, a body-admission wait cut by the admission deadline and a
+wait cut by the ticket's expiry keep 503 `provider_unavailable`. The
+attempt-failure metric labels refusals inside the completion handler
+`request_limit` (ticket expiry excepted), to keep them apart from upstream
+outages. Admission refusals are logged as `grok_proxy_admission_refused` with
+a fixed `reason` (`body_budget`, `visual_host_share`, `visual_gate`,
+`ticket_life`).
 
 ### Control-plane outage
 
