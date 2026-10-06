@@ -148,6 +148,11 @@ read and send timeouts to 90 s, above the 80 s a retained authorize can take
 (queue, read and work), so control-api's own answer reaches the Host. A bare
 504 from the gateway (a read or send timeout on an accepted connection) is
 read as `authorize_timeout`, never as a provider outage.
+A resolved authorize has committed its ticket and budget reservation, so it is
+answered 200 while the client is still connected, even when the work clock
+expired meanwhile. An `authorize_timeout` or a gateway 504 does not prove a
+rollback: when the COMMIT reply itself is lost, the ticket stays until its own
+TTL and the reservation until its TTL, about 36 min.
 
 The critical Codex test title migrated from "visual admission overflow answers
 503 provider_unavailable and logs visual_gate" to "visual admission overflow

@@ -821,13 +821,14 @@ describe('createApp retained authorize-body ownership', () => {
     })
   }
 
-  it('returns terminal authorize_timeout after the real work clock aborts, without publishing late success', async () => {
-    const started = deferred()
-    const abortObserved = deferred<AbortSignal>()
+  // The work clock's abort reaches the authorizer. A rejection means nothing
+  // was committed and is answered as authorize_timeout; a resolution means the
+  // transaction committed, so its result is answered (review 5426789128).
+  function shortenWorkClock() {
     const nativeSetTimeout = globalThis.setTimeout
     // Only shorten the owner clock for this socket fixture. The production
     // policy remains unchanged; this test makes no numeric safety claim.
-    const clock = vi
+    return vi
       .spyOn(globalThis, 'setTimeout')
       .mockImplementation((fn, ms, ...args) =>
         nativeSetTimeout(
@@ -836,6 +837,11 @@ describe('createApp retained authorize-body ownership', () => {
           ...args
         )
       )
+  }
+  function authorizeAfterAbort(outcome: 'reject' | 'resolve') {
+    const started = deferred()
+    const abortObserved = deferred<AbortSignal>()
+    const settled = deferred()
     vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
       async (_claims, _body, deps) => {
         const signal = deps?.signal
@@ -851,15 +857,20 @@ describe('createApp retained authorize-body ownership', () => {
             { once: true }
           )
         )
-        // Deliberately produce a late result: the route must check the signal
-        // immediately before publishing an execution ticket.
+        settled.resolve()
+        if (outcome === 'reject') signal.throwIfAborted()
         return SUCCESS
       }
     )
+    return { started, abortObserved, settled }
+  }
+
+  it('returns terminal authorize_timeout when the real work clock aborts an uncommitted authorize', async () => {
+    const clock = shortenWorkClock()
+    const { started, abortObserved } = authorizeAfterAbort('reject')
     try {
       await withApps(1, async ([app]) => {
-        const sent = send(app.url, headers('work-timeout-host'), '{}')
-        const outcome = sent.response
+        const outcome = send(app.url, headers('work-timeout-host'), '{}').response
         await started.promise
         const signal = await abortObserved.promise
         expect(signal.reason).toBeInstanceOf(AuthorizeWorkInterrupted)
@@ -876,6 +887,49 @@ describe('createApp retained authorize-body ownership', () => {
     } finally {
       clock.mockRestore()
     }
+  })
+
+  it('answers a committed authorize with 200 after the real work clock aborted', async () => {
+    const clock = shortenWorkClock()
+    const { started, abortObserved } = authorizeAfterAbort('resolve')
+    try {
+      await withApps(1, async ([app]) => {
+        const outcome = send(app.url, headers('late-commit-host'), '{}').response
+        await started.promise
+        const signal = await abortObserved.promise
+        expect(signal.reason).toBeInstanceOf(AuthorizeWorkInterrupted)
+        expect(signal.reason.code).toBe('authorize_timeout')
+        const response = await outcome
+        expect(response.status).toBe(200)
+        expect(JSON.parse(response.body)).toEqual(SUCCESS)
+        expect((app.observations[0].request as Request).body).toBeUndefined()
+        const recovered = await send(app.url, headers('after-late-commit-host'), '{}').response
+        expect(recovered.status).toBe(200)
+      })
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  it('writes nothing for a committed authorize whose client already disconnected', async () => {
+    const { started, abortObserved, settled } = authorizeAfterAbort('resolve')
+    await withApps(1, async ([app]) => {
+      const sent = send(app.url, headers('late-commit-gone-host'), '{}')
+      const outcome = sent.response.catch(error => error)
+      await started.promise
+      sent.client.destroy()
+      const signal = await abortObserved.promise
+      expect(signal.reason).toBeInstanceOf(AuthorizeWorkInterrupted)
+      expect(signal.reason.code).toBe('authorize_aborted')
+      // Witness: the authorizer resolved its committed result after the abort.
+      await settled.promise
+      await outcome
+      await vi.waitFor(() => expect(app.observations[0].request.destroyed).toBe(true))
+      const recovered = await send(app.url, headers('after-late-commit-gone-host'), '{}').response
+      expect(recovered.status).toBe(200)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(2)
+      expect(app.observations[0].responseWritesAfterClose).toBe(0)
+    })
   })
 
   it('stops a stalled body reader on the real read clock before releasing and admits the next request', async () => {

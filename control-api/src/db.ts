@@ -6845,7 +6845,8 @@ export async function withTransaction<T>(
     commitSent = true
     await client.query('COMMIT')
     transactionFinished = true
-    signal?.throwIfAborted()
+    // An acknowledged COMMIT is the outcome, even if the signal aborted
+    // meanwhile: the finally still evicts the session instead of restoring it.
     return result
   } catch (error) {
     if (commitSent || !transactionStarted) {

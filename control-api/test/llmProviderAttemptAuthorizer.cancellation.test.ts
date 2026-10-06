@@ -819,6 +819,55 @@ describe('cancellable transaction server idle backstop with native pool max one'
     await expect(withTransaction(async () => 'recovered', fixture.pool)).resolves.toBe('recovered')
   })
 
+  // Review 5426789128: an abort after the COMMIT reply arrived must not
+  // relabel the committed result as a cancellation.
+  it('keeps an acknowledged COMMIT when the signal aborts as its reply resolves', async () => {
+    const fixture = await postgresPeer()
+    const controller = new AbortController()
+    const reason = interruption('authorize_timeout')
+    fixture.pool.once('acquire', client => {
+      const query = client.query.bind(client) as (text: string) => Promise<unknown>
+      vi.spyOn(client, 'query').mockImplementation(((text: string, ...rest: unknown[]) => {
+        const reply = (query as (...args: unknown[]) => Promise<unknown>)(text, ...rest)
+        // Abort in the continuation of the acknowledged COMMIT, before the
+        // transaction helper resumes.
+        return text === 'COMMIT'
+          ? reply.then(result => {
+              controller.abort(reason)
+              return result
+            })
+          : reply
+      }) as never)
+    })
+    const outcome = withTransaction(async () => 'committed', fixture.pool, {
+      signal: controller.signal,
+    })
+    await expect(within(outcome)).resolves.toBe('committed')
+    // Witness: the abort did land, after COMMIT was acknowledged.
+    expect(controller.signal.aborted).toBe(true)
+    expect(fixture.queries).toContain('COMMIT')
+    expect(fixture.queries).not.toContain('ROLLBACK')
+    // The aborted session is evicted, not restored to the pool.
+    expect(fixture.sessionChanges).toHaveLength(1)
+    expect(fixture.pool.totalCount).toBe(0)
+  })
+
+  it('keeps an acknowledged COMMIT when the signal aborts during session restoration', async () => {
+    const fixture = await postgresPeer()
+    fixture.stall(settingSql, 2)
+    const controller = new AbortController()
+    const outcome = withTransaction(async () => 'committed', fixture.pool, {
+      signal: controller.signal,
+    })
+    await observed(() => fixture.sessionChanges.length === 2)
+    // Witness: COMMIT was acknowledged and the restoration is in flight.
+    expect(fixture.queries.indexOf('COMMIT')).toBeLessThan(fixture.queries.lastIndexOf(settingSql))
+    controller.abort(interruption('authorize_aborted'))
+    await expect(within(outcome)).resolves.toBe('committed')
+    expect(fixture.queries).not.toContain('ROLLBACK')
+    expect(fixture.pool.totalCount).toBe(0)
+  })
+
   it('evicts a failed restoration after ROLLBACK and keeps the original work failure', async () => {
     const fixture = await postgresPeer()
     fixture.fail(settingSql, 2)

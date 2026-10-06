@@ -221,7 +221,11 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
           signal,
           resolveAssignment: hostRef => resolveHostAssignedAssignment(gateway, hostRef, signal),
         })
-        signal.throwIfAborted()
+        // A resolved authorize has committed its ticket and reservation, even
+        // when the work clock or the client stopped meanwhile. It is answered
+        // while the client can still read it and never relabelled as
+        // authorize_timeout; the admission then sees the abort and returns.
+        if (res.destroyed || res.writableEnded) return
         res.status(200).json(result)
       }
       try {
