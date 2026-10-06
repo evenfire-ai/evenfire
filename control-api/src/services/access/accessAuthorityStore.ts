@@ -545,7 +545,6 @@ async function loadDerivedOperationalCandidates(input: {
   if (input.resource.type !== 'mcp_server' && input.resource.type !== 'shared_filesystem') {
     return []
   }
-  const derivedResourceType = input.resource.type
   const directEdges = input.graph.relationships.filter(relationship => {
     if (input.resource.type === 'mcp_server') {
       return (
