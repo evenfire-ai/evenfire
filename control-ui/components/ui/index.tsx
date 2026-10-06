@@ -62,7 +62,15 @@ export function Button({
   )
 }
 
-export function Field({ children, description, error, htmlFor, label, required }: FieldProps) {
+export function Field({
+  children,
+  description,
+  error,
+  errorId,
+  htmlFor,
+  label,
+  required,
+}: FieldProps) {
   return (
     <div className="cu-field">
       {label ? (
@@ -73,7 +81,11 @@ export function Field({ children, description, error, htmlFor, label, required }
       ) : null}
       {children}
       {description ? <span className="cu-field__hint">{description}</span> : null}
-      {error ? <span className="cu-field__error">{error}</span> : null}
+      {error ? (
+        <span className="cu-field__error" id={errorId}>
+          {error}
+        </span>
+      ) : null}
     </div>
   )
 }
