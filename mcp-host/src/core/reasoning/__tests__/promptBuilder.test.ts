@@ -8,7 +8,7 @@ function tool(name: string): ToolDefinition {
 
 describe('DefaultPromptBuilder — memory guidance (P.4)', () => {
   it('includes MEMORY_GUIDANCE_TEXT when a memory_* tool is registered', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt([tool('memory_write'), tool('memory_search')])
     expect(msg.content).toContain(MEMORY_GUIDANCE_TEXT)
     expect(msg.content).toContain('two scopes')
@@ -16,14 +16,14 @@ describe('DefaultPromptBuilder — memory guidance (P.4)', () => {
   })
 
   it('omits the guidance when no memory tools are present', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt([tool('clerum__get_capabilities')])
     expect(msg.content).not.toContain(MEMORY_GUIDANCE_TEXT)
     expect(msg.content).not.toContain('two scopes')
   })
 
   it('emits the guidance block exactly once even with multiple memory tools', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt([
       tool('memory_write'),
       tool('memory_read'),

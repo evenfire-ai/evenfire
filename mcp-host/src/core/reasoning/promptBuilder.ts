@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { logger } from '../../logger'
 import { PromptBuilder } from '../interfaces'
+import type { NativeToolPresentation } from '../orchestration/toolPresentationPolicy'
 import { ChatMessage, ToolDefinition } from '../types'
 import type { BuilderInput, SystemPromptParts } from './systemPrompt'
 
@@ -119,12 +120,33 @@ export const MCP_SERVER_SELECTION_TEXT =
 export const TOOL_DISCOVERY_TEXT =
   'Use directly listed tools when available. For additional approved tools, ' +
   'use `clerum__tool_search` to find them by keyword, `clerum__tool_describe` to ' +
-  "see one's schema, and `clerum__tool_call` to invoke it. This also covers " +
-  'internal tools that are not listed directly. Search narrowly for the current task; refine or page ' +
+  "see one's schema, and `clerum__tool_call` to invoke it. Native tools are " +
+  'already available directly. Search narrowly for the current task; refine or page ' +
   'only when needed rather than loading the whole catalog. Describe only the chosen ' +
   'tool and reuse its schema from the conversation when available. Each invocation ' +
   'still checks current permissions and arguments. Do not call tools for tasks that ' +
   'do not require them.'
+
+/**
+ * #1003 — discovery guidance when native `auto` is on: large internal tools are
+ * not listed directly and are reached through the same search/describe/call
+ * flow, so the "native tools are already available directly" sentence of
+ * `TOOL_DISCOVERY_TEXT` would be false. Constant per host, cache-safe.
+ */
+export const NATIVE_TOOL_DISCOVERY_TEXT =
+  'Use directly listed tools when available. For additional approved tools, ' +
+  'including internal tools that are not listed directly, use `clerum__tool_search` ' +
+  "to find them by keyword, `clerum__tool_describe` to see one's schema, and " +
+  '`clerum__tool_call` to invoke it. Search narrowly for the current task; refine or page ' +
+  'only when needed rather than loading the whole catalog. Describe only the chosen ' +
+  'tool and reuse its schema from the conversation when available. Each invocation ' +
+  'still checks current permissions and arguments. Do not call tools for tasks that ' +
+  'do not require them.'
+
+/** Discovery guidance for the host's native-tool presentation. */
+export function toolDiscoveryText(nativeToolPresentation: NativeToolPresentation): string {
+  return nativeToolPresentation === 'auto' ? NATIVE_TOOL_DISCOVERY_TEXT : TOOL_DISCOVERY_TEXT
+}
 
 /**
  * Default prompt builder.
@@ -133,6 +155,12 @@ export const TOOL_DISCOVERY_TEXT =
  * with identity, tool descriptions, date/time, and channel context.
  */
 export class DefaultPromptBuilder implements PromptBuilder {
+  private readonly discoveryText: string
+
+  constructor(options: { nativeToolPresentation: NativeToolPresentation }) {
+    this.discoveryText = toolDiscoveryText(options.nativeToolPresentation)
+  }
+
   buildSystemPrompt(
     tools: ToolDefinition[],
     identity?: string,
@@ -180,7 +208,7 @@ export class DefaultPromptBuilder implements PromptBuilder {
     // Tool-discovery guidance (F4.1): emitted when the stable bridge is active,
     // detected by the presence of `clerum__tool_search`.
     if (tools.some(t => t.name === 'clerum__tool_search')) {
-      sections.push(TOOL_DISCOVERY_TEXT)
+      sections.push(this.discoveryText)
     }
 
     // 2b. Desktop environment context

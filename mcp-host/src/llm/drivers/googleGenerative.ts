@@ -206,7 +206,10 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
         continue
       }
       if (m.role === 'tool') {
-        const name = m.name ?? (m.tool_call_id ? idToName.get(m.tool_call_id) : undefined) ?? 'tool'
+        // The functionCall's own name wins: a call routed through
+        // `clerum__tool_call` produces a result named after the REAL tool, but
+        // Gemini pairs the response with the `clerum__tool_call` functionCall.
+        const name = (m.tool_call_id ? idToName.get(m.tool_call_id) : undefined) ?? m.name ?? 'tool'
         contents.push({
           role: 'user',
           parts: [{ functionResponse: { name, response: { result: m.content } } }],

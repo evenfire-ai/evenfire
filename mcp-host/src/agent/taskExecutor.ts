@@ -37,6 +37,7 @@ import type { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
 import { buildLoopConfig } from '../core/orchestration/loopConfig'
 import type { LoopConfig } from '../core/orchestration/loopConfig'
 import { DefaultLoopController } from '../core/orchestration/loopConfig'
+import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { resolveToolPresentation } from '../core/orchestration/toolPresentationPolicy'
@@ -62,8 +63,8 @@ import {
   DefaultPromptBuilder,
   MCP_SERVER_SELECTION_TEXT,
   MEMORY_GUIDANCE_TEXT,
-  TOOL_DISCOVERY_TEXT,
   WORKFLOW_RECIPES_TEXT,
+  toolDiscoveryText,
 } from '../core/reasoning/promptBuilder'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
 import { BasicSafety } from '../core/safety/safety'
@@ -1481,7 +1482,7 @@ export class TaskExecutor {
     // single-string identity built by `buildSystemIdentity`.
     const reasoningFactory = new DefaultReasoningFactory(
       hookedLlmPort,
-      undefined,
+      new DefaultPromptBuilder({ nativeToolPresentation: appConfig.nativeToolPresentation }),
       metadata,
       // F1.4 — wire the send-time context-window-breakdown capture. The sink is
       // bound to the captured `conversation` local (not `this.conversation!`) so
@@ -1508,7 +1509,9 @@ export class TaskExecutor {
       const cachedPrompt = [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
       systemPromptFor = () => cachedPrompt
     } else {
-      const promptBuilder = new DefaultPromptBuilder()
+      const promptBuilder = new DefaultPromptBuilder({
+        nativeToolPresentation: appConfig.nativeToolPresentation,
+      })
       systemPromptFor = tools => promptBuilder.buildSystemPrompt(tools, identity, metadata).content
     }
 
@@ -1904,6 +1907,8 @@ export class TaskExecutor {
       tools.some(t => t.name.startsWith('workflow_')),
       tools.some(t => t.name.includes('__')),
       tools.some(t => t.name === 'clerum__tool_search'),
+      // #1003 — the discovery guidance text depends on the native presentation.
+      appConfig.nativeToolPresentation,
     ])
     // R2 — the system prompt embeds the model name, so a cache entry built for a
     // different (e.g. just-swapped) model is a miss: rebuild, but keep the frozen
@@ -1919,7 +1924,9 @@ export class TaskExecutor {
     const dailyLogSnapshot =
       cached?.dailyLogSnapshot ?? (await this.deps.workspaceService.snapshotDailyLogs(2))
     const identityFiles = await this.deps.workspaceService.readIdentityFiles()
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({
+      nativeToolPresentation: appConfig.nativeToolPresentation,
+    })
     const hasMemoryTools = tools.some(t => t.name.startsWith('memory_'))
     const hasCapabilities = tools.some(t => t.name === 'clerum__get_capabilities')
     const hasDesktopTools = tools.some(
@@ -1955,7 +1962,9 @@ export class TaskExecutor {
       capabilities,
       workflowGuidance: hasWorkflowTools ? WORKFLOW_RECIPES_TEXT : '',
       mcpServerGuidance: hasMcpTools ? MCP_SERVER_SELECTION_TEXT : '',
-      toolDiscoveryGuidance: hasToolDiscovery ? TOOL_DISCOVERY_TEXT : '',
+      toolDiscoveryGuidance: hasToolDiscovery
+        ? toolDiscoveryText(appConfig.nativeToolPresentation)
+        : '',
       memoryGuidance: hasMemoryTools ? MEMORY_GUIDANCE_TEXT : '',
     })
     this.deps.promptCache.set(sessionKey, {
@@ -2053,6 +2062,9 @@ export class TaskExecutor {
       appConfig,
       this.deps.failover?.policy.fallbacks
     )
+    // #1003 — native-tool presentation is host-wide and provider-independent:
+    // it never depends on the MCP presentation resolved above.
+    const nativeAuto = appConfig.nativeToolPresentation === 'auto'
     const nativeRegistry = new NativeToolRegistry(
       // The spillover threshold is a top-level setting; clerum__attachment_read
       // states it in its description (#666).
@@ -2076,7 +2088,9 @@ export class TaskExecutor {
       // (clerum__tool_search / clerum__tool_describe). Reuses the same manager
       // already threaded into the MCP tool registry below.
       this.deps.mcpManager ?? undefined,
-      presentation.bridgeEnabled,
+      // #1003 — MCP discovery and native discovery are separate decisions;
+      // either one registers the bridge tools.
+      { mcpDiscovery: presentation.bridgeEnabled, nativeDiscovery: nativeAuto },
       // §13 (stateless agents): the active provider's credential slot is the
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType()
@@ -2143,13 +2157,51 @@ export class TaskExecutor {
       : baseController
 
     const mcpManager = this.deps.mcpManager
-    // Codex direct still observes the live catalog; observation must not enable discovery.
-    if (!presentation.bridgeEnabled && presentation.codexMode === undefined) {
-      return { registry: compositeRegistry, loopController: innerController }
-    }
-
     // Exact native membership preserves every native/plugin capability.
     const nativeNames = new Set(nativeRegistry.listDefinitions().map(d => d.name))
+
+    // #1003 — native presentation wraps OUTSIDE the MCP decision on every
+    // return, so it can only remove natives from the list the MCP presentation
+    // produced. In `direct` it returns that list unchanged.
+    const withNativePresentation = (controller: LoopController): LoopController =>
+      new NativeToolPresentationController(controller, nativeNames, {
+        mode: appConfig.nativeToolPresentation,
+        discoveryBytes: appConfig.nativeToolDiscoveryBytes,
+      })
+
+    // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
+    // deferrable catalog. It exists exactly when NativeToolRegistry registered
+    // the bridge tools: MCP discovery with an McpManager, or native `auto`.
+    // Codex direct with native `direct` observes presentation without
+    // installing discovery interception or registering bridge tools.
+    const bridge: LoopConfig['bridge'] =
+      (presentation.bridgeEnabled && mcpManager) || nativeAuto
+        ? {
+            nativeNames,
+            getDeferrableCatalogNames: () =>
+              mcpManager
+                ? new Set(
+                    mcpManager
+                      .getAllTools()
+                      .map(t => t.name)
+                      .filter(name => !nativeNames.has(name))
+                  )
+                : new Set<string>(),
+            nativeTargets: nativeAuto,
+          }
+        : undefined
+
+    // Codex direct still observes the live catalog; observation must not enable discovery.
+    if (!presentation.bridgeEnabled && presentation.codexMode === undefined) {
+      return {
+        registry: compositeRegistry,
+        loopController: withNativePresentation(innerController),
+        // Native `auto` only: MCP presentation is unchanged (no MCP decision on
+        // this path) but the bridge serves natives and keeps MCP tools callable.
+        bridge,
+      }
+    }
+
     // LOCKED #6: the latch lives on the session-scoped Conversation, NOT on the
     // per-task controller, so a server connecting/disconnecting BETWEEN turns
     // cannot flip `tools[]` and re-introduce cache invalidation. Ephemeral RAM
@@ -2162,7 +2214,6 @@ export class TaskExecutor {
         dynamicToolsEnabled: presentation.bridgeEnabled,
         codexMode: presentation.codexMode,
         codexToolDiscoveryBytes: appConfig.codexToolDiscoveryBytes,
-        nativeToolDiscoveryBytes: appConfig.nativeToolDiscoveryBytes,
         dynamicToolsThreshold: appConfig.dynamicToolsThreshold,
       },
       {
@@ -2173,24 +2224,11 @@ export class TaskExecutor {
       }
     )
 
-    // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
-    // deferrable catalog. Direct mode observes presentation without installing
-    // discovery interception or registering bridge tools.
-    const bridge: LoopConfig['bridge'] =
-      presentation.bridgeEnabled && mcpManager
-        ? {
-            nativeNames,
-            getDeferrableCatalogNames: () =>
-              new Set(
-                mcpManager
-                  .getAllTools()
-                  .map(t => t.name)
-                  .filter(name => !nativeNames.has(name))
-              ),
-          }
-        : undefined
-
-    return { registry: compositeRegistry, loopController, bridge }
+    return {
+      registry: compositeRegistry,
+      loopController: withNativePresentation(loopController),
+      bridge,
+    }
   }
 
   private async prepareChannelWorkflowCallerContext(): Promise<

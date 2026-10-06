@@ -134,6 +134,43 @@ describe('GoogleGenerativeDriver — tool round-trip', () => {
     expect(fnResp.functionResponse.name).toBe('search')
     expect(fnResp.functionResponse.response).toEqual({ result: 'found' })
   })
+
+  it('names a bridged tool result after the clerum__tool_call functionCall, not the real tool', async () => {
+    const { client, generateContent } = mockClient({
+      candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+    })
+    const driver = new GoogleGenerativeDriver(client, 'gemini-2.5-pro')
+    const bridged = { name: 'clerum__generate_pptx', arguments: { title: 'Deck' } }
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'make a deck' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call_bridge', name: 'clerum__tool_call', arguments: bridged }],
+      },
+      // The loop names a bridged result after the REAL tool it executed.
+      {
+        role: 'tool',
+        name: 'clerum__generate_pptx',
+        content: 'File generated: deck.pptx (pptx)',
+        tool_call_id: 'call_bridge',
+      },
+      // Witness: a result whose id matches no functionCall keeps its own name.
+      { role: 'tool', name: 'orphan_tool', content: 'orphan', tool_call_id: 'unknown' },
+    ]
+    await driver.completeSingleTurnWithTools(messages, [])
+
+    const contents = generateContent.mock.calls[0][0].contents
+    const call = contents
+      .flatMap((c: { parts: Array<{ functionCall?: { name: string } }> }) => c.parts)
+      .find((p: { functionCall?: { name: string } }) => p.functionCall)
+    const responses = contents
+      .flatMap((c: { parts: Array<{ functionResponse?: { name: string } }> }) => c.parts)
+      .filter((p: { functionResponse?: { name: string } }) => p.functionResponse)
+      .map((p: { functionResponse: { name: string } }) => p.functionResponse.name)
+    expect(call.functionCall).toEqual({ name: 'clerum__tool_call', args: bridged })
+    expect(responses).toEqual(['clerum__tool_call', 'orphan_tool'])
+  })
 })
 
 describe('GoogleGenerativeDriver — finish reasons', () => {

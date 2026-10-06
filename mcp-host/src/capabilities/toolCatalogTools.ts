@@ -5,11 +5,13 @@ import type { InternalToolDefinition, InternalToolResult } from '../workflow/typ
  * Read-only meta-tools for dynamic tool discovery (Phase F2 of the
  * dynamic-tool-loading "stable bridge" design).
  *
- * Both tools are stateless and query the live MCP catalog on demand via a
- * `getCatalog` provider (in production this is bound to
- * `McpManager.getAllTools()`). They never mutate session state and never
- * advertise MCP tools into the `tools[]` array — the whole point of the
- * design is to keep schemas OUT of the prompt prefix.
+ * Both tools are stateless and query the live catalog on demand via a
+ * `getCatalog` provider. In production it is bound to `McpManager.getAllTools()`
+ * and, when native `auto` is on (#1003), also to the non-bridge native
+ * definitions under the `native` pseudo-server (see `NativeToolRegistry`). They
+ * never mutate session state and never advertise catalog tools into the
+ * `tools[]` array — the whole point of the design is to keep schemas OUT of
+ * the prompt prefix.
  *
  *   - `clerum__tool_search`   → ranks tools by keyword over name+description,
  *                               returns name/server/description, NEVER schemas
@@ -23,12 +25,21 @@ import type { InternalToolDefinition, InternalToolResult } from '../workflow/typ
 export type CatalogProvider = () => McpTool[]
 
 /** The 3 dynamic-tool-loading bridge tools. They are native and must never be
- * the TARGET of `clerum__tool_call` (LOCKED #11 — no bridge recursion). */
-export const BRIDGE_TOOL_NAMES = new Set([
+ * the TARGET of `clerum__tool_call` (LOCKED #11 — no recursion), nor appear in
+ * the discovery catalog, nor be hidden by native `auto` (#1003). */
+export const BRIDGE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'clerum__tool_search',
   'clerum__tool_describe',
   'clerum__tool_call',
 ])
+
+/**
+ * #1003 — whether the bridge also serves native tools (native `auto`). When
+ * false, every model-visible text below is exactly the pre-#1003 text.
+ */
+export interface BridgeToolOptions {
+  nativeTargets: boolean
+}
 
 /** Default cap for tool_search results. The model asks for one schema at a
  * time via tool_describe, so the search result stays a small, schema-free
@@ -219,11 +230,16 @@ export function buildToolDescribeResponse(catalog: McpTool[], name: string): Too
 }
 
 /**
- * `clerum__tool_search` — read-only, stateless keyword search over the MCP
+ * `clerum__tool_search` — read-only, stateless keyword search over the
  * catalog. Returns name/server/description only; NEVER schemas (Critical
  * Detail #4 — schemas are exactly the prefix cost the bridge avoids).
+ * With `nativeTargets` the `server` filter also accepts the `native`
+ * pseudo-server (#1003); otherwise the parameter text is the pre-#1003 text.
  */
-export function createToolSearchTool(getCatalog: CatalogProvider): InternalToolDefinition {
+export function createToolSearchTool(
+  getCatalog: CatalogProvider,
+  options: BridgeToolOptions
+): InternalToolDefinition {
   return {
     name: 'clerum__tool_search',
     description:
@@ -243,7 +259,9 @@ export function createToolSearchTool(getCatalog: CatalogProvider): InternalToolD
         query: { type: 'string', description: 'Keywords to search for.' },
         server: {
           type: 'string',
-          description: 'Optional: restrict results to a single MCP server name.',
+          description: options.nativeTargets
+            ? 'Optional: restrict results to a single MCP server name, or `native` for internal tools.'
+            : 'Optional: restrict results to a single MCP server name.',
         },
         limit: {
           type: 'number',
@@ -334,26 +352,30 @@ export function createToolDescribeTool(getCatalog: CatalogProvider): InternalToo
 }
 
 /**
- * `clerum__tool_call` — the execution bridge for deferred MCP tools (Phase F3.2).
+ * `clerum__tool_call` — the execution bridge for deferred MCP tools (Phase F3.2)
+ * and, with `nativeTargets` (native `auto`, #1003), for native tools too.
  *
  * IMPORTANT: this `execute` is a SAFETY NET only. The real handling happens in
  * `executeToolCalls` (`core/orchestration/toolUseLoopToolBatch.ts`), which
  * intercepts `clerum__tool_call` at the TOP of the per-call loop, BEFORE the
  * approval/validation gate, unwraps `{ name, arguments }`, and rewrites the
- * call to a synthetic call against the REAL MCP tool so approval/validation run
+ * call to a synthetic call against the REAL tool so approval/validation run
  * against the real name (LOCKED #8). The tool is still registered as a native so
  * it appears in `tools[]` and in `nativeNames`. If `execute` is ever reached
  * (the intercept did not fire), we return an error rather than silently doing
  * nothing — that would be a bug, not a normal path.
  */
-export function createToolCallTool(): InternalToolDefinition {
+export function createToolCallTool(options: BridgeToolOptions): InternalToolDefinition {
   return {
     name: 'clerum__tool_call',
-    description:
-      'Invoke a tool discovered via `clerum__tool_search` / `clerum__tool_describe` ' +
-      'by its exact name. Pass the target tool name and its arguments. Use this ' +
-      'for tools that are not listed directly, including deferred internal tools. ' +
-      'Tools already listed in `tools[]` are called directly by their own name.',
+    description: options.nativeTargets
+      ? 'Invoke a tool discovered via `clerum__tool_search` / `clerum__tool_describe` ' +
+        'by its exact name. Pass the target tool name and its arguments. Use this ' +
+        'for tools that are not listed directly, including internal tools; tools ' +
+        'listed directly are called by their own name.'
+      : 'Invoke a tool discovered via `clerum__tool_search` / `clerum__tool_describe` ' +
+        'by its exact name. Pass the target tool name and its arguments. Use this ' +
+        'for tools that are not listed directly; native tools are called directly.',
     parameters: {
       type: 'object',
       properties: {

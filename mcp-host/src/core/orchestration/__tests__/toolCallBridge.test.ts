@@ -126,6 +126,7 @@ function bridgeContext(nativeNames: string[], deferrable: string[]): LoopConfig[
   return {
     nativeNames: new Set(nativeNames),
     getDeferrableCatalogNames: () => new Set(deferrable),
+    nativeTargets: false,
   }
 }
 
@@ -298,47 +299,17 @@ describe('clerum__tool_call bridge intercept', () => {
     expect(real.calls).toHaveLength(0)
   })
 
-  it('rejects recursion into another bridge tool (LOCKED #11)', async () => {
+  it('rejects recursion: target is a native or another bridge tool', async () => {
     const config = makeConfig({
       tools: {},
       bridge: bridgeContext(NATIVE, ['server__x']),
     })
-    for (const target of ['clerum__tool_call', 'clerum__tool_search', 'clerum__tool_describe']) {
+    for (const target of ['shell_exec', 'clerum__tool_call', 'clerum__tool_search']) {
       const { toolResults } = await executeToolCalls([bridgeCall('c', target, {})], config, 0)
       expect(toolResults[0].is_error).toBe(true)
       expect(toolResults[0].tool_call_id).toBe('c')
       expect(toolResults[0].content).toMatch(/cannot target/)
     }
-  })
-
-  it('#1003 unwraps a native target, preserving call.id and executing the real tool', async () => {
-    const native = new StubTool('clerum__generate_docx')
-    const config = makeConfig({
-      tools: { clerum__generate_docx: native },
-      bridge: bridgeContext([...NATIVE, 'clerum__generate_docx'], []),
-    })
-    const { toolResults } = await executeToolCalls(
-      [bridgeCall('call-n', 'clerum__generate_docx', { title: 'Report' })],
-      config,
-      0
-    )
-    expect(native.calls).toEqual([{ title: 'Report' }])
-    expect(toolResults[0].tool_call_id).toBe('call-n')
-    expect(toolResults[0].is_error).toBe(false)
-  })
-
-  it('#1003 rejects a native-looking name absent from the native registry', async () => {
-    const config = makeConfig({
-      tools: {},
-      bridge: bridgeContext(NATIVE, ['server__x']),
-    })
-    const { toolResults } = await executeToolCalls(
-      [bridgeCall('c', 'ghost_native_tool', {})],
-      config,
-      0
-    )
-    expect(toolResults[0].is_error).toBe(true)
-    expect(toolResults[0].content).toMatch(/not in the current tool catalog/)
   })
 
   it('scope gate rejects an out-of-catalog target without executing', async () => {

@@ -1840,10 +1840,7 @@ describe('TaskExecutor Codex presentation wiring', () => {
     }
     const { executor } = makeExecutor('codex-subscription', manager)
     const { registry, loopController, bridge } = await executor.createToolRegistry()
-    const fullInitial = registry.listDefinitions()
-    const initial = await loopController.refreshTools(fullInitial)
-    // #1003 — oversized native generators defer even with zero MCP tools.
-    expect(initial.length).toBeLessThan(fullInitial.length)
+    const initial = await loopController.refreshTools(registry.listDefinitions())
     expect(initial.map((t: any) => t.name)).toEqual(
       expect.arrayContaining(['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call'])
     )
@@ -1851,7 +1848,7 @@ describe('TaskExecutor Codex presentation wiring', () => {
     for (const n of [83, 150, 250]) {
       count = n
       const full = registry.listDefinitions()
-      expect(full).toHaveLength(fullInitial.length + n)
+      expect(full).toHaveLength(initial.length + n)
       expect(JSON.stringify(await loopController.refreshTools(full))).toBe(JSON.stringify(initial))
       expect(bridge.getDeferrableCatalogNames().size).toBe(n)
       expect(registry.get(`fixture__tool_${n - 1}`)).not.toBeNull()
@@ -1924,7 +1921,6 @@ describe('TaskExecutor Codex presentation wiring', () => {
             mcpCount: 83,
             presentedCount: full.length,
             deferredCount: 0,
-            nativeDeferredCount: 0,
           },
           'Tool presentation selected'
         )

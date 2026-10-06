@@ -732,6 +732,32 @@ presentation counts change, including the first refresh. It reports the mode,
 strategy, native/MCP counts and presented/deferred counts without tool definitions.
 Direct mode reports `strategy: direct` and `deferredCount: 0`.
 
+### Native tool presentation (#1003)
+
+`CLERUM_NATIVE_TOOL_PRESENTATION=direct|auto` presents native tools and is
+independent of `CODEX_TOOL_PRESENTATION` and `CLERUM_DYNAMIC_TOOLS_ENABLED`. It
+applies to every provider and defaults to `direct`, which lists every native
+exactly as before #1003: same `tools[]`, catalog, bridge behaviour, prompt text
+and tool descriptions. `auto` lists the 3 bridge tools in every Codex mode, even
+`direct` and even before MCP connects. It removes from `tools[]` each native whose
+serialized definition exceeds `CLERUM_NATIVE_TOOL_DISCOVERY_BYTES` (positive
+integer, default 2048; `0` is rejected at startup). At the default that is the
+pdf, xlsx, pptx, chart and dashboard generators. A removed native stays reachable:
+`clerum__tool_search` lists natives under the `native` server,
+`clerum__tool_describe` returns their schema, and `clerum__tool_call` runs them
+by their real name, so validation and approval apply to that name. The bridge
+never targets itself. When an MCP tool and a native share a name, the native wins.
+
+The native decision runs after the MCP decision and only removes natives, so MCP
+tools in `tools[]` are the same for both native modes. When `auto` hides a
+native, all 3 bridge tools must be presented; otherwise mcp-host throws instead
+of presenting an unreachable native. In Codex `direct` with native `auto`, the
+`tool-presentation` diagnostic counts the 3 bridge tools: `nativeCount` and
+`presentedCount` are 3 higher than with native `direct`, and every MCP field is
+unchanged. The final list is reported by the separate `native-tool-presentation`
+diagnostic (mode, budget, hidden names, presented count), emitted only in `auto`
+when that result changes.
+
 Search results contain bounded compact descriptions and no schemas. Follow
 `nextOffset` with the same query/filter to continue; explicit `enumerate`
 permits full traversal. Describe returns the exact selected schema, never a

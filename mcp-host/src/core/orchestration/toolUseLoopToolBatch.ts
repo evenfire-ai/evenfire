@@ -70,10 +70,9 @@ function bridgeError(call: ToolCall, message: string): ToolResult {
  *     then rewrite to a synthetic `{ id: call.id, name, arguments }` so the
  *     normal gate runs against the REAL tool (Critical #12 validates inner args
  *     against the real schema; LOCKED #10 keys approval on the real name).
- *     Native targets are valid destinations (#1003 amendment of LOCKED #11):
- *     deferred native tools exist only in the native registry, so membership in
- *     `nativeNames` is their scope gate; recursion into a bridge tool stays
- *     forbidden.
+ *     With `bridge.nativeTargets` (native `auto`, #1003) a native target is
+ *     also rewritten, whether or not it is currently advertised; without it,
+ *     native targets are rejected as before. Recursion is rejected in both.
  *
  *  2. Direct call to a deferred MCP tool (Critical #9, auto-recover) — a
  *     non-bridge call naming an MCP tool that is currently un-advertised. It is
@@ -120,9 +119,8 @@ function resolveBridgeCall(
       return 'handled'
     }
 
-    // Reject recursion (LOCKED #11): a bridge tool must never target another
-    // bridge tool, whatever its size or presentation.
-    if (BRIDGE_TOOL_NAMES.has(name)) {
+    // Native `auto`: reject recursion (LOCKED #11) before accepting natives.
+    if (bridge.nativeTargets && BRIDGE_TOOL_NAMES.has(name)) {
       toolResults.push(
         bridgeError(
           call,
@@ -132,19 +130,29 @@ function resolveBridgeCall(
       return 'handled'
     }
 
-    // #1003 — native target. Deferred native tools are absent from the MCP
-    // catalog, so their scope gate is existence in the native registry
-    // (`nativeNames`). Rewrite to the real name; the normal gate below then
-    // validates and approves the REAL native tool, exactly as a direct call
-    // would. Whether the native is currently advertised is irrelevant here —
-    // the bridge is just a slower envelope for an advertised tool, never a
-    // permission bypass.
-    if (bridge.nativeNames.has(name)) {
+    // #1003 — native `auto`: a native target is valid. Its scope gate is
+    // membership in the native registry (deferred natives are not in the MCP
+    // catalog). The rewrite keeps `call.id` and the normal gate below then
+    // validates and approves the REAL native, exactly like a direct call, so
+    // the bridge never widens what the model could call directly.
+    if (bridge.nativeTargets && bridge.nativeNames.has(name)) {
       return {
         id: call.id,
         name,
         arguments: (innerArgs as Record<string, unknown>) ?? {},
       }
+    }
+
+    // Native `direct`: reject recursion / native targets (LOCKED #11): the
+    // bridge targets DEFERRABLE MCP tools only.
+    if (BRIDGE_TOOL_NAMES.has(name) || bridge.nativeNames.has(name)) {
+      toolResults.push(
+        bridgeError(
+          call,
+          `clerum__tool_call cannot target "${name}": native and bridge tools are called directly, not through the bridge.`
+        )
+      )
+      return 'handled'
     }
 
     // Scope gate (LOCKED #7, Critical #7): the target must exist in the session's

@@ -600,9 +600,9 @@ describe('CodexSubscriptionProvider', () => {
         inputSchema: { type: 'object', properties: { key: { type: 'string' } } },
       }))
       const nativeTools = [
-        createToolSearchTool(() => catalog),
+        createToolSearchTool(() => catalog, { nativeTargets: false }),
         createToolDescribeTool(() => catalog),
-        createToolCallTool(),
+        createToolCallTool({ nativeTargets: false }),
       ].map(tool => ({
         name: tool.name,
         description: tool.description,
