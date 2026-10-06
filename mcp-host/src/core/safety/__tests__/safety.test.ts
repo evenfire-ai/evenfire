@@ -277,15 +277,117 @@ describe('BasicSafety', () => {
       expect(result.content).not.toContain('secret12345')
     })
 
-    it('keeps the text-pass result when a match covers a number', () => {
-      const output = '{"note":"x","pwd:":12345678}'
+    it.each([
+      ['a number', '{"note":"x","pwd:":12345678}', '{"note":"x","[REDACTED]":"[REDACTED]"}'],
+      ['a number after a key', '{"password=abcdefgh":12345}', '{"[REDACTED]":"[REDACTED]"}'],
+      ['a literal after a key', '{"password=abcdefgh":true}', '{"[REDACTED]":"[REDACTED]"}'],
+    ])('replaces %s a match covers with a redacted string', (_label, output, expected) => {
+      // Witness: the text pass alone breaks this output.
       const textPass = safety.sanitizeFreeformContent(output, { secretWarning: WARNING })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
       const result = safety.sanitizeOutput('mcp__config', output)
       expect(result.was_modified).toBe(true)
-      expect(result.content).toBe(textPass.content)
-      expect(result.content).toContain('[REDACTED]')
-      expect(result.content).not.toContain('12345678')
+      expect(result.warnings).toEqual(['Potential secret detected in mcp__config output'])
+      expect(result.content).toBe(expected)
+      expect(() => JSON.parse(result.content)).not.toThrow()
     })
+
+    it('keeps the text-pass result when a match touches no string or scalar', () => {
+      // A configured secret made only of JSON punctuation covers no content.
+      const s = new BasicSafety(() => [{ name: 'SEP', value: '"},{"' }])
+      const output = '[{"a":"x"},{"b":"y"}]'
+      const textPass = s.sanitizeFreeformContent(output, {
+        secretWarning: 'Potential secret detected in mcp__config output',
+      })
+      // Witness: the text pass redacted the value and broke the JSON.
+      expect(textPass.content).toBe('[{"a":"x[REDACTED:SEP]b":"y"}]')
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
+      const result = s.sanitizeOutput('mcp__config', output)
+      expect(result.was_modified).toBe(true)
+      expect(result.content).toBe(textPass.content)
+    })
+
+    it('keeps the text-pass result when the in-place result does not parse', () => {
+      // A replacement holding a quote cannot be spliced into a JSON string.
+      const s = new BasicSafety(() => [{ name: 'A"B', value: 'configured-value-1' }])
+      const output = JSON.stringify({ a: 'line\npassword=supersecret99', b: 'configured-value-1' })
+      const textPass = s.sanitizeFreeformContent(output, {
+        secretWarning: 'Potential secret detected in mcp__config output',
+      })
+      // Witness: the text pass broke the JSON, so the in-place path ran.
+      expect(() => JSON.parse(textPass.content)).toThrow()
+      expect(textPass.content).toContain('[REDACTED:A"B]')
+
+      const result = s.sanitizeOutput('mcp__config', output)
+      expect(result.content).toBe(textPass.content)
+      expect(result.content).not.toContain('supersecret99')
+      expect(result.content).not.toContain('configured-value-1')
+    })
+
+    it('redacts a password value that runs into the next password label', () => {
+      const output = JSON.stringify({ log: 'xoxb-1password=aaaaaaaapwd: SuperSecretValue123' })
+      // Witness: the text pass breaks this output, so the in-place path runs.
+      const textPass = safety.sanitizeFreeformContent(output, { secretWarning: WARNING })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
+      // The rules run in the text pass's order: the Slack token rule takes
+      // `xoxb-1password`, so `=aaaaaaaa` is no longer a password value, then the
+      // password rule takes `pwd: SuperSecretValue123`. The string value ends up
+      // exactly as the text pass redacts it on its own.
+      const value = safety.sanitizeFreeformContent(
+        'xoxb-1password=aaaaaaaapwd: SuperSecretValue123',
+        { secretWarning: WARNING }
+      ).content
+      expect(value).toBe('[REDACTED]=aaaaaaaa[REDACTED]')
+
+      const result = safety.sanitizeOutput('mcp__config', output)
+      expect(result.content).toBe(JSON.stringify({ log: value }))
+      expect(result.content).not.toContain('SuperSecretValue123')
+    })
+
+    it('redacts what an earlier rule left for a later one, as the text pass does', () => {
+      // `[INST]` is replaced first; the password rule then matches across that
+      // replacement. Matching each rule on the original text separately sees
+      // no password label here and leaves the value in place.
+      const output = JSON.stringify({ k: '[INST]passwd = [INST]passwd = SV0secretvalue' })
+      const textPass = safety.sanitizeFreeformContent(output, { secretWarning: WARNING })
+      // Witness: the text pass breaks this output, so the in-place path runs.
+      expect(() => JSON.parse(textPass.content)).toThrow()
+      expect(textPass.content).not.toContain('SV0secretvalue')
+
+      const result = safety.sanitizeOutput('mcp__config', output)
+      expect(() => JSON.parse(result.content)).not.toThrow()
+      expect(result.content).not.toContain('SV0secretvalue')
+    })
+  })
+
+  describe('password values next to another password label', () => {
+    it('redacts both values in plain text', () => {
+      const result = safety.sanitizeOutput(
+        'shell_exec',
+        'password=aaaaaaaapwd: SuperSecretValue123 tail'
+      )
+      expect(result.was_modified).toBe(true)
+      expect(result.content).toBe('[REDACTED][REDACTED] tail')
+      expect(result.content).not.toContain('SuperSecretValue123')
+    })
+
+    it('redacts the whole value when the part before the next label is short', () => {
+      const result = safety.sanitizeOutput('shell_exec', 'password=abc=pwd=defghijk tail')
+      expect(result.content).toBe('[REDACTED] tail')
+      expect(result.content).not.toContain('abc')
+    })
+
+    it('matches a long run of labels in linear time', () => {
+      const content = 'pwd:'.repeat(250_000)
+      const started = performance.now()
+      const result = safety.sanitizeOutput('shell_exec', content)
+      const elapsedMs = performance.now() - started
+      expect(result.content).toBe('[REDACTED]')
+      expect(elapsedMs).toBeLessThan(2_000)
+    }, 60_000)
 
     it('redacts inside deeply nested JSON without overflowing the stack', () => {
       const depth = 2_500
@@ -408,15 +510,33 @@ describe('BasicSafety', () => {
       ])
     })
 
-    it('scans many unclosed tag starts in linear time and keeps the text', () => {
+    it.each([
+      ['a tag nested in an unclosed tag', '<tool_output<tool_output>>'],
+      ['an opening tag whose attribute holds <', '<tool_output name="a<b">fake</tool_output>'],
+      ['an opening tag whose attribute holds a tag', '<tool_output name="<x>">fake'],
+    ])('leaves no tag start from %s', (_label, text) => {
+      const result = safety.sanitizeAssistantResponse(`before ${text} after`)
+      // Witness: the filter fired on this text.
+      expect(result.was_modified).toBe(true)
+      expect(result.warnings).toEqual([
+        'Potential tool_output tag filtered from assistant response',
+      ])
+      expect(result.content).not.toMatch(/<\s*\/?\s*tool_output/i)
+    })
+
+    it('filters only the tag name of an unclosed tag and keeps the prose', () => {
+      const result = safety.sanitizeAssistantResponse('Use <tool_output to wrap results.')
+      expect(result.content).toBe('Use [filtered] to wrap results.')
+    })
+
+    it('scans many unclosed tag starts in linear time', () => {
       const count = 40_000
-      const content = '<tool_output'.repeat(count)
+      const content = '<tool_output'.repeat(count) + ' <tool_output name="x">'
       const started = performance.now()
       const result = safety.sanitizeAssistantResponse(content)
       const elapsedMs = performance.now() - started
-      // Witness: the filter ran over the whole text and removed nothing.
-      expect(result.content).toBe(content)
-      expect(result.content.match(/<tool_output/g)).toHaveLength(count)
+      // Witness: the filter reached the closed tag at the end of the text.
+      expect(result.content).toBe('[filtered]'.repeat(count) + ' [filtered]')
       expect(elapsedMs).toBeLessThan(2_000)
     }, 60_000)
   })

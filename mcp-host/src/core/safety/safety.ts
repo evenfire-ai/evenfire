@@ -48,6 +48,8 @@ function parsesAsJson(text: string): boolean {
 }
 
 type RedactionRange = { start: number; end: number; replacement: string }
+// `scalar`: the piece is a whole number or literal, replaced by a JSON string.
+type RedactionPiece = RedactionRange & { scalar: boolean }
 
 /**
  * String tokens of a valid JSON text, found in one iterative scan. `tokenOf[i]`
@@ -89,8 +91,66 @@ function scanJsonStrings(text: string): {
   return { tokens, tokenOf, escapeOffset }
 }
 
-// JSON punctuation and whitespace: the only bytes outside a string that a
-// redaction range may cover while the output can still be redacted in place.
+/**
+ * A working copy of a text that redaction rules rewrite in turn, with the
+ * range of the original text behind each of its code units. An original code
+ * unit stands for itself; a replacement's code units stand for the union of
+ * the ranges it replaced, so a later match that covers part of an earlier
+ * replacement covers everything that replacement stands for. Both range ends
+ * are non-decreasing along the copy, so a match `[a, b)` stands for
+ * `[origStart[a], origEnd[b - 1])`.
+ */
+class RedactionReplay {
+  text: string
+  readonly ranges: RedactionRange[] = []
+  private origStart: Int32Array
+  private origEnd: Int32Array
+
+  constructor(content: string) {
+    this.text = content
+    this.origStart = new Int32Array(content.length)
+    this.origEnd = new Int32Array(content.length)
+    for (let i = 0; i < content.length; i++) {
+      this.origStart[i] = i
+      this.origEnd[i] = i + 1
+    }
+  }
+
+  /** Replaces sorted, non-overlapping, non-empty `matches` of `text`. */
+  replace(matches: Array<[number, number]>, replacement: string): void {
+    if (matches.length === 0) return
+    let length = this.text.length
+    for (const [a, b] of matches) length += replacement.length - (b - a)
+    const nextStart = new Int32Array(length)
+    const nextEnd = new Int32Array(length)
+    const parts: string[] = []
+    let cursor = 0
+    let at = 0
+    for (const [a, b] of matches) {
+      nextStart.set(this.origStart.subarray(cursor, a), at)
+      nextEnd.set(this.origEnd.subarray(cursor, a), at)
+      at += a - cursor
+      const start = this.origStart[a]
+      const end = this.origEnd[b - 1]
+      this.ranges.push({ start, end, replacement })
+      nextStart.fill(start, at, at + replacement.length)
+      nextEnd.fill(end, at, at + replacement.length)
+      at += replacement.length
+      parts.push(this.text.slice(cursor, a), replacement)
+      cursor = b
+    }
+    nextStart.set(this.origStart.subarray(cursor), at)
+    nextEnd.set(this.origEnd.subarray(cursor), at)
+    parts.push(this.text.slice(cursor))
+    this.text = parts.join('')
+    this.origStart = nextStart
+    this.origEnd = nextEnd
+  }
+}
+
+// JSON punctuation and whitespace: the bytes outside a string that the in-place
+// redaction keeps. Every other byte outside a string belongs to a number or a
+// literal.
 function isJsonStructural(code: number): boolean {
   return (
     code === 0x22 || // "
@@ -135,7 +195,10 @@ export class BasicSafety implements Safety {
     /(?:xox[bprs])-[a-zA-Z0-9-]+/g,
     /Bearer\s+[a-zA-Z0-9._~+\/=-]{20,}/gi,
     /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
-    /(?:password|passwd|pwd)\s*[:=]\s*[^\s,;]{8,}/gi,
+    // The value stops before the next password label, so that label's own
+    // value is matched too. A value shorter than 8 characters up to that label
+    // is matched whole, as before.
+    /(?:password|passwd|pwd)\s*[:=]\s*(?:(?:(?!(?:password|passwd|pwd)\s*[:=])[^\s,;]){8,}|[^\s,;]{8,})/gi,
     // AWS access keys
     /AKIA[0-9A-Z]{16}/g,
     // Slack webhook URLs
@@ -151,9 +214,10 @@ export class BasicSafety implements Safety {
     warning: string
   }> = [
     {
-      // Closed tags only, because this replacement removes text. `[^<>]*`
-      // keeps the scan linear (see TOOL_OUTPUT_TAG_PATTERN).
-      pattern: /<(?:\s*\/)?\s*tool_output\b[^<>]*>/gi,
+      // A closed tag is removed whole. An unclosed one loses only `<tool_output`,
+      // because this replacement removes text and the prose after it must stay.
+      // `[^<>]*` keeps the scan linear (see TOOL_OUTPUT_TAG_PATTERN).
+      pattern: /<(?:\s*\/)?\s*tool_output\b(?:[^<>]*>)?/gi,
       replacement: '[filtered]',
       warning: 'Potential tool_output tag filtered from assistant response',
     },
@@ -376,15 +440,18 @@ export class BasicSafety implements Safety {
    * Otherwise the redaction is redone in place on the original text:
    * 1. One iterative scan records the inner span of every string token, keys
    *    and values alike, with escapes still encoded.
-   * 2. Every injection pattern, secret pattern and configured secret form is
-   *    matched independently against the original text.
-   * 3. If a match covers any byte outside every string other than JSON
-   *    punctuation or whitespace (a number, `true`, `false`, `null`), or
-   *    touches no string at all, the text-pass result is returned.
-   * 4. Each match is clipped to every string it covers and widened to whole
-   *    escape sequences. Pieces that overlap or touch inside one string are
-   *    merged (`[REDACTED]` when their replacements differ) and spliced in.
-   *    Every byte outside the replaced pieces stays as it was.
+   * 2. The text pass's rules (injection patterns, secret patterns, configured
+   *    secret forms) are replayed in its order, and each replacement is
+   *    mapped back to the range of the original text it covers
+   *    (`redactionRanges`).
+   * 3. Each match is clipped to every string it covers and widened to whole
+   *    escape sequences. A number or literal (`true`, `false`, `null`) the
+   *    match covers in part or whole is replaced whole by the replacement as
+   *    a JSON string. JSON punctuation and whitespace are kept. A match that
+   *    covers neither a string nor a scalar returns the text-pass result.
+   * 4. Pieces that overlap or touch inside one token are merged (`[REDACTED]`
+   *    when their replacements differ) and spliced in. Every byte outside the
+   *    replaced pieces stays as it was.
    * 5. If that result does not parse, the text-pass result is returned.
    * The warnings are always the text pass's.
    */
@@ -395,15 +462,26 @@ export class BasicSafety implements Safety {
       return textPass
     }
     const { tokens, tokenOf, escapeOffset } = scanJsonStrings(content)
-    const pieces: RedactionRange[] = []
+    const pieces: RedactionPiece[] = []
     for (const range of this.redactionRanges(content)) {
-      let touchedString = false
+      let touched = false
       let i = range.start
       while (i < range.end) {
         const token = tokenOf[i]
         if (token === -1) {
-          if (!isJsonStructural(content.charCodeAt(i))) return textPass
-          i++
+          if (isJsonStructural(content.charCodeAt(i))) {
+            i++
+            continue
+          }
+          // Outside strings, a run of non-structural bytes is one number or
+          // literal; it is bounded by punctuation or whitespace on both sides.
+          let start = i
+          while (start > 0 && !isJsonStructural(content.charCodeAt(start - 1))) start--
+          let end = i + 1
+          while (end < content.length && !isJsonStructural(content.charCodeAt(end))) end++
+          pieces.push({ start, end, replacement: range.replacement, scalar: true })
+          touched = true
+          i = end
           continue
         }
         const tokenEnd = tokens[token].end
@@ -414,18 +492,19 @@ export class BasicSafety implements Safety {
           const escapeStart = end - escapeOffset[end]
           end = escapeStart + (content.charCodeAt(escapeStart + 1) === 0x75 ? 6 : 2)
         }
-        pieces.push({ start, end, replacement: range.replacement })
-        touchedString = true
+        pieces.push({ start, end, replacement: range.replacement, scalar: false })
+        touched = true
         i = tokenEnd
       }
-      if (!touchedString) return textPass
+      if (!touched) return textPass
     }
 
-    // A piece ends at most at its string's closing quote and the next string
-    // starts at least two code units later, so merging sorted pieces that
-    // overlap or touch only ever joins pieces of the same string.
+    // A string piece ends at most at its closing quote and a scalar piece at
+    // the byte before the next punctuation or whitespace; the next token starts
+    // at least one code unit after either, so merging sorted pieces that
+    // overlap or touch only ever joins pieces of the same token.
     pieces.sort((a, b) => a.start - b.start)
-    const merged: RedactionRange[] = []
+    const merged: RedactionPiece[] = []
     for (const piece of pieces) {
       const last = merged[merged.length - 1]
       if (last && piece.start <= last.end) {
@@ -440,7 +519,8 @@ export class BasicSafety implements Safety {
     let redacted = ''
     let cursor = 0
     for (const piece of merged) {
-      redacted += content.slice(cursor, piece.start) + piece.replacement
+      const replacement = piece.scalar ? JSON.stringify(piece.replacement) : piece.replacement
+      redacted += content.slice(cursor, piece.start) + replacement
       cursor = piece.end
     }
     redacted += content.slice(cursor)
@@ -449,34 +529,41 @@ export class BasicSafety implements Safety {
   }
 
   /**
-   * Every match of the redaction rules `sanitizeFreeformContent` applies to
-   * tool output, each rule matched independently against `content`.
+   * The range of `content` behind every replacement the text pass makes on
+   * tool output. The rules are replayed in the text pass's order on a working
+   * copy, so each rule sees the earlier replacements exactly as the text pass
+   * does, and every range covers at least what the text pass replaced.
    */
   private redactionRanges(content: string): RedactionRange[] {
-    const ranges: RedactionRange[] = []
-    const addMatches = (pattern: RegExp, replacement: string) => {
-      for (const match of content.matchAll(pattern)) {
+    const replay = new RedactionReplay(content)
+    const replaceMatches = (pattern: RegExp, replacement: string) => {
+      const matches: Array<[number, number]> = []
+      for (const match of replay.text.matchAll(pattern)) {
         if (match[0].length === 0) continue
-        ranges.push({ start: match.index, end: match.index + match[0].length, replacement })
+        matches.push([match.index, match.index + match[0].length])
       }
+      replay.replace(matches, replacement)
     }
     for (const pattern of BasicSafety.INJECTION_PATTERNS) {
-      addMatches(pattern, BasicSafety.INJECTION_REPLACEMENT)
+      replaceMatches(pattern, BasicSafety.INJECTION_REPLACEMENT)
     }
     for (const pattern of BasicSafety.SECRET_PATTERNS) {
-      addMatches(pattern, BasicSafety.SECRET_REPLACEMENT)
+      replaceMatches(pattern, BasicSafety.SECRET_REPLACEMENT)
     }
     for (const secret of this.configuredSecretForms()) {
       const replacement = `[REDACTED:${secret.name}]`
       for (const form of secret.forms) {
-        let at = content.indexOf(form)
+        // The same non-overlapping, left-to-right occurrences `split` finds.
+        const matches: Array<[number, number]> = []
+        let at = replay.text.indexOf(form)
         while (at !== -1) {
-          ranges.push({ start: at, end: at + form.length, replacement })
-          at = content.indexOf(form, at + form.length)
+          matches.push([at, at + form.length])
+          at = replay.text.indexOf(form, at + form.length)
         }
+        replay.replace(matches, replacement)
       }
     }
-    return ranges
+    return replay.ranges
   }
 
   /**
