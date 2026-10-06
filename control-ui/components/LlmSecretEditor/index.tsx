@@ -1,21 +1,15 @@
 'use client'
 
 import { useState } from 'react'
-import { apiSend } from '../lib/api'
-import { createEmptyLlmKeyDraft, validateLlmSecretData } from '../lib/llm'
-import { useConfirmDialog } from './ConfirmDialog'
-import { LlmCredentialFields } from './LlmCredentialFields'
-import { useToast } from './Toast'
-import { IconX } from './icons'
+import { Button } from '@components/ui'
+import { apiSend } from '@lib/api'
+import { createEmptyLlmKeyDraft, validateLlmSecretData } from '@lib/llm'
+import { useConfirmDialog } from '../ConfirmDialog'
+import { LlmCredentialFields } from '../LlmCredentialFields'
+import { useToast } from '../Toast'
+import type { LlmSecretEditorProps } from './types'
 
-export type LlmSecretUpdateModalProps = {
-  secretName: string
-  existingKeys: string[]
-  /** Credential slots still referenced by persisted Host fallback policies. */
-  protectedCredentialSlots?: string[]
-  onClose: () => void
-  onChanged: () => Promise<void>
-}
+export type { LlmSecretEditorProps } from './types'
 
 /**
  * The single update surface for an LLM Secret.
@@ -25,13 +19,12 @@ export type LlmSecretUpdateModalProps = {
  * write and retirement logic here means every entry point gets the same safe
  * merge semantics and the same provider editor.
  */
-export function LlmSecretUpdateModal({
+export function LlmSecretEditor({
   secretName,
   existingKeys,
   protectedCredentialSlots = [],
   onClose,
-  onChanged,
-}: LlmSecretUpdateModalProps) {
+}: LlmSecretEditorProps) {
   const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
   const [keyDraft, setKeyDraft] = useState<Record<string, string>>(() => createEmptyLlmKeyDraft())
@@ -39,7 +32,7 @@ export function LlmSecretUpdateModal({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  function closeModal() {
+  function cancel() {
     if (!saving) onClose()
   }
 
@@ -114,7 +107,6 @@ export function LlmSecretUpdateModal({
         ...(removeKeys.length > 0 ? { removeKeys } : {}),
       })
       showToast(`Secret ${normalizedSecretName} updated.`, { tone: 'success' })
-      await onChanged()
       onClose()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save secret')
@@ -125,83 +117,38 @@ export function LlmSecretUpdateModal({
 
   return (
     <>
-      <div
-        style={{
-          position: 'fixed',
-          inset: 0,
-          background: 'var(--cu-overlay)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000,
-          padding: '1rem',
-        }}
-        role="presentation"
-        onClick={event => {
-          if (event.target === event.currentTarget) closeModal()
-        }}
-      >
-        <div
-          className="cu-modal-panel"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="llm-secret-title"
-          onClick={event => event.stopPropagation()}
-        >
-          <div className="cu-modal-panel__head">
-            <strong id="llm-secret-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-              Update LLM secret {secretName.trim()}
-            </strong>
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--ghost"
-              onClick={closeModal}
-              disabled={saving}
-              aria-label="Close"
-            >
-              <IconX width={18} height={18} />
-            </button>
-          </div>
+      <div className="cu-form-stack" style={{ maxWidth: '100%' }}>
+        <p className="cu-field__hint">
+          Updates the listed keys and deletes the ones you remove here; every other key already
+          stored in this secret is preserved.
+        </p>
+        <LlmCredentialFields
+          draft={keyDraft}
+          onChange={(dataKey, value) => setKeyDraft(prev => ({ ...prev, [dataKey]: value }))}
+          existingKeys={existingKeys}
+          // The editor reports on every change. Keep the parent state
+          // identity-stable so it does not cause an unnecessary rerender.
+          onRemovedKeysChange={next =>
+            setRemovedKeys(prev => (prev.join('\n') === next.join('\n') ? prev : next))
+          }
+          disabled={saving}
+        />
 
-          <div className="cu-form-stack" style={{ maxWidth: '100%' }}>
-            <p className="cu-field__hint">
-              Updates the listed keys and deletes the ones you remove here; every other key already
-              stored in this secret is preserved.
-            </p>
-            <LlmCredentialFields
-              draft={keyDraft}
-              onChange={(dataKey, value) => setKeyDraft(prev => ({ ...prev, [dataKey]: value }))}
-              existingKeys={existingKeys}
-              // The editor reports on every change. Keep the parent state
-              // identity-stable so it does not cause an unnecessary rerender.
-              onRemovedKeysChange={next =>
-                setRemovedKeys(prev => (prev.join('\n') === next.join('\n') ? prev : next))
-              }
-              disabled={saving}
-              pickerInline
-            />
-          </div>
+        {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
 
-          {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
-
-          <div className="cu-modal-panel__foot">
-            <button
-              type="button"
-              className="cu-btn cu-btn--ghost cu-btn--sm"
-              onClick={closeModal}
-              disabled={saving}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary"
-              onClick={() => void saveSecret()}
-              disabled={saving}
-            >
-              {saving ? 'Saving…' : 'Update secret'}
-            </button>
-          </div>
+        <div className="cu-create-actions">
+          <Button type="button" variant="ghost" size="sm" onClick={cancel} disabled={saving}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            onClick={() => void saveSecret()}
+            disabled={saving}
+          >
+            {saving ? 'Saving…' : 'Update secret'}
+          </Button>
         </div>
       </div>
       {confirmDialog}
