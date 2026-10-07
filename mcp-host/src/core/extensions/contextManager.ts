@@ -25,7 +25,8 @@ import { parseStructuredSummary } from '../conversation/structuredSummaryParser'
 import { ContextManageOptions, ContextManager, LlmPort } from '../interfaces'
 import type { AgentEventEmitter } from '../interfaces'
 import { validateToolLinkages } from '../orchestration/toolUseLoop'
-import { heuristicCountTools } from '../tokenizer/heuristic'
+import { bpeTokenEstimate } from '../tokenizer/bpeEstimate'
+import { heuristicCount, heuristicCountTools } from '../tokenizer/heuristic'
 import { tokenizerDryrunDelta, tokenizerDryrunTierMismatchTotal } from '../tokenizer/metrics'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
 import { ChatMessage, CompactionState, Conversation, ToolDefinition } from '../types'
@@ -166,6 +167,22 @@ export async function tierDecisionTokens(
 ): Promise<number> {
   if (!tokenCounter || dryRun) return estimateTokens(messages) + heuristicCountTools(tools)
   return tokenCounter.count(messages, tools)
+}
+
+/** Measure the complete emitted tool message with the larger applicable estimate. */
+export function toolMessageBudgetTokens(
+  message: ChatMessage,
+  tokenCounter: TokenCounter | undefined,
+  dryRun: boolean
+): number {
+  const applicable =
+    !tokenCounter || dryRun ? heuristicCount([message]) : tokenCounter.countSync([message])
+  const bpe =
+    bpeTokenEstimate(message.content ?? '') +
+    bpeTokenEstimate(message.name ?? '') +
+    bpeTokenEstimate(message.tool_call_id ?? '') +
+    6
+  return Math.max(applicable, bpe)
 }
 
 /**
@@ -375,7 +392,10 @@ export class PressureContextManager implements ContextManager {
     // set without invoking the tier (no LLM call, no workspace write).
     let working = messages
     if (this.prePruneEnabled) {
-      const result = prePrune(messages, this.prePruneOptions)
+      const result = prePrune(messages, this.prePruneOptions, {
+        inputTokens: pressure * this.maxTokens,
+        contextWindowTokens: this.maxTokens,
+      })
       working = result.messages
       if (result.passesApplied.length > 0) {
         validateToolLinkages(working)
