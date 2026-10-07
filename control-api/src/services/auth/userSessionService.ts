@@ -104,7 +104,7 @@ function nullableDateOf(value: Date | string | null): Date | null {
   return value === null ? null : dateOf(value)
 }
 
-async function loadDatabaseNow(db: SessionDatabase): Promise<Date> {
+export async function loadSessionDatabaseNow(db: SessionDatabase): Promise<Date> {
   const result = await db.query(`SELECT date_trunc('second', clock_timestamp()) AS db_now`)
   const value = (result.rows[0] as { db_now?: Date | string } | undefined)?.db_now
   const now = value ? dateOf(value) : null
@@ -234,7 +234,7 @@ export async function createUserSession(
   const work = async (db: SessionDatabase) => {
     const user = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [input.userId])
     if ((user.rowCount ?? 0) === 0) throw new Error('user session principal does not exist')
-    const now = await loadDatabaseNow(db)
+    const now = await loadSessionDatabaseNow(db)
     const authenticatedAt = atSecond(input.authenticatedAt ?? now)
     const idleExpiresAt = plusSeconds(now, USER_SESSION_IDLE_LIFETIME_SECONDS)
     const absoluteExpiresAt = plusSeconds(now, USER_SESSION_ABSOLUTE_LIFETIME_SECONDS)
@@ -310,7 +310,7 @@ export async function validateUserSessionClaims(
 ): Promise<UserSessionValidation> {
   const work = async (db: SessionDatabase) => {
     const row = await loadSessionForUpdate(db, claims.sid)
-    const now = await loadDatabaseNow(db)
+    const now = await loadSessionDatabaseNow(db)
     return validateLoadedSession(db, row, claims, now, options.touch !== false)
   }
   if (options.db) {
@@ -334,7 +334,7 @@ export async function renewUserSession(
 ): Promise<IssuedUserSession | UserSessionValidation> {
   const work = async (db: SessionDatabase) => {
     const row = await loadSessionForUpdate(db, claims.sid)
-    const now = await loadDatabaseNow(db)
+    const now = await loadSessionDatabaseNow(db)
     const validation = await validateLoadedSession(db, row, claims, now, false)
     if (validation.status !== 'valid' || !row) return validation
 
@@ -433,7 +433,7 @@ export async function revokeUserSession(
       [sid, userId]
     )
     if ((locked.rowCount ?? 0) === 0) return false
-    const now = await loadDatabaseNow(transaction)
+    const now = await loadSessionDatabaseNow(transaction)
     const result = await transaction.query(
       `UPDATE external_user_sessions
           SET revoked_at = COALESCE(revoked_at, $3),
@@ -462,7 +462,23 @@ export async function revokeAllUserSessions(
     if (actorContext && !(await isCurrentRevocationActor(transaction, userId, actorContext))) {
       return 0
     }
-    const revokedAt = await loadDatabaseNow(transaction)
+    const revokedAt = await loadSessionDatabaseNow(transaction)
+    const compatibilityValidAfter = new Date(revokedAt.getTime() - 1000)
+
+    const advanced = await transaction.query(
+      `UPDATE users
+          SET lifecycle_version = lifecycle_version + 1,
+              updated_at = NOW()
+        WHERE id = $1
+      RETURNING lifecycle_version`,
+      [userId]
+    )
+    const lifecycleVersion = Number(
+      (advanced.rows[0] as { lifecycle_version?: unknown } | undefined)?.lifecycle_version
+    )
+    if (!Number.isSafeInteger(lifecycleVersion) || lifecycleVersion < 1) {
+      throw new Error('security event did not advance lifecycle generation')
+    }
 
     await transaction.query(
       `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
@@ -474,7 +490,7 @@ export async function revokeAllUserSessions(
              ),
              reason = EXCLUDED.reason,
              updated_at = EXCLUDED.updated_at`,
-      [userId, revokedAt, reason]
+      [userId, compatibilityValidAfter, reason]
     )
     const result = await transaction.query(
       `UPDATE external_user_sessions
@@ -521,7 +537,7 @@ export async function validateExternalSessionAuthorityContext(
         return { status: 'revoked', reason: 'user_unavailable' }
       }
       const row = await loadSessionForUpdate(db, context.sid)
-      const now = await loadDatabaseNow(db)
+      const now = await loadSessionDatabaseNow(db)
       const claims: UserSessionV2Claims = {
         sub: context.userId,
         sid: context.sid,
@@ -560,7 +576,7 @@ export async function validateExternalSessionAuthorityContext(
       return { status: 'revoked', reason: 'security_event' }
     }
 
-    const now = await loadDatabaseNow(db)
+    const now = await loadSessionDatabaseNow(db)
     const authority = await db.query(
       `SELECT epoch.valid_after,
               EXISTS (
@@ -631,7 +647,7 @@ export async function validateLegacyUserSession(
       ])
       if ((locked.rowCount ?? 0) === 0) return { status: 'revoked', reason: 'user_unavailable' }
     }
-    const now = await loadDatabaseNow(db)
+    const now = await loadSessionDatabaseNow(db)
     const result = await db.query(
       `SELECT u.id, u.lifecycle_state, u.lifecycle_version,
             epoch.valid_after,
@@ -702,7 +718,7 @@ export async function revokeLegacyUserSession(
       claims.userId,
     ])
     if ((user.rowCount ?? 0) === 0) return false
-    const now = await loadDatabaseNow(transaction)
+    const now = await loadSessionDatabaseNow(transaction)
     const result = await transaction.query(
       `INSERT INTO external_v1_session_revocations(
          token_hash, user_id, expires_at, revoked_at, reason

@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken'
-import { createPublicKey } from 'node:crypto'
+import { createPublicKey, randomUUID } from 'node:crypto'
 import { config } from '../../config.js'
 import { AuthClaims, TEAM_ROLES } from '../../profileTypes.js'
 import { legacyExternalSessionAuthGeneration } from '../../services/auth/legacyV1Generation.js'
@@ -33,6 +33,7 @@ export function signExternalSessionToken(
       expiresIn: ttlSeconds,
       issuer: config.jwtIssuer,
       audience: config.jwtAudience,
+      jwtid: randomUUID(),
     }
   )
 }
@@ -71,6 +72,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       ...(authGeneration === undefined ? {} : { authGeneration: Number(authGeneration) }),
       exp: payload.exp,
       ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
+      ...(typeof payload.jti === 'string' ? { jti: payload.jti } : {}),
     }
   } catch {
     return null
