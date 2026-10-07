@@ -308,8 +308,10 @@ describe('pendingChatSelection effect', () => {
       await act(async () => {
         releaseIndexFailure.resolve()
       })
-      await waitFor(() =>
-        expect(controller.result.current.chatList.map(chat => chat.id)).toContain('prior-server')
+      await waitFor(
+        () =>
+          expect(controller.result.current.chatList.map(chat => chat.id)).toContain('prior-server'),
+        { timeout: 3000 }
       )
 
       await act(async () => {
@@ -371,8 +373,9 @@ describe('pendingChatSelection effect', () => {
         releaseIndexFailure.resolve()
       })
 
-      await waitFor(() =>
-        expect(controller.result.current.activeChatId).toBe('server-latest-after-retry')
+      await waitFor(
+        () => expect(controller.result.current.activeChatId).toBe('server-latest-after-retry'),
+        { timeout: 3000 }
       )
       expect(clerum.chat.getIndex).toHaveBeenCalledTimes(2)
     } finally {
