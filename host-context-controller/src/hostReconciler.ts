@@ -44,6 +44,7 @@ import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
   createsTotal,
+  heldWakeTemplateRefreshTotal,
   hostCleanupDeferredTotal,
   hostDeleteCleanupTotal,
   hostFleetBenignSupersessionsTotal,
@@ -508,9 +509,15 @@ type BootstrapOptions = {
   preserveDeploymentTemplateOnWake?: boolean
 }
 
+type HeldWakeTemplateBinding = {
+  deploymentUid: string
+  appliedRevision: string
+}
+
 type RuntimeTokenProvision = {
   revision: string
   scopeHash: string
+  heldWakeTemplateBinding?: HeldWakeTemplateBinding
 }
 
 // Reported as the reconcile_outcome transition `gfs_token:<outcome>` (#328).
@@ -519,9 +526,16 @@ type GfsTokenLifecycleOutcome = 'minted' | 'rotated' | 'reused' | 'failed'
 type DeploymentMutationState = {
   lifecycle: EffectiveHostLifecycle
   runtimeTokenRevision: string
+  heldWakeTemplateBinding?: HeldWakeTemplateBinding
   // Captured in the same synchronous step as the stable scope-hash check so
   // the pod's Grok factory switch and the minted llm:grok:execute scope agree.
   grokExecutionEnabled: boolean
+}
+
+type HostObservationMark = {
+  name: string
+  namespace: string
+  uid: string
 }
 
 export class HostReconciler {
@@ -539,6 +553,7 @@ export class HostReconciler {
   private readonly now: () => Date
   private readonly newTelemetryOccurrenceId: () => string
   private readonly statusMap: Map<string, HostRuntimeStatus> = new Map()
+  private readonly hostsAwaitingOAuthObservation = new Map<string, HostObservationMark>()
   private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
   private lastCodexConfigMap: k8s.V1ConfigMap | undefined
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
@@ -704,6 +719,36 @@ export class HostReconciler {
    */
   setHostFrontsOAuthServer(fn: HostFrontsOAuthServerFn): void {
     this.hostFrontsOAuthServerFn = fn
+  }
+
+  takeHostsAwaitingOAuthObservation(): HostObservationMark[] {
+    const observations = [...this.hostsAwaitingOAuthObservation.values()]
+    this.hostsAwaitingOAuthObservation.clear()
+    return observations
+  }
+
+  requeueHostsAwaitingOAuthObservation(observations: HostObservationMark[]): void {
+    for (const observation of observations) {
+      const key = `${observation.namespace}/${observation.name}`
+      const pending = this.hostsAwaitingOAuthObservation.get(key)
+      // A failed job restores its captured identity, never a newer Host's mark.
+      if (!pending || pending.uid === observation.uid) {
+        this.hostsAwaitingOAuthObservation.set(key, observation)
+      }
+    }
+  }
+
+  private markHostAwaitingOAuthObservation(host: HostCRD): void {
+    // Pending work requires an object identity. An OAuth read can outlive a
+    // replacement watch event; that old pass must not replace the new mark.
+    if (!host.uid) return
+    const current = this.resolveCurrentHost?.(host.name)
+    if (current && (current.namespace !== host.namespace || current.uid !== host.uid)) return
+    this.hostsAwaitingOAuthObservation.set(`${host.namespace}/${host.name}`, {
+      name: host.name,
+      namespace: host.namespace,
+      uid: host.uid,
+    })
   }
 
   /**
@@ -1591,6 +1636,29 @@ export class HostReconciler {
     )
   }
 
+  private static hasHeldWakeTemplateBinding(
+    record: Pick<k8s.V1Secret, 'metadata'> | null
+  ): boolean {
+    return (
+      !!record?.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_DEPLOYMENT_UID_ANNOTATION] &&
+      !!record.metadata.annotations[RUNTIME_TOKEN_BOOTSTRAP_APPLIED_REVISION_ANNOTATION]
+    )
+  }
+
+  private static heldWakeTemplateRefreshPending(
+    record: Pick<k8s.V1Secret, 'metadata'> | null,
+    deployment: k8s.V1Deployment | null
+  ): boolean {
+    return (
+      // The persisted binding also records an unacknowledged wake. Replacing
+      // its Deployment does not acknowledge the required fresh mint/rollout.
+      // Exact binding is still required to preserve a pre-Ready template.
+      HostReconciler.hasHeldWakeTemplateBinding(record) &&
+      (deployment?.spec?.replicas ?? 1) > 0 &&
+      HostReconciler.deploymentReady(deployment)
+    )
+  }
+
   private static credentialRecordBelongsToHost(
     record: { metadata?: { labels?: Record<string, string> } },
     host: HostCRD
@@ -1678,6 +1746,9 @@ export class HostReconciler {
       return false
     }
     return (
+      // A replaced bound wake cannot reuse its potentially consumed material.
+      // Ordinary fresh rollouts have no binding and retain revision-based reuse.
+      HostReconciler.hasHeldWakeTemplateBinding(credentialRecord) ||
       credentialRecord?.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] !==
         RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH ||
       HostReconciler.deploymentRuntimeTokenRevision(deployment) !== currentRevision
@@ -1905,6 +1976,10 @@ export class HostReconciler {
           (deployment.spec?.replicas ?? 1) === 0 &&
           HostReconciler.deploymentRuntimeTokenRevision(deployment) !== ''
         if (options.refreshGfsOnly) {
+          // This path renews only GFS material and deliberately does not observe
+          // OAuth. Narrowing OAuth needs a runtime mint and rollout during the
+          // hold, which would break Ready-runtime continuity. The authoritative
+          // runtime-token pass narrows the scope via contract_changed after CC recovery.
           const trustedDeployment =
             HostReconciler.deploymentBelongsToHost(deployment, host) &&
             (deployment?.spec?.replicas ?? 0) > 0
@@ -2142,9 +2217,21 @@ export class HostReconciler {
         // strip oauth:user-token and roll the Deployment; once the credential must
         // be renewed, the renewal mints without the unobserved scope. Under channel
         // cache loss the mint is skipped instead.
+        const heldWakeTemplateRefreshEligible =
+          !options.refreshGfsOnly &&
+          !options.preserveDeploymentTemplateOnWake &&
+          cacheSynced &&
+          options.targetSuspended !== true &&
+          retainedScopeIsTrusted &&
+          HostReconciler.deploymentBelongsToHost(deployment, host) &&
+          HostReconciler.heldWakeTemplateRefreshPending(existing, deployment)
         const liveFrontsOAuth = await this.observeFrontsOAuthServer(host)
         let observedFrontsOAuth: boolean
         if (liveFrontsOAuth.observed) {
+          const observationKey = `${host.namespace}/${host.name}`
+          if (this.hostsAwaitingOAuthObservation.get(observationKey)?.uid === host.uid) {
+            this.hostsAwaitingOAuthObservation.delete(observationKey)
+          }
           observedFrontsOAuth = liveFrontsOAuth.frontsOAuthServer
         } else {
           const observationFailure = {
@@ -2165,10 +2252,14 @@ export class HostReconciler {
             observedFrontsOAuth = false
           } else if (cacheSynced) {
             if (!decideRefresh(true).refresh) {
+              if (heldWakeTemplateRefreshEligible) {
+                heldWakeTemplateRefreshTotal.inc({ result: 'deferred_oauth_unobserved' })
+              }
               log.warn(
                 'deferring runtime token decision: OAuth observation unavailable and retained scope grants oauth:user-token',
                 observationFailure
               )
+              this.markHostAwaitingOAuthObservation(host)
               return null
             }
             log.warn(
@@ -2181,6 +2272,7 @@ export class HostReconciler {
               'skipping runtime token mint during channel cache loss without an authoritative OAuth observation',
               observationFailure
             )
+            this.markHostAwaitingOAuthObservation(host)
             return null
           }
         }
@@ -2191,7 +2283,16 @@ export class HostReconciler {
           projection,
           grokProjection
         )
-        const decision = decideRefresh(observedFrontsOAuth)
+        let decision = decideRefresh(observedFrontsOAuth)
+        // Keep this override after OAuth deferral: an unobserved retained grant
+        // must not be narrowed merely to refresh a held wake template.
+        if (heldWakeTemplateRefreshEligible && !decision.rolloutRequired) {
+          decision = {
+            refresh: true,
+            rolloutRequired: true,
+            reason: 'held_wake_template_refresh',
+          }
+        }
 
         if (existing && existingRevision && !decision.refresh) {
           const deploymentRevision = HostReconciler.deploymentRuntimeTokenRevision(deployment)
@@ -2282,6 +2383,14 @@ export class HostReconciler {
           return {
             revision: selectedRevision,
             scopeHash,
+            ...(bootstrapPendingForAppliedDeployment && !HostReconciler.deploymentReady(deployment)
+              ? {
+                  heldWakeTemplateBinding: {
+                    deploymentUid: deployment!.metadata!.uid!,
+                    appliedRevision: deploymentRevision,
+                  },
+                }
+              : {}),
           }
         }
 
@@ -2393,6 +2502,14 @@ export class HostReconciler {
           body: replaceBody,
         })
         this.recordGfsLifecycleEvidence(host, 'rotated')
+        if (heldWakeTemplateRefreshEligible) {
+          heldWakeTemplateRefreshTotal.inc({ result: 'minted' })
+          log.info('held wake template refresh', {
+            host: host.name,
+            namespace: host.namespace,
+            reason: decision.reason,
+          })
+        }
         log.info('rotated mcp-host-runtime-token Secret', {
           host: host.name,
           namespace: host.namespace,
@@ -4028,9 +4145,15 @@ export class HostReconciler {
     const buildDesiredDeployment = async (): Promise<k8s.V1Deployment | null> => {
       const state = resolveStateBeforeMutation ? await resolveStateBeforeMutation() : null
       const effective = state?.lifecycle ?? lifecycle
-      holdingTemplate = effective?.suspensionBlocked === true
+      const binding = state?.heldWakeTemplateBinding
+      holdingTemplate = effective?.suspensionBlocked === true || !!binding
       if (holdingTemplate) {
-        if (!observedDeployment) return null
+        if (!observedDeployment) {
+          if (binding) {
+            throw new Error(`Bound wake Deployment disappeared for Host "${host.name}"`)
+          }
+          return null
+        }
         const existing = observedDeployment
         if (
           !HostReconciler.isHccOwnedHostResource(existing, host.name) ||
@@ -4048,10 +4171,23 @@ export class HostReconciler {
         if (!hostUidVerified) {
           throw new Error(`Cannot preserve an unverified Deployment for Host "${host.name}"`)
         }
+        if (
+          binding &&
+          (existing.metadata.uid !== binding.deploymentUid ||
+            HostReconciler.deploymentRuntimeTokenRevision(existing) !== binding.appliedRevision)
+        ) {
+          throw new Error(`Wake bootstrap binding changed before preserving Host "${host.name}"`)
+        }
         // Preserve UID/resourceVersion and every applied field. Conflicts
         // re-read this object before retrying; replicas is the only field that
         // may change. An unverified legacy object must never be scaled.
-        const replicas = effective?.allowScaleUpDuringHold ? 1 : (existing.spec.replicas ?? 1)
+        const replicas = effective?.suspensionBlocked
+          ? effective.allowScaleUpDuringHold
+            ? 1
+            : (existing.spec.replicas ?? 1)
+          : effective?.stateless && effective.state === 'suspended'
+            ? 0
+            : 1
         return {
           ...existing,
           spec: { ...existing.spec, replicas },
@@ -5518,6 +5654,7 @@ export class HostReconciler {
           return {
             lifecycle: beforeScope,
             runtimeTokenRevision: requireRuntimeTokenProvision().revision,
+            heldWakeTemplateBinding: requireRuntimeTokenProvision().heldWakeTemplateBinding,
             grokExecutionEnabled: this.hostDerivesGrokExecution(host),
           }
         }
@@ -5537,6 +5674,7 @@ export class HostReconciler {
           return {
             lifecycle: effective,
             runtimeTokenRevision: requireRuntimeTokenProvision().revision,
+            heldWakeTemplateBinding: requireRuntimeTokenProvision().heldWakeTemplateBinding,
             grokExecutionEnabled: this.hostDerivesGrokExecution(host),
           }
         }
@@ -5710,6 +5848,7 @@ export class HostReconciler {
       await this.deleteHostRuntimeResources(name, namespace)
       this.clearStatus(name)
       this.desktopHosts.delete(name)
+      this.hostsAwaitingOAuthObservation.delete(`${namespace}/${name}`)
       // The delete path has no uid to key by, so every entry for this
       // namespace/name goes: the object is gone and no outcome will carry its
       // evidence (#696).

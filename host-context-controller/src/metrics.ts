@@ -298,6 +298,18 @@ export const hostFleetLifecycleCatchTotal = counter({
   labelNames: ['decision'] as const,
 })
 
+export const heldWakeTemplateRefreshTotal = counter({
+  name: 'clerum_hcc_held_wake_template_refresh_total',
+  help: 'Held wake template refresh outcomes: persisted fresh material or an eligible wake deferred by unavailable OAuth observation.',
+  labelNames: ['result'] as const,
+})
+
+export const oauthReobservationTotal = counter({
+  name: 'clerum_hcc_oauth_reobservation_total',
+  help: 'Targeted deferred OAuth re-observation attempts: resolved dispatches, denied admission requeues, or failures. A resolved dispatch does not certify an observation or mint.',
+  labelNames: ['trigger', 'result'] as const,
+})
+
 // Outcomes partition completed creates; sum created, conflict, and error for
 // completed attempts. The bounded kind inventory includes the read-first Secret.
 export const CREATE_KINDS = [

@@ -515,6 +515,31 @@ In `mcp-host` (`deploy/base/mcp-host/rbac.yaml`), the controller additionally ma
 
 ## Local Development
 
+### Lint prerequisites
+
+HCC reuses the ESLint and TypeScript parser/plugin versions pinned in
+`mcp-host/package-lock.json`. With Node 24, install that sibling toolchain
+before running HCC's literal lint command:
+
+```bash
+# From the repository root; lint does not need mcp-host runtime install scripts.
+sfw npm ci --prefix mcp-host --ignore-scripts
+cd host-context-controller
+npm run lint
+```
+
+For mcp-host runtime tests, use its normal installation with lifecycle scripts
+enabled. The `sfw` prefix is this workstation's package protection wrapper;
+CI installs the lint prerequisite with plain `npm ci`. Use the equivalent
+install command required by your local package policy.
+
+HCC CI runs the same literal lint command. Lint targets `src/**/*.ts`, including
+source-colocated tests, and rejects unused bindings and warnings in that scope.
+It also rejects direct console calls in `k8sClient.ts`, `server.ts`,
+`hostReconciler.ts`, and `metrics.ts`, which use HCC's structured logger.
+The lifecycle tests under `test/` run through `npm test` and are outside the
+lint command's `src` target.
+
 ### Dev Mode (without Kubernetes)
 
 Run host-context-controller locally without Kubernetes by providing MCP servers via environment variables. In dev mode, no reconciliation occurs (no Deployments, Services, or NetworkPolicies are created).

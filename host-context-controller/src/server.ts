@@ -593,7 +593,7 @@ export class ContextMapperServer {
     return new Promise((resolve, reject) => {
       this.server = http.createServer((req, res) => {
         this.handleRequest(req, res).catch(err => {
-          console.error('[Server] Request handler failed:', err)
+          hccLogger.error('[Server] Request handler failed', { err })
           if (!res.headersSent) {
             this.sendJson(res, 500, {
               error: 'Internal Server Error',
@@ -606,22 +606,23 @@ export class ContextMapperServer {
       })
 
       this.server.on('error', err => {
-        console.error('[Server] Error:', err)
+        hccLogger.error('[Server] Error', { err })
         reject(err)
       })
 
       this.server.listen(this.port, () => {
-        console.log(`[Server] Context Mapper listening on port ${this.port}`)
-        console.log(`[Server] Endpoints:`)
-        console.log(`[Server]   GET / - API information`)
-        console.log(`[Server]   GET /health - Health check`)
-        console.log(`[Server]   GET /ready - Readiness check`)
-        console.log(`[Server]   GET /api/v1/mcpservers - List all McpServers`)
-        console.log(`[Server]   GET /api/v2/hosts/self/mcpservers - Host-scoped MCP inventory`)
-        console.log(
-          `[Server]   POST /api/v2/hosts/self/mcpservers/credential - Host-scoped MCP credential`
-        )
-        console.log(`[Server]   GET /api/v1/desktop/:hostRef - Desktop status`)
+        hccLogger.info('[Server] Context Mapper listening', {
+          port: this.port,
+          endpoints: [
+            'GET /',
+            'GET /health',
+            'GET /ready',
+            'GET /api/v1/mcpservers',
+            'GET /api/v2/hosts/self/mcpservers',
+            'POST /api/v2/hosts/self/mcpservers/credential',
+            'GET /api/v1/desktop/:hostRef',
+          ],
+        })
         resolve()
       })
     })
@@ -668,9 +669,9 @@ export class ContextMapperServer {
   private async handleListAll(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    url: URL
+    _url: URL
   ): Promise<void> {
-    console.log(`[Server] GET /api/v1/mcpservers`)
+    hccLogger.info('[Server] GET /api/v1/mcpservers')
 
     const servers = this.provider.getAllServerInfos().map(server => ({
       name: server.name,
@@ -738,7 +739,7 @@ export class ContextMapperServer {
     return new Promise(resolve => {
       if (activeServer) {
         activeServer.close(() => {
-          console.log('[Server] Context Mapper stopped')
+          hccLogger.info('[Server] Context Mapper stopped')
           resolve()
         })
       } else {

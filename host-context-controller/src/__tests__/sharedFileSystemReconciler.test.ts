@@ -147,13 +147,11 @@ function makeMocks(systems: SharedFileSystemCRD[] = [makeSfs()]) {
 
 function makeReconciler(mocks: ReturnType<typeof makeMocks>, now?: () => Date) {
   return new SharedFileSystemReconciler(null, {
-    /* eslint-disable @typescript-eslint/no-explicit-any */
     appsApi: mocks.appsApi as any,
     coreApi: mocks.coreApi as any,
     batchApi: mocks.batchApi as any,
     networkingApi: mocks.networkingApi as any,
     customApi: mocks.customApi as any,
-    /* eslint-enable @typescript-eslint/no-explicit-any */
     now: now ?? (() => new Date('2026-04-30T12:00:00Z')),
     factoryConfig,
   })
