@@ -12,6 +12,8 @@ const {
   question,
   dnsResponse,
   tcpFrame,
+  listenDnsPair,
+  closeDnsListeners,
 } = require('../../tests/e2e/fixtures/wrc-egress-dns-proxy/server.cjs')
 
 const targets = [
@@ -65,25 +67,52 @@ async function exchangeTcp(port, message) {
   }
 }
 
-async function fixture(t, configuredTargets = targets) {
-  const upstream = await udpClient(t)
-  const upstreamPort = upstream.address().port
-  const respond = message => dnsResponse(message, question(message), 3, '203.0.113.7', 20)
-  upstream.on('message', (message, rinfo) =>
-    upstream.send(respond(message), rinfo.port, rinfo.address)
+async function tcpListener(t, port = 0) {
+  const server = net.createServer()
+  server.listen(port, '127.0.0.1')
+  await once(server, 'listening', { signal: AbortSignal.timeout(2000) })
+  t.after(() => new Promise(resolve => server.close(() => resolve())))
+  return server
+}
+
+async function occupiedDnsTransport(t, transport) {
+  const listeners = await listenDnsPair(
+    () => ({ udp: dgram.createSocket('udp4'), tcp: net.createServer() }),
+    0,
+    '127.0.0.1'
   )
-  const tcpUpstream = net.createServer(socket => {
-    let pending = Buffer.alloc(0)
-    socket.on('data', chunk => {
-      pending = Buffer.concat([pending, chunk])
-      if (pending.length >= 2 && pending.length >= pending.readUInt16BE(0) + 2) {
-        socket.end(tcpFrame(respond(pending.subarray(2, pending.readUInt16BE(0) + 2))))
-      }
-    })
-  })
-  tcpUpstream.listen(upstreamPort, '127.0.0.1')
-  await once(tcpUpstream, 'listening')
-  t.after(() => new Promise(resolve => tcpUpstream.close(resolve)))
+  t.after(() => closeDnsListeners(listeners))
+  if (transport === 'UDP') {
+    await new Promise(resolve => listeners.tcp.close(() => resolve()))
+    return listeners.udp
+  }
+  await new Promise(resolve => listeners.udp.close(resolve))
+  return listeners.tcp
+}
+
+async function fixture(t, configuredTargets = targets) {
+  const respond = message => dnsResponse(message, question(message), 3, '203.0.113.7', 20)
+  const upstream = await listenDnsPair(
+    () => {
+      const udp = dgram.createSocket('udp4')
+      udp.on('message', (message, rinfo) => udp.send(respond(message), rinfo.port, rinfo.address))
+      const tcp = net.createServer(socket => {
+        let pending = Buffer.alloc(0)
+        socket.on('data', chunk => {
+          pending = Buffer.concat([pending, chunk])
+          if (pending.length >= 2 && pending.length >= pending.readUInt16BE(0) + 2) {
+            socket.end(tcpFrame(respond(pending.subarray(2, pending.readUInt16BE(0) + 2))))
+          }
+        })
+      })
+      return { udp, tcp }
+    },
+    0,
+    '127.0.0.1'
+  )
+  t.after(() => closeDnsListeners(upstream))
+  const upstreamPort = upstream.udp.address().port
+  assert.equal(upstream.tcp.address().port, upstreamPort)
   const proxy = createDnsProxy({
     targets: configuredTargets,
     upstream: '127.0.0.1',
@@ -107,6 +136,218 @@ async function fixture(t, configuredTargets = targets) {
     }
   }
   return { proxy, ports, control }
+}
+
+test(
+  'ephemeral DNS binding recovers from a real UDP collision and preserves runtime faults',
+  { timeout: 5000 },
+  async t => {
+    const occupied = await occupiedDnsTransport(t, 'UDP')
+    const occupiedPort = occupied.address().port
+    const dnsListeners = []
+    const dnsDatagrams = []
+    const nativeCreateSocket = dgram.createSocket
+    t.mock.method(dgram, 'createSocket', function (...args) {
+      const socket = nativeCreateSocket.apply(this, args)
+      if (dnsDatagrams.length < 2) dnsDatagrams.push(socket)
+      return socket
+    })
+    const nativeListen = net.Server.prototype.listen
+    // Control only the first OS candidate, not the sockets or DNS exchange.
+    // The already-bound UDP socket makes the opposite-transport collision real.
+    t.mock.method(net.Server.prototype, 'listen', function (port, ...args) {
+      if (port === 0 && dnsListeners.length < 2) {
+        dnsListeners.push(this)
+        if (dnsListeners.length === 1) port = occupiedPort
+      }
+      return nativeListen.call(this, port, ...args)
+    })
+    const proxy = createDnsProxy({
+      targets,
+      upstream: '127.0.0.1',
+      listenHost: '127.0.0.1',
+      dnsPort: 0,
+      controlPort: 0,
+      ttlSeconds: 10,
+    })
+    t.after(() => proxy.close())
+    const ports = await proxy.start()
+    assert.equal(dnsListeners.length, 2)
+    assert.equal(dnsListeners[0].listening, false, 'the failed TCP reservation is released')
+    assert.equal(dnsListeners[0].address(), null)
+    assert.throws(() => dnsDatagrams[0].address(), { code: 'ERR_SOCKET_DGRAM_NOT_RUNNING' })
+    assert.equal(dnsListeners[1].address().port, ports.dnsPort)
+    assert.equal(dnsDatagrams[1].address().port, ports.dnsPort)
+    assert.notEqual(ports.dnsPort, occupiedPort)
+    assert.equal(proxy.snapshot().fault, null, 'a recovered bind collision is not a runtime fault')
+    const client = await udpClient(t)
+    const wire = query(targets[0].fqdn, 201)
+    const expected = dnsResponse(wire, question(wire), 0, targets[0].ip, 10)
+    assert.deepEqual(await exchangeUdp(client, ports.dnsPort, wire), expected)
+    assert.deepEqual(await exchangeTcp(ports.dnsPort, wire), expected)
+    assert.equal(proxy.snapshot().counts.ok, 2)
+    // A post-start socket error still invalidates fixture evidence.
+    for (const listener of [dnsListeners[1], dnsDatagrams[1]]) {
+      listener.emit('error', new Error('test runtime DNS socket error'))
+      assert.equal(proxy.snapshot().fault, 'DNS_SOCKET_FAILED')
+      assert.equal(proxy.snapshot().counts.ok, 2)
+    }
+  }
+)
+
+test(
+  'ephemeral opposite-transport collisions stop after eight attempts and release every pair',
+  { timeout: 5000 },
+  async t => {
+    const occupied = await occupiedDnsTransport(t, 'UDP')
+    const occupiedPort = occupied.address().port
+    const attempts = []
+    await assert.rejects(
+      listenDnsPair(
+        () => {
+          const udp = dgram.createSocket('udp4')
+          const tcp = net.createServer()
+          const nativeListen = tcp.listen.bind(tcp)
+          tcp.listen = (port, ...args) => nativeListen(port === 0 ? occupiedPort : port, ...args)
+          attempts.push({ udp, tcp })
+          // Independent cleanup also keeps a broken cleanup implementation
+          // from leaving this negative test's real sockets alive.
+          t.after(async () => {
+            await new Promise(resolve => tcp.close(() => resolve()))
+            try {
+              udp.close()
+            } catch (error) {
+              assert.equal(error.code, 'ERR_SOCKET_DGRAM_NOT_RUNNING')
+            }
+          })
+          return { udp, tcp }
+        },
+        0,
+        '127.0.0.1'
+      ),
+      { code: 'EADDRINUSE', port: occupiedPort }
+    )
+    assert.equal(attempts.length, 8)
+    for (const { udp, tcp } of attempts) {
+      assert.equal(tcp.listening, false)
+      assert.equal(tcp.address(), null)
+      assert.throws(() => udp.address(), { code: 'ERR_SOCKET_DGRAM_NOT_RUNNING' })
+    }
+    assert.equal(occupied.address().port, occupiedPort)
+    await tcpListener(t, occupiedPort)
+  }
+)
+
+test(
+  'failed DNS startup releases TCP clients accepted before an opposite-transport collision',
+  { timeout: 5000 },
+  async t => {
+    const occupied = await occupiedDnsTransport(t, 'UDP')
+    const occupiedPort = occupied.address().port
+    let listeners
+    let client
+    let accepted
+    t.after(async () => {
+      client?.destroy()
+      accepted?.destroy()
+      if (listeners) await closeDnsListeners(listeners)
+    })
+    await assert.rejects(
+      listenDnsPair(
+        () => {
+          const udp = dgram.createSocket('udp4')
+          const tcp = net.createServer(socket => {
+            accepted = socket
+          })
+          const nativeBind = udp.bind.bind(udp)
+          // Delay only the bind until a real TCP client has been accepted;
+          // the subsequent UDP bind still fails against the occupied socket.
+          udp.bind = (port, host) => {
+            const connected = once(tcp, 'connection')
+            client = net.createConnection({ port, host })
+            client.on('error', error => assert.equal(error.code, 'ECONNRESET'))
+            connected.then(() => nativeBind(port, host))
+            return udp
+          }
+          listeners = { udp, tcp }
+          return listeners
+        },
+        occupiedPort,
+        '127.0.0.1'
+      ),
+      { code: 'EADDRINUSE', port: occupiedPort }
+    )
+    assert.equal(accepted.destroyed, true)
+    assert.equal(listeners.tcp.address(), null)
+    assert.throws(() => listeners.udp.address(), { code: 'ERR_SOCKET_DGRAM_NOT_RUNNING' })
+    assert.equal(occupied.address().port, occupiedPort)
+  }
+)
+
+test(
+  'an ephemeral TCP allocation failure does not retry as an opposite-transport collision',
+  { timeout: 5000 },
+  async t => {
+    const occupied = await tcpListener(t)
+    const occupiedPort = occupied.address().port
+    const attempts = []
+    await assert.rejects(
+      listenDnsPair(
+        () => {
+          const udp = dgram.createSocket('udp4')
+          const tcp = net.createServer()
+          const nativeListen = tcp.listen.bind(tcp)
+          tcp.listen = (port, ...args) => nativeListen(port === 0 ? occupiedPort : port, ...args)
+          attempts.push({ udp, tcp })
+          return { udp, tcp }
+        },
+        0,
+        '127.0.0.1'
+      ),
+      { code: 'EADDRINUSE', port: occupiedPort }
+    )
+    assert.equal(attempts.length, 1)
+    assert.equal(attempts[0].tcp.address(), null)
+    assert.throws(() => attempts[0].udp.address(), { code: 'ERR_SOCKET_DGRAM_NOT_RUNNING' })
+    assert.equal(occupied.address().port, occupiedPort)
+  }
+)
+
+for (const transport of ['UDP', 'TCP']) {
+  test(
+    `a fixed DNS port occupied by ${transport} fails once without changing the requested port`,
+    { timeout: 5000 },
+    async t => {
+      const occupied = await occupiedDnsTransport(t, transport)
+      const occupiedPort = occupied.address().port
+      const nativeListen = net.Server.prototype.listen
+      let attempts = 0
+      t.mock.method(net.Server.prototype, 'listen', function (port, ...args) {
+        if (port === occupiedPort) attempts++
+        return nativeListen.call(this, port, ...args)
+      })
+      const proxy = createDnsProxy({
+        targets,
+        upstream: '127.0.0.1',
+        listenHost: '127.0.0.1',
+        dnsPort: occupiedPort,
+        controlPort: 0,
+      })
+      t.after(() => proxy.close())
+      await assert.rejects(proxy.start(), { code: 'EADDRINUSE', port: occupiedPort })
+      assert.equal(attempts, 1)
+      assert.equal(proxy.snapshot().counts.ok, 0)
+      assert.equal(occupied.address().port, occupiedPort)
+      if (transport === 'UDP') await tcpListener(t, occupiedPort)
+      else {
+        const udp = dgram.createSocket('udp4')
+        udp.bind(occupiedPort, '127.0.0.1')
+        await once(udp, 'listening', { signal: AbortSignal.timeout(2000) })
+        t.after(() => new Promise(resolve => udp.close(resolve)))
+      }
+      await assert.rejects(proxy.start(), /cannot be started twice/)
+    }
+  )
 }
 
 test('target configuration is explicit, bounded, unambiguous, and safe for arbitrary names', () => {

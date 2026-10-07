@@ -101,6 +101,85 @@ function increment(counts, mode) {
   else throw new Error('Invalid observation mode')
 }
 
+const listen = (server, action) =>
+  new Promise((resolve, reject) => {
+    const failed = error => {
+      server.removeListener('listening', ready)
+      server.removeListener('error', failed)
+      reject(error)
+    }
+    const ready = () => {
+      server.removeListener('error', failed)
+      resolve()
+    }
+    server.once('error', failed)
+    server.once('listening', ready)
+    try {
+      action()
+    } catch (error) {
+      failed(error)
+    }
+  })
+
+async function closeDnsListeners({ udp, tcp }) {
+  await new Promise((resolve, reject) => {
+    tcp.close(error => {
+      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error)
+      else resolve()
+    })
+  })
+  await new Promise((resolve, reject) => {
+    try {
+      udp.close(resolve)
+    } catch (error) {
+      if (error.code === 'ERR_SOCKET_DGRAM_NOT_RUNNING') resolve()
+      else reject(error)
+    }
+  })
+}
+
+async function listenDnsPair(createListeners, port, host) {
+  // UDP and TCP have separate port allocations. Hold the TCP reservation
+  // while binding UDP; only an ephemeral opposite-transport collision may
+  // choose another candidate, with at most eight fully cleaned-up attempts.
+  const attempts = port === 0 ? 8 : 1
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const listeners = createListeners()
+    const { udp, tcp } = listeners
+    const connections = new Set()
+    const connected = socket => connections.add(socket)
+    tcp.on('connection', connected)
+    let firstError
+    const recordError = error => {
+      firstError ??= error
+    }
+    udp.on('error', recordError)
+    tcp.on('error', recordError)
+    let udpCollision = false
+    try {
+      await listen(tcp, () => tcp.listen(port, host))
+      try {
+        await listen(udp, () => udp.bind(tcp.address().port, host))
+      } catch (error) {
+        udpCollision = error.code === 'EADDRINUSE' && firstError === error
+        throw error
+      }
+      if (firstError) throw firstError
+      return listeners
+    } catch (error) {
+      // A client may arrive before the second transport binds. Closing the
+      // listener alone would wait indefinitely for that accepted connection.
+      for (const socket of connections) socket.destroy()
+      await closeDnsListeners(listeners)
+      if (!udpCollision || attempt + 1 === attempts) throw firstError ?? error
+    } finally {
+      udp.removeListener('error', recordError)
+      tcp.removeListener('error', recordError)
+      tcp.removeListener('connection', connected)
+    }
+  }
+}
+
 /** A real UDP/TCP DNS fixture; ephemeral loopback ports are used only by tests. */
 function createDnsProxy({
   targets,
@@ -163,7 +242,8 @@ function createDnsProxy({
   }
 
   const counts = emptyCounts()
-  const udp = dgram.createSocket('udp4')
+  let udp
+  let tcp
   const connections = new Set()
   const relays = new Set()
   let fault = null
@@ -372,13 +452,7 @@ function createDnsProxy({
     }
   }
 
-  udp.on('message', (message, rinfo) =>
-    handle(message, { transport: 'udp', rinfo, client: `${rinfo.address}:${rinfo.port}` })
-  )
-  udp.on('error', () => {
-    fault = 'DNS_SOCKET_FAILED'
-  })
-  const tcp = net.createServer(socket => {
+  function acceptTcp(socket) {
     connections.add(socket)
     socket.once('close', () => connections.delete(socket))
     socket.once('error', () => socket.destroy())
@@ -402,8 +476,16 @@ function createDnsProxy({
         })
       }
     })
-  })
-  tcp.maxConnections = 64
+  }
+  function createListeners() {
+    udp = dgram.createSocket('udp4')
+    udp.on('message', (message, rinfo) =>
+      handle(message, { transport: 'udp', rinfo, client: `${rinfo.address}:${rinfo.port}` })
+    )
+    tcp = net.createServer(acceptTcp)
+    tcp.maxConnections = 64
+    return { udp, tcp }
+  }
   const control = http.createServer((request, response) => {
     const globalMode = request.url?.match(/^\/mode\/(ok|hold|servfail)$/)?.[1]
     const laneMode = request.url?.match(/^\/mode\/(ui|worker|canary)\/(ok|hold|servfail)$/)
@@ -428,20 +510,6 @@ function createDnsProxy({
   control.requestTimeout = 5000
   control.headersTimeout = 5000
 
-  const listen = (server, action) =>
-    new Promise((resolve, reject) => {
-      const failed = error => {
-        server.removeListener('listening', ready)
-        reject(error)
-      }
-      const ready = () => {
-        server.removeListener('error', failed)
-        resolve()
-      }
-      server.once('error', failed)
-      server.once('listening', ready)
-      action()
-    })
   async function close() {
     if (closing) return
     closing = true
@@ -449,23 +517,19 @@ function createDnsProxy({
     for (const relayClose of [...relays]) relayClose()
     for (const socket of connections) socket.destroy()
     control.closeAllConnections()
-    await Promise.all(
-      [tcp, control].map(server => new Promise(resolve => server.close(() => resolve())))
-    )
-    await new Promise(resolve => {
-      try {
-        udp.close(resolve)
-      } catch {
-        resolve()
-      }
-    })
+    await new Promise(resolve => control.close(() => resolve()))
+    if (udp && tcp) await closeDnsListeners({ udp, tcp })
   }
   async function start() {
     if (started || closing) throw new Error('DNS fixture cannot be started twice')
     started = true
     try {
-      await listen(udp, () => udp.bind(dnsPort, listenHost))
-      await listen(tcp, () => tcp.listen(udp.address().port, listenHost))
+      await listenDnsPair(createListeners, dnsPort, listenHost)
+      for (const listener of [udp, tcp]) {
+        listener.on('error', () => {
+          fault = 'DNS_SOCKET_FAILED'
+        })
+      }
       await listen(control, () => control.listen(controlPort, '127.0.0.1'))
       return { dnsPort: udp.address().port, controlPort: control.address().port }
     } catch (error) {
@@ -476,7 +540,15 @@ function createDnsProxy({
   return { start, close, snapshot, setMode }
 }
 
-module.exports = { createDnsProxy, readConfig, question, dnsResponse, tcpFrame }
+module.exports = {
+  createDnsProxy,
+  readConfig,
+  question,
+  dnsResponse,
+  tcpFrame,
+  listenDnsPair,
+  closeDnsListeners,
+}
 if (require.main === module) {
   let proxy
   try {
