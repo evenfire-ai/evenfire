@@ -1,4 +1,10 @@
 import {
+  ENVELOPE_ALLOWANCE_BYTES as GROK_ENVELOPE_ALLOWANCE_BYTES,
+  LIMITS as GROK_LIMITS,
+  PROVIDER_ID as GROK_PROVIDER_ID,
+  requestBodyLimitBytes as grokRequestBodyLimitBytes,
+} from '@clerum/grok-provider-attempt-contract'
+import {
   ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   parseAuthorizeAttemptResponse,
@@ -9,11 +15,46 @@ import { rateLimitedCode, retryAfterMs } from './retryAfter'
 
 export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 
+type RequestContract = {
+  label: 'Codex' | 'Grok'
+  maxRequestBodyBytes: number
+  envelopeAllowanceBytes: number
+  requestBodyLimitBytes: (request: unknown) => number
+}
+
+/**
+ * The contract that bounds `request`. The authorize route is shared, and
+ * control-api picks the Grok contract by `request.provider` (#784); checking a
+ * Grok request against the Codex caps here would refuse a Grok V2 body that
+ * control-api accepts.
+ */
+function requestContract(request: unknown): RequestContract {
+  if ((request as { provider?: unknown } | null)?.provider === GROK_PROVIDER_ID) {
+    return {
+      label: 'Grok',
+      maxRequestBodyBytes: GROK_LIMITS.maxRequestBodyBytes,
+      envelopeAllowanceBytes: GROK_ENVELOPE_ALLOWANCE_BYTES,
+      requestBodyLimitBytes: grokRequestBodyLimitBytes,
+    }
+  }
+  return {
+    label: 'Codex',
+    maxRequestBodyBytes: LIMITS.maxRequestBodyBytes,
+    envelopeAllowanceBytes: ENVELOPE_ALLOWANCE_BYTES,
+    requestBodyLimitBytes,
+  }
+}
+
 /**
  * Room for the authorize envelope around the contract-capped `request`: ids,
  * revisions, hashes and recipe names, a few hundred bytes in practice. The
  * contract owns the value and control-api imports the same one, so a request
  * control-api would accept is never refused here for its envelope (#739).
+ * Production code does not read this export: the authorizer takes the
+ * allowance from `requestContract(request).envelopeAllowanceBytes`, which
+ * selects the Grok contract's value for a Grok request. This export is the
+ * Codex value, kept so `providerAttemptAuthorizer.test.ts` can pin it to the
+ * contract.
  */
 export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 
@@ -101,17 +142,18 @@ export class ProviderAttemptAuthorizer {
     expiresAt: string
   }> {
     const serialized = JSON.stringify(body)
-    const requestLimit = requestBodyLimitBytes(body.request)
+    const contract = requestContract(body.request)
+    const requestLimit = contract.requestBodyLimitBytes(body.request)
     // The larger of the two budgets wins, as in control-api's authorizer: the
     // non-image cap plus the envelope allowance, or the V2 visual envelope.
     const bodyLimit = Math.max(
       requestLimit,
-      LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+      contract.maxRequestBodyBytes + contract.envelopeAllowanceBytes
     )
     if (Buffer.byteLength(serialized, 'utf8') > bodyLimit) {
       throw new CodexAuthorizeError(
         'payload_too_large',
-        `Codex request exceeds ${requestLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
+        `${contract.label} request exceeds ${requestLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
       )
     }
     const jwt = this.options.readPlatformJwt()
@@ -155,6 +197,11 @@ export class ProviderAttemptAuthorizer {
       // `Too Many Requests`, so only a machine code a 429 carries (such as
       // `budget_denied`) replaces `rate_limited`; a 429 with no JSON code is
       // `rate_limited` too.
+      // A 504 with no JSON code is the gateway's read or send timeout on a
+      // connection control-api accepted (a connect timeout is answered as
+      // `control_plane_unavailable`), so authorize outlived the gateway, as
+      // with control-api's own `authorize_timeout`. It is not a provider
+      // outage and must not fail over.
       const code =
         response.status === 413
           ? 'payload_too_large'
@@ -162,13 +209,27 @@ export class ProviderAttemptAuthorizer {
             ? rateLimitedCode(payload.error)
             : typeof payload.error === 'string'
               ? payload.error
-              : 'provider_unavailable'
+              : response.status === 504
+                ? 'authorize_timeout'
+                : 'provider_unavailable'
       throw new CodexAuthorizeError(
         code,
         code === 'payload_too_large'
-          ? 'Codex request is too large; use fewer or smaller images, or reduce context'
-          : `authorize failed with ${response.status}`,
-        { retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined }
+          ? `${contract.label} request is too large; use fewer or smaller images, or reduce context`
+          : code === 'authorize_capacity_exceeded'
+            ? 'Authorization is busy with other large requests, which share one capacity across all Hosts. Nothing was sent to the provider; wait for them to finish, then try again.'
+            : code === 'authorize_timeout'
+              ? 'Request authorization timed out. Wait for active requests to finish, then try again.'
+              : `authorize failed with ${response.status}`,
+        // Retry-After is read on a 429 and on control-api's capacity refusal,
+        // which the provider retries once after it (M-A).
+        {
+          retryAfterMs:
+            response.status === 429 ||
+            (response.status === 503 && code === 'authorize_capacity_exceeded')
+              ? retryAfterMs(response)
+              : undefined,
+        }
       )
     }
     for (const key of LEAK_KEYS) {
