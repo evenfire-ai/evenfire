@@ -131,7 +131,7 @@ describe('AppService pending external logout', () => {
     }
 
     await internal.installAuthenticatedLoginOnce({
-      token: 'new-session-token',
+      token: 'fixture-session-token',
       me: {
         id: 'user-1',
         email: 'user@example.com',
