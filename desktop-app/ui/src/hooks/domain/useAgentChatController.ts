@@ -3098,8 +3098,7 @@ export function useAgentChatController({
       // The accepted text belongs to its captured origin, while attachments
       // belong to the selected agent. Navigation can change the visible chat
       // without changing either owner.
-      const canConsumeComposer =
-        !preserveComposer && originalDraftAgent === sendAgent && sendStillAuthorized()
+      const canConsumeComposer = !preserveComposer && sendStillAuthorized()
       const shouldClearOriginDraft =
         canConsumeComposer &&
         getComposerDraftRevision(originalDraftChat, originalDraftAgent ?? undefined) ===
