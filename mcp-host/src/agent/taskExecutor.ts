@@ -316,11 +316,12 @@ export class TaskExecutor {
   /** #731 — the task's context window, resolved and logged once. */
   private contextWindow: number | null = null
   /**
-   * C15/C16 — one turn-owned attachment read ledger per executor. The native
-   * tool registry is memoized for the life of this executor, so the tool holds
-   * THIS instance by reference and the ledger mutates in place: `reset()` only
-   * after a successful `startTurn`, `restore()` on an approval resume that
-   * continues the same turn.
+   * C15/C16 — one turn-owned attachment read ledger per executor. An executor
+   * runs one task, and a task is one turn, so the ledger starts zeroed and is
+   * never reset. The native tool registry is memoized for the life of this
+   * executor, so the tool holds THIS instance by reference and the ledger
+   * mutates in place; `restore()` loads the persisted snapshot on an approval
+   * resume that continues the same turn.
    */
   private readonly attachmentReadLedger = new AttachmentReadLedger()
   /**
@@ -524,10 +525,6 @@ export class TaskExecutor {
         this.task.traceContext ?? null,
         autoTitle
       )
-      // C15/C16 — a fresh turn starts with a zeroed attachment read ledger. The
-      // reset runs only after `startTurn` resolved: a rejected write throws
-      // above and must not hand the retried turn a fresh budget.
-      this.attachmentReadLedger.reset()
       this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
 
       // P2 token budgets (§5.2) — capture the per-task brake baseline NOW, before
