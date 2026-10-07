@@ -8,6 +8,7 @@ import { type DbClient, initDb } from '../src/db.js'
 import { K8sGateway } from '../src/k8s.js'
 import { createExternalAccessRouter } from '../src/routes/external/access.js'
 import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
+import { compareAccessCatalogShadow } from '../src/services/access/accessCatalogShadow.js'
 import {
   AccessBudgetExceededError,
   AccessExecutionBudget,
@@ -730,6 +731,40 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       workflow_recipe: 11,
       sandbox_app: 11,
       shared_filesystem: 11,
+    })
+  })
+
+  it('executes normal operational shadow comparisons against the real catalog plan', async () => {
+    const outcomes: Partial<Record<CatalogFamily, string>> = {}
+    for (const family of [
+      'host',
+      'context',
+      'mcp_server',
+      'workflow_recipe',
+      'sandbox_app',
+      'shared_filesystem',
+    ] as const) {
+      const foreground = await buildAccessCatalog(
+        { session, families: [family], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      outcomes[family] = await compareAccessCatalogShadow(
+        {
+          session,
+          family,
+          legacyLogicalIds: foreground.items.map(item => item.resource.logicalId),
+          legacyComplete: foreground.complete,
+        },
+        { enabled: true }
+      )
+    }
+    expect(outcomes).toEqual({
+      host: 'match',
+      context: 'match',
+      mcp_server: 'match',
+      workflow_recipe: 'match',
+      sandbox_app: 'match',
+      shared_filesystem: 'match',
     })
   })
 
