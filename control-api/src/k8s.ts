@@ -234,9 +234,10 @@ export class K8sGateway {
   async getResource(
     plural: ClerumResourceType,
     name: string,
-    namespace?: string
+    namespace?: string,
+    signal?: AbortSignal
   ): Promise<unknown> {
-    return this.resources.getResource(plural, name, namespace)
+    return this.resources.getResource(plural, name, namespace, signal)
   }
 
   async createResource(

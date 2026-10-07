@@ -38,14 +38,38 @@ while IFS= read -r -d '' path; do
   sed 's/^/+/' "$ROOT/$path"
 done >>"$tmp"
 
-python3 - "$tmp" <<'PY'
+python3 - "$tmp" "$ROOT" <<'PY'
 from pathlib import Path
 import re
+import shlex
 import sys
 
 diff = Path(sys.argv[1]).read_text(errors="replace")
 bad = []
 current = ""
+root = Path(sys.argv[2]).resolve()
+
+
+def public_capture_source(relative):
+    # Test/config source may describe screenshots. This never exempts its added
+    # contents from the credential/private-URL checks below.
+    candidate = Path(relative)
+    if not re.search(r"\.(?:spec|test|config)\.(?:ts|tsx|js|mjs|cjs)$", candidate.name, re.I):
+        return False
+    if not any(part in {"src", "test", "tests"} for part in candidate.parts):
+        return False
+    filename = root / candidate
+    try:
+        if filename.is_symlink() or not filename.resolve().is_relative_to(root):
+            return False
+        raw = filename.read_bytes()
+        if len(raw) > 1024 * 1024 or any(byte < 32 and byte not in {9, 10, 13} for byte in raw):
+            return False
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError):
+        return False
+    return bool(re.search(r"(?m)^\s*(?:import\s|export\s|(?:const|let|var|type|interface|class|function)\s|(?:test|describe)\s*[.(])", text))
+
 safe_source_paths = {
     "control-api/src/routes/admin/communicationchannelcredentials.ts",
     "control-api/test/routes.admincommunicationchannelcredentials.test.ts",
@@ -60,8 +84,21 @@ safe_source_paths = {
     "deploy/scripts/reconcile-gfs-deploy-credentials.sh",
 }
 for line in diff.splitlines():
-    if line.startswith("+++ b/"):
-        current = line[6:]
+    changed_path = None
+    if line.startswith("diff --git "):
+        try:
+            headers = shlex.split(line[len("diff --git "):])
+        except ValueError:
+            bad.append(("<diff>", "malformed path header"))
+            continue
+        if len(headers) != 2 or not headers[1].startswith("b/"):
+            bad.append(("<diff>", "malformed path header"))
+            continue
+        changed_path = headers[1][2:]
+    elif line.startswith("+++ b/"):
+        changed_path = line[6:]
+    if changed_path is not None:
+        current = changed_path
         path = current.lower()
         path_parts = path.split("/")
         if (
@@ -76,11 +113,13 @@ for line in diff.splitlines():
                 )
                 and path not in safe_source_paths
             )
-            or "screenshot" in path
+            or ("screenshot" in path and not public_capture_source(current))
             or "e2e-artifacts" in path
         ):
             if not (path.endswith(".env.example") or path.endswith(".env.test")):
-                bad.append((current, "sensitive file name"))
+                finding = (current, "sensitive file name")
+                if finding not in bad:
+                    bad.append(finding)
         continue
     if not line.startswith("+") or line.startswith("+++"):
         continue

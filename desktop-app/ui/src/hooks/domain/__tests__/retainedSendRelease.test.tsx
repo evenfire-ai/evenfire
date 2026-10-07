@@ -8,7 +8,7 @@
  * held before the terminal outcome and is gone after it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
 import { readHostModelSelection, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { RetainedSendSnapshot } from '@lib/retainedSendStore'
 import type { ComposerImageAttachment } from '../../../uiTypes'
@@ -43,6 +43,8 @@ vi.mock('@lib/retainedSendStore', async importOriginal => {
 
 let clerum: MockClerum
 let uuidCounter = 0
+const ASYNC_WAIT_TIMEOUT_MS = 5_000
+const WIRING_TIMEOUT_MS = 10_000
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -57,11 +59,19 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
+  expect(document.body.childElementCount).toBe(0)
   vi.restoreAllMocks()
   vi.useRealTimers()
   resetHostModelSelectionStore()
   uninstallMockClerum()
 })
+
+// Real ChatStore-backed effects can exceed Testing Library's 1-second default
+// on loaded local/T0 runners. This follows the #958 wiring-timeout contract.
+function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof rtlWaitFor>[1]) {
+  return rtlWaitFor(callback, { timeout: ASYNC_WAIT_TIMEOUT_MS, ...options })
+}
 
 const image: ComposerImageAttachment = {
   id: 'input-image',
@@ -91,11 +101,12 @@ function heldSnapshot(): RetainedSendSnapshot | undefined {
 
 async function sendAsync(result: ReturnType<typeof renderController>['result'], taskId: string) {
   clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId })
-  const send = act(async () => {
+  await act(async () => {
     await result.current.handleSendAgentMessage('keep this payload')
   })
-  await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true))
-  await send
+  await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true), {
+    timeout: WIRING_TIMEOUT_MS,
+  })
   // Liveness: the send retained its payload and the task id is attached to it.
   expect(heldSnapshot()).toMatchObject({ content: 'keep this payload', taskId })
 }
@@ -245,11 +256,12 @@ describe('older failures of a chat (#654 M2)', () => {
     await sendFailing(result, 'first try')
 
     clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-later' })
-    const send = act(async () => {
+    await act(async () => {
       await result.current.handleSendAgentMessage('second try')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-later')).toBe(true))
-    await send
+    await waitFor(() => expect(clerum.hasProgressHandler('task-later')).toBe(true), {
+      timeout: WIRING_TIMEOUT_MS,
+    })
     // The later send has not reached a terminal yet, so it supersedes nothing.
     expect(result.current.failedAgentSend?.content).toBe('first try')
 
