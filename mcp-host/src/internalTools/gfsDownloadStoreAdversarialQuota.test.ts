@@ -411,7 +411,10 @@ describe('GFS download store adversarial quota', () => {
     await store.releaseReceiptOwner('filler-owner', CALLER)
   })
 
-  it('evicts a copy a shell has just read: a shell run holds no protection (#1019)', async () => {
+  // Store behaviour only: this shell has no store reference, so the test shows
+  // that eviction is unaffected by a shell run that read the copy. Decoupling of
+  // the shell from the store is proven by the TaskExecutor-level X3-TE test.
+  it('evicts a copy a shell has just read: eviction is unaffected by the shell run (#1019)', async () => {
     const size = GFS_FILE_LIMITS.inlineTextBytes + 1
     const receipts = []
     for (let index = 1; index <= GFS_FILE_LIMITS.callerRetainedFiles; index += 1)

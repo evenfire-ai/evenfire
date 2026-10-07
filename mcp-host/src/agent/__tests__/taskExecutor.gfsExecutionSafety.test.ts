@@ -8,7 +8,7 @@ import { ConversationManager } from '../../core/conversation/conversation'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { ShellTool } from '../../core/tools/shell'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
-import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import { GfsDownloadStore, GfsDownloadStoreError } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import type { Task, TaskSource } from '../../queue/types'
@@ -102,8 +102,16 @@ async function unavailableStore() {
   await fs.mkdir(join(root, '.gfs-download-store'), { mode: 0o700 })
   const store = new GfsDownloadStore(root)
   stores.push(store)
-  await store.initialize().catch(() => undefined)
-  return { root, store }
+  // A store directory without a ledger must refuse to initialize. Capture the
+  // rejection instead of swallowing it so tests can assert which failure the
+  // store reported; an initialize that resolves breaks the fixture loudly.
+  const initError = await store.initialize().then(
+    () => {
+      throw new Error('unavailableStore fixture: initialize() resolved on a ledger-less store')
+    },
+    (error: unknown) => error
+  )
+  return { root, store, initError }
 }
 
 /**
@@ -145,6 +153,12 @@ async function healthyStore() {
   return { root, store }
 }
 
+/** Hooks called by the scripted provider at the start and end of every model turn. */
+type TurnObserver = {
+  turnStarted(turn: number): void
+  turnReturned(turn: number, toolCall: ToolCall | undefined): void
+}
+
 async function shellScenario({
   source,
   approvalEnabled = true,
@@ -154,6 +168,7 @@ async function shellScenario({
   channelCaller = false,
   missingCallerRoot = false,
   calls = [{ id: 'shell-safety', name: 'shell_exec', arguments: { command: 'pwd' } }],
+  turnObserver,
 }: {
   source: TaskSource
   approvalEnabled?: boolean
@@ -163,13 +178,16 @@ async function shellScenario({
   channelCaller?: boolean
   missingCallerRoot?: boolean
   calls?: ToolCall[]
+  turnObserver?: TurnObserver
 }) {
   appConfig.enableApproval = approvalEnabled
-  const { root, store } = legacyLease
+  const fixture = legacyLease
     ? await legacyLeaseStore()
     : healthy
       ? await healthyStore()
       : await unavailableStore()
+  const { root, store } = fixture
+  const storeInitError = 'initError' in fixture ? fixture.initError : undefined
   const sourceMessage = channelCaller
     ? {
         sender: 'gfs-safety-caller',
@@ -201,9 +219,12 @@ async function shellScenario({
       throw new Error('Unexpected non-tool completion')
     },
     completeSingleTurnWithTools: async (messages, tools) => {
+      const turn = providerCalls.length
+      turnObserver?.turnStarted(turn)
       providerCalls.push(structuredClone(messages))
       advertisedTools.push(tools.map(tool => tool.name))
-      const call = calls[providerCalls.length - 1]
+      const call = calls[turn]
+      turnObserver?.turnReturned(turn, call)
       return {
         content: call ? null : 'Shell finished.',
         tool_calls: call ? [call] : null,
@@ -262,6 +283,7 @@ async function shellScenario({
     onApprovalNeeded,
     callerWorkspace,
     store,
+    storeInitError,
   }
 }
 
@@ -318,6 +340,10 @@ it('X2: a store at corrupt_store_ledger keeps shell and GFS reads but withdraws 
       { id: 'shell-safety', name: 'shell_exec', arguments: { command: 'pwd' } },
     ],
   })
+  // Witness: the store refused to initialize with exactly corrupt_store_ledger,
+  // not with any other initialize failure.
+  expect(scenario.storeInitError).toBeInstanceOf(GfsDownloadStoreError)
+  expect(scenario.storeInitError).toMatchObject({ code: 'corrupt_store_ledger' })
   expect(scenario.store.isAvailable()).toBe(false)
   await scenario.executor.run()
 
@@ -410,7 +436,7 @@ function storeSpyNet(store: GfsDownloadStore) {
  * Record, for every ShellTool.execute call, the timeout the executor passed and
  * the store methods called between entering and leaving execute.
  */
-function shellExecuteWindows(net: ReturnType<typeof storeSpyNet>) {
+function shellExecuteWindows(net: ReturnType<typeof storeSpyNet>, timeline?: string[]) {
   const windows: Array<{ timeoutMs: number | undefined; storeCalls: string[] }> = []
   const original = ShellTool.prototype.execute
   const spy = vi.spyOn(ShellTool.prototype, 'execute').mockImplementation(async function (
@@ -418,10 +444,12 @@ function shellExecuteWindows(net: ReturnType<typeof storeSpyNet>) {
     params,
     context
   ) {
+    timeline?.push('shell execute entered')
     const before = net.counts()
     try {
       return await original.call(this, params, context)
     } finally {
+      timeline?.push('shell execute returned')
       const after = net.counts()
       windows.push({
         timeoutMs: context?.timeoutMs,
@@ -433,6 +461,56 @@ function shellExecuteWindows(net: ReturnType<typeof storeSpyNet>) {
   })
   installedSpies.push(spy)
   return windows
+}
+
+/**
+ * Record the store methods called during the whole TaskExecutor dispatch of
+ * every shell_exec call: the window opens when the scripted model returns the
+ * call to the executor and closes when the executor sends the next model turn,
+ * which carries the tool result. Everything the executor does for that call
+ * (tool loop, approval gate, registry lookup, ShellTool.execute, output
+ * processing) falls inside it. Registry construction before the first turn and
+ * the terminal retention settlement after the last turn fall outside it by
+ * construction, because no shell call is in flight then.
+ */
+function shellDispatchWindows(timeline: string[]) {
+  let net: ReturnType<typeof storeSpyNet> | undefined
+  let open: { toolCallId: string; before: Map<string, number> } | undefined
+  const windows: Array<{ toolCallId: string; storeCalls: string[] }> = []
+  const liveNet = () => {
+    if (!net) throw new Error('shellDispatchWindows: the store spy net was never attached')
+    return net
+  }
+  const observer: TurnObserver = {
+    turnStarted(turn) {
+      if (open) {
+        const after = liveNet().counts()
+        const before = open.before
+        windows.push({
+          toolCallId: open.toolCallId,
+          storeCalls: [...after]
+            .filter(([name, calls]) => calls > (before.get(name) ?? 0))
+            .map(([name]) => name),
+        })
+        open = undefined
+      }
+      timeline.push(`turn ${turn} started`)
+    },
+    turnReturned(turn, toolCall) {
+      timeline.push(`turn ${turn} returned ${toolCall?.name ?? 'final answer'}`)
+      if (toolCall?.name === 'shell_exec')
+        open = { toolCallId: toolCall.id, before: liveNet().counts() }
+    },
+  }
+  return {
+    observer,
+    windows,
+    attach(spyNet: ReturnType<typeof storeSpyNet>) {
+      net = spyNet
+    },
+    /** A window still open after run() means the tool result never reached the model. */
+    unclosed: () => open?.toolCallId,
+  }
 }
 
 it('X1-shell: an inherited legacy lease does not stop an approved shell (#1019)', async () => {
@@ -490,21 +568,41 @@ describe('U5-TE: TaskExecutor runs a managed shell with a timeout above the form
   })
 })
 
-it('X3-TE: a shell run inside TaskExecutor makes zero GFS download store calls (#1019)', async () => {
-  const scenario = await shellScenario({ source: 'cron', healthy: true })
+it('X3-TE: a shell dispatch inside TaskExecutor makes zero GFS download store calls (#1019)', async () => {
+  const timeline: string[] = []
+  const dispatch = shellDispatchWindows(timeline)
+  const scenario = await shellScenario({
+    source: 'cron',
+    healthy: true,
+    turnObserver: dispatch.observer,
+  })
   const net = storeSpyNet(scenario.store)
-  const windows = shellExecuteWindows(net)
+  dispatch.attach(net)
+  const executeWindows = shellExecuteWindows(net, timeline)
 
   await scenario.executor.run()
 
   // Witnesses: the net is attached to the store instance the executor wired
-  // (isAvailable is read while the registry is built), the shell window opened
-  // once, and the command's stdout reached the model.
+  // (isAvailable is read while the registry is built, outside the dispatch
+  // window), exactly one shell dispatch window opened and closed with
+  // ShellTool.execute nested inside it, and the command's stdout reached the model.
   expect(net.names).toContain('isAvailable')
   expect(net.spies.get('isAvailable')!.mock.calls.length).toBeGreaterThan(0)
-  expect(windows).toHaveLength(1)
+  expect(dispatch.unclosed()).toBeUndefined()
+  expect(dispatch.windows).toEqual([{ toolCallId: 'shell-safety', storeCalls: expect.any(Array) }])
+  expect(executeWindows).toHaveLength(1)
+  expect(timeline).toEqual([
+    'turn 0 started',
+    'turn 0 returned shell_exec',
+    'shell execute entered',
+    'shell execute returned',
+    'turn 1 started',
+    'turn 1 returned final answer',
+  ])
   expect(spawn).toHaveBeenCalledOnce()
   expect(JSON.stringify(scenario.providerCalls.at(-1))).toContain(scenario.callerWorkspace)
-  // Claim: no store method ran while the shell executed.
-  expect(windows[0]!.storeCalls).toEqual([])
+  // Claim: no store method ran from the moment the executor received the shell
+  // call until it returned the shell result to the model.
+  expect(dispatch.windows[0]!.storeCalls).toEqual([])
+  expect(executeWindows[0]!.storeCalls).toEqual([])
 })

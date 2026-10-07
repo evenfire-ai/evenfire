@@ -1,3 +1,4 @@
+import { logger } from '../../logger'
 import { Safety } from '../interfaces'
 import { isPrivateIp } from '../tools/httpRequest'
 import { SanitizedOutput, ValidationResult } from '../types'
@@ -139,7 +140,10 @@ export class BasicSafety implements Safety {
     }
 
     const valid = errors.length === 0
-    console.log(`[NewCore:Safety] validateInput → length=${input?.length ?? 0}, passed=${valid}`)
+    logger.debug(
+      { component: 'NewCore:Safety', inputLength: input?.length ?? 0, passed: valid },
+      'validateInput'
+    )
     return { is_valid: valid, errors }
   }
 
@@ -235,8 +239,14 @@ export class BasicSafety implements Safety {
     const result = this.sanitizeFreeformContent(output, {
       secretWarning: `Potential secret detected in ${toolName} output`,
     })
-    console.log(
-      `[NewCore:Safety] sanitizeOutput → tool=${toolName}, sanitized=${result.was_modified}, warnings=${result.warnings.length}`
+    logger.debug(
+      {
+        component: 'NewCore:Safety',
+        toolName,
+        sanitized: result.was_modified,
+        warnings: result.warnings.length,
+      },
+      'sanitizeOutput'
     )
     return result
   }
@@ -246,8 +256,13 @@ export class BasicSafety implements Safety {
       secretWarning: 'Potential secret detected in assistant response',
       extraFilters: BasicSafety.ASSISTANT_RESPONSE_FILTER_PATTERNS,
     })
-    console.log(
-      `[NewCore:Safety] sanitizeAssistantResponse → sanitized=${result.was_modified}, warnings=${result.warnings.length}`
+    logger.debug(
+      {
+        component: 'NewCore:Safety',
+        sanitized: result.was_modified,
+        warnings: result.warnings.length,
+      },
+      'sanitizeAssistantResponse'
     )
     return result
   }
@@ -263,7 +278,10 @@ export class BasicSafety implements Safety {
     // Risk 4.10: Escape potential closing tags in content
     const escaped = content.replace(/<\/tool_output>/gi, '&lt;/tool_output&gt;')
     const wrapped = `<tool_output name="${toolName}" sanitized="${wasSanitized}">\n${escaped}\n</tool_output>`
-    console.log(`[NewCore:Safety] wrapForLlm → tool=${toolName}, wrappedLength=${wrapped.length}`)
+    logger.debug(
+      { component: 'NewCore:Safety', toolName, wrappedLength: wrapped.length },
+      'wrapForLlm'
+    )
     return wrapped
   }
 

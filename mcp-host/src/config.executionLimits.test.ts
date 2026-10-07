@@ -85,7 +85,28 @@ describe('tool timeouts bounded to the executable timer range (#1021)', () => {
 
       vi.resetModules()
       vi.stubEnv(name, String(largestTimeout + 1))
-      await expect(import('./config')).rejects.toThrow(`${name} must be a valid bounded integer`)
+      await expect(import('./config')).rejects.toThrow(
+        `${name} must be a valid bounded integer from 1 to 2147477647 (inclusive)`
+      )
+    }
+  )
+
+  it.each([
+    { name: 'CLERUM_AGENT_MAX_TASK_DURATION', field: 'agentMaxTaskDuration' as const },
+    { name: 'CLERUM_AGENT_MAX_TOOL_CALLS', field: 'agentMaxToolCallsPerTask' as const },
+  ])(
+    'accepts $name at the full timer range 2^31-1 and rejects one more',
+    async ({ name, field }) => {
+      vi.resetModules()
+      vi.stubEnv(name, String(maxTimerDelayMs))
+      const { config } = await import('./config')
+      expect(config[field]).toBe(maxTimerDelayMs)
+
+      vi.resetModules()
+      vi.stubEnv(name, String(maxTimerDelayMs + 1))
+      await expect(import('./config')).rejects.toThrow(
+        `${name} must be a valid bounded integer from 1 to 2147483647 (inclusive)`
+      )
     }
   )
 

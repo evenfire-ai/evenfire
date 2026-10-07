@@ -70,5 +70,41 @@
   {
     "suite": "codexLlmProxyClient.test.ts",
     "fullName": "CodexLlmProxyClient keeps wire malformed_json separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X1-shell: an inherited legacy lease does not stop an approved shell (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X1-delivery: an inherited legacy lease is discarded and GFS delivery stays advertised (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "U5-TE: TaskExecutor runs a managed shell with a timeout above the former lease ceiling (#1021) exactly one hour"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "U5-TE: TaskExecutor runs a managed shell with a timeout above the former lease ceiling (#1021) one millisecond over one hour"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X3-TE: a shell dispatch inside TaskExecutor makes zero GFS download store calls (#1019)"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "legacy processing leases after #1019 S1: discards an expired foreign-session lease left by a crashed Host and admits downloads"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "legacy processing leases after #1019 S8: a discard whose persist fails before the rename leaves the ledger byte-identical and is retried by the next initialize"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "legacy processing leases after #1019 S8b: a discard whose directory sync fails after the rename warns with an unknown outcome and does not count the discard"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "legacy processing leases after #1019 S9: reports the current quarantined-record count after reconcile without double counting across boots"
   }
 ]

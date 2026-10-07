@@ -189,27 +189,44 @@ describe('GFS runtime bootstrap', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('U9: logs that recovery is required when initialize succeeds but the store is unavailable', async () => {
+  it('U9: logs an error and stops the periodic lifecycle when the store becomes unavailable after initialize', async () => {
+    vi.useFakeTimers()
     const initialize = vi.spyOn(GfsDownloadStore.prototype, 'initialize')
-    vi.spyOn(GfsDownloadStore.prototype, 'isAvailable').mockReturnValue(false)
     const error = vi.spyOn(logger, 'error')
+    let sweeps = 0
+    // The first sweep runs against the real, available store; a failed persist
+    // during it is what makes a real store unavailable (`unsafe`).
+    const cleanup = vi
+      .spyOn(GfsDownloadStore.prototype, 'cleanupExpired')
+      .mockImplementation(async () => {
+        sweeps += 1
+      })
     const runtime = await bootstrapGfsRuntime(await root())
     runtimes.push(runtime)
-
-    expect(initialize).toHaveBeenCalledOnce()
     await expect(initialize.mock.results[0]!.value).resolves.toBeUndefined()
-    const recoveryLogs = error.mock.calls.filter(([, message]) =>
-      message.includes('operator recovery is required')
+    // initialize() sweeps once itself; the lifecycle's first sweep is the second.
+    for (let turn = 0; turn < 20 && sweeps < 2; turn += 1) await Promise.resolve()
+    expect(cleanup).toHaveBeenCalledTimes(2)
+    expect(runtime.store.isAvailable()).toBe(true)
+    expect(vi.getTimerCount()).toBe(1)
+
+    vi.spyOn(runtime.store, 'isAvailable').mockReturnValue(false)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    const stopLogs = error.mock.calls.filter(
+      ([, message]) => typeof message === 'string' && message.includes('no longer available')
     )
-    expect(recoveryLogs).toEqual([
+    expect(stopLogs).toEqual([
       [
         { component: 'gfs-runtime', available: false },
-        'GFS download store initialized but is not available; operator recovery is required and managed GFS delivery is disabled',
+        'GFS download store is no longer available; periodic cleanup stopped and managed GFS operations are disabled',
       ],
     ])
+    // Witness: the lifecycle ran its first sweep; it sweeps and schedules nothing more.
+    expect(cleanup).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('closes initialized ownership even when quarantine makes the store unavailable', async () => {
+  it('closes initialized ownership even when a failed persist has made the store unavailable', async () => {
     const runtime = await bootstrapGfsRuntime(await root())
     runtimes.push(runtime)
     const close = vi.spyOn(runtime.store, 'close')

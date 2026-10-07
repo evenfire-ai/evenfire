@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from 'child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { recordGfsShellOutputLimit } from '../../internalTools/gfsDownloadMetrics'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../llm/registryCore'
+import { logger } from '../../logger'
 import { verifyManagedCallerRootPath } from '../../workspace/callerRootBinding'
 import { ToolError, ToolErrorCode } from '../errors'
 import { ExecutionContext, Tool } from '../interfaces'
@@ -17,6 +18,10 @@ import { SHELL_SIGKILL_GRACE_MS, SHELL_TIMEOUT_CLEANUP_MS } from './shellTimeout
 // sandbox: POSIX permissions / a read-only mount remain the OS backstop.
 const STATE_DB_COMMAND_PATTERN =
   /(^|[^A-Za-z0-9_.-])state\.db(-wal|-shm)?([^A-Za-z0-9_]|$)|\.clerum-state(\/|[^A-Za-z0-9_.-]|$)/
+
+// Node/libuv error codes (E2BIG, ENOMEM, ERR_INVALID_ARG_VALUE) are fixed
+// identifiers; anything else is not echoed to the model.
+const SPAWN_ERROR_CODE_PATTERN = /^[A-Z0-9_]+$/
 
 function truncateUtf8Bytes(value: string, maximumBytes: number): string {
   if (maximumBytes <= 0) return ''
@@ -212,6 +217,24 @@ export class ShellTool implements Tool {
       }
     }
 
+    // A NUL byte in an env value (e.g. a ConfigStore secret, which BasicSafety
+    // never sees, #1020) makes spawn() throw ERR_INVALID_ARG_VALUE with up to
+    // 128 characters of the raw value in its message. Reject it here and name
+    // only the key, so no part of the value reaches the model or the logs.
+    for (const [key, value] of Object.entries(safeEnv)) {
+      if (value.includes('\0')) {
+        logger.error(
+          { component: 'ShellTool', errorCode: 'ENV_VALUE_CONTAINS_NUL' },
+          'Shell command failed to start'
+        )
+        return {
+          content: `Command failed to start: environment variable ${key} contains a NUL character`,
+          duration_ms: Date.now() - startTime,
+          is_error: true,
+        }
+      }
+    }
+
     return new Promise<ToolOutput>(resolve => {
       // detached: true makes the child a process group leader so we can kill
       // the whole group (shell + grandchildren like `sleep`) with -pid signal.
@@ -224,11 +247,25 @@ export class ShellTool implements Tool {
           detached: true,
         })
       } catch (error) {
-        // spawn() throws synchronously for invalid arguments, e.g. a NUL byte in
-        // a dynamic env value that BasicSafety never sees (#1020). No process
-        // exists, so this is a start failure reported as an error result.
+        // spawn() throws synchronously for invalid arguments and for most libuv
+        // errors (E2BIG for an oversized command, ENOMEM under memory pressure).
+        // No process exists, so this is a start failure reported as an error
+        // result. Node error messages can embed argument and env values, so
+        // only a well-formed error code is reported, never the message.
+        const rawCode = (error as NodeJS.ErrnoException | undefined)?.code
+        const errorCode =
+          typeof rawCode === 'string' && SPAWN_ERROR_CODE_PATTERN.test(rawCode)
+            ? rawCode
+            : undefined
+        logger.error(
+          { component: 'ShellTool', errorCode: errorCode ?? 'UNKNOWN' },
+          'Shell command failed to start'
+        )
         resolve({
-          content: `Command failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          content:
+            errorCode === undefined
+              ? 'Command failed to start'
+              : `Command failed to start: ${errorCode}`,
           duration_ms: Date.now() - startTime,
           is_error: true,
         })

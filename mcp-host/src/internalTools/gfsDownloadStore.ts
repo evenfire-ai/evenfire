@@ -7,8 +7,8 @@ import type { GfsImageSource } from '../visualInput/policy'
 import {
   recordGfsDownloadExpiry,
   recordGfsDownloadQuota,
-  recordGfsInheritedQuarantinedRecords,
   recordGfsLegacyProcessingLeasesDiscarded,
+  setGfsQuarantinedRecords,
 } from './gfsDownloadMetrics'
 import {
   GFS_FILE_LIMITS,
@@ -21,6 +21,8 @@ import {
   verifyPrivateStoreDirectory,
 } from './gfsStorePrivateFiles'
 import { GfsStoreWriterLease, GfsStoreWriterOwnershipError } from './gfsStoreWriterLease'
+
+const GFS_DOWNLOAD_STORE_LOG_COMPONENT = 'GfsDownloadStore'
 
 export type GfsDownloadStoreErrorCode =
   | 'caller_mismatch'
@@ -391,7 +393,6 @@ export class GfsDownloadStore {
         // truncated ledger fails closed.
         this.ledger = parseLedger(raw)
         await this.discardLegacyProcessingLeases()
-        this.reportInheritedQuarantine()
       } else if (createdStoreRoot) {
         // Genuinely new store directory: make the durable schema-1 ledger exist
         // before reconciliation or any transfer exposure, so a ledger missing
@@ -407,6 +408,7 @@ export class GfsDownloadStore {
       this.initialized = true
       await this.cleanupExpired()
       await this.persist()
+      this.reportQuarantine()
     } catch (error) {
       this.initialized = false
       await this.releaseWriterLease()
@@ -1183,9 +1185,14 @@ export class GfsDownloadStore {
    * #1019: shell_exec no longer holds processing leases, so no lease in a
    * ledger written by an earlier build protects an executor of this boot. A
    * lease left by a crashed Host would otherwise fence the store forever. The
-   * field is removed durably before reconciliation; the warning and the
-   * counter are emitted only after that removal is persisted, so a failed
-   * persist leaves the ledger untouched and initialize rejects.
+   * field is removed durably before reconciliation. The confirmed warning and
+   * the counter are emitted only after that removal is persisted. A failed
+   * persist restores the in-memory map and initialize rejects, but the ledger
+   * on disk is not necessarily untouched: `persist` can fail after the rename
+   * (the directory sync), when the lease-free ledger is already the visible
+   * file and no later boot will see the leases again. That outcome is logged
+   * as unknown and never counted, because the counter counts confirmed
+   * discards only.
    */
   private async discardLegacyProcessingLeases(): Promise<void> {
     const legacy = this.ledger.processingLeases
@@ -1198,30 +1205,40 @@ export class GfsDownloadStore {
       await this.persist()
     } catch (error) {
       this.ledger.processingLeases = legacy
+      logger.warn(
+        {
+          component: GFS_DOWNLOAD_STORE_LOG_COMPONENT,
+          legacyProcessingLeases: discarded,
+          outcome: 'unknown',
+        },
+        `GFS download store could not confirm the discard of ${discarded} legacy processing lease(s) at initialize; the discard may already be visible on disk because the persist can fail after the ledger rename`
+      )
       throw error
     }
     logger.warn(
-      { discarded },
+      { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, discarded },
       `GFS download store discarded ${discarded} legacy processing lease(s) at initialize`
     )
     recordGfsLegacyProcessingLeasesDiscarded(discarded)
   }
 
   /**
-   * Records an earlier boot quarantined stay charged to quota (`usageFor`).
-   * They are reported so an operator can recover them; this boot never
-   * reuses or deletes them.
+   * Quarantined records stay charged to quota (`usageFor`); this store never
+   * reuses or deletes them. Called once per initialize, after reconcile and
+   * the final persist, so the count includes records this boot quarantined.
+   * The gauge carries the current count, so repeated boots never add the same
+   * backlog twice.
    */
-  private reportInheritedQuarantine(): void {
+  private reportQuarantine(): void {
     const quarantined = Object.values(this.ledger.records).filter(
       record => record.state === 'quarantined'
     ).length
+    setGfsQuarantinedRecords(quarantined)
     if (quarantined === 0) return
     logger.warn(
-      { quarantined },
-      `GFS download store found ${quarantined} record(s) quarantined by an earlier boot; they stay charged to quota until operator recovery`
+      { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, quarantined },
+      `GFS download store holds ${quarantined} quarantined record(s) charged to quota. Operator recovery reclassifies only copies whose content still matches their recorded hash; any other quarantined copy stays charged, and the operator recovery tool cannot release it`
     )
-    recordGfsInheritedQuarantinedRecords(quarantined)
   }
 
   private async reconcile(): Promise<void> {

@@ -341,9 +341,11 @@ function getEnv(key: string, defaultValue?: string): string | undefined {
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 /**
- * Upper bound for a tool timeout: executeWithTimeout arms the shell's cleanup
- * timer on top of the execution deadline and rejects a sum above the timer
- * range, so a larger value would fail every shell call at runtime (#1021).
+ * Upper bound for a tool timeout: it reserves the shell's declared cleanup
+ * budget below the timer range. executeWithTimeout arms no cleanup timer for
+ * the shell (it joins abort settlement), but it rejects any timeout whose sum
+ * with that budget exceeds the timer range, so a larger value would fail every
+ * shell call at runtime (#1021).
  */
 const MAX_TOOL_TIMEOUT_MS = MAX_TIMER_DELAY_MS - SHELL_TIMEOUT_CLEANUP_MS
 
@@ -356,13 +358,11 @@ function getExecutionLimit(
   const raw = getEnv(key)
   if (raw === undefined) return defaultValue
   const value = Number(raw)
-  if (
-    !/^\d+$/.test(raw) ||
-    !Number.isSafeInteger(value) ||
-    value < (allowZero ? 0 : 1) ||
-    value > maximum
-  ) {
-    throw new Error(`${key} must be a valid bounded integer`)
+  const minimum = allowZero ? 0 : 1
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(
+      `${key} must be a valid bounded integer from ${minimum} to ${maximum} (inclusive)`
+    )
   }
   return value
 }

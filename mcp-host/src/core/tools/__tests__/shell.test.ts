@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawn } from 'child_process'
 import { existsSync } from 'fs'
 import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../../llm/registryCore'
+import { logger } from '../../../logger'
 import { executeWithTimeout } from '../../orchestration/toolExecutionTimeout'
 import { ShellTool } from '../shell'
 
@@ -244,51 +245,49 @@ describe('ShellTool', () => {
     expect(r2.content).not.toContain('first-run')
   })
 
-  // Skipped on CI: Ubuntu GH Actions runners (dash as /bin/sh) exhibit unreliable
-  // process-group kill propagation to `sleep` grandchildren even after SIGKILL grace.
-  // Production behavior is verified by manual minikube e2e + code review.
-  it.skipIf(process.env.CI)(
-    'kills grandchild processes (e.g. sleep in a semicolon chain) via process-group kill',
-    async () => {
-      // Spawn a long-sleeping grandchild and write its PID before waiting on it.
-      // Checking the PID directly avoids `pgrep` false positives from the probe
-      // command itself and from platform-specific process-list behavior.
-      const pidFile = join(workspacePath, 'grandchild.pid')
-      const tool = new ShellTool(workspacePath, 500, ['PATH'])
+  // Runs on CI like U6 below. It used to be skipped there because the tool
+  // resolved on leader close while a `sleep` grandchild could still be alive.
+  // Since 9b1c29e88 the close handler SIGKILLs the process group and resolves
+  // only after the group no longer exists (or reports
+  // process_group_termination_failed), so that skip reason no longer applies.
+  it('kills grandchild processes (e.g. sleep in a semicolon chain) via process-group kill', async () => {
+    // Spawn a long-sleeping grandchild and write its PID before waiting on it.
+    // Checking the PID directly avoids `pgrep` false positives from the probe
+    // command itself and from platform-specific process-list behavior.
+    const pidFile = join(workspacePath, 'grandchild.pid')
+    const tool = new ShellTool(workspacePath, 500, ['PATH'])
 
-      // Run the tool — timeout fires at 500ms.
-      const result = await tool.execute({
-        command: `echo start; sleep 60 & echo $! > ${pidFile}; wait`,
-      })
+    // Run the tool — timeout fires at 500ms.
+    const result = await tool.execute({
+      command: `echo start; sleep 60 & echo $! > ${pidFile}; wait`,
+    })
 
-      expect(result.is_error).toBe(true)
-      expect(result.content).toContain('start')
-      expect(result.content).toContain('timeout')
+    expect(result.is_error).toBe(true)
+    expect(result.content).toContain('start')
+    expect(result.content).toContain('timeout')
 
-      // After the tool resolves, give the kernel a moment to clean up.
-      // Then assert the captured `sleep` PID no longer exists.
-      const pid = Number((await readFile(pidFile, 'utf8')).trim())
-      expect(Number.isInteger(pid)).toBe(true)
-      expect(pid).toBeGreaterThan(0)
+    // After the tool resolves, give the kernel a moment to clean up.
+    // Then assert the captured `sleep` PID no longer exists.
+    const pid = Number((await readFile(pidFile, 'utf8')).trim())
+    expect(Number.isInteger(pid)).toBe(true)
+    expect(pid).toBeGreaterThan(0)
 
-      // Poll up to 8s for grandchild to be reaped. SIGTERM → SIGKILL grace is 5s,
-      // so the window must exceed that to cover slow runners where SIGTERM may
-      // not reach the grandchild immediately.
-      let grandchildAlive = true
-      for (let i = 0; i < 80; i++) {
-        await new Promise(r => setTimeout(r, 100))
-        try {
-          process.kill(pid, 0)
-        } catch {
-          grandchildAlive = false
-          break
-        }
+    // Poll up to 8s for grandchild to be reaped. SIGTERM → SIGKILL grace is 5s,
+    // so the window must exceed that to cover slow runners where SIGTERM may
+    // not reach the grandchild immediately.
+    let grandchildAlive = true
+    for (let i = 0; i < 80; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      try {
+        process.kill(pid, 0)
+      } catch {
+        grandchildAlive = false
+        break
       }
+    }
 
-      expect(grandchildAlive).toBe(false)
-    },
-    20_000
-  ) // generous test timeout — 500ms shell + up to 8s polling
+    expect(grandchildAlive).toBe(false)
+  }, 20_000) // generous test timeout — 500ms shell + up to 8s polling
 
   describe('dynamicEnvProvider — ConfigStore snapshot merge', () => {
     it('exposes ConfigStore values to the subprocess shell at spawn time', async () => {
@@ -676,20 +675,97 @@ describe('ShellTool without the GFS download store (#1019)', () => {
 })
 
 describe('ShellTool start failures (#1020)', () => {
+  let loggerError: MockInstance<typeof logger.error>
+
   beforeEach(() => {
     vi.mocked(spawn).mockClear()
+    loggerError = vi.spyOn(logger, 'error').mockImplementation(() => {})
   })
 
-  it('U3: resolves a synchronous spawn throw from a NUL env value as a start failure', async () => {
-    const tool = new ShellTool(workspacePath, 5_000, ['PATH'], () => ({ BROKEN: 'a\0b' }))
+  afterEach(() => {
+    loggerError.mockRestore()
+  })
+
+  // Synthetic secret-looking value; the text on both sides of the NUL must
+  // never reach the result or the log.
+  const SECRET_HEAD = 'opaque-integration-secret-7f3a9c'
+  const SECRET_TAIL = 'tail-after-nul-41be'
+
+  it('U3: rejects a NUL env value before spawn and names only the variable key', async () => {
+    const tool = new ShellTool(workspacePath, 5_000, ['PATH'], () => ({
+      INTEGRATION_TOKEN: `${SECRET_HEAD}\0${SECRET_TAIL}`,
+    }))
     const result = await tool.execute({ command: 'printf never-runs' })
-    expect(result.is_error).toBe(true)
-    expect(result.content).toMatch(/^Command failed to start: /)
-    expect(result.content).not.toContain('never-runs')
+    expect(result).toMatchObject({
+      is_error: true,
+      content:
+        'Command failed to start: environment variable INTEGRATION_TOKEN contains a NUL character',
+    })
     expect(result.duration_ms).toBeGreaterThanOrEqual(0)
-    // Witness: spawn was reached and threw; no process exists to report on.
+    for (const fragment of [SECRET_HEAD, SECRET_TAIL, SECRET_HEAD.slice(0, 8), '\\x00', '\0']) {
+      expect(result.content).not.toContain(fragment)
+    }
+    // Witness: the rejection was logged once with a fixed code and no value.
+    expect(loggerError).toHaveBeenCalledOnce()
+    expect(loggerError.mock.calls[0]![0]).toEqual({
+      component: 'ShellTool',
+      errorCode: 'ENV_VALUE_CONTAINS_NUL',
+    })
+    const logged = JSON.stringify(loggerError.mock.calls[0])
+    expect(logged).not.toContain(SECRET_HEAD.slice(0, 8))
+    expect(logged).not.toContain(SECRET_TAIL)
+    expect(spawn).not.toHaveBeenCalled()
+
+    // Witness: the same tool and key without the NUL does reach spawn.
+    const valid = new ShellTool(workspacePath, 5_000, ['PATH'], () => ({
+      INTEGRATION_TOKEN: SECRET_HEAD,
+    }))
+    const ok = await valid.execute({ command: 'printf runs' })
+    expect(ok).toMatchObject({ is_error: false, content: 'stdout:\nruns' })
+    expect(spawn).toHaveBeenCalledOnce()
+  })
+
+  it('U3b: reports only the error code of a synchronous spawn throw', async () => {
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      throw Object.assign(new Error(`spawn rejected argument ${SECRET_HEAD}`), { code: 'E2BIG' })
+    })
+    const tool = new ShellTool(workspacePath, 5_000, ['PATH'])
+    const result = await tool.execute({ command: 'printf never-runs' })
+    expect(result).toMatchObject({ is_error: true, content: 'Command failed to start: E2BIG' })
+    expect(result.content).not.toContain(SECRET_HEAD.slice(0, 8))
+    expect(result.content).not.toContain('spawn rejected')
+    // Witness: spawn was reached and threw.
     expect(spawn).toHaveBeenCalledOnce()
     expect(vi.mocked(spawn).mock.results[0]!.type).toBe('throw')
+    expect(loggerError).toHaveBeenCalledOnce()
+    expect(loggerError.mock.calls[0]![0]).toEqual({ component: 'ShellTool', errorCode: 'E2BIG' })
+    const logged = JSON.stringify(loggerError.mock.calls[0])
+    expect(logged).not.toContain(SECRET_HEAD.slice(0, 8))
+    expect(logged).not.toContain('spawn rejected')
+  })
+
+  it('U3c: reports a fixed message for a synchronous spawn throw without a well-formed code', async () => {
+    vi.mocked(spawn)
+      .mockImplementationOnce(() => {
+        throw new Error(`spawn rejected argument ${SECRET_HEAD}`)
+      })
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error(`spawn rejected argument ${SECRET_HEAD}`), {
+          code: `bad ${SECRET_TAIL}`,
+        })
+      })
+    const tool = new ShellTool(workspacePath, 5_000, ['PATH'])
+    for (let call = 0; call < 2; call += 1) {
+      const result = await tool.execute({ command: 'printf never-runs' })
+      expect(result).toMatchObject({ is_error: true, content: 'Command failed to start' })
+    }
+    // Witness: both calls reached spawn, threw, and were logged without text.
+    expect(vi.mocked(spawn).mock.results.map(r => r.type)).toEqual(['throw', 'throw'])
+    expect(loggerError.mock.calls.map(call => call[0])).toEqual([
+      { component: 'ShellTool', errorCode: 'UNKNOWN' },
+      { component: 'ShellTool', errorCode: 'UNKNOWN' },
+    ])
+    expect(JSON.stringify(loggerError.mock.calls)).not.toContain(SECRET_TAIL)
   })
 
   it('U4: reports an asynchronous spawn failure (missing cwd) as a start failure', async () => {

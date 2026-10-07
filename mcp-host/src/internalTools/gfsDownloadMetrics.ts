@@ -95,18 +95,17 @@ const gfsLegacyProcessingLeasesDiscardedTotal = getOrCreateCounter({
   labelNames: [] as const as Array<never>,
 })
 
-const gfsInheritedQuarantinedRecordsTotal = getOrCreateCounter({
-  name: 'clerum_gfs_inherited_quarantined_records_total',
-  help: 'GFS download store records found quarantined by an earlier boot at initialize; they stay charged to quota until operator recovery.',
-  labelNames: [] as const as Array<never>,
+const gfsDownloadStoreQuarantinedRecords = getOrCreateGauge({
+  name: 'clerum_gfs_download_store_quarantined_records',
+  help: 'GFS download store records currently quarantined, set at each initialize after reconcile; they stay charged to quota. Operator recovery reclassifies only copies whose content still matches their recorded hash; any other quarantined copy stays charged, and the operator recovery tool cannot release it.',
 })
 
 export function recordGfsLegacyProcessingLeasesDiscarded(count: number): void {
   gfsLegacyProcessingLeasesDiscardedTotal.inc(count)
 }
 
-export function recordGfsInheritedQuarantinedRecords(count: number): void {
-  gfsInheritedQuarantinedRecordsTotal.inc(count)
+export function setGfsQuarantinedRecords(count: number): void {
+  gfsDownloadStoreQuarantinedRecords.set(count)
 }
 
 export function recordGfsDownloadAdmission(outcome: GfsDownloadAdmissionOutcome): void {

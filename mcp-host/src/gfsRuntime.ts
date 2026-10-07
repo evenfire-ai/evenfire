@@ -49,6 +49,17 @@ export async function bootstrapGfsRuntime(
     if (lifecycleTimer) clearTimeout(lifecycleTimer)
     lifecycleTimer = undefined
   }
+  // A store whose initialize() resolved is available; it becomes unavailable
+  // only afterwards, when a persist fails (`unsafe`) or writer ownership is
+  // lost. The periodic lifecycle then ends for good, so that is logged as an
+  // error rather than returning silently.
+  const lifecycleStopped = (): undefined => {
+    logger.error(
+      { component: 'gfs-runtime', available: false },
+      'GFS download store is no longer available; periodic cleanup stopped and managed GFS operations are disabled'
+    )
+    return undefined
+  }
   const cycle = async (kind: LifecycleStep['kind']): Promise<LifecycleStep | undefined> => {
     if (stopped) return
     if (kind === 'retry') {
@@ -75,17 +86,19 @@ export async function bootstrapGfsRuntime(
       }
       if (stopped) return
       logger.info(
-        { component: 'gfs-runtime', attempt: attempts, available: store.isAvailable() },
+        { component: 'gfs-runtime', attempt: attempts },
         'GFS writer retry initialization completed'
       )
     }
-    if (stopped || !store.isAvailable()) return
+    if (stopped) return
+    if (!store.isAvailable()) return lifecycleStopped()
     try {
       await store.cleanupExpired()
     } catch (error) {
       logger.warn({ component: 'gfs-runtime', err: error }, 'GFS download cleanup failed')
     }
-    if (stopped || !store.isAvailable()) return
+    if (stopped) return
+    if (!store.isAvailable()) return lifecycleStopped()
     return { kind: 'cleanup', delayMs: 60 * 60 * 1000 }
   }
   const schedule = (step: LifecycleStep): void => {
@@ -117,12 +130,7 @@ export async function bootstrapGfsRuntime(
 
   try {
     await store.initialize()
-    if (store.isAvailable()) startCycle('cleanup')
-    else
-      logger.error(
-        { component: 'gfs-runtime', available: false },
-        'GFS download store initialized but is not available; operator recovery is required and managed GFS delivery is disabled'
-      )
+    startCycle('cleanup')
   } catch (error) {
     if (transientWriterContention(error)) {
       logger.warn(
@@ -147,8 +155,9 @@ export async function bootstrapGfsRuntime(
       clearLifecycleTimer()
       stopping = (async () => {
         await lifecycleInFlight
-        // Initialization can own a writer while quarantine makes isAvailable()
-        // false. Close unconditionally, including a retry that won during stop.
+        // An initialized store can still own its writer after a failed persist
+        // has made isAvailable() false. Close unconditionally, including a
+        // retry that won during stop.
         await store.close()
       })()
       return stopping

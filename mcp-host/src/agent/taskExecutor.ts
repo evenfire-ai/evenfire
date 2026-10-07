@@ -1045,8 +1045,8 @@ export class TaskExecutor {
 
   /**
    * A retention owner spans preparation, an approval suspension, and cold resume.
-   * Release happens only after this executor reaches a terminal state; inherited
-   * owners are deliberately left quarantined by the store when release is denied.
+   * Release happens only after this executor reaches a terminal state. A failed
+   * release leaves the owner recorded, so its retained records stay protected.
    */
   private settleGfsRetentionOwner(): Promise<void> {
     if (this.state === 'waiting_approval' && !this.abortController.signal.aborted)

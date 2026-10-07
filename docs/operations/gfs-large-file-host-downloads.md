@@ -52,7 +52,7 @@ without discarding the path, checksum, version or retained original.
 | `MCP_HOST_GFS_MAX_FILE_BYTES`                |   `16777216` |         `209715200` | Largest GFS source admitted by MCP Host.  |
 | `MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`        | `1073741824` | deployment-approved | Aggregate retained download budget.       |
 | `MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES` |  `268435456` |    aggregate budget | Per-caller retained download budget.      |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES`     |          `8` |                `64` | Retained completed files per caller.      |
+| `MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES`     |          `8` |                `64` | Retained files per caller, in any state.  |
 | `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY`   |          `1` |                 `2` | Simultaneous active transfers per caller. |
 | `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`            |        `168` |              `8760` | Retention period for a completed copy.    |
 
@@ -105,9 +105,10 @@ retained caller, resource version, size, expiry, private file and checksum. A
 valid copy keeps its download ID, path and expiry without another content
 transfer or quota reservation. Preparation and downloads pin receipts to a
 trusted task owner while its model, pending approval or execution can still use
-them. Reuse adds an owner without replacing another task's pin. A terminal task
-releases its pin only after its executions settle. A positively absent copy may
-release its charge; corrupt or ambiguous copies remain charged until recovery.
+them. Reuse adds an owner without replacing another task's pin. A task releases
+its pin when its executor reaches a terminal state. A positively absent copy may
+release its charge; corrupt or ambiguous copies remain charged (see
+[Retention, quotas, and recovery](#retention-quotas-and-recovery)).
 A replacement needs fresh GFS authorization.
 
 After a clean v2 writer restart, pins alone do not disable delivery. Fresh remote authorization and source version, size,
@@ -128,9 +129,13 @@ to recover access.
 - `shell_exec` never calls the GFS download store (#1019). It does not acquire
   a processing lease, does not depend on `store.isAvailable()`, and keeps
   running while the store is recovery-required. When a Host-owned store exists,
-  the shell stays bound to the verified caller root and keeps forced live
-  approval; before every command it re-verifies that the caller root is still
-  canonical. That check is per-user directory scoping, not store state.
+  the shell stays bound to the verified caller root; before every command it
+  re-verifies that the caller root is still canonical. That check is per-user
+  directory scoping, not store state. Live approval of `shell_exec` and
+  `clerum__gfs_download` is forced only for channel tasks on a Host with
+  approval enabled, unless the approval configuration sets `shell_exec` to
+  `false`. Cron, internal and approval-disabled tasks keep their existing
+  approval policy.
 - The store's lifecycle (expiry, pressure eviction, quota, `close()`) counts
   only its own transfers and task receipt owners. A running shell does not
   protect a copy and does not delay `close()`.
@@ -140,9 +145,17 @@ Accepted risks of this decoupling:
 1. Expiry or eviction can remove a retained copy while a command is using it.
    A file descriptor that is already open keeps reading; a later open gets
    `ENOENT`.
-2. A command can alter a retained copy. SHA-256 re-verification in
-   `reusableReceipt` and at startup reconciliation quarantines an altered copy
-   instead of reusing it.
+2. A command can alter a retained copy. Two checks prevent its reuse, and they
+   handle it differently:
+   - `reusableReceipt` checks the file type, size, `0600` mode and SHA-256
+     before reuse. On any mismatch, or when the copy cannot be opened, it sets
+     the record to `missing`, deletes its stored checksum and persists the
+     ledger. It writes no log and no metric. The record stays charged; the
+     hourly expiry sweep removes it after its TTL if the Host is still running.
+   - Startup reconciliation re-hashes every `completed` copy and sets an
+     altered one to `quarantined`, keeping its checksum. It also sets every
+     record that is not `completed`, including a `missing` one, to
+     `quarantined`. A quarantined record is never expired or evicted.
 3. The processing lease was never a security boundary: executors share the Host
    UID and run without a sandbox. Live approval, `BasicSafety` validation and
    credential-slot stripping remain the shell's controls.
@@ -181,12 +194,14 @@ shared-UID filesystem races; that remains the Stage 2 boundary.
 - A new store publishes an atomic schema-1 ledger before accepting transfers. Every existing ledger is parsed, including empty content; invalid record or owner maps, and malformed legacy processing-lease maps, are rejected with `corrupt_store_ledger`.
 - A pre-existing store directory with a missing ledger is unknown accounting, including an interrupted first initialization before ledger publication. Startup rejects it and preserves retained bytes for operator recovery instead of silently resetting quota. This can require recovery after a bootstrap interruption.
 - Startup does not reconstruct an accounting directory deleted in its entirety while caller copies remain. Approved shell commands share the Host UID and can destroy this state; whole-store deletion remains outside the recovery guarantee and requires operator inventory of retained copies.
-- Admission may evict the oldest verified completed copies that have no active
-  transfer or task receipt owner. The complete eviction plan
-  must satisfy both Host and caller quotas before any copy is removed. An
-  impossible or invalid request cannot evict another caller's files. Active,
-  pinned, inherited, corrupt and ambiguous entries are never pressure victims.
-  Quota limits still reject a request when no safe complete plan exists.
+- Admission may evict the oldest copies whose record is `completed`, that have
+  no active transfer and no task receipt owner, and whose content re-verifies.
+  The complete eviction plan must satisfy both Host and caller quotas before any
+  copy is removed. A caller-quota denial can only evict that caller's own
+  copies. Records in any other state (`transferring`, `missing`,
+  `cleanup_failed`, `quarantined`), pinned or active copies, and copies that
+  fail verification are never pressure victims. Quota limits still reject a
+  request when no safe complete plan exists.
 - Before pressure effects, current verified filesystem capacity must cover the
   incoming block-rounded reservation, the 16 MiB safety margin and pending
   active reservations. Apparent file length and allocated blocks do not prove
@@ -203,16 +218,28 @@ shared-UID filesystem races; that remains the Stage 2 boundary.
   initialize, after the ledger is parsed and before reconciliation. No lease in
   an older ledger can protect an executor of the current boot, and a lease left
   by a crashed Host would otherwise fence the store forever. The removal is
-  persisted first; only after that persist succeeds does the Host log a warning
-  with the count and increment
-  `clerum_gfs_legacy_processing_leases_discarded_total`. If the persist fails,
-  initialize rejects, the ledger keeps the lease, and nothing is logged or
-  counted; the next initialize retries. Records that protected copies are then
-  reconciled like any other: an intact completed copy is reusable, an altered
-  or unfinished one is quarantined.
-- Records an earlier boot left quarantined are counted at initialize, logged
-  and added to `clerum_gfs_inherited_quarantined_records_total`. They stay
-  charged to quota until operator recovery.
+  persisted first. When that persist succeeds, the Host logs a warning with the
+  count and increments `clerum_gfs_legacy_processing_leases_discarded_total`.
+  When it fails, initialize rejects and the Host logs a `warn` with outcome
+  `unknown` and the lease count; the counter is not incremented. The outcome is
+  unknown because the persist can fail after the rename, while syncing the
+  store directory: the lease-free ledger may already be the one on disk. In
+  that case the next initialize finds no leases and reports no discard, so the
+  `unknown` warning is the only record of it. The counter therefore counts only
+  confirmed discards. Records that protected copies are then reconciled like
+  any other: an intact completed copy is reusable, an altered or unfinished one
+  is quarantined.
+- At the end of initialize, after reconciliation and the final persist, the
+  Host counts every `quarantined` record in the ledger, including those this
+  boot quarantined, and sets the gauge
+  `clerum_gfs_download_store_quarantined_records` to that count. The gauge
+  holds the current count and does not accumulate across boots. When the count
+  is above zero the Host logs the warning
+  `GFS download store holds <n> quarantined record(s) charged to quota`. Quarantined records stay charged to
+  quota and are never expired, evicted or reused. Operator recovery can return
+  one to `completed` only when its published copy still matches its stored size
+  and checksum; it cannot reclassify or remove a quarantined record whose
+  content no longer matches its checksum (recovery step 5).
 - Shutdown stops new admission, drains active transfers where possible, and leaves unproven recovery state protected.
 - Pending and queued admission rechecks shutdown after asynchronous validation and persistence. Shutdown rechecks active ownership before releasing the writer lease.
 
@@ -234,9 +261,11 @@ owners, groups, symlinks and hard links remain errors.
 A store initialization failure leaves safe RPC capabilities running and records
 a recovery-required download state. Caller workspace binding remains in force.
 Managed shell execution keeps the verified caller root and continues; it cannot
-fall back to the Host's shared workspace. When initialization succeeds but the
-store is not available, the runtime logs an error that operator recovery is
-required and managed GFS delivery is disabled.
+fall back to the Host's shared workspace. A store whose initialization
+succeeded is available. It becomes unavailable only afterwards, when a ledger
+persist fails or writer ownership is lost. The periodic cleanup lifecycle then
+stops, and the runtime logs the error `GFS download store is no longer
+available; periodic cleanup stopped and managed GFS operations are disabled`.
 
 Verified contention with an active v2 writer and a valid unchanged ledger is a
 temporary state. The runtime retries that case up to 60 times at two-second
@@ -247,10 +276,12 @@ starts after successful acquisition, including acquisition after retry.
 Shutdown cancels scheduling, joins outstanding work and closes held writer
 ownership even when delivery is unavailable.
 
-Reuse verifies the checksum of a retained completed copy under store
-serialization, and startup reconciliation verifies every retained completed
-copy. Their cost grows with retained caller bytes; the default caller budget is
-256 MiB. This correctness check has not been benchmarked on every supported PVC.
+Reuse verifies the checksum of one retained completed copy under store
+serialization; its cost is the size of that one copy.
+Startup reconciliation hashes every retained completed copy of every caller, so
+its cost is bounded by the Host budget, 1024 MiB by default
+(`MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`). This correctness check has not been
+benchmarked on every supported PVC.
 
 A pending task pin can survive a Host restart and protect bytes beyond TTL.
 If the task never resumes, use the operator inventory and exact terminal-owner
@@ -277,8 +308,15 @@ The global `/metrics` endpoint exposes fixed-cardinality instruments:
 - `clerum_gfs_download_quota_total{scope,reason}`
 - `clerum_gfs_download_expiry_total{outcome}`
 - `clerum_gfs_shell_output_limits_total{outcome}`
-- `clerum_gfs_legacy_processing_leases_discarded_total` (legacy leases removed at initialize)
-- `clerum_gfs_inherited_quarantined_records_total` (records an earlier boot quarantined)
+- `clerum_gfs_legacy_processing_leases_discarded_total` (counter of legacy
+  processing leases whose discard at initialize was persisted; an unconfirmed
+  discard is logged with outcome `unknown` and not counted)
+- `clerum_gfs_download_store_quarantined_records` (gauge, no labels: GFS
+  download store records currently quarantined, set at each initialize after
+  reconcile; they stay charged to quota. Operator recovery reclassifies only
+  copies whose content still matches their recorded hash; any other
+  quarantined copy stays charged, and the operator recovery tool cannot
+  release it.)
 
 Labels contain bounded enums only. Caller, resource, download, command, path, correlation IDs, filenames, credentials, and raw output are prohibited as metric labels.
 
@@ -301,6 +339,39 @@ Labels contain bounded enums only. Caller, resource, download, command, path, co
 
 If limits are lowered, existing retained copies remain charged and new admissions are rejected until usage falls below the new policy.
 
+### Records quarantined by builds before the #1022 fix
+
+A build before this fix quarantined every record on any boot whose ledger held
+a processing lease from an earlier writer session, including intact completed
+copies. The fixed build discards the leases but does not reclassify those
+records. A quarantined record is never expired and never evicted, and it stays
+charged to quota. The defaults are 8 files (`MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES`)
+and 256 MiB (`MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES`) per caller, and 64
+files (fixed) and 1024 MiB (`MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`) per Host.
+Pressure eviction cannot free them. A caller whose quarantined records alone
+fill its limit gets `caller_quota_exceeded` on every new download; once
+quarantined records alone fill the Host limit, every caller gets
+`host_quota_exceeded`.
+
+After the first rollout of the fixed build:
+
+1. Read the startup warning `GFS download store holds <N> quarantined
+record(s) charged to quota` and the gauge
+   `clerum_gfs_download_store_quarantined_records`. N is the number of
+   quarantined records in the ledger after startup reconciliation; it includes
+   records the old build quarantined and any copy this boot found altered or
+   unfinished.
+2. Compare N, and the bytes those records hold, with the quotas above before
+   running any GFS download check. A caller already at a limit fails every new
+   download until its quarantined records are released.
+3. To release them, run the
+   [explicit operator recovery protocol](#explicit-operator-recovery-protocol)
+   under a physical fence. With no lease left in the ledger, every quarantined
+   record whose published copy still matches its stored size and checksum
+   returns to `completed`, and partial copies without a checksum can be
+   selected for removal. A record whose content no longer matches its checksum
+   stays quarantined and charged (step 5).
+
 ## Explicit operator recovery protocol
 
 The local operator module exports `inspectGfsStoreRecovery` and
@@ -319,22 +390,35 @@ contents, filenames, caller identities, commands or credentials.
    whole operation and recheck it before filesystem effects.
 3. Inspect and review the three hashes and exact selection IDs. Unknown or
    unjournaled caches fail inventory even with an empty ledger. Select only
-   task owners proved terminal and explicitly approved unused partial copies.
-   The default preserves copies and charges. Since #1019 the Host discards
-   legacy processing leases itself at initialize, so the operator no longer
-   settles them to restore availability; `settledProcessingLeaseIds` remains
-   accepted only for a ledger written by an older build that is inspected
-   before any current Host opens it.
+   task owners proved terminal and explicitly approved unused partial copies
+   (`removablePartialIds`). Select every legacy processing lease listed in
+   `processingLeaseIds` as settled. Since #1019 no executor holds a processing
+   lease, and a current Host discards any legacy lease at initialize, so a
+   legacy lease protects nothing once the fence of step 2 holds. A ledger
+   inspected after a current Host has opened it has no leases, and the list is
+   empty.
+   Leaving any lease unselected sets every record to `quarantined`, including
+   intact published copies, and writes the remaining leases back to the ledger.
+   The next Host discards those leases but keeps the quarantine, and every
+   retained copy stays charged until a second fenced recovery run.
 4. Call `recoverGfsStoreUnderPhysicalFence` with those expected hashes,
-   any `settledProcessingLeaseIds` from step 3, optional `terminalReceiptOwnerIds` and
+   `settledProcessingLeaseIds` (every ID from step 3, or `[]` when the ledger
+   has none), optional `terminalReceiptOwnerIds` and
    `removeSettledTransferIds`, and the real `withPhysicalFence` provider.
    A constant successful callback or an environment flag is not a provider.
 5. Verify the returned before/after receipt and preserved published copies.
-   Only an exact verified partial directory can be removed; its charge is
-   released after positive absence. A published `source` remains protected even
-   when a crash left its ledger entry without a completed state or checksum.
-   Verified copies with their original checksum can become reusable; corrupt
-   copies remain charged and quarantined.
+   When no lease remains, a record whose published `source` matches its stored
+   size and checksum becomes `completed` and reusable, whatever its previous
+   state, including `quarantined`. Every other record becomes or stays
+   `quarantined`. Only an exact verified partial directory can be removed: a
+   record that is not `completed`, has no stored checksum and has no published
+   `source`. Its charge is released after positive absence. A published
+   `source` remains protected even when a crash left its ledger entry without a
+   completed state or checksum.
+   Recovery cannot release a quarantined record that keeps a checksum its
+   content no longer matches, or whose published `source` is gone: it neither
+   reclassifies it nor accepts it for removal (`invalid_selection`). The
+   operator module has no path that releases that charge.
 6. Reopen the Host on the same retained PVC. Prove availability, authenticated
    reuse, source/version equality and quotas before restoring ordinary traffic.
    On interruption, preserve the last receipt and accounting objects, obtain a

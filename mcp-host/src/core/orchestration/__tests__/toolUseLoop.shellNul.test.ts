@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { spawn } from 'child_process'
 import { mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -13,17 +12,10 @@ import { SimpleEventEmitter } from '../eventEmitter'
 import { buildLoopConfig } from '../loopConfig'
 import { runToolUseLoop } from '../toolUseLoop'
 
-// Real processes would run; the spy only observes whether one was started.
-vi.mock('child_process', async importOriginal => {
-  const actual = await importOriginal<typeof import('child_process')>()
-  return { ...actual, spawn: vi.fn(actual.spawn) }
-})
-
 let workspacePath: string
 
 beforeEach(async () => {
   workspacePath = await mkdtemp(join(tmpdir(), 'clerum-shell-nul-loop-'))
-  vi.mocked(spawn).mockClear()
 })
 
 afterEach(async () => {
@@ -68,33 +60,36 @@ async function runShellCall(command: string) {
   return { result, blocked, reasoning }
 }
 
+// The loop stops at approval for every shell_exec call, so no process can be
+// spawned in this harness with or without a NUL; a spawn negative here could
+// never fail. What this level proves is that BasicSafety rejects the NUL
+// command before an approval card exists, while the same command without the
+// NUL reaches approval.
 describe('shell_exec NUL commands through the tool loop (#1020)', () => {
-  it('X5: BasicSafety rejects a NUL command before approval and no process is spawned', async () => {
-    const { result, blocked, reasoning } = await runShellCall('printf a\0b')
+  it('X5: BasicSafety rejects a NUL command before approval, the same command without NUL reaches approval', async () => {
+    const rejected = await runShellCall('printf a\0b')
 
-    expect(result.type).not.toBe('need_approval')
-    expect(blocked).toHaveLength(1)
-    expect(blocked[0]!.data).toMatchObject({
+    expect(rejected.result.type).toBe('response')
+    expect(rejected.blocked).toHaveLength(1)
+    expect(rejected.blocked[0]!.data).toMatchObject({
       toolName: 'shell_exec',
       errors: ['shell_exec.command must not contain NUL characters'],
     })
-    // Witness: the loop reached the model again with the validation error as the tool result.
-    expect(reasoning.continueWithToolResults).toHaveBeenCalledOnce()
-    expect(JSON.stringify(vi.mocked(reasoning.continueWithToolResults).mock.calls[0])).toContain(
-      'Parameter validation failed: shell_exec.command must not contain NUL characters'
-    )
-    expect(spawn).not.toHaveBeenCalled()
-  })
+    // The loop reached the model again with the validation error as the tool result.
+    expect(rejected.reasoning.continueWithToolResults).toHaveBeenCalledOnce()
+    expect(
+      JSON.stringify(vi.mocked(rejected.reasoning.continueWithToolResults).mock.calls[0])
+    ).toContain('Parameter validation failed: shell_exec.command must not contain NUL characters')
 
-  it('X5 witness: the same command without NUL reaches approval', async () => {
-    const { result, blocked } = await runShellCall('printf ab')
-
-    expect(blocked).toEqual([])
-    expect(result.type).toBe('need_approval')
-    if (result.type === 'need_approval') {
-      expect(result.approval.tool_name).toBe('shell_exec')
-      expect(result.approval.tool_call_id).toBe('tc_nul')
+    // Witness: without the NUL, the identical call produces an approval card,
+    // so the absence of one above is caused by the NUL rejection.
+    const approved = await runShellCall('printf ab')
+    expect(approved.blocked).toEqual([])
+    expect(approved.result.type).toBe('need_approval')
+    if (approved.result.type === 'need_approval') {
+      expect(approved.result.approval.tool_name).toBe('shell_exec')
+      expect(approved.result.approval.tool_call_id).toBe('tc_nul')
     }
-    expect(spawn).not.toHaveBeenCalled()
+    expect(approved.reasoning.continueWithToolResults).not.toHaveBeenCalled()
   })
 })

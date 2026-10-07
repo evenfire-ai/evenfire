@@ -693,7 +693,10 @@ describe('S6: expiry and admission without processing-lease exemptions (#1019)',
     )
   }
 
-  it('removes an expired record even after a shell read it', async () => {
+  // Store behaviour only: this shell has no store reference, so the test shows
+  // that expiry is unaffected by a shell run that read the copy. Decoupling of
+  // the shell from the store is proven by the TaskExecutor-level X3-TE test.
+  it('removes an expired record even after a shell read it: expiry is unaffected by the shell run', async () => {
     const receipt = await publishFixture()
     const shell = new ShellTool(callerRoot, 5_000, ['PATH'], () => ({}), undefined, true)
     const read = await shell.execute({ command: `cat ${JSON.stringify(receipt.path)}` })
@@ -767,12 +770,14 @@ describe('S6: expiry and admission without processing-lease exemptions (#1019)',
     const expired = await publishFixture()
     const callerBRoot = path.join(hostRoot, 'users', 'caller-b')
     await fs.mkdir(callerBRoot, { recursive: true, mode: 0o700 })
+    // Caller B's expiry is derived from caller A's, so the mocked clock below
+    // is strictly before it however fast the fixtures run.
     const callerBTransfer = await store.createTransfer({
       callerIdentity: 'caller-b',
       callerWorkspacePath: callerBRoot,
       source,
       sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      expiresAt: new Date(Date.parse(expired.expiresAt) + 60_000).toISOString(),
     })
     await fs.writeFile(path.join(callerBRoot, callerBTransfer.partialPath), 'fixture')
     const callerBReceipt = await store.publish(

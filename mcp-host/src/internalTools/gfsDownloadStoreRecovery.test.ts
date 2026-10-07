@@ -138,7 +138,7 @@ async function fixture(
 }
 
 const DISCARDED_COUNTER = 'clerum_gfs_legacy_processing_leases_discarded_total'
-const QUARANTINED_COUNTER = 'clerum_gfs_inherited_quarantined_records_total'
+const QUARANTINED_GAUGE = 'clerum_gfs_download_store_quarantined_records'
 const FOREIGN_WRITER_SESSION = '33333333-3333-4333-8333-333333333333'
 const LEGACY_LEASE_ID = '44444444-4444-4444-8444-444444444444'
 const otherSource: GfsImageSource = {
@@ -211,7 +211,10 @@ describe('legacy processing leases after #1019', () => {
     expect(onDisk).not.toHaveProperty('processingLeases')
     expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
     expect(discardWarnings(warn.mock.calls)).toEqual([
-      [{ discarded: 1 }, 'GFS download store discarded 1 legacy processing lease(s) at initialize'],
+      [
+        { component: 'GfsDownloadStore', discarded: 1 },
+        'GFS download store discarded 1 legacy processing lease(s) at initialize',
+      ],
     ])
     expect(reopened.isAvailable()).toBe(true)
     const receipt = await fixture(reopened)
@@ -287,7 +290,10 @@ describe('legacy processing leases after #1019', () => {
     expect(discardWarnings(warn.mock.calls)).toEqual([])
   })
 
-  it('S5: close() is blocked only by its own transfers, never by a running shell', async () => {
+  // Store behaviour only: this shell has no store reference, so the test shows
+  // that close() is unaffected by a concurrent shell run. Decoupling of the
+  // shell from the store is proven by the TaskExecutor-level X3-TE test.
+  it('S5: close() is blocked only by its own transfers and is unaffected by a concurrent shell run', async () => {
     const store = freshStore()
     await store.initialize()
     const callerRoot = path.join(root, 'users', 'caller-a')
@@ -325,22 +331,40 @@ describe('legacy processing leases after #1019', () => {
     expect(result.is_error).toBe(true)
   })
 
-  it('S8: an interrupted discard leaves the ledger byte-identical and is retried by the next initialize', async () => {
+  it('S8: a discard whose persist fails before the rename leaves the ledger byte-identical and is retried by the next initialize', async () => {
     await closedStore()
     const raw = await seedLegacyLeases([legacyLease()])
     const warn = vi.spyOn(logger, 'warn')
     const before = await counterValue(DISCARDED_COUNTER)
     const interrupted = freshStore()
-    const persist = vi
-      .spyOn(interrupted as unknown as { persist: () => Promise<void> }, 'persist')
-      .mockRejectedValueOnce(new Error('injected persist failure'))
+    const privateStore = interrupted as unknown as {
+      ledger: { processingLeases?: Record<string, unknown> }
+      persist: () => Promise<void>
+      reconcile: () => Promise<void>
+    }
+    let leasesAtFailedPersist: unknown = 'persist not reached'
+    const persist = vi.spyOn(privateStore, 'persist').mockImplementationOnce(async () => {
+      leasesAtFailedPersist = privateStore.ledger.processingLeases
+      throw new Error('injected persist failure')
+    })
+    const reconcile = vi.spyOn(privateStore, 'reconcile')
     await expect(interrupted.initialize()).rejects.toThrow('injected persist failure')
     expect(persist).toHaveBeenCalledTimes(1)
+    // The failing persist is the discard's own: the lease map was already
+    // removed from memory when it ran, and initialize stopped before reconcile.
+    expect(leasesAtFailedPersist).toBeUndefined()
+    expect(reconcile).not.toHaveBeenCalled()
+    expect(privateStore.ledger.processingLeases?.[LEGACY_LEASE_ID]).toBeDefined()
     expect(interrupted.isAvailable()).toBe(false)
     expect(await fs.readFile(ledgerFile(), 'utf8')).toBe(raw)
     expect(JSON.parse(raw).processingLeases[LEGACY_LEASE_ID]).toBeDefined()
     expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(0)
-    expect(discardWarnings(warn.mock.calls)).toEqual([])
+    expect(discardWarnings(warn.mock.calls)).toEqual([
+      [
+        { component: 'GfsDownloadStore', legacyProcessingLeases: 1, outcome: 'unknown' },
+        'GFS download store could not confirm the discard of 1 legacy processing lease(s) at initialize; the discard may already be visible on disk because the persist can fail after the ledger rename',
+      ],
+    ])
 
     const retried = freshStore()
     await retried.initialize()
@@ -349,29 +373,82 @@ describe('legacy processing leases after #1019', () => {
       'processingLeases'
     )
     expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
-    expect(discardWarnings(warn.mock.calls)).toHaveLength(1)
+    expect(
+      discardWarnings(warn.mock.calls).filter(
+        call =>
+          JSON.stringify(call[0]) ===
+          JSON.stringify({ component: 'GfsDownloadStore', discarded: 1 })
+      )
+    ).toHaveLength(1)
   })
 
-  it('S9: counts and logs records an earlier boot quarantined', async () => {
+  it('S8b: a discard whose directory sync fails after the rename warns with an unknown outcome and does not count the discard', async () => {
+    await closedStore()
+    await seedLegacyLeases([legacyLease()])
+    const storeDirectory = await fs.stat(path.join(root, '.gfs-download-store'))
+    const probe = await fs.open(ledgerFile(), 'r')
+    const prototype = Object.getPrototypeOf(probe) as FileHandle
+    await probe.close()
+    const originalSync = prototype.sync
+    let injected = 0
+    // Only the store-directory fsync that follows the ledger rename fails: the
+    // writer lease also syncs this directory, but before the discard the
+    // visible ledger still carries the legacy lease.
+    vi.spyOn(prototype, 'sync').mockImplementation(async function (this: FileHandle) {
+      const info = await this.stat()
+      if (injected === 0 && info.isDirectory() && info.ino === storeDirectory.ino) {
+        const visible = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+        if (!('processingLeases' in visible)) {
+          injected += 1
+          throw Object.assign(new Error('injected directory sync failure'), { code: 'EIO' })
+        }
+      }
+      return originalSync.call(this)
+    })
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue(DISCARDED_COUNTER)
+    const interrupted = freshStore()
+    await expect(interrupted.initialize()).rejects.toThrow('injected directory sync failure')
+    expect(injected).toBe(1)
+    expect(interrupted.isAvailable()).toBe(false)
+    // Witness that the rename happened: the visible ledger is already lease-free.
+    expect(JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))).not.toHaveProperty(
+      'processingLeases'
+    )
+    expect(discardWarnings(warn.mock.calls)).toEqual([
+      [
+        { component: 'GfsDownloadStore', legacyProcessingLeases: 1, outcome: 'unknown' },
+        'GFS download store could not confirm the discard of 1 legacy processing lease(s) at initialize; the discard may already be visible on disk because the persist can fail after the ledger rename',
+      ],
+    ])
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(0)
+  })
+
+  it('S9: reports the current quarantined-record count after reconcile without double counting across boots', async () => {
     const { child, message } = await childStore('transfer')
     expect(message.transferId).toMatch(/^[0-9a-f-]{36}$/)
     await kill(child)
     const warn = vi.spyOn(logger, 'warn')
-    const before = await counterValue(QUARANTINED_COUNTER)
+    const quarantineWarnings = () =>
+      warn.mock.calls.filter(
+        call =>
+          JSON.stringify(call[0]) ===
+          JSON.stringify({ component: 'GfsDownloadStore', quarantined: 1 })
+      )
     const recovering = freshStore()
     await recovering.initialize()
-    // This boot quarantines the interrupted transfer; it inherited none.
+    // The boot that quarantines the interrupted transfer reports it.
     expect(recovering.debugRecord(message.transferId)?.state).toBe('quarantined')
-    expect((await counterValue(QUARANTINED_COUNTER)) - before).toBe(0)
+    expect(await counterValue(QUARANTINED_GAUGE)).toBe(1)
+    expect(quarantineWarnings()).toHaveLength(1)
     await recovering.close()
 
     const next = freshStore()
     await next.initialize()
-    expect((await counterValue(QUARANTINED_COUNTER)) - before).toBe(1)
-    expect(
-      warn.mock.calls.filter(call => JSON.stringify(call[0]) === JSON.stringify({ quarantined: 1 }))
-    ).toHaveLength(1)
+    // The same backlog on the next boot keeps the gauge at 1, not 2.
     expect(next.debugRecord(message.transferId)?.state).toBe('quarantined')
+    expect(await counterValue(QUARANTINED_GAUGE)).toBe(1)
+    expect(quarantineWarnings()).toHaveLength(2)
     expect(next.debugUsage().bytes).toBe(7)
   })
 })
