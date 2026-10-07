@@ -1878,20 +1878,6 @@ export class AppService {
         const environmentUnchanged =
           getActiveEnvKey() === oldEnvKey &&
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
-        if (this.sessionGeneration !== transitionGeneration) {
-          if (!environmentUnchanged) {
-            this.clearAuthenticatedSessionState()
-            await this.tokenStore
-              .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
-              .catch(() => undefined)
-          } else if (this.sessionToken === oldSessionToken && this.me === oldMe) {
-            this.clearAuthenticatedSessionState()
-            await this.tokenStore
-              .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
-              .catch(() => undefined)
-          }
-          throw new Error('stale_session_generation')
-        }
         if (!environmentUnchanged) {
           this.clearAuthenticatedSessionState()
           await this.tokenStore
@@ -2429,11 +2415,6 @@ export class AppService {
               logoutEnvironment.restBaseUrl
           if (capturedSessionStillOwnsBoundary) {
             if (logoutToken && logoutMe) this.activateGfsAuthScope()
-          } else if (this.sessionToken === logoutToken && this.me === logoutMe) {
-            this.clearAuthenticatedSessionState()
-            await this.tokenStore
-              .clearSessionToken(envKey, { legacyEnvKeys })
-              .catch(() => undefined)
           }
           throw error
         }

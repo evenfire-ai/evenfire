@@ -8,6 +8,35 @@ import {
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService deliberate team transition ownership', () => {
+  it('rejects a stale handoff generation after a public login advances the session', async () => {
+    const { service, runtimeConfig, optionA } = await createNativeCommitTestHarness()
+    const app = service as unknown as {
+      authClient: unknown
+      selectRuntimeConfigForHandoff(optionId: string, generation: number): Promise<unknown>
+    }
+    app.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({
+        token: 'session-a',
+        me: {
+          id: 'user-a',
+          email: 'user-a@example.test',
+          name: 'User A',
+          picture: null,
+          teamId: 'team-a',
+          teamName: 'Team A',
+          role: 'member',
+        },
+      }),
+    }
+    const previousGeneration = service.getSessionGeneration()
+    await service.googleLogin('synthetic-google-token')
+
+    await expect(app.selectRuntimeConfigForHandoff(optionA.id, previousGeneration)).rejects.toThrow(
+      'stale_session_generation'
+    )
+    expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(optionA.id)
+  })
+
   it('does not let REST discovery block logout or overwrite a later session revision', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     await runtimeConfig.saveDesktopRuntimeConfig({
