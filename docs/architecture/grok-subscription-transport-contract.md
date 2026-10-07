@@ -623,7 +623,9 @@ constant to `true` only with recorded live-probe evidence.
 Tool payloads send `strict: false` so optional MCP fields stay optional on the
 Responses-shaped Grok wire (sibling of Codex #648). Agent tool presentation
 uses the same `CODEX_TOOL_PRESENTATION` knob as Codex and defaults to `direct`
-when Grok is the primary or a fallback (sibling of Codex #644).
+when Grok is the primary or a fallback (sibling of Codex #644). Native tools
+follow the provider-independent `CLERUM_NATIVE_TOOL_PRESENTATION` (default
+`direct`), described in the Codex contract under "Native tool presentation".
 
 ## Terminal outcomes
 

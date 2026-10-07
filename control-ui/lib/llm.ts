@@ -98,6 +98,7 @@ export function operatorProviderOptions(opts?: {
  */
 export function runtimeProviderOptions(opts?: {
   grokEnabled?: boolean
+  grokAvailabilityKnown?: boolean
   saved?: ReadonlyArray<string | null | undefined>
 }): Array<{ value: LlmProvider; label: string }> {
   const options = LLM_PROVIDER_OPTIONS.filter(
@@ -106,7 +107,8 @@ export function runtimeProviderOptions(opts?: {
   for (const value of opts?.saved ?? []) {
     if (!value || !isLlmProviderId(value)) continue
     if (options.some(option => option.value === value)) continue
-    options.push({ value, label: `${PROVIDER_DISPLAY_LABELS[value]} (disabled)` })
+    const availability = opts?.grokAvailabilityKnown === false ? 'availability unknown' : 'disabled'
+    options.push({ value, label: `${PROVIDER_DISPLAY_LABELS[value]} (${availability})` })
   }
   return options
 }

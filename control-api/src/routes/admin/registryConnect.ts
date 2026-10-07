@@ -244,7 +244,7 @@ export function createRegistryConnectRouter(): Router {
     // mount, connect panel mount, refresh button).
     rateLimitMiddleware({
       bucketType: 'registry_connect_status',
-      maxPerMinute: 30,
+      maxPerMinute: config.adminRegistryConnectStatusPerMin,
       getBucketKey: req => {
         const sub = (req as UiAuthedRequest).adminAuth?.sub
         return sub ? `registry_connect_status:${sub}` : null
@@ -350,13 +350,13 @@ export function createRegistryConnectRouter(): Router {
     // Per-admin token bucket — registration is a rare, deliberate,
     // once-in-a-deployment-lifetime action, and each call consumes one of
     // the shared registry's ~5/day per-IP registration attempts (and can
-    // create a deployment row there). 3/min still allows a legitimate retry
+    // create a deployment row there). 15/min still allows a legitimate retry
     // after a transient failure (e.g. a typo'd org name) while capping how
     // much of that daily budget a looped admin can burn through in a single
     // minute.
     rateLimitMiddleware({
       bucketType: 'registry_connect_request',
-      maxPerMinute: 3,
+      maxPerMinute: config.adminRegistryConnectRequestPerMin,
       getBucketKey: req => {
         const sub = (req as UiAuthedRequest).adminAuth?.sub
         return sub ? `registry_connect_request:${sub}` : null
@@ -612,12 +612,12 @@ export function createRegistryConnectRouter(): Router {
     // Per-admin token bucket — every call here rotates the deployment's
     // one-time claim token at the shared registry (/:id/claim-token), which
     // has no rate limiter of its own and emits a
-    // deployment.claim_token_reissued audit event on each rotate. 10/min is
+    // deployment.claim_token_reissued audit event on each rotate. 50/min is
     // generous for a human-pressed recovery button while bounding registry
     // rotate/audit spam from a looped admin.
     rateLimitMiddleware({
       bucketType: 'registry_connect_recover',
-      maxPerMinute: 10,
+      maxPerMinute: config.adminRegistryConnectRecoveryPerMin,
       getBucketKey: req => {
         const sub = (req as UiAuthedRequest).adminAuth?.sub
         return sub ? `registry_connect_recover:${sub}` : null

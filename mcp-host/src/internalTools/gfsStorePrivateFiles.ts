@@ -22,6 +22,17 @@ export function isPrivateStoreStatTrusted(info: Stats, kind: 'file' | 'directory
   )
 }
 
+/**
+ * The opened inode is trusted, but the name now points at another inode. An
+ * atomic rename over the name between open and lstat produces exactly this.
+ */
+export class PrivateStoreNameMovedError extends Error {
+  constructor() {
+    super('Private-store inode changed')
+    this.name = 'PrivateStoreNameMovedError'
+  }
+}
+
 /** Restore only the exact kubelet fsGroup expansion of a private, owned inode. */
 export async function openPrivateStoreObject(
   filename: string,
@@ -53,12 +64,12 @@ export async function openPrivateStoreObject(
     if (
       afterIdentity.dev !== identity.dev ||
       afterIdentity.ino !== identity.ino ||
-      named.dev !== identity.dev ||
-      named.ino !== identity.ino ||
       named.isSymbolicLink() ||
       (after.mode & 0o7777) !== (restore ? expected : actual)
     )
       throw new Error('Private-store inode changed')
+    if (named.dev !== identity.dev || named.ino !== identity.ino)
+      throw new PrivateStoreNameMovedError()
     return handle
   } catch (error) {
     await handle.close()

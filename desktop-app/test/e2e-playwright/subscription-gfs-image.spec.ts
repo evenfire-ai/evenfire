@@ -120,11 +120,9 @@ for (const binding of run.bindings) {
       })
       await expect(picker).toBeVisible()
       for (const folder of fixture.folderNames) {
-        const directory = picker
-          .getByRole('button')
-          .filter({
-            hasText: new RegExp(`^${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*Folder$`),
-          })
+        const directory = picker.getByRole('button').filter({
+          hasText: new RegExp(`^${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*Folder$`),
+        })
         await expect(directory).toBeVisible()
         await directory.click()
         await expect(

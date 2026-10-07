@@ -8,6 +8,7 @@ const { Resolver } = require('node:dns/promises')
 const net = require('node:net')
 const {
   createDnsProxy,
+  listenDnsPair,
   readConfig,
   question,
   dnsResponse,
@@ -66,8 +67,7 @@ async function exchangeTcp(port, message) {
 }
 
 async function fixture(t, configuredTargets = targets) {
-  const upstream = await udpClient(t)
-  const upstreamPort = upstream.address().port
+  const upstream = dgram.createSocket('udp4')
   const respond = message => dnsResponse(message, question(message), 3, '203.0.113.7', 20)
   upstream.on('message', (message, rinfo) =>
     upstream.send(respond(message), rinfo.port, rinfo.address)
@@ -81,8 +81,8 @@ async function fixture(t, configuredTargets = targets) {
       }
     })
   })
-  tcpUpstream.listen(upstreamPort, '127.0.0.1')
-  await once(tcpUpstream, 'listening')
+  const upstreamPort = await listenDnsPair(upstream, tcpUpstream, 0, '127.0.0.1')
+  t.after(() => new Promise(resolve => upstream.close(resolve)))
   t.after(() => new Promise(resolve => tcpUpstream.close(resolve)))
   const proxy = createDnsProxy({
     targets: configuredTargets,
@@ -410,3 +410,53 @@ test(
     await proxy.close()
   }
 )
+
+// A UDP socket stand-in whose bind reports EADDRINUSE for the first `collisions` calls.
+function collidingUdp(collisions) {
+  const { EventEmitter } = require('node:events')
+  const udp = new EventEmitter()
+  udp.bound = []
+  udp.bind = port => {
+    udp.bound.push(port)
+    setImmediate(() => {
+      if (udp.bound.length <= collisions) {
+        udp.emit('error', Object.assign(new Error('bind EADDRINUSE'), { code: 'EADDRINUSE' }))
+      } else {
+        udp.emit('listening')
+      }
+    })
+  }
+  return udp
+}
+
+test('an ephemeral DNS port pair is reallocated when UDP finds the TCP port taken', async t => {
+  const udp = collidingUdp(2)
+  const tcp = net.createServer()
+  t.after(() => new Promise(resolve => (tcp.listening ? tcp.close(resolve) : resolve())))
+  const port = await listenDnsPair(udp, tcp, 0, '127.0.0.1')
+  assert.equal(udp.bound.length, 3, 'two collisions, then a pair that binds')
+  assert.equal(tcp.listening, true)
+  assert.equal(tcp.address().port, port)
+  assert.equal(udp.bound[2], port, 'UDP joins the port TCP chose')
+})
+
+test('an explicit or exhausted DNS port pair rethrows EADDRINUSE and releases TCP', async () => {
+  const blocker = net.createServer()
+  blocker.listen(0, '127.0.0.1')
+  await once(blocker, 'listening')
+  const fixedUdp = collidingUdp(1)
+  const fixedTcp = net.createServer()
+  const free = blocker.address().port
+  await new Promise(resolve => blocker.close(resolve))
+  await assert.rejects(listenDnsPair(fixedUdp, fixedTcp, free, '127.0.0.1'), { code: 'EADDRINUSE' })
+  assert.equal(fixedUdp.bound.length, 1, 'an explicit port gets one attempt')
+  assert.equal(fixedTcp.listening, false)
+
+  const exhaustedUdp = collidingUdp(Infinity)
+  const exhaustedTcp = net.createServer()
+  await assert.rejects(listenDnsPair(exhaustedUdp, exhaustedTcp, 0, '127.0.0.1'), {
+    code: 'EADDRINUSE',
+  })
+  assert.equal(exhaustedUdp.bound.length, 20, 'every ephemeral attempt was made')
+  assert.equal(exhaustedTcp.listening, false)
+})
