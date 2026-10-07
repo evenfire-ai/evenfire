@@ -68,9 +68,14 @@ exact active environment is retained.
 The handoff is disabled by default. A release operator can enable it by setting
 the `PROFILE_DESKTOP_HANDOFF_ENABLED` repository variable to `true` when
 building Profile UI, after releasing the updated Desktop client and retiring
-older supported clients. While it is disabled, copy the REST API URL from
-Profile UI Settings and add it from Desktop's sign-in screen. Fleets can also
-be pre-seeded with a `CLERUM_DESKTOP_CONFIG_PATH` config file (see
+older supported clients. Changing the repository variable alone does not build
+a new image: the normal build runs only when Profile UI source paths change, or
+the **Build & Publish** workflow can be dispatched with `build_all=true` to
+rebuild every image. Production promotion reuses the digest built from dev, so
+rebuild Profile UI before promotion when the variable was the only change.
+While the handoff is disabled, copy the REST API URL from Profile UI Settings
+and add it from Desktop's sign-in screen. Fleets can also be pre-seeded with a
+`CLERUM_DESKTOP_CONFIG_PATH` config file (see
 [Ship it to your users](../surfaces/desktop-app.md#ship-it-to-your-users)).
 
 ### 3. Through an invitation
