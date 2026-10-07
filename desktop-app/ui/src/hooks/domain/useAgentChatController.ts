@@ -1417,9 +1417,7 @@ export function useAgentChatController({
           autoSelectedChatIdRef.current = latest.id
           await switchToChatForIntent(selectedAgent, latest.id, selectionIntentRevision)
         }
-        if (selectionIntentRevisionRef.current === selectionIntentRevision) {
-          setChatMessagesLoading(false)
-        }
+        setChatMessagesLoading(false)
         return
       }
       if (requestedSelection?.mode === 'specific') {
@@ -1441,9 +1439,7 @@ export function useAgentChatController({
           await switchToChatForIntent(selectedAgent, latest.id, selectionIntentRevision)
         }
       }
-      if (selectionIntentRevisionRef.current === selectionIntentRevision) {
-        setChatMessagesLoading(false)
-      }
+      setChatMessagesLoading(false)
     })()
 
     return () => {
