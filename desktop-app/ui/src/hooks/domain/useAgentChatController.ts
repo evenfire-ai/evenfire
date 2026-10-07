@@ -3094,9 +3094,7 @@ export function useAgentChatController({
         getComposerDraftRevision(originalDraftChat, originalDraftAgent ?? undefined) ===
           originalDraftRevision
       const shouldResetAttachments =
-        canConsumeComposer &&
-        activeChatVisibilityRef.current.selectedAgent === sendAgent &&
-        composerAttachmentRevisionRef.current === originalAttachmentRevision
+        canConsumeComposer && composerAttachmentRevisionRef.current === originalAttachmentRevision
       if (shouldClearOriginDraft) {
         clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined)
       }
@@ -3475,7 +3473,6 @@ export function useAgentChatController({
       appendAssistantMessage,
       appendNewEntry,
       bumpActivity,
-      selectionIntentRevisionRef,
     ]
   )
 
