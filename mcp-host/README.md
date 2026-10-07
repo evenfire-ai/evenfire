@@ -11,6 +11,7 @@ MCP Host is a Kubernetes-native service that reads Host CRD configuration and pr
 - HTTP RPC server for receiving messages from channel-reader
 - Connects to MCP servers via host-context-controller service for tool capabilities
 - LLM function calling support (OpenAI tools / Claude tools)
+- Built-in document and chart tools: Markdown, PDF, DOCX, XLSX, PPTX, PNG charts and HTML dashboards (see [Document and chart tools](#document-and-chart-tools))
 - Dev mode for local development without Kubernetes
 
 ## Configuration
@@ -144,9 +145,15 @@ Semantics:
 - `false` — skip approval (override a tool whose code default is `true`).
 - absent — use the tool's hard-coded `requiresApproval()` default.
 
-Currently in scope (v1): the always-on native tools — `http_request`, `shell_exec`, `file_read`, `file_write`, `system_info`, `json_transform`, plus `clerum__generate_markdown`, `clerum__generate_pdf`, `clerum__generate_docx`, `clerum__generate_xlsx`, `clerum__list_workflows`, `clerum__read_workflow`, `clerum__trigger_workflow`, and `clerum__get_capabilities`. The exact list at any deploy is whatever appears after `Always-on tools:` in the `[approval-config]` startup warning. Conditionally-registered tools (`memory_*` when `CLERUM_MEMORY_ENABLED=true`, `cron_*` when a scheduler is wired, `desktop_*` / browser tools when `Host.spec.desktop` is set) are NOT in the startup validator's known set, so an override will trigger an "unknown tool" warning at startup — but the override is still honored at runtime once the tool registers in the per-task `TaskExecutor`. MCP tools (named `serverName__toolName`) are NOT covered by this override and continue to always require approval.
+Currently in scope (v1): the always-on native tools — `http_request`, `shell_exec`, `file_read`, `file_write`, `system_info`, `json_transform`, plus `clerum__generate_markdown`, `clerum__generate_pdf`, `clerum__generate_docx`, `clerum__generate_xlsx`, `clerum__generate_pptx`, `clerum__generate_chart`, `clerum__generate_dashboard`, and `clerum__get_capabilities`. The exact list at any deploy is whatever appears after `Always-on tools:` in the `[approval-config]` startup warning. Conditionally-registered tools (`memory_*` when `CLERUM_MEMORY_ENABLED=true`, `cron_*` when a scheduler is wired, `desktop_*` / browser tools when `Host.spec.desktop` is set) are NOT in the startup validator's known set, so an override will trigger an "unknown tool" warning at startup — but the override is still honored at runtime once the tool registers in the per-task `TaskExecutor`. MCP tools (named `serverName__toolName`) are NOT covered by this override and continue to always require approval.
 
 The schema is permissive (`additionalProperties: { type: boolean }`) so adding a new native tool does not require a CRD bump. mcp-host emits an `[approval-config]` warning at startup and on each Host reconcile when an override references an unrecognized tool name or when `http_request: false` is set without `CLERUM_HTTP_ALLOWLIST`. A positive `[approval-config] Per-tool approval overrides in effect: ...` audit log is emitted whenever any override is configured so operators can confirm the CRD took effect.
+
+### Document and chart tools
+
+The `clerum__generate_*` tools write their files to the output folder: `/output` in a workflow run and `<workspace>/outputs` in chat, unless `CLERUM_OUTPUT_DIR` names another. Each generator loads its library on first use.
+
+Charts, PDFs, and the measuring of DOCX tables and slide text read system fonts through `@napi-rs/canvas`, a native module. The images install them: `font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew` on Alpine (`Dockerfile`), and `fonts-dejavu-core fonts-noto-core fonts-noto-cjk` on Debian (`Dockerfile.slim`, `Dockerfile.full`, `Dockerfile.desktop`). Without them, the bundled Roboto still draws Latin, Greek and Cyrillic, but CJK, Arabic, Hebrew, arrows and check marks have no glyph to draw. A machine that runs the tests needs the same packages: CI installs the Debian ones for mcp-host, and the font tests fail in CI when they are missing.
 
 ### API Keys Secret
 
@@ -166,6 +173,7 @@ The Secret name is what you reference from `Host.spec.secretRef`.
 
 - Node.js >= 24
 - npm
+- The fonts listed in [Document and chart tools](#document-and-chart-tools), for the chart and document tools and their tests
 
 ### Local Development
 

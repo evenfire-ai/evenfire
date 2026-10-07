@@ -114,6 +114,14 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      # The mcp-host images ship these faces, and the tests that set Arabic,
+      # Hebrew and Han text in a PDF fail in CI instead of skipping without them.
+      - name: Install the mcp-host image fonts
+        if: matrix.service == 'mcp-host'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core fonts-noto-core fonts-noto-cjk
+
       - name: Verify Electron runtime
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app

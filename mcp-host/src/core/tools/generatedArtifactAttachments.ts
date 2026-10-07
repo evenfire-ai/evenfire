@@ -104,17 +104,34 @@ function textContainsRedactableSecretEntry(
   })
 }
 
+/**
+ * Every string, number and key in `value` as written. A serialized form
+ * escapes quotes and backslashes, so a secret holding either would not match it.
+ */
+function payloadTexts(value: unknown, out: string[], seen: Set<object>, depth: number): void {
+  if (typeof value === 'string') out.push(value)
+  else if (typeof value === 'number' || typeof value === 'bigint') out.push(String(value))
+  else if (value && typeof value === 'object' && depth <= 64 && !seen.has(value)) {
+    seen.add(value)
+    if (Array.isArray(value)) {
+      for (const item of value) payloadTexts(item, out, seen, depth + 1)
+    } else {
+      for (const [key, item] of Object.entries(value)) {
+        out.push(key)
+        payloadTexts(item, out, seen, depth + 1)
+      }
+    }
+  }
+}
+
 function sourcePayloadContainsRedactableSecretEntry(
   sourcePayload: unknown,
   entries: ArtifactSecretEntry[]
 ): boolean {
   if (sourcePayload === undefined || entries.length === 0) return false
-  try {
-    const serialized = JSON.stringify(sourcePayload)
-    return textContainsRedactableSecretEntry(serialized ?? '', entries)
-  } catch {
-    return textContainsRedactableSecretEntry(String(sourcePayload), entries)
-  }
+  const texts: string[] = []
+  payloadTexts(sourcePayload, texts, new Set(), 0)
+  return texts.some(text => textContainsRedactableSecretEntry(text, entries))
 }
 
 export function isInternalGeneratedArtifactSourceTool(sourceTool: string | undefined): boolean {

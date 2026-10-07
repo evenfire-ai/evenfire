@@ -112,7 +112,7 @@ describe('ragged rows are normalized to header count', () => {
 // ─── XLSX cell-anchor validation ───────────────────────────────────
 
 describe('XLSX rejects invalid image anchors', () => {
-  it('skips silently when image path does not exist (anchor never parsed)', async () => {
+  it('leaves out a missing image with a warning (anchor never parsed)', async () => {
     const tool = findTool('clerum__generate_xlsx')
     const result = await tool.execute(
       {
@@ -131,6 +131,7 @@ describe('XLSX rejects invalid image anchors', () => {
       testOutputDir
     )
     expect(result.success).toBe(true)
+    expect(result.content).toContain('fake.png')
   })
 
   it('surfaces an error when anchor is malformed and the image file exists', async () => {
@@ -168,7 +169,7 @@ describe('XLSX rejects invalid image anchors', () => {
 // ─── XLSX hex validation ───────────────────────────────────────────
 
 describe('XLSX hex validation', () => {
-  it('rejects non-hex digits in conditionalFormatting fillColor', async () => {
+  it('reports a fillColor that is not a color instead of failing the workbook', async () => {
     const tool = findTool('clerum__generate_xlsx')
     const result = await tool.execute(
       {
@@ -188,8 +189,8 @@ describe('XLSX hex validation', () => {
       },
       testOutputDir
     )
-    expect(result.success).toBe(false)
-    expect(result.error).toMatch(/Invalid hex color/)
+    expect(result.success).toBe(true)
+    expect(result.content).toContain("conditionalFormatting[0].rules[0].fillColor '#gggggg'")
   })
 
   it('accepts valid 6-char and 8-char hex', async () => {
