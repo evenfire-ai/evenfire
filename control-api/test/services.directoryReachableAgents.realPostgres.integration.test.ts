@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { getReachableAgentNames } from '../src/services/directory/index.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -44,22 +45,19 @@ describeRealPostgres('getReachableAgentNames (real PostgreSQL)', () => {
   }, 60_000)
 
   afterAll(async () => {
-    querySpy?.mockRestore()
-    connectSpy?.mockRestore()
     try {
-      await testPool?.end()
-    } finally {
+      querySpy?.mockRestore()
+      connectSpy?.mockRestore()
+      await endPoolAndWaitForClients(testPool)
       if (adminPool) {
-        try {
-          await adminPool.query(
-            'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
-            [database]
-          )
-          await adminPool.query('DROP DATABASE IF EXISTS ' + quoteIdent(database))
-        } finally {
-          await adminPool.end()
-        }
+        await adminPool.query(
+          'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+          [database]
+        )
+        await adminPool.query('DROP DATABASE IF EXISTS ' + quoteIdent(database))
       }
+    } finally {
+      await adminPool?.end()
     }
   }, 60_000)
 
