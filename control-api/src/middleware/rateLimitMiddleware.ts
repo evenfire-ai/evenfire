@@ -33,6 +33,25 @@ export type RateLimitEnforcerOptions = {
  */
 export type RateLimitEnforcer = (req: Request, res: Response, key: string) => Promise<boolean>
 
+/** The last enforcing counter owns every advertised quota/header family. */
+function writeRateLimitHeaders(
+  res: Response,
+  limit: number,
+  remaining: number,
+  resetMs: number
+): void {
+  const resetSeconds = Math.max(1, Math.ceil((resetMs - Date.now()) / 1000))
+  res.setHeader('X-RateLimit-Limit', String(limit))
+  res.setHeader('X-RateLimit-Remaining', String(remaining))
+  res.setHeader('X-RateLimit-Reset', String(Math.floor(resetMs / 1000)))
+  res.setHeader('RateLimit', `limit=${limit}, remaining=${remaining}, reset=${resetSeconds}`)
+  res.setHeader('RateLimit-Policy', `${limit};w=60`)
+  // Keep existing draft-6 clients consistent with the ledger as well.
+  res.setHeader('RateLimit-Limit', String(limit))
+  res.setHeader('RateLimit-Remaining', String(remaining))
+  res.setHeader('RateLimit-Reset', String(resetSeconds))
+}
+
 /**
  * Factory for a per-request rate limit middleware backed by a PG token bucket.
  *
@@ -132,6 +151,11 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
     res.removeHeader('X-RateLimit-Limit')
     res.removeHeader('X-RateLimit-Remaining')
     res.removeHeader('X-RateLimit-Reset')
+    res.removeHeader('RateLimit')
+    res.removeHeader('RateLimit-Policy')
+    res.removeHeader('RateLimit-Limit')
+    res.removeHeader('RateLimit-Remaining')
+    res.removeHeader('RateLimit-Reset')
     res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
     res.setHeader('Cache-Control', 'no-store')
     res.status(503).json({
@@ -148,9 +172,7 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
   ): void {
     const retryAfterSec = Math.max(1, Math.ceil((denial.resetMs - Date.now()) / 1000))
     res.setHeader('Retry-After', String(retryAfterSec))
-    res.setHeader('X-RateLimit-Limit', String(opts.maxPerMinute))
-    res.setHeader('X-RateLimit-Remaining', '0')
-    res.setHeader('X-RateLimit-Reset', String(Math.floor(denial.resetMs / 1000)))
+    writeRateLimitHeaders(res, opts.maxPerMinute, 0, denial.resetMs)
     if (req.log) {
       req.log.warn(
         {
@@ -167,7 +189,12 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
         'rate limit exceeded'
       )
     }
-    res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds: retryAfterSec })
+    res.status(429).json({
+      error: 'Too Many Requests',
+      code: 'rate_limited',
+      message: `This request limit has been reached. Try again in ${retryAfterSec} seconds.`,
+      retryAfterSeconds: retryAfterSec,
+    })
   }
 
   return async function enforce(req: Request, res: Response, rawKey: string): Promise<boolean> {
@@ -193,9 +220,12 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
         return false
       }
       rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'fallback_allowed' }, 1)
-      res.setHeader('X-RateLimit-Limit', String(opts.maxPerMinute))
-      res.setHeader('X-RateLimit-Remaining', String(opts.maxPerMinute - decision.totalHits))
-      res.setHeader('X-RateLimit-Reset', String(Math.floor(decision.resetMs / 1000)))
+      writeRateLimitHeaders(
+        res,
+        opts.maxPerMinute,
+        opts.maxPerMinute - decision.totalHits,
+        decision.resetMs
+      )
       return true
     }
     if (!result.allowed) {
@@ -205,9 +235,7 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
     }
 
     rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'allowed' }, 1)
-    res.setHeader('X-RateLimit-Limit', String(opts.maxPerMinute))
-    res.setHeader('X-RateLimit-Remaining', String(result.remaining))
-    res.setHeader('X-RateLimit-Reset', String(Math.floor(result.resetMs / 1000)))
+    writeRateLimitHeaders(res, opts.maxPerMinute, result.remaining, result.resetMs)
     return true
   }
 }

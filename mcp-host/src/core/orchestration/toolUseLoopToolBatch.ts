@@ -1,3 +1,4 @@
+import { BRIDGE_TOOL_NAMES } from '../../capabilities/toolCatalogTools'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
 import {
   buildConnectRequiredApproval,
@@ -16,14 +17,6 @@ import { admitToolCall, executeAdmittedTool } from './toolCallPolicy'
 import { collectToolAttachments } from './toolUseLoopMessages'
 import { reportToolComplete, reportToolStart } from './toolUseLoopSingleTool'
 import { isWorkflowTriggerNotFoundToolResult } from './toolUseLoopWorkflowTriggerFallbacks'
-
-/** The 3 dynamic-tool-loading bridge tools. They are native and must never be
- * the TARGET of `clerum__tool_call` (LOCKED #11 — no recursion). */
-const BRIDGE_TOOL_NAMES = new Set([
-  'clerum__tool_search',
-  'clerum__tool_describe',
-  'clerum__tool_call',
-])
 
 function bridgeError(call: ToolCall, message: string): ToolResult {
   // Preserve the original `call.id`/name so the provider pairs the result with
@@ -45,6 +38,9 @@ function bridgeError(call: ToolCall, message: string): ToolResult {
  *     then rewrite to a synthetic `{ id: call.id, name, arguments }` so the
  *     normal gate runs against the REAL tool (Critical #12 validates inner args
  *     against the real schema; LOCKED #10 keys approval on the real name).
+ *     With `bridge.nativeTargets` (native `auto`, #1003) a native target is
+ *     also rewritten, whether or not it is currently advertised; without it,
+ *     native targets are rejected as before. Recursion is rejected in both.
  *
  *  2. Direct call to a deferred MCP tool (Critical #9, auto-recover) — a
  *     non-bridge call naming an MCP tool that is currently un-advertised. It is
@@ -62,7 +58,7 @@ function resolveBridgeCall(
   toolResults: ToolResult[],
   // Computed ONCE per batch by `executeToolCalls` and passed in, so we don't
   // re-derive the (potentially 290-entry) deferrable catalog Set on every call.
-  // `undefined` when the bridge is inactive (flag OFF) — no work to do.
+  // `undefined` when no bridge tools are registered — no work to do.
   deferrableCatalogNames: Set<string> | undefined
 ): ToolCall | 'handled' {
   const bridge = config.bridge
@@ -91,8 +87,34 @@ function resolveBridgeCall(
       return 'handled'
     }
 
-    // Reject recursion / native targets (LOCKED #11): the bridge targets
-    // DEFERRABLE MCP tools only.
+    // Native `auto`: reject recursion (LOCKED #11) before accepting natives.
+    if (bridge.nativeTargets && BRIDGE_TOOL_NAMES.has(name)) {
+      toolResults.push(
+        bridgeError(
+          call,
+          `clerum__tool_call cannot target "${name}": bridge tools cannot invoke one another.`
+        )
+      )
+      return 'handled'
+    }
+
+    // #1003 — native `auto`: a native target is valid. Its scope gate is
+    // membership in the native registry (deferred natives are not in the MCP
+    // catalog). The rewrite keeps `call.id` and the normal gate below then
+    // admits the REAL native exactly like a direct call (safety parameter
+    // checks, guardrails, approval; no native schema validation on either
+    // path, #1017), so the bridge never widens what the model could call
+    // directly.
+    if (bridge.nativeTargets && bridge.nativeNames.has(name)) {
+      return {
+        id: call.id,
+        name,
+        arguments: (innerArgs as Record<string, unknown>) ?? {},
+      }
+    }
+
+    // Native `direct`: reject recursion / native targets (LOCKED #11): the
+    // bridge targets DEFERRABLE MCP tools only.
     if (BRIDGE_TOOL_NAMES.has(name) || bridge.nativeNames.has(name)) {
       toolResults.push(
         bridgeError(
@@ -122,9 +144,11 @@ function resolveBridgeCall(
     // preserved id, so the provider pairs it with the model's tool_call block.
     //
     // The synthetic call (and its eventual ToolResult) intentionally carries the
-    // REAL tool name, NOT `clerum__tool_call`. Provider pairing is by
-    // `tool_call_id` ONLY, so preserving `call.id` is what matters — do NOT
-    // re-mint the id (a fresh id would orphan the model's tool_use block).
+    // REAL tool name, NOT `clerum__tool_call`. Providers pair the result by
+    // `tool_call_id`; drivers whose wire pairs by name (Gemini) resolve the
+    // name from that id against the preceding assistant turn. Preserving
+    // `call.id` is what matters — do NOT re-mint the id (a fresh id would
+    // orphan the model's tool_use block).
     return {
       id: call.id,
       name,
@@ -141,8 +165,9 @@ function resolveBridgeCall(
   // catalog == the full MCP universe, so this matches the registry's own
   // `Tool not found` — but enforcing the gate explicitly here means a future
   // per-host catalog subset cannot be bypassed by a direct call. Native names
-  // (and non-MCP names) pass through untouched — they are always advertised and
-  // resolved by the native registry. Stateless: nothing is recorded.
+  // (and non-MCP names) pass through untouched — the native registry resolves
+  // them whether or not native `auto` removed them from `tools[]`. Stateless:
+  // nothing is recorded.
   //
   // The `__` heuristic is safe because of the `serverName__toolName` naming
   // invariant (double underscore, see CLAUDE.md): natives are excluded first via
@@ -173,8 +198,8 @@ export async function executeToolCalls(
   const { loopController, events } = config
   const toolResults: ToolResult[] = []
   // F3.2 — derive the deferrable catalog Set ONCE for the whole batch instead of
-  // per call (it can hold ~290 names). `undefined` when the bridge is inactive
-  // (flag OFF) so `resolveBridgeCall` short-circuits with no work.
+  // per call (it can hold ~290 names). `undefined` when no bridge tools are
+  // registered, so `resolveBridgeCall` short-circuits with no work.
   const deferrableCatalogNames = config.bridge?.getDeferrableCatalogNames()
   // Crit #2: the batch shares ONE LLM call's usage — attach it to the first
   // reportToolComplete actually emitted (NOT strictly i === 0; the validation
@@ -188,7 +213,8 @@ export async function executeToolCalls(
     // Runs at the TOP of the per-call loop, BEFORE `beforeExecution` (:29) and
     // `beforeTool` (:49), so that validation and approval run against the REAL
     // target tool, not the opaque bridge envelope. The intercept unwraps the
-    // bridge call into a SYNTHETIC call against the real MCP tool, preserving
+    // bridge call into a SYNTHETIC call against the real target (an MCP tool, or a
+    // native when `bridge.nativeTargets`), preserving
     // `call.id` (LOCKED #9) so the provider pairs the tool_result by
     // tool_use_id. Direct calls to deferred MCP tools (Critical #9) are also
     // routed through the same scope gate here. A `'handled'` return means an
