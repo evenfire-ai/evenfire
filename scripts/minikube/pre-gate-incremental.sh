@@ -311,7 +311,7 @@ incremental_plan() {
 
 incremental_has_target() {
   local selector="$1" target
-  for target in "${INCREMENTAL_TARGETS[@]}"; do
+  for target in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do
     [[ "${target%%|*}" == "${selector}" ]] && return 0
   done
   return 1
@@ -524,7 +524,7 @@ incremental_restart_targets() {
   local target selector remainder namespace deployment deployment_key deployment_probe
   local restarted="|"
 
-  for target in "${INCREMENTAL_TARGETS[@]}"; do
+  for target in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do
     selector="${target%%|*}"
     remainder="${target#*|}"
     namespace="${remainder%%|*}"
@@ -588,7 +588,7 @@ incremental_verify_gfs_if_required() {
 
 incremental_target_summary() {
   local target selector summary=""
-  for target in "${INCREMENTAL_TARGETS[@]}"; do
+  for target in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do
     selector="${target%%|*}"
     summary+="${summary:+, }${selector}"
   done

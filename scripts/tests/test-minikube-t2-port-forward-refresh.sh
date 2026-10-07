@@ -98,6 +98,22 @@ for plan_state in targeted-sync full-reconcile full-bootstrap; do
     fail "a ${plan_state} plan left fingerprint='${T2_CLUSTER_FINGERPRINT}' matches=${T2_MARKER_MATCHES_HEAD} bootstrap=${T2_BOOTSTRAP_REQUIRED} evidence=${EVIDENCE_LOG}"
 done
 
+# An absent post-sync marker is a failed transition, even when the planner
+# would normally accept it as a bootstrap precondition.
+for missing_marker in '' '{}'; do
+  reset_pre_gate_case
+  T2_PLAN_STATE=full-bootstrap
+  T2_BOOTSTRAP_REQUIRED=true
+  FAKE_MARKER="$missing_marker"
+  if run_pre_gate >/dev/null 2>&1; then
+    fail 'a sync that did not stamp its marker was accepted'
+  fi
+  [[ "$(cat "$CALLS")" == "$SYNC_CALL" && "$(grep -c 'get configmap' "$KC_CALLS")" == 1 ]] ||
+    fail 'the missing-marker case did not sync and re-read once'
+  [[ "$T2_ERROR_CODE" == HEAD_MARKER_MISMATCH && -z "$T2_CLUSTER_FINGERPRINT" &&
+    "$EVIDENCE_LOG" == '' ]] || fail 'an absent post-sync marker recorded PASS evidence'
+done
+
 # A stamped marker that does not describe the current source fails the sync
 # before its PASS evidence is written.
 reset_pre_gate_case

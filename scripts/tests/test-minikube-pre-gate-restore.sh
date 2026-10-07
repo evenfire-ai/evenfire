@@ -106,10 +106,30 @@ fi
 
 events=""
 restore_pre_gate_writers() { events+="restore "; return 0; }
+# A consumed full-setup handoff clears the target list. The remaining sync
+# steps must reach the marker transaction, including under Bash 3.2 nounset.
+INCREMENTAL_TARGETS=('control-api|control-plane|control-api')
+INCREMENTAL_FULL_IMAGE_BUILD=true
+INCREMENTAL_FULL_DEPLOYMENT=true
+t2_setup_handoff_apply_plan_result consumed
+[ "$(incremental_target_summary)" = none ] || fail 'an empty handoff plan has a runtime target'
+if incremental_has_target control-api || incremental_requires_database_reconcile ||
+   incremental_requires_gfs_verify; then
+  fail 'a consumed full-setup handoff requested another runtime reconcile'
+fi
+incremental_build_images >/dev/null
+incremental_restart_targets
 commit_cluster_sync_state cluster-fingerprint infra-fingerprint || \
   fail 'cluster sync state rejected a successful writer restore'
 [ "$events" = "restore marker state-cluster state-infra " ] || \
   fail "cluster marker was not persisted after restore in the required order: ${events}"
+
+# A nonempty plan still selects its real consumer and reconciliation gates.
+incremental_add_target control-api control-plane control-api
+[ "$(incremental_target_summary)" = control-api ] || fail 'a populated plan lost its target summary'
+incremental_has_target control-api || fail 'a populated plan lost its Control API target'
+incremental_requires_database_reconcile || fail 'a Control API target skipped database reconciliation'
+incremental_requires_gfs_verify || fail 'a Control API target skipped GFS verification'
 
 # Leave the sourced script's EXIT finalizer with a successful cleanup stub.
 restore_pre_gate_writers() { return 0; }
