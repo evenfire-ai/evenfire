@@ -383,7 +383,7 @@ it.each(['cron', 'internal'] as const)(
 
 /**
  * Spy on every GfsDownloadStore method, enumerated at runtime so a method that
- * exists only in another revision (the pre-#1019 acquireProcessingLease, for
+ * exists only in another revision (the pre-#1019 processing-lease methods, for
  * example) is still covered.
  */
 function storeSpyNet(store: GfsDownloadStore) {
