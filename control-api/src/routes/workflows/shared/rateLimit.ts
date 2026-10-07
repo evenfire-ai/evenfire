@@ -447,11 +447,15 @@ function verifiedUserSessionRateLimitSubject(token: string): string | null {
 }
 
 /**
- * External trigger lane: prefer the verified Profile userId when
- * external-rest-api forwards both a service bearer and x-user-session-token.
- * An unverified session header falls back to IP so rotation cannot evade the cap.
+ * External trigger lane: prefer the canonical authenticated session identity
+ * staged before this limiter for either V1 or V2. A raw unverified session
+ * header falls back to IP so rotation cannot evade the cap.
  */
 export function workflowTriggerRateLimitCredential(req: Request): string | null {
+  const stagedUserId = (req as Request & { externalAuth?: { userId?: string } }).externalAuth
+    ?.userId
+  if (stagedUserId) return `user:${stagedUserId}`
+
   const userSessionToken = String(req.header('x-user-session-token') || '').trim()
   if (userSessionToken) {
     return (

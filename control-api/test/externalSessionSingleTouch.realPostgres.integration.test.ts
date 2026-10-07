@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import type { Request } from 'express'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
+import { workflowTriggerRateLimitCredential } from '../src/routes/workflows/shared/rateLimit.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import {
   authenticateExternalUserSession,
@@ -100,6 +102,17 @@ describeRealPostgres('external-session staged touch ownership on real PostgreSQL
     const identity = await authenticateExternalUserSessionIdentity(issued.token)
     expect(identity.status).toBe('authenticated')
     if (identity.status !== 'authenticated') throw new Error('Stage A rejected the issued session')
+    expect(
+      workflowTriggerRateLimitCredential({
+        externalAuth: identity.claims,
+        ip: '203.0.113.10',
+        header(name: string) {
+          if (name.toLowerCase() === 'authorization') return 'Bearer workflow-service-token'
+          if (name.toLowerCase() === 'x-user-session-token') return issued.token
+          return undefined
+        },
+      } as Request)
+    ).toBe(`user:${userId}`)
 
     const policy: EffectiveUserAccessPolicy = {
       policyVersion: '1',
