@@ -6,7 +6,11 @@ import {
   compareSemanticVersions,
 } from '../access/userAccessPolicy.js'
 import type { ExternalSessionClient } from './externalSessionAuthentication.js'
-import { createUserSession, validateLegacyUserSession } from './userSessionService.js'
+import {
+  createUserSession,
+  loadSessionDatabaseNow,
+  validateLegacyUserSession,
+} from './userSessionService.js'
 
 export type ExternalSessionContract = 'v1' | 'v2'
 
@@ -54,6 +58,8 @@ export async function issueExternalUserSession(
     email: string
     teamId: string | null
     role: TeamRole
+    // Legacy callers may still supply the generation they observed. V1 issuance
+    // deliberately re-reads it under the canonical user lock below.
     authGeneration?: number
     authenticationMethods: string[]
   },
@@ -81,17 +87,39 @@ export async function issueExternalUserSession(
   if (!policy.issueV1 || !policy.acceptV1) {
     throw new Error('legacy user-session issuance is not effective')
   }
-  if (!Number.isSafeInteger(input.authGeneration) || Number(input.authGeneration) < 1) {
-    throw new Error('legacy user-session issuance requires an active lifecycle generation')
-  }
-  return {
-    token: signExternalSessionToken({
+
+  const issueLegacy = async (db: Pick<DbClient, 'query'>) => {
+    const user = await db.query(
+      `SELECT lifecycle_state, lifecycle_version
+         FROM users
+        WHERE id = $1
+        FOR UPDATE`,
+      [input.userId]
+    )
+    const row = user.rows[0] as
+      | { lifecycle_state?: unknown; lifecycle_version?: unknown }
+      | undefined
+    const authGeneration = Number(row?.lifecycle_version)
+    if (
+      row?.lifecycle_state !== 'active' ||
+      !Number.isSafeInteger(authGeneration) ||
+      authGeneration < 1
+    ) {
+      throw new Error('legacy user-session issuance requires an active lifecycle generation')
+    }
+    const issuedAt = Math.floor((await loadSessionDatabaseNow(db)).getTime() / 1000)
+    return signExternalSessionToken({
       userId: input.userId,
       email: input.email,
       teamId: input.teamId,
       role: input.role,
-      authGeneration: Number(input.authGeneration),
-    }),
+      authGeneration,
+      iat: issuedAt,
+    })
+  }
+
+  return {
+    token: options.db ? await issueLegacy(options.db) : await withTransaction(issueLegacy),
     contract: 'v1',
   }
 }

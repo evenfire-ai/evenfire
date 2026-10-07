@@ -153,7 +153,7 @@ describeRealPostgres('legacy V1 live-admin revocation on real external team rout
         authGeneration: 1,
         authenticationMethods: ['pwd'],
       },
-      { policy: runtimePolicy }
+      { db: databasePool, policy: runtimePolicy }
     )
     staleAdminToken = issued.token
     expect(staleAdminToken).not.toBe('same-valid-v1-token-minted-while-admin')

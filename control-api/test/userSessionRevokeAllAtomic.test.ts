@@ -21,6 +21,7 @@ describe('revoke-all transaction boundary', () => {
         rows: [{ db_now: new Date('2026-08-27T00:00:01.000Z') }],
         rowCount: 1,
       })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
       .mockImplementationOnce(async () => {
         mocks.committedEpoch = true
         return { rows: [], rowCount: 1 }
@@ -42,7 +43,7 @@ describe('revoke-all transaction boundary', () => {
     )
 
     expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
-    expect(mocks.query).toHaveBeenCalledTimes(4)
+    expect(mocks.query).toHaveBeenCalledTimes(5)
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
     expect(mocks.committedEpoch).toBe(false)
   })
@@ -54,6 +55,7 @@ describe('revoke-all transaction boundary', () => {
     mocks.query
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ db_now: afterLock }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
       .mockImplementationOnce(async (_sql, values) => {
         cutoffs.push(values[1] as Date)
         return { rows: [], rowCount: 1 }
@@ -66,6 +68,9 @@ describe('revoke-all transaction boundary', () => {
 
     expect(String(mocks.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
     expect(String(mocks.query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
-    expect(cutoffs).toEqual([afterLock])
+    expect(String(mocks.query.mock.calls[2]?.[0])).toContain(
+      'lifecycle_version = lifecycle_version + 1'
+    )
+    expect(cutoffs).toEqual([new Date(afterLock.getTime() - 1000)])
   })
 })

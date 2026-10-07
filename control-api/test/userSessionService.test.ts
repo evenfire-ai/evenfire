@@ -224,14 +224,18 @@ describe('user session state machine', () => {
         .fn()
         .mockResolvedValueOnce({ rows: [{ id: userId }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [{ db_now: now }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 2 }),
     }
     await expect(revokeAllUserSessions(userId, 'password_changed', db)).resolves.toBe(2)
     expect(String(db.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
     expect(String(db.query.mock.calls[1]?.[0])).toContain('clock_timestamp()')
-    expect(String(db.query.mock.calls[2]?.[0])).toContain('security_epochs')
-    expect(String(db.query.mock.calls[3]?.[0])).toContain('external_user_sessions')
+    expect(String(db.query.mock.calls[2]?.[0])).toContain(
+      'lifecycle_version = lifecycle_version + 1'
+    )
+    expect(String(db.query.mock.calls[3]?.[0])).toContain('security_epochs')
+    expect(String(db.query.mock.calls[4]?.[0])).toContain('external_user_sessions')
 
     const claims = {
       userId,
