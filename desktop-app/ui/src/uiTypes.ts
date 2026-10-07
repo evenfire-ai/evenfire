@@ -1,3 +1,4 @@
+import type { FileClassification } from '@clerum/gfs-interaction-policy'
 import type {
   ChatMessageAttachment,
   HostActivityEvent,
@@ -159,6 +160,7 @@ export type AppErrorKind = 'network' | 'auth' | 'validation' | 'upstream' | 'wak
 export type FailedAgentSend = {
   content: string
   attachments: ComposerImageAttachment[]
+  files: ReadyComposerFileAttachment[]
   references: ComposerReferenceAttachment[]
   message: string
   kind: AppErrorKind
@@ -173,6 +175,16 @@ export type FailedAgentSend = {
   userMessageId?: string
   /** Model validated by the image guard when this attempt carried images. */
   model?: string
+  /**
+   * The Host answered the text but never received the documents (#678 D13).
+   * Only the documents can be recovered; a retry would send the text again.
+   */
+  answeredWithoutFiles?: boolean
+  /**
+   * With `answeredWithoutFiles`: the documents the Host did not admit. The Host
+   * already read the others, so recovery brings back only these.
+   */
+  undeliveredFileIds?: string[]
 }
 
 export type HostConnectionTone = 'healthy' | 'degraded' | 'offline'
@@ -263,6 +275,52 @@ export type ComposerImageAttachment = {
   dataBase64: string
   sizeBytes: number
   previewDataUrl: string
+}
+
+type ComposerFileAttachmentBase = {
+  id: string
+  addedOrder?: number
+  type: 'file'
+  filename: string
+  /** Size the picker reported; the bytes read must match it. */
+  sizeBytes: number
+  /** Media type the browser attached to the file; empty when it has none. */
+  declaredMediaType: string
+}
+
+/**
+ * A document picked for the current message (#678). It is read completely in
+ * the renderer (`selected` → `reading`) before it can be sent; only a `ready`
+ * file travels, as an inline `kind:'file'` attachment. A file that is refused
+ * or cannot be read never stays in this list: it becomes a
+ * `ComposerFileRefusal` instead.
+ */
+export type ComposerFileAttachment = ComposerFileAttachmentBase &
+  (
+    | { status: 'reading' }
+    | {
+        status: 'ready'
+        classification: FileClassification
+        dataBase64: string
+        digestHex: string
+      }
+  )
+
+/** A document that is fully read and hashed: the only state that can be sent. */
+export type ReadyComposerFileAttachment = Extract<ComposerFileAttachment, { status: 'ready' }>
+
+/** The outcome of reading a picked document: ready to send, or the reason it cannot be. */
+export type ComposerFileReadResult =
+  | ReadyComposerFileAttachment
+  | (ComposerFileAttachmentBase & { status: 'failed'; error: string })
+
+/**
+ * Why a picked document was not attached (#678). Shown as a notice until the
+ * next attach, a send or an agent change.
+ */
+export type ComposerFileRefusal = {
+  id: string
+  text: string
 }
 
 export type ComposerPluginReference = {
