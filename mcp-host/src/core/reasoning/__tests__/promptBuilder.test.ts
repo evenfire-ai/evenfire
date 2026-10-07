@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { ToolDefinition } from '../../types'
-import { DefaultPromptBuilder, MEMORY_GUIDANCE_TEXT } from '../promptBuilder'
+import {
+  DefaultPromptBuilder,
+  GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
+  MEMORY_GUIDANCE_TEXT,
+} from '../promptBuilder'
 
 function tool(name: string): ToolDefinition {
   return { name, description: `mock ${name}`, parameters: {} }
@@ -32,5 +36,24 @@ describe('DefaultPromptBuilder — memory guidance (P.4)', () => {
     ])
     const occurrences = msg.content.split(MEMORY_GUIDANCE_TEXT).length - 1
     expect(occurrences).toBe(1)
+  })
+})
+
+describe('DefaultPromptBuilder — governed GFS workspace files', () => {
+  it('includes the guidance when the explicit download tool is registered', () => {
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    const msg = builder.buildSystemPrompt([tool('clerum__gfs_download')])
+    expect(msg.content).toContain(GFS_WORKSPACE_FILE_GUIDANCE_TEXT)
+    expect(msg.content).toContain('never invent a resourceId')
+    expect(msg.content).toContain('call `clerum__gfs_download` and use the exact `path`')
+    expect(msg.content).toContain('never guess a `.gfs-downloads/<filename>` path')
+    expect(msg.content).toContain('copy the complete parsed header array verbatim')
+    expect(msg.content).toContain('write outputs outside `.gfs-downloads`')
+  })
+
+  it('omits the guidance when workspace download is unavailable', () => {
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    const msg = builder.buildSystemPrompt([tool('clerum__gfs_read')])
+    expect(msg.content).not.toContain(GFS_WORKSPACE_FILE_GUIDANCE_TEXT)
   })
 })

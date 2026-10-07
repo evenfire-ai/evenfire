@@ -22,7 +22,6 @@ import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { LlmProviderSummary } from '../../../components/LlmProviderSummary'
 import { LlmSecretSelect, type LlmSecretSelectOption } from '../../../components/LlmSecretSelect'
-import { LlmSecretUpdateModal } from '../../../components/LlmSecretUpdateModal'
 import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
@@ -202,7 +201,6 @@ export default function HostDetailsPage() {
   const [initialLoading, setInitialLoading] = useState(true)
 
   const [editingModel, setEditingModel] = useState(false)
-  const [llmSecretModalOpen, setLlmSecretModalOpen] = useState(false)
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
   const [deleteAgentDialogError, setDeleteAgentDialogError] = useState('')
@@ -280,10 +278,6 @@ export default function HostDetailsPage() {
   const [availableLlmSecrets, setAvailableLlmSecrets] = useState<HostSecretResource[]>([])
   // Fallback policy (spec §3-R5). `undefined` = the Host has no llmPolicy.
   const [llmPolicyDraft, setLlmPolicyDraft] = useState<LlmPolicy | undefined>(undefined)
-  // Keep the last server-backed policy separate from the editable draft. A
-  // model edit may contain an unsaved fallback slot, but Secret retirement
-  // must be guarded by the policy that is actually active on the Host.
-  const [persistedLlmPolicy, setPersistedLlmPolicy] = useState<LlmPolicy | undefined>(undefined)
   // Per-host model allowlist subset (spec.allowedModels, Topic 3a). Empty = the
   // host offers the full global allowlist per provider (back-compat default).
   const [allowedModelsDraft, setAllowedModelsDraft] = useState<HostAllowedModel[]>([])
@@ -336,17 +330,6 @@ export default function HostDetailsPage() {
       allowedCatalog
     )
   }, [allowedModelsDraft, allowedCatalog, providerDraft, llmPolicyDraft])
-  const protectedCredentialSlots = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          (persistedLlmPolicy?.fallbacks ?? [])
-            .map(fallback => String(fallback.credentialSlot || '').trim())
-            .filter(Boolean)
-        )
-      ),
-    [persistedLlmPolicy]
-  )
   // Mount race: if the host loaded before the allowlist and it had NO saved
   // model, loadData resolved the draft to '' — seed the default once the
   // catalog arrives. Never overrides a non-empty draft (a saved model that
@@ -507,8 +490,6 @@ export default function HostDetailsPage() {
       const { host, contexts: contextsList, secrets: secretsList, agentUsers, agentTeams } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
-      const nextPersistedLlmPolicy = normalizeLlmPolicy(spec.llmPolicy)
-      setPersistedLlmPolicy(nextPersistedLlmPolicy)
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
@@ -598,7 +579,7 @@ export default function HostDetailsPage() {
             (spec.model as { connectionRef?: string } | undefined)?.connectionRef || ''
           ).trim() || CODEX_UNASSIGNED_CONNECTION_KEY
         )
-        setLlmPolicyDraft(nextPersistedLlmPolicy)
+        setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
         // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
         // → [] = unrestricted (offers the full global allowlist per provider).
         setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
@@ -941,13 +922,33 @@ export default function HostDetailsPage() {
       return
     }
     setSecretRefDraft(parsed.name)
-    setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-    setCodexModels([])
-    setGrokModels([])
-    setGrantCatalogError('')
-    if (isOauthBrokerProvider(providerDraft)) {
-      setProviderDraft('openai')
-      setModelNameDraft(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
+    // Secret → provider sync (mirrors HostWizard.handleExistingSecretChange and
+    // an explicit provider switch): when the picked secret carries provider
+    // credentials (the same metadata that renders the option's provider icons),
+    // align the primary provider — and its default model — with it so the
+    // pair stays coherent. A secret that already serves the current provider
+    // keeps it (multi-provider secrets never clobber a coherent choice), and a
+    // provider-less/custom secret never touches the operator's provider.
+    const pickedProviders = (
+      llmSecretOptions.find(option => option.value === parsed.name)?.providers ?? []
+    )
+      .map(provider => normalizeProvider(provider.id))
+      .filter(provider => !isOauthBrokerProvider(provider))
+    if (pickedProviders.length > 0) {
+      setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+      setCodexModels([])
+      setGrokModels([])
+      setGrantCatalogError('')
+      if (!pickedProviders.includes(providerDraft)) {
+        const nextProvider = pickedProviders[0]
+        setProviderDraft(nextProvider)
+        setModelNameDraft(
+          resolveDefaultModel(
+            nextProvider,
+            constrainModelOptions(allowedCatalog, allowedModelsDraft, nextProvider)
+          )
+        )
+      }
     }
   }
 
@@ -1087,57 +1088,78 @@ export default function HostDetailsPage() {
     await loadData('model')
   }
 
-  function renderModelCredentialFields(idPrefix: string, selectDisabled: boolean) {
+  function renderModelCredentialFields(idPrefix: string, variant: 'summary' | 'editor') {
+    const isEditor = variant === 'editor'
+    // Static surfaces must not read as broken dropdowns: the summary renders a
+    // read-only value display (no chrome, chevron, hover, or pointer cursor)
+    // and no pencil — every editing affordance lives in the editor dialog.
+    const assignmentValue = credentialSelectValue(
+      showFallbackSecretField ? '' : secretRefDraft,
+      connectionRefDraft,
+      providerDraft === GROK_SUBSCRIPTION_PROVIDER
+        ? GROK_SUBSCRIPTION_PROVIDER
+        : 'codex-subscription'
+    )
+    const assignmentEditorPlaceholder = isBrokerAssignment
+      ? isBrokerUnassigned
+        ? 'No credential assigned'
+        : assignedBrokerLabel
+      : apiKeySecretOptions.length === 0
+        ? 'No LLM Secret available'
+        : 'Select an LLM Secret...'
+    const assignmentSummaryPlaceholder = isBrokerAssignment
+      ? isBrokerUnassigned
+        ? 'No credential assigned'
+        : assignedBrokerLabel
+      : 'No LLM Secret assigned'
+    const secretEditorPlaceholder =
+      apiKeySecretOptions.length === 0 ? 'No LLM Secret available' : 'Select an LLM Secret...'
+    function handleFallbackSecretChange(value: string) {
+      const parsed = parseCredentialSelect(value)
+      setSecretRefDraft(parsed.kind === 'secret' ? parsed.name : '')
+    }
+    // The pencil leaves this page for the full-screen secret editor. `from`
+    // brings the operator back to this tab when the edit completes or is
+    // cancelled — the editor dialog itself unmounts with the navigation.
+    const renderPencil = () => (
+      <button
+        type="button"
+        className="cu-btn cu-btn--icon cu-btn--toolbar"
+        onClick={() =>
+          router.push(
+            CONTROL_ROUTES.secrets.editLlm(secretRefDraft.trim(), { from: hostTabHref('model') })
+          )
+        }
+        disabled={busy || !secretRefDraft.trim()}
+        aria-label="Edit LLM Secret credentials"
+        title="Edit LLM Secret credentials"
+      >
+        <IconPencil width={16} height={16} />
+      </button>
+    )
     return (
       <>
         <div className="cu-field">
-          <label htmlFor={`${idPrefix}-assignment`}>{credentialFieldLabel}</label>
+          {isEditor ? (
+            <label htmlFor={`${idPrefix}-assignment`}>{credentialFieldLabel}</label>
+          ) : (
+            <span className="cu-llm-summary__label">{credentialFieldLabel}</span>
+          )}
           <div className="cu-llm-secret-control">
             <LlmSecretSelect
               id={`${idPrefix}-assignment`}
-              value={
-                showFallbackSecretField
-                  ? credentialSelectValue(
-                      '',
-                      connectionRefDraft,
-                      providerDraft === GROK_SUBSCRIPTION_PROVIDER
-                        ? GROK_SUBSCRIPTION_PROVIDER
-                        : 'codex-subscription'
-                    )
-                  : credentialSelectValue(
-                      secretRefDraft,
-                      connectionRefDraft,
-                      providerDraft === GROK_SUBSCRIPTION_PROVIDER
-                        ? GROK_SUBSCRIPTION_PROVIDER
-                        : 'codex-subscription'
-                    )
-              }
+              value={assignmentValue}
               ariaLabel={credentialFieldLabel}
-              onChange={handleCredentialChange}
               options={llmSecretOptions}
-              placeholder={
-                isBrokerAssignment
-                  ? isBrokerUnassigned
-                    ? 'No credential assigned'
-                    : assignedBrokerLabel
-                  : apiKeySecretOptions.length === 0
-                    ? 'No LLM Secret available'
-                    : 'Select an LLM Secret...'
-              }
-              disabled={selectDisabled}
+              {...(isEditor
+                ? {
+                    onChange: handleCredentialChange,
+                    disabled: busy,
+                    placeholder: assignmentEditorPlaceholder,
+                  }
+                : { readOnly: true, placeholder: assignmentSummaryPlaceholder })}
             />
-            {showFallbackSecretField ? null : (
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => setLlmSecretModalOpen(true)}
-                disabled={busy || !secretRefDraft.trim()}
-                aria-label="Edit LLM Secret credentials"
-                title="Edit LLM Secret credentials"
-              >
-                <IconPencil width={16} height={16} />
-              </button>
-            )}
+            {isEditor && !showFallbackSecretField ? renderPencil() : null}
           </div>
           <span className="cu-field__hint">
             {showFallbackSecretField
@@ -1149,34 +1171,26 @@ export default function HostDetailsPage() {
         </div>
         {showFallbackSecretField ? (
           <div className="cu-field">
-            <label htmlFor={`${idPrefix}-fallback`}>LLM Secret</label>
+            {isEditor ? (
+              <label htmlFor={`${idPrefix}-fallback`}>LLM Secret</label>
+            ) : (
+              <span className="cu-llm-summary__label">LLM Secret</span>
+            )}
             <div className="cu-llm-secret-control">
               <LlmSecretSelect
                 id={`${idPrefix}-fallback`}
                 value={secretRefDraft}
                 ariaLabel="LLM Secret"
-                onChange={value => {
-                  const parsed = parseCredentialSelect(value)
-                  setSecretRefDraft(parsed.kind === 'secret' ? parsed.name : '')
-                }}
                 options={apiKeySecretOptions}
-                placeholder={
-                  apiKeySecretOptions.length === 0
-                    ? 'No LLM Secret available'
-                    : 'Select an LLM Secret...'
-                }
-                disabled={selectDisabled}
+                {...(isEditor
+                  ? {
+                      onChange: handleFallbackSecretChange,
+                      disabled: busy,
+                      placeholder: secretEditorPlaceholder,
+                    }
+                  : { readOnly: true, placeholder: 'No LLM Secret assigned' })}
               />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => setLlmSecretModalOpen(true)}
-                disabled={busy || !secretRefDraft.trim()}
-                aria-label="Edit LLM Secret credentials"
-                title="Edit LLM Secret credentials"
-              >
-                <IconPencil width={16} height={16} />
-              </button>
+              {isEditor ? renderPencil() : null}
             </div>
             <span className="cu-field__hint">
               Needed for the {fallbackSecretLabels.join(', ') || 'static'} fallback
@@ -1408,7 +1422,7 @@ export default function HostDetailsPage() {
 
             {!editingModel ? (
               <div className="cu-form-stack cu-form-stack--wide">
-                {renderModelCredentialFields('model-secret-summary', true)}
+                {renderModelCredentialFields('model-secret-summary', 'summary')}
                 <LlmProviderSummary
                   provider={providerDraft}
                   model={modelNameDraft}
@@ -1453,10 +1467,10 @@ export default function HostDetailsPage() {
               }
               onDismiss={() => void cancelModelEdit()}
               open={editingModel}
-              size="default"
-              title="Edit model configuration"
+              title="Edit model & credentials"
             >
               <div className="cu-form-stack cu-form-stack--wide">
+                {renderModelCredentialFields('model-secret-editor', 'editor')}
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
@@ -1483,24 +1497,14 @@ export default function HostDetailsPage() {
                   catalogError={modelsError}
                   modelLabel="Current model"
                   secretKeys={currentSecretKeys}
+                  // Fallbacks are opt-in: the section starts collapsed so the
+                  // dialog leads with the primary provider + credentials.
+                  fallbackProvidersInitiallyCollapsed
                   disabled={busy}
                   grokEnabled={grokEnabled}
                 />
               </div>
             </DialogShell>
-
-            {llmSecretModalOpen && secretRefDraft.trim() ? (
-              <LlmSecretUpdateModal
-                key={secretRefDraft}
-                secretName={secretRefDraft}
-                existingKeys={currentSecretKeys}
-                protectedCredentialSlots={protectedCredentialSlots}
-                onClose={() => setLlmSecretModalOpen(false)}
-                onChanged={async () => {
-                  await loadData('none')
-                }}
-              />
-            ) : null}
           </>
         )}
 

@@ -17,8 +17,10 @@ import {
   textContentFromParts,
 } from '../core/types'
 import { logger } from '../logger'
+import { resolveVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
+import { type ImageTransportOperation, transportSupportsImageInput } from './imageInput'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
@@ -297,6 +299,11 @@ function assertTerminalCodexOutcome(result: {
 }
 
 export class CodexSubscriptionProvider implements SingleTurnProvider {
+  getVisualDeliveryLimits(operation: ImageTransportOperation) {
+    return transportSupportsImageInput('codex-subscription', operation)
+      ? resolveVisualDeliveryLimits('codex-subscription')
+      : null
+  }
   readonly requiresImageSourceIdentity =
     descriptorFor('codex-subscription').requiresImageSourceIdentity === true
   private nextProviderAttemptIndex = 1

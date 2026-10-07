@@ -13,6 +13,8 @@ import {
   referencedFilePins,
 } from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
+import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import type { GfsProcessingLeaseProvider } from '../../internalTools/gfsProcessingLease'
 import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
@@ -78,6 +80,10 @@ class InternalToolAdapter implements Tool {
   }
   traceDescriptor() {
     return { kind: 'internal_tool' as const, sourceRef: 'mcp-host' }
+  }
+
+  joinsAbortSettlement(): boolean {
+    return this.def.name === 'clerum__gfs_download' || this.def.name === 'clerum__gfs_read'
   }
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
@@ -186,18 +192,29 @@ export class NativeToolRegistry implements ToolRegistry {
     // credential-slot stripping — only the active provider's credential env
     // var survives into the child env. Appended as a trailing optional so
     // existing positional call sites stay valid; only taskExecutor passes it.
-    activeLlmProvider?: LlmProvider
+    activeLlmProvider?: LlmProvider,
+    gfsDownload?: {
+      /** Omitted when the durable store is recovery-required; delivery then fails closed. */
+      store?: GfsDownloadStore
+      /** True only for attended, policy-eligible, healthy workspace delivery. */
+      deliveryAvailable: boolean
+      callerIdentity: string
+      callerWorkspacePath?: string
+      processingLeaseProvider: GfsProcessingLeaseProvider
+      retentionOwnerId?: string
+    }
   ) {
-    // file_read/file_write are scoped to the per-user root when a ScopedWorkspace
-    // is wired (F1c) — they operate on a raw path string, not the Workspace
-    // interface, so we read the per-user root off it explicitly. Falls back to
-    // the shared root when there is no user context (e.g. the tool-name listing
-    // registry in main.ts). ShellTool stays on the shared root: scoping its cwd
-    // does not contain absolute-path access — shell isolation is a documented
-    // residual (bundled with OS-level sandboxing).
+    // A Host-owned GFS store establishes a trusted caller binding even when
+    // memory is disabled. In that mode file tools never fall back to the shared
+    // Host root; if the caller root cannot be verified they are omitted.
+    // Without that Host store, preserve the legacy memory/shared-root behavior.
     const fileToolsRoot =
-      workspace instanceof ScopedWorkspace ? workspace.userRootPath : config.workspacePath
-    this.register(new FileReadTool(fileToolsRoot))
+      gfsDownload !== undefined
+        ? gfsDownload.callerWorkspacePath
+        : workspace instanceof ScopedWorkspace
+          ? workspace.userRootPath
+          : config.workspacePath
+    if (fileToolsRoot !== undefined) this.register(new FileReadTool(fileToolsRoot))
     // NOTE (residual): FileWriteTool writes via raw fs and bypasses
     // WorkspaceService.write → scanWriteContent. So a `file_write` to
     // `daily/*` / `MEMORY.md` is NOT injection-scanned. It is scoped to the
@@ -206,14 +223,15 @@ export class NativeToolRegistry implements ToolRegistry {
     // radius is self-injection of the user's own daily snapshot (low). Closing
     // it (route memory/daily-class file_write through WorkspaceService) is future
     // hardening, independent of F5.
-    this.register(new FileWriteTool(fileToolsRoot))
+    if (fileToolsRoot !== undefined) this.register(new FileWriteTool(fileToolsRoot))
     this.register(
       new ShellTool(
-        config.workspacePath,
+        gfsDownload ? gfsDownload.callerWorkspacePath : config.workspacePath,
         config.shellTimeout,
         config.envAllowlist,
         dynamicEnvProvider,
-        activeLlmProvider
+        activeLlmProvider,
+        gfsDownload?.processingLeaseProvider
       )
     )
     this.register(new HttpRequestTool(config.httpAllowlist))
@@ -244,6 +262,10 @@ export class NativeToolRegistry implements ToolRegistry {
         ...(gfsScopes.has('gfs.read')
           ? buildGfsReadTools(gfsClient, {
               referencedFiles: referencedFilePins(sourceMessage?.fileReferenceResolutions),
+              downloadStore: gfsDownload?.deliveryAvailable ? gfsDownload.store : undefined,
+              callerIdentity: gfsDownload?.callerIdentity,
+              callerWorkspacePath: gfsDownload?.callerWorkspacePath,
+              retentionOwnerId: gfsDownload?.retentionOwnerId,
             })
           : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
