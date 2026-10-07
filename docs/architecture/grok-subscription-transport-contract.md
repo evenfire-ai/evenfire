@@ -272,8 +272,13 @@ Errors:
   refused after 40 s, the holder's read deadline (10 s) plus its work deadline
   (30 s). These bounds limit latency and fairness, not memory; the count of one
   is an uncertified ceiling (#813). The gateway's authorize location sets its
-  read and send timeouts to 90 s, above the 80 s a retained authorize can take
-  (queue, read and work), so control-api's own answer reaches the Host. A bare
+  read and send timeouts to 90 s, so control-api's own answer reaches the
+  Host. Each nginx timer bounds the gap between two successive writes or
+  reads, not the whole request: the send timer covers the stall while
+  control-api pauses a queued body (the 40 s queue wait, after the rate
+  limiter), and the read timer covers the work once the body is sent (30 s
+  plus connection teardown). The request as a whole can take longer than
+  90 s without either timer firing. A bare
   504 from the gateway (a read or send timeout on an accepted connection) is
   read as `authorize_timeout`, never as a provider outage.
   A resolved authorize has committed its ticket and budget reservation, so it
