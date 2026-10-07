@@ -8023,6 +8023,42 @@ h3 {
   scrollbar-width: thin;
 }
 
+.composer-attachments-count {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.composer-attachments-clear {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: 0 var(--space-1);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.composer-attachments-clear:hover {
+  color: var(--danger);
+  background: rgba(var(--danger-rgb), 0.08);
+}
+
+.composer-attachments-clear:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
 .composer-attachment-chip {
   display: inline-flex;
   align-items: center;
@@ -10465,6 +10501,11 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   color: var(--text);
 }
 
+/* TASK-172 — an interactive pill acts as a button, so it must read as one. */
+.ui-pill--interactive {
+  cursor: pointer;
+}
+
 .ui-pill--interactive:hover {
   background: var(--surface-hover);
   border-color: rgba(var(--accent-rgb), 0.42);
@@ -10607,8 +10648,43 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   margin-top: 1px;
 }
 
+.toast-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toast-action {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toast-action:hover {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger);
+}
+
+.toast-action:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
 .toast.tone-success {
   border-color: rgba(var(--success-rgb), 0.5);
+}
+
+.toast.tone-warn {
+  border-color: rgba(var(--warning-rgb), 0.5);
 }
 
 .toast.tone-error {
@@ -15278,6 +15354,66 @@ pre {
   gap: var(--space-2);
   color: var(--text-muted);
   font-size: var(--font-size-sm);
+}
+
+/* BUG-175 — folder-zip assembly progress strip. */
+.da-gfs-zip-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: var(--radius-control);
+  background: rgba(var(--panel-rgb), 0.72);
+  color: var(--text);
+  padding: var(--space-1-5) var(--space-2);
+  font-size: var(--font-size-sm);
+  line-height: 1.35;
+}
+
+.da-gfs-zip-progress__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.da-gfs-zip-progress__stop {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.da-gfs-zip-progress__stop:hover {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger);
+}
+
+.da-gfs-zip-progress__stop:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
+.da-gfs-zip-progress__label::before {
+  content: '';
+  flex: 0 0 auto;
+  width: var(--space-1);
+  height: var(--space-1);
+  border-radius: 999px;
+  background: var(--accent);
+  margin-right: var(--space-1-5);
+  display: inline-block;
+  animation: da-gfs-loading-dot 1.2s ease-in-out infinite;
 }
 
 .da-gfs-loading__dots {

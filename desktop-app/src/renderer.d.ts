@@ -131,7 +131,10 @@ declare global {
           bytes?: number
           updatedAt?: string
         }>
-        download: (uri: string) => Promise<{
+        download: (
+          uri: string,
+          options?: { maxBytes?: number; signal?: AbortSignal }
+        ) => Promise<{
           resource: {
             drive: string
             resourceId: string
@@ -195,7 +198,8 @@ declare global {
         listChildren: (
           resourceId: string,
           drive?: string,
-          cursor?: string
+          cursor?: string,
+          options?: { signal?: AbortSignal }
         ) => Promise<{
           items: Array<{
             resourceId: string
@@ -221,6 +225,15 @@ declare global {
           grantableBits: string[]
           canCreateShare: boolean
         }>
+        zipStream: {
+          start: () => Promise<{ jobId: string }>
+          append: (jobId: string, name: string, bytes: ArrayBuffer) => Promise<{ name: string }>
+          finish: (
+            jobId: string,
+            suggestedName: string
+          ) => Promise<{ saved: boolean; filePath: string | null; entryCount: number }>
+          abort: (jobId: string) => Promise<{ aborted: boolean }>
+        }
         createFolder: (
           parentResourceId: string,
           name: string,

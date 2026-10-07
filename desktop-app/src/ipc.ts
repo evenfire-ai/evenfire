@@ -17,7 +17,9 @@ import {
   requireChatStore,
   requireChatStoreForBindingGeneration,
 } from './chatStoreBinding.js'
+import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import { abortZipJob, appendZipEntry, finishZipJob, startZipJob } from './gfs/zipStream.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   PLUGIN_SDK_CAPABILITIES_CHANNEL,
@@ -290,6 +292,32 @@ export function registerIpcHandlers(service: AppService): void {
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
 
+  // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
+  // R1-M1): the renderer attaches a requestId to an invoke and fires
+  // 'gfs:abort' on Stop; the in-flight request's AbortController ends the
+  // producer fetch instead of leaving it to burn the read budget.
+  const gfsRequestAborters = new Map<string, AbortController>()
+  ipcMain.on('gfs:abort', (event, payload: { requestId?: string }) => {
+    try {
+      assertTrustedSender(event)
+    } catch {
+      return
+    }
+    const requestId = payload?.requestId ? sanitizeString(payload.requestId) : ''
+    if (requestId) gfsRequestAborters.get(requestId)?.abort()
+  })
+  function runWithGfsAbortSignal<T>(
+    requestId: string | undefined,
+    run: (signal?: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    if (!requestId) return run(undefined)
+    const controller = new AbortController()
+    gfsRequestAborters.set(requestId, controller)
+    return run(controller.signal).finally(() => {
+      gfsRequestAborters.delete(requestId)
+    })
+  }
+
   ipcMain.handle('auth:getSessionState', async event => {
     assertTrustedSender(event)
     return service.getSessionState()
@@ -479,10 +507,24 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
   })
-  ipcMain.handle('gfs:download', async (event, payload: { uri: string }) => {
-    assertTrustedSender(event)
-    return service.downloadGfsUri(sanitizeString(payload?.uri))
-  })
+  ipcMain.handle(
+    'gfs:download',
+    async (event, payload: { uri: string; maxBytes?: number; requestId?: string }) => {
+      assertTrustedSender(event)
+      // Optional producer-side bound (folder-zip walk): when present it is
+      // validated here in main so an over-large body is rejected before it
+      // materializes in either process. Absent keeps the single-file
+      // save-to-disk path uncapped.
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes !== undefined && maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('download limit exceeds the allowed maximum')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes, signal)
+      )
+    }
+  )
   ipcMain.handle(
     'gfs:downloadPreview',
     async (event, payload: { uri: string; maxBytes: number }) => {
@@ -515,11 +557,17 @@ export function registerIpcHandlers(service: AppService): void {
   )
   ipcMain.handle(
     'gfs:listChildren',
-    async (event, payload: { resourceId: string; drive?: string; cursor?: string }) => {
+    async (
+      event,
+      payload: { resourceId: string; drive?: string; cursor?: string; requestId?: string }
+    ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
       const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
-      return service.listGfsChildren(sanitizeString(payload?.resourceId), drive, cursor)
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.listGfsChildren(sanitizeString(payload?.resourceId), drive, cursor, signal)
+      )
     }
   )
   ipcMain.handle(
@@ -530,6 +578,42 @@ export function registerIpcHandlers(service: AppService): void {
       return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
     }
   )
+  // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
+  // main-process temp file, finish saves through a native dialog. All four
+  // channels trust-check; append validates the entry name before any header is
+  // written (R1-M2 defense in depth).
+  ipcMain.handle('gfs:zipStream:start', async event => {
+    assertTrustedSender(event)
+    return { jobId: await startZipJob() }
+  })
+  ipcMain.handle(
+    'gfs:zipStream:append',
+    async (event, payload: { jobId: string; name: string; bytes: ArrayBuffer }) => {
+      assertTrustedSender(event)
+      const name = sanitizeString(payload?.name)
+      if (!name) throw new Error('zipStream append requires an entry name')
+      if (!(payload?.bytes instanceof ArrayBuffer)) {
+        throw new Error('zipStream append requires entry bytes')
+      }
+      if (payload.bytes.byteLength > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('zip entry exceeds the allowed maximum')
+      }
+      const writtenName = await appendZipEntry(sanitizeString(payload.jobId), name, payload.bytes)
+      return { name: writtenName }
+    }
+  )
+  ipcMain.handle(
+    'gfs:zipStream:finish',
+    async (event, payload: { jobId: string; suggestedName: string }) => {
+      assertTrustedSender(event)
+      return finishZipJob(sanitizeString(payload.jobId), sanitizeString(payload.suggestedName))
+    }
+  )
+  ipcMain.handle('gfs:zipStream:abort', async (event, payload: { jobId: string }) => {
+    assertTrustedSender(event)
+    await abortZipJob(sanitizeString(payload.jobId))
+    return { aborted: true }
+  })
   ipcMain.handle(
     'gfs:createFolder',
     async (event, payload: { parentResourceId: string; name: string; drive?: string }) => {

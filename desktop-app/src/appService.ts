@@ -2108,17 +2108,21 @@ export class AppService {
    * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
    * reads the full body.
    */
-  async downloadGfsUri(uri: string, maxBytes?: number) {
+  async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
     return this.gfsClient.download(
       uri,
       this.requireSessionToken(),
-      maxBytes !== undefined ? { maxBytes } : undefined
+      maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
     )
   }
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
-  async listGfsChildren(resourceId: string, drive?: string, cursor?: string) {
-    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), { drive, cursor })
+  async listGfsChildren(resourceId: string, drive?: string, cursor?: string, signal?: AbortSignal) {
+    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), {
+      drive,
+      cursor,
+      signal,
+    })
   }
 
   /** List explicit gfs resources the current user can read through grants or shares. */

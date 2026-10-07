@@ -17,7 +17,11 @@ import {
   imageInputBlockMessage,
 } from '../../../../../src/imageInputDecision'
 import type { WorkflowRecipeListResult } from '../../../../../src/types'
-import type { ComposerImageAttachment, FailedAgentSend } from '../../../uiTypes'
+import type {
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+  FailedAgentSend,
+} from '../../../uiTypes'
 import { ComposerPanel } from '../ComposerPanel'
 
 // Resolve the stylesheet relative to THIS test file (not process.cwd()) so the
@@ -48,6 +52,7 @@ const actionsMock = {
   handleRemoveComposerImageAttachment: vi.fn(),
   handleAddComposerReferenceAttachments: vi.fn(),
   handleRemoveComposerReferenceAttachment: vi.fn(),
+  handleClearComposerAttachments: vi.fn(),
   handleSendAgentMessage: vi.fn(),
   handleRetryFailedAgentSend: vi.fn(),
   handleRecoverFailedAgentSend: vi.fn(),
@@ -947,6 +952,70 @@ describe('ComposerPanel with a pending image after a model switch', () => {
     expect(screen.getByText('pending.png')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Remove pending.png' }))
     expect(actionsMock.handleRemoveComposerImageAttachment).toHaveBeenCalledWith('pending-image-1')
+  })
+})
+
+describe('ComposerPanel attachments chip row (STORY-38)', () => {
+  const firstImage: ComposerImageAttachment = {
+    id: 'kept-image-1',
+    name: 'kept-a.png',
+    mimeType: 'image/png',
+    dataBase64: 'iVBORw0KGgo=',
+    sizeBytes: 8,
+    previewDataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+  }
+  const secondImage: ComposerImageAttachment = {
+    id: 'kept-image-2',
+    name: 'kept-b.png',
+    mimeType: 'image/png',
+    dataBase64: 'iVBORw0KGgoB',
+    sizeBytes: 9,
+    previewDataUrl: 'data:image/png;base64,iVBORw0KGgoB',
+  }
+  const pluginReference: ComposerReferenceAttachment = {
+    id: 'kept-ref-1',
+    type: 'plugin',
+    namespace: 'ns',
+    name: 'helper',
+    label: 'helper plugin',
+  }
+
+  it('shows no count or clear control while the composer has no attachments', () => {
+    render(<ComposerPanel inline />)
+    expect(screen.queryByTestId('composer-attachments-count')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Clear all attachments' })).toBeNull()
+  })
+
+  it('counts every pending attachment, singular and plural, with per-file remove buttons', () => {
+    composerState.composerImageAttachments = [firstImage]
+    const { rerender } = render(<ComposerPanel inline />)
+    expect(screen.getByTestId('composer-attachments-count').textContent).toBe('1 attachment')
+    expect(screen.getByRole('button', { name: 'Remove kept-a.png' })).toBeTruthy()
+
+    composerState.composerImageAttachments = [firstImage, secondImage]
+    composerState.composerReferenceAttachments = [pluginReference]
+    rerender(<ComposerPanel inline />)
+    expect(screen.getByTestId('composer-attachments-count').textContent).toBe('3 attachments')
+    expect(screen.getByRole('button', { name: 'Remove kept-b.png' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Remove helper plugin' })).toBeTruthy()
+  })
+
+  it('clears every pending attachment through the explicit clear control', () => {
+    composerState.composerImageAttachments = [firstImage, secondImage]
+    composerState.composerReferenceAttachments = [pluginReference]
+    render(<ComposerPanel inline />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all attachments' }))
+    expect(actionsMock.handleClearComposerAttachments).toHaveBeenCalledTimes(1)
+    expect(actionsMock.handleRemoveComposerImageAttachment).not.toHaveBeenCalled()
+    expect(actionsMock.handleRemoveComposerReferenceAttachment).not.toHaveBeenCalled()
+  })
+
+  it('styles the clear control and the count as part of the inline chip row', () => {
+    composerState.composerImageAttachments = [firstImage]
+    render(<ComposerPanel inline />)
+    expect(cssRule('.composer-attachments-count')).toContain('white-space: nowrap')
+    expect(cssRule('.composer-attachments-clear')).toContain('cursor: pointer')
   })
 })
 

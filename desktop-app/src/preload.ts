@@ -45,6 +45,30 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'app.backToApps',
 ])
 
+/**
+ * Producer-side cancellation wiring (folder-zip Stop, R1-M1): a cancellable
+ * invoke carries a requestId; if the caller's signal aborts, main aborts the
+ * in-flight request. An already-aborted signal never starts producer work —
+ * no invoke, no gfs:abort event (R2-L3). Kept INLINE: the sandboxed preload
+ * must stay free of relative value imports (self-containment contract).
+ */
+function cancellableGfsInvoke<T>(
+  channel: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!signal) return ipcRenderer.invoke(channel, payload) as Promise<T>
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('Request was stopped before it started.', 'AbortError'))
+  }
+  const requestId = crypto.randomUUID()
+  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
+  signal.addEventListener('abort', onAbort, { once: true })
+  return ipcRenderer
+    .invoke(channel, { ...payload, requestId })
+    .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
+}
+
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
   return typeof value === 'string' && DESKTOP_COMMAND_IDS.has(value as DesktopCommandId)
 }
@@ -143,15 +167,28 @@ const clerum = Object.freeze({
   },
   gfs: {
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
-    download: (uri: string) => ipcRenderer.invoke('gfs:download', { uri }),
+    download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
+      cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
     downloadPreview: (uri: string, maxBytes: number) =>
       ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
       ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
-    listChildren: (resourceId: string, drive?: string, cursor?: string) =>
-      ipcRenderer.invoke('gfs:listChildren', { resourceId, drive, cursor }),
+    listChildren: (
+      resourceId: string,
+      drive?: string,
+      cursor?: string,
+      options?: { signal?: AbortSignal }
+    ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
     affordances: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
+    zipStream: {
+      start: () => ipcRenderer.invoke('gfs:zipStream:start'),
+      append: (jobId: string, name: string, bytes: ArrayBuffer) =>
+        ipcRenderer.invoke('gfs:zipStream:append', { jobId, name, bytes }),
+      finish: (jobId: string, suggestedName: string) =>
+        ipcRenderer.invoke('gfs:zipStream:finish', { jobId, suggestedName }),
+      abort: (jobId: string) => ipcRenderer.invoke('gfs:zipStream:abort', { jobId }),
+    },
     createFolder: (parentResourceId: string, name: string, drive?: string) =>
       ipcRenderer.invoke('gfs:createFolder', { parentResourceId, name, drive }),
     createFile: (parentResourceId: string, name: string, encodedData: string, drive?: string) =>
