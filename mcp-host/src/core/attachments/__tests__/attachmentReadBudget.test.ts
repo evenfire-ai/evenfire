@@ -15,11 +15,19 @@ describe('notice overdraft', () => {
     const ledger = new AttachmentReadLedger()
     ledger.restore({ reads: 32, spentTokens: 3_000, bytesRead: 77 })
     expect(ledger.canEmit(WINDOW, 100)).toBe(false)
-    ledger.debitNotice(WINDOW, 1_000)
-    ledger.debitNotice(WINDOW, 500)
+    expect(ledger.debitNotice(WINDOW, 1_000)).toBe(true)
+    expect(ledger.debitNotice(WINDOW, 500)).toBe(true)
     expect(ledger.snapshot()).toEqual({ reads: 32, spentTokens: 4_500, bytesRead: 77 })
-    expect(() => ledger.debitNotice(WINDOW, 1)).toThrow(/notice cannot fit/)
+  })
+
+  it('reports the ceiling with false and leaves the ledger unchanged', () => {
+    const ledger = new AttachmentReadLedger()
+    ledger.restore({ reads: 32, spentTokens: 4_400, bytesRead: 77 })
+    // Witness: the last 100 tokens of overdraft are still charged.
+    expect(ledger.debitNotice(WINDOW, 100)).toBe(true)
     expect(ledger.snapshot().spentTokens).toBe(4_500)
+    expect(ledger.debitNotice(WINDOW, 1)).toBe(false)
+    expect(ledger.snapshot()).toEqual({ reads: 32, spentTokens: 4_500, bytesRead: 77 })
   })
 
   it('refuses a notice larger than one page even with overdraft left', () => {
@@ -27,8 +35,24 @@ describe('notice overdraft', () => {
     ledger.restore({ reads: 0, spentTokens: 3_000, bytesRead: 0 })
     expect(() => ledger.debitNotice(WINDOW, 1_001)).toThrow(/notice cannot fit/)
     // Witness: a page-sized notice is accepted on the same ledger.
-    ledger.debitNotice(WINDOW, 1_000)
+    expect(ledger.debitNotice(WINDOW, 1_000)).toBe(true)
     expect(ledger.snapshot().spentTokens).toBe(4_000)
+  })
+
+  it('still throws on an invalid cost or an unsafe spend, at or below the ceiling', () => {
+    const ledger = new AttachmentReadLedger()
+    ledger.restore({ reads: 0, spentTokens: 3_000, bytesRead: 0 })
+    for (const cost of [-1, 1.5, NaN]) {
+      expect(() => ledger.debitNotice(WINDOW, cost)).toThrow(/notice cannot fit/)
+    }
+    expect(ledger.snapshot().spentTokens).toBe(3_000)
+    // A spend that is no longer a safe integer is a corrupt ledger, not a ceiling.
+    const huge = 1_000_000_000_000
+    ledger.restore({ reads: 0, spentTokens: Number.MAX_SAFE_INTEGER - 10, bytesRead: 0 })
+    expect(() => ledger.debitNotice(huge, 100)).toThrow(/notice cannot fit/)
+    // Witness: a valid cost on the same ledger is answered, not thrown.
+    ledger.restore({ reads: 0, spentTokens: 3_000, bytesRead: 0 })
+    expect(ledger.debitNotice(WINDOW, 10)).toBe(true)
   })
 })
 

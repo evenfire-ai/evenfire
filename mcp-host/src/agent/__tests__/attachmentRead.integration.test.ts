@@ -6,10 +6,19 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { config as appConfig } from '../../config'
+import {
+  type AttachmentReadLedger,
+  type AttachmentReadLedgerSnapshot,
+  attachmentReadBudgets,
+} from '../../core/attachments/attachmentReadBudget'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { ATTACHED_FILES_INSTRUCTION } from '../../core/orchestration/turnContext'
+import { ATTACHMENT_READ_TURN_STOP_MESSAGE } from '../../core/tools/attachmentRead'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
@@ -48,20 +57,38 @@ function lastUserText(messages: ChatMessage[]): string {
   return user.content ?? ''
 }
 
+interface TaskOptions {
+  contextWindowTokens?: number
+  /** The double asks for the next page (or the same offset) on every response. */
+  readEveryResponse?: boolean
+  /** The first response asks for an approval-gated shell command instead. */
+  approvalFirst?: boolean
+}
+
 async function runTask(
   filename: string,
   mimeType: string,
   bytes: Buffer,
-  options: { contextWindowTokens?: number } = {}
+  options: TaskOptions = {}
 ) {
   const attachment = admittedFile(filename, mimeType, bytes)
   return { ...(await runTaskWith(attachment, options)), attachment }
 }
 
+/** The offset the double asks for next: the page's nextOffset, else the notice's resumeOffset. */
+function nextReadOffset(messages: ChatMessage[]): number {
+  const last = [...messages].reverse().find(message => message.role === 'tool')
+  if (!last || last.name !== 'clerum__attachment_read') return 0
+  const payload = toolPayload(last.content ?? '')
+  if (typeof payload.nextOffset === 'number') return payload.nextOffset
+  if (typeof payload.resumeOffset === 'number') return payload.resumeOffset
+  throw new Error(`unexpected attachment read payload kind ${String(payload.kind)}`)
+}
+
 /** Without an attachment the double answers directly; with one it reads it first. */
 async function runTaskWith(
   attachment: ReturnType<typeof admittedFile> | undefined,
-  options: { contextWindowTokens?: number } = {}
+  options: TaskOptions = {}
 ) {
   const call: ToolCall = {
     id: 'read-1',
@@ -69,6 +96,7 @@ async function runTaskWith(
     arguments: { attachmentId: 'file-1' },
   }
   const providerCalls: Array<{ messages: ChatMessage[]; toolNames: string[] }> = []
+  let reads = 0
   const provider: SingleTurnProvider = {
     getProviderType: () => 'openai',
     classifyError: () => {
@@ -82,6 +110,23 @@ async function runTaskWith(
         messages: structuredClone(messages),
         toolNames: tools.map(tool => tool.name),
       })
+      if (options.approvalFirst && providerCalls.length === 1) {
+        const shell: ToolCall = {
+          id: 'shell-1',
+          name: 'shell_exec',
+          arguments: { command: "printf 'approved\\n' >> effects.txt" },
+        }
+        return { content: null, tool_calls: [shell], usage, finish_reason: FinishReason.ToolUse }
+      }
+      if (options.readEveryResponse && attachment) {
+        reads += 1
+        const read: ToolCall = {
+          id: `read-${reads}`,
+          name: 'clerum__attachment_read',
+          arguments: { attachmentId: 'file-1', offset: nextReadOffset(messages) },
+        }
+        return { content: null, tool_calls: [read], usage, finish_reason: FinishReason.ToolUse }
+      }
       if (providerCalls.length === 1 && attachment) {
         return { content: null, tool_calls: [call], usage, finish_reason: FinishReason.ToolUse }
       }
@@ -119,6 +164,11 @@ async function runTaskWith(
   }
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
+  const coreEvents = new SimpleEventEmitter()
+  const toolRuns: string[] = []
+  coreEvents.on('tool:completed', event => {
+    toolRuns.push(`${String(event.data.toolName)}:${String(event.data.toolCallId)}`)
+  })
   const deps: TaskExecutorDeps = {
     conversationManager: new ConversationManager(),
     llmProvider: provider,
@@ -131,12 +181,12 @@ async function runTaskWith(
     approvalConfig: undefined,
     config: {
       maxTaskDuration: 300000,
-      maxToolCallsPerTask: 10,
+      maxToolCallsPerTask: options.readEveryResponse ? 100 : 10,
       autoStart: true,
       taskDelay: 0,
       approvalTimeout: 300000,
     },
-    coreEvents: new SimpleEventEmitter(),
+    coreEvents,
     cronScheduler: null,
     taskLifecycle: lifecycle,
     onApprovalNeeded: vi.fn(),
@@ -146,7 +196,13 @@ async function runTaskWith(
   }
   const executor = new TaskExecutor(task, deps)
   await executor.run()
-  return { attachment, call, deps, executor, providerCalls, task }
+  return { attachment, call, deps, executor, providerCalls, task, toolRuns }
+}
+
+function ledgerOf(executor: TaskExecutor): AttachmentReadLedgerSnapshot {
+  return (
+    executor as unknown as { attachmentReadLedger: AttachmentReadLedger }
+  ).attachmentReadLedger.snapshot()
 }
 
 /** The tool message content is the `<tool_output>` wrapper around the page JSON. */
@@ -312,5 +368,114 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
     expect(providerCalls).toHaveLength(1)
     expect(lastUserText(providerCalls[0]!.messages)).toBe('Analyze the attached file')
     expect(providerCalls[0]!.toolNames).not.toContain('clerum__attachment_read')
+  })
+
+  describe('notice overdraft ceiling (A15 U1)', () => {
+    const WINDOW = 8_192
+    const { turnTokens } = attachmentReadBudgets(WINDOW)
+    const ceiling = turnTokens + Math.floor(turnTokens / 2)
+    const reads = (from: number, to: number): string[] =>
+      Array.from({ length: to - from + 1 }, (_, i) => `clerum__attachment_read:read-${from + i}`)
+    /** The kind of read-k's result as the model received it on the following call. */
+    const kindSeenAfter = (
+      providerCalls: Array<{ messages: ChatMessage[] }>,
+      index: number,
+      k: number
+    ) => {
+      const message = providerCalls[index]!.messages.find(
+        entry => entry.role === 'tool' && entry.tool_call_id === `read-${k}`
+      )
+      if (!message) throw new Error(`the model never received read-${k}`)
+      return toolPayload(message.content ?? '').kind
+    }
+
+    it('ends the task with a stop message instead of failing it when the model keeps reading', async () => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: false,
+        promptCacheEnabled: true,
+      })
+      const { deps, executor, providerCalls, task, toolRuns } = await runTask(
+        'long.txt',
+        'text/plain',
+        Buffer.alloc(400_000, 'q'),
+        { contextWindowTokens: WINDOW, readEveryResponse: true }
+      )
+
+      expect(deps.onFail).not.toHaveBeenCalled()
+      expect(executor.executorState).toBe('completed')
+      expect(deps.onComplete).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(task.responseCallback!).mock.calls.map(([arg]) => arg.response)).toEqual([
+        ATTACHMENT_READ_TURN_STOP_MESSAGE,
+      ])
+      // Measured: 19 reads ran and the model was called once per read before
+      // the stop, never after it (two pages, then 16 charged notices).
+      expect(toolRuns).toEqual(reads(1, 19))
+      expect(providerCalls).toHaveLength(19)
+      // Witness: reads 1-18 reached the model as a page or a plain notice.
+      const kinds = Array.from({ length: 18 }, (_, i) => kindSeenAfter(providerCalls, i + 1, i + 1))
+      expect(kinds.slice(0, 2)).toEqual(['text', 'text'])
+      expect(kinds.slice(2).every(kind => kind === 'read_budget_exhausted')).toBe(true)
+      expect(ledgerOf(executor).spentTokens).toBeGreaterThan(turnTokens)
+      expect(ledgerOf(executor).spentTokens).toBeLessThanOrEqual(ceiling)
+    })
+
+    it('ends the task the same way after a resume that cannot prove the earlier spend', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'a15-turn-stop-'))
+      const savedWorkspace = appConfig.nativeTool.workspacePath
+      try {
+        Object.assign(appConfig, {
+          enableApproval: true,
+          dynamicToolsEnabled: false,
+          promptCacheEnabled: true,
+        })
+        appConfig.nativeTool.workspacePath = dir
+        const { deps, executor, providerCalls, task, toolRuns } = await runTask(
+          'long.txt',
+          'text/plain',
+          Buffer.alloc(400_000, 'q'),
+          { contextWindowTokens: WINDOW, readEveryResponse: true, approvalFirst: true }
+        )
+        expect(executor.executorState).toBe('waiting_approval')
+        const approval = executor.pendingApproval!
+        expect(approval.task_budget?.attachmentReadLedger).toEqual({
+          reads: 0,
+          spentTokens: 0,
+          bytesRead: 0,
+        })
+        // A missing carrier makes the resume exhaust the ledger (fail closed).
+        delete approval.task_budget!.attachmentReadLedger
+        await executor.resumeAfterApproval(false)
+
+        expect(deps.onFail).not.toHaveBeenCalled()
+        expect(executor.executorState).toBe('completed')
+        expect(deps.onComplete).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(task.responseCallback!).mock.calls.map(([arg]) => arg.response)).toEqual([
+          ATTACHMENT_READ_TURN_STOP_MESSAGE,
+        ])
+        // Measured: the exhausted ledger pays 8 notices from the overdraft and
+        // the 9th read stops the turn.
+        expect(toolRuns).toEqual(['shell_exec:shell-1', ...reads(1, 9)])
+        // The shell call, then one model call after the shell result and after
+        // each of reads 1-8.
+        expect(providerCalls).toHaveLength(10)
+        // Witness: reads 1-8 reached the model as notices, never as text.
+        for (let k = 1; k <= 8; k++) {
+          expect(kindSeenAfter(providerCalls, k + 1, k)).toBe('read_budget_exhausted')
+        }
+        const ledger = ledgerOf(executor)
+        expect(ledger.reads).toBe(32)
+        expect(ledger.bytesRead).toBe(0)
+        expect(ledger.spentTokens).toBeGreaterThan(turnTokens)
+        expect(ledger.spentTokens).toBeLessThanOrEqual(ceiling)
+        // The stop is the ceiling's: the room left is less than one notice.
+        const noticeCost = (ledger.spentTokens - turnTokens) / 8
+        expect(Number.isInteger(noticeCost)).toBe(true)
+        expect(ceiling - ledger.spentTokens).toBeLessThan(noticeCost)
+      } finally {
+        appConfig.nativeTool.workspacePath = savedWorkspace
+        await rm(dir, { recursive: true, force: true })
+      }
+    })
   })
 })

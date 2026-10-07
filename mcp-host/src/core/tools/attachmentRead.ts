@@ -172,6 +172,10 @@ function toByteRedactions(text: string, ranges: RedactionRange[]): ByteRedaction
 const EXHAUSTED_MESSAGE =
   'The current-turn attachment read budget is exhausted. Reattach the file in a new message to resume at the reported offset; earlier pages are not stored for re-reading.'
 
+/** The reply of a turn stopped once the notice overdraft is spent. */
+export const ATTACHMENT_READ_TURN_STOP_MESSAGE =
+  'I stopped reading the attached file for this turn because it reached its reading limit. Send another message to continue, or ask about a specific part of the file.'
+
 /** Execute-time reservation consumed exactly once by finalizeResult. */
 interface PendingEmission {
   attachmentId: string
@@ -452,8 +456,9 @@ export class AttachmentReadTool implements Tool {
    * and any result transform. If the final message outgrew the reservation,
    * replace it with the trusted exhausted notice at the ORIGINAL offset. A
    * notice that no longer fits the turn is charged to the bounded notice
-   * overdraft; once that is spent too, throw so publication stops without a
-   * rerun.
+   * overdraft; once that is spent too, the same notice is returned uncharged
+   * with `stopTurn`, so the loop ends the turn after this batch and no model
+   * call ever receives it.
    */
   finalizeResult(result: ToolResult, context: ToolEmissionContext): ToolResult {
     const pending = this.pending
@@ -475,14 +480,16 @@ export class AttachmentReadTool implements Tool {
     )
     const noticeContent = context.renderContent(noticeRaw)
     const noticeCost = context.measureContent(noticeContent)
+    let charged = true
     if (this.ledger.canEmit(this.contextWindowTokens, noticeCost)) {
       this.ledger.debit(this.contextWindowTokens, noticeCost, 0)
     } else {
-      // Throws once the notice overdraft is spent, which stops the turn.
-      this.ledger.debitNotice(this.contextWindowTokens, noticeCost)
+      // False once the notice overdraft is spent: the turn stops here.
+      charged = this.ledger.debitNotice(this.contextWindowTokens, noticeCost)
     }
     return {
       ...result,
+      ...(charged ? {} : { stopTurn: { message: ATTACHMENT_READ_TURN_STOP_MESSAGE } }),
       content: noticeContent,
       rawContent: noticeRaw,
       is_error: false,

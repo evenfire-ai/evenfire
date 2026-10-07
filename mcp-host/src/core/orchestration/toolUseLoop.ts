@@ -32,6 +32,7 @@ import {
   manageMessagesForIteration,
   responseResult,
   taskBrakeResult,
+  turnStopResult,
 } from './toolUseLoopRuntime'
 import { executeToolCalls } from './toolUseLoopToolBatch'
 import {
@@ -347,7 +348,7 @@ export async function runToolUseLoop(
                 config.visualInput?.budget.observeExternalImage(part.data)
             }
           }
-          const { toolResults, pendingApproval, cancelled } = await executeToolCalls(
+          const { toolResults, pendingApproval, cancelled, stopTurn } = await executeToolCalls(
             result.calls,
             config,
             iteration,
@@ -372,6 +373,17 @@ export async function runToolUseLoop(
               ]
             }
             return { type: 'need_approval', approval: projectGfsApproval(pendingApproval) }
+          }
+          if (stopTurn) {
+            // A15 U1 — a trusted tool ended the turn: keep the batch's results
+            // and attachments, make no further model call.
+            appendToolResults(
+              messages,
+              toolResults,
+              collectedAttachments,
+              config.imageSourceIdentity === true
+            )
+            return turnStopResult(config, iteration + 1, stopTurn.message, collectedAttachments)
           }
 
           const workflowFallbackResults = toolResults.filter(

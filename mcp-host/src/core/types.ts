@@ -328,6 +328,12 @@ export interface ToolResult {
    * resume time. Undefined for inline results.
    */
   spillover_ref?: string
+  /**
+   * Set only by a trusted tool's `finalizeResult` (after the safety transform):
+   * the turn ends after this batch with `message` as the reply, and no further
+   * model call is made. Later calls of the batch are answered without running.
+   */
+  stopTurn?: { message: string }
 }
 
 export interface ToolOutput {
@@ -702,7 +708,7 @@ export type LoopResult =
   | { type: 'error'; error: Error }
   | {
       type: 'exhaustion'
-      reason?: 'iteration_limit' | 'task_budget'
+      reason?: 'iteration_limit' | 'task_budget' | 'turn_stop'
       message: string
       iterations: number
       attachments?: Attachment[]

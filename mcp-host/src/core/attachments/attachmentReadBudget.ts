@@ -143,20 +143,22 @@ export class AttachmentReadLedger {
    * Charges a trusted exhausted notice that no longer fits the turn. Notices
    * read no bytes and do not count as reads, so a model that keeps calling
    * after the budget binds gets an answer instead of a failed task. The
-   * overdraft stops at half a turn above the turn budget; past it the caller
-   * stops the turn.
+   * overdraft stops at half a turn above the turn budget: past it nothing is
+   * charged and false tells the caller to stop the turn. An invalid cost, a
+   * cost above one page or an unsafe spend still throws.
    */
-  debitNotice(windowTokens: number, cost: number): void {
+  debitNotice(windowTokens: number, cost: number): boolean {
     const limits = attachmentReadBudgets(windowTokens)
     const ceiling = limits.turnTokens + Math.floor(limits.turnTokens / 2)
     if (
       !boundedCount(cost) ||
       cost > limits.pageTokens ||
-      !Number.isSafeInteger(this.state.spentTokens + cost) ||
-      this.state.spentTokens + cost > ceiling
+      !Number.isSafeInteger(this.state.spentTokens + cost)
     ) {
       throw new Error('Attachment read notice cannot fit the remaining page/turn budget')
     }
+    if (this.state.spentTokens + cost > ceiling) return false
     this.state.spentTokens += cost
+    return true
   }
 }

@@ -57,6 +57,7 @@ import {
   collectToolAttachments,
   mergeCollectedAttachments,
 } from '../core/orchestration/toolUseLoopMessages'
+import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
   type PreparedGfsFile,
   attachedFilesForTurnContext,
@@ -871,7 +872,10 @@ export class TaskExecutor {
         ...(approval.attachments || []),
         ...this.collectAttachments([...(approval.completed_results || []), toolResult]),
       ]
-      const result = await runToolUseLoop(loopConfig, messages)
+      // A15 U1 — the approved tool ended the turn: no further model call.
+      const result: LoopResult = toolResult.stopTurn
+        ? turnStopResult(loopConfig, 0, toolResult.stopTurn.message, [])
+        : await runToolUseLoop(loopConfig, messages)
 
       // Preserve attachments
       if (previousAttachments.length > 0) {
@@ -1307,7 +1311,11 @@ export class TaskExecutor {
     switch (result.type) {
       case 'response':
       case 'exhaustion': {
-        if (result.type === 'exhaustion' && result.reason !== 'task_budget')
+        if (
+          result.type === 'exhaustion' &&
+          result.reason !== 'task_budget' &&
+          result.reason !== 'turn_stop'
+        )
           throw new TaskLimitError(
             'TASK_ITERATION_LIMIT',
             `Task stopped before completion after ${this.executionBudget.maxIterations} iterations. Continuation requires a new budget.`

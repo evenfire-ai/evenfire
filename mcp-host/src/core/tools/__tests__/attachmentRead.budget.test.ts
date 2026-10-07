@@ -13,7 +13,7 @@ import { AttachmentReadLedger, attachmentReadBudgets } from '../../attachments/a
 import { toolMessageBudgetTokens } from '../../extensions/contextManager'
 import { BasicSafety } from '../../safety/safety'
 import type { Attachment, ToolResult } from '../../types'
-import { AttachmentReadTool } from '../attachmentRead'
+import { ATTACHMENT_READ_TURN_STOP_MESSAGE, AttachmentReadTool } from '../attachmentRead'
 
 const TOOL_NAME = 'clerum__attachment_read'
 const READ_LIMIT = 65_536
@@ -309,31 +309,39 @@ describe('C16 small context windows under the production tool-message measuremen
 
     const kinds: string[] = []
     let offset = 0
-    let stop: unknown = null
+    let stop: ToolResult | null = null
+    let spentAtStop = { before: -1, after: -1 }
     for (let call = 0; call < 200 && stop === null; call++) {
       const before = ledger.snapshot().spentTokens
-      try {
-        const { body } = await runMeasured(tool, { attachmentId: id, offset })
-        kinds.push(body.kind as string)
-        if (body.kind === 'text') offset += (body.byteRange as { length: number }).length
-        // Every emitted message is charged. Pages stay inside the turn; only
-        // notices may overdraw it, and never past half a turn more.
-        expect(ledger.snapshot().spentTokens).toBeGreaterThan(before)
-        if (body.kind === 'text')
-          expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(turnTokens)
-        expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(
-          turnTokens + Math.floor(turnTokens / 2)
-        )
-      } catch (error) {
-        stop = error
+      const { body, finalized } = await runMeasured(tool, { attachmentId: id, offset })
+      kinds.push(body.kind as string)
+      if (finalized.stopTurn) {
+        stop = finalized
+        spentAtStop = { before, after: ledger.snapshot().spentTokens }
+        break
       }
+      if (body.kind === 'text') offset += (body.byteRange as { length: number }).length
+      // Every emitted message is charged. Pages stay inside the turn; only
+      // notices may overdraw it, and never past half a turn more.
+      expect(ledger.snapshot().spentTokens).toBeGreaterThan(before)
+      if (body.kind === 'text')
+        expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(turnTokens)
+      expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(
+        turnTokens + Math.floor(turnTokens / 2)
+      )
     }
     expect(kinds[0]).toBe('text')
     const firstNotice = kinds.indexOf('read_budget_exhausted')
     expect(firstNotice).toBeGreaterThan(0)
     expect(kinds.slice(firstNotice).every(kind => kind === 'read_budget_exhausted')).toBe(true)
     expect(kinds.length - firstNotice).toBeGreaterThanOrEqual(2)
-    expect(String(stop)).toMatch(/notice cannot fit/)
+    // The call at the ceiling answers with the same notice and stops the turn,
+    // without charging the notice it could not afford.
+    expect(stop).not.toBeNull()
+    expect(stop!.is_error).toBe(false)
+    expect(stop!.stopTurn).toEqual({ message: ATTACHMENT_READ_TURN_STOP_MESSAGE })
+    expect(spentAtStop.after).toBe(spentAtStop.before)
+    expect(spentAtStop.after).toBeLessThanOrEqual(turnTokens + Math.floor(turnTokens / 2))
   })
 
   describe('bounded notice overdraft (jozer-rami M1)', () => {
@@ -419,18 +427,23 @@ describe('C16 small context windows under the production tool-message measuremen
       const { turnTokens } = attachmentReadBudgets(LARGE_WINDOW)
 
       let notices = 0
-      let stop: unknown = null
+      let stop: ToolResult | null = null
       for (let call = 0; call < 5_000 && stop === null; call++) {
-        try {
-          const { body } = await runMeasured(tool, { attachmentId: id })
-          expect(body.kind).toBe('read_budget_exhausted')
+        const before = ledger.snapshot().spentTokens
+        const { body, finalized } = await runMeasured(tool, { attachmentId: id })
+        expect(body.kind).toBe('read_budget_exhausted')
+        expect(finalized.content).not.toContain('stop page')
+        if (finalized.stopTurn) {
+          stop = finalized
+          // The stopping notice is not charged.
+          expect(ledger.snapshot().spentTokens).toBe(before)
+        } else {
           notices += 1
-        } catch (error) {
-          stop = error
+          expect(ledger.snapshot().spentTokens).toBeGreaterThan(before)
         }
       }
       expect(notices).toBeGreaterThanOrEqual(2)
-      expect(String(stop)).toMatch(/notice cannot fit/)
+      expect(stop?.stopTurn?.message).toBe(ATTACHMENT_READ_TURN_STOP_MESSAGE)
       expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(
         turnTokens + Math.floor(turnTokens / 2)
       )
@@ -504,20 +517,47 @@ describe('C16 finalize fence', () => {
     expect(ledger.snapshot().spentTokens).toBeGreaterThan(turnTokens)
   })
 
-  it('fails closed when the notice would pass half a turn of overdraft', async () => {
+  it('stops the turn with the notice when it would pass half a turn of overdraft', async () => {
     const [file] = admitted([
       rawFile('file-over', 'over.txt', 'text/plain', Buffer.from('over page body')),
     ])
     const ledger = new AttachmentReadLedger()
     const turnTokens = Math.floor(WINDOW_TOKENS * 0.3)
-    ledger.restore({
-      reads: 1,
-      spentTokens: turnTokens + Math.floor(turnTokens / 2) - 1,
-      bytesRead: 0,
-    })
+    const spent = turnTokens + Math.floor(turnTokens / 2) - 1
+    ledger.restore({ reads: 1, spentTokens: spent, bytesRead: 0 })
     const { tool } = toolFor([file!], { ledger })
 
-    await expect(runRead(tool, { attachmentId: 'file-over' })).rejects.toThrow(/notice cannot fit/)
+    const { finalized } = await runRead(tool, { attachmentId: 'file-over' })
+    // Witness: the result is the trusted notice, measured like any other.
+    const body = JSON.parse(finalized.rawContent as string) as Record<string, unknown>
+    expect(body.kind).toBe('read_budget_exhausted')
+    expect(finalized.is_error).toBe(false)
+    expect(finalized.emittedMessageCost).toBe(measureContent(finalized.content))
+    expect(finalized.content).not.toContain('over page body')
+    expect(finalized.stopTurn).toEqual({ message: ATTACHMENT_READ_TURN_STOP_MESSAGE })
+    expect(ATTACHMENT_READ_TURN_STOP_MESSAGE).toBe(
+      'I stopped reading the attached file for this turn because it reached its reading limit. Send another message to continue, or ask about a specific part of the file.'
+    )
+    // execute counted the call; the stopping notice itself is not charged.
+    expect(ledger.snapshot()).toEqual({ reads: 2, spentTokens: spent, bytesRead: 0 })
+  })
+
+  it('leaves stopTurn unset on a page and on a notice the overdraft still covers', async () => {
+    const [file] = admitted([
+      rawFile('file-cover', 'cover.txt', 'text/plain', Buffer.from('cover page body')),
+    ])
+    const page = await runRead(toolFor([file!]).tool, { attachmentId: 'file-cover' })
+    expect(page.finalized.content).toContain('cover page body')
+    expect(page.finalized).not.toHaveProperty('stopTurn')
+
+    const ledger = new AttachmentReadLedger()
+    const turnTokens = Math.floor(WINDOW_TOKENS * 0.3)
+    ledger.restore({ reads: 1, spentTokens: turnTokens, bytesRead: 0 })
+    const notice = await runRead(toolFor([file!], { ledger }).tool, { attachmentId: 'file-cover' })
+    // Witness: this call took the overdraft path and was charged.
+    expect(JSON.parse(notice.finalized.rawContent as string).kind).toBe('read_budget_exhausted')
+    expect(ledger.snapshot().spentTokens).toBeGreaterThan(turnTokens)
+    expect(notice.finalized).not.toHaveProperty('stopTurn')
   })
 
   it('finalizes exactly once without another tool execution', async () => {
