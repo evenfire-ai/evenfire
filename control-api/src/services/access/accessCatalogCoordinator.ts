@@ -102,6 +102,11 @@ type ProducerRuntime = {
   page: CatalogProducerPage
 }
 
+type PreparedOperationalHydration = Readonly<{
+  hydration: CatalogOperationalHydration | undefined
+  unavailableRootKeys: ReadonlySet<string>
+}>
+
 function normalizeFamilies(value: readonly CatalogFamily[] | undefined): CatalogFamily[] {
   if (value === undefined) return [...CATALOG_FAMILIES]
   if (value.length === 0 || value.length > CATALOG_FAMILIES.length) {
@@ -169,14 +174,14 @@ async function hydrateSelected(
 async function prepareOperationalHydration(
   context: CatalogRequestContext,
   selected: readonly CatalogIdentityCandidate[]
-): Promise<CatalogOperationalHydration | undefined> {
+): Promise<PreparedOperationalHydration> {
   const roots = selected.flatMap(candidate => {
     const resourceType = candidate.key[1]
     return isOperationalAccessResourceType(resourceType as AccessResourceType)
       ? [{ resourceType: resourceType as AccessResourceType, logicalId: candidate.key[2] }]
       : []
   })
-  if (roots.length === 0) return undefined
+  if (roots.length === 0) return { hydration: undefined, unavailableRootKeys: new Set() }
 
   const graphs = await loadOperationalResourceGraphs({
     db: context.db,
@@ -185,6 +190,20 @@ async function prepareOperationalHydration(
     roots,
     sourceStates: context.sourceStates,
   })
+  const unavailableRootKeys = new Set<string>()
+  for (const root of roots) {
+    const graph = graphs.get(operationalResourceGraphKey(root.resourceType, root.logicalId))
+    if (
+      graph?.status === 'unavailable' &&
+      graph.safeCode === 'operational_related_resource_incomplete'
+    ) {
+      unavailableRootKeys.add(operationalResourceGraphKey(root.resourceType, root.logicalId))
+      continue
+    }
+    if (!graph || graph.status !== 'current') {
+      throw new CatalogProducerContractError('operational_source_changed_before_hydration')
+    }
+  }
   const contextRefs = [...graphs.values()].flatMap(graph =>
     graph.status === 'current' ? budgetContextRefsForGraph(graph) : []
   )
@@ -193,13 +212,10 @@ async function prepareOperationalHydration(
     budget: context.budget,
     contextRefs,
   })
-  for (const root of roots) {
-    const graph = graphs.get(operationalResourceGraphKey(root.resourceType, root.logicalId))
-    if (!graph || graph.status !== 'current') {
-      throw new CatalogProducerContractError('operational_source_changed_before_hydration')
-    }
-  }
-  return Object.freeze({ graphs, policySnapshot })
+  return Object.freeze({
+    hydration: Object.freeze({ graphs, policySnapshot }),
+    unavailableRootKeys,
+  })
 }
 
 function catalogItem(
@@ -348,12 +364,36 @@ async function buildInTransaction(input: {
     input.limit + 1
   )
   const selected = merged.slice(0, input.limit)
-  const operationalHydration = await prepareOperationalHydration(context, selected)
-  const hydrated = await hydrateSelected(context, selected, operationalHydration)
-  const items = selected.map(candidate =>
+  const preparedOperationalHydration = await prepareOperationalHydration(context, selected)
+  const selectedHydratable = selected.filter(
+    candidate =>
+      !preparedOperationalHydration.unavailableRootKeys.has(
+        operationalResourceGraphKey(candidate.key[1] as AccessResourceType, candidate.key[2])
+      )
+  )
+  const hydrated = await hydrateSelected(
+    context,
+    selectedHydratable,
+    preparedOperationalHydration.hydration
+  )
+  const items = selectedHydratable.map(candidate =>
     catalogItem(context, hydrated.get(JSON.stringify(candidate.key))!)
   )
-  const partialErrors = safePartialErrors(runtimes)
+  const partialErrorsByIdentity = new Map(
+    safePartialErrors(runtimes).map(error => [JSON.stringify([error.producer, error.code]), error])
+  )
+  for (const key of preparedOperationalHydration.unavailableRootKeys) {
+    const [family] = JSON.parse(key) as [CatalogFamily, string]
+    const error = Object.freeze({
+      producer: family,
+      code: 'operational_related_resource_incomplete' as const,
+      retryable: true as const,
+    })
+    partialErrorsByIdentity.set(JSON.stringify([error.producer, error.code]), error)
+  }
+  const partialErrors = [...partialErrorsByIdentity.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, error]) => error)
   const continuations = finalContinuations({
     requestedFamilies: input.families,
     runtimes,

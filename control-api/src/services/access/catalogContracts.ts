@@ -44,7 +44,10 @@ export type CatalogIdentityCandidate = Readonly<{
 
 export type SafeCatalogPartialError = Readonly<{
   producer: CatalogFamily
-  code: 'operational_source_unavailable' | 'operational_source_relisting'
+  code:
+    | 'operational_source_unavailable'
+    | 'operational_source_relisting'
+    | 'operational_related_resource_incomplete'
   retryable: true
 }>
 

@@ -25,6 +25,10 @@ import {
   operationalSourceSpecs,
 } from '../src/services/access/operationalAccessIndexer.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
+import {
+  loadOperationalResourceGraphs,
+  operationalResourceGraphKey,
+} from '../src/services/access/operationalAccessReader.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import {
   catalogBudgetOptionsForIntent,
@@ -1233,6 +1237,214 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         contextName,
       ])
       kubernetesApi.delete(siblingContext.plural, siblingContext.namespace, contextName)
+      await indexer.reconcileSource(contextSource)
+    }
+  })
+
+  it('returns a retryable Host partial without masking an unrelated User', async () => {
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+    const contextSource = operationalSourceSpecs.find(value => value.family === 'context')!
+    const hostName = `catalog-host-dangling-root-${randomBytes(5).toString('hex')}`
+    const contextName = `catalog-context-dangling-root-${randomBytes(5).toString('hex')}`
+    const missingFilesystemName = `catalog-filesystem-missing-${randomBytes(5).toString('hex')}`
+    const danglingContext = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: contextName,
+      uid: randomUUID(),
+      spec: {
+        sharedFileSystems: [{ name: missingFilesystemName, mountPath: '/workspace/dangling' }],
+      },
+    })
+    const danglingHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: hostName,
+      uid: randomUUID(),
+      spec: {
+        contextRef: contextName,
+        model: { provider: 'openai', name: 'test-model' },
+      },
+    })
+    kubernetesApi.put(danglingContext.plural, danglingContext.namespace, danglingContext.object)
+    kubernetesApi.put(danglingHost.plural, danglingHost.namespace, danglingHost.object)
+    await databasePool.query(`INSERT INTO user_agents(user_id, agent_name) VALUES ($1, $2)`, [
+      userId,
+      hostName,
+    ])
+    await indexer.reconcileSource(contextSource)
+    await indexer.reconcileSource(hostSource)
+
+    try {
+      const indexedHost = await databasePool.query(
+        `SELECT logical_id
+           FROM operational_resource_index
+          WHERE environment_id = $1 AND resource_type = 'host' AND logical_id = $2`,
+        [environmentId, `${config.hostsNamespace}/${hostName}`]
+      )
+      const danglingContextEdge = await databasePool.query(
+        `SELECT target_id
+           FROM operational_resource_relationships
+          WHERE environment_id = $1 AND source_type = 'host' AND source_id = $2
+            AND relationship_type = 'uses_context'`,
+        [environmentId, `${config.hostsNamespace}/${hostName}`]
+      )
+      expect(indexedHost.rows).toHaveLength(1)
+      expect(danglingContextEdge.rows).toEqual([
+        expect.objectContaining({
+          target_id: `${config.contextsNamespace}/${contextName}`,
+        }),
+      ])
+      const graphBudget = AccessExecutionBudget.create('catalog')
+      try {
+        const graphs = await loadOperationalResourceGraphs({
+          db: databasePool,
+          budget: graphBudget,
+          environmentId,
+          roots: [
+            {
+              resourceType: 'host',
+              logicalId: `${config.hostsNamespace}/${hostName}`,
+            },
+          ],
+        })
+        expect(
+          graphs.get(operationalResourceGraphKey('host', `${config.hostsNamespace}/${hostName}`))
+        ).toEqual(
+          expect.objectContaining({
+            status: 'unavailable',
+            safeCode: 'operational_related_resource_incomplete',
+          })
+        )
+      } finally {
+        graphBudget.close()
+      }
+      await expect(
+        resolveLiveAuthorization(
+          {
+            session,
+            requiredCapability: 'host.read',
+            resource: canonicalResourceIdentity({
+              environmentId,
+              type: 'host',
+              logicalId: `${config.hostsNamespace}/${hostName}`,
+              displayName: hostName,
+            }),
+          },
+          { transaction: transaction(databasePool), gateway }
+        )
+      ).resolves.toEqual(
+        expect.objectContaining({
+          status: 'unavailable',
+          dependencyClass: 'operational_resource_store',
+          retryable: true,
+        })
+      )
+      const aggregate = await buildAccessCatalog(
+        { session, families: ['user', 'host'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(aggregate.complete).toBe(false)
+      expect(aggregate.partialErrors).toContainEqual({
+        producer: 'host',
+        code: 'operational_related_resource_incomplete',
+        retryable: true,
+      })
+      expect(
+        aggregate.items.some(
+          item => item.resource.logicalId === `${config.hostsNamespace}/${hostName}`
+        )
+      ).toBe(false)
+      expect(aggregate.items.some(item => item.resource.type === 'user')).toBe(true)
+      expect(
+        aggregate.items.some(
+          item => item.resource.logicalId === `${config.hostsNamespace}/catalog-host`
+        )
+      ).toBe(true)
+
+      const issued = await createUserSession(
+        {
+          userId,
+          email: `${userId}@example.test`,
+          authenticationMethods: ['password'],
+        },
+        { db: databasePool as never }
+      )
+      const priorIndexerEnabled = config.operationalAccessIndexerEnabled
+      const priorReadinessMaxAgeMs = config.operationalAccessReadinessMaxAgeMs
+      const priorActivationRecord = config.userAccessCatalogActivationRecord
+      config.operationalAccessIndexerEnabled = true
+      config.operationalAccessReadinessMaxAgeMs = 60_000
+      config.userAccessCatalogActivationRecord = JSON.stringify({
+        version: 1,
+        active: true,
+        revision: 'r35-h1-root-local-partial',
+        acceptedBy: 'realpg-test-harness',
+        acceptedAt: new Date().toISOString(),
+        catalogConfigurationRevision: catalogConfigurationRevision(configuredUserAccessIntent),
+        requiredFamilies: CATALOG_FAMILIES,
+        comparisonEvidence: CATALOG_FAMILIES.map(family => ({
+          family,
+          attempted: 1,
+          completed: 1,
+          reference: 'realpg-test-harness',
+        })),
+      })
+      try {
+        const app = express()
+        app.use(createExternalAccessRouter(gateway))
+        const mounted = await request(app)
+          .get('/external/access/catalog')
+          .set('x-user-session-token', issued.token)
+        expect(mounted.status).toBe(200)
+        expect(mounted.body.complete).toBe(false)
+        expect(mounted.body.partialErrors).toContainEqual({
+          producer: 'host',
+          code: 'operational_related_resource_incomplete',
+          retryable: true,
+        })
+        expect(
+          mounted.body.items.some(
+            (item: { resource?: { logicalId?: string } }) =>
+              item.resource?.logicalId === `${config.hostsNamespace}/${hostName}`
+          )
+        ).toBe(false)
+        expect(
+          mounted.body.items.some(
+            (item: { resource?: { type?: string } }) => item.resource?.type === 'user'
+          )
+        ).toBe(true)
+      } finally {
+        config.operationalAccessIndexerEnabled = priorIndexerEnabled
+        config.operationalAccessReadinessMaxAgeMs = priorReadinessMaxAgeMs
+        config.userAccessCatalogActivationRecord = priorActivationRecord
+      }
+
+      const firstPage = await buildAccessCatalog(
+        { session, families: ['host'], limit: 1 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(firstPage.nextCursor).not.toBeNull()
+      const progressed = await buildAccessCatalog(
+        { session, families: ['host'], limit: 1, cursor: firstPage.nextCursor },
+        { transaction: transaction(databasePool) }
+      )
+      expect(progressed.complete).toBe(false)
+      expect(progressed.partialErrors).toContainEqual({
+        producer: 'host',
+        code: 'operational_related_resource_incomplete',
+        retryable: true,
+      })
+      expect(progressed.items).toEqual([])
+      expect(progressed.nextCursor).toBeNull()
+    } finally {
+      await databasePool.query(`DELETE FROM user_agents WHERE user_id = $1 AND agent_name = $2`, [
+        userId,
+        hostName,
+      ])
+      kubernetesApi.delete(danglingHost.plural, danglingHost.namespace, hostName)
+      kubernetesApi.delete(danglingContext.plural, danglingContext.namespace, contextName)
+      await indexer.reconcileSource(hostSource)
       await indexer.reconcileSource(contextSource)
     }
   })
