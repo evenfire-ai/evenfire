@@ -4922,7 +4922,7 @@ export function createAdminRegistryRouter(
   // ── Org-scoped publish API keys (efrk_) — owner-gated, proxied to the registry ──
   const keysRateLimit = rateLimitMiddleware({
     bucketType: 'registry_org_keys',
-    maxPerMinute: 30,
+    maxPerMinute: config.adminRegistryKeysPerMin,
     getBucketKey: req => {
       const sub = (req as UiAuthedRequest).adminAuth?.sub
       return sub ? `orgkeys:${sub}` : null
@@ -5058,7 +5058,7 @@ export function createAdminRegistryRouter(
   // is audit-only (req.adminAuth.sub); it never lands in granted_by_user_id.
   const grantsRateLimit = rateLimitMiddleware({
     bucketType: 'registry_org_grants',
-    maxPerMinute: 30,
+    maxPerMinute: config.adminRegistryGrantsPerMin,
     getBucketKey: req => {
       const sub = (req as UiAuthedRequest).adminAuth?.sub
       return sub ? `orggrants:${sub}` : null

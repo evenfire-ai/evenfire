@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest'
-import type express from 'express'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import request from 'supertest'
 import { config } from '../src/config.js'
+import { requireMcpHostJwt } from '../src/middleware/mcpHostJwtAuth.js'
 import {
+  createPluginWorkloadSdkAnonymousPreauthRateLimit,
+  createPluginWorkloadSdkAuthenticatedPreauthRateLimit,
   pluginWorkloadSdkCredentialBucketKey,
   pluginWorkloadSdkRequestBucketKey,
 } from '../src/middleware/pluginWorkloadSdkRateLimits.js'
@@ -62,5 +66,61 @@ describe('pluginWorkloadSdkRateLimits standalone isolation', () => {
     expect(mcpHostRateLimitBucketKey('recipe', verifyMcpHostAccessJwt(recipe))).toBe(
       'recipe:sandbox-recipes/research-host'
     )
+  })
+})
+
+describe('authenticated SDK pre-auth calendar recovery', () => {
+  const originalAuthenticated = config.pluginSdkAuthenticatedPreauthRlPerMin
+  const originalAnonymous = config.pluginSdkPreauthRlPerMin
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-02T12:00:17.500Z'))
+    config.pluginSdkAuthenticatedPreauthRlPerMin = 2
+    config.pluginSdkPreauthRlPerMin = 2
+  })
+
+  afterEach(() => {
+    config.pluginSdkAuthenticatedPreauthRlPerMin = originalAuthenticated
+    config.pluginSdkPreauthRlPerMin = originalAnonymous
+    vi.useRealTimers()
+  })
+
+  function app() {
+    const instance = express()
+    instance.use(createPluginWorkloadSdkAnonymousPreauthRateLimit())
+    instance.use(createPluginWorkloadSdkAuthenticatedPreauthRateLimit())
+    instance.get('/sdk-gate', requireMcpHostJwt, (_req, res) => res.json({ ok: true }))
+    return instance
+  }
+
+  function signedCaller() {
+    return issueMcpHostAccessJwt('sandbox-recipes', 'calendar-sdk', undefined, {
+      workflowControlScopes: ['plugin-workload-sdk'],
+    }).token
+  }
+
+  it('allows the verified caller at the PG calendar boundary instead of waiting until its first-hit deadline', async () => {
+    const instance = app()
+    const authorization = `Bearer ${signedCaller()}`
+    await request(instance).get('/sdk-gate').set('Authorization', authorization).expect(200)
+    await request(instance).get('/sdk-gate').set('Authorization', authorization).expect(200)
+    const denied = await request(instance).get('/sdk-gate').set('Authorization', authorization)
+    expect(denied.status).toBe(429)
+    expect(denied.headers['retry-after']).toBe('43')
+    vi.setSystemTime(new Date('2026-10-02T12:01:00.000Z'))
+    await request(instance).get('/sdk-gate').set('Authorization', authorization).expect(200)
+  })
+
+  it('retains anonymous first-hit denial across that boundary without consuming the verified caller allowance', async () => {
+    const instance = app()
+    await request(instance).get('/sdk-gate').expect(401)
+    await request(instance).get('/sdk-gate').expect(401)
+    await request(instance).get('/sdk-gate').expect(429)
+    const authorization = `Bearer ${signedCaller()}`
+    await request(instance).get('/sdk-gate').set('Authorization', authorization).expect(200)
+    vi.setSystemTime(new Date('2026-10-02T12:01:00.000Z'))
+    await request(instance).get('/sdk-gate').expect(429)
+    await request(instance).get('/sdk-gate').set('Authorization', authorization).expect(200)
   })
 })
