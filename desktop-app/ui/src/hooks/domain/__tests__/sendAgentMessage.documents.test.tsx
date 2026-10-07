@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
 import { createHash } from 'node:crypto'
+import { getComposerDraft } from '@lib/composerDraftStore'
 import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { HostModelsResult } from '../../../../../src/types'
 import { renderController } from './__fixtures__/controllerHarness'
@@ -32,6 +33,9 @@ const NOTES_DIGEST = createHash('sha256').update(NOTES_BYTES).digest('hex')
 
 const UNSUPPORTED =
   'The Host does not accept file attachments yet; the message was not delivered with them. Your files are kept so you can retry once the Host is updated.'
+/** The Host answered the text and dropped every document (#678 D13). */
+const DROPPED =
+  'The Host does not accept file attachments yet; the message was sent without them. Recover the files to attach them again once the Host is updated.'
 
 beforeEach(() => {
   uuidCounter = 0
@@ -195,6 +199,8 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
     const failed = rendered.result.current.failedAgentSend
     expect(failed?.message).toBe(UNSUPPORTED)
     expect(failed?.files.map(item => item.id)).toEqual([file.id])
+    // Nothing was answered: the whole input is still a retry candidate.
+    expect(failed?.answeredWithoutFiles).toBe(false)
 
     // The Host was updated in the meantime: it now lists the file it admitted.
     clerum.rpc.invokeHostMessage.mockResolvedValueOnce({
@@ -247,8 +253,8 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
       await rendered.result.current.handleSendAgentMessage('Summarize this')
     })
 
-    expect(rendered.result.current.agentError).toBe(UNSUPPORTED)
-    expect(rendered.spies.pushToast).toHaveBeenCalledWith(UNSUPPORTED, 'error')
+    expect(rendered.result.current.agentError).toBe(DROPPED)
+    expect(rendered.spies.pushToast).toHaveBeenCalledWith(DROPPED, 'error')
     expect(rendered.spies.pushToast).not.toHaveBeenCalledWith('Message sent to agent-x.', 'success')
     expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
   })
@@ -282,7 +288,7 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
     })
 
     const partial =
-      'The Host did not receive 1 of the attached files. Your files are kept so you can retry.'
+      'The Host did not receive 1 of the attached files; the message was sent without them. Recover the files to attach them again.'
     expect(rendered.result.current.agentError).toBe(partial)
     expect(rendered.result.current.failedAgentSend?.files).toHaveLength(2)
   })
@@ -326,9 +332,11 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
         ])
       )
     )
-    expect(rendered.spies.pushToast).toHaveBeenCalledWith(UNSUPPORTED, 'error')
-    expect(rendered.result.current.failedAgentSend?.message).toBe(UNSUPPORTED)
+    expect(rendered.spies.pushToast).toHaveBeenCalledWith(DROPPED, 'error')
+    expect(rendered.result.current.failedAgentSend?.message).toBe(DROPPED)
     expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
+    // The task answered the text: only the files are left to recover.
+    expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
   })
 
   it('titles a new chat from both the images and the documents of a send without text', async () => {
@@ -391,6 +399,68 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
     expect(sentAttachments()).toHaveLength(1)
     expect(rendered.result.current.failedAgentSend).toBeNull()
     expect(rendered.result.current.agentError).toBeNull()
-    expect(rendered.spies.pushToast).not.toHaveBeenCalledWith(UNSUPPORTED, 'error')
+    expect(rendered.spies.pushToast).not.toHaveBeenCalledWith(DROPPED, 'error')
+  })
+})
+
+/**
+ * jozer-rami review 5437205747 — when the Host answered the text and dropped
+ * the documents, a retry would send that text again. The failure offers the
+ * files back instead, and nothing is re-sent.
+ */
+describe('sendAgentMessage — a message answered without its documents', () => {
+  async function answeredWithoutFiles(rendered: Rendered) {
+    const file = await addReadyFile(rendered)
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({
+      response: 'done',
+      acceptedAttachmentIds: [],
+    })
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('Summarize this')
+    })
+    // Witness: the send went out once with the document and the failure kept it.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachments()).toEqual([expect.objectContaining({ id: file.id })])
+    expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
+    expect(rendered.result.current.composerFileAttachments).toEqual([])
+    return file
+  }
+
+  it('marks the failure as answered without its files', async () => {
+    const rendered = renderController()
+    await settleMount()
+    await answeredWithoutFiles(rendered)
+    expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
+  })
+
+  it('refuses to retry, so the answered text is not sent again', async () => {
+    const rendered = renderController()
+    await settleMount()
+    const file = await answeredWithoutFiles(rendered)
+
+    await act(async () => {
+      await rendered.result.current.handleRetryFailedAgentSend()
+    })
+
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    // Liveness: the failure and its files are still there to recover.
+    expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
+  })
+
+  it('recovers only the files into the composer and sends nothing', async () => {
+    const rendered = renderController()
+    await settleMount()
+    const file = await answeredWithoutFiles(rendered)
+    const chat = rendered.result.current.activeChatId
+
+    act(() => rendered.result.current.handleRecoverFailedAgentSend())
+
+    expect(rendered.result.current.composerFileAttachments).toEqual([
+      expect.objectContaining({ id: file.id, status: 'ready', digestHex: NOTES_DIGEST }),
+    ])
+    // The text was answered: it does not come back as a draft to send again.
+    expect(getComposerDraft(chat, 'agent-x')).toBe('')
+    expect(rendered.result.current.failedAgentSend).toBeNull()
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
   })
 })

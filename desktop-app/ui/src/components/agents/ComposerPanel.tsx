@@ -1285,7 +1285,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 </details>
               ) : null}
               <div className="action-row">
-                {failedAgentSend && (
+                {/* A message answered without its documents is never resent. */}
+                {failedAgentSend && !failedAgentSend.answeredWithoutFiles && (
                   <Button
                     color="neutral"
                     onClick={onRetryFailedSend}
@@ -1305,7 +1306,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         <div className="composer-footer">
           <div className="action-row">
             <Button onClick={onRecoverFailedSend} disabled={agentSending} size="xs" variant="ghost">
-              Recover input
+              {failedAgentSend.answeredWithoutFiles ? 'Recover files' : 'Recover input'}
             </Button>
             <Button onClick={onDiscardFailedSend} disabled={agentSending} size="xs" variant="ghost">
               Discard failed input

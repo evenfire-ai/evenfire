@@ -175,6 +175,11 @@ export type FailedAgentSend = {
   userMessageId?: string
   /** Model validated by the image guard when this attempt carried images. */
   model?: string
+  /**
+   * The Host answered the text but never received the documents (#678 D13).
+   * Only the documents can be recovered; a retry would send the text again.
+   */
+  answeredWithoutFiles?: boolean
 }
 
 export type HostConnectionTone = 'healthy' | 'degraded' | 'offline'

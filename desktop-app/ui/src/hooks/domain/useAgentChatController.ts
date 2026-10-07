@@ -148,6 +148,8 @@ const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
 // with LLM_INVALID_ATTACHMENT or drops it and still accepts the message.
 const HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE =
   'The Host does not accept file attachments yet; the message was not delivered with them. Your files are kept so you can retry once the Host is updated.'
+const HOST_FILE_ATTACHMENTS_DROPPED_MESSAGE =
+  'The Host does not accept file attachments yet; the message was sent without them. Recover the files to attach them again once the Host is updated.'
 const HOST_INVALID_ATTACHMENT_CODE = 'LLM_INVALID_ATTACHMENT'
 const LATEST_PAGE_FALLBACK_WINDOW = Symbol('latest-page-fallback-window')
 const DELTA_RECONCILIATION_WINDOW = Symbol('delta-reconciliation-window')
@@ -3227,8 +3229,8 @@ export function useAgentChatController({
           if (undelivered.length > 0) {
             filesNotDeliveredMessage =
               undelivered.length === effectiveFiles.length
-                ? HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE
-                : `The Host did not receive ${undelivered.length} of the attached files. Your files are kept so you can retry.`
+                ? HOST_FILE_ATTACHMENTS_DROPPED_MESSAGE
+                : `The Host did not receive ${undelivered.length} of the attached files; the message was sent without them. Recover the files to attach them again.`
             setAgentError(filesNotDeliveredMessage)
             pushToast(filesNotDeliveredMessage, 'error')
           }
@@ -3315,7 +3317,7 @@ export function useAgentChatController({
               sendAgent,
               sendChatId ?? null,
               userMessageId,
-              'host_files_unsupported',
+              'host_files_dropped',
               filesNotDeliveredMessage,
               'upstream'
             )
@@ -3359,12 +3361,7 @@ export function useAgentChatController({
         if (filesNotDeliveredMessage) {
           // The task runs without the documents; the snapshot survives its
           // success (see releaseSucceededRetainedSendsForTask).
-          markRetainedSendReason(
-            taskId,
-            'host_files_unsupported',
-            filesNotDeliveredMessage,
-            'upstream'
-          )
+          markRetainedSendReason(taskId, 'host_files_dropped', filesNotDeliveredMessage, 'upstream')
         }
         activityTaskToMessageByAgentRef.current[sendAgent] = {
           ...(activityTaskToMessageByAgentRef.current[sendAgent] || {}),
@@ -3567,6 +3564,7 @@ export function useAgentChatController({
       ...snapshot,
       message: snapshot.failure.message,
       kind: snapshot.failure.kind,
+      answeredWithoutFiles: snapshot.reason === 'host_files_dropped',
     } satisfies FailedAgentSend
   }, [retainedSends, retainedRevision, selectedAgent, activeChatId])
   const visibleFailure =
@@ -3583,7 +3581,8 @@ export function useAgentChatController({
   // bytes and still answering `getLatestRetainedSendSnapshotForChat` (which picks
   // the newest snapshot *carrying a failure*).
   const handleRetryFailedAgentSend = useCallback(async () => {
-    if (!visibleFailure) return
+    // The Host already answered this text; only its documents are recoverable.
+    if (!visibleFailure || visibleFailure.answeredWithoutFiles) return
     const previous = visibleFailure
     const retainedBefore = lastRetainedSendIdRef.current
     // The retained files are already read and hashed: a retry never reads them again.
@@ -3639,6 +3638,13 @@ export function useAgentChatController({
       composerReferenceAttachments.length
     ) {
       pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
+      return
+    }
+    if (visibleFailure.answeredWithoutFiles) {
+      // The text and the other attachments were answered: bring back only the
+      // documents the Host never received, and send nothing.
+      handleRestoreComposerFiles(visibleFailure.files)
+      handleDiscardFailedAgentSend()
       return
     }
     setComposerDraft(activeChatId, visibleFailure.content, selectedAgent ?? undefined)

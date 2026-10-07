@@ -1133,6 +1133,25 @@ describe('ComposerPanel failed-send recovery actions', () => {
     expect(actionsMock.handleRetryFailedAgentSend).toHaveBeenCalledTimes(1)
   })
 
+  it('offers only the files back for a message answered without them', () => {
+    composerState.failedAgentSend = { ...failedSend, answeredWithoutFiles: true }
+    composerState.agentError = 'The Host does not accept file attachments yet'
+    render(<ComposerPanel inline />)
+
+    // A retry would send the answered text again; recovering the input would
+    // bring that text back as a draft.
+    expect(screen.queryByRole('button', { name: 'Retry last send' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Recover input' })).toBeNull()
+
+    // Liveness: the failure is shown and its recovery and discard are offered.
+    expect(screen.getByText('The Host does not accept file attachments yet')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Recover files' }))
+    expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Discard failed input' }))
+    expect(actionsMock.handleDiscardFailedAgentSend).toHaveBeenCalledTimes(1)
+    expect(actionsMock.handleRetryFailedAgentSend).not.toHaveBeenCalled()
+  })
+
   it('disables recovery while a send is in flight', () => {
     composerState.failedAgentSend = failedSend
     composerState.agentError = 'Sending failed'

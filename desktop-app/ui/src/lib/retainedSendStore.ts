@@ -54,8 +54,18 @@ export type RetainedSendReason =
   | 'sync_error_envelope'
   | 'async_task_failed'
   | 'stream_lost'
-  /** The Host did not confirm every attached document (#678, D13). */
+  /** The Host rejected the send because of its documents; nothing was answered (#678, D13). */
   | 'host_files_unsupported'
+  /**
+   * The Host answered the text without confirming every document (#678, D13).
+   * Only the documents are recoverable: a retry would send the answered text again.
+   */
+  | 'host_files_dropped'
+
+/** Both reasons hold documents the Host never received, which exist nowhere else. */
+export function holdsUndeliveredFiles(reason: RetainedSendReason): boolean {
+  return reason === 'host_files_unsupported' || reason === 'host_files_dropped'
+}
 
 /** Each controller owns its bytes; no module-global data survives an identity change. */
 export function createRetainedSendStore(changed: () => void) {
@@ -145,7 +155,7 @@ export function createRetainedSendStore(changed: () => void) {
     for (const [key, snapshot] of snapshots) {
       if (snapshot.agentRef !== agentRef || snapshot.chatId !== chatId) continue
       if (!snapshot.failure || snapshot.timestamp > upToTimestamp) continue
-      if (options.keepUndeliveredFiles && snapshot.reason === 'host_files_unsupported') continue
+      if (options.keepUndeliveredFiles && holdsUndeliveredFiles(snapshot.reason)) continue
       snapshots.delete(key)
       released = true
     }
@@ -178,7 +188,7 @@ export function createRetainedSendStore(changed: () => void) {
    */
   function releaseSucceededRetainedSendsForTask(taskId: string): void {
     const succeeded = [...snapshots.values()].filter(
-      snapshot => snapshot.taskId === taskId && snapshot.reason !== 'host_files_unsupported'
+      snapshot => snapshot.taskId === taskId && !holdsUndeliveredFiles(snapshot.reason)
     )
     for (const snapshot of succeeded) {
       releaseRetainedFailuresForChat(snapshot.agentRef, snapshot.chatId, snapshot.timestamp, {
@@ -197,7 +207,7 @@ export function createRetainedSendStore(changed: () => void) {
     snapshot: RetainedSendSnapshot,
     reason: RetainedSendReason
   ): RetainedSendReason {
-    return snapshot.reason === 'host_files_unsupported' ? snapshot.reason : reason
+    return holdsUndeliveredFiles(snapshot.reason) ? snapshot.reason : reason
   }
 
   /**
