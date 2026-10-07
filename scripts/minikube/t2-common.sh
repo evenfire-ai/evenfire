@@ -17,6 +17,8 @@ if [ -z "$T2_SCRIPT_DIR" ]; then T2_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SO
 . "$T2_SCRIPT_DIR/profile-readiness.sh"
 # shellcheck source=pre-gate-marker.sh
 . "$T2_SCRIPT_DIR/pre-gate-marker.sh"
+# shellcheck source=context-identity.sh
+. "$T2_SCRIPT_DIR/context-identity.sh"
 T2_PROJECT_DIR="$T2_PROJECT_DIR"
 if [ -z "$T2_PROJECT_DIR" ]; then T2_PROJECT_DIR="$(cd -- "$T2_SCRIPT_DIR/../.." && pwd -P)"; fi
 T2_PROFILE="$T2_PROFILE"
@@ -222,6 +224,65 @@ t2_canonical_path() {
   (cd -- "$1" 2>/dev/null && pwd -P)
 }
 
+# refs/remotes/origin/dev is shared by every worktree of this repository, so a
+# fetch from any of them moves it while a lane runs. The lease owner reads it
+# once (t2_lock_acquire exports T2_PINNED_ORIGIN_DEV) and every child of that
+# lease validates against the pin. The pin is honored only under an inherited
+# lease: an exported pin cannot certify a branch against an older dev, and a
+# lease child that lost the pin fails instead of re-reading the moved ref.
+#
+# A child the lease owner starts without handing it the lease (T0 in t2.sh
+# run_t0) must not inherit the pin either, or it is refused as an unleased pin.
+# t2_run_outside_lease starts it without T2_PINNED_ORIGIN_DEV; the arguments
+# are those of env(1), so NAME=VALUE assignments may precede the command.
+t2_run_outside_lease() {
+  env -u T2_PINNED_ORIGIN_DEV "$@"
+}
+
+t2_resolve_origin_dev() {
+  local pin="${T2_PINNED_ORIGIN_DEV:-}" current
+  current="$(git -C "$T2_PROJECT_DIR" rev-parse --verify origin/dev 2>/dev/null || true)"
+  if [ "${T2_SKIP_LOCK:-}" != true ]; then
+    if [ -n "$pin" ]; then
+      T2_NEXT_COMMAND='unset T2_PINNED_ORIGIN_DEV; the lease owner pins origin/dev for its children'
+      t2_fail DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is only honored under an inherited T2 lease'
+      return 1
+    fi
+    T2_ORIGIN_DEV="$current"
+    return 0
+  fi
+  if [ -z "$pin" ]; then
+    T2_NEXT_COMMAND='run this child from the T2 lease owner, which exports T2_PINNED_ORIGIN_DEV'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'an inherited T2 lease carries no pinned origin/dev'
+    return 1
+  fi
+  if [[ ! "$pin" =~ ^[0-9a-f]{40}$ ]]; then
+    T2_NEXT_COMMAND='run this child from the T2 lease owner, which exports the full origin/dev SHA'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is not a full commit SHA'
+    return 1
+  fi
+  if ! git -C "$T2_PROJECT_DIR" cat-file -e "$pin^{commit}" 2>/dev/null; then
+    T2_NEXT_COMMAND='run this child from the T2 lease owner of this repository'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is not a commit in this repository'
+    return 1
+  fi
+  if [ -z "$current" ]; then
+    T2_NEXT_COMMAND='fetch origin/dev and run from a named development branch'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'branch, HEAD, or origin/dev could not be resolved'
+    return 1
+  fi
+  if ! git -C "$T2_PROJECT_DIR" merge-base --is-ancestor "$pin" "$current"; then
+    T2_NEXT_COMMAND='origin/dev was rewritten during the lane; merge the current origin/dev, then re-run T2'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'the pinned origin/dev is not an ancestor of the current origin/dev'
+    return 1
+  fi
+  if [ "$current" != "$pin" ]; then
+    printf '[minikube-t2] origin/dev moved during the lane: pinned %s, local ref now %s; validating against the pin\n' \
+      "$pin" "$current" >&2
+  fi
+  T2_ORIGIN_DEV="$pin"
+}
+
 t2_repo_metadata() {
   local actual_root remote_url
   actual_root="$(git -C "$T2_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -241,7 +302,7 @@ t2_repo_metadata() {
   fi
   T2_BRANCH="$(git -C "$T2_PROJECT_DIR" branch --show-current 2>/dev/null || true)"
   T2_HEAD="$(git -C "$T2_PROJECT_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
-  T2_ORIGIN_DEV="$(git -C "$T2_PROJECT_DIR" rev-parse --verify origin/dev 2>/dev/null || true)"
+  t2_resolve_origin_dev || return 1
   if [ -z "$T2_BRANCH" ] || [ -z "$T2_HEAD" ] || [ -z "$T2_ORIGIN_DEV" ]; then
     T2_NEXT_COMMAND='fetch origin/dev and run from a named development branch'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'branch, HEAD, or origin/dev could not be resolved'
@@ -290,7 +351,12 @@ t2_profile_scope() {
     "$T2_PROJECT_DIR" "$T2_BRANCH" "$T2_PROFILE"; then
     case "$PROFILE_OWNER_ERROR_CODE" in
       PROFILE_METADATA_MISSING)
-        T2_NEXT_COMMAND='resolve or generate profile.env with the branch profile helper, then retry' ;;
+        # A profile that was never created has no directory to restore (#1001).
+        if [ ! -e "$(dirname -- "$T2_PROFILE_ENV")" ]; then
+          T2_NEXT_COMMAND='the profile was never created; run make -f scripts/minikube-profiles/branch.mk branch-profile-start, then retry'
+        else
+          T2_NEXT_COMMAND='restore profile.env from a backup or stop and ask; the branch profile helper never regenerates metadata for an existing profile directory'
+        fi ;;
       PROFILE_PORTS_MISSING)
         T2_NEXT_COMMAND='restore the persisted profile-owned ports.env; never regenerate adopted ports' ;;
       PROFILE_PORTS_INVALID)
@@ -311,37 +377,15 @@ t2_context_check() {
     T2_NEXT_COMMAND='select the explicit Kubernetes context generated with the profile'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context is unavailable: $T2_CONTEXT"
   fi
-  local endpoint host
+  local endpoint
   endpoint="$(t2_kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
   if [ -z "$endpoint" ]; then
     T2_NEXT_COMMAND='select a Kubernetes context with a resolvable local cluster endpoint'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is unavailable: $T2_CONTEXT"
   fi
-  host="${endpoint#*://}"
-  host="${host%%/*}"
-  if [[ "$host" == \[*\]* ]]; then
-    host="${host#\[}"
-    host="${host%%\]*}"
-  else
-    host="${host%%:*}"
-  fi
-  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$host" == 127.0.0.1 || "$host" == localhost || "$host" == ::1 || "$host" == *.minikube ]]; then
-    return 0
-  fi
-  if ! python3 - "$host" <<'PY'
-import ipaddress
-import sys
-
-try:
-    address = ipaddress.ip_address(sys.argv[1])
-except ValueError:
-    raise SystemExit(1)
-raise SystemExit(0 if (address.is_private or address.is_loopback or address.is_link_local) else 1)
-PY
-  then
+  if ! kube_endpoint_is_local "$endpoint"; then
     T2_NEXT_COMMAND='select the generated branch-owned Minikube context, not a remote cluster context'
-    t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is not local: $host"
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is not local: $(kube_endpoint_host "$endpoint")"
     return 1
   fi
 }
@@ -362,24 +406,7 @@ t2_profile_context_identity_check() {
     return 1
   fi
   nodes_json="$(t2_kc get nodes -o json 2>/dev/null || true)"
-  if [ -z "$nodes_json" ] || ! python3 - "$nodes_json" "$T2_PROFILE" "$expected_ip" <<'PY'
-import json
-import sys
-
-payload = json.loads(sys.argv[1])
-profile = sys.argv[2]
-expected_ip = sys.argv[3]
-for node in payload.get("items", []):
-    metadata = node.get("metadata") or {}
-    labels = metadata.get("labels") or {}
-    if labels.get("minikube.k8s.io/name") != profile:
-        continue
-    for address in (node.get("status") or {}).get("addresses", []):
-        if address.get("type") == "InternalIP" and address.get("address") == expected_ip:
-            raise SystemExit(0)
-raise SystemExit(1)
-PY
-  then
+  if ! minikube_nodes_identify_profile "$nodes_json" "$T2_PROFILE" "$expected_ip"; then
     T2_NEXT_COMMAND='select the kube-context generated for this exact branch-owned Minikube profile'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context does not identify Minikube profile $T2_PROFILE at $expected_ip"
     return 1
@@ -1237,6 +1264,11 @@ t2_lock_process_matches() {
 t2_lock_acquire() {
   local process_start reclaim_dir=""
   t2_lock_profile_id_check || return 1
+  if [ -z "${T2_ORIGIN_DEV:-}" ]; then
+    T2_NEXT_COMMAND='resolve repository metadata (t2_repo_metadata) before acquiring the profile lock'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'the lease owner has no origin/dev to pin'
+    return 1
+  fi
   mkdir -p "$T2_LOCK_ROOT"
   T2_LOCK_DIR="$T2_LOCK_ROOT/$T2_PROFILE.lock"
   T2_LOCK_KEY="$(t2_lock_key)"
@@ -1310,6 +1342,7 @@ PROFILE=$T2_PROFILE
 CONTEXT=$T2_CONTEXT
 WORKTREE_ID=$T2_WORKTREE_ID
 LOCK_KEY=$T2_LOCK_KEY
+ORIGIN_DEV=$T2_ORIGIN_DEV
 TOKEN=$T2_LOCK_TOKEN
 PID=$$
 PROCESS_START=$process_start
@@ -1318,6 +1351,9 @@ EOF
   if [ -n "$reclaim_dir" ]; then
     rmdir "$reclaim_dir" 2>/dev/null || true
   fi
+  # Children of this lease validate against the origin/dev read here, not
+  # against the shared remote-tracking ref (see t2_resolve_origin_dev).
+  export T2_PINNED_ORIGIN_DEV="$T2_ORIGIN_DEV"
   T2_LOCK_HELD=true
   T2_LOCK_RELEASED=false
 }
@@ -1339,7 +1375,7 @@ t2_lock_validate_inherited() {
     t2_fail PROFILE_LOCK_REQUIRED 'inherited profile lock token is missing or does not match'
     return 1
   fi
-  for owner_key in REPOSITORY BRANCH HEAD PROFILE CONTEXT WORKTREE_ID LOCK_KEY; do
+  for owner_key in REPOSITORY BRANCH HEAD PROFILE CONTEXT WORKTREE_ID LOCK_KEY ORIGIN_DEV; do
     case "$owner_key" in
       REPOSITORY) expected_pid="$T2_PROJECT_DIR" ;;
       BRANCH) expected_pid="$T2_BRANCH" ;;
@@ -1348,8 +1384,12 @@ t2_lock_validate_inherited() {
       CONTEXT) expected_pid="$T2_CONTEXT" ;;
       WORKTREE_ID) expected_pid="$T2_WORKTREE_ID" ;;
       LOCK_KEY) expected_pid="$T2_LOCK_KEY" ;;
+      ORIGIN_DEV) expected_pid="${T2_PINNED_ORIGIN_DEV:-}" ;;
     esac
-    if [ "$(t2_lock_owner_value "$owner_key" || true)" != "$expected_pid" ]; then
+    # An empty pin never matches, even against a lock written before the
+    # owner recorded ORIGIN_DEV.
+    if [ -z "$expected_pid" ] && [ "$owner_key" = ORIGIN_DEV ] ||
+      [ "$(t2_lock_owner_value "$owner_key" || true)" != "$expected_pid" ]; then
       T2_NEXT_COMMAND='re-run the operation from the worktree/profile that owns the T2 lock'
       t2_fail PROFILE_OWNERSHIP_MISMATCH "profile lock owner does not match $owner_key"
       return 1

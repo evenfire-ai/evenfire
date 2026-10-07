@@ -9,10 +9,15 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
+import { listHostSecrets } from '../../../control-api/src/routes/admin/hostSecrets'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
 import { materializeHostResource } from '../../test/fixtures/contextResource'
 import { ToastProvider } from '../Toast'
+
+vi.mock('../../../control-api/src/config', () => ({
+  config: { hostSecretLabelKey: 'clerum.io/host-secret', hostSecretLabelValue: 'true' },
+}))
 
 const replaceMock = vi.fn()
 const pushMock = vi.fn()
@@ -148,6 +153,22 @@ function detailBundle(bundleHost: TestHost, secrets = defaultSecretResources) {
     agentUsers: [],
     agentTeams: [],
   }
+}
+
+function produceHostSecretResources(name: string, keys: string[]) {
+  return listHostSecrets({
+    listSecrets: async () => [
+      {
+        metadata: {
+          name,
+          labels: {
+            'clerum.io/host-secret': 'true',
+          },
+        },
+        keys,
+      },
+    ],
+  } as Parameters<typeof listHostSecrets>[0])
 }
 
 function setupApiMocks(
@@ -314,15 +335,23 @@ describe('HostDetailsPage current model and credential flow', () => {
     setupApiMocks(formLoadHost, refetchedHost)
   })
 
-  it('opens the linked LLM Secret editor without navigating or saving the Host', async () => {
+  it('navigates from the model editor pencil to the full-screen secret editor without saving the Host', async () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     expect(await screen.findByText('Current model')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Edit LLM Secret credentials' }))
+    // No pencil on the read-only summary — editing affordances live in the dialog.
+    expect(
+      screen.queryByRole('button', { name: 'Edit LLM Secret credentials' })
+    ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Edit LLM Secret credentials' }))
 
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
-    expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
-    expect(pushMock).not.toHaveBeenCalled()
+    // The secret editor is a full-screen route; `from` returns to this tab.
+    expect(pushMock).toHaveBeenCalledWith(
+      '/secrets/llm/openai-secret/edit?from=%2Fagents%2Ffoo%2Fmodel'
+    )
+    // Nothing is written to the Host by opening the secret editor.
     expect(
       (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
         args => args[0] === 'PUT' && args[1] === '/api/v1/admin/hosts/foo'
@@ -334,17 +363,28 @@ describe('HostDetailsPage current model and credential flow', () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     expect(await screen.findByText('Current model')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Edit LLM Secret credentials' })).toBeInTheDocument()
+    // Summary = static display: shows the linked secret, no dropdown button, no pencil.
+    expect(screen.getByText('openai-secret')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'LLM Secret' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Edit LLM Secret credentials' })
+    ).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Edit model configuration' })
-    expect(dialog).toHaveClass('eft-dialog--default')
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    // Compact default shell: the 35rem content stack (.cu-form-stack--wide)
+    // fills the base 34rem dialog edge to edge — no large-size dead space.
+    expect(dialog).not.toHaveClass('eft-dialog--large')
+    expect(dialog).not.toHaveClass('cu-model-creds-dialog')
+    expect(dialog).toHaveClass('eft-dialog')
     expect(within(dialog).getByRole('region', { name: 'LLM configuration' })).toBeInTheDocument()
-    expect(within(dialog).queryByLabelText('Credential')).not.toBeInTheDocument()
+    // The credential picker lives INSIDE the editor and is the enabled way to
+    // change the linked LLM Secret (the summary picker stays read-only).
+    expect(within(dialog).getByLabelText('LLM Secret')).toBeEnabled()
     expect(
-      within(dialog).queryByRole('button', { name: 'Edit LLM Secret credentials' })
-    ).not.toBeInTheDocument()
+      within(dialog).getByRole('button', { name: 'Edit LLM Secret credentials' })
+    ).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: 'Save' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Update secret' })).not.toBeInTheDocument()
@@ -508,9 +548,11 @@ describe('HostDetailsPage current model and credential flow', () => {
     expect(api.getHostDetailBundle).toHaveBeenCalledTimes(2)
   })
 
-  it('blocks removing a stored fallback credential slot still referenced by the Host policy', async () => {
-    // Producer-valid Host data: the custom Secret key is referenced by an
-    // active fallback, not merely shown as an arbitrary extra Secret key.
+  it('still navigates to the secret editor when the Host policy references an extra slot', async () => {
+    // The retirement guard for a fallback credentialSlot lives in the
+    // full-screen secret editor (it scans Hosts); the pencil itself must never
+    // pre-block navigation. The blocking journey is covered by the
+    // secrets/llm/[name]/edit page suite.
     const fallbackSlot = 'claude-api-key-fb1'
     const hostWithFallback = materializeHostResource(
       {
@@ -538,34 +580,20 @@ describe('HostDetailsPage current model and credential flow', () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     await screen.findByText('Current model')
-    fireEvent.click(screen.getByRole('button', { name: 'Edit LLM Secret credentials' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const editorDialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    const pencil = within(editorDialog).getByRole('button', {
+      name: 'Edit LLM Secret credentials',
+    })
+    expect(pencil).toBeEnabled()
+    fireEvent.click(pencil)
 
-    const anthropicGroup = screen
-      .getByText('Anthropic', { selector: '.cu-llm-cred-group__title' })
-      .closest('section')
-    expect(anthropicGroup).not.toBeNull()
-    fireEvent.click(
-      within(anthropicGroup as HTMLElement).getByRole('button', {
-        name: 'Remove extra credential slot',
-      })
+    expect(pushMock).toHaveBeenCalledWith(
+      '/secrets/llm/openai-secret/edit?from=%2Fagents%2Ffoo%2Fmodel'
     )
-
-    fireEvent.click(screen.getByRole('button', { name: 'Update secret' }))
-
-    expect(
-      await screen.findByText(
-        new RegExp(`Cannot remove "${fallbackSlot}".*active fallback.*credential slot`)
-      )
-    ).toBeInTheDocument()
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
-    expect(
-      (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
-        args => args[0] === 'PUT' && args[1] === '/api/v1/admin/secrets'
-      )
-    ).toBe(false)
   })
 
-  it('keeps the linked LLM Secret selector outside the model configuration editor', async () => {
+  it('changes the linked LLM Secret from the inline credentials dropdown', async () => {
     setupApiMocks(formLoadHost, refetchedHost, [
       { name: 'openai-secret', keys: ['openai-api-key'] },
       { name: 'openai-secret-b', keys: ['openai-api-key'] },
@@ -573,39 +601,219 @@ describe('HostDetailsPage current model and credential flow', () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     await screen.findByText('Current model')
-    expect(screen.getByLabelText('LLM Secret')).toBeDisabled()
+    // The summary is a static display; the editor owns the change.
+    expect(screen.getByText('openai-secret')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'LLM Secret' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Edit model configuration' })
-    expect(within(dialog).queryByLabelText('LLM Secret')).not.toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    const picker = within(dialog).getByRole('button', { name: 'LLM Secret' })
+    expect(picker).toBeEnabled()
+    fireEvent.click(picker)
+    fireEvent.click(screen.getByRole('option', { name: /openai-secret-b/ }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
     )
     const payload = findHostPutPayload() as { spec: Record<string, unknown> }
-    expect(payload.spec.secretRef).toBe('openai-secret')
+    expect(payload.spec.secretRef).toBe('openai-secret-b')
     expect(payload.spec.model).toEqual(baseSpec.model)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('updates the linked Secret without writing Host model configuration', async () => {
+  it('syncs the primary provider when the picked LLM Secret serves another provider', async () => {
+    vi.mocked(api.getLlmModels).mockResolvedValue({
+      rows: [
+        ...modelCatalogRows,
+        {
+          id: 'zai-glm-5-1',
+          provider: 'zai',
+          model: 'glm-5.1',
+          vendor: 'Z.AI',
+          display_name: null,
+          context_window_tokens: 128000,
+          enabled: true,
+          source: 'manual' as const,
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+      ],
+    })
+    setupApiMocks(formLoadHost, refetchedHost, [
+      { name: 'openai-secret', keys: ['openai-api-key'] },
+      { name: 'zai-secret', keys: ['zai-api-key'] },
+    ])
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     await screen.findByText('Current model')
-    fireEvent.click(screen.getByRole('button', { name: 'Edit LLM Secret credentials' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Replace OpenAI API key' }))
-    fireEvent.change(screen.getByLabelText(/^OpenAI API key/i), {
-      target: { value: 'sk-live' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Update secret' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'LLM Secret' }))
+    fireEvent.click(screen.getByRole('option', { name: /zai-secret/ }))
+
+    // Provider and current model follow the picked secret's provider.
+    expect(
+      screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+    ).toHaveTextContent('Z.AI')
+    expect(
+      screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent('glm-5.1')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
-      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/secrets', {
-        name: 'openai-secret',
-        merge: true,
-        stringData: { 'openai-api-key': 'sk-live' },
-      })
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+    const payload = findHostPutPayload() as { spec: Record<string, unknown> }
+    expect(payload.spec.model).toEqual({ provider: 'zai', name: 'glm-5.1' })
+    expect(payload.spec.secretRef).toBe('zai-secret')
+  })
+
+  it('keeps the explicit provider when the picked LLM Secret has no recognized provider', async () => {
+    configureModelCatalog()
+    setupApiMocks(formLoadHost, refetchedHost, [
+      { name: 'openai-secret', keys: ['openai-api-key'] },
+      { name: 'custom-secret', keys: ['some-custom-key'] },
+    ])
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'LLM Secret' }))
+    fireEvent.click(screen.getByRole('option', { name: /custom-secret/ }))
+
+    // A provider-less secret never clobbers the operator's provider/model pair.
+    expect(
+      screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+    ).toHaveTextContent('OpenAI')
+    expect(
+      screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent('gpt-5.4-mini')
+  })
+
+  it('preserves a Grok provider and model when selecting a provider-less Secret', async () => {
+    const grokModel = { provider: 'grok-subscription', name: 'grok-4.6' }
+    const brokerHost = materializeHostResource(
+      {
+        metadata: { name: 'foo' },
+        spec: {
+          host: 'foo-display',
+          contextRef: 'ctx',
+          secretRef: '',
+          channels: [],
+          model: Object.assign(grokModel, { connectionRef: 'team-grok' }),
+        },
+      },
+      { metadata: { resourceVersion: 'rv-form-load' } }
+    )
+    const brokerSecretResources = await produceHostSecretResources('custom-secret', [
+      'some-custom-key',
+    ])
+    vi.mocked(api.apiGet).mockImplementation(async path => {
+      if (path.endsWith('/connections/team-grok/models')) {
+        return { models: [{ model: 'grok-4.6', enabled: true, stale: false }] }
+      }
+      if (path.includes('/grok-subscription/connections')) {
+        return {
+          connections: [
+            {
+              connectionKey: 'team-grok',
+              displayName: 'Team Grok',
+              status: 'connected',
+              credentialRevision: 1,
+              catalogRevision: 1,
+              accountFingerprint: 'account-fingerprint',
+              catalogStatus: 'ready',
+              catalogSyncedAt: '2026-09-01T00:00:00.000Z',
+              lastRefreshAt: '2026-09-01T00:00:00.000Z',
+              lastAuthAt: '2026-09-01T00:00:00.000Z',
+              refreshLockHeld: false,
+              defaultModel: 'grok-4.6',
+            },
+          ],
+        }
+      }
+      return { rows: [] }
+    })
+    vi.mocked(api.getLlmModels).mockResolvedValue({
+      rows: [
+        {
+          id: 'grok-grok-4-6',
+          provider: 'grok-subscription',
+          model: 'grok-4.6',
+          vendor: 'xAI',
+          display_name: null,
+          context_window_tokens: null,
+          enabled: true,
+          source: 'manual',
+          stale: false,
+          created_at: '',
+          updated_at: '',
+        },
+        ...modelCatalogRows,
+      ],
+    })
+    setupApiMocks(brokerHost, brokerHost, brokerSecretResources)
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Credential' }))
+    expect(
+      screen
+        .getByLabelText('Provider', { selector: '#llm-primary-provider' })
+        .querySelector('[data-provider]')
+    ).toHaveAttribute('data-provider', 'grok-subscription')
+    fireEvent.click(screen.getByRole('option', { name: /custom-secret/ }))
+
+    expect(
+      screen
+        .getByLabelText('Provider', { selector: '#llm-primary-provider' })
+        .querySelector('[data-provider]')
+    ).toHaveAttribute('data-provider', 'grok-subscription')
+    expect(
+      screen.getByLabelText('Current model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent('grok-4.6')
+
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
+    )
+    const payload = findHostPutPayload() as { spec: Record<string, unknown> }
+    expect(payload.spec.model).toEqual({
+      provider: 'grok-subscription',
+      name: 'grok-4.6',
+      connectionRef: 'team-grok',
+    })
+  })
+
+  it('routes the secret editor to the credential picked in the dialog, not the saved one', async () => {
+    setupApiMocks(formLoadHost, refetchedHost, [
+      { name: 'openai-secret', keys: ['openai-api-key'] },
+      { name: 'openai-secret-b', keys: ['openai-api-key'] },
+    ])
+    const view = render(<HostDetailsPage />)
+    navigateToTab(view, 'model')
+    await screen.findByText('Current model')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'LLM Secret' }))
+    fireEvent.click(screen.getByRole('option', { name: /openai-secret-b/ }))
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Edit LLM Secret credentials' }))
+
+    // The draft pick — not the persisted secretRef — names the edit route, and
+    // the Host itself is never written from this surface.
+    expect(pushMock).toHaveBeenCalledWith(
+      '/secrets/llm/openai-secret-b/edit?from=%2Fagents%2Ffoo%2Fmodel'
     )
     expect(
       (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.some(
@@ -660,7 +868,7 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
     expect(await screen.findByText('Current model')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
 
-    expect(screen.queryByLabelText('Credential')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
     expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()

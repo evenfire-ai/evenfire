@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { type Request, Router } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
@@ -8,7 +8,6 @@ import { buildAuthorizeUrl } from '../../oauth/authorizeUrlHelper.js'
 import {
   type McpServerOAuthReader,
   type McpServerOAuthSubject,
-  REMOTE_CALLBACK_CLIENT_SEGMENT,
   RecipeNotFoundError,
   type RecipeReader,
   type RecipeWithOAuthClients,
@@ -16,23 +15,45 @@ import {
   type SecretReader,
 } from '../../oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
-import { integrationNotConfigured, isSecretNotFound } from '../../oauth/integrationNotConfigured.js'
+import {
+  type IntegrationNotConfiguredBody,
+  integrationNotConfigured,
+  isSecretNotFound,
+} from '../../oauth/integrationNotConfigured.js'
 import {
   type McpServerOAuthSpecInput,
   RemoteOAuthSpecIncoherentError,
+  type ResolvedServerOAuthSubject,
   buildMcpServerGrantKey,
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../../oauth/mcpServerOAuthSpec.js'
+import {
+  buildPerServerRedirectUri,
+  resolvePerServerRegistration,
+} from '../../oauth/perServerRegistration.js'
 import { getAccessTokenReactive } from '../../oauth/reactiveTokenHelper.js'
+import {
+  buildRemoteRedirectUri,
+  isBareOrigin,
+  isValidRemoteServerNameSegment,
+  remoteCallbackVariant,
+} from '../../oauth/remoteCallback.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
 import { getUserContexts } from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
-import { buildPublicCallbackUrl } from '../external/oauthCallback.js'
+import {
+  buildPublicCallbackUrl,
+  normalizeConfiguredOrigin,
+  resolveCallbackOrigin,
+} from '../external/oauthCallback.js'
 
 // DNS-1123 subdomain — the shape a k8s resource name takes. Reject anything else
 // up front so a malformed `mcpServerName` becomes a 400 rather than surfacing a
-// non-404 apiserver error as a 500. (Mirrors routes/mcpOauth.ts.)
+// non-404 apiserver error as a 500. (Mirrors routes/mcpOauth.ts.) Deliberately wider
+// than the per-server callback segment (an RFC 1123 label): these routes serve every
+// OAuth lane, and only a per-server remote server needs its name to fit in a URL
+// segment — that narrower rule is applied where its redirect URI is built.
 const K8S_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
 function isValidK8sName(name: string): boolean {
   return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
@@ -134,10 +155,80 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         if (err instanceof K8sNotFoundError) return null
         throw err
       }
-      const resolved = resolveServerOAuthSubject(server)
+      const resolved = resolveServerOAuthSubject(server, 'consent')
       if (!resolved) return null
       return { namespace: config.mcpServersNamespace, ...resolved }
     },
+  }
+
+  /**
+   * The redirect URI an mcp-server's authorize URL carries — the one its client
+   * registered at the AS, which the callback replays on the token exchange:
+   *   - baked/generic: `/oauth-callback/<oauthClientId>`;
+   *   - remote, shared (AS returns RFC 9207 `iss`): `/oauth-callback/remote`;
+   *   - remote, per-server: `/oauth-callback/remote/<name>[/<installNonce>]`, the nonce
+   *     read from the `dynamic_clients` row bound to this CR.
+   * Per-server fails closed without a configured bare origin: the AS compares the URI
+   * byte-for-byte, and a request-Host fallback would depend on how the caller reached
+   * us. Minting for a server whose callback would reject the code is refused here
+   * rather than after the user has consented.
+   */
+  async function mintRedirectUri(
+    req: Request,
+    subject: ResolvedServerOAuthSubject,
+    mcpServerName: string
+  ): Promise<{ ok: true; redirectUri: string } | { ok: false; status: number; body: object }> {
+    const remote = subject.decl.remote
+    if (!remote) {
+      return {
+        ok: true,
+        redirectUri: buildPublicCallbackUrl(req, subject.decl.id, config.oauthCallbackBaseUrl),
+      }
+    }
+    if (remoteCallbackVariant(remote) === 'shared') {
+      return {
+        ok: true,
+        redirectUri: buildRemoteRedirectUri({
+          origin: resolveCallbackOrigin(req, config.oauthCallbackBaseUrl),
+          variant: 'shared',
+        }),
+      }
+    }
+    // Only a CR written outside the install can carry a name that is not a label; its
+    // callback route would never match, so there is no URI to mint.
+    if (!isValidRemoteServerNameSegment(mcpServerName)) {
+      return { ok: false, status: 400, body: { error: 'invalid_request' } }
+    }
+    const origin = normalizeConfiguredOrigin(config.oauthCallbackBaseUrl)
+    if (origin === null || !isBareOrigin(origin)) {
+      req.log?.error(
+        { event: 'remote_oauth_per_server_callback_unconfigured', mcpServerName },
+        'per-server remote consent requires a configured public callback base URL (bare origin)'
+      )
+      return { ok: false, status: 503, body: { error: 'callback_base_url_unconfigured' } }
+    }
+    const registration = await resolvePerServerRegistration(
+      { query: (text, values) => pool.query(text, values) },
+      { namespace: config.mcpServersNamespace, decl: subject.decl, crUid: subject.crUid },
+      mcpServerName
+    )
+    if (!registration) {
+      // Same contract as any other missing client credential, but there is no Secret to
+      // create: the DCR client is only (re)registered by installing the server again.
+      return {
+        ok: false,
+        status: 503,
+        body: {
+          error: 'integration_not_configured',
+          integration: subject.decl.id,
+          hint: `reinstall the remote MCP server ${mcpServerName} to register its OAuth client again`,
+        } satisfies IntegrationNotConfiguredBody,
+      }
+    }
+    return {
+      ok: true,
+      redirectUri: buildPerServerRedirectUri(origin, mcpServerName, registration),
+    }
   }
 
   // ── U5: mint a fresh authorize-URL for an OAuth mcp-server, on click ──────
@@ -194,7 +285,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         let subject: ReturnType<typeof resolveServerOAuthSubject> = null
         let incoherent: RemoteOAuthSpecIncoherentError | undefined
         try {
-          subject = resolveServerOAuthSubject(server)
+          subject = resolveServerOAuthSubject(server, 'consent')
         } catch (err) {
           if (!(err instanceof RemoteOAuthSpecIncoherentError)) throw err
           incoherent = err
@@ -246,18 +337,9 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         if (!resolved) return res.status(400).json({ error: 'not_oauth_server' })
 
         const oauthClientId = resolved.decl.id
-        // Remote lane registers ONE stable redirect_uri (`/oauth-callback/remote`),
-        // so the callback URL segment is the reserved constant, NOT the client id —
-        // the real binding rides the signed state. Baked keeps the per-client
-        // segment. The exchange re-derives the same redirect_uri from this segment.
-        const callbackSegment = resolved.decl.remote
-          ? REMOTE_CALLBACK_CLIENT_SEGMENT
-          : oauthClientId
-        const redirectUri = buildPublicCallbackUrl(
-          req,
-          callbackSegment,
-          config.oauthCallbackBaseUrl
-        )
+        const redirect = await mintRedirectUri(req, resolved, mcpServerName)
+        if (!redirect.ok) return res.status(redirect.status).json(redirect.body)
+        const redirectUri = redirect.redirectUri
 
         const result = await buildAuthorizeUrl(
           {

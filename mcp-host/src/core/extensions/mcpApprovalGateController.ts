@@ -82,6 +82,7 @@ export function buildConnectRequiredApproval(
   return {
     request_id: randomUUID(),
     tool_name: call.name,
+    authorization_scope: 'exact_invocation',
     tool_kind: 'mcp_server_tool',
     // The authoritative server name is the marker's mcpServerName (set from the
     // manager's sourceRef), mirroring the HITL gate's createSuspension
@@ -259,6 +260,7 @@ export class UnifiedApprovalGateController implements LoopController {
     const approval: PendingApproval = {
       request_id: randomUUID(),
       tool_name: toolName,
+      authorization_scope: 'turn_tools',
       tool_kind: traceDescriptor.kind,
       tool_source_ref: traceDescriptor.sourceRef,
       parameters: params,

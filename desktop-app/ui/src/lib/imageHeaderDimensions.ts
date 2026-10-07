@@ -56,6 +56,7 @@ function readJpegDimensions(bytes: Uint8Array): ImageHeaderDimensions | null {
     while (pos < bytes.length && bytes[pos] === 0xff) pos += 1
     if (pos >= bytes.length) return null
     const marker = bytes[pos]
+    if (marker === undefined) return null
     pos += 1
     if (marker === 0x00) return null
     if (marker === 0xd9) break

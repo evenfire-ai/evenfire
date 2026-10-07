@@ -14,6 +14,7 @@ import {
   classifyBytes,
 } from '@clerum/gfs-interaction-policy'
 import { type GfsRuntimeEnv, GfscHttpError, createGfscClient } from '../../internalTools/gfsClient'
+import { GFS_FILE_LIMITS } from '../../internalTools/gfsFilePolicy'
 import { logger } from '../../logger'
 import { VISUAL_INPUT_LIMITS } from '../../visualInput/policy'
 import {
@@ -202,7 +203,19 @@ describe('resolveFileReferences (#666)', () => {
     const result = await resolveFileReferences([ref], gfsc)
     expect(result).toEqual({
       ok: true,
-      resolutions: [{ availability: 'available', reference: ref }],
+      resolutions: [
+        {
+          availability: 'available',
+          reference: ref,
+          surfaces: {
+            metadata: true,
+            inline: true,
+            workspace: false,
+            localExecutor: false,
+            visual: false,
+          },
+        },
+      ],
     })
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
     expect(gfsc.resolve.mock.calls[0]![0]).toEqual({ uri: `gfs://main/${RID}` })
@@ -225,7 +238,7 @@ describe('resolveFileReferences (#666)', () => {
   })
 
   it('reports too_large above the per-file ceiling, and available at it', async () => {
-    const limit = VISUAL_INPUT_LIMITS.fileBytes
+    const limit = GFS_FILE_LIMITS.maxFileBytes
     const atLimit = await resolveFileReferences(
       [gfsReference({ byteLength: limit })],
       client(() => view({ bytes: limit }))
@@ -607,7 +620,19 @@ describe('resolveFileReferences (#666)', () => {
       )
       expect(await resolveFileReferences([gfsReference()], realClient(readable, fetch))).toEqual({
         ok: true,
-        resolutions: [{ availability: 'available', reference: gfsReference() }],
+        resolutions: [
+          {
+            availability: 'available',
+            reference: gfsReference(),
+            surfaces: {
+              metadata: true,
+              inline: true,
+              workspace: false,
+              localExecutor: false,
+              visual: false,
+            },
+          },
+        ],
       })
       expect(fetch).toHaveBeenCalledTimes(1)
     })

@@ -45,6 +45,20 @@ type InspectedDetail = PngDetail | JpegDetail
 export interface ValidateImageOptions {
   signal?: AbortSignal
   budget: VisualInputBudget
+  limits?: ImageValidationLimits
+}
+
+/** Trusted delivery limits; GFS supplies its effective provider contract. */
+export interface ImageValidationLimits {
+  maxFileBytes: number
+  maxDimension?: number
+  maxPixels?: number
+}
+
+const LEGACY_IMAGE_LIMITS: ImageValidationLimits = {
+  maxFileBytes: VISUAL_INPUT_LIMITS.fileBytes,
+  maxDimension: VISUAL_INPUT_LIMITS.dimension,
+  maxPixels: VISUAL_INPUT_LIMITS.pixels,
 }
 
 /**
@@ -185,9 +199,12 @@ function inspectDetail(bytes: Buffer): InspectedDetail | null {
   return null
 }
 
-export function inspectImage(bytes: Buffer): InspectedImage | null {
+export function inspectImage(
+  bytes: Buffer,
+  limits: ImageValidationLimits = LEGACY_IMAGE_LIMITS
+): InspectedImage | null {
   if (!Buffer.isBuffer(bytes)) throw new TypeError('Invalid visual input bytes')
-  if (bytes.byteLength > VISUAL_INPUT_LIMITS.fileBytes) throw new VisualInputError('limit_exceeded')
+  if (bytes.byteLength > limits.maxFileBytes) throw new VisualInputError('limit_exceeded')
   const detail = inspectDetail(bytes)
   if (detail === null) return null
   return { mimeType: detail.mimeType, width: detail.width, height: detail.height }
@@ -394,12 +411,14 @@ function inspectJpeg(bytes: Buffer): JpegDetail {
 }
 
 /**
- * Every buffer a single validation is known to hold at once: the encoded payload
- * as held by the caller plus the copy handed to the child, three RGBA surfaces
+ * Every validation-owned buffer held at once: the child's incoming chunks and
+ * their concatenated payload, three RGBA surfaces
  * (decoder raster, draw target and pixel readback), and, for PNG, the
  * concatenated IDAT stream together with the filtered raster the child
  * materialises. This is an accounting estimate used for admission, not a process
- * RSS cap: native decoder overhead is not observable from here.
+ * RSS cap: native decoder overhead is not observable from here. The caller's
+ * source buffer has a separate read reservation and must remain charged until
+ * validation and encoding finish.
  */
 function validationReservationBytes(
   byteLength: number,
@@ -436,17 +455,21 @@ function describeValidation(detail: InspectedDetail): {
   }
 }
 
-function assertWithinLimits(bytes: Buffer, inspected: InspectedImage): void {
-  if (bytes.byteLength > VISUAL_INPUT_LIMITS.fileBytes) {
+function assertWithinLimits(
+  bytes: Buffer,
+  inspected: InspectedImage,
+  limits: ImageValidationLimits
+): void {
+  if (bytes.byteLength > limits.maxFileBytes) {
     throw new VisualInputError('limit_exceeded')
   }
   if (
-    inspected.width > VISUAL_INPUT_LIMITS.dimension ||
-    inspected.height > VISUAL_INPUT_LIMITS.dimension
+    limits.maxDimension !== undefined &&
+    (inspected.width > limits.maxDimension || inspected.height > limits.maxDimension)
   ) {
     throw new VisualInputError('limit_exceeded')
   }
-  if (inspected.width * inspected.height > VISUAL_INPUT_LIMITS.pixels) {
+  if (limits.maxPixels !== undefined && inspected.width * inspected.height > limits.maxPixels) {
     throw new VisualInputError('limit_exceeded')
   }
 }
@@ -723,7 +746,7 @@ export async function validateImage(
     throw new VisualInputError('invalid_image')
   }
 
-  assertWithinLimits(bytes, inspected)
+  assertWithinLimits(bytes, inspected, options.limits ?? LEGACY_IMAGE_LIMITS)
   // Descriptors only: arithmetic over the header, bounded by the limits above.
   const validation = describeValidation(inspected)
   // Reserved before the child is spawned and before any buffer is allocated, and

@@ -2,11 +2,12 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
-const { declaredHeaderPng, declaredHeaderPngOfSize } = createRequire(
+const { declaredHeaderPng, declaredHeaderPngOfSize, realPngOfSize } = createRequire(
   join(__dirname, 'codexImageFixtures.ts')
 )('../../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs') as {
   declaredHeaderPng: (width: number, height: number) => Buffer
   declaredHeaderPngOfSize: (targetBytes: number) => Buffer
+  realPngOfSize: (targetBytes: number, width: number, height: number, seed: number) => Buffer
 }
 
 // Shared, independently decoded 2x2 fixtures; structural acceptance alone
@@ -34,3 +35,7 @@ export const PNG_OVER_DIMENSION_BASE64 = declaredHeaderPng(3000, 3000).toString(
 /** A structurally valid 2x2 PNG whose decoded length is exactly `decodedBytes`. */
 export const pngOfDecodedBytesBase64 = (decodedBytes: number): string =>
   declaredHeaderPngOfSize(decodedBytes).toString('base64')
+
+/** A native-decoder-valid PNG, including real IDAT data and CRCs. */
+export const realPngOfDecodedBytesBase64 = (decodedBytes: number, width = 2, height = 2): string =>
+  realPngOfSize(decodedBytes, width, height, 7).toString('base64')
