@@ -41,7 +41,8 @@ import { type ChatMessage, ConversationState, type LoopResult } from '../../type
 import { DeferrableToolController } from '../deferrableToolController'
 import { SimpleEventEmitter } from '../eventEmitter'
 import { DefaultLoopController, buildLoopConfig } from '../loopConfig'
-import { resolveToolPresentation } from '../toolPresentationPolicy'
+import { NativeToolPresentationController } from '../nativeToolPresentationController'
+import { resolveToolPresentation, selectDeferredNatives } from '../toolPresentationPolicy'
 import { runToolUseLoop } from '../toolUseLoop'
 
 type Evidence = {
@@ -291,6 +292,8 @@ async function host(presentation: Presentation, catalogSize: number) {
   // taskExecutor.createToolRegistry, for a Codex turn without approval gates.
   const toolPresentation = resolveToolPresentation('codex-subscription', appConfig)
   const conversation = makeFakeConversation({ state: ConversationState.Processing })
+  // #1003 — native presentation is host-wide and independent of the MCP decision.
+  const nativeAuto = appConfig.nativeToolPresentation === 'auto'
   const native = new NativeToolRegistry(
     { ...appConfig.nativeTool, toolSpilloverThresholdBytes: appConfig.toolSpilloverThresholdBytes },
     conversation.id,
@@ -303,7 +306,7 @@ async function host(presentation: Presentation, catalogSize: number) {
     undefined,
     undefined,
     manager,
-    toolPresentation.bridgeEnabled,
+    { mcpDiscovery: toolPresentation.bridgeEnabled, nativeDiscovery: nativeAuto },
     'codex-subscription'
   )
   const registry = new CompositeToolRegistry(
@@ -312,8 +315,15 @@ async function host(presentation: Presentation, catalogSize: number) {
       strictValidation: toolPresentation.codexMode !== undefined,
     })
   )
-  const nativeNames = new Set(native.listDefinitions().map(definition => definition.name))
-  const controller = new DeferrableToolController(
+  const nativeDefinitions = native.listDefinitions()
+  const nativeNames = new Set(nativeDefinitions.map(definition => definition.name))
+  const deferredNatives = nativeAuto
+    ? selectDeferredNatives(nativeDefinitions, appConfig.nativeToolDiscoveryBytes)
+    : new Set<string>()
+  const discoverableNatives = nativeDefinitions.filter(definition =>
+    deferredNatives.has(definition.name)
+  )
+  const mcpController = new DeferrableToolController(
     new DefaultLoopController(),
     nativeNames,
     {
@@ -329,9 +339,17 @@ async function host(presentation: Presentation, catalogSize: number) {
       },
     }
   )
+  // Native presentation wraps outside the MCP decision; `direct` passes the list through.
+  const controller = new NativeToolPresentationController(mcpController, nativeDefinitions, {
+    mode: appConfig.nativeToolPresentation,
+    discoveryBytes: appConfig.nativeToolDiscoveryBytes,
+  })
   const reasoning = new DefaultReasoningPort(
     new LlmPortAdapter(provider, MODEL, 'codex-subscription'),
-    new DefaultPromptBuilder()
+    new DefaultPromptBuilder({
+      nativeToolPresentation: appConfig.nativeToolPresentation,
+      discoverableNatives,
+    })
   )
   let history: ChatMessage[] = []
   const turn = async (content: string): Promise<LoopResult> => {
@@ -355,6 +373,7 @@ async function host(presentation: Presentation, catalogSize: number) {
               .map(tool => tool.name)
               .filter(name => !nativeNames.has(name))
           ),
+        nativeTargets: nativeAuto,
       }
     }
     const before = providerCall.mock.calls.length
