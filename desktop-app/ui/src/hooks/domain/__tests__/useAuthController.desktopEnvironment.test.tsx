@@ -639,6 +639,32 @@ describe('Desktop environment handoff', () => {
     expect(mocks.logoutForEnvironmentMismatch).not.toHaveBeenCalled()
     expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
+  it('reports a stale native environment selection instead of silently stopping', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    mocks.loadSession.mockClear()
+    mocks.selectRuntimeConfigForHandoff.mockRejectedValueOnce(
+      new Error(
+        "Error invoking remote method 'auth:selectRuntimeConfigForHandoff': Error: stale_session_generation"
+      )
+    )
+
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+    expect(mocks.loadSession).not.toHaveBeenCalled()
   })
 
   it('logs out and selects the linked saved environment after switch confirmation', async () => {

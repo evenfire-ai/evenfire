@@ -91,7 +91,9 @@ export function createDesktopEnvironmentSetupHandler({
   let linkInProgress = false
   const ownsSessionGeneration = async (expectedSessionGeneration: number): Promise<boolean> => {
     try {
-      return (await getSessionGeneration()) === expectedSessionGeneration
+      if ((await getSessionGeneration()) === expectedSessionGeneration) return true
+      setStatus('The desktop session changed while processing this link. Open it again.', 'info')
+      return false
     } catch {
       setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
       return false

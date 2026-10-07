@@ -432,6 +432,10 @@ export function useAuthController({
         return selection
       } catch (error) {
         if (error instanceof Error && error.message.includes('stale_session_generation')) {
+          setStatus(
+            'The desktop session changed while processing this link. Open it again.',
+            'info'
+          )
           return null
         }
         setStatus(
