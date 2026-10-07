@@ -38,4 +38,13 @@ describe('CONTROL_ROUTES', () => {
     expect(CONTROL_ROUTES.secrets.llmSubscriptions).toBe('/secrets/llm/subscriptions')
     expect(CONTROL_ROUTES.secrets.subscription).toBe('/secrets/llm/subscriptions')
   })
+
+  it('builds the full-screen LLM secret edit route with optional return context', () => {
+    expect(CONTROL_ROUTES.secrets.editLlm('chatllm-api-keys')).toBe(
+      '/secrets/llm/chatllm-api-keys/edit'
+    )
+    expect(CONTROL_ROUTES.secrets.editLlm('chatllm api keys', { from: '/agents/foo/model' })).toBe(
+      '/secrets/llm/chatllm%20api%20keys/edit?from=%2Fagents%2Ffoo%2Fmodel'
+    )
+  })
 })

@@ -227,12 +227,28 @@ describe('referencedFilePins (#666)', () => {
       { availability: 'stale', reference: gfsReference(3), resolvedVersion: 4 },
       { availability: 'unsupported', reference: attachment.value },
     ])
-    expect([...pins]).toEqual([[`main/${RID}`, { version: 3, currentVersion: 4 }]])
+    expect([...pins]).toEqual([
+      [
+        `main/${RID}`,
+        {
+          version: 3,
+          currentVersion: 4,
+          byteLength: 25,
+          reader: 'text',
+          modelImageInput: 'unsupported',
+        },
+      ],
+    ])
   })
 
   it('pins an unavailable reference at its version without a current version', () => {
     const pins = referencedFilePins([{ availability: 'denied', reference: gfsReference(3) }])
-    expect([...pins]).toEqual([[`main/${RID}`, { version: 3 }]])
+    expect([...pins]).toEqual([
+      [
+        `main/${RID}`,
+        { version: 3, byteLength: 25, reader: 'text', modelImageInput: 'unsupported' },
+      ],
+    ])
   })
 
   it('pins nothing for a message without references', () => {

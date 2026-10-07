@@ -60,6 +60,7 @@ let runtimeConfigModule: typeof import('../../../../../src/config') | null = nul
 let runtimeConfigDirectory = ''
 let nativeSessionGeneration = 0
 const originalOnboardingPreview = process.env.EVENFIRE_ONBOARDING_PREVIEW
+const frozenProfileIdMilliseconds = 1790000000000
 
 function Probe() {
   const auth = useAuthController({
@@ -113,6 +114,7 @@ async function savedTargetOptionId(): Promise<string> {
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  vi.spyOn(Date, 'now').mockReturnValue(frozenProfileIdMilliseconds)
   desktopEnvironmentSetupListener = null
   desktopSetupTokenListener = null
   confirmDesktopEnvironmentSetupForTest = null
@@ -199,6 +201,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   cleanup()
+  vi.restoreAllMocks()
   vi.doUnmock('electron')
   vi.resetModules()
   await fsp.rm(runtimeConfigDirectory, { recursive: true, force: true })
@@ -321,6 +324,9 @@ describe('Desktop environment handoff', () => {
         option.rpcProxyBaseUrl === targetEnvironment.rpcProxyBaseUrl
     )
     if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+    // The frozen Date.now value makes the historical slug+timestamp collision
+    // deterministic. Deleting one profile must never remove its same-name peer.
+    expect(savedTarget.id).not.toBe(pathBasedTarget.id)
     const other = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
       option => option.id !== savedTarget.id && option.id !== '__localhost__'
     )
