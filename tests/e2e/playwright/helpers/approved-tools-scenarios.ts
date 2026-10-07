@@ -1,5 +1,18 @@
 // E2E_GUARDIAN_IPC_FLOW: configuration and read-only fixture evidence only.
+import {
+  type BusinessReceipt,
+  businessReceiptProblem,
+} from '../../fixtures/codex-subscription/approved-tools/business-receipt.mjs'
+
 export const catalogSizes = [83, 150, 250] as const
+
+/**
+ * The display name the deterministic fixture model advertises for its model
+ * (`FIXTURE_MODEL` in `codex-llm-proxy/test/approvedToolsUpstream.ts`, whose
+ * test pins this declaration). The catalog sync carries it to the Desktop
+ * model selector, which renders it as the chip label.
+ */
+export const FIXTURE_MODEL_DISPLAY_NAME = 'Codex isolated tool test'
 
 /**
  * The Control UI does not call control-api directly from the browser: every
@@ -40,10 +53,13 @@ export type Scenario = {
 export type Evidence = {
   runId: string
   catalogSize: number
-  calls: Array<{ runId: string; tool: string; callId: string | number; businessId: string }>
+  calls: BusinessReceipt[]
 }
 export type UpstreamEvidence = {
   rejected: number
+  // Closed-set reason of each rejection, in order. The fixture model keeps at
+  // most the first 64 (MAX_RECORDED_REJECTIONS); `rejected` keeps counting.
+  rejections: string[]
   searchCalls: number
   describeCalls: number
   businessCalls: number
@@ -141,6 +157,12 @@ export async function readEvidence(scenario: Scenario): Promise<Evidence> {
     !Array.isArray(evidence.calls)
   )
     throw new Error('Evidence scenario mismatch')
+  // Every recorded call must satisfy the receipt contract the fixture model
+  // enforces, so a malformed record fails here with its named problem.
+  evidence.calls.forEach((call, index) => {
+    const problem = businessReceiptProblem(call, 'mcp')
+    if (problem !== null) throw new Error(`Fixture evidence call ${index}: ${problem}`)
+  })
   return evidence
 }
 
@@ -181,5 +203,29 @@ export async function readUpstreamEvidence(scenario: Scenario): Promise<Upstream
       throw new Error(`Missing upstream limit boundary evidence ${field}`)
   }
   if (!Array.isArray(evidence.requests)) throw new Error('Missing upstream request evidence')
+  if (
+    !Array.isArray(evidence.rejections) ||
+    evidence.rejections.length > evidence.rejected ||
+    evidence.rejections.some(reason => typeof reason !== 'string' || !/^[a-z_]{1,64}$/.test(reason))
+  )
+    throw new Error('Missing upstream rejection evidence')
   return evidence
+}
+
+/**
+ * Assertion message naming the rejections the fixture model recorded between
+ * two evidence reads. The model names at most the first 64 rejections of a run
+ * (MAX_RECORDED_REJECTIONS); later ones are counted in `rejected` only.
+ */
+export function rejectionDelta(before: UpstreamEvidence, after: UpstreamEvidence): string {
+  const added = after.rejected - before.rejected
+  const named = after.rejections.slice(before.rejections.length)
+  const unnamed = added - named.length
+  return (
+    `fixture model rejected ${added} request(s) in this step: ` +
+    (named.length > 0 ? named.join(', ') : 'none named') +
+    (unnamed > 0
+      ? `; ${unnamed} more beyond the 64 named rejections (MAX_RECORDED_REJECTIONS)`
+      : '')
+  )
 }

@@ -1,6 +1,9 @@
 /** External model boundary for the isolated approved-tools E2E image only. */
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+// Shared with the MCP fixture server that creates the receipt. The isolated
+// proxy image copies it to the same repository-relative path.
+import { businessReceiptProblem } from '../../tests/e2e/fixtures/codex-subscription/approved-tools/business-receipt.mjs'
 
 type Row = Record<string, unknown>
 const COMPLETIONS = 'https://chatgpt.com/backend-api/codex/responses'
@@ -16,6 +19,65 @@ const LIMIT_PROBE_CALLS = 257
 // the continuation must carry every result back before the final answer.
 const LIMIT_BOUNDARY = 'tool call limit boundary'
 const LIMIT_BOUNDARY_CALLS = 256
+// The model the catalog advertises. The Desktop model selector renders this
+// display name for the bound model, so the E2E spec asserts it by value.
+export const FIXTURE_MODEL = { slug: 'gpt-5.3-codex', displayName: 'Codex isolated tool test' }
+
+// Closed set of rejection reasons. Each is a fixed string thrown below; any
+// other error (for example a JSON syntax error) is reported as `unclassified`,
+// so no payload text, token or message ever reaches the evidence or the body.
+export const REJECTION_REASONS = [
+  'ambiguous_workflow_target',
+  'boundary_search_failed',
+  'description_target_mismatch',
+  'description_without_search',
+  'duplicate_call_id',
+  'evidence_capacity_exceeded',
+  'expected_json_text',
+  'expected_object',
+  'fixture_requires_empty_arguments',
+  'incomplete_boundary_batch',
+  'incomplete_or_repeated_calls',
+  'invalid_call',
+  'invalid_definitions',
+  'invalid_envelope_target',
+  'invalid_search_result',
+  'invalid_search_target',
+  'invalid_stream_contract',
+  'invalid_tool_output_envelope',
+  'invocation_target_mismatch',
+  'invocation_without_schema',
+  'missing_business_result',
+  'missing_discovery_bridge',
+  'missing_input_or_tools',
+  'missing_user_request',
+  'operation_denied',
+  'search_must_find_one_target',
+  'status_binding_missing',
+  'trigger_binding_missing',
+  'unadvertised_function',
+  'uncorrelated_boundary_call',
+  'uncorrelated_result',
+  'unexpected_fixture_call',
+  'unexpected_retry',
+  'unknown_boundary_turn',
+  'unsupported_fixture_task',
+  'unsupported_receipt_transition',
+  'unsupported_workflow_transition',
+  'workflow_artifact_missing',
+  'workflow_list_required',
+  'workflow_not_uniquely_resolved',
+  'workflow_target_mismatch',
+] as const
+export type RejectionReason = (typeof REJECTION_REASONS)[number] | 'unclassified'
+const KNOWN_REASONS: ReadonlySet<string> = new Set(REJECTION_REASONS)
+const MAX_RECORDED_REJECTIONS = 64
+
+export function rejectionReason(error: unknown): RejectionReason {
+  return error instanceof Error && KNOWN_REASONS.has(error.message)
+    ? (error.message as RejectionReason)
+    : 'unclassified'
+}
 
 function record(value: unknown): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -42,15 +104,10 @@ function textResult(value: unknown, expectedName: string): Row {
   // Real tool failures can be plain sanitized text; preserve that failure as
   // data rather than inventing a successful result or retrying an approval.
   if (typeof value === 'string' && !value.trim().startsWith('{')) return { error: value }
-  const result = parse(value)
-  if (result.isError === true || result.is_error === true) return result
-  if (Array.isArray(result.content)) {
-    const blocks = result.content.map(record)
-    if (blocks.length !== 1 || blocks[0]?.type !== 'text')
-      throw new Error('expected_single_text_result')
-    return parse(blocks[0].text)
-  }
-  return result
+  // The Host hands the model the tool's text, never the MCP content wrapper,
+  // so a `{ content: [...] }` object is passed on unchanged and fails the
+  // receipt contract in receipt().
+  return parse(value)
 }
 
 type Exchange = { call: Row; args: Row; result: Row }
@@ -129,13 +186,11 @@ function receipt(exchange: Exchange, candidate: string): Row {
   )
     throw new Error('invocation_target_mismatch')
   const value = exchange.result
+  // callId is the MCP JSON-RPC request id: an integer from the Host's SDK
+  // client, a string from others. It is never used for correlation.
   if (
-    typeof value.businessId !== 'string' ||
-    !value.businessId ||
-    typeof value.runId !== 'string' ||
-    typeof value.callId !== 'string' ||
-    typeof value.tool !== 'string' ||
-    !candidate.endsWith(`__${value.tool}`)
+    businessReceiptProblem(value, 'mcp') !== null ||
+    !candidate.endsWith(`__${String(value.tool)}`)
   )
     throw new Error('missing_business_result')
   return value
@@ -145,33 +200,42 @@ function reusableDescription(history: Row[]): string | undefined {
   let previousUser = history.length - 1
   while (previousUser >= 0 && history[previousUser]?.role !== 'user') previousUser--
   if (previousUser < 0) return undefined
-  try {
-    // A canceled or denied previous task invalidates reuse; an ordinary new
-    // request must recover via discovery, not continue its interrupted call.
-    const previous = exchanges(history.slice(previousUser + 1))
-    const last = previous.at(-1)
-    if (
-      !last ||
-      last.call.name !== BRIDGES[2] ||
-      failed(last.result) ||
-      typeof last.args.name !== 'string'
+  // A canceled or denied previous task invalidates reuse; an ordinary new
+  // request must recover via discovery, not continue its interrupted call.
+  // Historical partial results are expected after genuine user cancellation:
+  // they cannot be paired into exchanges and never block the new task. A
+  // completed previous receipt that breaks the contract is still rejected.
+  const previous = pairedExchanges(history.slice(previousUser + 1))
+  const last = previous?.at(-1)
+  if (
+    !last ||
+    last.call.name !== BRIDGES[2] ||
+    failed(last.result) ||
+    typeof last.args.name !== 'string'
+  )
+    return undefined
+  receipt(last, last.args.name)
+  const allCalls = history.filter(row => row.type === 'function_call' && row.name === BRIDGES[1])
+  for (const call of allCalls.reverse()) {
+    const result = history.find(
+      row => row.type === 'function_call_output' && row.call_id === call.call_id
     )
-      return undefined
-    receipt(last, last.args.name)
-    const allCalls = history.filter(row => row.type === 'function_call' && row.name === BRIDGES[1])
-    for (const call of allCalls.reverse()) {
-      const result = history.find(
-        row => row.type === 'function_call_output' && row.call_id === call.call_id
-      )
-      if (!result) continue
-      const candidate = described(exchanges([call, result])[0]!)
-      if (candidate === last.args.name) return candidate
-    }
-  } catch {
-    // Historical partial results are expected after genuine user cancellation.
-    // They cannot supply a reusable schema, but never block the new task.
+    if (!result) continue
+    const description = pairedExchanges([call, result])?.[0]
+    // A description that found nothing is legitimate history (a new search
+    // followed it) but supplies no reusable schema.
+    if (!description || description.result.found !== true) return undefined
+    if (described(description) === last.args.name) return last.args.name
   }
   return undefined
+}
+
+function pairedExchanges(rows: Row[]): Exchange[] | undefined {
+  try {
+    return exchanges(rows)
+  } catch {
+    return undefined
+  }
 }
 
 function receiptDecision(current: Exchange[], known?: string): Decision {
@@ -309,6 +373,9 @@ export function createApprovedToolsUpstream() {
   const evidence = {
     catalogRequests: 0,
     rejected: 0,
+    // Reason of each rejection, in order, from the closed set above. Bounded:
+    // `rejected` keeps counting after the list is full.
+    rejections: [] as RejectionReason[],
     completions: 0,
     searchCalls: 0,
     describeCalls: 0,
@@ -350,7 +417,7 @@ export function createApprovedToolsUpstream() {
       if (url === CATALOG && (!init?.method || init.method === 'GET')) {
         evidence.catalogRequests++
         return Response.json({
-          models: [{ slug: 'gpt-5.3-codex', display_name: 'Codex isolated tool test' }],
+          models: [{ slug: FIXTURE_MODEL.slug, display_name: FIXTURE_MODEL.displayName }],
         })
       }
       if (url !== COMPLETIONS || init?.method !== 'POST') throw new Error('operation_denied')
@@ -523,9 +590,11 @@ export function createApprovedToolsUpstream() {
           arguments: JSON.stringify(args),
         },
       })
-    } catch {
+    } catch (error) {
+      const reason = rejectionReason(error)
       evidence.rejected++
-      return Response.json({ error: { code: 'fixture_protocol_rejected' } }, { status: 422 })
+      if (evidence.rejections.length < MAX_RECORDED_REJECTIONS) evidence.rejections.push(reason)
+      return Response.json({ error: { code: 'fixture_protocol_rejected', reason } }, { status: 422 })
     }
   }
   return { fetchFn, evidence: () => structuredClone(evidence) }

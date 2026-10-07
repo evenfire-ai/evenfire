@@ -21,6 +21,7 @@ test('receipt artifacts contain only bounded validated business fields', () => {
     { ...receipt, tool: 'other_tool' },
     { ...receipt, businessId: 'not-a-business-id' },
     { ...receipt, callId: '' },
+    { ...receipt, callId: 7 },
     { ...receipt, runId: '../other-artifact' },
     { ...receipt, runId: 'x'.repeat(129) },
   ]) {

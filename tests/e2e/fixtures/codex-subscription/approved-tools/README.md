@@ -51,9 +51,20 @@ returns 400; a different run returns 404. Observation cannot advance the flow.
 Discovery and rejected calls do not create records. After UI revocation,
 reuse the same instance and verify its call count remains unchanged.
 
-callId is the MCP JSON-RPC request ID, which can differ from the model call ID.
-Correlate that boundary using real Evenfire execution evidence. The fixture
-does not claim user or agent identity from model arguments.
+callId is the MCP JSON-RPC request ID of the `tools/call`, not the model call
+ID. It can be an integer (the MCP SDK client the Host uses numbers its requests
+from 0 on) or a non-empty string of at most 128 characters; any other id gets
+JSON-RPC error -32600 and no record. A client numbers requests per connection,
+so the same callId can repeat across reconnects. callId is never used for
+correlation: correlate the boundary using real Evenfire execution evidence.
+The fixture does not claim user or agent identity from model arguments.
+
+`business-receipt.mjs` holds this receipt contract. The server creates records
+with it, the approved-tools workflow fixture validates the receipt it persists
+with it, and the fixture models (`codex-llm-proxy/test/approvedToolsUpstream.ts`
+and `grok-llm-proxy/test/approvedToolsUpstream.ts`) reject a business result
+that breaks it. Every image that runs one of them copies the module next to it;
+no image ships the Grok fixture model, which runs only in its unit tests.
 
 ## Responsibility and false-positive review
 

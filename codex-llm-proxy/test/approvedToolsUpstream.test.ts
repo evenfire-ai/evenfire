@@ -4,7 +4,13 @@ import { hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contr
 import { streamCodexCompletion } from '../src/codexTransport.js'
 import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
-import { createApprovedToolsUpstream } from './approvedToolsUpstream'
+import { readFileSync } from 'node:fs'
+import {
+  createApprovedToolsUpstream,
+  FIXTURE_MODEL,
+  REJECTION_REASONS,
+  rejectionReason,
+} from './approvedToolsUpstream'
 
 const URL = 'https://chatgpt.com/backend-api/codex/responses'
 const bridges = ['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call']
@@ -31,16 +37,20 @@ async function request(
   return { response, body, event: response.ok ? JSON.parse(body.split('\n')[0]!.slice(6)) : null }
 }
 
+// Drives search -> describe -> call and returns the business receipt. The
+// MCP SDK client the Host uses numbers JSON-RPC requests with integers, so the
+// receipt's callId defaults to one; other clients send strings.
 async function complete(
   simulator: ReturnType<typeof createApprovedToolsUpstream>,
   input: Entry[],
   runId: string,
-  wrapped = false
+  wrapped = false,
+  callId: string | number = 3
 ) {
   const result = {
     runId,
     tool: 'workitem_read_receipt',
-    callId: randomUUID(),
+    callId,
     businessId: randomUUID(),
   }
   const outputs = [
@@ -54,7 +64,8 @@ async function complete(
       name: target,
       parameters: { type: 'object', properties: {}, additionalProperties: false },
     },
-    { content: [{ type: 'text', text: JSON.stringify(result) }] },
+    // The Host hands the model the tool's text, not the MCP content wrapper.
+    result,
   ]
   for (let index = 0; index < 3; index++) {
     const step = await request(simulator, input)
@@ -146,6 +157,97 @@ describe('approved-tools isolated upstream boundary', () => {
       expect(JSON.stringify(evidence)).not.toContain(result.runId)
     }
   )
+
+  it('accepts a string JSON-RPC callId from a client other than the MCP SDK', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const result = await complete(
+      simulator,
+      [{ role: 'user', content: 'verification receipt' }],
+      'string-call-id',
+      false,
+      randomUUID()
+    )
+    expect(typeof result.callId).toBe('string')
+    expect(simulator.evidence()).toMatchObject({ businessCalls: 1, finalResponses: 1, rejected: 0 })
+  })
+
+  it.each([
+    ['a null callId', { callId: null }],
+    ['a fractional callId', { callId: 1.5 }],
+    ['an empty callId', { callId: '' }],
+    ['a callId over 128 characters', { callId: 'x'.repeat(129) }],
+    ['an extra field', { extra: 'unexpected' }],
+  ])('rejects a business receipt with %s', async (_label, change) => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    const valid = await complete(simulator, input, 'negative')
+    // Liveness witness: the same journey answers a valid receipt.
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 0 })
+    input.push({ role: 'user', content: 'verification receipt again' })
+    const call = await request(simulator, input)
+    expect(call.event.item.name).toBe(bridges[2])
+    input.push(call.event.item, {
+      type: 'function_call_output',
+      call_id: call.event.item.call_id,
+      output: JSON.stringify({ ...valid, ...change }),
+    })
+    const rejected = await request(simulator, input)
+    expect(rejected.response.status).toBe(422)
+    expect(JSON.parse(rejected.body).error.reason).toBe('missing_business_result')
+    expect(simulator.evidence()).toMatchObject({
+      finalResponses: 1,
+      rejected: 1,
+      rejections: ['missing_business_result'],
+    })
+  })
+
+  it('rejects the MCP content wrapper instead of unwrapping it', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    const valid = await complete(simulator, input, 'wrapper')
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 0 })
+    input.push({ role: 'user', content: 'verification receipt again' })
+    const call = await request(simulator, input)
+    input.push(call.event.item, {
+      type: 'function_call_output',
+      call_id: call.event.item.call_id,
+      output: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(valid) }] }),
+    })
+    const rejected = await request(simulator, input)
+    expect(rejected.response.status).toBe(422)
+    expect(JSON.parse(rejected.body).error.reason).toBe('missing_business_result')
+    expect(simulator.evidence()).toMatchObject({
+      finalResponses: 1,
+      rejected: 1,
+      rejections: ['missing_business_result'],
+    })
+  })
+
+  it('rejects a new turn whose previous completed receipt breaks the contract', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    await complete(simulator, input, 'prior-turn')
+    const output = input.at(-1)!
+    expect(output.type).toBe('function_call_output')
+    // The same history with a valid receipt is reused, so only the violation
+    // makes the next turn fail.
+    const reused = await request(simulator, [
+      ...input,
+      { role: 'user', content: 'verification receipt again' },
+    ])
+    expect(reused.event.item.name).toBe(bridges[2])
+    const receipt = JSON.parse(output.output as string)
+    output.output = JSON.stringify({ ...receipt, callId: 1.5 })
+    input.push({ role: 'user', content: 'verification receipt again' })
+    const rejected = await request(simulator, input)
+    expect(rejected.response.status).toBe(422)
+    expect(JSON.parse(rejected.body).error.reason).toBe('missing_business_result')
+    expect(simulator.evidence()).toMatchObject({
+      finalResponses: 1,
+      rejected: 1,
+      rejections: ['missing_business_result'],
+    })
+  })
 
   it('interleaves separate conversations without global stage or answer reuse', async () => {
     const simulator = createApprovedToolsUpstream()
@@ -340,6 +442,62 @@ describe('approved-tools isolated upstream boundary', () => {
       ).response.status
     ).toBe(422)
     expect(simulator.evidence().businessCalls).toBe(0)
+    // The reason of each rejection is kept, in order, from the closed set.
+    expect(simulator.evidence()).toMatchObject({
+      rejected: 4,
+      rejections: [
+        'missing_discovery_bridge',
+        'incomplete_or_repeated_calls',
+        'uncorrelated_result',
+        'invalid_search_target',
+      ],
+    })
+  })
+
+  it('returns the closed-set rejection reason in the 422 body and never the payload', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const secret = `sk-${randomUUID()}`
+    const missing = await request(
+      simulator,
+      [{ role: 'user', content: `verification receipt ${secret}` }],
+      tools.slice(0, 2)
+    )
+    expect(missing.response.status).toBe(422)
+    expect(JSON.parse(missing.body)).toEqual({
+      error: { code: 'fixture_protocol_rejected', reason: 'missing_discovery_bridge' },
+    })
+    // A body that is not JSON throws a SyntaxError outside the closed set.
+    const malformed = await simulator.fetchFn(URL, { method: 'POST', body: `{${secret}` })
+    expect(malformed.status).toBe(422)
+    expect(await malformed.json()).toEqual({
+      error: { code: 'fixture_protocol_rejected', reason: 'unclassified' },
+    })
+    const evidence = simulator.evidence()
+    expect(evidence).toMatchObject({
+      rejected: 2,
+      rejections: ['missing_discovery_bridge', 'unclassified'],
+    })
+    expect(JSON.stringify(evidence)).not.toContain(secret)
+    expect(missing.body).not.toContain(secret)
+  })
+
+  it('keeps every thrown fixture error name inside the closed rejection set', () => {
+    const source = readFileSync(
+      new globalThis.URL('./approvedToolsUpstream.ts', import.meta.url),
+      'utf8'
+    )
+    const thrown = [...source.matchAll(/new Error\(([^)]*)\)/g)].map(match => match[1]!)
+    // Liveness witness: the scan found the fixture's throw sites.
+    expect(thrown.length).toBeGreaterThan(40)
+    const names = thrown.map(argument => {
+      const literal = /^'([a-z_]+)'$/.exec(argument)
+      expect(literal, `non-literal error name: ${argument}`).not.toBeNull()
+      return literal![1]!
+    })
+    expect([...new Set(names)].sort()).toEqual([...REJECTION_REASONS].sort())
+    for (const name of REJECTION_REASONS) expect(rejectionReason(new Error(name))).toBe(name)
+    expect(rejectionReason(new Error('anything else'))).toBe('unclassified')
+    expect(rejectionReason('missing_discovery_bridge')).toBe('unclassified')
   })
 
   it('accepts only the frozen catalog and completion operations without making network calls', async () => {
@@ -347,7 +505,21 @@ describe('approved-tools isolated upstream boundary', () => {
     const catalog = await simulator.fetchFn(
       'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0'
     )
-    expect(await catalog.json()).toMatchObject({ models: [{ slug: 'gpt-5.3-codex' }] })
+    expect(await catalog.json()).toEqual({
+      models: [{ slug: 'gpt-5.3-codex', display_name: 'Codex isolated tool test' }],
+    })
+    expect(FIXTURE_MODEL).toEqual({ slug: 'gpt-5.3-codex', displayName: 'Codex isolated tool test' })
+    // The Desktop journey asserts the model chip shows this display name.
+    const scenarios = readFileSync(
+      new globalThis.URL(
+        '../../tests/e2e/playwright/helpers/approved-tools-scenarios.ts',
+        import.meta.url
+      ),
+      'utf8'
+    )
+    expect(scenarios).toContain(
+      `export const FIXTURE_MODEL_DISPLAY_NAME = '${FIXTURE_MODEL.displayName}'\n`
+    )
     for (const url of [
       'http://chatgpt.com/backend-api/codex/responses',
       'https://example.com/',
@@ -495,6 +667,7 @@ describe('approved-tools tool-call limit probe', () => {
     expect(simulator.evidence()).toMatchObject({
       limitProbe: { turns: 1, completions: 3, unexpectedRetries: 2 },
       rejected: 2,
+      rejections: ['unexpected_retry', 'unexpected_retry'],
     })
   })
 

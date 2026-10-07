@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { createRequire } from 'node:module'
 import { test } from 'node:test'
+import { businessReceiptProblem } from './business-receipt.mjs'
 import { RECEIPT_TOOL, createApprovedToolsFixture } from './server.mjs'
 
 // Exercise interoperability with the same installed SDK as MCP Host.
@@ -54,6 +55,9 @@ for (const count of [83, 150, 250]) {
     assert.equal(receipt.tool, RECEIPT_TOOL)
     assert.equal(receipt.runId, runId)
     assert.match(receipt.businessId, /^[0-9a-f-]{36}$/)
+    // The installed MCP SDK client numbers its requests with integers.
+    assert.equal(Number.isSafeInteger(receipt.callId), true)
+    assert.equal(businessReceiptProblem(receipt, 'mcp'), null)
     assert.deepEqual((await evidence()).calls, [receipt])
     const repeated = await client.callTool({ name: RECEIPT_TOOL, arguments: {} })
     assert.equal(JSON.parse(repeated.content[0].text).businessId, receipt.businessId)

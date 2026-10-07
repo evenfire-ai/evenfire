@@ -7,6 +7,11 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  // Eight serial tests at 480 s each can outlast the runner's outer deadline
+  // (#715). Stopping at the first failure keeps a failing run inside it, so
+  // the run still ends with its JSON report. The runner still requires all
+  // eight titles to pass and zero skipped tests.
+  maxFailures: 1,
   timeout: 480_000,
   expect: { timeout: 30_000 },
   forbidOnly: true,

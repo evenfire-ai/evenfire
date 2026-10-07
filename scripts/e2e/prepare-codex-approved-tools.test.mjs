@@ -13,14 +13,17 @@ import {
 } from '../release/images-manifest.mjs'
 import {
   assertResourceRoundTrip,
+  boundedOperationFailure,
   makeResources,
   makeScenarios,
   makeWorkflowResources,
   makeWorkflowScenario,
   openOwnedFile,
   parseDryRunItems,
+  preparationFailureLine,
   readOwnedDescriptor,
   readOwnedFile,
+  resolveHostPresentation,
   validateKubectlArgs,
   validateOwnerArgs,
   validateProfile,
@@ -441,4 +444,142 @@ test('fixed ownership CLI rejects invalid operations and bindings without touchi
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('a failed bounded operation names the operation and its outcome, never its output', () => {
+  assert.equal(
+    boundedOperationFailure('kubectl', { status: 1, stdout: 'secret-token', stderr: 'dsn' }),
+    "FIXTURE_OPERATION_FAILED: bounded fixture operation 'kubectl' exited with status 1"
+  )
+  assert.equal(
+    boundedOperationFailure('runner', { status: null, signal: 'SIGTERM' }),
+    "FIXTURE_OPERATION_FAILED: bounded fixture operation 'runner' stopped by SIGTERM"
+  )
+  const missing = Object.assign(new Error('spawn minikube ENOENT /private/path'), {
+    code: 'ENOENT',
+  })
+  assert.equal(
+    boundedOperationFailure('image-inventory', { error: missing, status: null }),
+    "FIXTURE_OPERATION_FAILED: bounded fixture operation 'image-inventory' could not run (ENOENT)"
+  )
+  assert.equal(
+    boundedOperationFailure('lease', { error: { code: 'weird code' }, status: null }),
+    "FIXTURE_OPERATION_FAILED: bounded fixture operation 'lease' could not run (spawn error)"
+  )
+})
+
+test('preparation failure line keeps the diagnostic message and its code on one line', () => {
+  const proof = new Error(
+    'IMAGE_PROOF_HEAD_MISMATCH: clerum/x:test was built at aaa,\nthe commit under review is bbb'
+  )
+  assert.equal(
+    preparationFailureLine(proof, 0),
+    'Approved tools preparation failed: IMAGE_PROOF_HEAD_MISMATCH: clerum/x:test was built at aaa, the commit under review is bbb; no fixture evidence was written\n'
+  )
+  assert.equal(
+    preparationFailureLine(new Error('Missing MINIKUBE_PROFILE'), 3),
+    'Approved tools preparation failed: PREPARATION_FAILED: Missing MINIKUBE_PROFILE; review bounded sanitized fixture evidence\n'
+  )
+  // A runtime SyntaxError can quote the text it failed to parse.
+  let syntax
+  try {
+    JSON.parse('{"token":"sk-live-secret"')
+  } catch (error) {
+    syntax = error
+  }
+  assert.ok(syntax instanceof SyntaxError)
+  const line = preparationFailureLine(syntax, 0)
+  assert.equal(
+    line,
+    'Approved tools preparation failed: PREPARATION_FAILED: unexpected SyntaxError; no fixture evidence was written\n'
+  )
+  assert.ok(!line.includes('sk-live-secret'))
+  assert.match(
+    preparationFailureLine('not an error', 0),
+    /PREPARATION_FAILED: unexpected non-Error value;/
+  )
+  const long = preparationFailureLine(new Error('x'.repeat(5000)), 0)
+  assert.ok(long.length < 700)
+  assert.equal(long.split('\n').length, 2)
+})
+
+test('the CLI prints the failure reason instead of a generic sentence', () => {
+  const env = { ...process.env }
+  delete env.APPROVED_TOOLS_EVIDENCE_DIR
+  const result = spawnSync(
+    process.execPath,
+    ['scripts/e2e/prepare-codex-approved-tools.mjs', 'unsupported-action'],
+    { cwd: path.resolve(import.meta.dirname, '../..'), env, encoding: 'utf8', timeout: 30_000 }
+  )
+  assert.equal(result.status, 1)
+  assert.equal(
+    result.stderr,
+    'Approved tools preparation failed: PREPARATION_FAILED: Expected prepare, run, or restore; no fixture evidence was written\n'
+  )
+})
+
+test('the Host presentation must be auto with threshold 60 and direct native tools', () => {
+  const overlay = { MCP_HOST_CODEX_SUBSCRIPTION_ENABLED: 'true', CODEX_TOOL_PRESENTATION: 'auto' }
+  // Liveness witness: the accepted shapes resolve and name where each value came from.
+  assert.deepEqual(resolveHostPresentation(overlay), {
+    codexToolPresentation: 'auto',
+    dynamicToolsThreshold: 60,
+    dynamicToolsThresholdSource: 'default',
+    nativeToolPresentation: 'direct',
+    nativeToolPresentationSource: 'default',
+  })
+  assert.deepEqual(
+    resolveHostPresentation({
+      ...overlay,
+      CLERUM_DYNAMIC_TOOLS_THRESHOLD: '60',
+      CLERUM_NATIVE_TOOL_PRESENTATION: 'direct',
+    }),
+    {
+      codexToolPresentation: 'auto',
+      dynamicToolsThreshold: 60,
+      dynamicToolsThresholdSource: 'configmap',
+      nativeToolPresentation: 'direct',
+      nativeToolPresentationSource: 'configmap',
+    }
+  )
+  for (const [data, key] of [
+    [undefined, 'has no data'],
+    [null, 'has no data'],
+    [[], 'has no data'],
+    [{}, 'CODEX_TOOL_PRESENTATION'],
+    [{ CODEX_TOOL_PRESENTATION: 'direct' }, 'CODEX_TOOL_PRESENTATION'],
+    [{ CODEX_TOOL_PRESENTATION: 'discovery' }, 'CODEX_TOOL_PRESENTATION'],
+    [{ CODEX_TOOL_PRESENTATION: 'AUTO' }, 'CODEX_TOOL_PRESENTATION'],
+    [{ ...overlay, CLERUM_DYNAMIC_TOOLS_THRESHOLD: '61' }, 'CLERUM_DYNAMIC_TOOLS_THRESHOLD'],
+    [{ ...overlay, CLERUM_DYNAMIC_TOOLS_THRESHOLD: '' }, 'CLERUM_DYNAMIC_TOOLS_THRESHOLD'],
+    [{ ...overlay, CLERUM_DYNAMIC_TOOLS_THRESHOLD: '060' }, 'CLERUM_DYNAMIC_TOOLS_THRESHOLD'],
+    [{ ...overlay, CLERUM_NATIVE_TOOL_PRESENTATION: 'auto' }, 'CLERUM_NATIVE_TOOL_PRESENTATION'],
+    [{ ...overlay, CLERUM_NATIVE_TOOL_PRESENTATION: '' }, 'CLERUM_NATIVE_TOOL_PRESENTATION'],
+  ])
+    assert.throws(
+      () => resolveHostPresentation(data),
+      error =>
+        error.message.startsWith('HOST_PRESENTATION_MISMATCH: ') && error.message.includes(key),
+      JSON.stringify(data)
+    )
+  // A declared value is matched, never echoed into the failure line.
+  assert.throws(
+    () => resolveHostPresentation({ CODEX_TOOL_PRESENTATION: 'secret-looking-value' }),
+    error => !error.message.includes('secret-looking-value')
+  )
+})
+
+test('prepare resolves the Host presentation before the fixture state exists and records it', () => {
+  const source = fs.readFileSync(
+    path.resolve(import.meta.dirname, 'prepare-codex-approved-tools.mjs'),
+    'utf8'
+  )
+  const read = source.indexOf("'configmap/mcp-host-config'")
+  const resolved = source.indexOf('const hostPresentation = resolveHostPresentation(hostFlags.data)')
+  const created = source.indexOf("openOwnedFile(evidence, 'fixture-state.json', { create: true })")
+  const firstCreate = source.indexOf("kubectl(['create', '-f', '-'")
+  for (const index of [read, resolved, created, firstCreate]) assert.ok(index > 0)
+  assert.ok(read < resolved && resolved < created && created < firstCreate)
+  const state = source.slice(source.lastIndexOf('state = {', created), created)
+  assert.match(state, /\n {4}hostPresentation,\n/)
 })

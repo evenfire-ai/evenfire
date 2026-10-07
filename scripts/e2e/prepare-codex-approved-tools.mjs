@@ -738,8 +738,88 @@ function command(
   // Subprocess output can include runtime state. Only callers parse their
   // specific safe result; never embed raw stderr/stdout in an exception.
   if (result.error || result.signal || result.status !== 0)
-    throw new Error('Bounded fixture operation failed')
+    throw new Error(boundedOperationFailure(operation, result))
   return result.stdout ?? ''
+}
+
+// The operation name comes from the closed switch above; the outcome is an
+// exit status, a signal name or a spawn error code. None carries output.
+export function boundedOperationFailure(operation, result) {
+  const code = result.error?.code
+  const outcome = result.error
+    ? `could not run (${typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(code) ? code : 'spawn error'})`
+    : result.signal
+      ? `stopped by ${/^SIG[A-Z0-9]{1,16}$/.test(result.signal) ? result.signal : 'a signal'}`
+      : `exited with status ${Number.isSafeInteger(result.status) ? result.status : 'unknown'}`
+  return `FIXTURE_OPERATION_FAILED: bounded fixture operation '${operation}' ${outcome}`
+}
+
+// The fixture model scripts search, describe and call through the discovery
+// bridges, which the Host presents only under CODEX_TOOL_PRESENTATION=auto once
+// a context exceeds CLERUM_DYNAMIC_TOOLS_THRESHOLD (mcp-host config.ts:936-942).
+// A native presentation other than direct adds natives to the discovery
+// catalog and changes the search results the fixture expects. Every fixture
+// Host loads mcp-host-config through envFrom, so the ConfigMap data is the
+// presentation the run uses. Values are matched exactly and never echoed.
+export function resolveHostPresentation(data) {
+  if (data === null || typeof data !== 'object' || Array.isArray(data))
+    throw new Error('HOST_PRESENTATION_MISMATCH: mcp-host-config has no data')
+  const declared = key => (Object.hasOwn(data, key) ? data[key] : undefined)
+  if (declared('CODEX_TOOL_PRESENTATION') !== 'auto')
+    throw new Error(
+      'HOST_PRESENTATION_MISMATCH: mcp-host-config must set CODEX_TOOL_PRESENTATION to auto'
+    )
+  const threshold = declared('CLERUM_DYNAMIC_TOOLS_THRESHOLD')
+  if (threshold !== undefined && threshold !== '60')
+    throw new Error(
+      'HOST_PRESENTATION_MISMATCH: CLERUM_DYNAMIC_TOOLS_THRESHOLD must be unset or 60'
+    )
+  const native = declared('CLERUM_NATIVE_TOOL_PRESENTATION')
+  if (native !== undefined && native !== 'direct')
+    throw new Error(
+      'HOST_PRESENTATION_MISMATCH: CLERUM_NATIVE_TOOL_PRESENTATION must be unset or direct'
+    )
+  return {
+    codexToolPresentation: 'auto',
+    dynamicToolsThreshold: 60,
+    dynamicToolsThresholdSource: threshold === undefined ? 'default' : 'configmap',
+    nativeToolPresentation: 'direct',
+    nativeToolPresentationSource: native === undefined ? 'default' : 'configmap',
+  }
+}
+
+const PREPARATION_FAILURE_MAX_CHARS = 600
+
+// One line for the operator. Messages raised by this harness are fixed text,
+// environment variable names, image references and commit SHAs; runtime errors
+// of other classes (for example a JSON SyntaxError quoting its input) are
+// reported by class name only. Evidence is mentioned only when some exists.
+export function preparationFailureLine(error, evidenceFiles) {
+  const plain = error instanceof Error && Object.getPrototypeOf(error) === Error.prototype
+  const message = plain
+    ? error.message
+        .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+        .trim()
+        .slice(0, PREPARATION_FAILURE_MAX_CHARS)
+    : ''
+  const coded = /^([A-Z][A-Z0-9_]{2,63}): /.exec(message)
+  const code = coded ? coded[1] : 'PREPARATION_FAILED'
+  const name = error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : ''
+  const detail = message
+    ? message.slice(coded ? coded[0].length : 0)
+    : `unexpected ${name || 'non-Error value'}`
+  const suffix =
+    evidenceFiles > 0
+      ? '; review bounded sanitized fixture evidence'
+      : '; no fixture evidence was written'
+  return `Approved tools preparation failed: ${code}: ${detail}${suffix}\n`
+}
+
+function evidenceFileCount() {
+  const dir = process.env.APPROVED_TOOLS_EVIDENCE_DIR
+  return dir && fs.existsSync(dir) && fs.statSync(dir).isDirectory()
+    ? fs.readdirSync(dir).length
+    : 0
 }
 
 function required(key) {
@@ -1285,6 +1365,8 @@ async function main() {
   )
   if (hostFlags.data?.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true')
     throw new Error('Host Codex feature gate is not enabled by the Minikube overlay')
+  // Refuse before any fixture resource exists; the result goes into the state.
+  const hostPresentation = resolveHostPresentation(hostFlags.data)
   if (
     kubectl([
       '-n',
@@ -1381,6 +1463,7 @@ async function main() {
     worktree: repo,
     head,
     imageProof,
+    hostPresentation,
     run,
     scenarios,
     workflowScenario,
@@ -1611,10 +1694,8 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(() => {
-    process.stderr.write(
-      'Approved tools preparation failed; review bounded sanitized fixture evidence\n'
-    )
+  main().catch(error => {
+    process.stderr.write(preparationFailureLine(error, evidenceFileCount()))
     process.exitCode = 1
   })
 }

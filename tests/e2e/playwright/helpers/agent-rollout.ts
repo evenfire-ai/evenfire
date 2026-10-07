@@ -28,22 +28,37 @@ type DeploymentSnapshot = {
   unavailableReplicas: number
 }
 
+// The Deployment as JSON, or undefined when the API server answers NotFound.
+// Every other failure (unreachable API server, RBAC, timeout) is thrown.
+function getAgentDeployment(agentName: string): string | undefined {
+  try {
+    return execFileSync(
+      'kubectl',
+      [
+        '--context',
+        required('MINIKUBE_PROFILE'),
+        '--request-timeout=30s',
+        '-n',
+        NAMESPACE,
+        'get',
+        `deployment/${agentName}`,
+        '-o',
+        'json',
+      ],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+    )
+  } catch (error) {
+    const stderr = (error as { stderr?: unknown }).stderr
+    if (typeof stderr === 'string' && /^Error from server \(NotFound\): /m.test(stderr))
+      return undefined
+    throw error
+  }
+}
+
 function readAgentDeployment(agentName: string): DeploymentSnapshot {
-  const raw = execFileSync(
-    'kubectl',
-    [
-      '--context',
-      required('MINIKUBE_PROFILE'),
-      '--request-timeout=30s',
-      '-n',
-      NAMESPACE,
-      'get',
-      `deployment/${agentName}`,
-      '-o',
-      'json',
-    ],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
-  )
+  const raw = getAgentDeployment(agentName)
+  if (raw === undefined)
+    throw new Error(`Agent Deployment ${NAMESPACE}/${agentName} does not exist`)
   const deployment = JSON.parse(raw) as {
     metadata?: { generation?: number }
     spec?: { replicas?: number }
@@ -64,6 +79,28 @@ function readAgentDeployment(agentName: string): DeploymentSnapshot {
     availableReplicas: deployment.status?.availableReplicas ?? 0,
     unavailableReplicas: deployment.status?.unavailableReplicas ?? 0,
   }
+}
+
+// prepare creates the fixture Host resources and moves on once the connector
+// Deployments exist; HCC creates each Host's Deployment asynchronously. A
+// rollout baseline read before that point fails on a missing object, so the
+// baseline waits here first. Bounded, and on expiry it reports what it saw.
+export async function waitForAgentDeployment(
+  agentName: string,
+  timeoutMs = 180_000
+): Promise<void> {
+  const started = Date.now()
+  const deadline = started + timeoutMs
+  let polls = 0
+  while (Date.now() < deadline) {
+    polls += 1
+    if (getAgentDeployment(agentName) !== undefined) return
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS))
+  }
+  throw new Error(
+    `Agent Deployment ${NAMESPACE}/${agentName} was not created within ${timeoutMs} ms: ` +
+      `NotFound on all ${polls} polls over ${Date.now() - started} ms`
+  )
 }
 
 export function readAgentDeploymentGeneration(agentName: string): number {

@@ -10,14 +10,20 @@
  * providers are simulated in deterministic mode.
  */
 import { type Page, expect, test } from '@playwright/test'
-import { readAgentDeploymentGeneration, waitForAgentRollout } from '../helpers/agent-rollout'
 import {
+  readAgentDeploymentGeneration,
+  waitForAgentDeployment,
+  waitForAgentRollout,
+} from '../helpers/agent-rollout'
+import {
+  FIXTURE_MODEL_DISPLAY_NAME,
   type Scenario,
   type UpstreamEvidence,
   browserApiPath,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
+  rejectionDelta,
   required,
   scenarios,
 } from '../helpers/approved-tools-scenarios'
@@ -132,9 +138,16 @@ async function openAgentChat(desktop: Page, scenario: Scenario) {
   const modelOption = desktop.getByTestId(`model-option-${scenario.modelName}`)
   await expect(modelOption).toHaveCount(1)
   await modelOption.click()
-  await expect(
-    desktop.getByRole('button', { name: `Model — ${scenario.modelName}`, exact: true })
-  ).toBeVisible()
+  // Business signal: the effective model is the id the Control UI step bound
+  // (ModelSelector.tsx:213). The chip label is the catalog displayName
+  // (ModelSelector.tsx:34), so a selection that renders nothing still fails.
+  const chip = desktop.getByTestId('selected-chat-model')
+  await expect(chip).toHaveCount(1)
+  await expect(chip).toHaveAttribute('data-model-id', scenario.modelName)
+  await expect(chip).toBeVisible()
+  if (mode === 'deterministic') await expect(chip).toHaveText(FIXTURE_MODEL_DISPLAY_NAME)
+  // The real catalog's display name is not owned by this spec.
+  else await expect(chip).not.toHaveText(/^\s*(Select model)?\s*$/)
   await expect(desktop.getByTestId('agent-response')).toHaveCount(0)
 }
 
@@ -253,6 +266,7 @@ for (const scenario of cases) {
     let rolloutBaseline = 0
     await test.step('Select the prepared subscription and persist its model binding', async () => {
       const model = new AgentModelPage(page)
+      await waitForAgentDeployment(scenario.agentName)
       rolloutBaseline = readAgentDeploymentGeneration(scenario.agentName)
       await model.openEditor()
       await model.chooseSubscription(scenario.subscriptionName)
@@ -320,7 +334,9 @@ for (const scenario of cases) {
         expect((await readEvidence(scenario)).calls).toEqual(evidence.calls)
         if (upstreamBefore) {
           const upstreamAfter = await readUpstreamEvidence(scenario)
-          expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+          expect(upstreamAfter.rejected, rejectionDelta(upstreamBefore, upstreamAfter)).toBe(
+            upstreamBefore.rejected
+          )
           expect(upstreamAfter.searchCalls - upstreamBefore.searchCalls).toBe(1)
           expect(upstreamAfter.describeCalls - upstreamBefore.describeCalls).toBe(1)
           expect(upstreamAfter.businessCalls - upstreamBefore.businessCalls).toBe(1)
@@ -396,7 +412,9 @@ for (const scenario of cases) {
         let requests = null
         if (upstreamBefore) {
           const after = await readUpstreamEvidence(scenario)
-          expect(after.rejected).toBe(upstreamBefore.rejected)
+          expect(after.rejected, rejectionDelta(upstreamBefore, after)).toBe(
+            upstreamBefore.rejected
+          )
           expect(after.describeCalls).toBe(upstreamBefore.describeCalls)
           expect(after.searchCalls).toBe(upstreamBefore.searchCalls)
           expect(after.businessCalls - upstreamBefore.businessCalls).toBe(1)
@@ -516,7 +534,9 @@ for (const scenario of cases) {
         expect((await readEvidence(scenario)).calls).toEqual(before.calls)
         if (upstreamBefore) {
           const upstreamAfter = await readUpstreamEvidence(scenario)
-          expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+          expect(upstreamAfter.rejected, rejectionDelta(upstreamBefore, upstreamAfter)).toBe(
+            upstreamBefore.rejected
+          )
           expect(upstreamAfter.businessCalls).toBe(upstreamBefore.businessCalls)
           expect(upstreamAfter.deniedResponses - upstreamBefore.deniedResponses).toBe(1)
           const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
@@ -623,7 +643,9 @@ if (mode === 'deterministic') {
         expect(upstreamAfter.limitProbe.turns - upstreamBefore.limitProbe.turns).toBe(1)
         expect(upstreamAfter.limitProbe.completions - upstreamBefore.limitProbe.completions).toBe(1)
         expect(upstreamAfter.limitProbe.unexpectedRetries).toBe(0)
-        expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+        expect(upstreamAfter.rejected, rejectionDelta(upstreamBefore, upstreamAfter)).toBe(
+          upstreamBefore.rejected
+        )
         const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
         expect(requests.map(request => request.stage)).toEqual(['limit_probe'])
         expect((await readEvidence(scenario)).calls).toEqual(before.calls)
@@ -689,7 +711,9 @@ if (mode === 'deterministic') {
         expect(delta('toolResults')).toBe(256)
         expect(delta('finalResponses')).toBe(1)
         expect(upstreamAfter.limitBoundary.unexpectedRetries).toBe(0)
-        expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+        expect(upstreamAfter.rejected, rejectionDelta(upstreamBefore, upstreamAfter)).toBe(
+          upstreamBefore.rejected
+        )
         const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
         expect(requests.map(request => request.stage)).toEqual([
           'limit_boundary',
