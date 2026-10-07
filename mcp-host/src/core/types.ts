@@ -9,6 +9,7 @@
 import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
+import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
 // ─── Message Types ──────────────────────────────────────────
@@ -313,6 +314,8 @@ export interface ToolResult {
   is_error: boolean
   attachments?: Attachment[]
   metadata?: Record<string, unknown>
+  /** Token estimate of the final model-visible message; not part of its content. */
+  emittedMessageCost?: number
   /**
    * Pre-sanitization content for user-facing output preview.
    * WARNING: bypasses the XML safety wrapper. Do NOT use in LLM messages.
@@ -325,6 +328,12 @@ export interface ToolResult {
    * resume time. Undefined for inline results.
    */
   spillover_ref?: string
+  /**
+   * Set only by a trusted tool's `finalizeResult` (after the safety transform):
+   * the turn ends after this batch with `message` as the reply, and no further
+   * model call is made. Later calls of the batch are answered without running.
+   */
+  stopTurn?: { message: string }
 }
 
 export interface ToolOutput {
@@ -633,6 +642,11 @@ export interface TaskExecutionBudgetSnapshot {
   maxIterations: number
   /** Cumulative source-read work; payloads are not durable task budget data. */
   visualReadBytes?: number
+  /**
+   * C15/C16 — the turn's attachment read ledger, carried inside this existing
+   * JSON column. Data-only counts; no file bytes, no content.
+   */
+  attachmentReadLedger?: AttachmentReadLedgerSnapshot
 }
 
 export interface PendingApproval {
@@ -695,7 +709,7 @@ export type LoopResult =
   | { type: 'error'; error: Error }
   | {
       type: 'exhaustion'
-      reason?: 'iteration_limit' | 'task_budget'
+      reason?: 'iteration_limit' | 'task_budget' | 'turn_stop'
       message: string
       iterations: number
       attachments?: Attachment[]

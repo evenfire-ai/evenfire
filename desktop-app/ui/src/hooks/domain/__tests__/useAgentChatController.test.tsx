@@ -13,6 +13,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
+import { classifyBytes } from '@clerum/gfs-interaction-policy'
+import { base64Length, composerNonImageShareBytes } from '@lib/composerFileAdmission'
+import { buildComposerFileReferences } from '@lib/composerFileReferences'
+import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
+import type { HostModelsResult } from '../../../../../src/types'
+import type {
+  ComposerGlobalFileReference,
+  ComposerImageAttachment,
+  ReadyComposerFileAttachment,
+} from '../../../uiTypes'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -1901,5 +1912,365 @@ describe('interrupted generated-file contract', () => {
         attachments: [expect.objectContaining({ type: 'response_file', label: 'report.md' })],
       }),
     ])
+  })
+})
+
+/**
+ * #678 — the send-time blockers for documents. Files enter through the public
+ * restore action (the path a retried send uses), which skips the picker's
+ * admission, so each blocker is reached exactly as the controller sees it at
+ * send time. Every refusal is paired, in the same test, with a twin one step
+ * inside the limit that reaches the Host once.
+ */
+describe('sendAgentMessage — per-message limits for documents (#678)', () => {
+  const MIB = 1024 * 1024
+  const TEXT_SHARE_BLOCKER =
+    'The message text and attachment details take more than 6.0 MiB once encoded. Shorten the message or remove an attachment.'
+  const FILE_QUOTA_BLOCKER =
+    'The attached files take more than 16.0 MiB once encoded. Remove a file.'
+  const REQUEST_BODY_BLOCKER =
+    'The attachments and text take more than 24.0 MiB once encoded. Remove an attachment or shorten the message.'
+  const COUNT_BLOCKER = 'A message can carry at most 20 attachments.'
+
+  const catalog: HostModelsResult = {
+    provider: 'zai',
+    hostDefault: 'glm-5.3-flash',
+    sessionModel: null,
+    degraded: false,
+    modelSelectionRevision: 0,
+    models: [{ name: 'glm-5.3-flash', imageInput: { state: 'supported', reason: 'supported' } }],
+  }
+  const modelTransport = {
+    getHostModels: vi.fn(async () => catalog),
+    setHostModel: vi.fn(),
+  }
+
+  afterEach(() => {
+    resetHostModelSelectionStore()
+  })
+
+  /** A read and hashed text document of `sizeBytes`, as `readComposerFile` returns it. */
+  function readyTextFile(
+    id: string,
+    filename: string,
+    sizeBytes: number
+  ): ReadyComposerFileAttachment {
+    return {
+      id,
+      type: 'file',
+      filename,
+      sizeBytes,
+      declaredMediaType: 'text/plain',
+      status: 'ready',
+      classification: classifyBytes({
+        // Built with this environment's Uint8Array, as readComposerFile does:
+        // TextEncoder and Buffer return one from another realm under jsdom.
+        bytes: new Uint8Array(Buffer.from('plain text')),
+        totalByteLength: sizeBytes,
+        declaredMediaType: 'text/plain',
+        filename,
+      }),
+      dataBase64: 'Y'.repeat(base64Length(sizeBytes)),
+      digestHex: 'ab'.repeat(32),
+    }
+  }
+
+  async function mountedWithFiles(files: ReadyComposerFileAttachment[]) {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    act(() => rendered.result.current.handleRestoreComposerFiles(files))
+    return rendered
+  }
+
+  function sentAttachmentIds(): unknown[] {
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      attachments?: Array<{ id: unknown }>
+    }
+    expect(request).toBeDefined()
+    return (request.attachments ?? []).map(attachment => attachment.id)
+  }
+
+  function expectBlocked(rendered: ReturnType<typeof renderController>, blocker: string) {
+    expect(rendered.result.current.agentError).toBe(blocker)
+    expect(rendered.spies.pushToast).toHaveBeenCalledWith(blocker, 'error')
+    expect(clerum.chat.create).not.toHaveBeenCalled()
+    expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+  }
+
+  it('refuses text that overflows the 6 MiB share beside an 11 MiB file, and sends one byte less', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([big])
+    // Envelope (4096) + the fields rpc-proxy adds (2048) + the text as a JSON
+    // string (+2 quotes) + the agent twice as a JSON string (2 × 9) + the file's
+    // JSON name and fixed fields; the file's base64 is credited to the file quota.
+    const fullShareText = 6 * MIB - 4096 - 2048 - 2 - 18 - JSON.stringify('big.txt').length - 640
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullShareText + 1))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullShareText))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-big'])
+  })
+
+  it('refuses files one byte past the 16 MiB quota, and sends the pair that fills it exactly', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([
+      big,
+      readyTextFile('file-over', 'tail.txt', 1_048_576),
+    ])
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read both')
+    })
+    expectBlocked(rendered, FILE_QUOTA_BLOCKER)
+
+    act(() =>
+      rendered.result.current.handleRestoreComposerFiles([
+        big,
+        readyTextFile('file-fits', 'tail.txt', 1_048_575),
+      ])
+    )
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read both')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-big', 'file-fits'])
+  })
+
+  it('refuses images and files that together pass the 24 MiB body, and sends without one file', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([
+      big,
+      readyTextFile('file-tail', 'tail.txt', 1_048_575),
+    ])
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', null)
+    })
+    const image: ComposerImageAttachment = {
+      id: 'image-8mib',
+      name: 'scan.png',
+      mimeType: 'image/png',
+      dataBase64: 'A'.repeat(8 * MIB),
+      sizeBytes: 6 * MIB,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+    // Precondition: the files sit exactly on their quota and the text is short,
+    // so only the whole-body limit can refuse this send.
+    expect(base64Length(11 * MIB) + base64Length(1_048_575)).toBe(16 * MIB)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('describe')
+    })
+    expectBlocked(rendered, REQUEST_BODY_BLOCKER)
+
+    act(() => rendered.result.current.handleRestoreComposerFiles([big]))
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('describe')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(expect.arrayContaining(['file-big', 'image-8mib']))
+  })
+
+  it('refuses Codex images and text that pass the 24 MiB body without any file, and sends the text that fills it', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    const codexCatalog: HostModelsResult = {
+      provider: 'codex-subscription',
+      hostDefault: 'gpt-5.5',
+      // A broker-backed provider has no silent default: the session names its model.
+      sessionModel: 'gpt-5.5',
+      degraded: false,
+      modelSelectionRevision: 0,
+      models: [{ name: 'gpt-5.5', imageInput: { state: 'supported', reason: 'supported' } }],
+    }
+    await act(async () => {
+      await loadHostModels(
+        { getHostModels: vi.fn(async () => codexCatalog), setHostModel: vi.fn() },
+        'agent-x',
+        null
+      )
+    })
+    // Four bytes under the 16 MiB decoded quota Codex admits, as canonical
+    // base64 without padding.
+    const decodedBytes = 16 * MIB - 4
+    const imageBase64Length = base64Length(decodedBytes)
+    expect(imageBase64Length % 4).toBe(0)
+    const image: ComposerImageAttachment = {
+      id: 'image-codex',
+      name: 'scan.png',
+      mimeType: 'image/png',
+      dataBase64: 'A'.repeat(imageBase64Length),
+      sizeBytes: decodedBytes,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(0)
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
+    // Envelope (4096) + the fields rpc-proxy adds (2048) + the text as a JSON
+    // string (+2 quotes) + the agent twice as a JSON string (2 × 9) + the
+    // image's JSON name and fixed fields + the image's base64.
+    const fullBodyText =
+      24 * MIB - 4096 - 2048 - 2 - 18 - JSON.stringify('scan.png').length - 640 - imageBase64Length
+    // Precondition: the text share stays far inside its 6 MiB, so only the
+    // whole-body limit can refuse this send.
+    expect(fullBodyText + 1).toBeLessThan(3 * MIB)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullBodyText + 1))
+    })
+    expectBlocked(rendered, REQUEST_BODY_BLOCKER)
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullBodyText))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['image-codex'])
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
+    expect(request.content).toHaveLength(fullBodyText)
+  })
+
+  it('refuses a twenty-first attachment and sends twenty', async () => {
+    const files = Array.from({ length: 21 }, (_, index) =>
+      readyTextFile(`file-${index}`, `part-${index}.txt`, 10)
+    )
+    const rendered = await mountedWithFiles(files)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read all')
+    })
+    expectBlocked(rendered, COUNT_BLOCKER)
+
+    act(() => rendered.result.current.handleRestoreComposerFiles(files.slice(0, 20)))
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read all')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toHaveLength(20)
+  })
+
+  const utf8Bytes = (value: string) => new TextEncoder().encode(value).length
+
+  /** Four Global Files references whose names take three UTF-8 bytes per character. */
+  function wideNameReferences(): ComposerGlobalFileReference[] {
+    return Array.from({ length: 4 }, (_, index) => {
+      const resourceId = String(index).repeat(32)
+      return {
+        id: `global-file:main:${resourceId}`,
+        type: 'global_file' as const,
+        resourceId,
+        drive: 'main',
+        gfsUri: `gfs://main/${resourceId}`,
+        label: `${'文'.repeat(251)}.txt`,
+        version: 1,
+        bytes: 2048,
+      }
+    })
+  }
+
+  it('counts the serialized references and the agent in the 6 MiB share, and sends the draft that fills it', async () => {
+    const references = wideNameReferences()
+    const rendered = await mountedWithFiles([readyTextFile('file-doc', 'doc.txt', 1024)])
+    act(() => rendered.result.current.handleAddComposerReferenceAttachments(references))
+    const jsonBytes = (value: unknown) => utf8Bytes(JSON.stringify(value))
+    const contentBytes = (draft: string) =>
+      jsonBytes(buildComposerRequestContent(draft, references))
+    // Everything the share holds besides the draft, each part as the request
+    // body carries it: envelope, fields rpc-proxy adds, the text with its
+    // references section, the serialized references, the agent twice and the
+    // file details.
+    const referencesBytes = jsonBytes(buildComposerFileReferences(references))
+    const fixedBytes =
+      4096 +
+      2048 +
+      (contentBytes('x') - 1) +
+      referencesBytes +
+      2 * jsonBytes('agent-x') +
+      jsonBytes('doc.txt') +
+      640
+    const boundary = 6 * MIB - fixedBytes
+    // The text grows one byte per draft character: the arithmetic above holds.
+    expect(contentBytes('x'.repeat(boundary))).toBe(contentBytes('x') - 1 + boundary)
+    // Leaving the references out would let the blocked draft below through.
+    expect(referencesBytes).toBeGreaterThan(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(boundary + 1))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(1)
+    expect(rendered.result.current.composerReferenceAttachments).toHaveLength(4)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(boundary))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      content: string
+      fileReferences: Parameters<typeof composerNonImageShareBytes>[0]['fileReferences']
+      attachments: Array<Record<string, unknown>>
+    }
+    // The request carries the text and references the boundary was computed from.
+    expect(request.content).toBe(buildComposerRequestContent('x'.repeat(boundary), references))
+    expect(request.fileReferences).toEqual(buildComposerFileReferences(references))
+    // The estimate bounds what is posted: the request as serialized without the
+    // base64 the file quota credits, plus 1 KiB for the fields rpc-proxy adds.
+    const postedShareBytes = utf8Bytes(
+      JSON.stringify({
+        ...request,
+        attachments: request.attachments.map(attachment => ({ ...attachment, dataBase64: '' })),
+      })
+    )
+    expect(
+      composerNonImageShareBytes({
+        content: request.content,
+        fileReferences: request.fileReferences,
+        hostRef: 'agent-x',
+        files: [{ filename: 'doc.txt' }],
+        images: [],
+      })
+    ).toBeGreaterThanOrEqual(postedShareBytes + 1024)
+  })
+
+  it('counts the JSON escaping of the text in the share, and sends fewer escaped characters', async () => {
+    const rendered = await mountedWithFiles([readyTextFile('file-doc', 'doc.txt', 1024)])
+    // A newline is one byte typed and two once escaped in the JSON body.
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage(`a${'\n'.repeat(3.5 * MIB)}b`)
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage(`a${'\n'.repeat(2 * MIB)}b`)
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-doc'])
+  })
+
+  it('checks the share on a send without attachments, and sends shorter text', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    // A double quote is one byte typed and two once escaped in the JSON body.
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('"'.repeat(Math.floor(3.2 * MIB)))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('"'.repeat(Math.floor(2.9 * MIB)))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
+    expect(request.content).toHaveLength(Math.floor(2.9 * MIB))
   })
 })
