@@ -3,7 +3,7 @@ import { isIP } from 'node:net'
 import { z } from 'zod'
 import { PASSWORD_ADMISSION_POLICY } from '../services/auth/passwordAdmissionState.js'
 import { PasswordAdmissionError } from '../services/auth/passwordCredentialVerification.js'
-import { rateLimitMiddleware } from './rateLimitMiddleware.js'
+import { clearRateLimitHeaders, rateLimitMiddleware } from './rateLimitMiddleware.js'
 
 const credentials = z.object({
   email: z.string().trim().min(1).max(320),
@@ -12,14 +12,7 @@ const credentials = z.object({
 
 export function sendPasswordAdmissionError(error: unknown, res: Response): boolean {
   if (!(error instanceof PasswordAdmissionError)) return false
-  for (const name of [
-    'X-RateLimit-Limit',
-    'X-RateLimit-Remaining',
-    'X-RateLimit-Reset',
-    'RateLimit',
-    'RateLimit-Policy',
-  ])
-    res.removeHeader(name)
+  clearRateLimitHeaders(res)
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Retry-After', String(error.retryAfterSeconds))
   res.status(error.status).json({

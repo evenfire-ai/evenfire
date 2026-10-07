@@ -13,6 +13,9 @@ export function sendPasswordAuthorityError(error: unknown, res: Response): boole
     'X-RateLimit-Reset',
     'RateLimit',
     'RateLimit-Policy',
+    'RateLimit-Limit',
+    'RateLimit-Remaining',
+    'RateLimit-Reset',
   ])
     res.removeHeader(name)
   res.setHeader('Retry-After', String(retryAfterSeconds))
