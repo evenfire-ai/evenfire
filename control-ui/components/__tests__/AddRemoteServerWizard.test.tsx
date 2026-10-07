@@ -13,6 +13,7 @@ import {
   ATLASSIAN_DISCOVER,
   ATLASSIAN_DISCOVER_UNCONFIGURED,
   CALLBACK_UNCONFIGURED_FAILURE,
+  CLIENT_ID_IN_USE_FAILURE,
   DCR_REGISTRATION_REJECTED_FAILURE,
   LINEAR_DISCOVER,
   LINEAR_DISCOVER_UNCONFIGURED,
@@ -272,10 +273,34 @@ describe('AddRemoteServerWizard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
 
-    const error = await screen.findByText(/rejected client registration/i)
-    expect(error).toHaveTextContent('HTTP 400, invalid_redirect_uri')
-    expect(error).toHaveTextContent('not approved for use by this authorization server')
-    expect(error).not.toHaveTextContent('fetch_failed')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('rejected client registration (HTTP 400, invalid_redirect_uri)')
+    expect(alert).not.toHaveTextContent('fetch_failed')
+    // The AS's own text sits in its own attributed block, apart from the platform copy.
+    const quote = screen.getByRole('figure', { name: /message from auth\.atlassian\.com/i })
+    expect(alert).toContainElement(quote)
+    const providerText = screen.getByText(
+      'The provided redirect URIs are not approved for use by this authorization server.'
+    )
+    expect(providerText.tagName).toBe('BLOCKQUOTE')
+    expect(quote).toContainElement(providerText)
+    expect(screen.getByText(/rejected client registration/i)).not.toHaveTextContent(
+      'not approved for use'
+    )
+  })
+
+  it('shows no provider block for an install error without provider text', async () => {
+    discoverMock.mockResolvedValue(discovered(LINEAR_DISCOVER_UNCONFIGURED))
+    installMock.mockRejectedValue(apiErrorFrom(CALLBACK_UNCONFIGURED_FAILURE))
+    renderWizard()
+    await fillIdentity('https://mcp.linear.app/mcp', 'linear')
+    clickDetect()
+    await screen.findByText('https://mcp.linear.app/authorize')
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+    await screen.findByText(/callback url is not configured/i)
+    expect(screen.queryByRole('figure')).not.toBeInTheDocument()
   })
 
   describe('a failed install does not leak into the next attempt', () => {
@@ -459,6 +484,32 @@ describe('AddRemoteServerWizard', () => {
     const template = PRE_REGISTERED_PER_SERVER_DISCOVER.callback?.redirectUriTemplate ?? ''
     return template.replace('{serverName}', name)
   }
+
+  it('pre-registered: editing the credentials clears a client-ID-in-use error', async () => {
+    installMock.mockRejectedValue(apiErrorFrom(CLIENT_ID_IN_USE_FAILURE))
+    await detectPreRegisteredPerServer('hubspot')
+    fireEvent.change(screen.getByLabelText(/Client ID/), { target: { value: 'taken-id' } })
+    fireEvent.change(screen.getByLabelText(/Client secret/), { target: { value: 's3cret' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+    await screen.findByRole('alert')
+
+    // The conflict was about that client ID; a new one makes the error stale.
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.change(screen.getByLabelText(/Client ID/), { target: { value: 'fresh-id' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(await screen.findByRole('button', { name: 'Install remote server' })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    // Same for the secret.
+    fireEvent.click(screen.getByRole('button', { name: 'Install remote server' }))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.change(screen.getByLabelText(/Client secret/), { target: { value: 'other' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(await screen.findByRole('button', { name: 'Install remote server' })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
 
   it('pre-registered per-server: shows the redirect URI for this server name, with copy', async () => {
     await detectPreRegisteredPerServer('hubspot')

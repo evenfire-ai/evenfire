@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useId, useMemo, useState } from 'react'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { useToast } from '@components/Toast'
@@ -22,6 +22,7 @@ import {
   mapRemoteDiscoverError,
   mapRemoteInstallError,
   remoteCallbackBlocker,
+  remoteInstallProviderMessage,
   remotePreRegisteredRedirectUri,
   requiresPreRegisteredCredentials,
   shouldWarnNoRefresh,
@@ -43,6 +44,7 @@ import {
 import type {
   AddRemoteServerWizardProps,
   AsEndpointHostsSummaryProps,
+  InstallFailure,
   InstalledRedirectUri,
   RedirectUriCopyProps,
 } from './types'
@@ -84,7 +86,8 @@ export function AddRemoteServerWizard({
 
   // Step 2 — install
   const [installing, setInstalling] = useState(false)
-  const [installError, setInstallError] = useState('')
+  const [installFailure, setInstallFailure] = useState<InstallFailure | null>(null)
+  const providerMessageSourceId = useId()
   // A pre-registered install holds here so the operator can copy the redirect URI
   // the AS must hold before leaving the wizard.
   const [installed, setInstalled] = useState<InstalledRedirectUri | null>(null)
@@ -160,7 +163,7 @@ export function AddRemoteServerWizard({
     setTransport(null)
     setCallback(undefined)
     setDiscoverError('')
-    setInstallError('')
+    setInstallFailure(null)
   }
 
   async function copyRedirectUri(uri: string) {
@@ -205,7 +208,7 @@ export function AddRemoteServerWizard({
   async function runInstall() {
     if (!detected || !installMode) return
     setInstalling(true)
-    setInstallError('')
+    setInstallFailure(null)
     try {
       const body = buildRemoteInstallRequest({
         serverName,
@@ -229,7 +232,10 @@ export function AddRemoteServerWizard({
       onInstalled()
     } catch (e) {
       if (isSilentApiError(e)) return
-      setInstallError(mapRemoteInstallError(e, { callbackVariant: callback?.variant }))
+      setInstallFailure({
+        message: mapRemoteInstallError(e, { callbackVariant: callback?.variant }),
+        provider: remoteInstallProviderMessage(e),
+      })
     } finally {
       setInstalling(false)
     }
@@ -295,7 +301,7 @@ export function AddRemoteServerWizard({
                   monospace
                   onChange={event => {
                     setServerName(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
-                    setInstallError('')
+                    setInstallFailure(null)
                   }}
                   placeholder="example-remote"
                   disabled={detecting}
@@ -451,7 +457,11 @@ export function AddRemoteServerWizard({
                     <TextInput
                       id="remote-client-id"
                       monospace
-                      onChange={event => setClientId(event.target.value)}
+                      onChange={event => {
+                        setClientId(event.target.value)
+                        // A client-ID conflict belongs to the previous credentials.
+                        setInstallFailure(null)
+                      }}
                       placeholder="pre-registered client_id"
                       value={clientId}
                     />
@@ -466,7 +476,10 @@ export function AddRemoteServerWizard({
                       id="remote-client-secret"
                       type="password"
                       autoComplete="off"
-                      onChange={event => setClientSecret(event.target.value)}
+                      onChange={event => {
+                        setClientSecret(event.target.value)
+                        setInstallFailure(null)
+                      }}
                       placeholder="pre-registered client_secret"
                       value={clientSecret}
                     />
@@ -570,9 +583,26 @@ export function AddRemoteServerWizard({
                 </div>
               ) : null}
 
-              {installError ? (
+              {installFailure ? (
                 <div className="cu-banner cu-banner--error" role="alert">
-                  {installError}
+                  <p className="cu-banner__text">{installFailure.message}</p>
+                  {installFailure.provider ? (
+                    // Third-party text, attributed and set apart from the platform's copy.
+                    <figure
+                      aria-labelledby={providerMessageSourceId}
+                      className="cu-provider-message"
+                    >
+                      <figcaption
+                        className="cu-provider-message__source"
+                        id={providerMessageSourceId}
+                      >
+                        Message from {installFailure.provider.source}
+                      </figcaption>
+                      <blockquote className="cu-provider-message__text">
+                        {installFailure.provider.text}
+                      </blockquote>
+                    </figure>
+                  ) : null}
                 </div>
               ) : null}
             </div>

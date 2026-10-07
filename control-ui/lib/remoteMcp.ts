@@ -16,6 +16,7 @@ import type {
   RemoteDetected,
   RemoteDiscoveryErrorKind,
   RemoteInstallMode,
+  RemoteProviderMessage,
   RemoteRegistrationMode,
   RemoteTransportProbe,
 } from './remoteMcp.types'
@@ -371,8 +372,9 @@ function hostOf(url: unknown): string {
 }
 
 /**
- * Names the AS by host and quotes its own message last, so nothing written by the
- * platform follows provider text and the operator can tell the two apart.
+ * The platform's copy for a rejected registration: it names the AS by host and never
+ * embeds the AS's own message, which {@link remoteInstallProviderMessage} returns
+ * separately for the wizard to render as attributed third-party text.
  */
 function describeRegistrationRejected(
   detail: Partial<RemoteDcrRegistrationRejectedDetail> | undefined
@@ -383,7 +385,6 @@ function describeRegistrationRejected(
     typeof detail?.error === 'string' && PROVIDER_ERROR_CODE_RE.test(detail.error)
       ? detail.error
       : ''
-  const description = boundedProviderText(detail?.errorDescription, PROVIDER_DESCRIPTION_MAX)
   const facts = [status, code].filter(Boolean).join(', ')
   let copy = `The authorization server${host ? ` at ${host}` : ''} rejected client registration${
     facts ? ` (${facts})` : ''
@@ -392,8 +393,23 @@ function describeRegistrationRejected(
     ? REGISTRATION_ERROR_ADVICE[code]
     : ''
   if (advice) copy += ` ${advice}`
-  if (description) copy += ` ${host || 'It'} responded: "${description}"`
   return copy
+}
+
+/**
+ * The authorization server's own message from a failed install, bounded for display,
+ * or `null` when the failure carries none. Only a `registration_rejected` DCR failure
+ * relays provider text today.
+ */
+export function remoteInstallProviderMessage(error: unknown): RemoteProviderMessage | null {
+  const { code, body } = asCodedError(error)
+  if (code !== 'dcr_registration_failed' || discoveryDetailKind(body) !== 'registration_rejected') {
+    return null
+  }
+  const detail = body?.detail as Partial<RemoteDcrRegistrationRejectedDetail>
+  const text = boundedProviderText(detail.errorDescription, PROVIDER_DESCRIPTION_MAX)
+  if (!text) return null
+  return { source: hostOf(detail.url) || 'the authorization server', text }
 }
 
 const DCR_REJECTION_KINDS: readonly string[] = [
