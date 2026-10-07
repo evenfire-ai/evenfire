@@ -16,6 +16,8 @@ import {
   resetComposerDraftStore,
   setComposerDraft,
 } from '@lib/composerDraftStore'
+import { RpcProxyClient } from '../../../../../src/rpcProxyClient'
+import { serverSessions } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -44,6 +46,19 @@ async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
 }
 
+async function parsedSessionMessages(agent: string, chatId: string) {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+    ok: true,
+    status: 200,
+    json: async () => ({ agent, chatId, state: 'idle', turns: [] }),
+  } as Response)
+  try {
+    return await new RpcProxyClient().loadSessionMessages('test-token', 'test-host', agent, chatId)
+  } finally {
+    fetchMock.mockRestore()
+  }
+}
+
 const chatMeta = (id: string, title = id) => ({
   id,
   title,
@@ -68,8 +83,8 @@ describe('pendingChatSelection effect', () => {
       onboardingDismissed: false,
       chats: [],
     })
-    clerum.rpc.listSessions.mockResolvedValue({
-      items: [
+    clerum.rpc.listSessions.mockResolvedValue(
+      serverSessions([
         {
           agent: 'agent-x',
           chatId: 'server-latest',
@@ -77,8 +92,8 @@ describe('pendingChatSelection effect', () => {
           messageCount: 4,
           lastActivityAt: '2026-05-01T00:00:00Z',
         },
-      ],
-    })
+      ])
+    )
 
     const { result } = renderController({ navItem: 'chat' })
 
@@ -92,16 +107,16 @@ describe('pendingChatSelection effect', () => {
       onboardingDismissed: false,
       chats: [],
     })
-    clerum.rpc.listSessions.mockResolvedValue({
-      items: [
+    clerum.rpc.listSessions.mockResolvedValue(
+      serverSessions([
         {
           agent: 'agent-x',
           chatId: 'legacy-summary',
           turnCount: 7,
           lastActivityAt: '2026-05-01T00:00:00Z',
         },
-      ],
-    })
+      ])
+    )
 
     const { result } = renderController({ navItem: 'chat' })
 
@@ -246,8 +261,8 @@ describe('pendingChatSelection effect', () => {
         throw new Error('Not authenticated during store rebind')
       })
       .mockImplementation(agentRef => clerum.readIndex(agentRef))
-    clerum.rpc.listSessions.mockResolvedValue({
-      items: [
+    clerum.rpc.listSessions.mockResolvedValue(
+      serverSessions([
         {
           agent: 'agent-x',
           chatId: 'prior-server',
@@ -255,14 +270,11 @@ describe('pendingChatSelection effect', () => {
           messageCount: 2,
           lastActivityAt: '2026-05-03T00:00:00Z',
         },
-      ],
-    })
-    clerum.rpc.loadSessionMessages.mockResolvedValue({
-      agent: 'agent-x',
-      chatId: 'prior-server',
-      state: 'idle',
-      turns: [],
-    })
+      ])
+    )
+    clerum.rpc.loadSessionMessages.mockResolvedValue(
+      await parsedSessionMessages('agent-x', 'prior-server')
+    )
     clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'accepted reply' })
 
     const createChat = clerum.chat.create.getMockImplementation()
@@ -340,8 +352,8 @@ describe('pendingChatSelection effect', () => {
         throw new Error('Not authenticated during store rebind')
       })
       .mockImplementation(agentRef => clerum.readIndex(agentRef))
-    clerum.rpc.listSessions.mockResolvedValue({
-      items: [
+    clerum.rpc.listSessions.mockResolvedValue(
+      serverSessions([
         {
           agent: 'agent-x',
           chatId: 'server-latest-after-retry',
@@ -349,8 +361,8 @@ describe('pendingChatSelection effect', () => {
           messageCount: 4,
           lastActivityAt: '2026-05-01T00:00:00Z',
         },
-      ],
-    })
+      ])
+    )
 
     const controller = renderController({ navItem: 'chat', loadMenuData: false })
     try {
@@ -370,8 +382,8 @@ describe('pendingChatSelection effect', () => {
   })
 
   it('none → selects nothing and clears the spinner', async () => {
-    clerum.rpc.listSessions.mockResolvedValue({
-      items: [
+    clerum.rpc.listSessions.mockResolvedValue(
+      serverSessions([
         {
           agent: 'agent-x',
           chatId: 'must-not-auto-select',
@@ -379,8 +391,8 @@ describe('pendingChatSelection effect', () => {
           messageCount: 2,
           lastActivityAt: '2026-05-01T00:00:00Z',
         },
-      ],
-    })
+      ])
+    )
     const { result, rerender } = renderController({ navItem: 'agents' })
     await settleMount()
 
@@ -435,7 +447,7 @@ describe('pendingChatSelection effect', () => {
       onboardingDismissed: false,
       chats: [],
     })
-    clerum.rpc.listSessions.mockResolvedValue({ items: [] })
+    clerum.rpc.listSessions.mockResolvedValue(serverSessions([]))
     const { result, rerender } = renderController({ navItem: 'agents' })
     await settleMount()
 
