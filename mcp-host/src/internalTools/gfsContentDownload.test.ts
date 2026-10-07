@@ -108,7 +108,8 @@ describe('governed GFS content download', () => {
     expect((await fs.stat(path.dirname(path.join(callerRoot, result.path)))).mode & 0o777).toBe(
       0o700
     )
-  }, 10_000)
+    // The durable 3.8 MB publication measured 7.7 s on a loaded host.
+  }, 30_000)
 
   it('waits for each partial write before pulling more content', async () => {
     let finish!: () => void

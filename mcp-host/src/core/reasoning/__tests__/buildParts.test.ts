@@ -36,7 +36,9 @@ function tool(name: string): ToolDefinition {
 
 describe('DefaultPromptBuilder.buildParts (T2.2)', () => {
   it('assembles stable with identity → daily → runtime; context with capabilities → memory', () => {
-    const parts = new DefaultPromptBuilder().buildParts(makeInput())
+    const parts = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
+      makeInput()
+    )
     const sIdent = parts.stable.indexOf('## Identity')
     const sSoul = parts.stable.indexOf('## Core Values')
     const sAgents = parts.stable.indexOf('## Agent Instructions')
@@ -61,7 +63,7 @@ describe('DefaultPromptBuilder.buildParts (T2.2)', () => {
   })
 
   it('omits empty identity sections without producing double separators', () => {
-    const parts = new DefaultPromptBuilder().buildParts(
+    const parts = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
       makeInput({
         identityFiles: { identity: '', soul: '', agents: 'AGENTS', user: '' },
         dailyLogSnapshot: '',
@@ -77,15 +79,15 @@ describe('DefaultPromptBuilder.buildParts (T2.2)', () => {
   })
 
   it('omits empty context sections', () => {
-    const parts = new DefaultPromptBuilder().buildParts(
+    const parts = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
       makeInput({ memoryGuidance: '', capabilities: 'only this' })
     )
     expect(parts.context).toBe('only this')
   })
 
   it('produces deterministic hashes (same input → same hash)', () => {
-    const a = new DefaultPromptBuilder().buildParts(makeInput())
-    const b = new DefaultPromptBuilder().buildParts(makeInput())
+    const a = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(makeInput())
+    const b = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(makeInput())
     expect(a.stableHash).toBe(b.stableHash)
     expect(a.contextHash).toBe(b.contextHash)
     // Hashes match a fresh sha256(content)
@@ -94,15 +96,21 @@ describe('DefaultPromptBuilder.buildParts (T2.2)', () => {
   })
 
   it('hash diverges when stable input mutates (e.g. model change)', () => {
-    const baseline = new DefaultPromptBuilder().buildParts(makeInput())
-    const mutated = new DefaultPromptBuilder().buildParts(makeInput({ model: 'claude-haiku-4-5' }))
+    const baseline = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
+      makeInput()
+    )
+    const mutated = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
+      makeInput({ model: 'claude-haiku-4-5' })
+    )
     expect(mutated.stableHash).not.toBe(baseline.stableHash)
     expect(mutated.contextHash).toBe(baseline.contextHash)
   })
 
   it('hash stays constant when context input mutates only (capabilities change)', () => {
-    const baseline = new DefaultPromptBuilder().buildParts(makeInput())
-    const mutated = new DefaultPromptBuilder().buildParts(
+    const baseline = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
+      makeInput()
+    )
+    const mutated = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
       makeInput({ capabilities: 'different contract' })
     )
     expect(mutated.stableHash).toBe(baseline.stableHash)
@@ -114,7 +122,7 @@ describe('DefaultPromptBuilder.buildParts (T2.2)', () => {
   // (`buildParts`) had no slot for them, so enabling the prompt cache silently
   // dropped both blocks. These guard the cross-path parity.
   it('places workflow + MCP guidance in the context tier, ordered after capabilities and before memory', () => {
-    const parts = new DefaultPromptBuilder().buildParts(
+    const parts = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
       makeInput({
         workflowGuidance: WORKFLOW_RECIPES_TEXT,
         mcpServerGuidance: MCP_SERVER_SELECTION_TEXT,
@@ -135,7 +143,7 @@ describe('DefaultPromptBuilder.buildParts (T2.2)', () => {
 
   it('cache-path context carries the exact guidance the legacy buildSystemPrompt emits', () => {
     const tools = [tool('workflow_list'), tool('github__create_issue')]
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const legacy = builder.buildSystemPrompt(tools).content as string
     const parts = builder.buildParts(
       makeInput({
@@ -151,31 +159,35 @@ describe('DefaultPromptBuilder.buildParts (T2.2)', () => {
   })
 
   it('omits workflow + MCP guidance when not provided (empty string → no block)', () => {
-    const parts = new DefaultPromptBuilder().buildParts(makeInput())
+    const parts = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
+      makeInput()
+    )
     expect(parts.context).not.toContain('WORKFLOW RECIPES:')
     expect(parts.context).not.toContain('MCP SERVER SELECTION:')
   })
 
   // F4.1 — TOOL_DISCOVERY_TEXT (dynamic-tool-loading).
   it('tiered path: emits TOOL_DISCOVERY_TEXT only when provided, and it is a constant (cache-safe)', () => {
-    const without = new DefaultPromptBuilder().buildParts(makeInput())
+    const without = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
+      makeInput()
+    )
     expect(without.context).not.toContain(TOOL_DISCOVERY_TEXT)
 
-    const withGuidance = new DefaultPromptBuilder().buildParts(
+    const withGuidance = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
       makeInput({ toolDiscoveryGuidance: TOOL_DISCOVERY_TEXT })
     )
     expect(withGuidance.context).toContain(TOOL_DISCOVERY_TEXT)
     // Stable tier never carries it → stableHash unchanged.
     expect(withGuidance.stableHash).toBe(without.stableHash)
     // It is a CONSTANT: building twice with it on yields the same context hash.
-    const again = new DefaultPromptBuilder().buildParts(
+    const again = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }).buildParts(
       makeInput({ toolDiscoveryGuidance: TOOL_DISCOVERY_TEXT })
     )
     expect(again.contextHash).toBe(withGuidance.contextHash)
   })
 
   it('legacy path: buildSystemPrompt emits TOOL_DISCOVERY_TEXT only when clerum__tool_search is present', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const withSearch = builder.buildSystemPrompt([tool('clerum__tool_search')]).content as string
     expect(withSearch).toContain(TOOL_DISCOVERY_TEXT)
 

@@ -174,7 +174,7 @@ describe('runToolUseLoop — loop control', () => {
       })
     const reasoning = new DefaultReasoningPort(
       { complete: vi.fn(), completeWithTools, modelName: () => 'glm-5.3' },
-      new DefaultPromptBuilder()
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     )
 
     const config = buildLoopConfig({

@@ -134,6 +134,136 @@ describe('GoogleGenerativeDriver — tool round-trip', () => {
     expect(fnResp.functionResponse.name).toBe('search')
     expect(fnResp.functionResponse.response).toEqual({ result: 'found' })
   })
+
+  it('names a bridged tool result after the clerum__tool_call functionCall, not the real tool', async () => {
+    const { client, generateContent } = mockClient({
+      candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+    })
+    const driver = new GoogleGenerativeDriver(client, 'gemini-2.5-pro')
+    const bridged = { name: 'clerum__generate_pptx', arguments: { title: 'Deck' } }
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'make a deck' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call_bridge', name: 'clerum__tool_call', arguments: bridged }],
+      },
+      // The loop names a bridged result after the REAL tool it executed.
+      {
+        role: 'tool',
+        name: 'clerum__generate_pptx',
+        content: 'File generated: deck.pptx (pptx)',
+        tool_call_id: 'call_bridge',
+      },
+      // Witness: a result whose id matches no functionCall keeps its own name.
+      { role: 'tool', name: 'orphan_tool', content: 'orphan', tool_call_id: 'unknown' },
+    ]
+    await driver.completeSingleTurnWithTools(messages, [])
+
+    const contents = generateContent.mock.calls[0][0].contents
+    const call = contents
+      .flatMap((c: { parts: Array<{ functionCall?: { name: string } }> }) => c.parts)
+      .find((p: { functionCall?: { name: string } }) => p.functionCall)
+    const responses = contents
+      .flatMap((c: { parts: Array<{ functionResponse?: { name: string } }> }) => c.parts)
+      .filter((p: { functionResponse?: { name: string } }) => p.functionResponse)
+      .map((p: { functionResponse: { name: string } }) => p.functionResponse.name)
+    expect(call.functionCall).toEqual({ name: 'clerum__tool_call', args: bridged })
+    expect(responses).toEqual(['clerum__tool_call', 'orphan_tool'])
+  })
+
+  it('names each result after its own turn when the driver reuses call ids across turns', async () => {
+    const callResponse = (name: string) => ({
+      candidates: [
+        { content: { parts: [{ functionCall: { name, args: {} } }] }, finishReason: 'STOP' },
+      ],
+    })
+    const { client, generateContent } = mockClient({
+      candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+    })
+    generateContent
+      .mockResolvedValueOnce(callResponse('web_search'))
+      .mockResolvedValueOnce(callResponse('file_read'))
+    const driver = new GoogleGenerativeDriver(client, 'gemini-2.5-pro')
+
+    // Drive three real turns, appending history the way the tool loop does.
+    const history: ChatMessage[] = [{ role: 'user', content: 'research and read' }]
+    const results: Record<string, string> = {
+      web_search: 'search result',
+      file_read: 'file content',
+    }
+    const mintedIds: string[] = []
+    for (let turn = 0; turn < 2; turn++) {
+      const res = await driver.completeSingleTurnWithTools(history, [])
+      const toolCalls = res.tool_calls ?? []
+      expect(toolCalls).toHaveLength(1)
+      mintedIds.push(toolCalls[0].id)
+      history.push({ role: 'assistant', content: '', tool_calls: toolCalls })
+      history.push({
+        role: 'tool',
+        name: toolCalls[0].name,
+        content: results[toolCalls[0].name],
+        tool_call_id: toolCalls[0].id,
+      })
+    }
+    await driver.completeSingleTurnWithTools(history, [])
+
+    // Witness: the driver really minted the same id in both turns.
+    expect(mintedIds).toEqual(['call_0', 'call_0'])
+    const wire = generateContent.mock.calls[2][0].contents.flatMap(
+      (c: {
+        parts: Array<{
+          functionCall?: { name: string }
+          functionResponse?: { name: string; response: { result: string } }
+        }>
+      }) =>
+        c.parts.flatMap(p =>
+          p.functionCall
+            ? [`call:${p.functionCall.name}`]
+            : p.functionResponse
+              ? [`resp:${p.functionResponse.name}=${p.functionResponse.response.result}`]
+              : []
+        )
+    )
+    expect(wire).toEqual([
+      'call:web_search',
+      'resp:web_search=search result',
+      'call:file_read',
+      'resp:file_read=file content',
+    ])
+  })
+
+  it('resolves an id only against the preceding assistant turn', async () => {
+    const { client, generateContent } = mockClient({
+      candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+    })
+    const driver = new GoogleGenerativeDriver(client, 'gemini-2.5-pro')
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call_0', name: 'search', arguments: {} }],
+      },
+      { role: 'tool', name: 'search', content: 'r1', tool_call_id: 'call_0' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'file_read', arguments: {} }],
+      },
+      // Witness: an id of this turn resolves through the map.
+      { role: 'tool', content: 'r2', tool_call_id: 'call_1' },
+      // `call_0` belongs to the earlier turn, not this one: the message keeps its own name.
+      { role: 'tool', name: 'late_result', content: 'r3', tool_call_id: 'call_0' },
+    ]
+    await driver.completeSingleTurnWithTools(messages, [])
+
+    const responses = generateContent.mock.calls[0][0].contents
+      .flatMap((c: { parts: Array<{ functionResponse?: { name: string } }> }) => c.parts)
+      .filter((p: { functionResponse?: { name: string } }) => p.functionResponse)
+      .map((p: { functionResponse: { name: string } }) => p.functionResponse.name)
+    expect(responses).toEqual(['search', 'file_read', 'late_result'])
+  })
 })
 
 describe('GoogleGenerativeDriver — finish reasons', () => {
