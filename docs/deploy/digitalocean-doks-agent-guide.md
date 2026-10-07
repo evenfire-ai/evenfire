@@ -602,7 +602,11 @@ Control UI → **Secrets → LLM** for the Host's `secretRef`.
 Optional, for the connector and recipe catalog: Control UI → **Marketplace →
 Connect**, enter an organization name and contact email. This registers the
 deployment with `registry.evenfire.ai` (outbound HTTPS from control-api). Until
-then Marketplace shows "The registry is currently unavailable".
+then Marketplace shows "The registry is currently unavailable", or "The registry
+could not be reached" (control-api has no registry credentials yet; the network is
+fine). Reload Marketplace after connecting; errors from before the connect stay on
+screen. Expect the public catalog's connectors; the API Keys, Entries, and Images
+tabs belong to your new organization and stay empty until you publish.
 
 `kubectl port-forward` drops after idle time or laptop sleep ("lost connection to
 pod"; the page then loads blank or times out). Restart it, or keep it in a loop:
