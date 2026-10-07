@@ -1,3 +1,4 @@
+// E2E_GUARDIAN_IPC_FLOW: test-only generation/collection for Electron IPC journeys; no renderer HTTP transition.
 // desktop-app/test/e2e-playwright/playwright.config.ts
 import { defineConfig } from '@playwright/test'
 import fs from 'node:fs'
@@ -118,7 +119,7 @@ function loadCanonicalRootEnv(): void {
     loadCanonicalFile(path.join(repoRoot, '.env'))
     return
   }
-  const worktreeGitDir = path.resolve(repoRoot, gitdirMatch[1])
+  const worktreeGitDir = path.resolve(repoRoot, gitdirMatch[1]!)
   const commonDirFile = path.join(worktreeGitDir, 'commondir')
   const commonDirValue = readOptionalFile(commonDirFile)
   if (commonDirValue === null) {
@@ -163,7 +164,11 @@ export default defineConfig({
   projects: [
     {
       name: 'default',
-      testIgnore: ['**/gfs-upload-v2.test.ts', '**/codex-image-input.spec.ts'],
+      testIgnore: [
+        '**/gfs-upload-v2.test.ts',
+        '**/codex-image-input.spec.ts',
+        '**/subscription-image-input.spec.ts',
+      ],
     },
     {
       name: 'packaged-gfs-upload-v2',

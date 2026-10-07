@@ -65,8 +65,9 @@ const CONNECT_PHASE_CODES: ReadonlySet<string> = new Set([
   'UND_ERR_CONNECT_TIMEOUT',
 ])
 
-// The code undici puts on a failed fetch's cause. Only a code-shaped string is
-// returned, so nothing else from the error can reach a log.
+// The code a rejected undici fetch puts on its cause, or origin policy puts on
+// a wrapped dns.lookup failure. Only a code-shaped string is returned, so
+// nothing else from the error can reach a log.
 export function fetchCauseCode(err: unknown): string | undefined {
   if (!(err instanceof Error)) return undefined
   const cause: unknown = (err as { cause?: unknown }).cause

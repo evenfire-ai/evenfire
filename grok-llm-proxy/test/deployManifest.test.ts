@@ -24,15 +24,31 @@ const WORKFLOW_RECIPES = readFileSync(
 /** Headroom between the last in-flight request finishing and SIGKILL. */
 const SHUTDOWN_MARGIN_SECONDS = 20
 /**
- * D5 (#739): peak RSS with eight 8 MiB streams and three queued 8 MiB bodies,
- * heap capped at 384 MiB (tsc build, one process).
+ * Heap cap the peak below was measured with. The byte-based BodyBudget admits
+ * about eight compact bodies of the worst structure the contract admits
+ * (262144 containers, 262144 members, 1048576 elements; 2.8 MiB each), and each
+ * parsed tree costs about 44 MiB after a collection. With 8 held streams, 8
+ * queued bodies and one V2 stream, a 640 MiB cap aborted the Codex proxy in 3
+ * of 3 runs (Grok passed 3 of 3); 768 MiB passed both proxies in 3 of 3.
+ * 768 MiB is the smallest cap tested that passes both, not a proven minimum.
  */
-const D5_CAPPED_PEAK_RSS_MIB = 509.8
+const HEAP_CAP_MIB = 768
+/**
+ * The largest measured peak RSS, heap capped at HEAP_CAP_MIB (real proxy built
+ * with tsc, upstream request through undici, macOS, Node v24.18.0, the compact
+ * worst-structure shape: 8 held streams, 8 queued bodies, one ~36 MB V2
+ * stream). Three runs: 1357.1, 1481.6 and 1212.5 MiB. The recorded peak is the
+ * maximum, because the run-to-run spread on macOS is over 100 MiB and RSS
+ * there is not cgroup memory. The earlier sparse-shape peaks (511 MiB at
+ * heap 384, 775.4 MiB with the visual slot) are lower.
+ * Measured by hand, not by this suite. Re-measure before changing it.
+ */
+const CAPPED_PEAK_RSS_MIB = 1481.6
 const MEMORY_HEADROOM = 1.25
 /**
- * Owner decision on review M4 (#739): the request equals the limit, so the
- * pod's memory use can never exceed its request and a busy node does not
- * schedule it on memory it cannot give it under load.
+ * The request stays at 768Mi (owner decision on review M4, #739). It sits
+ * below the limit, so the scheduler reserves 768Mi while the pod can burst to
+ * the limit. That burst is not reserved on the node.
  */
 const MEMORY_REQUEST_MIB = 768
 
@@ -85,16 +101,17 @@ describe('grok-llm-proxy base manifest', () => {
     expect(grace).toBe(Math.ceil(worstCaseMs / 1000) + SHUTDOWN_MARGIN_SECONDS)
   })
 
-  it('T-DEP-2 caps the heap below the memory limit, keeps the limit above the D5 peak and requests 768Mi', () => {
+  it('T-DEP-2 caps the heap below the memory limit, keeps the limit 25% above the worst-structure peak and requests 768Mi', () => {
     const nodeOptions = activeLines(MANIFEST).findIndex((line) => /name:\s*NODE_OPTIONS\s*$/.test(line))
     expect(nodeOptions, 'the container must set NODE_OPTIONS').toBeGreaterThanOrEqual(0)
     const heap = /--max-old-space-size=(\d+)/.exec(activeLines(MANIFEST)[nodeOptions + 1] ?? '')
     expect(heap, 'NODE_OPTIONS must cap the heap').not.toBeNull()
     const limit = resourceMemory('limits')
+    expect(Number(heap![1])).toBe(HEAP_CAP_MIB)
     expect(Number(heap![1])).toBeLessThan(limit)
     expect(resourceMemory('requests')).toBeLessThanOrEqual(limit)
     expect(resourceMemory('requests')).toBe(MEMORY_REQUEST_MIB)
-    expect(limit).toBeGreaterThanOrEqual(Math.ceil(D5_CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
+    expect(limit).toBeGreaterThanOrEqual(Math.ceil(CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
   })
 
   it('T-DEP-3 keeps the Grok subscription off in base, as keyper-labs/evenfire-infra CI requires', () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import ts from 'typescript'
 import { STREAM_LIMITS } from '../src/requestLimits.js'
 
 const fixturePath = new URL(
@@ -45,8 +46,10 @@ function emittedTransportCodes(): { codes: Set<string>; sites: number; construct
   for (const name of readdirSync(srcDir).filter(file => file.endsWith('.ts'))) {
     const source = readFileSync(new URL(name, srcDir), 'utf8')
     constructions +=
-      source.split('new CodexTransportError(').length - 1 +
-      source.split('new UpstreamTimeoutError(').length - 1
+      source.split('new CodexTransportError(').length -
+      1 +
+      source.split('new UpstreamTimeoutError(').length -
+      1
     for (const match of source.matchAll(TRANSPORT_ERROR_SITE)) {
       const args = callArguments(source, match.index! + match[0].length - 1)
       const code = args[match[1] === 'UpstreamTimeoutError' ? 1 : 0] ?? ''
@@ -70,11 +73,71 @@ const REJECT_SITE = /reject\(res,/g
 // Refusal codes are wire strings; `Unauthorized` is the one spelled in capitals.
 const REJECT_CODE_LITERAL = /^'([A-Za-z][A-Za-z0-9_]+)'$/
 // The only computed codes a refusal may carry, as their exact source text.
-// `err.code` is a RequestLimitError (always provider_unavailable) and
+// `err.code` uses the closed, readonly RequestLimitCode union checked below;
 // `mapped.code` is a transport or control-api code passed through mapError,
 // whose transport half the scanner above already gates. Any other computed
 // form cannot be checked against the taxonomy, so it fails here.
 const COMPUTED_REJECT_CODES = ['err.code', 'mapped.code'] as const
+
+/** Computed admission codes are allowed only through this closed, readonly type. */
+function requestLimitCodes(
+  sourceText = readFileSync(new URL('requestLimits.ts', srcDir), 'utf8')
+): Set<string> {
+  const source = ts.createSourceFile('requestLimits.ts', sourceText, ts.ScriptTarget.Latest, true)
+  const alias = source.statements.find(
+    (node): node is ts.TypeAliasDeclaration =>
+      ts.isTypeAliasDeclaration(node) && node.name.text === 'RequestLimitCode'
+  )
+  if (!alias || !ts.isUnionTypeNode(alias.type)) {
+    throw new Error('RequestLimitCode must remain a closed literal union')
+  }
+  const codes = new Set(
+    alias.type.types.map(node => {
+      if (!ts.isLiteralTypeNode(node) || !ts.isStringLiteral(node.literal)) {
+        throw new Error('RequestLimitCode must not accept computed or open string types')
+      }
+      return node.literal.text
+    })
+  )
+  const owner = source.statements.find(
+    (node): node is ts.ClassDeclaration =>
+      ts.isClassDeclaration(node) && node.name?.text === 'RequestLimitError'
+  )
+  const property = owner?.members.find(
+    (node): node is ts.PropertyDeclaration =>
+      ts.isPropertyDeclaration(node) && node.name.getText(source) === 'code'
+  )
+  expect(property?.type?.getText(source)).toBe('RequestLimitCode')
+  expect(property?.modifiers?.some(node => node.kind === ts.SyntaxKind.ReadonlyKeyword)).toBe(true)
+  const constructor = owner?.members.find(ts.isConstructorDeclaration)
+  const input = constructor?.parameters.find(node => node.name.getText(source) === 'code')
+  expect(input?.type?.getText(source)).toBe('RequestLimitCode')
+  expect(input?.initializer?.getText(source)).toBe("'provider_unavailable'")
+  const assignments: string[] = []
+  const collect = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      node.left.getText(source) === 'this.code'
+    ) {
+      assignments.push(node.right.getText(source))
+    }
+    ts.forEachChild(node, collect)
+  }
+  if (owner) collect(owner)
+  expect(assignments).toEqual(['code'])
+  return codes
+}
+
+function rejectCodeLiteral(code: string, name: string): RegExpExecArray | null {
+  const literal = REJECT_CODE_LITERAL.exec(code)
+  const allowed = (COMPUTED_REJECT_CODES as readonly string[]).includes(code)
+  expect(
+    literal !== null || allowed,
+    `${name}: reject code must be a string literal or one of ${COMPUTED_REJECT_CODES.join(', ')}, got ${code}`
+  ).toBe(true)
+  return literal
+}
 
 function emittedRejectCodes(): {
   codes: Set<string>
@@ -82,7 +145,7 @@ function emittedRejectCodes(): {
   sites: number
   occurrences: number
 } {
-  const codes = new Set<string>()
+  const codes = requestLimitCodes()
   const computed = new Set<string>()
   let sites = 0
   let occurrences = 0
@@ -92,12 +155,7 @@ function emittedRejectCodes(): {
     for (const match of source.matchAll(REJECT_SITE)) {
       const args = callArguments(source, match.index! + 'reject'.length)
       const code = args[2] ?? ''
-      const literal = REJECT_CODE_LITERAL.exec(code)
-      const allowed = (COMPUTED_REJECT_CODES as readonly string[]).includes(code)
-      expect(
-        literal !== null || allowed,
-        `${name}: reject code must be a string literal or one of ${COMPUTED_REJECT_CODES.join(', ')}, got ${code}`
-      ).toBe(true)
+      const literal = rejectCodeLiteral(code, name)
       if (literal) codes.add(literal[1]!)
       else computed.add(code)
       sites += 1
@@ -107,6 +165,42 @@ function emittedRejectCodes(): {
 }
 
 describe('codex-subscription stream limits freeze', () => {
+  it('rejects open or mutable admission code producers while reading the closed production union', () => {
+    const sourceText = readFileSync(new URL('requestLimits.ts', srcDir), 'utf8')
+    const tree = ts.createSourceFile('requestLimits.ts', sourceText, ts.ScriptTarget.Latest, true)
+    const alias = tree.statements.find(
+      (node): node is ts.TypeAliasDeclaration =>
+        ts.isTypeAliasDeclaration(node) && node.name.text === 'RequestLimitCode'
+    )!
+    const withType = (type: string) =>
+      sourceText.slice(0, alias.type.getStart(tree)) + type + sourceText.slice(alias.type.end)
+    expect([...requestLimitCodes(sourceText)]).toEqual(
+      expect.arrayContaining(['provider_unavailable', 'proxy_capacity_exceeded', 'visual_gate'])
+    )
+    expect(() => requestLimitCodes(withType('string'))).toThrow('closed literal union')
+    expect(() => requestLimitCodes(withType("'provider_unavailable' | string"))).toThrow(
+      'open string types'
+    )
+    expect(() =>
+      requestLimitCodes(
+        sourceText.replace('readonly code: RequestLimitCode', 'code: RequestLimitCode')
+      )
+    ).toThrow()
+    expect(() =>
+      requestLimitCodes(sourceText.replace('this.code = code', "this.code = 'arbitrary_code'"))
+    ).toThrow()
+  })
+
+  it.each(['caller.code', "err.code || 'provider_unavailable'", 'String(err.code)'])(
+    'rejects unbounded computed refusal expression %s',
+    expression => {
+      expect(rejectCodeLiteral("'request_timeout'", 'fixture')).not.toBeNull()
+      expect(rejectCodeLiteral('err.code', 'fixture')).toBeNull()
+      expect(rejectCodeLiteral('mapped.code', 'fixture')).toBeNull()
+      expect(() => rejectCodeLiteral(expression, 'fixture')).toThrow('reject code must be')
+    }
+  )
+
   it('pins the proxy STREAM_LIMITS to the limits the fixture publishes', () => {
     // StreamGate and the upstream deadlines enforce these published bounds
     // from the proxy's own constant, not from the contract package, so the
