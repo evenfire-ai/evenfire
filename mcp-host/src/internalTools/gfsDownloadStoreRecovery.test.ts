@@ -251,7 +251,73 @@ describe('legacy processing leases after #1019', () => {
     expect(reopened.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
   })
 
-  it('S2: re-verifies records a discarded lease protected, reusing the intact copy and quarantining the altered one', async () => {
+  it('S1c: discards several legacy leases from different foreign sessions in one initialize and counts each', async () => {
+    const store = freshStore()
+    await store.initialize()
+    const protectedReceipt = await fixture(store)
+    await store.close()
+    const leaseIds = [
+      '55555555-5555-4555-8555-555555555551',
+      '55555555-5555-4555-8555-555555555552',
+      '55555555-5555-4555-8555-555555555553',
+    ]
+    const sessions = [
+      '66666666-6666-4666-8666-666666666661',
+      '66666666-6666-4666-8666-666666666662',
+      '66666666-6666-4666-8666-666666666663',
+    ]
+    const raw = await seedLegacyLeases([
+      // Expired, protecting the completed record.
+      legacyLease({
+        leaseId: leaseIds[0],
+        writerSessionId: sessions[0],
+        recordIds: [protectedReceipt.id],
+      }),
+      // Not expired, protecting the same record.
+      legacyLease({
+        leaseId: leaseIds[1],
+        writerSessionId: sessions[1],
+        recordIds: [protectedReceipt.id],
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      }),
+      // Not expired, protecting no record.
+      legacyLease({
+        leaseId: leaseIds[2],
+        writerSessionId: sessions[2],
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      }),
+    ])
+    // Witness: the ledger the store reads carries three leases from three
+    // distinct foreign sessions, one expired and two still live.
+    const seeded = Object.values(JSON.parse(raw).processingLeases) as Array<{
+      writerSessionId: string
+      expiresAt: string
+    }>
+    expect(seeded).toHaveLength(3)
+    expect(new Set(seeded.map(lease => lease.writerSessionId)).size).toBe(3)
+    expect(seeded.filter(lease => Date.parse(lease.expiresAt) > Date.now())).toHaveLength(2)
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue(DISCARDED_COUNTER)
+    const reopened = freshStore()
+    await reopened.initialize()
+    const onDisk = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+    expect(onDisk).not.toHaveProperty('processingLeases')
+    expect(Object.keys(onDisk.records)).toEqual([protectedReceipt.id])
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(3)
+    expect(discardWarnings(warn.mock.calls)).toEqual([
+      [
+        { component: 'GfsDownloadStore', discarded: 3 },
+        'GFS download store discarded 3 legacy processing lease(s) at initialize',
+      ],
+    ])
+    expect(reopened.isAvailable()).toBe(true)
+    expect(reopened.debugRecord(protectedReceipt.id)?.state).toBe('completed')
+    const receipt = await fixture(reopened, undefined, otherSource)
+    expect(reopened.debugRecord(receipt.id)?.state).toBe('completed')
+    expect(reopened.debugUsage()).toMatchObject({ bytes: 14, files: 2 })
+  })
+
+  it('S2:re-verifies records a discarded lease protected, reusing the intact copy and quarantining the altered one', async () => {
     const store = freshStore()
     await store.initialize()
     const intact = await fixture(store)
@@ -494,6 +560,56 @@ describe('legacy processing leases after #1019', () => {
     expect(await counterValue(QUARANTINED_GAUGE)).toBe(1)
     expect(quarantineWarnings()).toHaveLength(2)
     expect(next.debugUsage().bytes).toBe(7)
+  })
+
+  it('S10: a legacy lease next to a half-finished transfer: the lease is discarded and the transfer is quarantined in the same initialize', async () => {
+    const { child, message } = await childStore('transfer')
+    expect(message.transferId).toMatch(/^[0-9a-f-]{36}$/)
+    await kill(child)
+    const raw = await seedLegacyLeases([legacyLease({ recordIds: [message.transferId] })])
+    // Witness: the ledger the store reads carries both the lease and the
+    // interrupted transfer, whose host partial is still on disk.
+    const seeded = JSON.parse(raw)
+    expect(seeded.processingLeases[LEGACY_LEASE_ID].recordIds).toEqual([message.transferId])
+    const seededRecord = seeded.records[message.transferId]
+    expect(seededRecord.state).toBe('transferring')
+    const hostPartial = path.join(root, `${seededRecord.hostPath}.partial`)
+    expect((await fs.lstat(hostPartial)).isFile()).toBe(true)
+
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue(DISCARDED_COUNTER)
+    const recovering = freshStore()
+    await recovering.initialize()
+    expect(recovering.isAvailable()).toBe(true)
+    expect(recovering.debugRecord(message.transferId)?.state).toBe('quarantined')
+    expect(recovering.debugUsage().bytes).toBe(7)
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
+    expect(await counterValue(QUARANTINED_GAUGE)).toBe(1)
+    expect(discardWarnings(warn.mock.calls)).toEqual([
+      [
+        { component: 'GfsDownloadStore', discarded: 1 },
+        'GFS download store discarded 1 legacy processing lease(s) at initialize',
+      ],
+    ])
+    // The persisted ledger reflects both outcomes of the one initialize.
+    const persisted = await fs.readFile(ledgerFile(), 'utf8')
+    const onDisk = JSON.parse(persisted)
+    expect(onDisk).not.toHaveProperty('processingLeases')
+    expect(Object.keys(onDisk.records)).toEqual([message.transferId])
+    expect(onDisk.records[message.transferId].state).toBe('quarantined')
+    await recovering.close()
+
+    // A second initialize finds nothing left to discard and rewrites nothing.
+    const secondBefore = await counterValue(DISCARDED_COUNTER)
+    const next = freshStore()
+    await next.initialize()
+    expect(next.isAvailable()).toBe(true)
+    expect(next.debugRecord(message.transferId)?.state).toBe('quarantined')
+    expect(next.debugUsage().bytes).toBe(7)
+    expect((await counterValue(DISCARDED_COUNTER)) - secondBefore).toBe(0)
+    expect(discardWarnings(warn.mock.calls)).toHaveLength(1)
+    await next.close()
+    expect(await fs.readFile(ledgerFile(), 'utf8')).toBe(persisted)
   })
 })
 

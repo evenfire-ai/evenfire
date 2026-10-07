@@ -116,6 +116,34 @@
     "fullName": "legacy processing leases after #1019 S9: reports the current quarantined-record count after reconcile without double counting across boots"
   },
   {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "legacy processing leases after #1019 S1c: discards several legacy leases from different foreign sessions in one initialize and counts each"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "legacy processing leases after #1019 S10: a legacy lease next to a half-finished transfer: the lease is discarded and the transfer is quarantined in the same initialize"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X1-shell-live: an inherited non-expired legacy lease does not stop an approved shell (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X1-delivery-live: an inherited non-expired legacy lease is discarded and GFS delivery stays advertised (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X6: an approved shell runs while the store is unavailable writer contention"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X6: an approved shell runs while the store is unavailable store closed"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X6: an approved shell runs while the store is unavailable initialize rejected by an EIO persist during the legacy discard"
+  },
+  {
     "suite": "shell.detachedStdio.test.ts",
     "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-a: a timeout with an escaped stdout/stderr holder settles through executeWithTimeout within the cleanup budget"
   },
