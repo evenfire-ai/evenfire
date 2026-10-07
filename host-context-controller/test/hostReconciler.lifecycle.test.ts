@@ -700,6 +700,8 @@ describe('HostReconciler resource rollout bootstrap', () => {
           for (const kind of ['requests', 'limits'] as const) {
             const values = container.resources?.[kind]
             if (values?.cpu === '1000m') values.cpu = '1'
+            if (values?.cpu === '0.1') values.cpu = '100m'
+            if (values?.cpu === '0.025') values.cpu = '25m'
             if (values?.memory === '1024Mi') values.memory = '1Gi'
           }
         }
@@ -991,6 +993,47 @@ describe('HostReconciler resource rollout bootstrap', () => {
       expect(fixture.deployment().metadata!.generation).toBe(1)
     }
   )
+
+  it('keeps the reviewed decimal CPU no-op stable across four canonicalized reconciles', async () => {
+    config.hostResources.requests.cpu = '0.1'
+    const fixture = await runtime({ canonicalResources: true, consumed: false })
+    const revision = fixture.secret().metadata!.annotations![SECRET_REVISION]
+    for (let pass = 0; pass < 4; pass++) {
+      await fixture.reconcile()
+      fixture.advance()
+    }
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.templateChanges()).toBe(0)
+    expect(fixture.deployment().metadata!.generation).toBe(1)
+    expect(fixture.secret().metadata!.annotations![SECRET_REVISION]).toBe(revision)
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+      '100m'
+    )
+  })
+
+  it('rolls the reviewed decimal CPU transition once and settles after four canonicalized reconciles', async () => {
+    const fixture = await runtime({ canonicalResources: true })
+    config.hostResources.requests.cpu = '0.025'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
+    const appliedGeneration = fixture.deployment().metadata!.generation
+    expect(appliedGeneration).toBe(2)
+    for (let pass = 0; pass < 4; pass++) {
+      fixture.advance()
+      await fixture.reconcile()
+    }
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.templateChanges()).toBe(1)
+    expect(fixture.deployment().metadata!.generation).toBe(appliedGeneration)
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      prepared
+    )
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+      '25m'
+    )
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
 
   it('defers resource preparation when retained OAuth authority is temporarily unobserved', async () => {
     const fixture = await runtime({ oauth: true })
