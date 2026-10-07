@@ -179,6 +179,11 @@ export type FailedAgentSend = {
 
 export type HostConnectionTone = 'healthy' | 'degraded' | 'offline'
 
+export interface ApprovalInputPreview {
+  text: string
+  truncated: boolean
+}
+
 export interface SuspendedInfo {
   requestId: string
   displayName: string
@@ -190,6 +195,7 @@ export interface SuspendedInfo {
    *  is the server to connect. Absent on ordinary approval suspensions. */
   reason?: string
   mcpServerName?: string
+  inputPreview?: ApprovalInputPreview
 }
 
 export interface TaskProgress {

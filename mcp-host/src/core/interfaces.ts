@@ -137,6 +137,12 @@ export interface Tool {
     result: ToolResult,
     context: ToolEmissionContext
   ): ToolResult | Promise<ToolResult>
+  /**
+   * True when the concrete producer owns abort/timeout settlement and callers
+   * must await that promise instead of racing cancellation cleanup. Used by
+   * physical-execution tools whose late effects must be fenced before release.
+   */
+  joinsAbortSettlement?(): boolean
 }
 
 // ─── Channel ────────────────────────────────────────────────

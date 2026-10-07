@@ -12,8 +12,10 @@ import { MessageQueue } from '../../../queue/messageQueue'
 import { Task } from '../../../queue/types'
 import { serializeSessionKey } from '../../../session'
 import { runToolUseLoop } from '../../orchestration/toolUseLoop'
+import { ShellTool } from '../../tools/shell'
 import { ApprovalResolver } from '../approvalResolver'
 import type { ApprovalConfig } from '../approvalTypes'
+import { UnifiedApprovalGateController } from '../mcpApprovalGateController'
 
 // Mock config
 vi.mock('../../../config', () => ({
@@ -163,10 +165,19 @@ describe('Approval Flow -- end-to-end integration', () => {
     // First call: need approval
     // After approval with alwaysApprove=true: shell_exec added to auto_approved_tools
     // Second call: should proceed without approval
+    const shell = new ShellTool('/tmp', 5000, ['PATH'])
+    const gate = new UnifiedApprovalGateController({
+      get: name => (name === shell.name() ? shell : null),
+      register: () => {},
+      listDefinitions: () => [],
+    })
+    const decision = gate.beforeTool('shell_exec', { command: 'whoami' })
+    if (typeof decision !== 'object') throw new Error('Ordinary shell producer did not suspend')
     ;(runToolUseLoop as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({
         type: 'need_approval',
         approval: {
+          ...decision.approval,
           request_id: 'req-auto-1',
           tool_name: 'shell_exec',
           parameters: { command: 'whoami' },

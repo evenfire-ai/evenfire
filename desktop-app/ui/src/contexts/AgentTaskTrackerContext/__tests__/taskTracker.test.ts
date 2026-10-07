@@ -71,6 +71,24 @@ afterEach(() => {
 const flush = () => Promise.resolve().then(() => Promise.resolve())
 
 describe('TaskTracker', () => {
+  it('carries a pending input preview through a reconnect without starting the tool', async () => {
+    tracker.start(KEY, 'task-1', 'um-1')
+    const inputPreview = { text: 'node -e "console.log(1)"', truncated: false }
+    await rpc.emit({
+      type: 'suspended',
+      data: {
+        taskId: 'task-1',
+        requestId: 'preview-request',
+        displayName: 'Shell',
+        inputPreview: { ...inputPreview, headers: { other: 'not-for-preview' } },
+      },
+    })
+    await rpc.emit({ type: 'open', taskId: 'task-1', hostRef: 'agent-x' })
+    expect(tracker.get(KEY)?.pendingApproval?.inputPreview).toEqual(inputPreview)
+    expect(tracker.get(KEY)?.status).toBe('suspended')
+    expect(tracker.get(KEY)?.steps).toEqual([])
+    expect(rpc.cancelTask).not.toHaveBeenCalled()
+  })
   it('start() seeds connecting state, opens the SSE and emits to subscribers', () => {
     const seen: TaskState[] = []
     tracker.subscribe(KEY, s => seen.push(s))

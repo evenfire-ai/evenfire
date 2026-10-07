@@ -1,4 +1,5 @@
 import type {
+  ApprovalInputPreview,
   ComposerImageAttachment,
   ComposerReferenceAttachment,
   ProgressStep,
@@ -46,6 +47,7 @@ export interface TaskPendingApproval {
   // completion back to this task. Absent on ordinary approval suspensions.
   reason?: string
   mcpServerName?: string
+  inputPreview?: ApprovalInputPreview
 }
 
 /**
