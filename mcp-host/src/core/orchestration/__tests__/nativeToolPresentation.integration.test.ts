@@ -197,6 +197,9 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
             : scenario.mcp
         )
   const providerCalls: ProviderCall[] = []
+  // A failed assertion inside a turn callback throws inside the provider, which
+  // TaskExecutor turns into a task failure. Record it so the test fails with it.
+  const turnErrors: unknown[] = []
   const usage = { input_tokens: 1, output_tokens: 1, total_tokens: 2 }
   const provider: SingleTurnProvider = {
     getProviderType: () => scenario.provider,
@@ -209,9 +212,15 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
     completeSingleTurnWithTools: async (messages, tools) => {
       const call = { messages: structuredClone(messages), tools: structuredClone(tools) }
       providerCalls.push(call)
-      const turn = turns[providerCalls.length - 1]
-      if (!turn) throw new Error(`Unexpected provider call ${providerCalls.length}`)
-      const reply = turn(call)
+      let reply: ReturnType<Turn>
+      try {
+        const turn = turns[providerCalls.length - 1]
+        if (!turn) throw new Error(`Unexpected provider call ${providerCalls.length}`)
+        reply = turn(call)
+      } catch (error) {
+        turnErrors.push(error)
+        throw error
+      }
       return reply.tool_calls
         ? {
             content: null,
@@ -282,8 +291,21 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
     dynamicEnvProvider: () => ({}),
   }
   const executor = new TaskExecutor(task, deps)
+  /**
+   * Fails the test with the first turn-callback error, or if the task failed.
+   * Once the task has settled without suspending, every scripted turn must have
+   * been consumed. Called after `run()`, and again by tests after each resume.
+   */
+  const settle = () => {
+    if (turnErrors.length > 0) throw turnErrors[0]
+    expect(deps.onFail).not.toHaveBeenCalled()
+    if (executor.executorState !== 'waiting_approval') {
+      expect(providerCalls).toHaveLength(turns.length)
+    }
+  }
   await executor.run()
-  return { executor, deps, providerCalls, responses, workspaceService }
+  settle()
+  return { executor, deps, providerCalls, responses, workspaceService, settle }
 }
 
 /** Search → describe → bridged call for the pptx generator, then a final answer. */
@@ -388,6 +410,7 @@ describe('T1 — native discovery journeys through TaskExecutor.run()', () => {
     expect(run.deps.onApprovalNeeded).toHaveBeenCalledTimes(1)
 
     await run.executor.resumeAfterApproval(false)
+    run.settle()
     expect(run.executor.executorState).toBe('completed')
     expect(run.providerCalls).toHaveLength(2)
     expect(
@@ -747,6 +770,40 @@ describe('T3 — negative guards with liveness witnesses (through TaskExecutor.r
         },
       ]
     )
+    expect(pptxFiles()).toEqual(['bridged-deck.pptx'])
+  })
+
+  it('a bridged native call passes the same parameter validation as a direct one', async () => {
+    const privateUrl = { url: 'http://127.0.0.1:9/internal', method: 'GET' }
+    const blocked = 'Parameter validation failed: Non-public target "127.0.0.1" is blocked'
+    const run = await runScenario(
+      {
+        provider: 'codex-subscription',
+        codexMode: 'direct',
+        native: 'auto',
+        mcp: 2,
+        approval: true,
+      },
+      [
+        () =>
+          toolCalls(
+            bridged('bridged-http', 'http_request', privateUrl),
+            { id: 'direct-http', name: 'http_request', arguments: privateUrl },
+            bridged('pptx-call', 'clerum__generate_pptx', PPTX_ARGS)
+          ),
+        ({ messages }) => {
+          expect(toolResult(messages, 'bridged-http')).toContain(blocked)
+          expect(toolResult(messages, 'direct-http')).toContain(blocked)
+          // Witness: a valid bridged native in the same batch executes.
+          expect(toolResult(messages, 'pptx-call')).toContain('File generated: bridged-deck.pptx')
+          return { content: 'done' }
+        },
+      ]
+    )
+    // http_request requires approval and the gate is live here (it suspends the
+    // same call when validation is skipped); a rejected call never reaches it.
+    expect(run.deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(run.executor.executorState).toBe('completed')
     expect(pptxFiles()).toEqual(['bridged-deck.pptx'])
   })
 
