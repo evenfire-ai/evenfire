@@ -540,14 +540,6 @@ export function useAgentChatController({
 
   useEffect(() => {
     chatMessagesRef.current = chatMessages
-    const localPageRequest = activeChatLocalPageRequestRef.current
-    if (
-      localPageRequest &&
-      !localPageRequest.initialized &&
-      activeChatSwitchRequestRef.current === localPageRequest.request
-    ) {
-      localPageRequest.initialized = true
-    }
   }, [chatMessages])
 
   const [agentSending, setAgentSending] = useState(false)
@@ -612,11 +604,9 @@ export function useAgentChatController({
   })
   const activeChatSwitchRequestRef = useRef<symbol | null>(null)
   const activeChatSwitchKeyRef = useRef<string | null>(null)
-  // Visible messages become reusable only after the local page has been rendered
-  // and copied into chatMessagesRef by its effect.
+  // Correlate the visible local page to the switch request that loaded it.
   const activeChatLocalPageRequestRef = useRef<{
     request: symbol
-    initialized: boolean
   } | null>(null)
   // Latest `pushToast` for the hoisted tracker callbacks (onTrackerTerminal reads
   // it) so that `tracker.setCallbacks` can run once (cross-ref D.3 M1) without
@@ -1021,11 +1011,11 @@ export function useAgentChatController({
 
       // PHASE 1 — render only the newest local page. The authoritative reconcile
       // below requests a delta after the newest cached server turn.
+      // `setLastActive` above crosses the ChatStore boundary before this ref is
+      // read, allowing the rendered page's effect to synchronize chatMessagesRef.
       const activeLocalPage = activeChatLocalPageRequestRef.current
       const reuseVisibleMessages =
-        canReuseActiveSwitch &&
-        activeLocalPage?.request === switchRequest &&
-        activeLocalPage.initialized
+        canReuseActiveSwitch && activeLocalPage?.request === switchRequest
       let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
       let loadedLocalPage = false
       try {
@@ -1050,7 +1040,7 @@ export function useAgentChatController({
         (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
       if (!isStillActive()) return
       if (loadedLocalPage && !reuseVisibleMessages) {
-        activeChatLocalPageRequestRef.current = { request: switchRequest, initialized: false }
+        activeChatLocalPageRequestRef.current = { request: switchRequest }
       }
       loadedLocalMessageCountRef.current = cached.length
       setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
