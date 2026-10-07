@@ -2384,6 +2384,7 @@ describe('executeSingleTool — progress watcher', () => {
     }
 
     /** 20 chunks of 64 lines: about 83 KB, more than the 64 KiB buffer. */
+    /** `lines` as chunks of 64 lines, each ending in a newline. */
     function bodyChunks(lines: string[]): string[] {
       const chunks: string[] = []
       for (let at = 0; at < lines.length; at += 64) {

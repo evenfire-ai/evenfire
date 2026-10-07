@@ -336,11 +336,15 @@ function passwordValueMatches(text: string): Array<[number, number]> {
 // Private key armor (#1034): PEM `-----BEGIN <label>PRIVATE KEY-----` and PGP
 // `-----BEGIN PGP PRIVATE KEY BLOCK-----`. Labels are bounded so a label
 // millions of characters long cannot overflow the regex engine's stack.
-const PRIVATE_KEY_HEADER_SOURCE = '-----BEGIN ((?:[A-Z0-9]{1,16} ){0,4})PRIVATE KEY( BLOCK)?-----'
-const PRIVATE_KEY_FOOTER_SOURCE = '-----END ((?:[A-Z0-9]{1,16} ){0,4})PRIVATE KEY( BLOCK)?-----'
+const LABEL_WORDS_MAX = 4
+const LABEL_WORD_MAX = 16
+const PRIVATE_KEY_LABEL = `((?:[A-Z0-9]{1,${LABEL_WORD_MAX}} ){0,${LABEL_WORDS_MAX}})PRIVATE KEY( BLOCK)?-----`
+const PRIVATE_KEY_HEADER_SOURCE = `-----BEGIN ${PRIVATE_KEY_LABEL}`
+const PRIVATE_KEY_FOOTER_SOURCE = `-----END ${PRIVATE_KEY_LABEL}`
 
-/** The longest text a header or footer can span, in UTF-16 code units. */
-const PRIVATE_KEY_MARKER_MAX = 101
+/** The longest text a header or footer can span, in UTF-16 code units (101). */
+const PRIVATE_KEY_MARKER_MAX =
+  '-----BEGIN '.length + LABEL_WORDS_MAX * (LABEL_WORD_MAX + 1) + 'PRIVATE KEY BLOCK-----'.length
 
 type PrivateKeyMarker = { start: number; end: number; pgp: boolean }
 
@@ -360,19 +364,20 @@ function privateKeyMarkers(text: string, source: string): PrivateKeyMarker[] {
 
 // Armor alphabet, read one code unit at a time so no regex runs per line (a
 // regex over one 10M-character line overflows the stack):
-// - B, base64: `A-Z a-z 0-9 + / =`, and `\/` as JSON escapes it;
-// - H, blank: space, tab and the JSON escape `\t`;
-// - S, line separator: `\r\n`, `\n`, `\r` and their JSON escapes.
+// - base64: `A-Z a-z 0-9 + / =`, and `\/` as JSON escapes it;
+// - blank: space, tab and the JSON escape `\t`;
+// - line separator: `\r\n`, `\n`, `\r` and their JSON escapes.
 // Base64 holds no `\`, so an `n`, `r` or `t` after a `\` is always an escape.
+function isLetter(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+}
+
+function isAlphanumeric(code: number): boolean {
+  return isLetter(code) || isDigit(code)
+}
+
 function isBase64(code: number): boolean {
-  return (
-    (code >= 65 && code <= 90) ||
-    (code >= 97 && code <= 122) ||
-    (code >= 48 && code <= 57) ||
-    code === 43 ||
-    code === 47 ||
-    code === 61
-  )
+  return isAlphanumeric(code) || code === 43 || code === 47 || code === 61
 }
 
 /** Code units of the base64 character at `i`, or 0. */
@@ -412,6 +417,17 @@ function separatorBefore(text: string, i: number): number {
   return text.charCodeAt(i - 3) === 114 && text.charCodeAt(i - 4) === 92 ? 4 : 2
 }
 
+/** The run of base64 characters from `i`: where it ends, and its length in characters. */
+function base64RunFrom(text: string, i: number): { end: number; length: number } {
+  let end = i
+  let length = 0
+  for (let n = base64At(text, end); n > 0; n = base64At(text, end)) {
+    end += n
+    length++
+  }
+  return { end, length }
+}
+
 function skipBlanks(text: string, i: number): number {
   for (let n = blankAt(text, i); n > 0; n = blankAt(text, i)) i += n
   return i
@@ -427,22 +443,106 @@ function skipBlanksBefore(text: string, i: number): number {
   return i
 }
 
-/** Up to two separators from `i`, blanks allowed between them. */
-function separatorsFrom(text: string, i: number): { count: number; end: number } {
-  const first = separatorAt(text, i)
-  if (first === 0) return { count: 0, end: i }
-  i += first
-  const blank = skipBlanks(text, i)
-  const second = separatorAt(text, blank)
-  return second === 0 ? { count: 1, end: i } : { count: 2, end: blank + second }
+function isDigit(code: number): boolean {
+  return code >= 48 && code <= 57
 }
 
-/** Up to two separators ending just before `i`, blanks allowed between them. */
-function separatorsBefore(text: string, i: number): { count: number; start: number } {
+/** The longest line prefix (`    12\t`, a timestamp, `> `) a key may carry, in code units. */
+const LINE_PREFIX_MAX = 128
+
+/** Where the line holding `i` starts, or -1 when that is more than `LINE_PREFIX_MAX` back. */
+function lineStartBefore(text: string, i: number): number {
+  for (let start = i; start >= 0 && i - start <= LINE_PREFIX_MAX; start--) {
+    if (start === 0 || separatorBefore(text, start) > 0) return start
+  }
+  return -1
+}
+
+/**
+ * The shape of the text before a marker on its line, for output that prefixes
+ * every line (`cat -n`, `grep -n -A`, `kubectl logs --timestamps`, `> `, a
+ * `git diff` removal). In a shape `0` stands for any run of digits, a space
+ * for any run of blanks, and `-` for `-` or `:`, because `grep` marks matching
+ * lines with `:` and context lines with `-`. Null when that text is blank,
+ * longer than `LINE_PREFIX_MAX`, or ends in base64, which the body would absorb.
+ */
+function linePrefixShape(text: string, markerStart: number): string | null {
+  const lineStart = lineStartBefore(text, markerStart)
+  if (lineStart < 0) return null
+  let shape = ''
+  for (let i = lineStart; i < markerStart; ) {
+    const blank = blankAt(text, i)
+    const code = text.charCodeAt(i)
+    const part = blank > 0 ? ' ' : isDigit(code) ? '0' : code === 58 ? '-' : text[i]
+    i += blank > 0 ? blank : 1
+    if ((part !== ' ' && part !== '0') || !shape.endsWith(part)) shape += part
+  }
+  if (shape.trim() === '' || isBase64(shape.charCodeAt(shape.length - 1))) return null
+  return shape
+}
+
+/** Where a line prefix of `shape` that starts at `i` ends, or -1 when there is none. */
+function linePrefixEnd(text: string, i: number, shape: string): number {
+  const limit = i + LINE_PREFIX_MAX
+  for (const part of shape) {
+    if (part === ' ') {
+      const end = skipBlanks(text, i)
+      if (end === i) return -1
+      i = end
+    } else if (part === '0') {
+      if (!isDigit(text.charCodeAt(i))) return -1
+      while (i < limit && isDigit(text.charCodeAt(i))) i++
+    } else if (part === '-') {
+      const code = text.charCodeAt(i)
+      if (code !== 45 && code !== 58) return -1
+      i++
+    } else if (text[i] === part) i++
+    else return -1
+    if (i > limit) return -1
+  }
+  return i
+}
+
+/**
+ * Up to two separators from `i`, blanks allowed between them. With a line
+ * prefix `shape`, each separator counts only when the next line carries it,
+ * and `end` is past that prefix.
+ */
+function separatorsFrom(
+  text: string,
+  i: number,
+  shape: string | null
+): { count: number; end: number } {
+  const first = separatorAt(text, i)
+  if (first === 0) return { count: 0, end: i }
+  const next = shape ? linePrefixEnd(text, i + first, shape) : i + first
+  if (next < 0) return { count: 0, end: i }
+  const blank = skipBlanks(text, next)
+  const second = separatorAt(text, blank)
+  if (second === 0) return { count: 1, end: next }
+  const after = shape ? linePrefixEnd(text, blank + second, shape) : blank + second
+  return after < 0 ? { count: 1, end: next } : { count: 2, end: after }
+}
+
+/**
+ * Up to two separators ending just before `i`, blanks allowed between them.
+ * With a line prefix `shape`, a line between them must hold that prefix alone.
+ */
+function separatorsBefore(
+  text: string,
+  i: number,
+  shape: string | null
+): { count: number; start: number } {
   const last = separatorBefore(text, i)
   if (last === 0) return { count: 0, start: i }
   i -= last
-  const blank = skipBlanksBefore(text, i)
+  let blank = skipBlanksBefore(text, i)
+  if (shape) {
+    blank = lineStartBefore(text, i)
+    if (blank < 0) return { count: 1, start: i }
+    const prefixEnd = linePrefixEnd(text, blank, shape)
+    if (prefixEnd < 0 || skipBlanks(text, prefixEnd) !== i) return { count: 1, start: i }
+  }
   const first = separatorBefore(text, blank)
   return first === 0 ? { count: 1, start: i } : { count: 2, start: blank - first }
 }
@@ -467,12 +567,7 @@ type ArmorLine = {
 
 function armorLineAt(text: string, i: number, footerEnds: Map<number, number>): ArmorLine | null {
   const start = skipBlanks(text, i)
-  let end = start
-  let length = 0
-  for (let n = base64At(text, end); n > 0; n = base64At(text, end)) {
-    end += n
-    length++
-  }
+  const { end, length } = base64RunFrom(text, start)
   if (length === 0) return null
   const after = skipBlanks(text, end)
   const line = { start, end, after, length }
@@ -491,11 +586,14 @@ function armorLineAt(text: string, i: number, footerEnds: Map<number, number>): 
  * `armorLineAt` classifies it read backwards: `armed` when the line starts
  * the text or follows a separator, `glued` when the base64 follows another
  * character directly (`"k":"AAAA`, `keep this,AAAA`), `prose` otherwise.
- * `lineStart` is where the line begins, blanks included.
+ * With a line prefix `shape`, the line is `armed` only when the prefix alone
+ * comes before the base64, and `prose` otherwise. `lineStart` is where the
+ * line begins, blanks and prefix included.
  */
 function armorLineBefore(
   text: string,
-  i: number
+  i: number,
+  shape: string | null
 ): { kind: 'armed' | 'glued' | 'prose'; start: number; lineStart: number; length: number } | null {
   let start = skipBlanksBefore(text, i)
   let length = 0
@@ -509,14 +607,19 @@ function armorLineBefore(
     length++
   }
   if (length === 0) return null
+  if (shape) {
+    const lineStart = lineStartBefore(text, start)
+    const prefixEnd = lineStart < 0 ? -1 : linePrefixEnd(text, lineStart, shape)
+    if (prefixEnd < 0 || skipBlanks(text, prefixEnd) !== start) {
+      return { kind: 'prose', start, lineStart: start, length }
+    }
+    return { kind: 'armed', start, lineStart, length }
+  }
   const lineStart = skipBlanksBefore(text, start)
-  const kind =
-    lineStart === 0 || separatorBefore(text, lineStart) > 0
-      ? 'armed'
-      : lineStart === start
-        ? 'glued'
-        : 'prose'
-  return { kind, start, lineStart, length }
+  if (lineStart === 0 || separatorBefore(text, lineStart) > 0) {
+    return { kind: 'armed', start, lineStart, length }
+  }
+  return { kind: lineStart === start ? 'glued' : 'prose', start, lineStart, length }
 }
 
 /** A PGP checksum line, `=` and four base64 characters. */
@@ -526,31 +629,28 @@ function isChecksum(text: string, start: number, length: number): boolean {
 
 /**
  * Where the metadata line at `i` ends (`Proc-Type: …`, `DEK-Info: …`, and any
- * `Name: value` armor header in PGP), or -1 when the line is not metadata.
+ * `Name: value` armor header in PGP), or null when the line is not metadata.
  * The value ends at a separator, at a marker, at the end of the text, or at an
  * unescaped `"` that closes a JSON string (blanks, then `,` `}` `]` `:` or the
  * end), so it cannot run across JSON fields. `next` is where the following
- * line starts, or -1 when the value did not end at a separator.
+ * line starts, and is absent when the value did not end at a separator.
  */
 function metadataLineAt(
   text: string,
   i: number,
   pgp: boolean,
   markerStarts: Set<number>
-): { end: number; next: number } | null {
-  let colon = i
+): { end: number; next?: number } | null {
+  let colon: number
   if (text.startsWith('Proc-Type:', i)) colon = i + 9
   else if (text.startsWith('DEK-Info:', i)) colon = i + 8
-  else if (pgp) {
-    const first = text.charCodeAt(i)
-    if (!((first >= 65 && first <= 90) || (first >= 97 && first <= 122))) return null
+  else if (pgp && isLetter(text.charCodeAt(i))) {
     colon = i + 1
     for (;;) {
       const code = text.charCodeAt(colon)
-      if (code === 45 || isBase64(code)) {
-        if (code === 43 || code === 47 || code === 61) return null
-        colon++
-      } else break
+      if (code === 43 || code === 47 || code === 61) return null
+      if (code !== 45 && !isAlphanumeric(code)) break
+      colon++
     }
     if (text.charCodeAt(colon) !== 58) return null
   } else return null
@@ -558,7 +658,7 @@ function metadataLineAt(
   while (j < text.length) {
     const separator = separatorAt(text, j)
     if (separator > 0) return { end: j, next: j + separator }
-    if (markerStarts.has(j)) return { end: j, next: -1 }
+    if (markerStarts.has(j)) return { end: j }
     const code = text.charCodeAt(j)
     if (code === 92) {
       j += 2
@@ -574,47 +674,57 @@ function metadataLineAt(
         closing === 93 ||
         closing === 58
       )
-        return { end: j, next: -1 }
+        return { end: j }
     }
     j++
   }
-  return { end: text.length, next: -1 }
+  return { end: text.length }
 }
 
 /**
- * Where the key that starts with a header ending at `headerEnd` ends.
+ * Where the key that starts with `header` ends.
  *
  * The body runs while its lines keep the length `L` of the first one; the
  * first shorter line is the last line and is included. So a truncated key
  * without a footer takes at most one more line after a full-length one: a
  * line of base64 alone whose length is `L` cannot be told apart from the body.
- * A checksum line and a footer of any label may follow.
+ * A checksum line and a footer of any label may follow. When the header's line
+ * has a prefix (`linePrefixShape`) and the next line starts with the same
+ * shape, every line of the block must carry it, and a line without it ends
+ * the block.
  */
 function privateKeyEndAfter(
   text: string,
-  headerEnd: number,
-  pgp: boolean,
+  header: PrivateKeyMarker,
   footerEnds: Map<number, number>,
   markerStarts: Set<number>
 ): number {
-  let end = headerEnd
-  let i = skipBlanks(text, headerEnd)
+  let end = header.end
+  let i = skipBlanks(text, header.end)
   const footerEnd = footerEnds.get(i)
   if (footerEnd !== undefined) return footerEnd
   if (base64At(text, i) > 0) return flattenedKeyEnd(text, i, footerEnds)
   const separator = separatorAt(text, i)
   if (separator === 0) return end
   i += separator
+  let shape = linePrefixShape(text, header.start)
+  const prefixEnd = shape ? linePrefixEnd(text, i, shape) : -1
+  if (prefixEnd < 0) shape = null
+  else i = prefixEnd
   for (;;) {
-    const metadata = metadataLineAt(text, i, pgp, markerStarts)
+    const metadata = metadataLineAt(text, skipBlanks(text, i), header.pgp, markerStarts)
     if (!metadata) break
     end = metadata.end
-    if (metadata.next < 0) return end
-    i = metadata.next
+    if (metadata.next === undefined) return end
+    i = shape ? linePrefixEnd(text, metadata.next, shape) : metadata.next
+    if (i < 0) return end
   }
   const blank = skipBlanks(text, i)
   const blankLine = separatorAt(text, blank)
-  if (blankLine > 0) i = blank + blankLine
+  if (blankLine > 0) {
+    i = shape ? linePrefixEnd(text, blank + blankLine, shape) : blank + blankLine
+    if (i < 0) return end
+  }
 
   let bodyLength = -1
   let unit = -1
@@ -629,7 +739,7 @@ function privateKeyEndAfter(
     if (line.footerEnd !== undefined) return line.footerEnd
     lastAfter = line.after
     if (line.length < bodyLength) break
-    const separators = separatorsFrom(text, line.after)
+    const separators = separatorsFrom(text, line.after, shape)
     if (separators.count === 0) return end
     if (unit < 0) unit = separators.count
     else if (separators.count !== unit) break
@@ -637,13 +747,13 @@ function privateKeyEndAfter(
   }
   if (lastAfter < 0) return footerEnds.get(skipBlanks(text, i)) ?? end
 
-  let separators = separatorsFrom(text, lastAfter)
+  let separators = separatorsFrom(text, lastAfter, shape)
   if (separators.count === 0) return end
   const checksum = armorLineAt(text, separators.end, footerEnds)
   if (checksum?.kind === 'armed' && isChecksum(text, checksum.start, checksum.length)) {
     end = checksum.end
     if (checksum.footerEnd !== undefined) return checksum.footerEnd
-    separators = separatorsFrom(text, checksum.after)
+    separators = separatorsFrom(text, checksum.after, shape)
     if (separators.count === 0) return end
   }
   return footerEnds.get(skipBlanks(text, separators.end)) ?? end
@@ -658,12 +768,7 @@ function flattenedKeyEnd(text: string, i: number, footerEnds: Map<number, number
   let end = i
   let wordLength = -1
   for (;;) {
-    let wordEnd = i
-    let length = 0
-    for (let n = base64At(text, wordEnd); n > 0; n = base64At(text, wordEnd)) {
-      wordEnd += n
-      length++
-    }
+    const { end: wordEnd, length } = base64RunFrom(text, i)
     if (wordLength < 0) wordLength = length
     else if (length > wordLength) return end
     end = wordEnd
@@ -683,42 +788,53 @@ function flattenedKeyEnd(text: string, i: number, footerEnds: Map<number, number
  * mid-key). Read backwards: an optional checksum line, the last body line at
  * any length, then lines of the length `L` of the line before the last one.
  * A line that breaks the rule adds only its base64 suffix glued to another
- * character; a shorter line is taken only where the text starts.
+ * character; a shorter line is taken only where the text starts. A prefix on
+ * the footer's line is followed upwards as `privateKeyEndAfter` follows it
+ * downwards.
  */
 function privateKeyStartBefore(text: string, footerStart: number): number {
   let start = footerStart
-  // The last line shares the footer's line, or ends at the separator before it.
-  let line = armorLineBefore(text, footerStart)
-  if (!line) {
-    const separators = separatorsBefore(text, skipBlanksBefore(text, footerStart))
-    if (separators.count === 0) return start
-    line = armorLineBefore(text, separators.start)
+  let line: ReturnType<typeof armorLineBefore> = null
+  let shape = linePrefixShape(text, footerStart)
+  if (shape) {
+    const separators = separatorsBefore(text, lineStartBefore(text, footerStart), shape)
+    if (separators.count > 0) line = armorLineBefore(text, separators.start, shape)
+    if (line?.kind !== 'armed') {
+      shape = null
+      line = null
+    }
+  }
+  if (!shape) {
+    // The last line shares the footer's line, or ends at the separator before it.
+    line = armorLineBefore(text, footerStart, null)
+    if (!line) {
+      const separators = separatorsBefore(text, skipBlanksBefore(text, footerStart), null)
+      if (separators.count === 0) return start
+      line = armorLineBefore(text, separators.start, null)
+    }
   }
   if (line?.kind === 'armed' && isChecksum(text, line.start, line.length)) {
     start = line.start
-    const separators = separatorsBefore(text, line.lineStart)
+    const separators = separatorsBefore(text, line.lineStart, shape)
     if (separators.count === 0) return start
-    line = armorLineBefore(text, separators.start)
+    line = armorLineBefore(text, separators.start, shape)
   }
   if (!line || line.kind === 'prose') return start
   start = line.start
   if (line.kind === 'glued') return start
 
-  let separators = separatorsBefore(text, line.lineStart)
-  if (separators.count === 0) return start
-  const unit = separators.count
-  line = armorLineBefore(text, separators.start)
-  if (!line || line.kind === 'prose') return start
-  start = line.start
-  if (line.kind === 'glued') return start
-  const bodyLength = line.length
+  let unit = -1
+  let bodyLength = -1
   for (;;) {
-    separators = separatorsBefore(text, line.lineStart)
-    if (separators.count !== unit) return start
-    line = armorLineBefore(text, separators.start)
+    const separators = separatorsBefore(text, line.lineStart, shape)
+    if (separators.count === 0) return start
+    if (unit < 0) unit = separators.count
+    else if (separators.count !== unit) return start
+    line = armorLineBefore(text, separators.start, shape)
     if (!line || line.kind === 'prose') return start
     if (line.kind === 'glued') return line.start
-    if (line.length !== bodyLength) {
+    if (bodyLength < 0) bodyLength = line.length
+    else if (line.length !== bodyLength) {
       return line.length < bodyLength && line.lineStart === 0 ? line.start : start
     }
     start = line.start
@@ -743,10 +859,7 @@ function privateKeyMatches(text: string): Array<[number, number]> {
   for (const header of headers) {
     const last = blocks[blocks.length - 1]
     if (last && header.start < last[1]) continue
-    blocks.push([
-      header.start,
-      privateKeyEndAfter(text, header.end, header.pgp, footerEnds, markerStarts),
-    ])
+    blocks.push([header.start, privateKeyEndAfter(text, header, footerEnds, markerStarts)])
   }
   let covering = 0
   const forward = blocks.length
@@ -773,11 +886,13 @@ function privateKeyMatches(text: string): Array<[number, number]> {
  * `PRIVATE_KEY_MARKER_MAX` code units of everything seen, so a header or
  * footer split across any number of chunks is still found whole.
  */
-export function createPrivateKeyBlockTracker(): {
+export type PrivateKeyBlockTracker = {
   observe(chunk: string): void
   /** True while a block is open and `snapshot` no longer shows its header. */
   hidesPreview(snapshot: string): boolean
-} {
+}
+
+export function createPrivateKeyBlockTracker(): PrivateKeyBlockTracker {
   let tail = ''
   let open = false
   return {

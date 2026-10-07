@@ -128,6 +128,66 @@
     "fullName": "BasicSafety private key blocks (#1034) redacts 200,000 footers without headers in linear time"
   },
   {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a whole ENCRYPTED key"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a CRLF key (footer: false)"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a YAML indentation key (footer: false)"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts an encrypted PEM key with Proc-Type and DEK-Info and no footer"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a key with every line prefixed as cat -n output (footer)"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a key with every line prefixed as grep -n -A output (tail only)"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a key with every line prefixed as kubectl logs --timestamps (no footer)"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts an encrypted PEM key indented in YAML without a footer"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a PGP key with armor headers indented in YAML without a footer"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a key inside a JSON string with escaped slashes (footer: false)"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a key whose label has four words of sixteen characters"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) leaves BLOCK on a label other than PGP unchanged"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker takes the state of the last marker in a chunk"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker keeps hiding the preview of a block that never closes"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker finds the longest header fed one character per chunk"
+  },
+  {
     "suite": "attachmentRead.redaction.test.ts",
     "fullName": "a private key split across attachment pages (#1034) a middle page holding only body leaks nothing (footer: false)"
   },

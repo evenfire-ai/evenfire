@@ -39,7 +39,7 @@ export class RingBuffer {
   private evictToFit(): void {
     // Keep at least one chunk — never evict the last chunk, even if it alone
     // exceeds capacity. This ensures a single oversized append is preserved
-    // (trimmed at the first newline below if needed).
+    // (trimmed at the first newline below only if older chunks were evicted).
     let evicted = false
     while (this.totalBytes > this.maxBytes && this.chunks.length > 1) {
       const oldest = this.chunks.shift()!

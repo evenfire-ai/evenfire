@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BasicSafety } from '../safety'
+import { BasicSafety, createPrivateKeyBlockTracker } from '../safety'
 
 describe('BasicSafety', () => {
   const safety = new BasicSafety()
@@ -1355,6 +1355,160 @@ describe('BasicSafety', () => {
       expect(result.warnings).toContain('Potential secret detected in assistant response')
     })
 
+    // Each prefix builds line `n` of a block as a tool would print it.
+    const LINE_PREFIXES: Array<[string, (line: string, n: number) => string]> = [
+      ['cat -n output', (line, n) => `${String(n + 1).padStart(6)}\t${line}`],
+      ['grep -n -A output', (line, n) => `${n + 12}${n === 0 ? ':' : '-'}${line}`],
+      [
+        'kubectl logs --timestamps',
+        (line, n) => `2026-10-08T10:00:${String(n).padStart(2, '0')}.${n}Z ${line}`,
+      ],
+      ['a Markdown quote', line => `> ${line}`],
+      ['git diff removal', line => `-${line}`],
+      ['kubectl logs --prefix', line => `[pod/api-7f9c/app] ${line}`],
+    ]
+
+    it.each(
+      LINE_PREFIXES.flatMap(([name, prefix]) =>
+        (['footer', 'no footer', 'tail only'] as const).map(shape => [name, shape, prefix] as const)
+      )
+    )('redacts a key with every line prefixed as %s (%s)', (_name, shape, prefix) => {
+      const lines = bodyLines(24)
+      const block =
+        shape === 'footer'
+          ? [header(), ...lines, footer()]
+          : shape === 'no footer'
+            ? [header('OPENSSH '), ...lines]
+            : [...lines.slice(1), footer()]
+      const body = shape === 'tail only' ? lines.slice(1) : lines
+      const first = shape === 'tail only' ? 3 : 0
+      const printed = block.map((line, n) => prefix(line, n + first))
+      const text = ['before', ...printed, 'after'].join('\n')
+      const result = expectRedacted(text, body)
+      // Witnesses: the prose around the block and the prefix of its first line survive.
+      expect(result.content.startsWith(`before\n${prefix('', first)}`)).toBe(true)
+      expect(result.content.endsWith('\nafter')).toBe(true)
+    })
+
+    it.each([
+      [
+        'an encrypted PEM key',
+        (lines: string[]) => [
+          header(),
+          'Proc-Type: 4,ENCRYPTED',
+          'DEK-Info: AES-128-CBC,0011223344556677',
+          '',
+          ...lines,
+        ],
+      ],
+      [
+        'a PGP key with armor headers',
+        (lines: string[]) => [PGP_HEADER, 'Version: GnuPG v2', '', ...lines],
+      ],
+    ])('redacts %s indented in YAML without a footer', (_name, build) => {
+      const lines = bodyLines(25)
+      const text = ['key: |', ...build(lines).map(line => `    ${line}`), 'next: keep'].join('\n')
+      const result = expectRedacted(text, lines)
+      expect(result.content).toBe('key: |\n    [REDACTED]\nnext: keep')
+    })
+
+    // A body whose lines start with `/` and `+` and whose last line ends in
+    // `==`, the characters JSON escaping and the armor alphabet share.
+    const SLASHED = [
+      `/${bodyLine(26, 63)}`,
+      `+${bodyLine(27, 63)}`,
+      `//${bodyLine(28, 62)}`,
+      bodyLine(29, 64),
+      `${bodyLine(30, 22)}==`,
+    ]
+
+    it.each(
+      LAYOUTS.flatMap(([name, build]) => [true, false].map(end => [name, end, build] as const))
+    )('redacts a %s key with slashes, plus signs and padding (footer: %s)', (_name, end, build) => {
+      expectRedacted(build(SLASHED, end), SLASHED)
+    })
+
+    it.each([true, false])(
+      'redacts a key inside a JSON string with escaped slashes (footer: %s)',
+      end => {
+        const output = JSON.stringify({ a: pem(SLASHED, { end }), b: 'KEEP THIS PROSE' })
+          .split('/')
+          .join('\\/')
+        // Witness: the fixture really carries `\/` escapes.
+        expect(output).toContain('\\/')
+        const result = safety.sanitizeOutput('shell_exec', output)
+        expect(JSON.parse(result.content)).toEqual({ a: '[REDACTED]', b: 'KEEP THIS PROSE' })
+        expect(leakedFragment(result.content.split('\\/').join('/'), SLASHED)).toBeNull()
+      }
+    )
+
+    it('redacts a key whose label has four words of sixteen characters', () => {
+      const label = 'ABCDEFGHIJKLMNOP '.repeat(4)
+      const lines = bodyLines(31)
+      expect(expectRedacted(pem(lines, { label }), lines).content).toBe('[REDACTED]')
+    })
+
+    it.each([
+      ['a five-word label', (lines: string[]) => pem(lines, { label: 'A B C D E ' })],
+      [
+        'BLOCK on a label other than PGP',
+        (lines: string[]) =>
+          [header('RSA ', ' BLOCK'), ...lines, footer('RSA ', ' BLOCK')].join('\n'),
+      ],
+      [
+        'a public key',
+        (lines: string[]) =>
+          ['-----BEGIN PUBLIC KEY-----', ...lines, '-----END PUBLIC KEY-----'].join('\n'),
+      ],
+    ])('leaves %s unchanged', (_name, build) => {
+      const lines = bodyLines(32)
+      const text = build(lines)
+      const result = safety.sanitizeOutput('shell_exec', text)
+      expect(result.content).toBe(text)
+      expect(result.was_modified).toBe(false)
+      // Witness: the same body under a valid header is redacted.
+      expectRedacted(pem(lines), lines)
+    })
+
+    describe('createPrivateKeyBlockTracker', () => {
+      const body = bodyLines(33).join('\n')
+
+      it('takes the state of the last marker in a chunk', () => {
+        const opened = createPrivateKeyBlockTracker()
+        opened.observe(`${footer()}\nlog line\n${header()}\n`)
+        expect(opened.hidesPreview(body)).toBe(true)
+        // Witness: a snapshot that still shows the header is previewed.
+        expect(opened.hidesPreview(`${header()}\n${body}`)).toBe(false)
+
+        const closed = createPrivateKeyBlockTracker()
+        closed.observe(`${header()}\n${body}\n${footer()}\n`)
+        expect(closed.hidesPreview(body)).toBe(false)
+      })
+
+      it('keeps hiding the preview of a block that never closes', () => {
+        // Intended: without a footer, nothing after the header can be told
+        // apart from the body, so the preview stays off until the tool ends.
+        const tracker = createPrivateKeyBlockTracker()
+        tracker.observe(`${header()}\n${body}\n`)
+        const log = 'ordinary log line\n'.repeat(4_000)
+        tracker.observe(log)
+        expect(log.length).toBeGreaterThan(64 * 1024)
+        expect(tracker.hidesPreview(log)).toBe(true)
+      })
+
+      it('finds the longest header fed one character per chunk', () => {
+        const longest = header('ABCDEFGHIJKLMNOP '.repeat(4))
+        const tracker = createPrivateKeyBlockTracker()
+        for (const char of `log\n${longest}\n`) tracker.observe(char)
+        expect(tracker.hidesPreview(body)).toBe(true)
+
+        // Witness: one character over the label bound, nothing opens.
+        const tooLong = createPrivateKeyBlockTracker()
+        for (const char of `log\n${header('ABCDEFGHIJKLMNOPQ '.repeat(4))}\n`) tooLong.observe(char)
+        expect(tooLong.hidesPreview(body)).toBe(false)
+      })
+    })
+
     function timed(content: string) {
       const started = performance.now()
       const result = safety.sanitizeOutput('shell_exec', content)
@@ -1415,7 +1569,8 @@ describe('BasicSafety', () => {
         expect(() => {
           outcome = timed(content)
         }).not.toThrow()
-        // Witness: the text came back whole, so the scan ran to the end.
+        // No marker completes, so the text must come back whole; the time
+        // bound is what shows the label scan did not backtrack.
         expectSameText(outcome?.result.content, content)
         expect(outcome?.elapsedMs).toBeLessThan(2_000)
       },

@@ -7,7 +7,7 @@ import {
 import type { ToolCallTokens } from '../../progress/types.js'
 import { ToolError } from '../errors'
 import type { ExecutionContext } from '../interfaces'
-import { createPrivateKeyBlockTracker } from '../safety/safety'
+import { type PrivateKeyBlockTracker, createPrivateKeyBlockTracker } from '../safety/safety'
 import { RingBuffer } from '../tools/ringBuffer'
 import type { TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
@@ -101,7 +101,7 @@ export async function executeSingleTool(
   // Once the buffer evicts a private key's header, the body left in the
   // snapshot no longer looks like a key, so the preview is skipped until the
   // footer arrives.
-  let keyBlocks: ReturnType<typeof createPrivateKeyBlockTracker> | null = null
+  let keyBlocks: PrivateKeyBlockTracker | null = null
   const executionContext: ExecutionContext = {
     onOutput: chunk => {
       ringBuffer?.append(chunk)
