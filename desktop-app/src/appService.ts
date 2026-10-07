@@ -1284,7 +1284,8 @@ export class AppService {
 
       const assertContextIsCurrent = () => {
         this.assertSessionGeneration(context.sessionGeneration)
-        if (this.sessionToken !== context.sessionToken || this.me?.teamId !== context.teamId) {
+        const currentTeamId = String(this.me?.teamId || '').trim()
+        if (this.sessionToken !== context.sessionToken || currentTeamId !== context.teamId) {
           throw new Error('stale_auth_epoch: authenticated team scope changed during operation')
         }
         this.assertAuthEnvironmentBinding(context.environmentBinding)
