@@ -17,6 +17,18 @@ vi.mock('child_process', async importOriginal => {
   return { ...actual, spawn: vi.fn(actual.spawn) }
 })
 
+// The fake clock does not reach node:timers/promises, so the group-termination
+// poll sleeps through the global setTimeout: real under real timers, fake under
+// a fake clock.
+vi.mock('node:timers/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:timers/promises')>()
+  return {
+    ...actual,
+    setTimeout: (delayMs: number) =>
+      new Promise<void>(resolve => globalThis.setTimeout(resolve, delayMs)),
+  }
+})
+
 /** Mirrors ShellTool.MAX_RESULT_BYTES (1 MB minus 2048 bytes of headroom). */
 const MAX_RESULT_BYTES = 1024 * 1024 - 2048
 /** Delay before a timeout or cancellation is triggered on a real process. */
@@ -538,5 +550,119 @@ describe('ShellTool single finalizer races (#1028 P1, hermetic child)', () => {
     expect(warn.mock.calls.map(call => call[0])).toEqual([
       { component: 'ShellTool', errorCode: 'EINVAL' },
     ])
+  })
+
+  /** Fakes performance.now as well, so the termination deadline follows the fake clock. */
+  const useFakeClock = () =>
+    vi.useFakeTimers({
+      toFake: [
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        'setImmediate',
+        'clearImmediate',
+        'Date',
+        'performance',
+      ],
+    })
+
+  /** Intercepts process.kill; the group probe never confirms absence. */
+  function groupThatNeverDisappears() {
+    const signals: Array<{ pid: number; signal: unknown; at: number }> = []
+    vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
+      signals.push({ pid, signal, at: performance.now() })
+      return true
+    })
+    return signals
+  }
+
+  const TIMEOUT_FOOTER = (timeoutMs: number) =>
+    `[Command killed after ${timeoutMs}ms timeout — partial output above]`
+
+  for (const closeAfterSigtermMs of [100, SHELL_TIMEOUT_CLEANUP_MS - 100]) {
+    it(`R1-H1: a close delivered ${closeAfterSigtermMs}ms after SIGTERM with a group probe that never confirms absence settles within the cleanup budget and reports process_group_termination_failed`, async () => {
+      useFakeClock()
+      const child = hermeticChild()
+      vi.mocked(spawn).mockImplementationOnce(() => child as never)
+      const signals = groupThatNeverDisappears()
+      const timeoutMs = 1_000
+      let settledAt: number | undefined
+      const execution = new ShellTool(workspacePath, timeoutMs, []).execute({
+        command: 'hermetic command',
+      })
+      void execution.then(() => {
+        settledAt = performance.now()
+      })
+      child.stdout.emit('data', Buffer.from('partial'))
+      await vi.advanceTimersByTimeAsync(timeoutMs)
+      const sigterm = signals.find(entry => entry.signal === 'SIGTERM')
+      expect(sigterm).toMatchObject({ pid: -FAKE_PID })
+      const terminationStartedAt = sigterm!.at
+
+      await vi.advanceTimersByTimeAsync(closeAfterSigtermMs)
+      expect(settledAt).toBeUndefined()
+      child.signalCode = 'SIGTERM'
+      child.emit('close', null)
+      await vi.advanceTimersByTimeAsync(SHELL_TIMEOUT_CLEANUP_MS)
+
+      expect(settledAt).toBeDefined()
+      expect(settledAt! - terminationStartedAt).toBeLessThanOrEqual(SHELL_TIMEOUT_CLEANUP_MS)
+      const result = await execution
+      expect(result.is_error).toBe(true)
+      expect(result.content).toBe(
+        `stdout:\npartial\n\n${TIMEOUT_FOOTER(timeoutMs)}\n\n[process_group_termination_failed]`
+      )
+      // Witness: close verification ran and probed the group after close.
+      const probesAfterClose = signals.filter(
+        entry => entry.signal === 0 && entry.at >= terminationStartedAt + closeAfterSigtermMs
+      )
+      expect(probesAfterClose.length).toBeGreaterThan(0)
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  }
+
+  it('R1-H1: a natural exit whose group never disappears and whose stdio never closes is bounded by the execution timeout plus the cleanup budget', async () => {
+    useFakeClock()
+    const child = hermeticChild()
+    vi.mocked(spawn).mockImplementationOnce(() => child as never)
+    const signals = groupThatNeverDisappears()
+    const timeoutMs = 3 * SHELL_STDIO_DRAIN_MS + SHELL_STDIO_DRAIN_MS / 2
+    const startedAt = performance.now()
+    let settledAt: number | undefined
+    const execution = new ShellTool(workspacePath, timeoutMs, []).execute({
+      command: 'hermetic command',
+    })
+    void execution.then(() => {
+      settledAt = performance.now()
+    })
+    child.stdout.emit('data', Buffer.from('natural output'))
+    child.exitCode = 0
+    child.emit('exit', 0, null)
+
+    await vi.advanceTimersByTimeAsync(timeoutMs)
+    // Witness: the drain poll probed the live group before the execution timeout.
+    const drainProbes = signals.filter(
+      entry => entry.signal === 0 && entry.at < startedAt + timeoutMs
+    )
+    expect(drainProbes).toHaveLength(3)
+    expect(signals.filter(entry => entry.signal === 'SIGTERM')).toEqual([
+      { pid: -FAKE_PID, signal: 'SIGTERM', at: startedAt + timeoutMs },
+    ])
+
+    await vi.advanceTimersByTimeAsync(SHELL_TIMEOUT_CLEANUP_MS - 1)
+    expect(settledAt).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(settledAt).toBe(startedAt + timeoutMs + SHELL_TIMEOUT_CLEANUP_MS)
+    const result = await execution
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe(
+      `${notice('timeout')}stdout:\nnatural output\n\n${TIMEOUT_FOOTER(timeoutMs)}\n\n[process_group_termination_failed]`
+    )
+    expect(heldWarnings()).toEqual([
+      expect.objectContaining({ reason: 'timeout', processGroupTerminated: false }),
+    ])
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

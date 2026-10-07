@@ -128,6 +128,14 @@
     "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-g: an asynchronous start failure reports only the error code and publishes one result"
   },
   {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) R1-H1: a close delivered 5900ms after SIGTERM with a group probe that never confirms absence settles within the cleanup budget and reports process_group_termination_failed"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) R1-H1: a natural exit whose group never disappears and whose stdio never closes is bounded by the execution timeout plus the cleanup budget"
+  },
+  {
     "suite": "config.toolProgressInterval.test.ts",
     "fullName": "CLERUM_TOOL_PROGRESS_INTERVAL_MS (#1028 P2) P2-b: malformed and sub-second values stop startup with the exact message and do not echo the value"
   }
