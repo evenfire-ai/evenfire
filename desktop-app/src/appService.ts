@@ -1255,7 +1255,7 @@ export class AppService {
   ): Promise<T> {
     const targetTeamId = String(teamId || '').trim()
     const run = () => this.runWithTeamContextInTeamQueue(targetTeamId, operation)
-    return targetTeamId ? this.withNativeAuthEnvironmentCommit(run) : run()
+    return run()
   }
 
   private async runWithTeamContextInTeamQueue<T>(
@@ -1280,82 +1280,110 @@ export class AppService {
 
     await previousQueue.catch(() => undefined)
 
-    let operationError: unknown
     try {
-      const originalToken = this.requireSessionToken()
-      const originalTeamId = await this.getCurrentSessionTeamId(originalToken)
-      let activeToken = originalToken
-      const shouldSwitch = originalTeamId !== targetTeamId
-      const shouldRestore = Boolean(originalTeamId && shouldSwitch)
-      let restoredOriginalTeam = false
-      const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
-      if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
-
-      try {
-        if (shouldSwitch) {
-          activeToken = await this.switchSessionToTeam(targetTeamId, originalToken, {
-            commitOwnerHeld: true,
-          })
+      const context = await this.withNativeAuthEnvironmentCommit(async () => {
+        const sessionToken = this.requireSessionToken()
+        const teamId = await this.getCurrentSessionTeamId(sessionToken)
+        return {
+          sessionToken,
+          teamId,
+          sessionGeneration: this.sessionGeneration,
+          environmentBinding: this.captureAuthEnvironmentBinding(),
         }
+      })
+
+      const assertContextIsCurrent = () => {
+        this.assertSessionGeneration(context.sessionGeneration)
+        if (this.sessionToken !== context.sessionToken || this.me?.teamId !== context.teamId) {
+          throw new Error('stale_auth_epoch: authenticated team scope changed during operation')
+        }
+        this.assertAuthEnvironmentBinding(context.environmentBinding)
+      }
+
+      if (context.teamId === targetTeamId) {
+        const { request } = await this.withNativeAuthEnvironmentCommit(async () => {
+          assertContextIsCurrent()
+          return { request: operation(context.sessionToken) }
+        })
+        const result = await request
+        return this.withNativeAuthEnvironmentCommit(async () => {
+          assertContextIsCurrent()
+          return result
+        })
+      }
+
+      return await this.withNativeAuthEnvironmentCommit(async () => {
+        assertContextIsCurrent()
+        const originalToken = context.sessionToken
+        const originalTeamId = context.teamId
+        const shouldRestore = Boolean(originalTeamId)
+        let restoredOriginalTeam = false
+        let operationError: unknown
+        const releaseTransientHop = this.enterGfsTransientTeamHop()
+        if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
 
         try {
-          return await operation(activeToken)
-        } catch (error) {
-          operationError = error
-          throw error
+          const activeToken = await this.switchSessionToTeam(targetTeamId, originalToken, {
+            commitOwnerHeld: true,
+          })
+
+          try {
+            return await operation(activeToken)
+          } catch (error) {
+            operationError = error
+            throw error
+          } finally {
+            if (shouldRestore) {
+              try {
+                await this.switchSessionToTeam(originalTeamId, this.requireSessionToken(), {
+                  commitOwnerHeld: true,
+                })
+                restoredOriginalTeam = true
+              } catch (restoreError) {
+                if (!operationError) throw restoreError
+                console.warn(
+                  '[AppService] Failed to restore team context after operation:',
+                  restoreError
+                )
+              }
+            }
+            if (restoredOriginalTeam && this.sessionToken) {
+              this.updateEntityChangeSessionToken(this.sessionToken)
+              this.restartEntityChangeStreamForSessionReplacement()
+            } else if (
+              shouldRestore &&
+              this.sessionToken &&
+              this.me &&
+              this.me.teamId !== originalTeamId
+            ) {
+              // A failed restore leaves the hop team as the actual committed
+              // session. Rebind the stream to the token that remains active.
+              this.updateEntityChangeSessionToken(this.sessionToken)
+              this.restartEntityChangeStreamForSessionReplacement()
+            }
+          }
         } finally {
           if (shouldRestore) {
-            try {
-              await this.switchSessionToTeam(originalTeamId, this.requireSessionToken(), {
-                commitOwnerHeld: true,
-              })
-              restoredOriginalTeam = true
-            } catch (restoreError) {
-              if (!operationError) throw restoreError
-              console.warn(
-                '[AppService] Failed to restore team context after operation:',
-                restoreError
-              )
+            this.chatStoreHomeTeamId = null
+            // A failed switch back leaves the session on the hop team while the
+            // store is still bound to the pinned home team. Rebind so the store
+            // scope and delete-fence authority agree again. A rebind failure is
+            // logged and never replaces the operation or restore error.
+            const sessionUserId = this.me?.id
+            if (sessionUserId && this.me?.teamId !== originalTeamId) {
+              try {
+                await this.bindCurrentChatStore(sessionUserId)
+              } catch (rebindError) {
+                console.error(
+                  '[AppService] Failed to rebind the chat store after a failed team restore:',
+                  rebindError
+                )
+              }
             }
           }
-          if (restoredOriginalTeam && this.sessionToken) {
-            this.updateEntityChangeSessionToken(this.sessionToken)
-            this.restartEntityChangeStreamForSessionReplacement()
-          } else if (
-            shouldRestore &&
-            this.sessionToken &&
-            this.me &&
-            this.me.teamId !== originalTeamId
-          ) {
-            // A failed restore leaves the hop team as the actual committed
-            // session. Rebind now that the restore attempt is over; the stream
-            // must not remain attached to the replaced pre-hop token.
-            this.updateEntityChangeSessionToken(this.sessionToken)
-            this.restartEntityChangeStreamForSessionReplacement()
-          }
+          releaseTransientHop()
         }
-      } finally {
-        if (shouldRestore) {
-          this.chatStoreHomeTeamId = null
-          // A failed switch back leaves the session on the hop team while the
-          // store is still bound to the pinned home team. Rebind so the store
-          // scope and the delete-fence authority (both derived from
-          // chatStoreTeamId) agree again. A rebind failure is logged and never
-          // replaces the error of the operation or of the failed restore.
-          const sessionUserId = this.me?.id
-          if (sessionUserId && this.me?.teamId !== originalTeamId) {
-            try {
-              await this.bindCurrentChatStore(sessionUserId)
-            } catch (rebindError) {
-              console.error(
-                '[AppService] Failed to rebind the chat store after a failed team restore:',
-                rebindError
-              )
-            }
-          }
-        }
-        releaseTransientHop?.()
-      }
+      })
     } finally {
       releaseQueue()
     }
@@ -1777,9 +1805,7 @@ export class AppService {
   }
 
   async getDependenciesHealth(): Promise<DependencyHealth> {
-    await this.withNativeAuthEnvironmentCommit(() =>
-      this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
-    )
+    await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
     const [externalHealth, rpcHealth] = await Promise.allSettled([
       this.authClient.health(),
       this.rpcClient.health(),
@@ -1966,7 +1992,7 @@ export class AppService {
   }
 
   async saveRuntimeConfig(next: DesktopRuntimeConfig) {
-    return this.withNativeAuthEnvironmentCommit(async () => {
+    await this.withNativeAuthEnvironmentCommit(async () => {
       const nextEnvKey = resolveEnvKey(next.externalRestApiBaseUrl, next.rpcProxyBaseUrl || '')
       const sameUploadBoundary =
         nextEnvKey === getActiveEnvKey() &&
@@ -1974,9 +2000,9 @@ export class AppService {
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
       if (sameUploadBoundary) await saveDesktopRuntimeConfig(next)
       else await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
-      await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
-      return getDesktopRuntimeConfigState()
     })
+    await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+    return getDesktopRuntimeConfigState()
   }
 
   async deleteRuntimeConfig(optionId: string) {
@@ -2171,11 +2197,10 @@ export class AppService {
         this.sessionGeneration += 1
         return this.sessionGeneration
       })
-      await this.withNativeAuthEnvironmentCommit(async () => {
-        if (this.sessionGeneration === committedGeneration) {
-          await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
-        }
-      })
+      const shouldResolve = await this.withNativeAuthEnvironmentCommit(
+        async () => this.sessionGeneration === committedGeneration
+      )
+      if (shouldResolve) await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
       return getDesktopRuntimeConfigState()
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
@@ -2201,8 +2226,8 @@ export class AppService {
       })
       await this.withNativeAuthEnvironmentCommit(async () => {
         this.assertSessionGeneration(loginGeneration)
-        await this.resolveRuntimeConfigIfNeeded()
       })
+      await this.resolveRuntimeConfigIfNeeded()
       this.assertSessionGeneration(loginGeneration)
       const normalizedEmail = email.trim().toLowerCase()
       return await this.completePasswordLogin(normalizedEmail, password, loginGeneration)
@@ -2307,20 +2332,36 @@ export class AppService {
   }
 
   private async resolveRuntimeConfigIfNeeded(): Promise<void> {
-    hydrateDesktopRuntimeConfig()
-    if (!isDesktopRuntimeConfigured()) return
-    if (config.rpcProxyBaseUrl?.trim()) return
-    const externalRestApiBaseUrl = canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl)
+    const request = await this.withNativeAuthEnvironmentCommit(async () => {
+      hydrateDesktopRuntimeConfig()
+      if (!isDesktopRuntimeConfigured() || config.rpcProxyBaseUrl?.trim()) return null
+      return {
+        externalRestApiBaseUrl: canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl),
+        appName: config.appName,
+        sessionGeneration: this.sessionGeneration,
+        environmentBinding: this.captureAuthEnvironmentBinding(),
+      }
+    })
+    if (!request) return
+
     const discovered = await this.authClient.getDesktopEnvironment()
-    if (!sameDesktopRestEndpoint(discovered.externalRestApiBaseUrl, externalRestApiBaseUrl)) {
+    if (
+      !sameDesktopRestEndpoint(discovered.externalRestApiBaseUrl, request.externalRestApiBaseUrl)
+    ) {
       throw new Error('Desktop environment discovery returned a different REST endpoint')
     }
-    await saveDesktopRuntimeConfig({
-      // Discovery is scoped to the configured REST endpoint; it may provide
-      // RPC details but must never switch or overwrite another REST profile.
-      externalRestApiBaseUrl,
-      rpcProxyBaseUrl: discovered.rpcProxyBaseUrl,
-      appName: discovered.appName || config.appName,
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(request.sessionGeneration)
+      this.assertAuthEnvironmentBinding(request.environmentBinding)
+      hydrateDesktopRuntimeConfig()
+      if (!isDesktopRuntimeConfigured() || config.rpcProxyBaseUrl?.trim()) return
+      await saveDesktopRuntimeConfig({
+        // Discovery is scoped to the configured REST endpoint; it may provide
+        // RPC details but must never switch or overwrite another REST profile.
+        externalRestApiBaseUrl: request.externalRestApiBaseUrl,
+        rpcProxyBaseUrl: discovered.rpcProxyBaseUrl,
+        appName: discovered.appName || request.appName,
+      })
     })
   }
 

@@ -8,6 +8,101 @@ import {
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService deliberate team transition ownership', () => {
+  it('does not let REST discovery block logout or overwrite a later session revision', async () => {
+    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+    const discovery = deferred<{
+      externalRestApiBaseUrl: string
+      rpcProxyBaseUrl: string
+      appName: string
+    }>()
+    const discoveryStarted = deferred<void>()
+    const app = service as unknown as {
+      sessionToken: string | null
+      me: { id: string; email: string; name: string; picture: null; teamId: string; role: string }
+      authClient: unknown
+      rpcClient: unknown
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+      getDependenciesHealth(): Promise<unknown>
+    }
+    app.sessionToken = 'session-a'
+    app.me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      role: 'member',
+    }
+    app.authClient = {
+      getDesktopEnvironment: vi.fn(() => {
+        discoveryStarted.resolve()
+        return discovery.promise
+      }),
+      health: vi.fn().mockResolvedValue({ status: 'ok' }),
+    }
+    app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
+    app.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
+
+    const healthRequest = app.getDependenciesHealth()
+    await discoveryStarted.promise
+    await expect(service.logout()).resolves.toBeTypeOf('number')
+    discovery.resolve({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+      appName: 'Environment A',
+    })
+    await healthRequest
+
+    expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe('')
+  })
+
+  it('lets logout commit while a same-team request is pending and rejects its stale result', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const request = deferred<string>()
+    const requestStarted = deferred<void>()
+    const app = service as unknown as {
+      sessionToken: string | null
+      me: {
+        id: string
+        email: string
+        name: string
+        picture: null
+        teamId: string
+        teamName: string
+        role: string
+      } | null
+      runWithTeamContext<T>(teamId: string, operation: (token: string) => Promise<T>): Promise<T>
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    app.sessionToken = 'session-a'
+    app.me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    app.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
+    const operation = app.runWithTeamContext('team-a', async () => {
+      requestStarted.resolve()
+      return request.promise
+    })
+    await requestStarted.promise
+
+    await expect(service.logout()).resolves.toBeTypeOf('number')
+    request.resolve('old-session-result')
+
+    await expect(operation).rejects.toThrow(/stale_(auth_epoch|session_generation)/)
+    expect(app.sessionToken).toBeNull()
+  })
+
   it('finishes GFS activation before a queued workflow read borrows another team', async () => {
     const { service, restA } = await createNativeCommitTestHarness()
     const teamBResponse = deferred<{
