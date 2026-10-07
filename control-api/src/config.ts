@@ -208,6 +208,30 @@ type Config = {
   workflowArtifactDownloadMaxBytes: number
   // Per-minute rate limits (PG-backed token buckets).
   approvalRlRequestPerMin: number
+  adminSubscriptionReadPerMin: number
+  adminSubscriptionWritePerMin: number
+  subscriptionOAuthCallbackPerMin: number
+  adminWorkflowReadPerMin: number
+  adminWorkflowGrantReadPerMin: number
+  adminWorkflowGrantWritePerMin: number
+  adminWorkflowTriggerPerMin: number
+  adminOutputsReadPerMin: number
+  llmProviderAttemptAuthorizePerMin: number
+  llmProviderAttemptAuthorizeAnonymousIpPerMin: number
+  adminRegistryKeysPerMin: number
+  adminRegistryGrantsPerMin: number
+  adminRegistryConnectStatusPerMin: number
+  adminRegistryConnectRequestPerMin: number
+  adminRegistryConnectRecoveryPerMin: number
+  adminConnectorDeleteEdgePerMin: number
+  adminConnectorDeletePerMin: number
+  pluginSdkAdminRlPerMin: number
+  pluginSdkInternalRlPerMin: number
+  pluginSdkCredentialRlPerMin: number
+  pluginSdkAuthenticatedPreauthRlPerMin: number
+  adminGfsGrantsPerMin: number
+  adminGfsSharesPerMin: number
+  adminGfsLegacyGrantReportPerMin: number
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
   approvalRlExternalEdgePerMin: number
@@ -1019,8 +1043,83 @@ export const config: Config = {
     'CLERUM_ATTACHMENT_MAX_BYTES',
     50 * 1024 * 1024
   ),
-  approvalRlRequestPerMin: Number(process.env.APPROVAL_RL_REQUEST_PER_MIN || 120),
-  approvalRlRefreshPerMin: Number(process.env.APPROVAL_RL_REFRESH_PER_MIN || 20),
+  adminSubscriptionReadPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_SUBSCRIPTION_READ_PER_MIN',
+    150
+  ),
+  adminSubscriptionWritePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_SUBSCRIPTION_WRITE_PER_MIN',
+    100
+  ),
+  subscriptionOAuthCallbackPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_SUBSCRIPTION_OAUTH_CALLBACK_PER_MIN',
+    100
+  ),
+  adminWorkflowReadPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_WORKFLOW_READ_PER_MIN', 300),
+  adminWorkflowGrantReadPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_WORKFLOW_GRANT_READ_PER_MIN',
+    300
+  ),
+  adminWorkflowGrantWritePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_WORKFLOW_GRANT_WRITE_PER_MIN',
+    100
+  ),
+  adminWorkflowTriggerPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_WORKFLOW_TRIGGER_PER_MIN',
+    50
+  ),
+  adminOutputsReadPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_OUTPUTS_READ_PER_MIN', 150),
+  llmProviderAttemptAuthorizePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MIN',
+    300
+  ),
+  llmProviderAttemptAuthorizeAnonymousIpPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_ANONYMOUS_IP_PER_MIN',
+    60
+  ),
+  adminRegistryKeysPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_REGISTRY_KEYS_PER_MIN', 150),
+  adminRegistryGrantsPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_REGISTRY_GRANTS_PER_MIN',
+    150
+  ),
+  adminRegistryConnectStatusPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_REGISTRY_CONNECT_STATUS_PER_MIN',
+    150
+  ),
+  adminRegistryConnectRequestPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_REGISTRY_CONNECT_REQUEST_PER_MIN',
+    15
+  ),
+  adminRegistryConnectRecoveryPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_REGISTRY_CONNECT_RECOVERY_PER_MIN',
+    50
+  ),
+  adminConnectorDeleteEdgePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_CONNECTOR_DELETE_EDGE_PER_MIN',
+    300
+  ),
+  adminConnectorDeletePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_CONNECTOR_DELETE_PER_MIN',
+    150
+  ),
+  pluginSdkAdminRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_ADMIN_PER_MIN', 600),
+  pluginSdkInternalRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_INTERNAL_PER_MIN', 600),
+  pluginSdkCredentialRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_CREDENTIAL_PER_MIN',
+    1800
+  ),
+  pluginSdkAuthenticatedPreauthRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN',
+    6000
+  ),
+  adminGfsGrantsPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_GFS_GRANTS_PER_MIN', 150),
+  adminGfsSharesPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_GFS_SHARES_PER_MIN', 150),
+  adminGfsLegacyGrantReportPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_GFS_LEGACY_GRANT_REPORT_PER_MIN',
+    150
+  ),
+  approvalRlRequestPerMin: positiveIntegerFromEnv('APPROVAL_RL_REQUEST_PER_MIN', 600),
+  approvalRlRefreshPerMin: positiveIntegerFromEnv('APPROVAL_RL_REFRESH_PER_MIN', 100),
   approvalRlExternalPerMin: externalRateLimitConfig.operation,
   approvalRlExternalEdgePerMin: externalRateLimitConfig.session,
   // By default the source-IP backstop is wider than the per-session edge bucket
@@ -1028,7 +1127,7 @@ export const config: Config = {
   // platform-wide ceiling. Operators may override these independent scopes;
   // crossed values are preserved after the boot advisory above.
   approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
-  oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
+  oauthBrokerRlPerMin: positiveIntegerFromEnv('CONTROL_API_OAUTH_BROKER_RL_PER_MIN', 300),
   // The public control-admin token routes (password reset, invitation, email
   // confirmation) have two buckets per route. The first keys on source IP and
   // the submitted value (email, login or token prefix): one person retrying.
@@ -1048,15 +1147,15 @@ export const config: Config = {
   // would effectively fail open.
   pluginSdkNotificationsRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN',
-    150
+    750
   ),
   pluginSdkPromptBridgeRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN',
-    120
+    600
   ),
   pluginSdkRequestBucketRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN',
-    600
+    6000
   ),
   pluginSdkPreauthRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN', 600),
   // External GFS authority-boundary budgets. The four keyed by source IP or
@@ -1141,11 +1240,11 @@ export const config: Config = {
   // handler, and the hostWakeCoalesceWindowMs coalescer runs INSIDE the
   // handler (it coalesces annotation projections, not calls) — coalesced
   // calls therefore still consume rate-limit budget, so this budget must
-  // cover RAW calls (the arithmetic above counts raw calls). 30/min is >=3x
+  // cover RAW calls (the arithmetic above counts raw calls). 150/min is >=3x
   // the single-hold mechanism volume and covers one held wake plus prewarm
   // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
   // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
-  hostWakeRlPerMin: Number(process.env.CONTROL_API_HOST_WAKE_RL_PER_MIN || 30),
+  hostWakeRlPerMin: positiveIntegerFromEnv('CONTROL_API_HOST_WAKE_RL_PER_MIN', 150),
   // Owner-approved Host artifact-read policy. This durable control-plane
   // budget is enforced after live user/Host authorization and is shared by
   // list and download reads across rpc-proxy replicas.
@@ -1246,7 +1345,7 @@ export const config: Config = {
     const n = Number(process.env.NOTIFICATION_DESKTOP_GRACE_SECONDS || 90)
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 90
   })(),
-  approvalRlReissuePerMin: Number(process.env.APPROVAL_RL_REISSUE_PER_MIN || 5),
+  approvalRlReissuePerMin: positiveIntegerFromEnv('APPROVAL_RL_REISSUE_PER_MIN', 25),
   // Cleanup of stale token-bucket rows (older than 5 min — the only active
   // window). 5 min lines up with the longest bucket window we use.
   approvalRlCleanupIntervalMs: Number(process.env.APPROVAL_RL_CLEANUP_INTERVAL_MS || 5 * 60_000),

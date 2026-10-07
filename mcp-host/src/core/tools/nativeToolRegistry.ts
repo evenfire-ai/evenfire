@@ -1,6 +1,7 @@
 import type { CronScheduler } from '../../agent/cronScheduler'
 import { createGetCapabilitiesTool } from '../../capabilities/getCapabilitiesTool'
 import {
+  BRIDGE_TOOL_NAMES,
   createToolCallTool,
   createToolDescribeTool,
   createToolSearchTool,
@@ -12,9 +13,12 @@ import {
   referencedFilePins,
 } from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
+import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import type { GfsProcessingLeaseProvider } from '../../internalTools/gfsProcessingLease'
 import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
+import type { McpTool } from '../../types'
 import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
@@ -76,6 +80,10 @@ class InternalToolAdapter implements Tool {
   }
   traceDescriptor() {
     return { kind: 'internal_tool' as const, sourceRef: 'mcp-host' }
+  }
+
+  joinsAbortSettlement(): boolean {
+    return this.def.name === 'clerum__gfs_download' || this.def.name === 'clerum__gfs_read'
   }
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
@@ -171,30 +179,42 @@ export class NativeToolRegistry implements ToolRegistry {
     // Appended as a trailing optional dep so existing positional call sites
     // stay valid; only taskExecutor passes it.
     mcpManager?: McpManager,
-    // F3/F4 (dynamic-tool-loading): the STATIC feature flag
-    // (config.dynamicToolsEnabled). The 3 bridge tools are only registered when
-    // this is true, so a default-OFF host is byte-identical to today (no extra
-    // native tools, no discovery guidance — the guidance gates on the presence
-    // of clerum__tool_search). Constant per host/session, so it is cache-safe.
-    // Appended as a trailing optional so existing positional call sites stay
-    // valid; only taskExecutor passes it.
-    dynamicToolsEnabled?: boolean,
+    // F3/F4 (dynamic-tool-loading) + #1003: which concerns need the 3 bridge
+    // tools. `mcpDiscovery` is the MCP presentation decision (Codex/Grok mode
+    // or the legacy flag) and only counts when an McpManager is wired;
+    // `nativeDiscovery` is native `auto`, which needs the bridge even without
+    // MCP. With both false nothing is registered, so tools[] is byte-identical
+    // to a host without discovery and no discovery guidance is emitted (it
+    // gates on clerum__tool_search). Constant per host/session, so it is
+    // cache-safe. Trailing optional; only taskExecutor passes it.
+    discovery?: { mcpDiscovery: boolean; nativeDiscovery: boolean },
     // §13 (stateless agents): the ACTIVE LLM provider steers shell_exec
     // credential-slot stripping — only the active provider's credential env
     // var survives into the child env. Appended as a trailing optional so
     // existing positional call sites stay valid; only taskExecutor passes it.
-    activeLlmProvider?: LlmProvider
+    activeLlmProvider?: LlmProvider,
+    gfsDownload?: {
+      /** Omitted when the durable store is recovery-required; delivery then fails closed. */
+      store?: GfsDownloadStore
+      /** True only for attended, policy-eligible, healthy workspace delivery. */
+      deliveryAvailable: boolean
+      callerIdentity: string
+      callerWorkspacePath?: string
+      processingLeaseProvider: GfsProcessingLeaseProvider
+      retentionOwnerId?: string
+    }
   ) {
-    // file_read/file_write are scoped to the per-user root when a ScopedWorkspace
-    // is wired (F1c) — they operate on a raw path string, not the Workspace
-    // interface, so we read the per-user root off it explicitly. Falls back to
-    // the shared root when there is no user context (e.g. the tool-name listing
-    // registry in main.ts). ShellTool stays on the shared root: scoping its cwd
-    // does not contain absolute-path access — shell isolation is a documented
-    // residual (bundled with OS-level sandboxing).
+    // A Host-owned GFS store establishes a trusted caller binding even when
+    // memory is disabled. In that mode file tools never fall back to the shared
+    // Host root; if the caller root cannot be verified they are omitted.
+    // Without that Host store, preserve the legacy memory/shared-root behavior.
     const fileToolsRoot =
-      workspace instanceof ScopedWorkspace ? workspace.userRootPath : config.workspacePath
-    this.register(new FileReadTool(fileToolsRoot))
+      gfsDownload !== undefined
+        ? gfsDownload.callerWorkspacePath
+        : workspace instanceof ScopedWorkspace
+          ? workspace.userRootPath
+          : config.workspacePath
+    if (fileToolsRoot !== undefined) this.register(new FileReadTool(fileToolsRoot))
     // NOTE (residual): FileWriteTool writes via raw fs and bypasses
     // WorkspaceService.write → scanWriteContent. So a `file_write` to
     // `daily/*` / `MEMORY.md` is NOT injection-scanned. It is scoped to the
@@ -203,14 +223,15 @@ export class NativeToolRegistry implements ToolRegistry {
     // radius is self-injection of the user's own daily snapshot (low). Closing
     // it (route memory/daily-class file_write through WorkspaceService) is future
     // hardening, independent of F5.
-    this.register(new FileWriteTool(fileToolsRoot))
+    if (fileToolsRoot !== undefined) this.register(new FileWriteTool(fileToolsRoot))
     this.register(
       new ShellTool(
-        config.workspacePath,
+        gfsDownload ? gfsDownload.callerWorkspacePath : config.workspacePath,
         config.shellTimeout,
         config.envAllowlist,
         dynamicEnvProvider,
-        activeLlmProvider
+        activeLlmProvider,
+        gfsDownload?.processingLeaseProvider
       )
     )
     this.register(new HttpRequestTool(config.httpAllowlist))
@@ -241,6 +262,10 @@ export class NativeToolRegistry implements ToolRegistry {
         ...(gfsScopes.has('gfs.read')
           ? buildGfsReadTools(gfsClient, {
               referencedFiles: referencedFilePins(sourceMessage?.fileReferenceResolutions),
+              downloadStore: gfsDownload?.deliveryAvailable ? gfsDownload.store : undefined,
+              callerIdentity: gfsDownload?.callerIdentity,
+              callerWorkspacePath: gfsDownload?.callerWorkspacePath,
+              retentionOwnerId: gfsDownload?.retentionOwnerId,
             })
           : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
@@ -377,19 +402,43 @@ export class NativeToolRegistry implements ToolRegistry {
     )
 
     // F2/F3/F4 (dynamic-tool-loading): read-only discovery meta-tools + the
-    // execution bridge. They query the live MCP catalog (McpManager.getAllTools())
-    // on demand and never put schemas into the announced tools[] array.
-    // Gated on BOTH an McpManager being wired (chat path via taskExecutor; the
-    // tool-name listing registry in main.ts and tests omit it) AND the static
-    // feature flag (LOCKED #5: default OFF, opt-in, small hosts untouched). When
-    // the flag is OFF, none of these 3 tools are registered, so tools[] is
-    // byte-identical to today and the presence-gated discovery guidance is not
-    // emitted by either prompt path.
-    if (mcpManager && dynamicToolsEnabled) {
-      const getCatalog = () => mcpManager.getAllTools()
+    // execution bridge. They query the live catalog on demand and never put
+    // schemas into the announced tools[] array.
+    // Registered when MCP discovery needs them (an McpManager is wired — the
+    // tool-name listing registry in main.ts and tests omit it — AND the MCP
+    // presentation enables the bridge; LOCKED #5: default OFF) or when native
+    // `auto` needs them (#1003; no McpManager required). Otherwise none of
+    // these 3 tools are registered, so tools[] is byte-identical to today and
+    // the presence-gated discovery guidance is not emitted by either prompt path.
+    const mcpDiscovery = Boolean(mcpManager && discovery?.mcpDiscovery)
+    const nativeDiscovery = discovery?.nativeDiscovery === true
+    if (mcpDiscovery || nativeDiscovery) {
+      // Single catalog. Without native discovery it is exactly the MCP catalog.
+      // With it (#1003), every non-bridge native is appended under the `native`
+      // pseudo-server so a deferred native can be searched and described, and
+      // MCP entries whose name collides with ANY native (bridge tools included)
+      // are dropped, because the registry routes such a name to the native.
+      // Read lazily: desktop tools are registered after construction and MCP
+      // servers connect late.
+      const getCatalog = (): McpTool[] => {
+        const mcpTools = mcpManager?.getAllTools() ?? []
+        if (!nativeDiscovery) return mcpTools
+        const allNatives = this.listDefinitions()
+        const nativeNames = new Set(allNatives.map(def => def.name))
+        const natives = allNatives.filter(def => !BRIDGE_TOOL_NAMES.has(def.name))
+        return [
+          ...mcpTools.filter(tool => !nativeNames.has(tool.name)),
+          ...natives.map(def => ({
+            name: def.name,
+            description: def.description,
+            inputSchema: def.parameters,
+            serverName: 'native',
+          })),
+        ]
+      }
       this.register(
         new InternalToolAdapter(
-          createToolSearchTool(getCatalog),
+          createToolSearchTool(getCatalog, { nativeTargets: nativeDiscovery }),
           outputDir,
           resolvedAttachmentOptions
         )
@@ -406,7 +455,11 @@ export class NativeToolRegistry implements ToolRegistry {
       // intercept at the top of `executeToolCalls`. The adapter's `execute` is a
       // safety net that errors if the intercept is bypassed.
       this.register(
-        new InternalToolAdapter(createToolCallTool(), outputDir, resolvedAttachmentOptions)
+        new InternalToolAdapter(
+          createToolCallTool({ nativeTargets: nativeDiscovery }),
+          outputDir,
+          resolvedAttachmentOptions
+        )
       )
     }
   }

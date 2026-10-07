@@ -56,19 +56,13 @@ describe('oauthBrokerJwtToken', () => {
 
   it('rejects a tampered token', () => {
     const { token } = issueOAuthBrokerJwt('sandbox-recipes', 'crm')
-    const [header, payload, encodedSignature] = token.split('.')
-    const signature = Buffer.from(encodedSignature, 'base64url')
-
+    // Alter signature bytes, not base64 padding bits that may decode identically.
+    const signatureStart = token.lastIndexOf('.') + 1
+    const signature = Buffer.from(token.slice(signatureStart), 'base64url')
     expect(signature.length).toBeGreaterThan(0)
-
-    const tamperedSignature = Buffer.from(signature)
-    tamperedSignature[0] ^= 0x01
-
-    expect(tamperedSignature.equals(signature)).toBe(false)
-
-    const tamperedToken = `${header}.${payload}.${tamperedSignature.toString('base64url')}`
-
-    expect(verifyOAuthBrokerJwt(tamperedToken)).toBeNull()
+    signature[0] = signature[0]! ^ 1
+    const tampered = token.slice(0, signatureStart) + signature.toString('base64url')
+    expect(verifyOAuthBrokerJwt(tampered)).toBeNull()
   })
 })
 

@@ -1,34 +1,16 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import {
-  isGrokSubscriptionUiEnabled,
-  loadGrokSubscriptionCapability,
-} from '@lib/grokSubscriptionFeature'
+import { isGrokSubscriptionUiEnabled } from '@lib/grokSubscriptionFeature'
+import { useSubscriptionCapabilities } from './useSubscriptionCapabilities'
 
 /**
- * True only once the Control API Grok capability probe proves the flag on.
- * Starts false and fails closed: a probe error keeps Grok out of operator
- * pickers exactly like the flag being off (a saved Grok value is still shown by
- * the caller, marked "(disabled)").
+ * True only once the shared Control API capability response proves the flag on.
+ * A transient failure after a confirmed true value does not hide a previously
+ * confirmed provider; before confirmation it still fails closed.
  */
-export function useGrokSubscriptionEnabled(): boolean {
-  const [enabled, setEnabled] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    loadGrokSubscriptionCapability().then(
-      capability => {
-        if (!cancelled) setEnabled(isGrokSubscriptionUiEnabled(capability))
-      },
-      () => {
-        if (!cancelled) setEnabled(false)
-      }
-    )
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  return enabled
+export function useGrokSubscriptionEnabled(enabled = true): boolean {
+  const { capabilities } = useSubscriptionCapabilities({ enabled })
+  return isGrokSubscriptionUiEnabled({
+    enabled: capabilities?.providers['grok-subscription']?.enabled ?? false,
+  })
 }

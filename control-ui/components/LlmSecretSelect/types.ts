@@ -18,8 +18,15 @@ export type LlmSecretSelectProps = {
   className?: string
   disabled?: boolean
   id?: string
-  onChange: (value: string) => void
+  /** Only used by the interactive variant; ignored when `readOnly` is set. */
+  onChange?: (value: string) => void
   options: LlmSecretSelectOption[]
   placeholder: string
+  /**
+   * Static presentation for read-only surfaces: renders the selected option
+   * (label + provider icons or meta) as a plain value display — no button,
+   * chevron, hover, or menu. Interactive behavior is unchanged when unset.
+   */
+  readOnly?: boolean
   value: string
 }

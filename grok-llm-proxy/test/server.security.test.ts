@@ -7,7 +7,8 @@ import request from 'supertest'
 import {
   ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
-  hashGrokCompletionRequestV1,
+  hashGrokCompletionRequest,
+  parseGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
@@ -19,7 +20,7 @@ import {
   type FinalizeAttemptSuccess,
   type RedeemAttemptSuccess,
 } from '../src/controlApiClient.js'
-import { MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
+import { GrokTransportError, MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import {
@@ -28,7 +29,9 @@ import {
   ENVELOPE_ALLOWANCE_BYTES,
   RequestLimitError,
   STREAM_LIMITS,
+  VISUAL_STREAM_LIMITS,
   streamGate,
+  visualStreamGate,
 } from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 
@@ -44,6 +47,7 @@ function config(overrides: Partial<GrokLlmProxyConfig> = {}): GrokLlmProxyConfig
     adminPort: 8081,
     probePort: 9090,
     maxBodyBytes: 1024,
+    maxVisualBodyBytes: LIMITS.maxVisualRequestBodyBytes,
     maxStreamDurationMs: 1_800_000,
     maxDeadlineMs: 1_800_000,
     upstreamIdleTimeoutMs: 600_000,
@@ -196,6 +200,257 @@ describe('grok-llm-proxy security surface', () => {
     expect(limited.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
     expect(limited.headers['ratelimit-policy']).toBe('60;w=60')
   })
+
+  it('reserves the visual transport budget for an authenticated ~30 MiB V2 body', async () => {
+    const { runtimeApp, adminApp } = createProxyApps(
+      config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES })
+    )
+    // Deliberately invalid ticket: this test checks parser admission and the
+    // unchanged ticket gate, without redeeming or contacting any model. 30 MiB
+    // is past the Codex 24 MiB visual ceiling and inside the Grok 35 MiB one.
+    const payload = {
+      executionTicket: 'invalid-ticket',
+      requestHash: 'a'.repeat(64),
+      request: {
+        schemaVersion: 'grok-completion-request.v2',
+        messages: [
+          {
+            role: 'user',
+            contentParts: [{ type: 'image', data: 'A'.repeat(30 * 1024 * 1024) }],
+          },
+        ],
+      },
+    }
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeGreaterThan(24 * 1024 * 1024)
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
+    const admitted = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send(payload)
+    expect(admitted.status).toBe(403)
+    expect(admitted.body.error).toBe('ticket_invalid')
+    // Witness: the body went through the visual gate, not the ordinary parser.
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+
+    // R9-M-B: without a platform JWT the body is never read, so the caller
+    // gets 401 instead of a parser's 413. The 401 is written before the upload
+    // ends; a keep-alive client has the unread rest discarded.
+    const anonymous = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Connection', 'keep-alive')
+      .send(payload)
+    expect(anonymous.status).toBe(401)
+    const noScope = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Connection', 'keep-alive')
+      .set('Authorization', `Bearer ${platformToken({ workflowControlScopes: [] })}`)
+      .send(payload)
+    expect(noScope.status).toBe(401)
+    const v1 = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        ...payload,
+        request: { ...payload.request, schemaVersion: 'grok-completion-request.v1' },
+      })
+    expect(v1.status).toBe(413)
+    expect(v1.body.error).toBe('payload_too_large')
+    const admin = await request(adminApp)
+      .post('/internal/admin/v1/grok/models')
+      .set('Authorization', `Bearer ${adminPermit()}`)
+      .send(payload)
+    expect(admin.status).toBe(413)
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    acquire.mockRestore()
+  }, 30_000)
+
+  // r10 Y1: the ticket is a signed JWT of a few hundred bytes. The non-image
+  // ceiling alone lets an ~8 MiB ticket reach jwt.verify, so the schema bounds
+  // it at the envelope allowance.
+  it('T-Y1-grok bounds the execution ticket at the envelope allowance before verifying it', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    const send = (executionTicket: string, body: Record<string, unknown> = {}) =>
+      request(runtimeApp)
+        .post('/internal/runtime/v1/grok/completions')
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send({ executionTicket, requestHash: 'a'.repeat(64), request: body })
+
+    // Witness: a ticket exactly at the bound reaches the verifier.
+    const atBound = await send('x'.repeat(ENVELOPE_ALLOWANCE_BYTES))
+    expect(atBound.status).toBe(403)
+    expect(atBound.body.error).toBe('ticket_invalid')
+
+    const overBound = await send('x'.repeat(ENVELOPE_ALLOWANCE_BYTES + 1))
+    expect(overBound.status).toBe(400)
+    expect(overBound.body.error).toBe('invalid_request')
+
+    // A V2 body pushed past the ordinary cap by its ticket and one small image
+    // takes the visual gate, is refused at the schema, and frees its slot.
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
+    const visual = await send('x'.repeat(8_000_000), {
+      schemaVersion: 'grok-completion-request.v2',
+      messages: [
+        { role: 'user', contentParts: [{ type: 'image', data: 'A'.repeat(1024 * 1024) }] },
+      ],
+    })
+    expect(visual.status).toBe(400)
+    expect(visual.body.error).toBe('invalid_request')
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    acquire.mockRestore()
+  }, 30_000)
+
+  it('refuses a declared length past the visual ceiling with 413 before reading it', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    const pad = 'A'.repeat(LIMITS.maxVisualRequestBodyBytes)
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .set('Connection', 'keep-alive')
+      .send({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: { schemaVersion: 'grok-completion-request.v2', pad },
+      })
+    expect(res.status).toBe(413)
+    expect(res.body.error).toBe('payload_too_large')
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+  }, 30_000)
+
+  it('answers a transport payload_too_large with HTTP 413 before any SSE byte', async () => {
+    const raw = {
+      schemaVersion: 'grok-completion-request.v2',
+      requestId: 'req-payload-too-large',
+      idempotencyKey: 'idem-payload-too-large',
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'hello' }],
+    }
+    const parsed = parseGrokCompletionRequest(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
+    const executionTicket = sign(
+      {
+        jti: '12121212-1212-4121-8121-121212121212',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId: 'att-payload-too-large',
+      },
+      'grok-llm-proxy'
+    )
+    let streamCalls = 0
+    const { runtimeApp, probeApp } = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+      streamCompletion: async () => {
+        streamCalls += 1
+        throw new GrokTransportError(
+          'payload_too_large',
+          'request exceeds maxVisualRequestBodyBytes'
+        )
+      },
+    })
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({ executionTicket, requestHash, request: raw })
+    // Witness: the request reached the transport.
+    expect(streamCalls).toBe(1)
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({ error: 'payload_too_large' })
+    const metricsText = (await request(probeApp).get('/metrics')).text
+    expect(metricsText).toMatch(
+      /^grok_proxy_attempt_failures_total\{code="payload_too_large"\} 1$/m
+    )
+  })
+
+  it('does not let a V2 declaration raise the non-image budget to 35 MiB', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    // One byte of text past the non-image ceiling plus its envelope allowance,
+    // far under the 35 MiB visual ceiling the V2 declaration opens.
+    const pad = 'x'.repeat(LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES + 1)
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: { schemaVersion: 'grok-completion-request.v2', pad },
+      })
+    expect(res.status).toBe(413)
+    expect(res.body.error).toBe('payload_too_large')
+    // Witness: the same body with an image-sized pad inside contentParts
+    // instead of text passes the size checks and stops at the ticket gate.
+    const imageSized = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: {
+          schemaVersion: 'grok-completion-request.v2',
+          messages: [{ role: 'user', contentParts: [{ type: 'image', data: pad }] }],
+        },
+      })
+    expect(imageSized.status).toBe(403)
+    expect(imageSized.body.error).toBe('ticket_invalid')
+  }, 30_000)
+
+  // Review R3-L3: V2 text repeated in content and in its text parts counts
+  // once on the non-image budget, as the same text does in V1.
+  it('R3-L3 counts V2 text repeated in content and its text parts once', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    const completion = (content: string, textPart: string) => ({
+      executionTicket: 'invalid-ticket',
+      requestHash: 'a'.repeat(64),
+      request: {
+        schemaVersion: 'grok-completion-request.v2',
+        messages: [
+          {
+            role: 'user',
+            content,
+            contentParts: [
+              { type: 'text', text: textPart },
+              { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+            ],
+          },
+        ],
+      },
+    })
+    const post = (content: string, textPart: string) =>
+      request(runtimeApp)
+        .post('/internal/runtime/v1/grok/completions')
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(completion(content, textPart))
+    // The share the proxy measures: no ticket, no image data, and the text
+    // part blanked because it repeats content.
+    const { executionTicket: _ticket, ...empty } = completion('', '')
+    empty.request.messages[0].contentParts[1] = { type: 'image', mimeType: 'image/png', data: '' }
+    const budget = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    const exact = budget - Buffer.byteLength(JSON.stringify(empty), 'utf8')
+
+    // A 4.5 MiB prompt beside an image passes the size checks and stops at the
+    // ticket gate.
+    const text = 'x'.repeat(4.5 * 1024 * 1024)
+    const repeated = await post(text, text)
+    expect(repeated.status).toBe(403)
+    expect(repeated.body).toEqual({ error: 'ticket_invalid' })
+
+    // Exact boundary: the largest text reaches the ticket gate, one more byte
+    // is refused 413.
+    const atLimit = await post('x'.repeat(exact), 'x'.repeat(exact))
+    expect(atLimit.status).toBe(403)
+    expect(atLimit.body).toEqual({ error: 'ticket_invalid' })
+    const overLimit = await post('x'.repeat(exact + 1), 'x'.repeat(exact + 1))
+    expect(overLimit.status).toBe(413)
+    expect(overLimit.body).toEqual({ error: 'payload_too_large' })
+
+    // Parts that do not repeat content keep both copies and are refused.
+    const mismatched = await post(`${text.slice(1)}y`, text)
+    expect(mismatched.status).toBe(413)
+    expect(mismatched.body).toEqual({ error: 'payload_too_large' })
+  }, 60_000)
 
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
     const { runtimeApp } = createProxyApps(config())
@@ -467,7 +722,7 @@ describe('grok-llm-proxy execution kill switch', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     const executionTicket = sign(
       {
         jti: '33333333-3333-4333-8333-333333333333',
@@ -609,10 +864,97 @@ describe('grok-llm-proxy startup config', () => {
       loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(LIMITS.maxRequestBodyBytes) })
     ).toThrow(/GROK_LLM_PROXY_MAX_BODY_BYTES must be at least/)
     // Witness: the floor itself and any larger value load.
-    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor) }).maxBodyBytes).toBe(floor)
-    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes).toBe(
-      floor + 1
+    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor) }).maxBodyBytes).toBe(
+      floor
     )
+    expect(
+      loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes
+    ).toBe(floor + 1)
+  })
+
+  it('defaults the visual body limit to the contract visual ceiling, with no allowance on top', () => {
+    expect(LIMITS.maxVisualRequestBodyBytes).toBe(36_700_160)
+    expect(loadConfig(base).maxVisualBodyBytes).toBe(LIMITS.maxVisualRequestBodyBytes)
+  })
+
+  it('refuses a visual body limit below the contract visual ceiling', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes - 1),
+      })
+    ).toThrow(
+      `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
+    expect(() => loadConfig({ ...base, GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: '1024' })).toThrow(
+      /^GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least 36700160,/
+    )
+    // Witness: the ceiling itself loads.
+    expect(
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes),
+      }).maxVisualBodyBytes
+    ).toBe(LIMITS.maxVisualRequestBodyBytes)
+  })
+
+  // The 2048Mi memory limit was measured with one visual stream at the contract
+  // ceiling. A larger visual limit would admit bodies that measurement never
+  // covered, so the proxy refuses to start with one.
+  it('refuses a visual body limit above the contract visual ceiling', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes + 1),
+      })
+    ).toThrow(
+      `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at most ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
+    expect(() =>
+      loadConfig({ ...base, GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(64 * 1024 * 1024) })
+    ).toThrow(/^GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at most 36700160,/)
+    // Witness: the ceiling itself loads.
+    expect(
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes),
+      }).maxVisualBodyBytes
+    ).toBe(LIMITS.maxVisualRequestBodyBytes)
+  })
+
+  // With an equal budget every visual envelope would also fit the ordinary
+  // parser's cap, so the visual gate's separate admission and memory
+  // accounting would never engage.
+  it('refuses a visual body limit less than or equal to the ordinary body limit', () => {
+    const equal = LIMITS.maxVisualRequestBodyBytes
+    expect(() =>
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_BODY_BYTES: String(equal),
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      })
+    ).toThrow(
+      'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than GROK_LLM_PROXY_MAX_BODY_BYTES'
+    )
+    expect(() =>
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_BODY_BYTES: String(equal + 1),
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      })
+    ).toThrow(
+      'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than GROK_LLM_PROXY_MAX_BODY_BYTES'
+    )
+    // Liveness witness: a visual limit one byte above the ordinary limit loads.
+    // The visual limit is pinned to the contract ceiling, so the ordinary limit
+    // moves instead.
+    expect(
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_BODY_BYTES: String(equal - 1),
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      }).maxVisualBodyBytes
+    ).toBe(equal)
   })
 
   it('T-R2-6c-grok does not refuse a request at the contract cap with a real ticket as payload_too_large', async () => {
@@ -692,7 +1034,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     // Applied after hashing: the ticket stays bound to the untampered request,
     // so the transport's parser rejects the body before any hash comparison.
     tamper?.(raw)
@@ -936,7 +1278,10 @@ describe('grok-llm-proxy attempt telemetry', () => {
 
   // Denies the redeem after `delayMs`, which is longer than the heartbeat
   // interval the caller configures.
-  function slowDenyingClient(code: string, delayMs: number): {
+  function slowDenyingClient(
+    code: string,
+    delayMs: number
+  ): {
     client: ControlApiClient
     redeemCalls: () => number
   } {
@@ -964,6 +1309,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
     maxStreamDurationMs?: number
     configOverrides?: Partial<GrokLlmProxyConfig>
     controlApiClient?: ControlApiClient
+    lookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>
   }) {
     const info = vi.spyOn(logger, 'info')
     const warn = vi.spyOn(logger, 'warn')
@@ -973,7 +1319,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
         options.controlApiClient ??
         (options.deniedCode ? denyingClient(options.deniedCode) : client),
       fetchFn: options.fetchFn ?? upstream(options.textDeltas ?? 0, options.calls ?? 0),
-      lookup,
+      lookup: options.lookup ?? lookup,
     })
     try {
       const res = await request(apps.runtimeApp)
@@ -1033,6 +1379,329 @@ describe('grok-llm-proxy attempt telemetry', () => {
         headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter },
       })) as typeof fetch
   }
+
+  it('logs the error of an unmapped handler failure while it still answers 503 provider_unavailable', async () => {
+    const boom = new Error('boom')
+    const failingClient = {
+      async redeem(): Promise<RedeemAttemptSuccess> {
+        throw boom
+      },
+      async finalize(): Promise<FinalizeAttemptSuccess> {
+        throw new Error('finalize must not run after a failed redeem')
+      },
+    } as unknown as ControlApiClient
+    const { res, lines } = await run({
+      providerAttemptId: 'att-unmapped-error',
+      controlApiClient: failingClient,
+    })
+    // Witnesses: the request reached the handler's catch and was logged once.
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-unmapped-error',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      httpStatus: 503,
+    })
+    expect(lines[0]?.err).toBe(boom)
+  })
+
+  it('logs a mapped transport failure without an err entry', async () => {
+    const { res, lines } = await run({
+      providerAttemptId: 'att-mapped-transport-error',
+      fetchFn: rateLimitedUpstream('7'),
+    })
+    // Witnesses: the failure reached the same catch and produced its attempt line.
+    expect(res.status).toBe(429)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-mapped-transport-error',
+      outcome: 'failed',
+      code: 'rate_limited',
+    })
+    expect('err' in (lines[0] ?? {})).toBe(false)
+  })
+
+  async function closedLoopbackPort(): Promise<number> {
+    const closed = createServer()
+    await new Promise<void>(resolve => closed.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = closed.address() as AddressInfo
+    await new Promise<void>(resolve => closed.close(() => resolve()))
+    return port
+  }
+
+  // Real undici fetch against a loopback port nothing listens on, so the
+  // failure is undici's own TypeError, whose cause message names the address.
+  function closedPortFetch(port: number, calls: { count: number }): typeof fetch {
+    return (async (_input: unknown, init?: RequestInit) => {
+      calls.count += 1
+      return fetch(`http://127.0.0.1:${port}/`, {
+        method: init?.method ?? 'GET',
+        signal: init?.signal ?? null,
+      })
+    }) as typeof fetch
+  }
+
+  // Serializes Error values with their message and cause, as the logger's err
+  // serializer does, so an error hidden in a log line cannot pass as clean.
+  function serializeWithErrors(value: unknown): string {
+    return JSON.stringify(value, (_key, nested: unknown) =>
+      nested instanceof Error
+        ? { name: nested.name, message: nested.message, cause: nested.cause }
+        : nested
+    )
+  }
+
+  // Review R3-L1: a completion fetch nothing accepted reaches the handler as a
+  // mapped transport error, so the attempt line keeps the cause code and drops
+  // the err entry whose cause message names the upstream address.
+  it('(r3-l1a) logs an upstream connection refusal by cause code, without err or address', async () => {
+    const port = await closedLoopbackPort()
+    const calls = { count: 0 }
+    const { res, lines } = await run({
+      providerAttemptId: 'att-upstream-refused',
+      fetchFn: closedPortFetch(port, calls),
+    })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    // Witnesses: the real fetch ran against the closed port, and the failure
+    // produced its attempt line.
+    expect(calls.count).toBe(1)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-upstream-refused',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      reason: 'upstream fetch failed',
+      causeCode: 'ECONNREFUSED',
+      deliveredAs: 'http_status',
+      httpStatus: 503,
+    })
+    expect('err' in lines[0]!).toBe(false)
+    expect(serializeWithErrors(lines[0])).not.toContain(`127.0.0.1:${port}`)
+    expectNoForbiddenKeys(lines[0]!)
+  })
+
+  // Review R3-L9: the admin route's refusal line carries only the code, so the
+  // catalog logs the cause code of a failed fetch before the 503.
+  it('(r3-l9a) logs a catalog connection refusal by cause code on both admin routes', async () => {
+    const port = await closedLoopbackPort()
+    for (const [route, operation] of [
+      ['/internal/admin/v1/grok/models', 'catalog_list'],
+      ['/internal/admin/v1/grok/test', 'connection_test'],
+    ] as const) {
+      const calls = { count: 0 }
+      const warn = vi.spyOn(logger, 'warn')
+      const info = vi.spyOn(logger, 'info')
+      try {
+        const { adminApp } = createProxyApps(
+          config({ executionEnabled: true, maxBodyBytes: 65_536 }),
+          { fetchFn: closedPortFetch(port, calls), lookup }
+        )
+        const res = await request(adminApp)
+          .post(route)
+          .set(
+            'Authorization',
+            `Bearer ${sign({ sub: 'admin-1', typ: 'grok-admin-permit', operation }, 'grok-llm-proxy-admin')}`
+          )
+          .send({ accessToken: 'tok' })
+        expect(res.status).toBe(503)
+        expect(res.body).toEqual({ error: 'provider_unavailable' })
+        // Witness: the real fetch ran against the closed port.
+        expect(calls.count).toBe(1)
+        const logged = [...warn.mock.calls, ...info.mock.calls].map(
+          call => call[0] as unknown as Record<string, unknown>
+        )
+        expect(logged.filter(entry => entry?.event === 'grok_catalog_upstream')).toEqual([
+          { event: 'grok_catalog_upstream', causeCode: 'ECONNREFUSED' },
+        ])
+        expect(logged.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+          { event: 'grok_proxy_denied', code: 'provider_unavailable' },
+        ])
+        expect(serializeWithErrors(logged)).not.toContain(`127.0.0.1:${port}`)
+      } finally {
+        warn.mockRestore()
+        info.mockRestore()
+      }
+    }
+  })
+
+  it('(r3-l9b) answers a catalog body that is not JSON with a mapped 503 and its own log line', async () => {
+    let calls = 0
+    const warn = vi.spyOn(logger, 'warn')
+    try {
+      const { adminApp } = createProxyApps(
+        config({ executionEnabled: true, maxBodyBytes: 65_536 }),
+        {
+          fetchFn: (async () => {
+            calls += 1
+            return new Response('<html>maintenance</html>', {
+              status: 200,
+              headers: { 'content-type': 'text/html' },
+            })
+          }) as typeof fetch,
+          lookup,
+        }
+      )
+      const res = await request(adminApp)
+        .post('/internal/admin/v1/grok/models')
+        .set('Authorization', `Bearer ${adminPermit()}`)
+        .send({ accessToken: 'tok' })
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(calls).toBe(1)
+      const logged = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+      expect(logged.filter(entry => entry?.event === 'grok_catalog_upstream')).toEqual([
+        { event: 'grok_catalog_upstream', reason: 'invalid_json' },
+      ])
+      expect(logged.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+        { event: 'grok_proxy_denied', code: 'provider_unavailable' },
+      ])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  // Review R4-L1: a DNS failure carries its code on the lookup error itself,
+  // not in `cause`, and its message names the upstream host. The attempt line
+  // and both admin routes log it by cause code, with no err entry and no host.
+  // These real .invalid lookups depend on the resolver honoring NXDOMAIN.
+  const INVALID_UPSTREAM_HOST = 'grok-r4-l1.invalid'
+
+  function invalidHostLookup(calls: { count: number }) {
+    return async () => {
+      calls.count += 1
+      const { lookup: dnsLookup } = await import('node:dns/promises')
+      const records = await dnsLookup(INVALID_UPSTREAM_HOST, { all: true })
+      return records.map(record => ({ address: record.address, family: record.family }))
+    }
+  }
+
+  function countingFetch(calls: { count: number }): typeof fetch {
+    return (async () => {
+      calls.count += 1
+      throw new Error('fetch must not run after a failed lookup')
+    }) as typeof fetch
+  }
+
+  it('(r4-l1a) logs a DNS lookup failure by cause code, without err or host', async () => {
+    const lookups = { count: 0 }
+    const fetches = { count: 0 }
+    const { res, lines } = await run({
+      providerAttemptId: 'att-upstream-dns',
+      fetchFn: countingFetch(fetches),
+      lookup: invalidHostLookup(lookups),
+    })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    // Witnesses: the real lookup ran once, failed before any fetch, and the
+    // failure produced its attempt line.
+    expect(lookups.count).toBe(1)
+    expect(fetches.count).toBe(0)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-upstream-dns',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      reason: 'upstream fetch failed',
+      deliveredAs: 'http_status',
+      httpStatus: 503,
+    })
+    expect(String(lines[0]!.causeCode)).toMatch(/^(ENOTFOUND|EAI_AGAIN)$/)
+    expect('err' in lines[0]!).toBe(false)
+    expect(serializeWithErrors(lines[0])).not.toContain(INVALID_UPSTREAM_HOST)
+    expectNoForbiddenKeys(lines[0]!)
+  }, 15_000)
+
+  // Both admin routes look up serially: 30 s bounds two 15 s lookup budgets.
+  it('(r4-l1b) logs a catalog DNS lookup failure by cause code on both admin routes', async () => {
+    for (const [route, operation] of [
+      ['/internal/admin/v1/grok/models', 'catalog_list'],
+      ['/internal/admin/v1/grok/test', 'connection_test'],
+    ] as const) {
+      const lookups = { count: 0 }
+      const fetches = { count: 0 }
+      const warn = vi.spyOn(logger, 'warn')
+      const info = vi.spyOn(logger, 'info')
+      const error = vi.spyOn(logger, 'error')
+      try {
+        const { adminApp } = createProxyApps(
+          config({ executionEnabled: true, maxBodyBytes: 65_536 }),
+          { fetchFn: countingFetch(fetches), lookup: invalidHostLookup(lookups) }
+        )
+        const res = await request(adminApp)
+          .post(route)
+          .set(
+            'Authorization',
+            `Bearer ${sign({ sub: 'admin-1', typ: 'grok-admin-permit', operation }, 'grok-llm-proxy-admin')}`
+          )
+          .send({ accessToken: 'tok' })
+        expect(res.status).toBe(503)
+        expect(res.body).toEqual({ error: 'provider_unavailable' })
+        // Witnesses: the real lookup ran once and failed before any fetch.
+        expect(lookups.count).toBe(1)
+        expect(fetches.count).toBe(0)
+        const logged = [...warn.mock.calls, ...info.mock.calls, ...error.mock.calls].map(
+          call => call[0] as unknown as Record<string, unknown>
+        )
+        const upstream = logged.filter(entry => entry?.event === 'grok_catalog_upstream')
+        expect(upstream).toHaveLength(1)
+        expect(Object.keys(upstream[0]!).sort()).toEqual(['causeCode', 'event'])
+        expect(String(upstream[0]!.causeCode)).toMatch(/^(ENOTFOUND|EAI_AGAIN)$/)
+        expect(logged.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+          { event: 'grok_proxy_denied', code: 'provider_unavailable' },
+        ])
+        expect(serializeWithErrors(logged)).not.toContain(INVALID_UPSTREAM_HOST)
+      } finally {
+        warn.mockRestore()
+        info.mockRestore()
+        error.mockRestore()
+      }
+    }
+  }, 30_000)
+
+  it('logs a mapped control-api failure without an err entry', async () => {
+    const { res, lines } = await run({
+      providerAttemptId: 'att-mapped-control-api-error',
+      deniedCode: 'ticket_expired',
+    })
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-mapped-control-api-error',
+      outcome: 'failed',
+      code: 'ticket_expired',
+    })
+    expect('err' in (lines[0] ?? {})).toBe(false)
+  })
+
+  it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'])(
+    'normalizes real transport upstream 503 claiming %s to provider_unavailable',
+    async code => {
+      const fetchFn = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          Response.json({ error: code, reason: 'local capacity claim' }, { status: 503 })
+        )
+      const { res, receipts, lines, metricsText } = await run({
+        providerAttemptId: 'att-spoofed-local',
+        fetchFn,
+      })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toMatchObject({
+        code: 'provider_unavailable',
+        deliveredAs: 'http_status',
+        httpStatus: 503,
+      })
+      expect(failureCount(metricsText, 'provider_unavailable')).toBe(1)
+      expect(failureCount(metricsText, 'request_limit')).toBe(0)
+    }
+  )
 
   it('(g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After', async () => {
     const { res, receipts, lines, metricsText } = await run({
@@ -1105,7 +1774,9 @@ describe('grok-llm-proxy attempt telemetry', () => {
     // Witness: a keepalive went out first, so only the frame can carry it.
     expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
     expect(
-      res.text.endsWith('data: {"type":"error","code":"upstream_rejected","upstreamStatus":402}\n\n')
+      res.text.endsWith(
+        'data: {"type":"error","code":"upstream_rejected","upstreamStatus":402}\n\n'
+      )
     ).toBe(true)
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
@@ -1516,20 +2187,24 @@ describe('grok-llm-proxy attempt telemetry', () => {
   it('(rl1) logs the request-limit reason and labels its failure metric request_limit', async () => {
     const acquire = vi
       .spyOn(streamGate, 'acquire')
-      .mockRejectedValueOnce(new RequestLimitError('stream queue is full'))
+      .mockRejectedValueOnce(
+        new RequestLimitError('stream queue is full', 'queue_full', 'proxy_capacity_exceeded')
+      )
     try {
-      const { res, receipts, lines, metricsText } = await run({ providerAttemptId: 'att-queue-full' })
+      const { res, receipts, lines, metricsText } = await run({
+        providerAttemptId: 'att-queue-full',
+      })
       // Witness: the refusal came from the stream gate this test replaced.
       expect(acquire).toHaveBeenCalledTimes(1)
       expect(res.status).toBe(503)
-      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(res.body).toEqual({ error: 'proxy_capacity_exceeded' })
       // The gate refused before the redeem, so there is no receipt to finalize.
       expect(receipts).toEqual([])
       expect(lines).toHaveLength(1)
       expect(lines[0]).toMatchObject({
         providerAttemptId: 'att-queue-full',
         outcome: 'failed',
-        code: 'provider_unavailable',
+        code: 'proxy_capacity_exceeded',
         reason: 'stream queue is full',
         deliveredAs: 'http_status',
         httpStatus: 503,
@@ -1593,9 +2268,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
     })
     expect(res.status).toBe(200)
     expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
-    expect(res.text.endsWith('data: {"type":"error","code":"provider_unavailable"}\n\n')).toBe(
-      true
-    )
+    expect(res.text.endsWith('data: {"type":"error","code":"provider_unavailable"}\n\n')).toBe(true)
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
       outcome: 'failed',
@@ -1694,7 +2367,7 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     const executionTicket = jwt.sign(
       {
         jti: '77777777-7777-4777-8777-777777777777',
@@ -1884,6 +2557,176 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
       await releaseAndDrain(slots)
     }
   }, 30_000)
+
+  /** A V2 envelope past `maxBodyBytes`, so it takes the visual gate. */
+  function visualEnvelope(
+    providerAttemptId: string,
+    ticketLifeMs: number
+  ): Record<string, unknown> {
+    const raw: Record<string, unknown> = {
+      schemaVersion: 'grok-completion-request.v2',
+      requestId: `req-${providerAttemptId}`,
+      idempotencyKey: `idem-${providerAttemptId}`,
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'x'.repeat(80_000) }],
+    }
+    const parsed = parseGrokCompletionRequest(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
+    const executionTicket = jwt.sign(
+      {
+        jti: '78787878-7878-4787-8787-787878787878',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId,
+        exp: (Date.now() + ticketLifeMs) / 1000,
+      },
+      privateKey,
+      { algorithm: 'RS256', issuer: 'control-api', audience: 'grok-llm-proxy' }
+    )
+    return { executionTicket, requestHash, request: raw }
+  }
+
+  // R17-2 on the visual path: the visual gate is taken before the body is
+  // parsed, so the ticket is read only once the slot frees. A ticket that died
+  // during that wait reaches the ticket gate expired, and the answer is the
+  // retryable ticket_expired, not the stream gate's ticket-life refusal.
+  it('T-R17-2-visual-grok answers ticket_expired when the ticket died while the body waited at the visual gate', async () => {
+    fakeClock()
+    const warn = vi.spyOn(logger, 'warn')
+    let held: (() => void) | undefined
+    try {
+      held = await visualStreamGate.acquire()
+      const control = countingClient('granted')
+      const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+        controlApiClient: control.client,
+        fetchFn: upstream,
+        lookup,
+      })
+      const ticketLifeMs = 20_000
+      const body = visualEnvelope('att-visual-expired', ticketLifeMs)
+      expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(65_536)
+      const reply = request(apps.runtimeApp)
+        .post(COMPLETIONS)
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(body)
+        .then(res => res)
+      await until(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the body queueing at the visual gate'
+      )
+
+      await vi.advanceTimersByTimeAsync(ticketLifeMs)
+      // Witness: the body was still waiting for the slot at the ticket's expiry.
+      expect(await withinReal(reply, 100)).toBeUndefined()
+      held()
+      held = undefined
+      // One stream-gate poll interval.
+      await vi.advanceTimersByTimeAsync(10)
+      const res = await withinReal(reply, 2_000)
+      expect(res?.status).toBe(403)
+      expect(res?.body).toEqual({ error: 'ticket_expired' })
+      expect(control.redeems()).toBe(0)
+
+      const events = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+      expect(events.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+        { event: 'grok_proxy_denied', code: 'ticket_expired' },
+      ])
+      expect(events.filter(entry => entry?.event === 'grok_proxy_admission_refused')).toEqual([])
+      // The ticket refusal released the visual slot the body was parsed under.
+      expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+      expect(streamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    } finally {
+      held?.()
+      vi.useRealTimers()
+      warn.mockRestore()
+    }
+  }, 30_000)
+
+  // The visual gate's own wait is the admission clock stamped at arrival. A
+  // body that reaches the gate some ms after arrival and waits that clock out
+  // is refused as the gate's own queue wait, `visual_gate`: the same answer as
+  // a body that reached the gate in the arrival millisecond.
+  it.each([0, 5])(
+    'T-VG-QW-grok answers 503 visual_gate when a body enqueued %i ms after arrival waits out the admission clock',
+    async lagMs => {
+      fakeClock()
+      const warn = vi.spyOn(logger, 'warn')
+      const held: Array<() => void> = []
+      let acquire: { mockRestore: () => void } | undefined
+      try {
+        for (let i = 0; i < VISUAL_STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+          held.push(await visualStreamGate.acquire())
+        }
+        const enqueue = visualStreamGate.acquire.bind(visualStreamGate)
+        // Moves the clock `lagMs` between the arrival stamp and the enqueue,
+        // then calls the real gate.
+        const spy = vi
+          .spyOn(visualStreamGate, 'acquire')
+          .mockImplementation((signal, deadlineAt, queueWaitStartedAt) => {
+            vi.setSystemTime(Date.now() + lagMs)
+            return enqueue(signal, deadlineAt, queueWaitStartedAt)
+          })
+        acquire = spy
+        const control = countingClient('granted')
+        const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+          controlApiClient: control.client,
+          fetchFn: upstream,
+          lookup,
+        })
+        const arrivedAt = Date.now()
+        const reply = request(apps.runtimeApp)
+          .post(COMPLETIONS)
+          .set('Authorization', `Bearer ${platformToken()}`)
+          .send(visualEnvelope(`att-visual-wait-${lagMs}`, 60_000))
+          .then(res => res)
+        await until(
+          () => spy.mock.calls.length === 1 && visualStreamGate.snapshot().queued === 1,
+          'the body queueing at the visual gate'
+        )
+        // Witness: the gate was handed the admission clock and the arrival
+        // instant, and it enqueued the body `lagMs` after arrival.
+        expect(spy.mock.calls[0]?.slice(1)).toEqual([
+          arrivedAt + STREAM_LIMITS.maxQueueWaitMs,
+          arrivedAt,
+        ])
+        expect(Date.now()).toBe(arrivedAt + lagMs)
+
+        await vi.advanceTimersByTimeAsync(STREAM_LIMITS.maxQueueWaitMs - lagMs - 1)
+        // Witness: still queued one millisecond before the admission clock
+        // runs out, so the body was not refused early.
+        expect(await withinReal(reply, 100)).toBeUndefined()
+        expect(visualStreamGate.snapshot().queued).toBe(1)
+        await vi.advanceTimersByTimeAsync(1)
+        const res = await withinReal(reply, 2_000)
+        expect(Date.now()).toBe(arrivedAt + STREAM_LIMITS.maxQueueWaitMs)
+        expect(res?.status).toBe(503)
+        expect(res?.body).toEqual({ error: 'visual_gate' })
+        expect(control.redeems()).toBe(0)
+        const refusals = warn.mock.calls
+          .map(call => call[0] as unknown as Record<string, unknown>)
+          .filter(entry => entry?.event === 'grok_proxy_admission_refused')
+        expect(refusals).toEqual([
+          {
+            event: 'grok_proxy_admission_refused',
+            reason: 'visual_gate',
+            code: 'visual_gate',
+            detail: 'stream queue wait exceeded',
+          },
+        ])
+        expect(visualStreamGate.snapshot()).toEqual({ running: held.length, queued: 0 })
+      } finally {
+        acquire?.mockRestore()
+        for (const release of held.splice(0)) release()
+        vi.useRealTimers()
+        warn.mockRestore()
+      }
+    },
+    30_000
+  )
 })
 
 /**
@@ -1891,7 +2734,7 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
  * copies of it are alive: reading, parsing, hashing and forwarding. That phase
  * ends when the upstream fetch resolves, because the whole request body has
  * been written by then. The reservation is released there instead of when the
- * SSE stream closes; the response's `close` event stays the backstop for every
+ * SSE stream closes; the response's `close` event still releases it on every
  * path that never reaches the upstream.
  */
 describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', () => {
@@ -1923,7 +2766,7 @@ describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', 
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     return JSON.stringify({
       executionTicket:
         executionTicket ??
@@ -2211,7 +3054,7 @@ describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', 
       const client = open(proxy.port, payload)
       await until(() => client.ended(), 'the refusal')
       expect(client.status()).toBe(503)
-      expect(JSON.parse(client.received())).toEqual({ error: 'provider_unavailable' })
+      expect(JSON.parse(client.received())).toEqual({ error: 'proxy_capacity_exceeded' })
       await until(() => proxy.closes() === 1, "the response's close event")
       expect(client.errors()).toEqual([])
       expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
@@ -2275,7 +3118,7 @@ describe('grok-llm-proxy graceful drain on shutdown (#739 D6)', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     const executionTicket = sign(
       {
         jti: '99999999-9999-4999-8999-999999999999',
@@ -2377,7 +3220,10 @@ describe('grok-llm-proxy graceful drain on shutdown (#739 D6)', () => {
     req.end(payload)
     let closing: Promise<void> | undefined
     try {
-      await until(() => received.includes('data: {"type":"text","text":"t0"}'), 'the first SSE frame')
+      await until(
+        () => received.includes('data: {"type":"text","text":"t0"}'),
+        'the first SSE frame'
+      )
       closing = apps.close().then(() => {
         order.push('closed')
       })

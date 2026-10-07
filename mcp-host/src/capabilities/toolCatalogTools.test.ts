@@ -62,7 +62,7 @@ describe('complete bounded discovery', () => {
   })
 
   it.each([-1, 1.5, NaN, Infinity, '10', null])('rejects malformed offset %s', async offset => {
-    const result = await createToolSearchTool(() => CATALOG).execute(
+    const result = await createToolSearchTool(() => CATALOG, { nativeTargets: false }).execute(
       { query: 'task', offset },
       '/tmp'
     )
@@ -109,7 +109,7 @@ describe('complete bounded discovery', () => {
   })
 
   it('enumerates through the factory and rejects an offset beyond the live catalog', async () => {
-    const tool = createToolSearchTool(() => CATALOG)
+    const tool = createToolSearchTool(() => CATALOG, { nativeTargets: false })
     const first = await tool.execute({ query: '', enumerate: true, limit: 2 }, '/tmp')
     expect(first.success).toBe(true)
     expect(JSON.parse(first.content!)).toMatchObject({ found: 5, returned: 2, nextOffset: 2 })
@@ -120,7 +120,7 @@ describe('complete bounded discovery', () => {
 
   it('restarts against the live catalog after removal and never describes a revoked entry', async () => {
     let catalog = [...CATALOG]
-    const search = createToolSearchTool(() => catalog)
+    const search = createToolSearchTool(() => catalog, { nativeTargets: false })
     const describeTool = createToolDescribeTool(() => catalog)
     await search.execute({ query: '', enumerate: true, limit: 2 }, '/tmp')
     catalog = catalog.filter(tool => tool.name !== 'brain__search_notes')
@@ -133,7 +133,7 @@ describe('complete bounded discovery', () => {
   })
 
   it('never executes a real tool through the discovery factory safety net', async () => {
-    const result = await createToolCallTool().execute(
+    const result = await createToolCallTool({ nativeTargets: false }).execute(
       { name: 'board__create_task', arguments: {} },
       '/tmp'
     )
@@ -304,7 +304,7 @@ describe('clerum__tool_describe — buildToolDescribeResponse', () => {
 
 describe('tool factories — definition + execute', () => {
   it('tool_search uses the clerum__ prefix and required query param', () => {
-    const tool = createToolSearchTool(() => CATALOG)
+    const tool = createToolSearchTool(() => CATALOG, { nativeTargets: false })
     expect(tool.name).toBe('clerum__tool_search')
     expect(tool.parameters).toMatchObject({ required: ['query'] })
   })
@@ -316,7 +316,7 @@ describe('tool factories — definition + execute', () => {
   })
 
   it('tool_search execute returns JSON content with no schema field', async () => {
-    const tool = createToolSearchTool(() => CATALOG)
+    const tool = createToolSearchTool(() => CATALOG, { nativeTargets: false })
     const result = await tool.execute({ query: 'forecast' }, '/tmp')
     expect(result.success).toBe(true)
     const parsed = JSON.parse(result.content!)
@@ -327,7 +327,7 @@ describe('tool factories — definition + execute', () => {
 
   it('tool_search reads the catalog lazily on each call (stateless)', async () => {
     let catalog: McpTool[] = []
-    const tool = createToolSearchTool(() => catalog)
+    const tool = createToolSearchTool(() => catalog, { nativeTargets: false })
     const empty = JSON.parse((await tool.execute({ query: 'forecast' }, '/tmp')).content!)
     expect(empty.found).toBe(0)
     catalog = CATALOG
@@ -336,7 +336,7 @@ describe('tool factories — definition + execute', () => {
   })
 
   it('tool_search execute returns an informative message for an empty query', async () => {
-    const tool = createToolSearchTool(() => CATALOG)
+    const tool = createToolSearchTool(() => CATALOG, { nativeTargets: false })
     const result = await tool.execute({ query: '   ' }, '/tmp')
     expect(result.success).toBe(true)
     const parsed = JSON.parse(result.content!)
@@ -349,7 +349,7 @@ describe('tool factories — definition + execute', () => {
   })
 
   it('tool_search execute returns the empty-query message when query is missing', async () => {
-    const tool = createToolSearchTool(() => CATALOG)
+    const tool = createToolSearchTool(() => CATALOG, { nativeTargets: false })
     const result = await tool.execute({}, '/tmp')
     expect(result.success).toBe(true)
     const parsed = JSON.parse(result.content!)

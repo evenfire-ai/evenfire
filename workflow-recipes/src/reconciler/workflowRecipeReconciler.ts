@@ -4806,28 +4806,66 @@ export class WorkflowRecipeReconciler {
     })
   }
 
+  // Read-first, like ensureTransportService in mcpDelegation.ts (#760): GET the
+  // StatefulSet; create it only on a 404; a 409 on that create re-reads. A POST
+  // against an existing StatefulSet is a rejected write the audit log counts.
   private async createOrPatchStatefulSet(
     statefulSet: k8s.V1StatefulSet,
     namespace: string,
     name: string
   ): Promise<void> {
     const desiredHash = stampSpecHash(statefulSet)
-    try {
-      await this.appsApi.createNamespacedStatefulSet({ namespace, body: statefulSet })
-      createLogger('wrc', 'workflow-recipes').info('Created StatefulSet', { name, namespace })
-      return
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) {
-        createLogger('wrc', 'workflow-recipes').error('Failed to create StatefulSet', {
-          name,
-          namespace,
-          err: error,
-        })
-        throw error
+    let existing = await this.readStatefulSetIfPresent(name, namespace)
+    if (!existing) {
+      try {
+        await this.appsApi.createNamespacedStatefulSet({ namespace, body: statefulSet })
+        createLogger('wrc', 'workflow-recipes').info('Created StatefulSet', { name, namespace })
+        return
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 409) {
+          createLogger('wrc', 'workflow-recipes').error('Failed to create StatefulSet', {
+            name,
+            namespace,
+            err: error,
+          })
+          throw error
+        }
+        // Another writer created it between our read and this POST. A 404 on
+        // this re-read means it is gone again; the 404 is the cause, as in
+        // ensureTransportService.
+        try {
+          existing = await this.appsApi.readNamespacedStatefulSet({ name, namespace })
+        } catch (readError: unknown) {
+          if (getErrorCode(readError) !== 404) throw readError
+          throw new ResourceVanishedAfterConflictError(`StatefulSet "${name}" in ${namespace}`, {
+            cause: readError,
+          })
+        }
       }
     }
+    await this.reconcileExistingStatefulSet(statefulSet, existing, desiredHash, namespace, name)
+  }
 
-    const existing = await this.appsApi.readNamespacedStatefulSet({ name, namespace })
+  /** The live StatefulSet, or null on a 404; every other read error is rethrown. */
+  private async readStatefulSetIfPresent(
+    name: string,
+    namespace: string
+  ): Promise<k8s.V1StatefulSet | null> {
+    try {
+      return await this.appsApi.readNamespacedStatefulSet({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+  }
+
+  private async reconcileExistingStatefulSet(
+    statefulSet: k8s.V1StatefulSet,
+    existing: k8s.V1StatefulSet,
+    desiredHash: string,
+    namespace: string,
+    name: string
+  ): Promise<void> {
     if (existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash) {
       createLogger('wrc', 'workflow-recipes').info(
         'StatefulSet spec hash unchanged; skipping update',

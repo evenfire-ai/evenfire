@@ -1,15 +1,9 @@
-import { randomUUID } from 'crypto'
+import { BRIDGE_TOOL_NAMES } from '../../capabilities/toolCatalogTools'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
 import {
   buildConnectRequiredApproval,
   extractConnectRequiredMarker,
 } from '../extensions/mcpApprovalGateController'
-import {
-  type ToolIdentity,
-  recordAndCheck,
-  recordDecision,
-  resolveToolIdentityFromRegistry,
-} from '../guardrails'
 import type {
   Attachment,
   ChatMessage,
@@ -19,43 +13,10 @@ import type {
   ToolResult,
 } from '../types'
 import type { LoopConfig } from './loopConfig'
+import { admitToolCall, executeAdmittedTool } from './toolCallPolicy'
 import { collectToolAttachments } from './toolUseLoopMessages'
-import { executeSingleTool, reportToolComplete, reportToolStart } from './toolUseLoopSingleTool'
+import { reportToolComplete, reportToolStart } from './toolUseLoopSingleTool'
 import { isWorkflowTriggerNotFoundToolResult } from './toolUseLoopWorkflowTriggerFallbacks'
-
-/**
- * Build a guardrail-originated approval suspension (spec §6.3), shaped like the
- * existing approval gate so the batch loop's suspend path handles it unchanged.
- */
-function buildGuardrailSuspension(
-  call: ToolCall,
-  config: LoopConfig,
-  reasonCode: string
-): { type: 'suspend'; approval: PendingApproval } {
-  const descriptor = config.toolRegistry.get(call.name)?.traceDescriptor?.(call.arguments) ?? {
-    kind: 'internal_tool' as const,
-    sourceRef: 'mcp-host',
-  }
-  const approval: PendingApproval = {
-    request_id: randomUUID(),
-    tool_name: call.name,
-    tool_kind: descriptor.kind,
-    tool_source_ref: descriptor.sourceRef,
-    parameters: call.arguments,
-    description: `Guardrail requires approval (${reasonCode})`,
-    tool_call_id: '', // filled below from call.id
-    context_snapshot: [],
-  }
-  return { type: 'suspend', approval }
-}
-
-/** The 3 dynamic-tool-loading bridge tools. They are native and must never be
- * the TARGET of `clerum__tool_call` (LOCKED #11 — no recursion). */
-const BRIDGE_TOOL_NAMES = new Set([
-  'clerum__tool_search',
-  'clerum__tool_describe',
-  'clerum__tool_call',
-])
 
 function bridgeError(call: ToolCall, message: string): ToolResult {
   // Preserve the original `call.id`/name so the provider pairs the result with
@@ -77,6 +38,9 @@ function bridgeError(call: ToolCall, message: string): ToolResult {
  *     then rewrite to a synthetic `{ id: call.id, name, arguments }` so the
  *     normal gate runs against the REAL tool (Critical #12 validates inner args
  *     against the real schema; LOCKED #10 keys approval on the real name).
+ *     With `bridge.nativeTargets` (native `auto`, #1003) a native target is
+ *     also rewritten, whether or not it is currently advertised; without it,
+ *     native targets are rejected as before. Recursion is rejected in both.
  *
  *  2. Direct call to a deferred MCP tool (Critical #9, auto-recover) — a
  *     non-bridge call naming an MCP tool that is currently un-advertised. It is
@@ -94,7 +58,7 @@ function resolveBridgeCall(
   toolResults: ToolResult[],
   // Computed ONCE per batch by `executeToolCalls` and passed in, so we don't
   // re-derive the (potentially 290-entry) deferrable catalog Set on every call.
-  // `undefined` when the bridge is inactive (flag OFF) — no work to do.
+  // `undefined` when no bridge tools are registered — no work to do.
   deferrableCatalogNames: Set<string> | undefined
 ): ToolCall | 'handled' {
   const bridge = config.bridge
@@ -123,8 +87,34 @@ function resolveBridgeCall(
       return 'handled'
     }
 
-    // Reject recursion / native targets (LOCKED #11): the bridge targets
-    // DEFERRABLE MCP tools only.
+    // Native `auto`: reject recursion (LOCKED #11) before accepting natives.
+    if (bridge.nativeTargets && BRIDGE_TOOL_NAMES.has(name)) {
+      toolResults.push(
+        bridgeError(
+          call,
+          `clerum__tool_call cannot target "${name}": bridge tools cannot invoke one another.`
+        )
+      )
+      return 'handled'
+    }
+
+    // #1003 — native `auto`: a native target is valid. Its scope gate is
+    // membership in the native registry (deferred natives are not in the MCP
+    // catalog). The rewrite keeps `call.id` and the normal gate below then
+    // admits the REAL native exactly like a direct call (safety parameter
+    // checks, guardrails, approval; no native schema validation on either
+    // path, #1017), so the bridge never widens what the model could call
+    // directly.
+    if (bridge.nativeTargets && bridge.nativeNames.has(name)) {
+      return {
+        id: call.id,
+        name,
+        arguments: (innerArgs as Record<string, unknown>) ?? {},
+      }
+    }
+
+    // Native `direct`: reject recursion / native targets (LOCKED #11): the
+    // bridge targets DEFERRABLE MCP tools only.
     if (BRIDGE_TOOL_NAMES.has(name) || bridge.nativeNames.has(name)) {
       toolResults.push(
         bridgeError(
@@ -154,9 +144,11 @@ function resolveBridgeCall(
     // preserved id, so the provider pairs it with the model's tool_call block.
     //
     // The synthetic call (and its eventual ToolResult) intentionally carries the
-    // REAL tool name, NOT `clerum__tool_call`. Provider pairing is by
-    // `tool_call_id` ONLY, so preserving `call.id` is what matters — do NOT
-    // re-mint the id (a fresh id would orphan the model's tool_use block).
+    // REAL tool name, NOT `clerum__tool_call`. Providers pair the result by
+    // `tool_call_id`; drivers whose wire pairs by name (Gemini) resolve the
+    // name from that id against the preceding assistant turn. Preserving
+    // `call.id` is what matters — do NOT re-mint the id (a fresh id would
+    // orphan the model's tool_use block).
     return {
       id: call.id,
       name,
@@ -173,8 +165,9 @@ function resolveBridgeCall(
   // catalog == the full MCP universe, so this matches the registry's own
   // `Tool not found` — but enforcing the gate explicitly here means a future
   // per-host catalog subset cannot be bypassed by a direct call. Native names
-  // (and non-MCP names) pass through untouched — they are always advertised and
-  // resolved by the native registry. Stateless: nothing is recorded.
+  // (and non-MCP names) pass through untouched — the native registry resolves
+  // them whether or not native `auto` removed them from `tools[]`. Stateless:
+  // nothing is recorded.
   //
   // The `__` heuristic is safe because of the `serverName__toolName` naming
   // invariant (double underscore, see CLAUDE.md): natives are excluded first via
@@ -205,8 +198,8 @@ export async function executeToolCalls(
   const { loopController, events } = config
   const toolResults: ToolResult[] = []
   // F3.2 — derive the deferrable catalog Set ONCE for the whole batch instead of
-  // per call (it can hold ~290 names). `undefined` when the bridge is inactive
-  // (flag OFF) so `resolveBridgeCall` short-circuits with no work.
+  // per call (it can hold ~290 names). `undefined` when no bridge tools are
+  // registered, so `resolveBridgeCall` short-circuits with no work.
   const deferrableCatalogNames = config.bridge?.getDeferrableCatalogNames()
   // Crit #2: the batch shares ONE LLM call's usage — attach it to the first
   // reportToolComplete actually emitted (NOT strictly i === 0; the validation
@@ -220,7 +213,8 @@ export async function executeToolCalls(
     // Runs at the TOP of the per-call loop, BEFORE `beforeExecution` (:29) and
     // `beforeTool` (:49), so that validation and approval run against the REAL
     // target tool, not the opaque bridge envelope. The intercept unwraps the
-    // bridge call into a SYNTHETIC call against the real MCP tool, preserving
+    // bridge call into a SYNTHETIC call against the real target (an MCP tool, or a
+    // native when `bridge.nativeTargets`), preserving
     // `call.id` (LOCKED #9) so the provider pairs the tool_result by
     // tool_use_id. Direct calls to deferred MCP tools (Critical #9) are also
     // routed through the same scope gate here. A `'handled'` return means an
@@ -229,145 +223,18 @@ export async function executeToolCalls(
     if (rewritten === 'handled') continue
     call = rewritten
 
-    let validation = config.toolOutputProcessor.beforeExecution(call.name, call.arguments)
-    if (validation.is_valid) {
-      validation =
-        (await config.toolRegistry.get(call.name)?.validateParams?.(call.arguments)) ?? validation
-    }
-    if (!validation.is_valid) {
-      events.emit({
-        type: 'safety:input_blocked',
-        data: {
-          toolName: call.name,
-          errors: validation.errors,
-          iteration,
-        },
-        timestamp: new Date(),
-      })
-      toolResults.push({
-        tool_call_id: call.id,
-        name: call.name,
-        content: `Parameter validation failed: ${validation.errors.join(', ')}`,
-        is_error: true,
-      })
+    const admission = await admitToolCall(call, config, iteration)
+    if (admission.kind === 'result') {
+      toolResults.push(admission.toolResult)
       continue
     }
-
-    // Guardrail gate (spec §6) — behind config.guardrails; absent = today.
-    let gate: 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval }
-    // Resolved once when the guardrail runs; reused for PostToolUse redaction below.
-    let toolIdentity: ToolIdentity | undefined
-    if (config.guardrails) {
-      const identity = resolveToolIdentityFromRegistry(
-        call.name,
-        config.toolRegistry,
-        call.arguments
-      )
-      toolIdentity = identity
-
-      // Doom-loop guard (spec §6.4): deny 3 consecutive identical (tool, input)
-      // calls within a task. Best-effort runaway/cost guard, not a security
-      // control (alternation evades it, §12.4/N12). Cross-turn state lives on the
-      // conversation (ephemeral; resets on resume).
-      const dlKey = `${identity.provenance}:${identity.server ?? ''}:${identity.name}:${JSON.stringify(call.arguments)}`
-      const dl = recordAndCheck(config.conversation.guardrail_doom_loop ?? { count: 0 }, dlKey)
-      config.conversation.guardrail_doom_loop = dl.state
-      if (dl.tripped) {
-        recordDecision('tool', 'deny', 'current', 'denied', 'repeated_identical_call')
-        events.emit({
-          type: 'guardrail:decision',
-          data: {
-            toolName: call.name,
-            decision: 'deny',
-            reasonCode: 'repeated_identical_call',
-            source: 'current',
-            iteration,
-          },
-          timestamp: new Date(),
-        })
-        toolResults.push({
-          tool_call_id: call.id,
-          name: call.name,
-          content: 'Blocked: repeated identical tool call (doom-loop guard).',
-          is_error: true,
-        })
-        continue
-      }
-
-      const gd = await config.guardrails.decide(identity, call.arguments)
-      events.emit({
-        type: 'guardrail:decision',
-        data: {
-          toolName: call.name,
-          decision: gd.decision,
-          reasonCode: gd.reasonCode,
-          source: gd.source,
-          iteration,
-        },
-        timestamp: new Date(),
-      })
-
-      const mode = config.executionMode ?? 'interactive'
-
-      if (gd.decision === 'deny') {
-        recordDecision('tool', 'deny', gd.source, 'denied', gd.reasonCode, mode)
-        toolResults.push({
-          tool_call_id: call.id,
-          name: call.name,
-          content: `Blocked by guardrail policy (${gd.reasonCode}).`,
-          is_error: true,
-        })
-        continue
-      }
-
-      // Apply any honored rewrite (Phase 1 rules never rewrite; forward-compatible).
-      if (gd.effectiveInput !== call.arguments) {
-        call = { ...call, arguments: gd.effectiveInput }
-      }
-
-      if (gd.decision === 'ask') {
-        // Resume-safe one-shot: an exact approve-once grant satisfies the ask
-        // (spec §6.3). Broad `auto_approved_tools` do NOT — an explicit guardrail
-        // ask needs an exact approval, so we only consume the pending_approval.
-        const pending = config.conversation.pending_approval
-        if (pending && pending.tool_name === call.name) {
-          config.conversation.pending_approval = undefined
-          recordDecision('tool', 'ask', gd.source, 'executed', gd.reasonCode, mode)
-          gate = 'proceed'
-        } else if (mode === 'unattended') {
-          // §6.3: an `ask` with no human to answer it fails safe to deny.
-          recordDecision('tool', 'deny', gd.source, 'denied', 'approval_unavailable', mode)
-          toolResults.push({
-            tool_call_id: call.id,
-            name: call.name,
-            content:
-              'Blocked: approval required but no approver is available in an autonomous run.',
-            is_error: true,
-          })
-          continue
-        } else {
-          recordDecision('tool', 'ask', gd.source, 'ask', gd.reasonCode, mode)
-          gate = buildGuardrailSuspension(call, config, gd.reasonCode)
-        }
-      } else {
-        // allow / no_decision → the existing approval path. Phase 1: guardrail
-        // `allow` does NOT bypass existing approvals (separating containment from
-        // approval is deferred — the safe direction).
-        recordDecision('tool', gd.decision, gd.source, 'executed', gd.reasonCode, mode)
-        gate = loopController.beforeTool(call.name, call.arguments)
-      }
-    } else {
-      gate = loopController.beforeTool(call.name, call.arguments)
-    }
-
-    if (gate === 'skip') {
-      toolResults.push({
-        tool_call_id: call.id,
-        name: call.name,
-        content: 'Tool execution skipped',
-        is_error: false,
-      })
-      continue
+    let gate: 'proceed' | { type: 'suspend'; approval: PendingApproval } =
+      admission.kind === 'suspend' ? { type: 'suspend', approval: admission.approval } : 'proceed'
+    if (admission.kind === 'execute') call = admission.call
+    else if (admission.kind === 'suspend') {
+      // A guardrail can rewrite input before it asks. The consent event and
+      // frozen approval must show the same effective parameters.
+      call = { ...call, arguments: admission.approval.parameters }
     }
 
     if (typeof gate === 'object' && gate.type === 'suspend') {
@@ -407,22 +274,8 @@ export async function executeToolCalls(
     }
 
     const progressStart = reportToolStart(config, call, iteration, i, calls.length, llmTextContent)
-    let toolResult = await executeSingleTool(call, config, iteration)
-
-    // PostToolUse redaction (spec §6.2 / §10 #3): installed `post_tool_use` hooks
-    // may redact the model-visible result `content` (never `is_error`). Only the
-    // LLM-message `content` is touched — `rawContent` (UI preview) is left intact.
-    // Applied here — before the abort push, the U5 connect-required suspend, and
-    // the main push below — so every downstream consumer sees the redacted result.
-    if (config.guardrails?.transformResult && toolIdentity) {
-      const view = await config.guardrails.transformResult(toolIdentity, call.arguments, {
-        content: toolResult.content,
-        isError: toolResult.is_error,
-      })
-      if (view.content !== toolResult.content) {
-        toolResult = { ...toolResult, content: view.content }
-      }
-    }
+    if (admission.kind !== 'execute') throw new Error('Admitted tool call has no execution phase')
+    const toolResult = await executeAdmittedTool(admission, config, iteration)
 
     // Retain policy-processed output before a subsequent tool can throw.
     if (config.onAttachments && toolResult.attachments?.length) {

@@ -69,6 +69,37 @@ function deps(overrides?: {
 }
 
 describe('CodexSubscriptionProvider', () => {
+  it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'] as const)(
+    'keeps the provider usable after a local %s admission refusal',
+    async code => {
+      const wired = deps({
+        stream: vi
+          .fn()
+          .mockRejectedValueOnce(
+            new CodexProxyError(code, 'proxy admission is full', { dispatched: true })
+          )
+          .mockResolvedValueOnce({ text: 'next text turn', toolCalls: [], outcome: 'success' }),
+      })
+      const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+      await expect(
+        provider.completeSingleTurn([{ role: 'user', content: 'image' }])
+      ).rejects.toMatchObject({ code })
+      const result = await provider.completeSingleTurn([{ role: 'user', content: 'next text' }])
+      expect(result.content).toBe('next text turn')
+      expect(wired.authorize).toHaveBeenCalledTimes(2)
+      expect(wired.stream).toHaveBeenCalledTimes(2)
+
+      const classified = provider.classifyError(
+        new CodexProxyError(code, 'proxy admission is full', { dispatched: true })
+      )
+      expect(classified.code).toBe(LlmErrorCode.ApiCallFailed)
+      expect(classified.retryable).toBe(false)
+      expect(classified.providerCode).toBe(code)
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
   it.each(['unknown', 'canceled', 'error'])(
     'never returns executable calls from a %s batch',
     async outcome => {
@@ -293,12 +324,8 @@ describe('CodexSubscriptionProvider', () => {
   it('T-C3 reports the element bound as request_limit_exceeded before authorize (#731)', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
-    // `checkStructure` runs before `JSON.stringify`, so a structure with more
-    // elements than the byte cap is refused by the element bound and never by
-    // the byte measurement. Its message carries a suffix the byte bound does
-    // not, which is why `CONTEXT_LENGTH_REFUSALS` matches the byte pattern as a
-    // prefix: anchoring it at both ends would drop this refusal back to
-    // `invalid_request` and no other test would notice.
+    // This body fits the byte cap. The independent element bound refuses it
+    // before authorize and must remain a non-retryable context-length error.
     const history = [
       { role: 'user' as const, content: 'summarize the export' },
       {
@@ -308,7 +335,7 @@ describe('CodexSubscriptionProvider', () => {
           {
             id: 'call_1',
             name: 'export_rows',
-            arguments: { ids: new Array<number>(LIMITS.maxRequestBodyBytes + 1).fill(0) },
+            arguments: { ids: new Array<number>(LIMITS.maxRequestElements + 1).fill(0) },
           },
         ],
       },
@@ -318,8 +345,7 @@ describe('CodexSubscriptionProvider', () => {
     await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
     await expect(rejected).rejects.toMatchObject({
       code: 'request_limit_exceeded',
-      message:
-        'codex completion request rejected: request exceeds maxRequestBodyBytes element bound',
+      message: 'codex completion request rejected: request exceeds maxRequestElements',
     })
     expect(wired.authorize).not.toHaveBeenCalled()
     expect(wired.stream).not.toHaveBeenCalled()
@@ -338,6 +364,128 @@ describe('CodexSubscriptionProvider', () => {
         tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { ids: [0] } }],
       },
     ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3b reports the container bound as a non-retryable context-length failure (A8)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // `maxRequestContainers` bounds the heap JSON.parse allocates for a body.
+    // Its refusal carries `kind: 'size'` and matches no
+    // `CONTEXT_LENGTH_REFUSALS` row, so it reaches the user through
+    // `payload_too_large`, which classifies as `ContextLengthExceeded`. The
+    // array holds maxRequestContainers + 1 objects in well under 8 MiB, so the
+    // byte bound and the element bound cannot be what refuses it.
+    const rows = (count: number) => Array.from({ length: count }, () => ({}))
+    const history = (count: number) => [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { rows: rows(count) } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history(LIMITS.maxRequestContainers + 1))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'codex completion request rejected: request exceeds maxRequestContainers',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape with a few objects goes through.
+    await provider.completeSingleTurn(history(3))
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3c surfaces the proxy member-bound 413 as a non-retryable context-length failure', async () => {
+    const wired = deps({
+      stream: vi
+        .fn()
+        .mockRejectedValue(new CodexProxyError('payload_too_large', 'proxy refused the envelope')),
+    })
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // A member-bound proxy refusal reaches the Host as `payload_too_large`.
+    // The mock checks this generic code's classification after a small turn
+    // passes the local guards; it does not execute the proxy's member scanner
+    // or establish which bound produced the 413. T-C3d below uses the
+    // real local contract member bound and an accepted-body witness.
+    const rejected = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    await expect(rejected).rejects.toBeInstanceOf(CodexProxyError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      dispatched: true,
+    })
+
+    const err = await rejected.catch((e: unknown) => e)
+    const classified = provider.classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+      providerDispatched: true,
+    })
+    // Retrying or failing over cannot shrink a body the proxy already counted:
+    // this is a context-length refusal, not a provider outage.
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+    // Liveness witness: the request actually reached the proxy path.
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3d reports the local member bound as a non-retryable context-length failure (R2-H1)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // The local member-bound twin of T-C3b. `checkStructure` refuses a request
+    // over `maxRequestMembers` with `kind: 'size'` and the message
+    // `request exceeds maxRequestMembers`, which matches no
+    // `CONTEXT_LENGTH_REFUSALS` row, so — exactly like the container bound — it
+    // reaches the user through `payload_too_large`, which classifies as
+    // `ContextLengthExceeded`. A single flat object of scalar keys trips the
+    // member bound (262144) before the element bound (1048576) and adds only one
+    // container, so neither of those can be what refuses it.
+    const fields = (count: number) => {
+      const object: Record<string, number> = {}
+      for (let i = 0; i < count; i++) object['f' + i] = 1
+      return object
+    }
+    const history = (count: number) => [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { fields: fields(count) } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history(LIMITS.maxRequestMembers + 1))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'codex completion request rejected: request exceeds maxRequestMembers',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape with a few members goes through.
+    await provider.completeSingleTurn(history(3))
     expect(wired.authorize).toHaveBeenCalledTimes(1)
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
@@ -600,9 +748,9 @@ describe('CodexSubscriptionProvider', () => {
         inputSchema: { type: 'object', properties: { key: { type: 'string' } } },
       }))
       const nativeTools = [
-        createToolSearchTool(() => catalog),
+        createToolSearchTool(() => catalog, { nativeTargets: false }),
         createToolDescribeTool(() => catalog),
-        createToolCallTool(),
+        createToolCallTool({ nativeTargets: false }),
       ].map(tool => ({
         name: tool.name,
         description: tool.description,
@@ -1109,6 +1257,36 @@ describe('CodexSubscriptionProvider', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  it('classifies image_source_invalid as a non-retryable ApiCallFailed with no failover', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', deps() as never)
+    const message = 'image part has no usable provenance source (missing source)'
+
+    const classified = provider.classifyError(
+      new CodexAuthorizeError('image_source_invalid', message)
+    )
+
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      message,
+      providerCode: 'image_source_invalid',
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+    // Liveness witness: a retryable code classified by the same provider does
+    // retry and fail over, so the assertions above are not satisfied by a
+    // classifier that never retries.
+    const retryable = provider.classifyError(
+      new CodexProxyError(
+        'provider_unavailable',
+        'proxy stream failed with 503 (provider_unavailable)'
+      )
+    )
+    expect(retryable.retryable).toBe(true)
+    expect(classifyFailoverClass(retryable.code, retryable.retryable)).not.toBeNull()
+  })
+
   it.each(METHODS)('rejects an image part without provenance through %s', async method => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
@@ -1386,6 +1564,47 @@ describe('CodexSubscriptionProvider', () => {
     })
     expect(wired.authorize).not.toHaveBeenCalled()
   })
+
+  // Review R3-L3: V2 text sits in content and in its text part. The host's
+  // canonical check counts it once, as the same text counts in V1.
+  it('R3-L3 dispatches a 4.5 MiB prompt beside an image and still refuses text over the cap', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const text = 'x'.repeat(4.5 * 1024 * 1024)
+    const image = imagePart(PNG_2X2_BASE64, 'a')
+
+    await provider.completeSingleTurn([
+      { role: 'user', content: text, contentParts: [{ type: 'text', text }, image] },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+    const body = wired.authorize.mock.calls[0][0]
+    expect(body.request.schemaVersion).toBe('codex-completion-request.v2')
+    expect(body.request.messages[0].content).toBe(text)
+
+    // The host derives content from the text parts (projectMessage), so every
+    // V2 turn it sends repeats its text; a caller's disagreeing content never
+    // reaches the wire.
+    await provider.completeSingleTurn([
+      { role: 'user', content: 'other', contentParts: [{ type: 'text', text }, image] },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(2)
+    expect(wired.authorize.mock.calls[1][0].request.messages[0].content).toBe(text)
+
+    // Counted once is still counted: text over the non-image cap is refused.
+    const over = 'x'.repeat(LIMITS.maxRequestBodyBytes)
+    const refused = await provider
+      .completeSingleTurn([
+        { role: 'user', content: over, contentParts: [{ type: 'text', text: over }, image] },
+      ])
+      .catch((e: unknown) => e)
+    expect(refused).toMatchObject({
+      code: 'request_limit_exceeded',
+      message:
+        'codex completion request rejected: request exceeds maxRequestBodyBytes outside image data',
+    })
+    expect(wired.authorize).toHaveBeenCalledTimes(2)
+  }, 30_000)
 
   it('T-R9-11d keeps conversation-volume refusals on a V2 request as context length', async () => {
     const wired = deps()
@@ -1791,6 +2010,174 @@ describe('CodexSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     // Witness: the first authorize ran; the negative is that no second one did.
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(wired.stream).toHaveBeenCalledTimes(0)
+  })
+
+  // M-A (review 5426789128): control-api's capacity refusal is answered
+  // before any read and carries Retry-After. The provider retries it once in
+  // place; the second refusal is terminal, with no failover or cooldown.
+  const capacityRefusal = (seconds?: number) =>
+    Response.json(
+      { error: 'authorize_capacity_exceeded' },
+      seconds === undefined
+        ? { status: 503 }
+        : { status: 503, headers: { 'retry-after': String(seconds) } }
+    )
+
+  it('M-A1: a capacity refusal on authorize is retried once after its Retry-After', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn), stream: vi.fn().mockResolvedValue(ok) })
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    await vi.advanceTimersByTimeAsync(9999)
+    // Witness: the first authorize ran; nothing was dispatched on its refusal.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(turn).resolves.toMatchObject({ content: 'after the wait' })
+
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    const [first, second] = fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string))
+    expect(second.invocationId).toBe(first.invocationId)
+    expect([first.providerAttemptIndex, second.providerAttemptIndex]).toEqual([1, 2])
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream.mock.calls[0][0].executionTicket).toBe('ticket-second')
+  })
+
+  it('M-A2: a second capacity refusal is terminal and never fails over', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn) })
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const caught = turn.then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await caught
+
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'authorize_capacity_exceeded', retryAfterMs: 10_000 })
+    const classified = provider.classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    // Exactly two authorizes: the retry ran once and the third answer was never asked for.
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
+  it('M-A3: a capacity refusal without Retry-After is not retried', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal())
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn) })
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const caught = turn.then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await caught
+
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'authorize_capacity_exceeded' })
+    expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+    // Witness: the first authorize ran; the negative is that no second one did.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
+  it('M-A4: a capacity refusal on a caller-pinned attempt index is not retried', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn) })
+    wired.attemptContext = vi.fn(() => ({
+      policyRevision: 1,
+      policyHash: 'b'.repeat(64),
+      hostRef: 'chatllm',
+      providerAttemptIndex: 3,
+    }))
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const caught = turn.then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await caught
+
+    expect(err).toMatchObject({ code: 'authorize_capacity_exceeded', retryAfterMs: 10_000 })
+    // Witness: the pinned authorize ran; the negative is that no second one did.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body as string).providerAttemptIndex).toBe(3)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
+  it('M-A5: a proxy error named authorize_capacity_exceeded is not retried', async () => {
+    vi.useFakeTimers()
+    const err = new CodexProxyError('authorize_capacity_exceeded', 'proxy refused', {
+      retryAfterMs: 1000,
+    })
+    const wired = deps({
+      authorize: authorizeTwice(),
+      stream: vi.fn().mockRejectedValueOnce(err).mockResolvedValueOnce(ok),
+    })
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const settled = expect(turn).rejects.toBe(err)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settled
+    // Witness: the attempt was dispatched once; the negative is that no retry followed.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('M-A6: an abort during the capacity wait rejects with the abort reason and sends nothing more', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const reason = new Error('caller gave up')
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(capacityRefusal(10))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn), stream: vi.fn().mockResolvedValue(ok) })
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }], {
+      signal: controller.signal,
+    })
+    const settled = expect(turn).rejects.toBe(reason)
+    await vi.advanceTimersByTimeAsync(5000)
+    // Witness: the first authorize ran and the wait is pending.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    controller.abort(reason)
+    await settled
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
   })
 
   it('G1-12: an abort after the wait resolves and before the second authorize sends nothing more', async () => {

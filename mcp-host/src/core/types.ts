@@ -34,6 +34,9 @@ export type MessageContentPart =
       data: string
       /** Extra source copy, omitted from the legacy view while another current frame represents it. */
       sourceIdentityOnly?: true
+      /** Producer-measured image shape; used by provider-attempt policy without redecoding. */
+      width?: number
+      height?: number
       /**
        * Optional so pre-#650 producers and provider translators keep compiling;
        * `codexSubscription` rejects an image part without a usable source
@@ -546,8 +549,9 @@ export interface ContextBreakdown {
      * active (the stable bridge), this reflects natives + the 3 bridge tools
      * only — deferrable MCP schemas LEAVE this array and instead appear
      * transiently in `messages` via `clerum__tool_describe` / `clerum__tool_call`
-     * outputs. So a sharp drop here when the bridge engages is expected, not a
-     * breakdown bug.
+     * outputs. With native `auto` (#1003) the natives larger than the native
+     * discovery budget leave it the same way. So a sharp drop here when either
+     * engages is expected, not a breakdown bug.
      */
     systemTools: number
     metaContext: number
@@ -635,6 +639,12 @@ export interface PendingApproval {
   task_budget?: TaskExecutionBudgetSnapshot
   /** Set only by reconstruction of migration-marked legacy rows. */
   legacy_budget?: boolean
+  /**
+   * Consent expansion. New ordinary approvals use `turn_tools`; high-risk
+   * exact-call paths use `exact_invocation`. Legacy NULL rows are treated as
+   * exact because their original expansion cannot be proven.
+   */
+  authorization_scope?: 'turn_tools' | 'exact_invocation'
   /** Internal atomic replacement instruction; not persisted in the snapshot. */
   replaces_request_id?: string
   request_id: string

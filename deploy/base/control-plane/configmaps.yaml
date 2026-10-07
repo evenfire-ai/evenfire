@@ -64,18 +64,44 @@ data:
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED: "true"
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_INTERVAL_MS: "5000"
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_BATCH_SIZE: "10"
-  APPROVAL_RL_REQUEST_PER_MIN: "120"
+  APPROVAL_RL_REQUEST_PER_MIN: "600"
+  APPROVAL_RL_REFRESH_PER_MIN: "100"
+  APPROVAL_RL_REISSUE_PER_MIN: "25"
+  CONTROL_API_OAUTH_BROKER_RL_PER_MIN: "300"
+  CONTROL_API_HOST_WAKE_RL_PER_MIN: "150"
   # Plugin Workload SDK platform rate limits (issue #348). Per-run SDK quotas
   # (maxRequestsPerRun / maxNotificationsPerRun) are deprecated and ignored;
-  # limits are enforced over a trailing 60s window (no fixed reset); once
-  # traffic slows below the limit the window drains within ~60s — stepless
-  # recipes are never permanently trapped. Values MUST equal the code defaults
-  # in control-api/src/config.ts (150/120/600/600) — the config deploy-mirror
-  # test fails on drift.
-  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "150"
-  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "120"
-  CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "600"
+  # Method quotas use their existing trailing 60s window. Authenticated request
+  # and edge budgets use the PG calendar minute; anonymous IP backstops retain
+  # first-hit windows. Defaults below mirror control-api/src/config.ts.
+  # Healthy static prompts cost three credential operations and six/seven SDK
+  # API requests; the 1800/6000 defaults keep the prompt600 allowance reachable
+  # without removing fresh capability proof, either Secret check or redemption.
+  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "750"
+  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "6000"
   CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN: "6000"
+  CONTROL_API_PLUGIN_SDK_ADMIN_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_INTERNAL_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_CREDENTIAL_PER_MIN: "1800"
+  CONTROL_API_ADMIN_WORKFLOW_READ_PER_MIN: "300"
+  CONTROL_API_ADMIN_WORKFLOW_GRANT_READ_PER_MIN: "300"
+  CONTROL_API_ADMIN_WORKFLOW_GRANT_WRITE_PER_MIN: "100"
+  CONTROL_API_ADMIN_WORKFLOW_TRIGGER_PER_MIN: "50"
+  CONTROL_API_ADMIN_OUTPUTS_READ_PER_MIN: "150"
+  CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MIN: "300"
+  CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_ANONYMOUS_IP_PER_MIN: "60"
+  CONTROL_API_ADMIN_REGISTRY_KEYS_PER_MIN: "150"
+  CONTROL_API_ADMIN_REGISTRY_GRANTS_PER_MIN: "150"
+  CONTROL_API_ADMIN_REGISTRY_CONNECT_STATUS_PER_MIN: "150"
+  CONTROL_API_ADMIN_REGISTRY_CONNECT_REQUEST_PER_MIN: "15"
+  CONTROL_API_ADMIN_REGISTRY_CONNECT_RECOVERY_PER_MIN: "50"
+  CONTROL_API_ADMIN_CONNECTOR_DELETE_EDGE_PER_MIN: "300"
+  CONTROL_API_ADMIN_CONNECTOR_DELETE_PER_MIN: "150"
+  CONTROL_API_ADMIN_GFS_GRANTS_PER_MIN: "150"
+  CONTROL_API_ADMIN_GFS_SHARES_PER_MIN: "150"
+  CONTROL_API_ADMIN_GFS_LEGACY_GRANT_REPORT_PER_MIN: "150"
   # Hard ceiling for caller-provided ttlSeconds. Defaults to 48h so a client
   # asking for ttlSeconds=604800 (code default) can't freeze a workflow step
   # for a full week. Overlays may tighten further for stricter environments.
@@ -882,17 +908,32 @@ data:
         location = /api/v1/mcp-host/llm/provider-attempts/authorize {
           # V2 carries bounded inline images; keep the larger body allowance
           # on this authenticated authorization route, not the whole gateway.
+          # The route is shared by both providers, so the value is the larger
+          # visual envelope: Grok 36700160 (#784) over Codex 25165824 (#660).
           # It also covers the #731 non-image request cap (8 MiB) plus
           # control-api's 16 KiB authorize envelope allowance, which nginx's
           # 1m default would refuse before control-api sees it. nginx refuses
           # to start when a location repeats this directive.
-          client_max_body_size 25165824;
+          client_max_body_size 36700160;
           limit_except POST {
             deny all;
           }
           error_page 502 = @control_plane_unavailable;
           error_page 504 = @control_plane_connect_timeout;
-          proxy_pass http://control_api_upstream;
+          # control-api answers queue_wait or authorize_timeout itself; the
+          # server's 30 s would turn those answers into nginx's own 504. Each
+          # timer bounds the gap between two writes or reads, not the whole
+          # request: control-api pauses a queued body, so the send timer covers
+          # the queue wait (40 s), and the read timer covers the work deadline
+          # (30 s) once the body is sent.
+          proxy_read_timeout 90s;
+          proxy_send_timeout 90s;
+          # This exact location matches the normalized URI, but a proxy_pass
+          # without a URI part forwards the raw one. Aliases such as
+          # %61uthorize or ./authorize would then reach control-api with the
+          # 35 MiB allowance on a path its parser exemption does not know.
+          # The URI part makes nginx send the canonical path (query kept).
+          proxy_pass http://control_api_upstream/api/v1/mcp-host/llm/provider-attempts/authorize;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
