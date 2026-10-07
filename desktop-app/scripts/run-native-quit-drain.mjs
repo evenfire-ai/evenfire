@@ -56,7 +56,7 @@ async function runFixture(rejectedPreparationPhase) {
       const deadline = setTimeout(() => {
         timedOut = true
         child.kill('SIGKILL')
-      }, 15_000)
+      }, 45_000)
       child.once('error', error => {
         clearTimeout(deadline)
         reject(error)

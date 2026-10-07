@@ -210,7 +210,7 @@ registerQuitDrain(
       )
 
       if (prepareCount === 1) {
-        await sleep(5_100)
+        await sleep(20_100)
         preparationHeldPastDeadline = !preparationSettled && !firstLogoutSettled
         authStateIntactBeforeRelease =
           appService.sessionToken === 'synthetic-session-token' &&
@@ -218,8 +218,8 @@ registerQuitDrain(
           savedCredential
 
         // The old deadline resumes quit first, so the real beforeunload veto
-        // below releases this fence. The corrected path stays pending and the
-        // fixture releases it after proving the five-second wait.
+        // below releases this fence. The corrected path stays pending while
+        // this 20-second observation window elapses.
         if (!preparationSettled) {
           firstAuthFence.resolve()
           if (process.env.EVENFIRE_TEST_QUIT_DRAIN_REJECT_PREPARATION === 'first') {
@@ -269,7 +269,7 @@ registerQuitDrain(
     resolveCancellation()
   }
 )
-setTimeout(() => app.exit(8), 12_000)
+setTimeout(() => app.exit(8), 35_000)
 
 app
   .whenReady()
