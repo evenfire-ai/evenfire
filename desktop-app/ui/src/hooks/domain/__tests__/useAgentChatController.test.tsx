@@ -142,7 +142,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
 
       const firstSetLastActive = deferred<void>()
       const setLastActive = clerum.chat.setLastActive.getMockImplementation()
-      if (!setLastActive) throw new Error('Expected the ChatStore setLastActive producer')
+      if (!setLastActive) throw new Error('Expected the setLastActive test mock implementation')
       let holdFirstCall = true
       clerum.chat.setLastActive.mockImplementation(async (agentRef, chatId) => {
         if (agentRef === 'agent-x' && chatId === 'chat-a' && holdFirstCall) {
