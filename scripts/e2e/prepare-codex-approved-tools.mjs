@@ -738,8 +738,54 @@ function command(
   // Subprocess output can include runtime state. Only callers parse their
   // specific safe result; never embed raw stderr/stdout in an exception.
   if (result.error || result.signal || result.status !== 0)
-    throw new Error('Bounded fixture operation failed')
+    throw new Error(boundedOperationFailure(operation, result))
   return result.stdout ?? ''
+}
+
+// The operation name comes from the closed switch above; the outcome is an
+// exit status, a signal name or a spawn error code. None carries output.
+export function boundedOperationFailure(operation, result) {
+  const code = result.error?.code
+  const outcome = result.error
+    ? `could not run (${typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(code) ? code : 'spawn error'})`
+    : result.signal
+      ? `stopped by ${/^SIG[A-Z0-9]{1,16}$/.test(result.signal) ? result.signal : 'a signal'}`
+      : `exited with status ${Number.isSafeInteger(result.status) ? result.status : 'unknown'}`
+  return `FIXTURE_OPERATION_FAILED: bounded fixture operation '${operation}' ${outcome}`
+}
+
+const PREPARATION_FAILURE_MAX_CHARS = 600
+
+// One line for the operator. Messages raised by this harness are fixed text,
+// environment variable names, image references and commit SHAs; runtime errors
+// of other classes (for example a JSON SyntaxError quoting its input) are
+// reported by class name only. Evidence is mentioned only when some exists.
+export function preparationFailureLine(error, evidenceFiles) {
+  const plain = error instanceof Error && Object.getPrototypeOf(error) === Error.prototype
+  const message = plain
+    ? error.message
+        .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+        .trim()
+        .slice(0, PREPARATION_FAILURE_MAX_CHARS)
+    : ''
+  const coded = /^([A-Z][A-Z0-9_]{2,63}): /.exec(message)
+  const code = coded ? coded[1] : 'PREPARATION_FAILED'
+  const name = error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : ''
+  const detail = message
+    ? message.slice(coded ? coded[0].length : 0)
+    : `unexpected ${name || 'non-Error value'}`
+  const suffix =
+    evidenceFiles > 0
+      ? '; review bounded sanitized fixture evidence'
+      : '; no fixture evidence was written'
+  return `Approved tools preparation failed: ${code}: ${detail}${suffix}\n`
+}
+
+function evidenceFileCount() {
+  const dir = process.env.APPROVED_TOOLS_EVIDENCE_DIR
+  return dir && fs.existsSync(dir) && fs.statSync(dir).isDirectory()
+    ? fs.readdirSync(dir).length
+    : 0
 }
 
 function required(key) {
@@ -1611,10 +1657,8 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(() => {
-    process.stderr.write(
-      'Approved tools preparation failed; review bounded sanitized fixture evidence\n'
-    )
+  main().catch(error => {
+    process.stderr.write(preparationFailureLine(error, evidenceFileCount()))
     process.exitCode = 1
   })
 }

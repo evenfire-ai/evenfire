@@ -19,6 +19,65 @@ const LIMIT_PROBE_CALLS = 257
 // the continuation must carry every result back before the final answer.
 const LIMIT_BOUNDARY = 'tool call limit boundary'
 const LIMIT_BOUNDARY_CALLS = 256
+// The model the catalog advertises. The Desktop model selector renders this
+// display name for the bound model, so the E2E spec asserts it by value.
+export const FIXTURE_MODEL = { slug: 'gpt-5.3-codex', displayName: 'Codex isolated tool test' }
+
+// Closed set of rejection reasons. Each is a fixed string thrown below; any
+// other error (for example a JSON syntax error) is reported as `unclassified`,
+// so no payload text, token or message ever reaches the evidence or the body.
+export const REJECTION_REASONS = [
+  'ambiguous_workflow_target',
+  'boundary_search_failed',
+  'description_target_mismatch',
+  'description_without_search',
+  'duplicate_call_id',
+  'evidence_capacity_exceeded',
+  'expected_json_text',
+  'expected_object',
+  'fixture_requires_empty_arguments',
+  'incomplete_boundary_batch',
+  'incomplete_or_repeated_calls',
+  'invalid_call',
+  'invalid_definitions',
+  'invalid_envelope_target',
+  'invalid_search_result',
+  'invalid_search_target',
+  'invalid_stream_contract',
+  'invalid_tool_output_envelope',
+  'invocation_target_mismatch',
+  'invocation_without_schema',
+  'missing_business_result',
+  'missing_discovery_bridge',
+  'missing_input_or_tools',
+  'missing_user_request',
+  'operation_denied',
+  'search_must_find_one_target',
+  'status_binding_missing',
+  'trigger_binding_missing',
+  'unadvertised_function',
+  'uncorrelated_boundary_call',
+  'uncorrelated_result',
+  'unexpected_fixture_call',
+  'unexpected_retry',
+  'unknown_boundary_turn',
+  'unsupported_fixture_task',
+  'unsupported_receipt_transition',
+  'unsupported_workflow_transition',
+  'workflow_artifact_missing',
+  'workflow_list_required',
+  'workflow_not_uniquely_resolved',
+  'workflow_target_mismatch',
+] as const
+export type RejectionReason = (typeof REJECTION_REASONS)[number] | 'unclassified'
+const KNOWN_REASONS: ReadonlySet<string> = new Set(REJECTION_REASONS)
+const MAX_RECORDED_REJECTIONS = 64
+
+export function rejectionReason(error: unknown): RejectionReason {
+  return error instanceof Error && KNOWN_REASONS.has(error.message)
+    ? (error.message as RejectionReason)
+    : 'unclassified'
+}
 
 function record(value: unknown): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -314,6 +373,9 @@ export function createApprovedToolsUpstream() {
   const evidence = {
     catalogRequests: 0,
     rejected: 0,
+    // Reason of each rejection, in order, from the closed set above. Bounded:
+    // `rejected` keeps counting after the list is full.
+    rejections: [] as RejectionReason[],
     completions: 0,
     searchCalls: 0,
     describeCalls: 0,
@@ -355,7 +417,7 @@ export function createApprovedToolsUpstream() {
       if (url === CATALOG && (!init?.method || init.method === 'GET')) {
         evidence.catalogRequests++
         return Response.json({
-          models: [{ slug: 'gpt-5.3-codex', display_name: 'Codex isolated tool test' }],
+          models: [{ slug: FIXTURE_MODEL.slug, display_name: FIXTURE_MODEL.displayName }],
         })
       }
       if (url !== COMPLETIONS || init?.method !== 'POST') throw new Error('operation_denied')
@@ -528,9 +590,11 @@ export function createApprovedToolsUpstream() {
           arguments: JSON.stringify(args),
         },
       })
-    } catch {
+    } catch (error) {
+      const reason = rejectionReason(error)
       evidence.rejected++
-      return Response.json({ error: { code: 'fixture_protocol_rejected' } }, { status: 422 })
+      if (evidence.rejections.length < MAX_RECORDED_REJECTIONS) evidence.rejections.push(reason)
+      return Response.json({ error: { code: 'fixture_protocol_rejected', reason } }, { status: 422 })
     }
   }
   return { fetchFn, evidence: () => structuredClone(evidence) }

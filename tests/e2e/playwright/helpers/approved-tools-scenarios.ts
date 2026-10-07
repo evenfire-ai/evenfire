@@ -49,6 +49,9 @@ export type Evidence = {
 }
 export type UpstreamEvidence = {
   rejected: number
+  // Closed-set reason of each rejection, in order. The fixture model keeps at
+  // most the first 64 (MAX_RECORDED_REJECTIONS); `rejected` keeps counting.
+  rejections: string[]
   searchCalls: number
   describeCalls: number
   businessCalls: number
@@ -192,5 +195,11 @@ export async function readUpstreamEvidence(scenario: Scenario): Promise<Upstream
       throw new Error(`Missing upstream limit boundary evidence ${field}`)
   }
   if (!Array.isArray(evidence.requests)) throw new Error('Missing upstream request evidence')
+  if (
+    !Array.isArray(evidence.rejections) ||
+    evidence.rejections.length > evidence.rejected ||
+    evidence.rejections.some(reason => typeof reason !== 'string' || !/^[a-z_]{1,64}$/.test(reason))
+  )
+    throw new Error('Missing upstream rejection evidence')
   return evidence
 }

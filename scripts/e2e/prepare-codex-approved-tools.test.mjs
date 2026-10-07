@@ -13,12 +13,14 @@ import {
 } from '../release/images-manifest.mjs'
 import {
   assertResourceRoundTrip,
+  boundedOperationFailure,
   makeResources,
   makeScenarios,
   makeWorkflowResources,
   makeWorkflowScenario,
   openOwnedFile,
   parseDryRunItems,
+  preparationFailureLine,
   readOwnedDescriptor,
   readOwnedFile,
   validateKubectlArgs,
@@ -441,4 +443,76 @@ test('fixed ownership CLI rejects invalid operations and bindings without touchi
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('a failed bounded operation names the operation and its outcome, never its output', () => {
+  assert.equal(
+    boundedOperationFailure('kubectl', { status: 1, stdout: 'secret-token', stderr: 'dsn' }),
+    "FIXTURE_OPERATION_FAILED: bounded fixture operation 'kubectl' exited with status 1"
+  )
+  assert.equal(
+    boundedOperationFailure('runner', { status: null, signal: 'SIGTERM' }),
+    "FIXTURE_OPERATION_FAILED: bounded fixture operation 'runner' stopped by SIGTERM"
+  )
+  const missing = Object.assign(new Error('spawn minikube ENOENT /private/path'), {
+    code: 'ENOENT',
+  })
+  assert.equal(
+    boundedOperationFailure('image-inventory', { error: missing, status: null }),
+    "FIXTURE_OPERATION_FAILED: bounded fixture operation 'image-inventory' could not run (ENOENT)"
+  )
+  assert.equal(
+    boundedOperationFailure('lease', { error: { code: 'weird code' }, status: null }),
+    "FIXTURE_OPERATION_FAILED: bounded fixture operation 'lease' could not run (spawn error)"
+  )
+})
+
+test('preparation failure line keeps the diagnostic message and its code on one line', () => {
+  const proof = new Error(
+    'IMAGE_PROOF_HEAD_MISMATCH: clerum/x:test was built at aaa,\nthe commit under review is bbb'
+  )
+  assert.equal(
+    preparationFailureLine(proof, 0),
+    'Approved tools preparation failed: IMAGE_PROOF_HEAD_MISMATCH: clerum/x:test was built at aaa, the commit under review is bbb; no fixture evidence was written\n'
+  )
+  assert.equal(
+    preparationFailureLine(new Error('Missing MINIKUBE_PROFILE'), 3),
+    'Approved tools preparation failed: PREPARATION_FAILED: Missing MINIKUBE_PROFILE; review bounded sanitized fixture evidence\n'
+  )
+  // A runtime SyntaxError can quote the text it failed to parse.
+  let syntax
+  try {
+    JSON.parse('{"token":"sk-live-secret"')
+  } catch (error) {
+    syntax = error
+  }
+  assert.ok(syntax instanceof SyntaxError)
+  const line = preparationFailureLine(syntax, 0)
+  assert.equal(
+    line,
+    'Approved tools preparation failed: PREPARATION_FAILED: unexpected SyntaxError; no fixture evidence was written\n'
+  )
+  assert.ok(!line.includes('sk-live-secret'))
+  assert.match(
+    preparationFailureLine('not an error', 0),
+    /PREPARATION_FAILED: unexpected non-Error value;/
+  )
+  const long = preparationFailureLine(new Error('x'.repeat(5000)), 0)
+  assert.ok(long.length < 700)
+  assert.equal(long.split('\n').length, 2)
+})
+
+test('the CLI prints the failure reason instead of a generic sentence', () => {
+  const env = { ...process.env }
+  delete env.APPROVED_TOOLS_EVIDENCE_DIR
+  const result = spawnSync(
+    process.execPath,
+    ['scripts/e2e/prepare-codex-approved-tools.mjs', 'unsupported-action'],
+    { cwd: path.resolve(import.meta.dirname, '../..'), env, encoding: 'utf8', timeout: 30_000 }
+  )
+  assert.equal(result.status, 1)
+  assert.equal(
+    result.stderr,
+    'Approved tools preparation failed: PREPARATION_FAILED: Expected prepare, run, or restore; no fixture evidence was written\n'
+  )
 })
