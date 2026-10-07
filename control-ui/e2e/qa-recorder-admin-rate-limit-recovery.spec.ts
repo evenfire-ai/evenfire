@@ -752,19 +752,19 @@ test.describe('optional QA recorder: administrative rate-limit journeys', () => 
         ).toBeVisible()
         await screenshotAndLog(page, testInfo, 'admin-rate-limit-real-429-draft')
 
-        // Wait on the deadline supplied by the real guard, not a fixed delay.
-        await expect
-          .poll(() => Date.now(), {
-            timeout: retryAfter * 1_000 + 10_000,
-            message: 'Respect the observed server Retry-After deadline before the visible retry',
-          })
-          .toBeGreaterThanOrEqual(retryAt)
-        // The shared background recovery may read the denied inventory before or
-        // after this click; Retry reuses that result instead of forcing a second
-        // read, so assert the quota invariant rather than an exact read count.
+        // The editor recovers on its own at the deadline supplied by the real
+        // guard: the shared background recovery rereads the denied inventory and
+        // the alert, with its Retry button, goes away without a click. Clicking
+        // Retry here would race that recovery. The client starts its deadline
+        // when the 429 arrives, slightly before retryAt, hence the tolerance.
         const readsBeforeDeadline = 3
-        await alert.getByRole('button', { name: 'Retry', exact: true }).click()
-        await expect(dialog.getByRole('alert')).toHaveCount(0)
+        await expect(dialog.getByRole('alert')).toHaveCount(0, {
+          timeout: retryAfter * 1_000 + 15_000,
+        })
+        expect(
+          Date.now(),
+          'The automatic recovery must not read before the Retry-After deadline'
+        ).toBeGreaterThanOrEqual(retryAt - 1_000)
         await expect(
           dialog.getByRole('status').filter({ hasText: 'Loading subscription options…' })
         ).toHaveCount(0)
@@ -779,7 +779,7 @@ test.describe('optional QA recorder: administrative rate-limit journeys', () => 
         ).not.toContain(429)
         expect(
           afterDeadline.length,
-          'Recovery and the visible Retry stay within one quota window'
+          'The automatic recovery stays within one quota window'
         ).toBeLessThanOrEqual(fixture.quota)
         expect(
           afterDeadline.every(read => read.path !== CAPABILITIES),
