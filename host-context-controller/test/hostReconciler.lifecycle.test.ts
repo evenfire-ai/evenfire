@@ -1035,6 +1035,59 @@ describe('HostReconciler resource rollout bootstrap', () => {
     expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
   })
 
+  it.each([false, undefined] as const)(
+    'blocks an active resource change with an unprepared provision (%s), then resumes with persisted preparation',
+    async proof => {
+      const fixture = await runtime()
+      const template = structuredClone(fixture.deployment().spec!.template)
+      const generation = fixture.deployment().metadata!.generation
+      const credentialData = { ...fixture.secret().data }
+      config.hostResources.requests.cpu = '25m'
+      // Model a provisioning-contract regression at its boundary. The real
+      // Deployment mutation guard must reject the missing delivery proof.
+      const provision = vi
+        .spyOn(fixture.reconciler as any, 'provisionRuntimeTokenRevision')
+        .mockResolvedValue({
+          revision: template.metadata!.annotations![APPLIED_REVISION],
+          scopeHash: fixture.secret().metadata!.annotations!['clerum.io/runtime-token-scope-hash'],
+          deploymentUid: fixture.deployment().metadata!.uid,
+          freshBootstrapPrepared: proof,
+        })
+      try {
+        await fixture.reconcile()
+        expect(issue).not.toHaveBeenCalled()
+        expect(fixture.events).toEqual([])
+        expect(fixture.secret().data).toEqual(credentialData)
+        expect(fixture.deployment().spec!.template).toEqual(template)
+        expect(fixture.deployment().metadata!.generation).toBe(generation)
+        expect(fixture.reconciler.getStatus(fixture.host.name)).toMatchObject({
+          deployed: true,
+          ready: false,
+          message: 'Waiting for a prepared runtime bootstrap before changing resources',
+        })
+      } finally {
+        provision.mockRestore()
+      }
+
+      // The same intended change must proceed once real provisioning supplies
+      // persisted material, so refusal cannot hide a permanent convergence block.
+      await fixture.reconcile()
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.templateChanges()).toBe(1)
+      expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+        '25m'
+      )
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        fixture.secret().metadata!.annotations![SECRET_REVISION]
+      )
+      fixture.advance()
+      await fixture.reconcile()
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+      expect(issue).toHaveBeenCalledOnce()
+    }
+  )
+
   it('defers resource preparation when retained OAuth authority is temporarily unobserved', async () => {
     const fixture = await runtime({ oauth: true })
     config.hostResources.requests.cpu = '25m'
