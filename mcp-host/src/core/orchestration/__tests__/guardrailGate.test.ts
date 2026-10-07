@@ -219,6 +219,62 @@ describe('guardrail gate in executeToolCalls', () => {
     expect(toolResults[0].content).toBe('[fenced:[redacted:ok]]')
   })
 
+  // Post-result hooks redact error text too (a thrown upstream message can
+  // carry a secret) and observe failed calls, so every error result the
+  // execution boundary produces must pass through transformResult.
+  it.each([
+    {
+      path: 'a thrown tool error',
+      tools: (): Record<string, Tool> => {
+        const throwing = new StubTool('do_thing')
+        throwing.execute = async params => {
+          throwing.calls.push(params)
+          throw new Error('upstream said SECRET-TOKEN-123')
+        }
+        return { do_thing: throwing }
+      },
+      raw: 'Tool execution failed: upstream said SECRET-TOKEN-123',
+    },
+    {
+      // Admission accepts the call; the execution boundary re-validates the
+      // effective parameters and refuses them.
+      path: 'an execution-boundary validation failure',
+      tools: (): Record<string, Tool> => {
+        const strict = new StubTool('do_thing')
+        let validations = 0
+        Object.assign(strict, {
+          validateParams: () =>
+            ++validations === 1
+              ? { is_valid: true, errors: [] }
+              : { is_valid: false, errors: ['bad SECRET-TOKEN-123'] },
+        })
+        return { do_thing: strict }
+      },
+      raw: 'Parameter validation failed: bad SECRET-TOKEN-123',
+    },
+    {
+      path: 'a missing tool',
+      tools: (): Record<string, Tool> => ({}),
+      raw: 'Tool not found: do_thing',
+    },
+  ])('PostToolUse transformResult also sees $path', async ({ tools, raw }) => {
+    const seen: Array<{ content: string; isError: boolean }> = []
+    const guardrail: ToolLaneGuardrail = {
+      async decide(_id, input) {
+        return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'host_rule' }
+      },
+      async transformResult(_id, _input, result) {
+        seen.push(result)
+        return { content: '[redacted]', isError: result.isError }
+      },
+    }
+    const config = makeConfig(new StubTool('unused'), guardrail)
+    config.toolRegistry = registry(tools())
+    const { toolResults } = await executeToolCalls([call], config, 0)
+    expect(seen).toEqual([{ content: raw, isError: true }])
+    expect(toolResults[0]).toMatchObject({ content: '[redacted]', is_error: true })
+  })
+
   it('ask + matching one-shot approval → proceeds and clears pending', async () => {
     const tool = new StubTool('do_thing')
     const conversation: Partial<Conversation> = {

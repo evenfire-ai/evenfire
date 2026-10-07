@@ -35,6 +35,13 @@ export async function executeSingleTool(
 ): Promise<ToolResult> {
   const { toolRegistry, toolOutputProcessor, events, toolTimeout } = config
 
+  // Post-result hooks see error results too: they redact error text (a thrown
+  // upstream message can carry a secret) and observe failed calls.
+  const errorResult = async (content: string): Promise<ToolResult> => {
+    const result: ToolResult = { tool_call_id: call.id, name: call.name, content, is_error: true }
+    return transformResult ? transformResult(result) : result
+  }
+
   const tool = toolRegistry.get(call.name)
   let validation = toolOutputProcessor.beforeExecution(call.name, call.arguments)
   if (validation.is_valid) {
@@ -52,22 +59,10 @@ export async function executeSingleTool(
       },
       timestamp: new Date(),
     })
-    return {
-      tool_call_id: call.id,
-      name: call.name,
-      content: `Parameter validation failed: ${validation.errors.join(', ')}`,
-      is_error: true,
-    }
+    return errorResult(`Parameter validation failed: ${validation.errors.join(', ')}`)
   }
 
-  if (!tool) {
-    return {
-      tool_call_id: call.id,
-      name: call.name,
-      content: `Tool not found: ${call.name}`,
-      is_error: true,
-    }
-  }
+  if (!tool) return errorResult(`Tool not found: ${call.name}`)
 
   const renderContent = (content: string): string => {
     if (!tool.requiresSanitization()) return content
@@ -279,12 +274,7 @@ export async function executeSingleTool(
 
     logger.error({ toolName: call.name, err }, 'Tool execution failed')
 
-    return {
-      tool_call_id: call.id,
-      name: call.name,
-      content: errorMessage,
-      is_error: true,
-    }
+    return await errorResult(errorMessage)
   } finally {
     if (watcherId) {
       clearInterval(watcherId)
