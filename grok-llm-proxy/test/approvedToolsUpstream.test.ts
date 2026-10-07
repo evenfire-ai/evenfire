@@ -54,7 +54,8 @@ async function complete(
       name: target,
       parameters: { type: 'object', properties: {}, additionalProperties: false },
     },
-    { content: [{ type: 'text', text: JSON.stringify(result) }] },
+    // The Host hands the model the tool's text, not the MCP content wrapper.
+    result,
   ]
   for (let index = 0; index < 3; index++) {
     const step = await request(simulator, input)
@@ -180,6 +181,42 @@ describe('approved-tools isolated upstream boundary', () => {
       call_id: call.event.item.call_id,
       output: JSON.stringify({ ...valid, ...change }),
     })
+    expect((await request(simulator, input)).response.status).toBe(422)
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 1 })
+  })
+
+  it('rejects the MCP content wrapper instead of unwrapping it', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    const valid = await complete(simulator, input, 'wrapper')
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 0 })
+    input.push({ role: 'user', content: 'verification receipt again' })
+    const call = await request(simulator, input)
+    input.push(call.event.item, {
+      type: 'function_call_output',
+      call_id: call.event.item.call_id,
+      output: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(valid) }] }),
+    })
+    expect((await request(simulator, input)).response.status).toBe(422)
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 1 })
+  })
+
+  it('rejects a new turn whose previous completed receipt breaks the contract', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    await complete(simulator, input, 'prior-turn')
+    const output = input.at(-1)!
+    expect(output.type).toBe('function_call_output')
+    // The same history with a valid receipt is reused, so only the violation
+    // makes the next turn fail.
+    const reused = await request(simulator, [
+      ...input,
+      { role: 'user', content: 'verification receipt again' },
+    ])
+    expect(reused.event.item.name).toBe(bridges[2])
+    const receipt = JSON.parse(output.output as string)
+    output.output = JSON.stringify({ ...receipt, callId: 1.5 })
+    input.push({ role: 'user', content: 'verification receipt again' })
     expect((await request(simulator, input)).response.status).toBe(422)
     expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 1 })
   })
