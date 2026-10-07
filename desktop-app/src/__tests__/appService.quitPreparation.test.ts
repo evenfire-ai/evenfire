@@ -36,10 +36,12 @@ afterAll(async () => {
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
-  const promise = new Promise<T>(done => {
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((done, fail) => {
     resolve = done
+    reject = fail
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
 }
 
 function createService(tokenStore: {
@@ -175,6 +177,31 @@ describe('AppService quit preparation', () => {
       producer.resolve()
       await Promise.allSettled([logout, preparation])
     }
+  })
+
+  it('waits for remaining admitted producers after one producer rejects', async () => {
+    const rejectedProducer = deferred<void>()
+    const pendingProducer = deferred<void>()
+    const tokenStore = {
+      prepareForQuit: vi.fn().mockResolvedValue(undefined),
+      reopenAdmission: vi.fn(),
+    }
+    const service = createService(tokenStore)
+    service.logoutOnce
+      .mockImplementationOnce(() => rejectedProducer.promise)
+      .mockImplementationOnce(() => pendingProducer.promise)
+
+    const first = service.logout().catch(error => error)
+    const second = service.logout()
+    const preparation = service.prepareForQuit()
+
+    rejectedProducer.reject(new Error('first producer failed'))
+    await first
+    expect(tokenStore.prepareForQuit).not.toHaveBeenCalled()
+
+    pendingProducer.resolve()
+    await Promise.all([second, preparation])
+    expect(tokenStore.prepareForQuit).toHaveBeenCalledOnce()
   })
 
   it('does not gate a runWithTeamContext call that has no team credential hop', async () => {
