@@ -5,5 +5,7 @@ FROM ${CODEX_PROXY_IMAGE}
 LABEL ai.evenfire.test-only="approved-tools-minikube"
 WORKDIR /app/codex-llm-proxy
 COPY codex-llm-proxy/test/approvedToolsUpstream.ts ./test/approvedToolsUpstream.ts
+# approvedToolsUpstream.ts imports the shared receipt contract by its repository path.
+COPY tests/e2e/fixtures/codex-subscription/approved-tools/business-receipt.mjs /app/tests/e2e/fixtures/codex-subscription/approved-tools/business-receipt.mjs
 COPY tests/e2e/fixtures/codex-subscription/approved-tools-proxy/entrypoint.mjs ./approved-tools-entrypoint.mjs
 CMD ["node", "approved-tools-entrypoint.mjs"]

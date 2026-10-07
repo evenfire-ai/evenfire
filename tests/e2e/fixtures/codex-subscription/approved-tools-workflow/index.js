@@ -1,24 +1,17 @@
 // Isolated custom-coordinator fixture. The SDK owns WRC identity and status.
 const fs = require('node:fs/promises')
 const { randomUUID } = require('node:crypto')
+// Shared with the MCP fixture server and the fixture model. Node 24 loads this
+// ES module synchronously through require().
+const { businessReceiptProblem } = require('../approved-tools/business-receipt.mjs')
 
 const ARTIFACT_NAME = 'approved-tools-workflow-result.json'
 const ARTIFACT_PATH = `/output/${ARTIFACT_NAME}`
 
 function validatedReceipt(value, selected) {
-  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
-  if (
-    !value ||
-    value.tool !== selected ||
-    typeof value.tool !== 'string' ||
-    !/^[a-zA-Z0-9_]{1,128}$/.test(value.tool) ||
-    typeof value.businessId !== 'string' ||
-    !uuid.test(value.businessId) ||
-    typeof value.callId !== 'string' ||
-    !uuid.test(value.callId) ||
-    typeof value.runId !== 'string' ||
-    !/^[a-zA-Z0-9_-]{1,128}$/.test(value.runId)
-  )
+  // This coordinator issues its own requests with UUID ids (readReceipt), so
+  // the receipt's callId is one of them.
+  if (businessReceiptProblem(value, 'host-workflow-result') !== null || value.tool !== selected)
     throw new Error('receipt_binding_missing')
   // Persist only the bounded receipt contract, never arbitrary remote fields.
   return {

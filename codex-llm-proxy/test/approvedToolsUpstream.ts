@@ -1,6 +1,9 @@
 /** External model boundary for the isolated approved-tools E2E image only. */
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+// Shared with the MCP fixture server that creates the receipt. The isolated
+// proxy image copies it to the same repository-relative path.
+import { businessReceiptProblem } from '../../tests/e2e/fixtures/codex-subscription/approved-tools/business-receipt.mjs'
 
 type Row = Record<string, unknown>
 const COMPLETIONS = 'https://chatgpt.com/backend-api/codex/responses'
@@ -42,15 +45,10 @@ function textResult(value: unknown, expectedName: string): Row {
   // Real tool failures can be plain sanitized text; preserve that failure as
   // data rather than inventing a successful result or retrying an approval.
   if (typeof value === 'string' && !value.trim().startsWith('{')) return { error: value }
-  const result = parse(value)
-  if (result.isError === true || result.is_error === true) return result
-  if (Array.isArray(result.content)) {
-    const blocks = result.content.map(record)
-    if (blocks.length !== 1 || blocks[0]?.type !== 'text')
-      throw new Error('expected_single_text_result')
-    return parse(blocks[0].text)
-  }
-  return result
+  // The Host hands the model the tool's text, never the MCP content wrapper,
+  // so a `{ content: [...] }` object is passed on unchanged and fails the
+  // receipt contract in receipt().
+  return parse(value)
 }
 
 type Exchange = { call: Row; args: Row; result: Row }
@@ -129,13 +127,11 @@ function receipt(exchange: Exchange, candidate: string): Row {
   )
     throw new Error('invocation_target_mismatch')
   const value = exchange.result
+  // callId is the MCP JSON-RPC request id: an integer from the Host's SDK
+  // client, a string from others. It is never used for correlation.
   if (
-    typeof value.businessId !== 'string' ||
-    !value.businessId ||
-    typeof value.runId !== 'string' ||
-    typeof value.callId !== 'string' ||
-    typeof value.tool !== 'string' ||
-    !candidate.endsWith(`__${value.tool}`)
+    businessReceiptProblem(value, 'mcp') !== null ||
+    !candidate.endsWith(`__${String(value.tool)}`)
   )
     throw new Error('missing_business_result')
   return value
@@ -145,33 +141,42 @@ function reusableDescription(history: Row[]): string | undefined {
   let previousUser = history.length - 1
   while (previousUser >= 0 && history[previousUser]?.role !== 'user') previousUser--
   if (previousUser < 0) return undefined
-  try {
-    // A canceled or denied previous task invalidates reuse; an ordinary new
-    // request must recover via discovery, not continue its interrupted call.
-    const previous = exchanges(history.slice(previousUser + 1))
-    const last = previous.at(-1)
-    if (
-      !last ||
-      last.call.name !== BRIDGES[2] ||
-      failed(last.result) ||
-      typeof last.args.name !== 'string'
+  // A canceled or denied previous task invalidates reuse; an ordinary new
+  // request must recover via discovery, not continue its interrupted call.
+  // Historical partial results are expected after genuine user cancellation:
+  // they cannot be paired into exchanges and never block the new task. A
+  // completed previous receipt that breaks the contract is still rejected.
+  const previous = pairedExchanges(history.slice(previousUser + 1))
+  const last = previous?.at(-1)
+  if (
+    !last ||
+    last.call.name !== BRIDGES[2] ||
+    failed(last.result) ||
+    typeof last.args.name !== 'string'
+  )
+    return undefined
+  receipt(last, last.args.name)
+  const allCalls = history.filter(row => row.type === 'function_call' && row.name === BRIDGES[1])
+  for (const call of allCalls.reverse()) {
+    const result = history.find(
+      row => row.type === 'function_call_output' && row.call_id === call.call_id
     )
-      return undefined
-    receipt(last, last.args.name)
-    const allCalls = history.filter(row => row.type === 'function_call' && row.name === BRIDGES[1])
-    for (const call of allCalls.reverse()) {
-      const result = history.find(
-        row => row.type === 'function_call_output' && row.call_id === call.call_id
-      )
-      if (!result) continue
-      const candidate = described(exchanges([call, result])[0]!)
-      if (candidate === last.args.name) return candidate
-    }
-  } catch {
-    // Historical partial results are expected after genuine user cancellation.
-    // They cannot supply a reusable schema, but never block the new task.
+    if (!result) continue
+    const description = pairedExchanges([call, result])?.[0]
+    // A description that found nothing is legitimate history (a new search
+    // followed it) but supplies no reusable schema.
+    if (!description || description.result.found !== true) return undefined
+    if (described(description) === last.args.name) return last.args.name
   }
   return undefined
+}
+
+function pairedExchanges(rows: Row[]): Exchange[] | undefined {
+  try {
+    return exchanges(rows)
+  } catch {
+    return undefined
+  }
 }
 
 function receiptDecision(current: Exchange[], known?: string): Decision {

@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import { pathToFileURL } from 'node:url'
+import { RECEIPT_TOOL, createBusinessReceipt, isJsonRpcRequestId } from './business-receipt.mjs'
 
-export const RECEIPT_TOOL = 'workitem_read_receipt'
+export { RECEIPT_TOOL }
 const SIZES = new Set([83, 150, 250])
 const RUN_ID = /^[a-zA-Z0-9_-]{1,80}$/
 const MAX_REQUEST_BYTES = 64 * 1024
@@ -92,6 +93,9 @@ export function createApprovedToolsFixture({ catalogSize = 83, runId = randomUUI
           return send(response, 202)
         return send(response, 400, { error: 'Unsupported notification' })
       }
+      // Checked before any method runs, so a receipt never carries an id the
+      // shared contract would reject.
+      if (!isJsonRpcRequestId(id)) return rpcError(response, null, -32600, 'Invalid Request')
       let result
       if (method === 'initialize') {
         if (typeof params?.protocolVersion !== 'string')
@@ -121,7 +125,7 @@ export function createApprovedToolsFixture({ catalogSize = 83, runId = randomUUI
         } else {
           // Generated inside this service only when a business call arrives.
           businessId ??= randomUUID()
-          const record = { runId, tool: params.name, callId: id, businessId }
+          const record = createBusinessReceipt({ runId, tool: params.name, callId: id, businessId })
           calls.push(record)
           result = { content: [{ type: 'text', text: JSON.stringify(record) }], isError: false }
         }

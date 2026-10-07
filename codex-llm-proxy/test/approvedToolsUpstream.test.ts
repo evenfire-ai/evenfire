@@ -31,16 +31,20 @@ async function request(
   return { response, body, event: response.ok ? JSON.parse(body.split('\n')[0]!.slice(6)) : null }
 }
 
+// Drives search -> describe -> call and returns the business receipt. The
+// MCP SDK client the Host uses numbers JSON-RPC requests with integers, so the
+// receipt's callId defaults to one; other clients send strings.
 async function complete(
   simulator: ReturnType<typeof createApprovedToolsUpstream>,
   input: Entry[],
   runId: string,
-  wrapped = false
+  wrapped = false,
+  callId: string | number = 3
 ) {
   const result = {
     runId,
     tool: 'workitem_read_receipt',
-    callId: randomUUID(),
+    callId,
     businessId: randomUUID(),
   }
   const outputs = [
@@ -54,7 +58,8 @@ async function complete(
       name: target,
       parameters: { type: 'object', properties: {}, additionalProperties: false },
     },
-    { content: [{ type: 'text', text: JSON.stringify(result) }] },
+    // The Host hands the model the tool's text, not the MCP content wrapper.
+    result,
   ]
   for (let index = 0; index < 3; index++) {
     const step = await request(simulator, input)
@@ -146,6 +151,79 @@ describe('approved-tools isolated upstream boundary', () => {
       expect(JSON.stringify(evidence)).not.toContain(result.runId)
     }
   )
+
+  it('accepts a string JSON-RPC callId from a client other than the MCP SDK', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const result = await complete(
+      simulator,
+      [{ role: 'user', content: 'verification receipt' }],
+      'string-call-id',
+      false,
+      randomUUID()
+    )
+    expect(typeof result.callId).toBe('string')
+    expect(simulator.evidence()).toMatchObject({ businessCalls: 1, finalResponses: 1, rejected: 0 })
+  })
+
+  it.each([
+    ['a null callId', { callId: null }],
+    ['a fractional callId', { callId: 1.5 }],
+    ['an empty callId', { callId: '' }],
+    ['a callId over 128 characters', { callId: 'x'.repeat(129) }],
+    ['an extra field', { extra: 'unexpected' }],
+  ])('rejects a business receipt with %s', async (_label, change) => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    const valid = await complete(simulator, input, 'negative')
+    // Liveness witness: the same journey answers a valid receipt.
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 0 })
+    input.push({ role: 'user', content: 'verification receipt again' })
+    const call = await request(simulator, input)
+    expect(call.event.item.name).toBe(bridges[2])
+    input.push(call.event.item, {
+      type: 'function_call_output',
+      call_id: call.event.item.call_id,
+      output: JSON.stringify({ ...valid, ...change }),
+    })
+    expect((await request(simulator, input)).response.status).toBe(422)
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 1 })
+  })
+
+  it('rejects the MCP content wrapper instead of unwrapping it', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    const valid = await complete(simulator, input, 'wrapper')
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 0 })
+    input.push({ role: 'user', content: 'verification receipt again' })
+    const call = await request(simulator, input)
+    input.push(call.event.item, {
+      type: 'function_call_output',
+      call_id: call.event.item.call_id,
+      output: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(valid) }] }),
+    })
+    expect((await request(simulator, input)).response.status).toBe(422)
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 1 })
+  })
+
+  it('rejects a new turn whose previous completed receipt breaks the contract', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    await complete(simulator, input, 'prior-turn')
+    const output = input.at(-1)!
+    expect(output.type).toBe('function_call_output')
+    // The same history with a valid receipt is reused, so only the violation
+    // makes the next turn fail.
+    const reused = await request(simulator, [
+      ...input,
+      { role: 'user', content: 'verification receipt again' },
+    ])
+    expect(reused.event.item.name).toBe(bridges[2])
+    const receipt = JSON.parse(output.output as string)
+    output.output = JSON.stringify({ ...receipt, callId: 1.5 })
+    input.push({ role: 'user', content: 'verification receipt again' })
+    expect((await request(simulator, input)).response.status).toBe(422)
+    expect(simulator.evidence()).toMatchObject({ finalResponses: 1, rejected: 1 })
+  })
 
   it('interleaves separate conversations without global stage or answer reuse', async () => {
     const simulator = createApprovedToolsUpstream()

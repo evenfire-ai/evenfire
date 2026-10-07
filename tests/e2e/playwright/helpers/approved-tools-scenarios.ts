@@ -1,4 +1,9 @@
 // E2E_GUARDIAN_IPC_FLOW: configuration and read-only fixture evidence only.
+import {
+  type BusinessReceipt,
+  businessReceiptProblem,
+} from '../../fixtures/codex-subscription/approved-tools/business-receipt.mjs'
+
 export const catalogSizes = [83, 150, 250] as const
 
 /**
@@ -40,7 +45,7 @@ export type Scenario = {
 export type Evidence = {
   runId: string
   catalogSize: number
-  calls: Array<{ runId: string; tool: string; callId: string | number; businessId: string }>
+  calls: BusinessReceipt[]
 }
 export type UpstreamEvidence = {
   rejected: number
@@ -141,6 +146,12 @@ export async function readEvidence(scenario: Scenario): Promise<Evidence> {
     !Array.isArray(evidence.calls)
   )
     throw new Error('Evidence scenario mismatch')
+  // Every recorded call must satisfy the receipt contract the fixture model
+  // enforces, so a malformed record fails here with its named problem.
+  evidence.calls.forEach((call, index) => {
+    const problem = businessReceiptProblem(call, 'mcp')
+    if (problem !== null) throw new Error(`Fixture evidence call ${index}: ${problem}`)
+  })
   return evidence
 }
 

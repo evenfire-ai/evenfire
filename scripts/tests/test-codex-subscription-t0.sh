@@ -248,6 +248,7 @@ run_node_group "approved-tools-fixtures-and-runner" \
   "scripts/e2e/prepare-subscription-remaining-fixtures.test.mjs" \
   "scripts/e2e/fixtures/subscription-image-provider.test.mjs" \
   "scripts/tests/run-node-test-files.test.mjs" \
+  "tests/e2e/fixtures/codex-subscription/approved-tools/business-receipt.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \
   "scripts/e2e/prepare-codex-approved-tools.test.mjs" \
   "scripts/e2e/run-codex-approved-tools.test.mjs" \
