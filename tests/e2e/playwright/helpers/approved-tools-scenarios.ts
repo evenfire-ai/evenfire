@@ -7,6 +7,14 @@ import {
 export const catalogSizes = [83, 150, 250] as const
 
 /**
+ * The display name the deterministic fixture model advertises for its model
+ * (`FIXTURE_MODEL` in `codex-llm-proxy/test/approvedToolsUpstream.ts`, whose
+ * test pins this declaration). The catalog sync carries it to the Desktop
+ * model selector, which renders it as the chip label.
+ */
+export const FIXTURE_MODEL_DISPLAY_NAME = 'Codex isolated tool test'
+
+/**
  * The Control UI does not call control-api directly from the browser: every
  * request goes through its own Next.js proxy route, so `control-ui/lib/api.ts`
  * prepends `API_BASE`, which defaults to `/control-api` and is only overridden
@@ -202,4 +210,22 @@ export async function readUpstreamEvidence(scenario: Scenario): Promise<Upstream
   )
     throw new Error('Missing upstream rejection evidence')
   return evidence
+}
+
+/**
+ * Assertion message naming the rejections the fixture model recorded between
+ * two evidence reads. The model names at most the first 64 rejections of a run
+ * (MAX_RECORDED_REJECTIONS); later ones are counted in `rejected` only.
+ */
+export function rejectionDelta(before: UpstreamEvidence, after: UpstreamEvidence): string {
+  const added = after.rejected - before.rejected
+  const named = after.rejections.slice(before.rejections.length)
+  const unnamed = added - named.length
+  return (
+    `fixture model rejected ${added} request(s) in this step: ` +
+    (named.length > 0 ? named.join(', ') : 'none named') +
+    (unnamed > 0
+      ? `; ${unnamed} more beyond the 64 named rejections (MAX_RECORDED_REJECTIONS)`
+      : '')
+  )
 }

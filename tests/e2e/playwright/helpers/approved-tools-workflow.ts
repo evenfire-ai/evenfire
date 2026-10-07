@@ -6,13 +6,19 @@
  */
 import { type Page, type TestInfo, expect, test } from '@playwright/test'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
-import { readAgentDeploymentGeneration, waitForAgentRollout } from './agent-rollout'
 import {
+  readAgentDeploymentGeneration,
+  waitForAgentDeployment,
+  waitForAgentRollout,
+} from './agent-rollout'
+import {
+  FIXTURE_MODEL_DISPLAY_NAME,
   type Scenario,
   browserApiPath,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
+  rejectionDelta,
   required,
   scenarios,
 } from './approved-tools-scenarios'
@@ -89,6 +95,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await model.chooseSubscription(scenario.subscriptionName)
     await page.getByLabel('Current model', { exact: true }).click()
     await page.getByRole('option', { name: scenario.modelName, exact: true }).click()
+    await waitForAgentDeployment(scenario.agentName)
     rolloutBaseline = readAgentDeploymentGeneration(scenario.agentName)
     const saved = await model.saveHost(scenario.agentName)
     expect(saved.spec?.model).toMatchObject({
@@ -171,15 +178,22 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
       await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
       // The menu labels an option with the allowlist entry's displayName and
       // falls back to the model id when there is none (ModelSelector.tsx:276).
-      // The Codex allowlist carries no displayName, so the id is what renders.
       // Keying on the testid (ModelSelector.tsx:269) anchors this to the same
-      // id the Control UI step bound, instead of to a label nothing defines.
+      // id the Control UI step bound, instead of to a label sourced elsewhere.
       const option = desktop.getByTestId(`model-option-${scenario.modelName}`)
       await expect(option).toHaveCount(1)
       await option.click()
-      await expect(
-        desktop.getByRole('button', { name: `Model — ${scenario.modelName}`, exact: true })
-      ).toBeVisible()
+      // Business signal: the effective model is the id the Control UI step
+      // bound (ModelSelector.tsx:213). The chip label is the catalog
+      // displayName (ModelSelector.tsx:34), so a selection that renders
+      // nothing still fails.
+      const chip = desktop.getByTestId('selected-chat-model')
+      await expect(chip).toHaveCount(1)
+      await expect(chip).toHaveAttribute('data-model-id', scenario.modelName)
+      await expect(chip).toBeVisible()
+      if (mode === 'deterministic') await expect(chip).toHaveText(FIXTURE_MODEL_DISPLAY_NAME)
+      // The real catalog's display name is not owned by this helper.
+      else await expect(chip).not.toHaveText(/^\s*(Select model)?\s*$/)
     })
 
     await test.step('Request the workflow and approve its native invocation and bound recipe approval', async () => {
@@ -231,7 +245,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
       let requests = null
       if (upstreamBefore) {
         const after = await readUpstreamEvidence(scenario)
-        expect(after.rejected).toBe(upstreamBefore.rejected)
+        expect(after.rejected, rejectionDelta(upstreamBefore, after)).toBe(upstreamBefore.rejected)
         requests = after.requests.slice(upstreamBefore.requests.length)
         const stages = requests.map(request => request.stage)
         expect(stages.slice(0, 2)).toEqual(['workflow_list', 'workflow_trigger'])

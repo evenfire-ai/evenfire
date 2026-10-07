@@ -509,6 +509,17 @@ describe('approved-tools isolated upstream boundary', () => {
       models: [{ slug: 'gpt-5.3-codex', display_name: 'Codex isolated tool test' }],
     })
     expect(FIXTURE_MODEL).toEqual({ slug: 'gpt-5.3-codex', displayName: 'Codex isolated tool test' })
+    // The Desktop journey asserts the model chip shows this display name.
+    const scenarios = readFileSync(
+      new globalThis.URL(
+        '../../tests/e2e/playwright/helpers/approved-tools-scenarios.ts',
+        import.meta.url
+      ),
+      'utf8'
+    )
+    expect(scenarios).toContain(
+      `export const FIXTURE_MODEL_DISPLAY_NAME = '${FIXTURE_MODEL.displayName}'\n`
+    )
     for (const url of [
       'http://chatgpt.com/backend-api/codex/responses',
       'https://example.com/',
