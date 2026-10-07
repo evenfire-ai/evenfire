@@ -8,6 +8,7 @@ import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import type { IncomingMessage } from '../../../server'
 import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
 import type { NativeToolConfig } from '../../interfaces'
+import { BasicSafety } from '../../safety/safety'
 import { SpilloverStorage } from '../../spillover'
 import type { Attachment } from '../../types'
 import { NativeToolRegistry } from '../nativeToolRegistry'
@@ -254,5 +255,107 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
     expect(reader.spilloverExempt?.()).toBe(true)
     expect(reader.description()).toContain('reader=text')
     expect(reader.description()).not.toContain('spillover')
+  })
+
+  // A15 item 5 — the registry must hand the turn's ConfigStore secrets to the
+  // tool's whole-text redactor. The loop's per-page sanitizer sees the same
+  // secrets, but only whole: a literal cut by a page end reaches the model
+  // unless the tool masked it against the whole text first.
+  it('masks a ConfigStore secret split across pages with the turn secretEntriesProvider', async () => {
+    const TOOL = 'clerum__attachment_read'
+    const secret = 'CfgLiteralSecretValue9f8e7d'
+    const secretEntriesProvider = () => [{ name: 'CFG_TOKEN', value: secret }]
+    // What the loop applies to every page: the same ConfigStore secrets.
+    const loopSafety = new BasicSafety(secretEntriesProvider)
+    const context = {
+      onOutput: () => {},
+      measureResult: (raw: string): number =>
+        Math.ceil(Buffer.byteLength(loopSafety.previewOutputForLlm(TOOL, raw), 'utf8') / 4) + 4,
+    }
+    const before = 'intro text line\n'
+    const text = before + secret + '\ntrailing words here\n'
+    const bytes = Buffer.from(text)
+    const validated = validateIncomingAttachments(
+      [
+        {
+          id: 'file-1',
+          kind: 'file',
+          mimeType: 'text/plain',
+          detectedMediaType: 'text/plain',
+          encoding: 'base64',
+          dataBase64: bytes.toString('base64'),
+          filename: 'notes.txt',
+          sizeBytes: bytes.length,
+          digest: { algorithm: 'sha256', hex: createHash('sha256').update(bytes).digest('hex') },
+        },
+      ],
+      { maxCount: 20, maxBytes: 1_000_000, maxFileBytes: 3_145_728, messageId: 'message-1' }
+    )
+    if (!validated.ok) throw new Error(`fixture rejected: ${validated.error.code}`)
+    const registry = new NativeToolRegistry(
+      config,
+      'conv-1',
+      undefined,
+      message(validated.attachments!),
+      undefined,
+      undefined,
+      undefined,
+      { ...attachmentOptions(), secretEntriesProvider }
+    )
+    const tool = registry.get(TOOL)!
+
+    /** One page as the model receives it: tool output, then the loop's pass. */
+    const readPage = async (params: Record<string, unknown>) => {
+      const output = await tool.execute(params, context)
+      return {
+        output,
+        body: JSON.parse(output.content) as {
+          kind: string
+          text?: string
+          truncated?: boolean
+          nextOffset?: number
+        },
+        visible: loopSafety.sanitizeOutput(TOOL, output.content).content,
+      }
+    }
+    /** The first 6-character piece of the secret that `visible` shows, if any. */
+    const leakedPiece = (visible: string): string | null => {
+      for (let i = 0; i + 6 <= secret.length; i++) {
+        if (visible.includes(secret.slice(i, i + 6))) return secret.slice(i, i + 6)
+      }
+      return null
+    }
+
+    // Witness: read whole, the file carries the literal and the model sees it
+    // redacted. This holds with or without the provider at the registry (the
+    // loop pass masks a whole literal), so only the split walk below can tell
+    // whether the registry wired the provider into the tool.
+    const whole = await readPage({ attachmentId: 'file-1' })
+    expect(whole.body).toMatchObject({ kind: 'text', truncated: false })
+    expect(whole.visible).toContain('[REDACTED')
+    expect(whole.visible).toContain('intro text line')
+    expect(leakedPiece(whole.visible)).toBeNull()
+
+    // Split: the first page ends in the middle of the literal.
+    const splitAt = Buffer.byteLength(before) + Math.floor(secret.length / 2)
+    const pages: Awaited<ReturnType<typeof readPage>>[] = []
+    let offset = 0
+    for (;;) {
+      const page = await readPage({ attachmentId: 'file-1', offset, maxBytes: splitAt })
+      expect(page.body.kind).toBe('text')
+      pages.push(page)
+      if (!page.body.truncated) break
+      offset = page.body.nextOffset!
+    }
+    // Precondition: the walk really crossed the secret on a page boundary.
+    expect(pages.length).toBeGreaterThan(1)
+    expect(pages[0]!.body.nextOffset).toBe(splitAt)
+    for (const page of pages) {
+      expect(leakedPiece(page.visible)).toBeNull()
+    }
+    // Liveness: the text around the secret is still delivered.
+    const joined = pages.map(page => page.body.text).join('')
+    expect(joined).toContain('intro text line')
+    expect(joined).toContain('trailing words here')
   })
 })

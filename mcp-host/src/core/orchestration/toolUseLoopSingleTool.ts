@@ -35,10 +35,18 @@ export async function executeSingleTool(
 ): Promise<ToolResult> {
   const { toolRegistry, toolOutputProcessor, events, toolTimeout } = config
 
-  // Post-result hooks see error results too: they redact error text (a thrown
-  // upstream message can carry a secret) and observe failed calls.
+  // Post-result hooks see error results too and observe failed calls. A thrown
+  // upstream message can carry a secret, so the error text first goes through
+  // the tool-output sanitizer the success path applies (`toolOutputProcessor`
+  // delegates to `config.safety.sanitizeOutput`), unwrapped: error text keeps
+  // its plain shape for the model.
   const errorResult = async (content: string): Promise<ToolResult> => {
-    const result: ToolResult = { tool_call_id: call.id, name: call.name, content, is_error: true }
+    const result: ToolResult = {
+      tool_call_id: call.id,
+      name: call.name,
+      content: config.safety.sanitizeOutput(call.name, content).content,
+      is_error: true,
+    }
     return transformResult ? transformResult(result) : result
   }
 
