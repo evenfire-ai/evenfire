@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { TaskExecutor, type TaskExecutorDeps } from '../../../agent/taskExecutor'
@@ -605,6 +606,21 @@ describe('T2 — independence matrix (I1, I2 with deviation D1)', () => {
 
 describe('I4 — native direct sends exactly what origin/dev sends', () => {
   const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
+  // shell_exec's description (also carried by the system prompt) embeds the
+  // host's Node executable and exceljs entry point. Both are absolute paths that
+  // differ per machine, so they are replaced by fixed tokens before hashing; each
+  // must be present, so the replacement cannot silently do nothing.
+  const withoutMachinePaths = (text: string) => {
+    let result = text
+    for (const [machinePath, token] of [
+      [process.execPath, '<node-exec-path>'],
+      [createRequire(__filename).resolve('exceljs'), '<exceljs-entry>'],
+    ]) {
+      expect(result).toContain(machinePath)
+      result = result.split(machinePath).join(token)
+    }
+    return result
+  }
   const savedWorkspacePath = appConfig.nativeTool.workspacePath
   afterEach(() => {
     vi.useRealTimers()
@@ -643,8 +659,8 @@ describe('I4 — native direct sends exactly what origin/dev sends', () => {
       const { tools, messages } = run.providerCalls[0]
       const expected = NATIVE_DIRECT_DEV_BASELINE[key]
       expect(names(tools)).toEqual(expected.toolNames)
-      expect(sha256(JSON.stringify(tools))).toBe(expected.toolsSha256)
-      expect(sha256(systemText(messages))).toBe(expected.systemSha256)
+      expect(sha256(withoutMachinePaths(JSON.stringify(tools)))).toBe(expected.toolsSha256)
+      expect(sha256(withoutMachinePaths(systemText(messages)))).toBe(expected.systemSha256)
     }
   )
 })
