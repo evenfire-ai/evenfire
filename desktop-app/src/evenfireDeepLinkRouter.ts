@@ -14,6 +14,7 @@ type EvenfireDeepLinkRouterOptions<TWindow extends RendererTarget> = {
   isRendererReady: () => boolean
   logout: () => Promise<unknown>
   reportLogoutFailure: (error: unknown) => void
+  deferLogout?: (error: unknown) => void
   maxPendingUrls?: number
   requestMainWindow: () => void
   sandboxUiDeepLinkHost: string
@@ -143,6 +144,12 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
           // The in-memory session can already be cleared when persisted-token
           // deletion fails. Report that state change to the renderer, but never
           // emit success while the service still considers the user signed in.
+          try {
+            options.deferLogout?.(error)
+          } catch (deferError) {
+            void reportLogoutFailure(deferError)
+            return
+          }
           void reportLogoutFailure(error)
         }
       )

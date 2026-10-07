@@ -445,14 +445,14 @@ export class TokenStore {
 
   async clearSessionToken(
     envKey: string,
-    options: { legacyEnvKeys?: readonly string[] } = {}
+    options: { legacyEnvKeys?: readonly string[]; throwOnStorageError?: boolean } = {}
   ): Promise<void> {
     return this.trackOperation(() => this.clearSessionTokenOnce(envKey, options))
   }
 
   private async clearSessionTokenOnce(
     envKey: string,
-    options: { legacyEnvKeys?: readonly string[] }
+    options: { legacyEnvKeys?: readonly string[]; throwOnStorageError?: boolean }
   ): Promise<void> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
@@ -466,12 +466,14 @@ export class TokenStore {
     for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
     const scopedEnvKeys = [envKey, ...legacyEnvKeys]
     const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
+    const storageErrors: unknown[] = []
     if (keytar) {
       const deleteKeychainPassword = async (account: string) => {
         try {
           await keytar.deletePassword(SERVICE, account)
-        } catch {
+        } catch (error) {
           // Keychain cleanup is best-effort; continue through the scoped files.
+          if (options.throwOnStorageError) storageErrors.push(error)
         }
       }
       for (const scopedEnvKey of scopedEnvKeys) {
@@ -483,28 +485,25 @@ export class TokenStore {
     }
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.
-    const scopedFileRemovals = [
-      ...scopedEnvKeys.flatMap(scopedEnvKey => [
-        this.encryptedFilePath(scopedEnvKey)
-          .then(file => fs.unlink(file))
-          .catch(() => {}),
-        this.plainFilePath(scopedEnvKey)
-          .then(file => fs.unlink(file))
-          .catch(() => {}),
-      ]),
-    ]
-    if (this.isolatedUserDataPath !== undefined) {
-      await Promise.all(scopedFileRemovals)
-      return
-    }
-    await Promise.all([
-      ...scopedFileRemovals,
-      legacyEncryptedFilePath()
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
-      legacyFilePath()
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
+    const filePaths = scopedEnvKeys.flatMap(scopedEnvKey => [
+      this.encryptedFilePath(scopedEnvKey),
+      this.plainFilePath(scopedEnvKey),
     ])
+    if (this.isolatedUserDataPath === undefined) {
+      filePaths.push(legacyEncryptedFilePath(), legacyFilePath())
+    }
+    await Promise.all(
+      filePaths.map(async filePath => {
+        try {
+          await fs.unlink(await filePath)
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code
+          if (options.throwOnStorageError && code !== 'ENOENT') storageErrors.push(error)
+        }
+      })
+    )
+    if (options.throwOnStorageError && storageErrors.length > 0) {
+      throw new AggregateError(storageErrors, 'Failed to clear session token storage')
+    }
   }
 }

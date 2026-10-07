@@ -107,6 +107,18 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     await expect(store.getSessionToken(ENV_A)).resolves.toBe('retry-token')
   })
 
+  it('reports storage failures when clearing a deferred logout intent', async () => {
+    const keytar = await import('keytar')
+    keychain.set(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`), 'saved-token')
+    vi.mocked(keytar.deletePassword).mockRejectedValueOnce(new Error('keychain unavailable'))
+
+    await expect(
+      new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
+    ).rejects.toMatchObject({ message: 'Failed to clear session token storage' })
+
+    expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe('saved-token')
+  })
+
   it('finishes an accepted read migration after admission closes and drains its native write', async () => {
     const keytar = await import('keytar')
     const store = new TokenStore()

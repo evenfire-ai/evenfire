@@ -38,6 +38,7 @@ function createHarness() {
   const focusWindow = vi.fn()
   const requestMainWindow = vi.fn()
   const logout = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+  const deferLogout = vi.fn<(error: unknown) => void>()
   const getSessionState = vi.fn(async () => ({ authenticated }))
   const reportLogoutFailure = vi.fn()
   const handleSandboxUiDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
@@ -52,6 +53,7 @@ function createHarness() {
     handleSandboxUiDeepLink,
     isRendererReady: () => rendererReady,
     logout,
+    deferLogout,
     getSessionState,
     reportLogoutFailure,
     requestMainWindow,
@@ -63,6 +65,7 @@ function createHarness() {
     focusWindow,
     handleSandboxUiDeepLink,
     logout,
+    deferLogout,
     getSessionState,
     reportLogoutFailure,
     requestMainWindow,
@@ -259,6 +262,20 @@ describe('evenfire deep-link router', () => {
     } finally {
       process.off('unhandledRejection', observeUnhandledRejection)
     }
+  })
+
+  it('records quit-rejected logout intent without reporting success while still authenticated', async () => {
+    const harness = createHarness()
+    const failure = new Error('Application is shutting down')
+    harness.logout.mockRejectedValue(failure)
+    harness.setAuthenticated(true)
+
+    harness.router.handle('evenfire://logout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(harness.deferLogout).toHaveBeenCalledWith(failure)
+    expect(harness.reportLogoutFailure).toHaveBeenCalledWith(failure)
+    expect(harness.sent).toEqual([])
   })
 
   it('handles unexpected external logout failures without reporting completion', async () => {

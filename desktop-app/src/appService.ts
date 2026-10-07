@@ -1,3 +1,4 @@
+import { app } from 'electron'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -33,6 +34,7 @@ import {
 import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
+import { clearPendingExternalLogout, hasPendingExternalLogout } from './pendingExternalLogout.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
 import { RpcTokenManager } from './rpcTokenManager.js'
@@ -868,6 +870,17 @@ export function migrateDesktopGfsUploadState(value: unknown): {
 
 export interface AppServiceOptions {
   tokenStore?: TokenStore
+  getUserDataDirectory?: () => string
+  reportDeferredLogoutFailure?: (error: unknown) => void
+}
+
+export class QuitAdmissionClosedError extends Error {
+  readonly code = 'QUIT_ADMISSION_CLOSED'
+
+  constructor() {
+    super('Application is shutting down')
+    this.name = 'QuitAdmissionClosedError'
+  }
 }
 
 export class AppService {
@@ -883,6 +896,8 @@ export class AppService {
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
   })
   private readonly tokenStore: TokenStore
+  private readonly getUserDataDirectory: () => string
+  private readonly reportDeferredLogoutFailure: (error: unknown) => void
   private readonly pendingCredentialProducers = new Set<Promise<unknown>>()
   private quitPreparationStarted = false
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -982,6 +997,8 @@ export class AppService {
 
   constructor(options: AppServiceOptions = {}) {
     this.tokenStore = options.tokenStore ?? new TokenStore()
+    this.getUserDataDirectory = options.getUserDataDirectory ?? (() => app.getPath('userData'))
+    this.reportDeferredLogoutFailure = options.reportDeferredLogoutFailure ?? (() => {})
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1018,7 +1035,7 @@ export class AppService {
 
   private runCredentialProducer<T>(operation: () => Promise<T>): Promise<T> {
     if (this.quitPreparationStarted) {
-      return Promise.reject(new Error('Application is shutting down'))
+      return Promise.reject(new QuitAdmissionClosedError())
     }
 
     let resolveProducer!: (value: T | PromiseLike<T>) => void
@@ -1525,6 +1542,9 @@ export class AppService {
   }
 
   private async restoreSavedSession(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (await this.clearPendingExternalLogoutBeforeRestore()) {
+      return { authenticated: false, me: null }
+    }
     if (this.restoreSavedSessionInFlight) {
       return await this.restoreSavedSessionInFlight
     }
@@ -1537,6 +1557,28 @@ export class AppService {
       // single-flight slot can be cleared unconditionally after it settles.
       this.restoreSavedSessionInFlight = null
     }
+  }
+
+  private async clearPendingExternalLogoutBeforeRestore(): Promise<boolean> {
+    const userDataDirectory = this.getUserDataDirectory()
+    if (!hasPendingExternalLogout(userDataDirectory)) return false
+    this.clearAuthenticatedSessionState()
+    try {
+      await this.runCredentialProducer(() =>
+        this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+          legacyEnvKeys: getActiveLegacyEnvKeys(),
+          throwOnStorageError: true,
+        })
+      )
+      clearPendingExternalLogout(userDataDirectory)
+    } catch (error) {
+      try {
+        this.reportDeferredLogoutFailure(error)
+      } catch {
+        // A diagnostic callback must not permit restoring a deferred logout.
+      }
+    }
+    return true
   }
 
   private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
@@ -1620,6 +1662,14 @@ export class AppService {
 
   async initialize(): Promise<SessionState> {
     return this.restoreSavedSession({ runLaunchMaintenance: true })
+  }
+
+  async applyPendingExternalLogoutIntent(): Promise<boolean> {
+    const userDataDirectory = this.getUserDataDirectory()
+    if (!hasPendingExternalLogout(userDataDirectory)) return false
+    await this.runCredentialProducer(() => this.logoutOnce({ strictTokenClear: true }))
+    clearPendingExternalLogout(userDataDirectory)
+    return true
   }
 
   async prepareForQuit(): Promise<void> {
@@ -1706,6 +1756,7 @@ export class AppService {
       this.workflowTeamByKey.clear()
       this.rpcTokenManager.clear()
       await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
+      clearPendingExternalLogout(this.getUserDataDirectory())
       this.activateGfsAuthScope()
       return { authenticated: true, me: result.me }
     } finally {
@@ -2146,7 +2197,7 @@ export class AppService {
     return this.runCredentialProducer(() => this.logoutOnce())
   }
 
-  private async logoutOnce(): Promise<void> {
+  private async logoutOnce(options: { strictTokenClear?: boolean } = {}): Promise<void> {
     this.logoutInProgress = true
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
@@ -2154,7 +2205,10 @@ export class AppService {
       const legacyEnvKeys = getActiveLegacyEnvKeys()
       await this.suspendDesktopGfsUploadsForAuthBoundary()
       this.clearAuthenticatedSessionState()
-      await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+      await this.tokenStore.clearSessionToken(envKey, {
+        legacyEnvKeys,
+        ...(options.strictTokenClear ? { throwOnStorageError: true } : {}),
+      })
       // Grants survive logout (they are keyed by userId), but every cached SDK
       // result must not: the next user of this machine gets nothing of this one's.
       tryGetPluginSdkRuntime()?.notifySessionChanged(false)
