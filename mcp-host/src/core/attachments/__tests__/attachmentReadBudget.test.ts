@@ -8,6 +8,30 @@ import {
 
 const zero = { reads: 0, spentTokens: 0, bytesRead: 0 }
 
+describe('notice overdraft', () => {
+  const WINDOW = 10_000 // page 1000, turn 3000, ceiling 4500
+
+  it('charges a notice past the turn up to half a turn more, without reads or bytes', () => {
+    const ledger = new AttachmentReadLedger()
+    ledger.restore({ reads: 32, spentTokens: 3_000, bytesRead: 77 })
+    expect(ledger.canEmit(WINDOW, 100)).toBe(false)
+    ledger.debitNotice(WINDOW, 1_000)
+    ledger.debitNotice(WINDOW, 500)
+    expect(ledger.snapshot()).toEqual({ reads: 32, spentTokens: 4_500, bytesRead: 77 })
+    expect(() => ledger.debitNotice(WINDOW, 1)).toThrow(/notice cannot fit/)
+    expect(ledger.snapshot().spentTokens).toBe(4_500)
+  })
+
+  it('refuses a notice larger than one page even with overdraft left', () => {
+    const ledger = new AttachmentReadLedger()
+    ledger.restore({ reads: 0, spentTokens: 3_000, bytesRead: 0 })
+    expect(() => ledger.debitNotice(WINDOW, 1_001)).toThrow(/notice cannot fit/)
+    // Witness: a page-sized notice is accepted on the same ledger.
+    ledger.debitNotice(WINDOW, 1_000)
+    expect(ledger.snapshot().spentTokens).toBe(4_000)
+  })
+})
+
 describe('attachment turn ledger', () => {
   it('derives the 10% page and 30% turn limits', () => {
     expect(attachmentReadBudgets(10_000)).toEqual({ pageTokens: 1_000, turnTokens: 3_000 })

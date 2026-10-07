@@ -315,9 +315,14 @@ describe('C16 small context windows under the production tool-message measuremen
         const { body } = await runMeasured(tool, { attachmentId: id, offset })
         kinds.push(body.kind as string)
         if (body.kind === 'text') offset += (body.byteRange as { length: number }).length
-        // Every emitted message is charged, and the turn envelope is never crossed.
+        // Every emitted message is charged. Pages stay inside the turn; only
+        // notices may overdraw it, and never past half a turn more.
         expect(ledger.snapshot().spentTokens).toBeGreaterThan(before)
-        expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(turnTokens)
+        if (body.kind === 'text')
+          expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(turnTokens)
+        expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(
+          turnTokens + Math.floor(turnTokens / 2)
+        )
       } catch (error) {
         stop = error
       }
@@ -328,6 +333,108 @@ describe('C16 small context windows under the production tool-message measuremen
     expect(kinds.slice(firstNotice).every(kind => kind === 'read_budget_exhausted')).toBe(true)
     expect(kinds.length - firstNotice).toBeGreaterThanOrEqual(2)
     expect(String(stop)).toMatch(/notice cannot fit/)
+  })
+
+  describe('bounded notice overdraft (jozer-rami M1)', () => {
+    const LARGE_WINDOW = 128_000
+
+    it('answers the read after the cap with a notice instead of failing the turn', async () => {
+      const id = randomUUID()
+      const [file] = admitted([rawFile(id, 'big.txt', 'text/plain', Buffer.alloc(3_000_000, 'q'))])
+      const { tool, ledger } = toolFor([file!], { windowTokens: LARGE_WINDOW })
+      const { turnTokens } = attachmentReadBudgets(LARGE_WINDOW)
+
+      const kinds: string[] = []
+      const bytesAfter: number[] = []
+      let offset = 0
+      for (let call = 0; call < 34; call++) {
+        const { body } = await runMeasured(tool, { attachmentId: id, offset })
+        kinds.push(body.kind as string)
+        bytesAfter.push(ledger.snapshot().bytesRead)
+        if (body.kind === 'text') offset += (body.byteRange as { length: number }).length
+      }
+      // Liveness: the turn really read pages before the budget bound.
+      expect(kinds[0]).toBe('text')
+      expect(bytesAfter[0]).toBeGreaterThan(0)
+      // Calls 33 and 34 are past the 32-read cap: both are notices.
+      expect(kinds[32]).toBe('read_budget_exhausted')
+      expect(kinds[33]).toBe('read_budget_exhausted')
+      const firstNotice = kinds.indexOf('read_budget_exhausted')
+      expect(kinds.slice(firstNotice).every(kind => kind === 'read_budget_exhausted')).toBe(true)
+      // A notice reads nothing.
+      expect(bytesAfter[33]).toBe(bytesAfter[32])
+      expect(bytesAfter[32]).toBe(bytesAfter[firstNotice])
+      expect(ledger.snapshot().reads).toBe(32)
+      expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(
+        turnTokens + Math.floor(turnTokens / 2)
+      )
+    })
+
+    it('answers a cold-restored exhausted ledger with a notice', async () => {
+      const id = randomUUID()
+      const [file] = admitted([rawFile(id, 'cold.txt', 'text/plain', Buffer.from('cold page'))])
+      // Witness: the same read on a fresh ledger returns the text.
+      const fresh = await runMeasured(toolFor([file!], { windowTokens: LARGE_WINDOW }).tool, {
+        attachmentId: id,
+      })
+      expect(fresh.body.kind).toBe('text')
+
+      const ledger = new AttachmentReadLedger()
+      ledger.exhaust(LARGE_WINDOW)
+      const { tool } = toolFor([file!], { windowTokens: LARGE_WINDOW, ledger })
+      const { body, finalized } = await runMeasured(tool, { attachmentId: id })
+      expect(body.kind).toBe('read_budget_exhausted')
+      expect(finalized.is_error).toBe(false)
+      expect(finalized.content).not.toContain('cold page')
+      expect(ledger.snapshot().bytesRead).toBe(0)
+    })
+
+    it('answers an unavailable-bytes read on a spent turn with a notice', async () => {
+      const id = randomUUID()
+      const [file] = admitted([rawFile(id, 'gone.txt', 'text/plain', Buffer.from('gone'))])
+      const withoutBytes = { ...file!, dataBase64: undefined } as unknown as Attachment
+      const { turnTokens } = attachmentReadBudgets(LARGE_WINDOW)
+      // Witness: with budget left, the same attachment reports the missing bytes.
+      const fresh = await runMeasured(
+        toolFor([withoutBytes], { windowTokens: LARGE_WINDOW }).tool,
+        { attachmentId: id }
+      )
+      expect(fresh.body.reason).toBe('bytes_unavailable_after_restart')
+
+      const ledger = new AttachmentReadLedger()
+      ledger.restore({ reads: 5, spentTokens: turnTokens, bytesRead: 0 })
+      const { tool } = toolFor([withoutBytes], { windowTokens: LARGE_WINDOW, ledger })
+      const { body } = await runMeasured(tool, { attachmentId: id })
+      expect(body.kind).toBe('read_budget_exhausted')
+      expect(ledger.snapshot().spentTokens).toBeGreaterThan(turnTokens)
+    })
+
+    it('still stops the turn once notices would pass half a turn of overdraft', async () => {
+      const id = randomUUID()
+      const [file] = admitted([rawFile(id, 'stop.txt', 'text/plain', Buffer.from('stop page'))])
+      const ledger = new AttachmentReadLedger()
+      ledger.exhaust(LARGE_WINDOW)
+      const { tool } = toolFor([file!], { windowTokens: LARGE_WINDOW, ledger })
+      const { turnTokens } = attachmentReadBudgets(LARGE_WINDOW)
+
+      let notices = 0
+      let stop: unknown = null
+      for (let call = 0; call < 5_000 && stop === null; call++) {
+        try {
+          const { body } = await runMeasured(tool, { attachmentId: id })
+          expect(body.kind).toBe('read_budget_exhausted')
+          notices += 1
+        } catch (error) {
+          stop = error
+        }
+      }
+      expect(notices).toBeGreaterThanOrEqual(2)
+      expect(String(stop)).toMatch(/notice cannot fit/)
+      expect(ledger.snapshot().spentTokens).toBeLessThanOrEqual(
+        turnTokens + Math.floor(turnTokens / 2)
+      )
+      expect(ledger.snapshot().bytesRead).toBe(0)
+    })
   })
 
   it('keeps error and binary results no larger than the exhausted notice (regression guard)', async () => {
@@ -379,18 +486,37 @@ describe('C16 finalize fence', () => {
     expect(ledger.snapshot().bytesRead).toBe(0)
   })
 
-  it('fails closed when even the trusted notice cannot fit the remaining budget', async () => {
+  it('answers with the trusted notice from the overdraft when the turn has no room left', async () => {
     const [file] = admitted([
       rawFile('file-tight', 'tight.txt', 'text/plain', Buffer.from('tight page body')),
     ])
     const ledger = new AttachmentReadLedger()
-    const spent = Math.floor(WINDOW_TOKENS * 0.3) - 1
-    ledger.restore({ reads: 1, spentTokens: spent, bytesRead: 0 })
+    const turnTokens = Math.floor(WINDOW_TOKENS * 0.3)
+    ledger.restore({ reads: 1, spentTokens: turnTokens - 1, bytesRead: 0 })
     const { tool } = toolFor([file!], { ledger })
 
-    await expect(runRead(tool, { attachmentId: 'file-tight' })).rejects.toThrow(
-      /cannot fit|budget/i
-    )
+    const { finalized } = await runRead(tool, { attachmentId: 'file-tight' })
+    const body = JSON.parse(finalized.rawContent as string) as Record<string, unknown>
+    expect(body.kind).toBe('read_budget_exhausted')
+    expect(finalized.content).not.toContain('tight page body')
+    expect(ledger.snapshot().bytesRead).toBe(0)
+    expect(ledger.snapshot().spentTokens).toBeGreaterThan(turnTokens)
+  })
+
+  it('fails closed when the notice would pass half a turn of overdraft', async () => {
+    const [file] = admitted([
+      rawFile('file-over', 'over.txt', 'text/plain', Buffer.from('over page body')),
+    ])
+    const ledger = new AttachmentReadLedger()
+    const turnTokens = Math.floor(WINDOW_TOKENS * 0.3)
+    ledger.restore({
+      reads: 1,
+      spentTokens: turnTokens + Math.floor(turnTokens / 2) - 1,
+      bytesRead: 0,
+    })
+    const { tool } = toolFor([file!], { ledger })
+
+    await expect(runRead(tool, { attachmentId: 'file-over' })).rejects.toThrow(/notice cannot fit/)
   })
 
   it('finalizes exactly once without another tool execution', async () => {

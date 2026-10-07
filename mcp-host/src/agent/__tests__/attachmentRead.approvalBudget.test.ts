@@ -258,15 +258,19 @@ describe('attachment budget through real approval persistence', () => {
     expect(await readFile(join(f.dir, 'effects.txt'), 'utf8')).toBe('approved\n')
   })
   it.each(['missing', 'corrupt', 'empty'] as const)(
-    'rejects new reads with an unprovable %s carrier',
+    'answers new reads with notices after an unprovable %s carrier',
     async mode => {
       const f = await fixture()
       const next = await f.cold(mode)
-      expect(next.value.executorState).toBe('failed')
-      expect(next.onFail).toHaveBeenCalledTimes(1)
-      // The task fails because the read was refused, not for an unrelated reason.
-      expect(next.onFail.mock.calls[0]![1].message).toMatch(/notice cannot fit/)
-      expect(f.messages().some(m => m.tool_call_id === 'read-after-0')).toBe(false)
+      expect(next.onFail.mock.calls.map(call => call[1])).toEqual([])
+      expect(next.value.executorState).toBe('completed')
+      // Liveness: the resumed turn did call the tool, and every call got a notice.
+      const reads = f.messages().filter(m => m.tool_call_id?.startsWith('read-after-'))
+      expect(reads).toHaveLength(32)
+      for (const read of reads) {
+        expect(read.content).toContain('read_budget_exhausted')
+        expect(read.content).not.toContain('Public first-page sentinel')
+      }
     }
   )
   it('preserves conservative exhaustion when a legacy row requires another approval', async () => {

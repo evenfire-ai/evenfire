@@ -364,8 +364,10 @@ export class AttachmentReadTool implements Tool {
   /**
    * Final budget fence. Runs once per executed read after safety, spillover
    * and any result transform. If the final message outgrew the reservation,
-   * replace it with the trusted exhausted notice at the ORIGINAL offset; if
-   * even that cannot fit, throw so publication stops without a rerun.
+   * replace it with the trusted exhausted notice at the ORIGINAL offset. A
+   * notice that no longer fits the turn is charged to the bounded notice
+   * overdraft; once that is spent too, throw so publication stops without a
+   * rerun.
    */
   finalizeResult(result: ToolResult, context: ToolEmissionContext): ToolResult {
     const pending = this.pending
@@ -387,10 +389,12 @@ export class AttachmentReadTool implements Tool {
     )
     const noticeContent = context.renderContent(noticeRaw)
     const noticeCost = context.measureContent(noticeContent)
-    if (!this.ledger.canEmit(this.contextWindowTokens, noticeCost)) {
-      throw new Error('Attachment read notice cannot fit the remaining page/turn budget')
+    if (this.ledger.canEmit(this.contextWindowTokens, noticeCost)) {
+      this.ledger.debit(this.contextWindowTokens, noticeCost, 0)
+    } else {
+      // Throws once the notice overdraft is spent, which stops the turn.
+      this.ledger.debitNotice(this.contextWindowTokens, noticeCost)
     }
-    this.ledger.debit(this.contextWindowTokens, noticeCost, 0)
     return {
       ...result,
       content: noticeContent,
