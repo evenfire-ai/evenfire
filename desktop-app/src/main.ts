@@ -76,7 +76,11 @@ const appService = new AppService(
 registerQuitDrain(
   app,
   () => appService.prepareForQuit(),
-  () => appService.cancelQuitPreparation()
+  () => appService.cancelQuitPreparation(),
+  error => {
+    const errorName = error instanceof Error && error.name ? error.name : typeof error
+    console.error(`[Desktop] Quit preparation failed; continuing quit (${errorName}).`)
+  }
 )
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the

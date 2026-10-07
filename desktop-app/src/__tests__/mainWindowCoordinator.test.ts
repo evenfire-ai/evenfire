@@ -153,6 +153,28 @@ describe('quit drain registration', () => {
     expect(prepareForQuit).toHaveBeenCalledOnce()
   })
 
+  it('reports preparation rejection and resumes quit', async () => {
+    const { app, emit } = createAppHarness()
+    const failure = new Error('storage drain failed')
+    const prepareForQuit = vi.fn<() => Promise<void>>().mockRejectedValue(failure)
+    const reportPreparationFailure = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      vi.fn(),
+      reportPreparationFailure
+    )
+
+    const firstAttempt = { preventDefault: vi.fn() }
+    emit('before-quit', firstAttempt)
+    expect(firstAttempt.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+
+    expect(reportPreparationFailure).toHaveBeenCalledWith(failure)
+    expect(app.quit).toHaveBeenCalledOnce()
+  })
+
   it('reopens quit preparation after a page cancels the resumed quit', async () => {
     const { app, emit } = createAppHarness()
     const prepareForQuit = vi.fn(async () => undefined)

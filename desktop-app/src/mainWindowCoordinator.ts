@@ -59,7 +59,8 @@ export function createRetryableInitializer(initialize: () => Promise<unknown>) {
 export function registerQuitDrain(
   app: Pick<App, 'on' | 'quit'>,
   prepareForQuit: () => Promise<void>,
-  cancelQuitPreparation: () => void
+  cancelQuitPreparation: () => void,
+  reportPreparationFailure: (error: unknown) => void = () => {}
 ): void {
   let quitDrainStarted = false
   let quitDrainComplete = false
@@ -103,7 +104,14 @@ export function registerQuitDrain(
         app.quit()
       })
     }
-    void prepareForQuit().then(resumeQuit, resumeQuit)
+    void prepareForQuit().then(resumeQuit, error => {
+      try {
+        reportPreparationFailure(error)
+      } catch {
+        // Failure reporting must never prevent the best-effort quit path.
+      }
+      resumeQuit()
+    })
   })
 
   app.on('will-quit', event => {
