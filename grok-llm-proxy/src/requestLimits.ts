@@ -112,9 +112,16 @@ export function assertBoundedIdleTimeout(idleTimeoutMs: number | undefined): num
   return Math.min(requested, STREAM_LIMITS.upstreamIdleTimeoutMs)
 }
 
+type StreamWaiter = {
+  queuedAt: number
+  waitBoundMs: number
+  expire: () => void
+  grant: (release: () => void) => void
+}
+
 export class StreamGate {
   private running = 0
-  private queued = 0
+  private readonly waiters: StreamWaiter[] = []
 
   constructor(
     private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
@@ -139,72 +146,87 @@ export class StreamGate {
   }
 
   /**
-   * Take a stream slot. When `signal` aborts (client disconnected) while the
-   * caller is still queued, the waiter is rejected and its queue slot freed, so
-   * a dropped client never proceeds to redeem an attempt. A waiter still
-   * queued after `maxQueueWaitMs`, or at `deadlineAt` (epoch ms) when that
-   * comes first, is rejected the same way (#739 D1). The bound is fixed when
-   * the caller queues, as the smaller of the two, and measured on the
-   * monotonic clock from then on. A deadline timer settles the waiter at the
-   * bound, and a poll that runs after the bound checks the elapsed wait before
-   * the slot count, so a slot that frees after the bound does not admit it
-   * even when the event loop stalled across the bound. A free slot is granted
-   * at once whatever the deadline; the caller checks a deadline already past.
+   * Take a stream slot. Waiters are served in arrival order: a caller that
+   * finds a free slot is admitted at once only when nobody is queued, and a
+   * release hands its slot to the head waiter inside the same call, so a
+   * newcomer never overtakes a queued caller. When `signal` aborts (client
+   * disconnected) while the caller is queued, the waiter is rejected and its
+   * queue place freed, so a dropped client never proceeds to redeem an attempt.
+   * A waiter still queued after `maxQueueWaitMs`, or at `deadlineAt` (epoch ms)
+   * when that comes first, is rejected the same way (#739 D1). The bound is
+   * fixed when the caller queues, as the smaller of the two, and measured on
+   * the monotonic clock from then on. One timer settles the waiter at the
+   * bound, and a release that finds the head waiter already past the bound
+   * rejects it instead of granting the slot, so a slot that frees after the
+   * bound does not admit it even when the event loop stalled across the bound.
+   * The returned release is idempotent. A free slot is granted at once
+   * whatever the deadline; the caller checks a deadline already past.
    */
   async acquire(signal?: AbortSignal, deadlineAt?: number): Promise<() => void> {
     if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
       throw new RangeError(`a stream gate deadline must be a finite epoch time, got ${deadlineAt}`)
     }
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
-    if (this.running >= this.maxConcurrent) {
-      if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
-      this.queued += 1
-      try {
-        await new Promise<void>((resolve, reject) => {
-          let poll: ReturnType<typeof setTimeout> | undefined
-          const settle = () => {
-            if (poll !== undefined) clearTimeout(poll)
-            clearTimeout(deadline)
-            signal?.removeEventListener('abort', onAbort)
-          }
-          const onAbort = () => {
-            settle()
-            reject(new RequestLimitError('stream request was aborted'))
-          }
-          const expire = () => {
-            settle()
-            reject(new RequestLimitError('stream queue wait exceeded'))
-          }
-          const queuedAt = performance.now()
-          const waitBoundMs =
-            deadlineAt === undefined
-              ? this.maxQueueWaitMs
-              : Math.min(this.maxQueueWaitMs, deadlineAt - Date.now())
-          const deadline = setTimeout(expire, Math.max(0, waitBoundMs))
-          const wait = () => {
-            // After the event loop stalls, a poll and the deadline can both be
-            // overdue, and Node runs the poll first because it was due first.
-            if (performance.now() - queuedAt >= waitBoundMs) {
-              expire()
-              return
-            }
-            if (this.running < this.maxConcurrent) {
-              settle()
-              resolve()
-              return
-            }
-            poll = setTimeout(wait, 10)
-          }
-          signal?.addEventListener('abort', onAbort, { once: true })
-          wait()
-        })
-      } finally {
-        this.queued -= 1
-      }
+    if (this.waiters.length === 0 && this.running < this.maxConcurrent) {
+      return this.take()
     }
+    if (this.waiters.length >= this.maxQueued) throw new RequestLimitError('stream queue is full')
+    return new Promise<() => void>((resolve, reject) => {
+      const queuedAt = performance.now()
+      const waitBoundMs =
+        deadlineAt === undefined
+          ? this.maxQueueWaitMs
+          : Math.min(this.maxQueueWaitMs, deadlineAt - Date.now())
+      const leave = (reason: string) => {
+        const index = this.waiters.indexOf(waiter)
+        if (index === -1) return
+        this.waiters.splice(index, 1)
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        reject(new RequestLimitError(reason))
+      }
+      const onAbort = () => leave('stream request was aborted')
+      const expire = () => leave('stream queue wait exceeded')
+      const waiter: StreamWaiter = {
+        queuedAt,
+        waitBoundMs,
+        expire,
+        grant: release => {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', onAbort)
+          resolve(release)
+        },
+      }
+      const timer = setTimeout(expire, Math.max(0, waitBoundMs))
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.waiters.push(waiter)
+    })
+  }
+
+  private take(): () => void {
     this.running += 1
+    let released = false
     return () => {
-      this.running = Math.max(0, this.running - 1)
+      if (released) return
+      released = true
+      this.running -= 1
+      this.drain()
+    }
+  }
+
+  /**
+   * Hand free slots to queued callers in arrival order. A head waiter already
+   * past its bound is rejected instead, and the next one is considered.
+   */
+  private drain(): void {
+    while (this.running < this.maxConcurrent && this.waiters.length > 0) {
+      const waiter = this.waiters[0]!
+      if (performance.now() - waiter.queuedAt >= waiter.waitBoundMs) {
+        waiter.expire()
+        continue
+      }
+      this.waiters.shift()
+      waiter.grant(this.take())
     }
   }
 }
