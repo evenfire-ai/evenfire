@@ -310,4 +310,28 @@ describe('quit drain registration', () => {
     await nextImmediate()
     expect(prepareForQuit).toHaveBeenCalledTimes(2)
   })
+
+  it('keeps admission closed when resumed before-quit and will-quit are not vetoed', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    emit('before-quit', { defaultPrevented: false, preventDefault: vi.fn() })
+    await nextImmediate()
+    emit('will-quit', { defaultPrevented: false })
+    await nextImmediate()
+
+    expect(cancelQuitPreparation).not.toHaveBeenCalled()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
+  })
 })
