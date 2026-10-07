@@ -474,7 +474,6 @@ export function useAuthController({
   }, [
     getDesktopEnvironmentHandoffAuthState,
     getSessionGeneration,
-    handleSelectRuntimeConfig,
     handleSelectRuntimeConfigForHandoff,
     logoutForEnvironmentMismatch,
     onSessionNeedsLoad,

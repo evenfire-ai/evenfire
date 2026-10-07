@@ -421,8 +421,6 @@ describe('AppService invitation configuration lookup', () => {
     expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
       legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()],
     })
-    expect(service.logoutInProgress).toBe(false)
-
     await expect(service.getSessionState()).resolves.toEqual({ authenticated: true, me })
     expect(service.getCachedUserId()).toBe('user-1')
     expect(getSessionToken).not.toHaveBeenCalled()

@@ -402,9 +402,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
       return operation
     })
     await operationStarted
-    expect(switchSessionToTeam).toHaveBeenCalledWith('team-2', expect.any(String), {
-      commitOwnerHeld: true,
-    })
+    expect(switchSessionToTeam).toHaveBeenCalledWith('team-2', expect.any(String))
     expect(
       (
         svc as unknown as { prewarmAttemptAtByHostRef: Map<string, number> }
@@ -416,9 +414,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
 
     finishOperation()
     await hop
-    expect(switchSessionToTeam).toHaveBeenCalledWith('team-1', expect.any(String), {
-      commitOwnerHeld: true,
-    })
+    expect(switchSessionToTeam).toHaveBeenCalledWith('team-1', expect.any(String))
     await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
       requested: false,
       skipped: 'cooldown',

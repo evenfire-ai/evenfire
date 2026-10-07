@@ -895,7 +895,6 @@ export class AppService {
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private interactiveLoginAttempts = 0
-  private logoutInProgress = false
   private nativeAuthEnvironmentCommitQueue: Promise<void> = Promise.resolve()
   private gfsAuthEpoch = 0
   private gfsDispatchBlocked = true
@@ -1160,17 +1159,8 @@ export class AppService {
     return this.me.teamId || ''
   }
 
-  private switchSessionToTeam(
-    teamId: string,
-    token?: string,
-    options: { commitOwnerHeld?: boolean } = {}
-  ): Promise<string> {
-    const run = () =>
-      this.switchSessionToTeamWithCommitOwner(teamId, token ?? this.requireSessionToken())
-    return options.commitOwnerHeld ? run() : this.withNativeAuthEnvironmentCommit(run)
-  }
-
-  private async switchSessionToTeamWithCommitOwner(teamId: string, token: string) {
+  /** Caller must hold the native auth/environment commit owner. */
+  private async switchSessionToTeam(teamId: string, token: string) {
     const releaseTransientHop = this.enterGfsTransientTeamHop()
     const targetTeamId = String(teamId || '').trim()
     try {
@@ -1323,9 +1313,7 @@ export class AppService {
         if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
 
         try {
-          const activeToken = await this.switchSessionToTeam(targetTeamId, originalToken, {
-            commitOwnerHeld: true,
-          })
+          const activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
 
           try {
             return await operation(activeToken)
@@ -1335,9 +1323,7 @@ export class AppService {
           } finally {
             if (shouldRestore) {
               try {
-                await this.switchSessionToTeam(originalTeamId, this.requireSessionToken(), {
-                  commitOwnerHeld: true,
-                })
+                await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
                 restoredOriginalTeam = true
               } catch (restoreError) {
                 if (!operationError) throw restoreError
@@ -1589,7 +1575,7 @@ export class AppService {
 
   private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
     const reservation = await this.withNativeAuthEnvironmentCommit(async () => {
-      if (this.logoutInProgress || this.interactiveLoginAttempts > 0) return null
+      if (this.interactiveLoginAttempts > 0) return null
       hydrateDesktopRuntimeConfig()
       const environment = this.captureAuthEnvironmentBinding()
       const legacyEnvKeys = getActiveLegacyEnvKeys()
@@ -1623,7 +1609,6 @@ export class AppService {
 
     const ownsRestore = () =>
       this.sessionGeneration === reservation.sessionGeneration &&
-      !this.logoutInProgress &&
       this.interactiveLoginAttempts === 0 &&
       getActiveEnvKey() === reservation.environment.environmentKey &&
       normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) ===
@@ -1763,7 +1748,6 @@ export class AppService {
           throw new Error('stale_auth_epoch: authenticated scope changed during login replacement')
         }
       }
-      this.logoutInProgress = false
       this.sessionGeneration += 1
       this.sessionToken = result.token
       this.me = result.me
@@ -2006,7 +1990,6 @@ export class AppService {
     let registered = false
     try {
       const attempt = await this.withNativeAuthEnvironmentCommit(async () => {
-        if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
         const sessionGeneration = ++this.sessionGeneration
         const binding = this.captureAuthEnvironmentBinding()
         loginRequest = this.authClient.googleLogin(idToken)
@@ -2200,7 +2183,6 @@ export class AppService {
     let registered = false
     try {
       const loginGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
-        if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
         const generation = ++this.sessionGeneration
         hydrateDesktopRuntimeConfig()
         if (!isDesktopRuntimeConfigured()) {
@@ -2390,7 +2372,6 @@ export class AppService {
 
   async logout(): Promise<number> {
     return this.withNativeAuthEnvironmentCommit(async () => {
-      this.logoutInProgress = true
       this.sessionGeneration += 1
       const logoutGeneration = this.sessionGeneration
       const logoutToken = this.sessionToken
@@ -2425,7 +2406,6 @@ export class AppService {
         return this.sessionGeneration
       } finally {
         releasePrewarm()
-        this.logoutInProgress = false
       }
     })
   }
@@ -3781,14 +3761,11 @@ export class AppService {
         // GFS activation and stream/cache publication complete. Transient
         // runWithTeamContext hops continue to reuse their existing owner and do
         // not suspend uploads or stop streams.
-        const switchedToken = await this.switchSessionToTeam(targetTeamId, undefined, {
-          commitOwnerHeld: true,
-        })
+        const switchedToken = await this.switchSessionToTeam(
+          targetTeamId,
+          this.requireSessionToken()
+        )
         const switchedMe = this.me
-        const switchedGeneration = this.sessionGeneration
-        const switchedEnvironment = this.captureAuthEnvironmentBinding()
-        this.assertSessionGeneration(switchedGeneration)
-        this.assertAuthEnvironmentBinding(switchedEnvironment)
         if (this.sessionToken !== switchedToken || !switchedMe || this.me !== switchedMe) {
           throw new Error('stale_auth_epoch: authenticated team scope changed before activation')
         }
