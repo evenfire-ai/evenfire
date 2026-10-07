@@ -3,6 +3,7 @@ import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook } from '@testing-library/react'
+import type { DesktopRuntimeConfigState } from '../../../../../../src/types'
 import { useAppController } from '../../../useAppController'
 import { type MockClerum, installMockClerum } from './mockClerum'
 
@@ -110,12 +111,22 @@ export interface AppControllerClerumOptions {
   teamDirectory?: { items: unknown[]; currentTeamId: string }
   /** Overrides on the authenticated `me` the session state reports. */
   me?: Partial<typeof HARNESS_ME>
+  /** Runtime profiles exposed to the desktop-environment handoff flow. */
+  runtimeConfigState?: DesktopRuntimeConfigState
 }
 
 export interface AppControllerClerumHandle {
   getDependenciesHealth: Fn
   getSessionState: Fn
   passwordLogin: Fn
+  logout: Fn
+  getSessionGeneration: Fn
+  selectRuntimeConfigForHandoff: Fn
+  onDesktopEnvironmentSetup: Fn
+  emitDesktopEnvironmentSetup: (payload: {
+    externalRestApiBaseUrl: string
+    appName?: string
+  }) => Promise<void>
   getDesktopReleaseStatus: Fn
   teamDirectory: Fn
   switchTeam: Fn
@@ -148,6 +159,17 @@ export function extendMockClerumForAppController(
   const bridge = clerum as unknown as Record<string, unknown>
 
   let authenticated = options.startAuthenticated ?? true
+  let sessionGeneration = 0
+  let runtimeConfigState: DesktopRuntimeConfigState = options.runtimeConfigState ?? {
+    configured: true,
+    isLocalhost: false,
+    selectorVisible: true,
+    activeOptionId: null,
+    currentConfig: undefined,
+    envKey: 'harness-environment',
+    storagePath: '/harness/runtime-configs',
+    options: [],
+  }
   let sessionMe = { ...HARNESS_ME, ...options.me }
   const teamDirectoryPayload = options.teamDirectory ?? {
     items: [],
@@ -168,6 +190,31 @@ export function extendMockClerumForAppController(
     if (options.passwordLoginError) throw options.passwordLoginError
     authenticated = true
     return createSessionState(true, sessionMe)
+  })
+  const getSessionGeneration = vi.fn(async () => sessionGeneration)
+  const selectRuntimeConfigForHandoff = vi.fn(
+    async (optionId: string, expectedGeneration: number) => {
+      if (expectedGeneration !== sessionGeneration) throw new Error('stale_session_generation')
+      const selected = runtimeConfigState.options.find(option => option.id === optionId)
+      if (!selected) throw new Error('runtime configuration not found')
+      runtimeConfigState = {
+        ...runtimeConfigState,
+        activeOptionId: selected.id,
+        currentConfig: {
+          externalRestApiBaseUrl: selected.externalRestApiBaseUrl,
+          rpcProxyBaseUrl: selected.rpcProxyBaseUrl,
+          appName: selected.appName,
+        },
+        envKey: `harness-${selected.id}`,
+      }
+      sessionGeneration += 1
+      return { runtimeConfigState, sessionGeneration }
+    }
+  )
+  const logout = vi.fn(async () => {
+    authenticated = false
+    sessionGeneration += 1
+    return { ok: true as const, sessionGeneration }
   })
   const getDesktopReleaseStatus = vi.fn(
     async () => options.desktopReleaseStatus ?? DEFAULT_DESKTOP_RELEASE_STATUS
@@ -199,6 +246,22 @@ export function extendMockClerumForAppController(
       }
     }
   )
+  let desktopEnvironmentSetupListener:
+    | ((payload: { externalRestApiBaseUrl: string; appName?: string }) => void | Promise<void>)
+    | null = null
+  const onDesktopEnvironmentSetup = vi.fn(
+    (
+      callback: (payload: {
+        externalRestApiBaseUrl: string
+        appName?: string
+      }) => void | Promise<void>
+    ) => {
+      desktopEnvironmentSetupListener = callback
+      return () => {
+        if (desktopEnvironmentSetupListener === callback) desktopEnvironmentSetupListener = null
+      }
+    }
+  )
 
   Object.assign(bridge.rpc as object, {
     listServers: vi.fn(async () => ({ servers: [] })),
@@ -217,18 +280,15 @@ export function extendMockClerumForAppController(
     auth: {
       getDependenciesHealth,
       getSessionState,
-      getRuntimeConfigState: vi.fn(async () => ({
-        activeProfileId: null,
-        configured: true,
-        isPackaged: false,
-        options: [],
-      })),
+      getRuntimeConfigState: vi.fn(async () => runtimeConfigState),
+      getSessionGeneration,
+      selectRuntimeConfigForHandoff,
       getDesktopReleaseStatus,
       openDesktopRelease: vi.fn(async () => undefined),
       passwordLogin,
-      logout: vi.fn(async () => undefined),
+      logout,
       onDesktopSetupToken: vi.fn(() => () => undefined),
-      onDesktopEnvironmentSetup: vi.fn(() => () => undefined),
+      onDesktopEnvironmentSetup,
       onExternalLogout: vi.fn(() => () => undefined),
     },
     team: {
@@ -300,6 +360,13 @@ export function extendMockClerumForAppController(
     getDependenciesHealth,
     getSessionState,
     passwordLogin,
+    logout,
+    getSessionGeneration,
+    selectRuntimeConfigForHandoff,
+    onDesktopEnvironmentSetup,
+    async emitDesktopEnvironmentSetup(payload) {
+      await desktopEnvironmentSetupListener?.(payload)
+    },
     getDesktopReleaseStatus,
     teamDirectory,
     switchTeam,
