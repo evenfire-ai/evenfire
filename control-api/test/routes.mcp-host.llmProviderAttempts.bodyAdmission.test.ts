@@ -68,6 +68,9 @@ type Observation = {
   request: IncomingMessage
   bodyDataSubscriptions: number
   readBytesBeforeResponse: number
+  // Every body byte delivered to a data listener before the response ended,
+  // whether through read() or emitted directly to a flowing stream.
+  dataBytesBeforeResponse: number
   responseWritesAfterClose: number
 }
 
@@ -94,6 +97,15 @@ function declaredRetainedHeaders(
   provider: 'codex' | 'grok' = 'codex'
 ): Record<string, string> {
   return { ...textHeaders(host, provider), 'content-length': String(AUTHORIZE_TEXT_BODY_BYTES + 1) }
+}
+
+// A capacity refusal discards the body before it answers, except for a
+// declared length above the discard cap, which it answers from headers alone.
+function overDiscardCapHeaders(host: string): Record<string, string> {
+  return {
+    ...textHeaders(host),
+    'content-length': String(LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.maxDiscardBodyBytes + 1),
+  }
 }
 
 function send(url: string, requestHeaders: Record<string, string>, body?: string) {
@@ -129,6 +141,7 @@ async function withApps(
         request: req,
         bodyDataSubscriptions: 0,
         readBytesBeforeResponse: 0,
+        dataBytesBeforeResponse: 0,
         responseWritesAfterClose: 0,
       }
       observations.push(observed)
@@ -151,6 +164,18 @@ async function withApps(
           observed.readBytesBeforeResponse += value.length
         return value
       }
+      // A flowing stream can emit a chunk without calling read(), so data
+      // delivery is counted at emit.
+      const emit = req.emit
+      req.emit = function (this: typeof req, event: string | symbol, ...args: unknown[]) {
+        const [chunk] = args
+        if (event === 'data' && !res.writableEnded) {
+          observed.dataBytesBeforeResponse += Buffer.isBuffer(chunk)
+            ? chunk.length
+            : Buffer.byteLength(String(chunk))
+        }
+        return emit.call(this, event, ...args)
+      } as typeof req.emit
       const on = req.on
       vi.spyOn(req, 'on').mockImplementation(function (
         this: typeof req,
@@ -277,23 +302,28 @@ describe('createApp retained authorize-body ownership', () => {
           expect(blocked.headers['retry-after']).toBe(
             String(LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.retryAfterSeconds)
           )
+          // The refusal discards the whole body (one counting listener) before
+          // it answers; nothing reaches JSON.parse or the authorizer.
           expect(otherApp.observations[0]).toMatchObject({
-            bodyDataSubscriptions: 0,
-            readBytesBeforeResponse: 0,
+            bodyDataSubscriptions: 1,
+            dataBytesBeforeResponse: Buffer.byteLength(rejectedBody),
           })
           expect(parse.mock.calls.map(([text]) => text)).not.toContain(rejectedBody)
           expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
 
-          // The same refusal must also arrive from headers alone. An owner
-          // that first buffers the next body would stall this request.
+          // A declared body above the discard cap is refused from headers
+          // alone. An owner that first read that body would stall this request.
           const headersOnly = await send(
             otherApp.url,
-            declaredRetainedHeaders('admission-headers-only-host')
+            overDiscardCapHeaders('admission-headers-only-host')
           ).response
           expect(headersOnly.status).toBe(503)
+          expect(JSON.parse(headersOnly.body)).toEqual({ error: 'authorize_capacity_exceeded' })
+          expect(headersOnly.headers.connection).toBe('close')
           expect(otherApp.observations[1]).toMatchObject({
             bodyDataSubscriptions: 0,
             readBytesBeforeResponse: 0,
+            dataBytesBeforeResponse: 0,
           })
 
           const malformed = '{unauthenticated while full'
@@ -307,6 +337,7 @@ describe('createApp retained authorize-body ownership', () => {
           expect(otherApp.observations[2]).toMatchObject({
             bodyDataSubscriptions: 0,
             readBytesBeforeResponse: 0,
+            dataBytesBeforeResponse: 0,
           })
 
           first.client.destroy()
@@ -317,8 +348,8 @@ describe('createApp retained authorize-body ownership', () => {
           expect(JSON.parse(stillHeld.body)).toEqual({ error: 'authorize_capacity_exceeded' })
           expect(parse.mock.calls.map(([text]) => text)).not.toContain(rejectedBody)
           expect(otherApp.observations[3]).toMatchObject({
-            bodyDataSubscriptions: 0,
-            readBytesBeforeResponse: 0,
+            bodyDataSubscriptions: 1,
+            dataBytesBeforeResponse: Buffer.byteLength(rejectedBody),
           })
           expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
 
@@ -462,25 +493,26 @@ describe('createApp retained authorize-body ownership', () => {
               principals: 1,
             })
           )
-          rejected = send(
-            app.url,
-            headers('verified-share-host'),
-            '{"hostRef":"forged-third-host"}'
-          )
+          const rejectedBody = '{"hostRef":"forged-third-host"}'
+          rejected = send(app.url, headers('verified-share-host'), rejectedBody)
           rejectedOutcome = rejected.response.catch(error => error)
           await vi.waitFor(() => expect(owner.spy).toHaveBeenCalledTimes(3))
           expect(owner.admission?.snapshot()).toEqual({ inFlight: 1, queued: 1, principals: 1 })
           const refused = (await rejectedOutcome) as Reply
           expect(refused.status).toBe(503)
           expect(JSON.parse(refused.body)).toEqual({ error: 'authorize_capacity_exceeded' })
+          // The queued request is still paused and unread; the refused one was
+          // discarded to its end by one counting listener and never parsed.
           expect(app.observations[1]).toMatchObject({
             bodyDataSubscriptions: 0,
             readBytesBeforeResponse: 0,
+            dataBytesBeforeResponse: 0,
           })
           expect(app.observations[2]).toMatchObject({
-            bodyDataSubscriptions: 0,
-            readBytesBeforeResponse: 0,
+            bodyDataSubscriptions: 1,
+            dataBytesBeforeResponse: Buffer.byteLength(rejectedBody),
           })
+          expect((app.observations[2].request as Request).body).toBeUndefined()
           expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
 
           permitUnwind.resolve()
@@ -568,20 +600,44 @@ describe('createApp retained authorize-body ownership', () => {
     }
   })
 
-  it('expires queued headers without reading them and preserves terminal local saturation followed by recovery', async () => {
+  it('expires queued headers without parsing them, refuses them at the discard read deadline and preserves terminal local saturation followed by recovery', async () => {
     const started = deferred()
     const permitUnwind = deferred()
     const owner = observeHeldOwner()
     const nativeSetTimeout = globalThis.setTimeout
-    const clock = vi
-      .spyOn(globalThis, 'setTimeout')
-      .mockImplementation((fn, ms, ...args) =>
-        nativeSetTimeout(
-          fn,
-          ms === LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.queueWaitMs ? 40 : ms,
+    // Shortens the queue wait, and only the first read deadline installed by
+    // the queue expiry (the refusal's discard deadline), so the holder and the
+    // recovery request keep the production read clock. Fired timers are counted.
+    let queueExpirations = 0
+    let shortenNextReadDeadline = false
+    let discardDeadlinesFired = 0
+    const clock = vi.spyOn(globalThis, 'setTimeout').mockImplementation((fn, ms, ...args) => {
+      const callback = fn as (...callbackArgs: unknown[]) => void
+      if (ms === LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.queueWaitMs) {
+        return nativeSetTimeout(
+          (...callbackArgs: unknown[]) => {
+            queueExpirations += 1
+            shortenNextReadDeadline = true
+            callback(...callbackArgs)
+            shortenNextReadDeadline = false
+          },
+          40,
           ...args
         )
-      )
+      }
+      if (shortenNextReadDeadline && ms === LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.readDeadlineMs) {
+        shortenNextReadDeadline = false
+        return nativeSetTimeout(
+          (...callbackArgs: unknown[]) => {
+            discardDeadlinesFired += 1
+            callback(...callbackArgs)
+          },
+          80,
+          ...args
+        )
+      }
+      return nativeSetTimeout(fn, ms, ...args)
+    })
     vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
       async (_claims, _body, deps) => {
         started.resolve()
@@ -600,16 +656,22 @@ describe('createApp retained authorize-body ownership', () => {
         const firstOutcome = first.response.catch(error => error)
         try {
           await started.promise
+          // Headers only: the queue expires, the refusal waits for a body that
+          // never comes and answers when its read deadline fires.
           const expired = await send(app.url, declaredRetainedHeaders('queued-expiry-host'))
             .response
+          expect(queueExpirations).toBe(1)
+          expect(discardDeadlinesFired).toBe(1)
           expect(expired.status).toBe(503)
           expect(JSON.parse(expired.body)).toEqual({ error: 'authorize_capacity_exceeded' })
           expect(expired.headers.connection).toBe('close')
           expect(expired.headers['retry-after']).toBe('10')
           expect(app.observations[1]).toMatchObject({
-            bodyDataSubscriptions: 0,
+            bodyDataSubscriptions: 1,
             readBytesBeforeResponse: 0,
+            dataBytesBeforeResponse: 0,
           })
+          expect((app.observations[1].request as Request).body).toBeUndefined()
           await vi.waitFor(() => expect(app.observations[1].request.destroyed).toBe(true))
           expect(owner.admission?.snapshot()).toEqual({ inFlight: 1, queued: 0, principals: 1 })
           expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
@@ -768,10 +830,13 @@ describe('createApp retained authorize-body ownership', () => {
           ).response
           expect(refused.status).toBe(503)
           expect(JSON.parse(refused.body)).toEqual({ error: 'authorize_capacity_exceeded' })
+          // Discarded to its end by one counting listener, never parsed.
           expect(app.observations[1]).toMatchObject({
-            bodyDataSubscriptions: 0,
-            readBytesBeforeResponse: 0,
+            bodyDataSubscriptions: 1,
+            dataBytesBeforeResponse: 2,
           })
+          expect((app.observations[1].request as Request).body).toBeUndefined()
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
 
           permitUnwind.resolve()
           const response = await firstOutcome

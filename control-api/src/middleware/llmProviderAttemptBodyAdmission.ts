@@ -12,6 +12,8 @@ export type AuthorizeBodyAdmissionPolicy = Readonly<{
   closeGraceMs: number
   /** `Retry-After` on a capacity refusal; the Host retries once after it. */
   retryAfterSeconds: number
+  /** Most bytes a capacity refusal reads and discards before it answers. */
+  maxDiscardBodyBytes: number
 }>
 
 // The route supplies these claims only after requireMcpHostJwt succeeds.
@@ -85,6 +87,9 @@ export class AuthorizeBodyAdmission {
     ) {
       throw new TypeError('retryAfterSeconds must be an integer from 1 to 3600')
     }
+    if (!Number.isSafeInteger(policy.maxDiscardBodyBytes) || policy.maxDiscardBodyBytes <= 0) {
+      throw new TypeError('maxDiscardBodyBytes must be a positive safe integer')
+    }
     this.policy = Object.freeze({
       maxInFlight: policy.maxInFlight,
       maxQueued: policy.maxQueued,
@@ -94,6 +99,7 @@ export class AuthorizeBodyAdmission {
       workDeadlineMs: policy.workDeadlineMs,
       closeGraceMs: policy.closeGraceMs,
       retryAfterSeconds: policy.retryAfterSeconds,
+      maxDiscardBodyBytes: policy.maxDiscardBodyBytes,
     })
   }
 
@@ -303,24 +309,18 @@ export class AuthorizeBodyAdmission {
     }
   }
 
+  // The refusal reads and discards the body before it answers. Closing a
+  // socket with unread request bytes sends a TCP reset, and the gateway
+  // (nginx, which buffers the whole body and is still writing it) can then
+  // fail its write before it reads the queued 503. It answers 502 instead,
+  // mapped to control_plane_unavailable, and the Host never sees the
+  // retryable code. Discarding retains nothing, so the refusal still takes no
+  // admission unit. A body that does not end within the read deadline, or
+  // that declares or sends more than maxDiscardBodyBytes, is answered at once
+  // and closed, as before.
   private refuseBeforeRead(req: Request, res: Response, refusal: AdmissionRefusal): void {
     const inFlight = this.inFlight
     req.pause()
-    let stopped = false
-    let closeTimer: ReturnType<typeof setTimeout> | undefined
-    const stopRejectedBody = (): void => {
-      if (stopped) return
-      stopped = true
-      if (closeTimer !== undefined) clearTimeout(closeTimer)
-      res.off('finish', stopRejectedBody)
-      res.off('close', stopRejectedBody)
-      if (!req.destroyed) req.destroy()
-    }
-    // A blocked or pipelined peer can leave the 503 response unable to reach
-    // finish/close. The unread request body still needs a bounded stop.
-    closeTimer = setTimeout(stopRejectedBody, this.policy.closeGraceMs)
-    res.once('finish', stopRejectedBody)
-    res.once('close', stopRejectedBody)
     res.setHeader('Connection', 'close')
     // Nothing was read or recorded, so the Host may retry the same attempt
     // once after this delay (same provider, no failover).
@@ -339,12 +339,116 @@ export class AuthorizeBodyAdmission {
       },
       'authorize admission refused before body read'
     )
-    try {
-      res.status(503).json({ error: 'authorize_capacity_exceeded' })
-    } catch (err) {
-      stopRejectedBody()
-      throw err
+    this.discardThenAnswer(req, res)
+  }
+
+  private discardThenAnswer(req: Request, res: Response): void {
+    let settled = false
+    let discarded = 0
+    let readTimer: ReturnType<typeof setTimeout> | undefined
+    let closeTimer: ReturnType<typeof setTimeout> | undefined
+    const { closeGraceMs, maxDiscardBodyBytes, readDeadlineMs } = this.policy
+
+    const detachReader = (): void => {
+      if (readTimer !== undefined) clearTimeout(readTimer)
+      req.off('data', discard)
+      req.off('end', answerDiscarded)
+      req.off('aborted', abandon)
+      req.off('error', abandon)
+      res.off('close', abandonUnfinished)
     }
+    const clearClose = (): void => {
+      if (closeTimer !== undefined) clearTimeout(closeTimer)
+      res.off('finish', stopSocket)
+      res.off('close', stopSocket)
+      res.off('finish', clearClose)
+      res.off('close', clearClose)
+    }
+    const stopSocket = (): void => {
+      clearClose()
+      if (!req.destroyed) req.destroy()
+    }
+    // Inside an event callback a throw would be uncaught, so it is logged and
+    // the socket closed; on the synchronous path it propagates to the caller.
+    const send = (rethrow: boolean): void => {
+      try {
+        res.status(503).json({ error: 'authorize_capacity_exceeded' })
+      } catch (err) {
+        stopSocket()
+        if (rethrow) throw err
+        requestLog(req).error(
+          { event: 'llm_provider_attempt_admission_refusal_write_failed', err },
+          'authorize capacity refusal could not be written'
+        )
+      }
+    }
+    // Unread bytes remain: answer now and close the socket. A blocked or
+    // pipelined peer can leave the 503 unable to reach finish/close, so the
+    // close is also bounded by closeGraceMs.
+    const answerAndClose = (
+      reason: 'declared_length' | 'discard_limit' | 'read_deadline',
+      rethrow: boolean
+    ): void => {
+      if (settled) return
+      settled = true
+      detachReader()
+      req.pause()
+      requestLog(req).warn(
+        {
+          event: 'llm_provider_attempt_admission_discard_stopped',
+          reason,
+          discardedBytes: discarded,
+          maxDiscardBodyBytes,
+        },
+        'authorize capacity refusal closed before the body ended'
+      )
+      closeTimer = setTimeout(stopSocket, closeGraceMs)
+      res.once('finish', stopSocket)
+      res.once('close', stopSocket)
+      send(rethrow)
+    }
+    // The body was read to its end, so Node's Connection: close ends the
+    // socket without a reset. closeGraceMs still bounds a peer that never
+    // reads the 503.
+    const answerDiscarded = (): void => {
+      if (settled) return
+      settled = true
+      detachReader()
+      closeTimer = setTimeout(stopSocket, closeGraceMs)
+      res.once('finish', clearClose)
+      res.once('close', clearClose)
+      send(false)
+    }
+    const abandon = (): void => {
+      if (settled) return
+      settled = true
+      detachReader()
+      if (!req.destroyed) req.destroy()
+    }
+    const abandonUnfinished = (): void => {
+      if (!res.writableFinished) abandon()
+    }
+    const discard = (chunk: Buffer): void => {
+      discarded += chunk.length
+      if (discarded > maxDiscardBodyBytes) answerAndClose('discard_limit', false)
+    }
+
+    const declared = req.headers?.['content-length']
+    if (
+      typeof declared === 'string' &&
+      /^\d+$/.test(declared) &&
+      Number(declared) > maxDiscardBodyBytes
+    ) {
+      answerAndClose('declared_length', true)
+      return
+    }
+    readTimer = setTimeout(() => answerAndClose('read_deadline', false), readDeadlineMs)
+    req.on('data', discard)
+    req.once('end', answerDiscarded)
+    req.once('aborted', abandon)
+    req.once('error', abandon)
+    res.once('close', abandonUnfinished)
+    req.resume()
   }
 }
 

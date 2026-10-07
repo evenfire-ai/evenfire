@@ -1,3 +1,5 @@
+import { LIMITS as GROK_LIMITS } from '@clerum/grok-provider-attempt-contract'
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import type { AuthorizeBodyAdmissionPolicy } from './llmProviderAttemptBodyAdmission.js'
 
 // Ships as an explicit uncertified ceiling; see #813. The combined
@@ -24,6 +26,11 @@ import type { AuthorizeBodyAdmissionPolicy } from './llmProviderAttemptBodyAdmis
 // once in the same provider after it, re-uploading the body, and the second
 // refusal is terminal. It equals the read deadline, the bound on a slow
 // upload, and stays below the Host's 30 s retry ceiling. Uncertified (#813).
+//
+// maxDiscardBodyBytes is the retained parser's limit. A capacity refusal reads
+// and discards up to that many bytes before it answers, so the gateway reads
+// the 503 instead of failing its write on a reset (502). Discarded bytes are
+// never retained, so this costs network and CPU, not memory.
 const READ_DEADLINE_MS = 10_000
 const WORK_DEADLINE_MS = 30_000
 
@@ -36,4 +43,8 @@ export const LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY: AuthorizeBodyAdmissionPolicy
   workDeadlineMs: WORK_DEADLINE_MS,
   closeGraceMs: 250,
   retryAfterSeconds: READ_DEADLINE_MS / 1000,
+  maxDiscardBodyBytes: Math.max(
+    LIMITS.maxVisualRequestBodyBytes,
+    GROK_LIMITS.maxVisualRequestBodyBytes
+  ),
 })
