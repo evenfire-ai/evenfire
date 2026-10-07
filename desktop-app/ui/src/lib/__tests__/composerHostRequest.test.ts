@@ -74,6 +74,26 @@ describe('mapComposerAttachmentsToHostRequest (#678)', () => {
     expect(file.classification.detectedMediaType).toBe('text/plain')
   })
 
+  it('posts the declared type as mimeType and the sniffed type as detectedMediaType', () => {
+    const declared = 'application/octet-stream'
+    const untyped: ReadyComposerFileAttachment = {
+      ...file,
+      declaredMediaType: declared,
+      classification: classifyBytes({
+        bytes: NOTES,
+        totalByteLength: NOTES.length,
+        declaredMediaType: declared,
+        filename: 'notes.txt',
+      }),
+    }
+    // Precondition: the two types differ, so a swap or a copy is visible.
+    expect(untyped.classification.detectedMediaType).toBe('text/plain')
+
+    const [mapped] = mapComposerAttachmentsToHostRequest([], [untyped])
+
+    expect(mapped).toMatchObject({ mimeType: declared, detectedMediaType: 'text/plain' })
+  })
+
   it('posts nothing for an empty composer', () => {
     expect(mapComposerAttachmentsToHostRequest([], [])).toEqual([])
   })

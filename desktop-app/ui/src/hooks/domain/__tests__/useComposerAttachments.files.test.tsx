@@ -157,6 +157,28 @@ describe('useComposerAttachments — documents (#678)', () => {
     await waitFor(() => expect(statuses(result)).toEqual(['ready', 'ready']))
   })
 
+  it('keeps two files that share their bytes but not their name', async () => {
+    const { result } = render()
+
+    act(() => {
+      result.current.handleAddComposerFiles([textFile('first.txt', 'same')], '')
+    })
+    await waitFor(() => expect(statuses(result)).toEqual(['ready']))
+    act(() => {
+      result.current.handleAddComposerFiles([textFile('second.txt', 'same')], '')
+    })
+    // Liveness witness: the second file reached the duplicate check while the
+    // first was ready, as in the same-name test above.
+    expect(statuses(result)).toEqual(['ready', 'reading'])
+
+    await waitFor(() => expect(statuses(result)).toEqual(['ready', 'ready']))
+    const digests = result.current.composerFileAttachments.map(file =>
+      file.status === 'ready' ? file.digestHex : null
+    )
+    expect(digests[0]).toBe(digests[1])
+    expect(result.current.composerFileRefusals).toEqual([])
+  })
+
   it('refuses a file over the size limit with a notice, adds no chip and never reads it', () => {
     const { result } = render()
     const huge = textFile('huge.bin', 'x')

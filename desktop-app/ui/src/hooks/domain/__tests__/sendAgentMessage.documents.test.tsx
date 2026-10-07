@@ -219,6 +219,33 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
     expect(rendered.result.current.failedAgentSend).toBeNull()
   })
 
+  it('recovers a refused send into the composer with its text and its document', async () => {
+    const rendered = renderController()
+    await settleMount()
+    const file = await addReadyFile(rendered)
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({
+      success: false,
+      error: { code: 'LLM_INVALID_ATTACHMENT', message: 'Unsupported attachment kind: file' },
+    })
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('Summarize this')
+    })
+    // Witness: the refusal kept the document and emptied the composer.
+    expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(false)
+    expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
+    expect(rendered.result.current.composerFileAttachments).toEqual([])
+    const chat = rendered.result.current.activeChatId
+
+    act(() => rendered.result.current.handleRecoverFailedAgentSend())
+
+    expect(getComposerDraft(chat, 'agent-x')).toBe('Summarize this')
+    expect(rendered.result.current.composerFileAttachments).toEqual([
+      expect.objectContaining({ id: file.id, status: 'ready', digestHex: NOTES_DIGEST }),
+    ])
+    expect(rendered.result.current.failedAgentSend).toBeNull()
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+  })
+
   it('does not blame the files for an unrelated LLM_INVALID_ATTACHMENT on a send without any', async () => {
     const rendered = renderController()
     await settleMount()

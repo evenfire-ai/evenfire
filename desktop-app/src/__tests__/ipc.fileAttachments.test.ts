@@ -105,6 +105,11 @@ describe('rpc:invokeHostMessage file attachments', () => {
     ['sizeBytes', { sizeBytes: 1.5 }],
     ['digest', { digest: { algorithm: 'md5', hex: 'a'.repeat(64) } }],
     ['digest', { digest: { algorithm: 'sha256', hex: 'not-hex' } }],
+    // The digest is exactly 64 lowercase hex characters, anchored at both ends.
+    ['digest', { digest: { algorithm: 'sha256', hex: 'a'.repeat(63) } }],
+    ['digest', { digest: { algorithm: 'sha256', hex: 'a'.repeat(65) } }],
+    ['digest', { digest: { algorithm: 'sha256', hex: 'A'.repeat(64) } }],
+    ['digest', { digest: { algorithm: 'sha256', hex: `x${'a'.repeat(64)}` } }],
     ['digest', { digest: undefined }],
   ])('rejects a file attachment with a bad %s before it reaches the host', async (field, patch) => {
     await expect(
