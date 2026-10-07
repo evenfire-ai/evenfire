@@ -121,6 +121,7 @@ export interface AppControllerClerumHandle {
   passwordLogin: Fn
   logout: Fn
   getSessionGeneration: Fn
+  getRuntimeConfigState: () => Promise<DesktopRuntimeConfigState>
   selectRuntimeConfigForHandoff: Fn
   onDesktopEnvironmentSetup: Fn
   emitDesktopEnvironmentSetup: (payload: {
@@ -192,6 +193,7 @@ export function extendMockClerumForAppController(
     return createSessionState(true, sessionMe)
   })
   const getSessionGeneration = vi.fn(async () => sessionGeneration)
+  const getRuntimeConfigState = vi.fn(async () => runtimeConfigState)
   const selectRuntimeConfigForHandoff = vi.fn(
     async (optionId: string, expectedGeneration: number) => {
       if (expectedGeneration !== sessionGeneration) throw new Error('stale_session_generation')
@@ -280,7 +282,7 @@ export function extendMockClerumForAppController(
     auth: {
       getDependenciesHealth,
       getSessionState,
-      getRuntimeConfigState: vi.fn(async () => runtimeConfigState),
+      getRuntimeConfigState,
       getSessionGeneration,
       selectRuntimeConfigForHandoff,
       getDesktopReleaseStatus,
@@ -362,6 +364,7 @@ export function extendMockClerumForAppController(
     passwordLogin,
     logout,
     getSessionGeneration,
+    getRuntimeConfigState,
     selectRuntimeConfigForHandoff,
     onDesktopEnvironmentSetup,
     async emitDesktopEnvironmentSetup(payload) {

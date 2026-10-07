@@ -81,7 +81,7 @@ describe('useAppController desktop environment handoff', () => {
         targetExternalRestApiBaseUrl: 'https://target-api.example.test/api/v1',
       })
     )
-    return { app, clerum, handle, handoff }
+    return { app, handle, handoff }
   }
 
   it('keeps the signed-in session and skips selection when the user cancels', async () => {
@@ -97,18 +97,18 @@ describe('useAppController desktop environment handoff', () => {
   })
 
   it('signs out before selecting the saved environment with the logout generation', async () => {
-    const { app, clerum, handle, handoff } = await openSwitchConfirmation()
+    const { app, handle, handoff } = await openSwitchConfirmation()
 
     await act(async () => app.result.current.handleConfirmDesktopEnvironmentSwitchConfirmation())
     await act(async () => handoff)
 
     expect(handle.logout).toHaveBeenCalledOnce()
     expect(handle.selectRuntimeConfigForHandoff).toHaveBeenCalledWith('target-profile', 1)
-    expect(handle.logout.mock.invocationCallOrder[0]).toBeLessThan(
-      handle.selectRuntimeConfigForHandoff.mock.invocationCallOrder[0]
+    expect(handle.logout.mock.invocationCallOrder[0]!).toBeLessThan(
+      handle.selectRuntimeConfigForHandoff.mock.invocationCallOrder[0]!
     )
     expect(app.result.current.isAuthenticated).toBe(false)
-    await expect(clerum.auth.getRuntimeConfigState()).resolves.toMatchObject({
+    await expect(handle.getRuntimeConfigState()).resolves.toMatchObject({
       activeOptionId: 'target-profile',
     })
   })
