@@ -90,6 +90,23 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     }
   })
 
+  it('accepts a new public operation after quit cancellation reopens admission', async () => {
+    const keytar = await import('keytar')
+    const store = new TokenStore()
+    await store.prepareForQuit()
+
+    await expect(store.getSessionToken(ENV_A)).rejects.toThrow('Application is shutting down')
+    store.reopenAdmission()
+    await store.setSessionToken('retry-token', ENV_A)
+
+    expect(keytar.setPassword).toHaveBeenCalledWith(
+      SERVICE,
+      `${LEGACY_ACCOUNT}::${ENV_A}`,
+      'retry-token'
+    )
+    await expect(store.getSessionToken(ENV_A)).resolves.toBe('retry-token')
+  })
+
   it('finishes an accepted read migration after admission closes and drains its native write', async () => {
     const keytar = await import('keytar')
     const store = new TokenStore()
