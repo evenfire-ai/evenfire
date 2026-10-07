@@ -85,7 +85,7 @@ describe('AppService quit preparation', () => {
     expect(tokenStore.reopenAdmission).toHaveBeenCalledOnce()
   })
 
-  it('finishes an admitted logout before draining storage beyond the former deadline', async () => {
+  it('keeps an admitted logout pending beyond a two-minute producer bound', async () => {
     vi.useFakeTimers()
     const pendingAuthFence = deferred<void>()
     let storeAdmissionClosed = false
@@ -136,7 +136,7 @@ describe('AppService quit preparation', () => {
     try {
       expect(service.quitPreparationStarted).toBe(true)
       await expect(service.logout()).rejects.toThrow('Application is shutting down')
-      await vi.advanceTimersByTimeAsync(5_001)
+      await vi.advanceTimersByTimeAsync(120_001)
       expect(preparationSettled).toBe(false)
       expect(prepareForQuit).not.toHaveBeenCalled()
       expect(service.sessionToken).toBe('active-session-token')
