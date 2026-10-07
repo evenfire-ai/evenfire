@@ -1,4 +1,5 @@
 import type { DbClient } from '../../db.js'
+import { PASSWORD_ADMISSION_POLICY } from './passwordAdmissionState.js'
 
 /** New forward migration; database triggers cover all credential/lifecycle producers. */
 export async function applyPasswordAdmissionSchema(db: Pick<DbClient, 'query'>): Promise<void> {
@@ -50,5 +51,43 @@ export async function applyPasswordAdmissionSchema(db: Pick<DbClient, 'query'>):
       FOR EACH ROW EXECUTE FUNCTION password_credential_generation_fence();
     GRANT SELECT, INSERT, UPDATE, DELETE ON password_identifier_state, password_verification_pace
       TO control_api_runtime;
+  `)
+}
+
+/** Forward capture retention, including deletion protection for older cleanup owners. */
+export async function applyPasswordEvaluationRetentionSchema(
+  db: Pick<DbClient, 'query'>
+): Promise<void> {
+  const lifetime = PASSWORD_ADMISSION_POLICY.evaluationMs
+  await db.query(`
+    ALTER TABLE password_identifier_state
+      ADD COLUMN IF NOT EXISTS retained_until_ms BIGINT NOT NULL DEFAULT 0;
+    UPDATE password_identifier_state
+       SET retained_until_ms = greatest(retained_until_ms,
+         floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint + ${lifetime});
+    CREATE OR REPLACE FUNCTION password_evaluation_retention() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+    DECLARE deadline bigint := floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint + ${lifetime};
+    BEGIN
+      IF TG_OP = 'DELETE' THEN
+        IF OLD.retained_until_ms > deadline - ${lifetime} THEN RETURN NULL; END IF;
+        RETURN OLD;
+      END IF;
+      IF TG_OP = 'INSERT' THEN
+        NEW.retained_until_ms := greatest(NEW.retained_until_ms, deadline);
+      ELSIF NEW.retained_until_ms = OLD.retained_until_ms
+        AND NEW.revision = OLD.revision
+        AND NEW.user_id IS NOT DISTINCT FROM OLD.user_id
+        AND cardinality(NEW.failures) <= cardinality(OLD.failures)
+        AND NEW.locked_until_ms <= OLD.locked_until_ms THEN
+        -- Older capture producers write settled history without retention metadata.
+        -- Retain those captures too; denials do not write and cannot extend retention.
+        NEW.retained_until_ms := greatest(OLD.retained_until_ms, deadline);
+      END IF;
+      RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS password_evaluation_retention ON password_identifier_state;
+    CREATE TRIGGER password_evaluation_retention BEFORE INSERT OR UPDATE OR DELETE
+      ON password_identifier_state FOR EACH ROW EXECUTE FUNCTION password_evaluation_retention();
   `)
 }

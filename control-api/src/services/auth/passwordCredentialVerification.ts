@@ -40,6 +40,7 @@ export type PasswordCapture = {
   key: string
   instance: string
   revision: string
+  expiresAt: number
   user: PasswordUser | null
 }
 type StateRow = {
@@ -79,14 +80,16 @@ export async function capturePasswordEvaluation(
       [key]
     )
     const row = result.rows[0] as StateRow
-    const decision = admitPasswordIdentifier(stateOf(row), await databaseNow(db), chargeAttempt)
+    const now = await databaseNow(db)
+    const decision = admitPasswordIdentifier(stateOf(row), now, chargeAttempt)
     // A denied request never writes: it cannot move the rolling denial horizon.
     if (decision.retryMs) return { retryMs: decision.retryMs, row }
+    const expiresAt = now + policy.evaluationMs
     await db.query(
-      'UPDATE password_identifier_state SET attempts = $2, failures = $3, locked_until_ms = $4 WHERE identifier_key = $1',
-      [key, decision.state.attempts, decision.state.failures, decision.state.lockedUntil]
+      'UPDATE password_identifier_state SET attempts = $2, failures = $3, locked_until_ms = $4, retained_until_ms = greatest(retained_until_ms, $5) WHERE identifier_key = $1',
+      [key, decision.state.attempts, decision.state.failures, decision.state.lockedUntil, expiresAt]
     )
-    return { retryMs: 0, row }
+    return { retryMs: 0, row, expiresAt }
   })
   if (snapshot.retryMs) denied(snapshot.retryMs)
   // No transaction or row lock survives into bcrypt.
@@ -100,6 +103,7 @@ export async function capturePasswordEvaluation(
     key,
     instance: snapshot.row.instance,
     revision: String(snapshot.row.revision),
+    expiresAt: snapshot.expiresAt!,
     user: (users.rows[0] as PasswordUser) ?? null,
   }
 }
@@ -149,7 +153,9 @@ export async function completePasswordEvaluation(
     // Instance makes cleanup/recreation ABA-safe; revision fences stale results after success.
     if (!row || row.instance !== capture.instance || String(row.revision) !== capture.revision)
       return false
-    const state = finishPasswordState(stateOf(row), await databaseNow(db), success)
+    const now = await databaseNow(db)
+    if (now >= capture.expiresAt) return false
+    const state = finishPasswordState(stateOf(row), now, success)
     await db.query(
       `UPDATE password_identifier_state SET failures = $2, locked_until_ms = $3,
       revision = revision + $4, user_id = $5 WHERE identifier_key = $1`,
@@ -226,7 +232,8 @@ export async function verifyMemberPassword(
 export async function cleanupPasswordIdentifierState(): Promise<number> {
   const result = await pool.query(
     `DELETE FROM password_identifier_state
-    WHERE locked_until_ms <= floor(extract(epoch FROM clock_timestamp()) * 1000)
+    WHERE retained_until_ms <= floor(extract(epoch FROM clock_timestamp()) * 1000)
+      AND locked_until_ms <= floor(extract(epoch FROM clock_timestamp()) * 1000)
       AND NOT EXISTS (SELECT 1 FROM unnest(attempts || failures) t
         WHERE t > floor(extract(epoch FROM clock_timestamp()) * 1000) - $1)`,
     [policy.windowMs]

@@ -7,7 +7,10 @@ import {
 import { config } from './config.js'
 import { rootLogger } from './observability/logger.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
-import { applyPasswordAdmissionSchema } from './services/auth/passwordAdmissionSchema.js'
+import {
+  applyPasswordAdmissionSchema,
+  applyPasswordEvaluationRetentionSchema,
+} from './services/auth/passwordAdmissionSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
@@ -6336,6 +6339,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // Preserve the deployed identity after dev assigned slot 0125 to admin admission.
     legacyVersions: ['0125_bug192_password_admission'],
     apply: applyPasswordAdmissionSchema,
+  },
+  {
+    version: '0127_password_evaluation_retention',
+    apply: applyPasswordEvaluationRetentionSchema,
   },
 ]
 

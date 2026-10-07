@@ -96,6 +96,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     await holder.pool.query('DELETE FROM users')
     await holder.pool.query('DELETE FROM rate_limit_buckets')
     if (await newStateExists()) {
+      await holder.pool.query('UPDATE password_identifier_state SET retained_until_ms=0')
       await holder.pool.query('DELETE FROM password_identifier_state')
       await holder.pool.query('DELETE FROM password_verification_pace')
     }

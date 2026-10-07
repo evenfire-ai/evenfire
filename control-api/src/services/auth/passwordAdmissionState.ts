@@ -9,6 +9,7 @@ export const PASSWORD_ADMISSION_POLICY = Object.freeze({
   cooldownMs: 15 * 60_000,
   paceMs: 7_500,
   concurrency: 1,
+  evaluationMs: 15 * 60_000,
   bcryptCost: 12,
 })
 

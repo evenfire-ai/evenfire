@@ -70,6 +70,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   beforeEach(async () => {
     vi.restoreAllMocks()
     await holder.pool.query('DELETE FROM users')
+    await holder.pool.query('UPDATE password_identifier_state SET retained_until_ms=0')
     await holder.pool.query('DELETE FROM password_identifier_state')
     await holder.pool.query('DELETE FROM password_verification_pace')
     userId = (
@@ -348,6 +349,10 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       )
     }
     const old = await capturePasswordEvaluation('expired@example.invalid', false)
+    await holder.pool.query(
+      'UPDATE password_identifier_state SET retained_until_ms=0 WHERE identifier_key=$1',
+      [passwordIdentifierKey('expired@example.invalid')]
+    )
     expect(await cleanupPasswordIdentifierState()).toBe(1)
     expect((await holder.pool.query('SELECT * FROM password_identifier_state')).rows).toHaveLength(
       3
