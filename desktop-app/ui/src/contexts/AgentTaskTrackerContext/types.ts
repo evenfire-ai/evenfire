@@ -1,4 +1,9 @@
-import type { ComposerImageAttachment, ComposerReferenceAttachment, ProgressStep } from '@/uiTypes'
+import type {
+  ApprovalInputPreview,
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+  ProgressStep,
+} from '@/uiTypes'
 import type { ChatMessageAttachment } from '../../../../src/types'
 
 /**
@@ -41,6 +46,7 @@ export interface TaskPendingApproval {
   // completion back to this task. Absent on ordinary approval suspensions.
   reason?: string
   mcpServerName?: string
+  inputPreview?: ApprovalInputPreview
 }
 
 /**

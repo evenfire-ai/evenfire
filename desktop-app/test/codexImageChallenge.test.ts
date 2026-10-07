@@ -1,10 +1,31 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRequire } from 'node:module'
 import {
   challengeImage,
   challengeImageAt,
   paddedChallengeImage,
 } from './e2e-playwright/codexImageChallenge.js'
+
+const renderer = vi.hoisted(() => ({ unavailable: false }))
+vi.mock('node:module', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:module')>()
+  return {
+    ...actual,
+    createRequire: (filename: string | URL) => {
+      const require = actual.createRequire(filename)
+      return (id: string) => {
+        if (id === '@napi-rs/canvas' && renderer.unavailable)
+          throw new Error('native renderer absent')
+        return require(id)
+      }
+    },
+  }
+})
+
+afterEach(() => {
+  renderer.unavailable = false
+  vi.unstubAllEnvs()
+})
 
 const MIB = 1024 * 1024
 const { inspectVisualImage } = createRequire(import.meta.url)(
@@ -71,5 +92,52 @@ describe('Codex image challenge fixtures', () => {
       data: image.bytes.toString('base64'),
     })
     expect(inspected.ok, inspected.message).toBe(true)
+  })
+})
+
+describe('strict pixel rendering admission', () => {
+  it.each(['png', 'jpeg'] as const)(
+    'refuses missing native %s pixels independently of Codex opt-in',
+    format => {
+      renderer.unavailable = true
+      vi.stubEnv('E2E_CODEX_IMAGE_INPUT', undefined)
+      expect(() => challengeImage(format, { requirePixels: true })).toThrow(/native.*pixels/i)
+      expect(() => challengeImageAt(format, 800, 120, { requirePixels: true })).toThrow(
+        /native.*pixels/i
+      )
+      expect(() => paddedChallengeImage(format, MIB, { requirePixels: true })).toThrow(
+        /native.*pixels/i
+      )
+    }
+  )
+
+  it('preserves the explicitly non-strict container-only geometry fixture', () => {
+    renderer.unavailable = true
+    vi.stubEnv('E2E_CODEX_IMAGE_INPUT', undefined)
+    const image = challengeImageAt('png', 2049, 128)
+    expect(
+      inspectVisualImage({ mimeType: 'image/png', data: image.bytes.toString('base64') }).ok
+    ).toBe(false)
+  })
+})
+
+describe('strict native image content', () => {
+  it.each(['png', 'jpeg'] as const)('contains painted pixels in strict %s output', async format => {
+    const native = createRequire(new URL('../../mcp-host/package.json', import.meta.url))(
+      '@napi-rs/canvas'
+    )
+    const image = challengeImage(format, { requirePixels: true })
+    const decoded = await native.loadImage(image.bytes)
+    const canvas = native.createCanvas(800, 120),
+      context = canvas.getContext('2d')
+    context.drawImage(decoded, 0, 0)
+    const rgba = context.getImageData(0, 0, 800, 120).data
+    let darkPixels = 0
+    for (let offset = 0; offset < rgba.length; offset += 4) {
+      if (rgba[offset] < 100 && rgba[offset + 1] < 100 && rgba[offset + 2] < 100) darkPixels++
+    }
+    expect(darkPixels).toBeGreaterThan(1000)
+    expect(decoded.width).toBe(800)
+    expect(decoded.height).toBe(120)
   })
 })

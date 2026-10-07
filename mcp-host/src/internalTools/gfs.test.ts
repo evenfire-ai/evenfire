@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createCanvas } from '@napi-rs/canvas'
+import { resolveOfficialVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { VisualInputBudget } from '../visualInput/policy'
 import {
   type GfscReadClient,
@@ -145,6 +146,11 @@ describe('buildGfsReadTools', () => {
           resolveCapability: async () => ({
             status: 'supported',
             provider: 'openai',
+            deliveryLimits: resolveOfficialVisualDeliveryLimits(
+              'openai',
+              'https://api.openai.com/v1',
+              'completeWithTools'
+            ),
             model: 'gpt-4.1',
             evidence: 'unit',
           }),

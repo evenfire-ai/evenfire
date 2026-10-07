@@ -55,6 +55,16 @@ function isKeytarModule(value: unknown): value is KeytarModule {
   )
 }
 
+export type TokenStoreOptions = {
+  /**
+   * Development-isolation contract. The constructor only validates the declared
+   * path; every operation verifies it against Electron's actual ready userData
+   * directory before touching files. Isolated storage never uses keytar or the
+   * shared home-directory fallback.
+   */
+  isolatedUserDataPath?: string
+}
+
 async function loadKeytar(): Promise<KeytarModule | null> {
   try {
     const mod = await import('keytar')
@@ -69,6 +79,10 @@ async function loadKeytar(): Promise<KeytarModule | null> {
   } catch {
     return null
   }
+}
+
+async function realPath(value: string): Promise<string> {
+  return fs.realpath(value)
 }
 
 async function resolvedStorageBase(): Promise<string> {
@@ -177,6 +191,41 @@ export class TokenStore {
     }
   }
 
+  private readonly isolatedUserDataPath: string | undefined
+
+  constructor(options: TokenStoreOptions = {}) {
+    const isolatedUserDataPath = options.isolatedUserDataPath
+    if (
+      isolatedUserDataPath !== undefined &&
+      (!isolatedUserDataPath || !path.isAbsolute(isolatedUserDataPath))
+    ) {
+      throw new Error('Isolated token storage requires an absolute userData path')
+    }
+    this.isolatedUserDataPath = isolatedUserDataPath
+  }
+
+  private async verifiedStorageBase(): Promise<string> {
+    if (this.isolatedUserDataPath === undefined) return resolvedStorageBase()
+    if (!app?.isReady()) throw new Error('Isolated token storage requires Electron readiness')
+    const actual = await realPath(app.getPath('userData'))
+    const declared = await realPath(this.isolatedUserDataPath)
+    if (actual !== declared) throw new Error('Isolated token storage directory mismatch')
+    await fs.mkdir(actual, { recursive: true })
+    return actual
+  }
+
+  private async encryptedFilePath(envKey: string): Promise<string> {
+    const key = String(envKey || '').trim()
+    const name = key ? `session-token-${key}.enc` : 'session-token.enc'
+    return path.join(await this.verifiedStorageBase(), name)
+  }
+
+  private async plainFilePath(envKey: string): Promise<string> {
+    const key = String(envKey || '').trim()
+    const name = key ? `session-token-${key}.json` : 'session-token.json'
+    return path.join(await this.verifiedStorageBase(), name)
+  }
+
   /**
    * Read the session token for `envKey`. Falls back keytar → safeStorage file,
    * optional older env-key aliases, then does a one-time best-effort migration
@@ -199,8 +248,9 @@ export class TokenStore {
     options: { legacyEnvKeys?: readonly string[] }
   ): Promise<string | null> {
     assertEnvKey(envKey)
+    if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
-    const keytar = await loadKeytar()
+    const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
     if (keytar) {
       try {
         const stored = await keytar.getPassword(SERVICE, account)
@@ -213,7 +263,7 @@ export class TokenStore {
 
     if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
       try {
-        const file = await encryptedFilePath(envKey)
+        const file = await this.encryptedFilePath(envKey)
         const encrypted = await fs.readFile(file)
         return safeStorage.decryptString(encrypted)
       } catch {
@@ -225,7 +275,7 @@ export class TokenStore {
     // per-env plain-text file — read it back symmetrically before falling
     // through to the one-time legacy-global migration.
     try {
-      const file = await plainFilePath(envKey)
+      const file = await this.plainFilePath(envKey)
       const raw = await fs.readFile(file, 'utf8')
       const data = JSON.parse(raw) as { token?: unknown }
       if (typeof data.token === 'string' && data.token) return data.token
@@ -240,7 +290,10 @@ export class TokenStore {
     )
     if (migratedScopedToken) return migratedScopedToken
 
-    return this.migrateLegacyGlobalToken(envKey, keytar)
+    if (this.isolatedUserDataPath === undefined) {
+      return this.migrateLegacyGlobalToken(envKey, keytar)
+    }
+    return null
   }
 
   /**
@@ -276,7 +329,7 @@ export class TokenStore {
 
       if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
         try {
-          const file = await encryptedFilePath(legacyEnvKey)
+          const file = await this.encryptedFilePath(legacyEnvKey)
           const encrypted = await fs.readFile(file)
           const token = safeStorage.decryptString(encrypted)
           if (token) {
@@ -290,7 +343,7 @@ export class TokenStore {
       }
 
       try {
-        const file = await plainFilePath(legacyEnvKey)
+        const file = await this.plainFilePath(legacyEnvKey)
         const raw = await fs.readFile(file, 'utf8')
         const data = JSON.parse(raw) as { token?: unknown }
         const token = typeof data.token === 'string' && data.token ? data.token : null
@@ -368,8 +421,9 @@ export class TokenStore {
 
   private async setSessionTokenOnce(token: string, envKey: string): Promise<void> {
     assertEnvKey(envKey)
+    if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
-    const keytar = await loadKeytar()
+    const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
     if (keytar) {
       try {
         await keytar.setPassword(SERVICE, account, token)
@@ -380,12 +434,12 @@ export class TokenStore {
     }
 
     if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
-      const file = await encryptedFilePath(envKey)
+      const file = await this.encryptedFilePath(envKey)
       await writeTokenFileAtomic(file, safeStorage.encryptString(token))
       return
     }
 
-    const file = await plainFilePath(envKey)
+    const file = await this.plainFilePath(envKey)
     await writeTokenFileAtomic(file, JSON.stringify({ token }))
   }
 
@@ -401,6 +455,7 @@ export class TokenStore {
     options: { legacyEnvKeys?: readonly string[] }
   ): Promise<void> {
     assertEnvKey(envKey)
+    if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const legacyEnvKeys = Array.from(
       new Set(
         (options.legacyEnvKeys ?? [])
@@ -410,7 +465,7 @@ export class TokenStore {
     )
     for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
     const scopedEnvKeys = [envKey, ...legacyEnvKeys]
-    const keytar = await loadKeytar()
+    const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
     if (keytar) {
       const deleteKeychainPassword = async (account: string) => {
         try {
@@ -428,15 +483,22 @@ export class TokenStore {
     }
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.
-    await Promise.all([
+    const scopedFileRemovals = [
       ...scopedEnvKeys.flatMap(scopedEnvKey => [
-        encryptedFilePath(scopedEnvKey)
+        this.encryptedFilePath(scopedEnvKey)
           .then(file => fs.unlink(file))
           .catch(() => {}),
-        plainFilePath(scopedEnvKey)
+        this.plainFilePath(scopedEnvKey)
           .then(file => fs.unlink(file))
           .catch(() => {}),
       ]),
+    ]
+    if (this.isolatedUserDataPath !== undefined) {
+      await Promise.all(scopedFileRemovals)
+      return
+    }
+    await Promise.all([
+      ...scopedFileRemovals,
       legacyEncryptedFilePath()
         .then(file => fs.unlink(file))
         .catch(() => {}),

@@ -8500,6 +8500,12 @@ td.cu-registry-description {
   min-width: 0;
 }
 
+/* A fallback-locked extra slot adds a `cu-chip` state marker beside the
+   remove control, so the row gains a fourth (auto) actions track. */
+.cu-llm-cred-extra--locked {
+  grid-template-columns: 1fr 1fr auto auto;
+}
+
 /* Chip + optional remove icon-button on the right side of a group head. */
 .cu-llm-cred-group__head-actions {
   display: flex;
@@ -8536,13 +8542,9 @@ td.cu-registry-description {
   font-size: 0.95em;
 }
 
-/* The "Add provider" picker of the additive editor (a SelectionDropdown, so
-   the width cap lands on its root element, not on a native <select>). The cap
-   also bounds the popover menu, so it stays wide enough for the longest
-   provider labels; inline mode (update modal) keeps the surface's full width. */
-.cu-selection-dropdown.cu-llm-cred-add:not(.cu-selection-dropdown--inline) {
-  max-width: 16rem;
-}
+/* The "Add provider" picker of the additive editor is a plain field on the
+   full-screen surfaces: the SelectionDropdown root is width:100%, so the
+   trigger and its popover menu match the width of the surrounding key rows. */
 
 /* The picker is a MENU (value is always empty): entries mount a provider
    section and vanish from the list, so the never-filled selection squares
