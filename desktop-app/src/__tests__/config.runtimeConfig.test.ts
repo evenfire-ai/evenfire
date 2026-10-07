@@ -54,6 +54,64 @@ describe('desktop runtime config', () => {
     vi.resetModules()
   })
 
+  it('keeps same-named profiles independent when saved in the same millisecond', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: true,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+      },
+    }))
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_790_000_000_000)
+    try {
+      const runtimeConfig = await import('../config.js')
+      const firstConfig = {
+        appName: 'Example tenant',
+        externalRestApiBaseUrl: 'https://first-api.example.test',
+        rpcProxyBaseUrl: 'https://first-rpc.example.test',
+      }
+      const secondConfig = {
+        appName: firstConfig.appName,
+        externalRestApiBaseUrl: 'https://second-api.example.test',
+        rpcProxyBaseUrl: 'https://second-rpc.example.test',
+      }
+      await runtimeConfig.saveDesktopRuntimeConfig(firstConfig)
+      await runtimeConfig.saveDesktopRuntimeConfig(secondConfig)
+      const options = runtimeConfig.getDesktopRuntimeConfigState().options
+      const first = options.find(
+        option => option.externalRestApiBaseUrl === firstConfig.externalRestApiBaseUrl
+      )
+      const second = options.find(
+        option => option.externalRestApiBaseUrl === secondConfig.externalRestApiBaseUrl
+      )
+      expect(first).toBeDefined()
+      expect(second).toBeDefined()
+      expect(first!.id).not.toBe(second!.id)
+
+      await runtimeConfig.selectDesktopRuntimeConfigOption(first!.id)
+      expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(firstConfig.externalRestApiBaseUrl)
+      await runtimeConfig.deleteDesktopRuntimeConfigOption(first!.id)
+      expect(runtimeConfig.getDesktopRuntimeConfigState().options).toContainEqual(
+        expect.objectContaining({ id: second!.id, ...secondConfig })
+      )
+
+      vi.resetModules()
+      const reloaded = await import('../config.js')
+      expect(reloaded.getDesktopRuntimeConfigState().options).toContainEqual(
+        expect.objectContaining({ id: second!.id, ...secondConfig })
+      )
+      expect(reloaded.getDesktopRuntimeConfigState().options).not.toContainEqual(
+        expect.objectContaining({ id: first!.id })
+      )
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it('keeps localhost selectable in packaged builds with prod env defaults', async () => {
     tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://example.com'
