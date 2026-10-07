@@ -747,6 +747,54 @@ assert_minimal_seed_rejects_a_divergent_identity() {
   fi
 }
 
+assert_seed_context_allowlist_runs_on_system_bash() {
+  local seed="$REPO_ROOT/scripts/e2e/seed-e2e-data.sh" guard output
+  guard="$(awk '/^DEFAULT_ALLOWED_CONTEXTS=\(/{f=1} f{print} f && /^ok "Context/{exit}' "$seed")"
+  if [ -z "$guard" ] || ! printf '%s\n' "$guard" | grep -q '^ok "Context'; then
+    fail "could not extract the complete seeder context allowlist guard"
+    return
+  fi
+  # Evaluate the shipped guard, not a duplicate. Only the external ownership
+  # predicate is stubbed; no seeder API or cluster operation can run here.
+  if ! output="$(/bin/bash -euc '
+    guard=$1
+    ok() { :; }
+    die() { printf "%s\n" "$*" >&2; exit 1; }
+    is_branch_scoped_minikube_context() { [ "$CONTEXT" = clerum-fixture-owned ]; }
+    rejects() {
+      local result
+      if result="$(CONTEXT="$1" ALLOWED_CONTEXTS="$2" eval "$guard" 2>&1)"; then
+        printf "unexpectedly accepted context: %s\n" "$1" >&2
+        exit 1
+      fi
+      case "$result" in *"$3"*) ;; *) printf "%s\n" "$result" >&2; exit 1 ;; esac
+    }
+    CONTEXT=clerum-test; ALLOWED_CONTEXTS=""; eval "$guard"
+    [ "${#ALLOWED[@]}" -eq 2 ]
+    CONTEXT="fixture dev two"; ALLOWED_CONTEXTS="fixture dev one,fixture dev two"; eval "$guard"
+    [ "${#ALLOWED[@]}" -eq 4 ]
+    [ "${ALLOWED[2]}" = "fixture dev one" ] && [ "${ALLOWED[3]}" = "fixture dev two" ]
+    CONTEXT=clerum-test; ALLOWED_CONTEXTS=","; eval "$guard"
+    [ "${#ALLOWED[@]}" -eq 3 ] && [ -z "${ALLOWED[2]}" ]
+    CONTEXT=fixture-two; ALLOWED_CONTEXTS="fixture-one,,fixture-two,"; eval "$guard"
+    [ "${#ALLOWED[@]}" -eq 5 ] && [ -z "${ALLOWED[3]}" ]
+    [ "${ALLOWED[2]}" = fixture-one ] && [ "${ALLOWED[4]}" = fixture-two ]
+    CONTEXT=clerum-fixture-owned; ALLOWED_CONTEXTS=""; eval "$guard"
+    [ "${#ALLOWED[@]}" -eq 2 ]
+    rejects fixture-unlisted "" "is not in the non-prod allowlist"
+    rejects fixture-prod fixture-prod "matches prod pattern"
+    printf ok
+  ' bash "$guard")"; then
+    fail "seeder context allowlist fails on system Bash: $output"
+    return
+  fi
+  if [ "$output" = ok ]; then
+    pass "seeder allowlist handles empty and CSV extensions on Bash 3.2 without weakening context denial"
+  else
+    fail "seeder context allowlist did not complete (output=$output)"
+  fi
+}
+
 assert_minimal_setup_requires_admin_identity_email() {
   local contract="$REPO_ROOT/scripts/e2e/minimal-bootstrap-contract.sh"
   local output
@@ -1567,6 +1615,7 @@ assert_bootstrap_seed_deferral_rejects_non_local_or_e2e_modes
 assert_minimal_seed_is_setup_first_and_link_fail_closed
 assert_minimal_setup_requires_admin_identity_email
 assert_minimal_bootstrap_contract_runs_on_system_bash
+assert_seed_context_allowlist_runs_on_system_bash
 assert_minimal_seed_rejects_a_divergent_identity
 assert_an_unknown_image_source_is_a_hard_error
 assert_ghcr_mode_moves_only_the_render_dir
