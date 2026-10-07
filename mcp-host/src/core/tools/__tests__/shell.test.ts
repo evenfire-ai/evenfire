@@ -659,3 +659,33 @@ describe('ShellTool without the GFS download store (#1019)', () => {
     })
   })
 })
+
+describe('ShellTool start failures (#1020)', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockClear()
+  })
+
+  it('U3: resolves a synchronous spawn throw from a NUL env value as a start failure', async () => {
+    const tool = new ShellTool(workspacePath, 5_000, ['PATH'], () => ({ BROKEN: 'a\0b' }))
+    const result = await tool.execute({ command: 'printf never-runs' })
+    expect(result.is_error).toBe(true)
+    expect(result.content).toMatch(/^Command failed to start: /)
+    expect(result.content).not.toContain('never-runs')
+    expect(result.duration_ms).toBeGreaterThanOrEqual(0)
+    // Witness: spawn was reached and threw; no process exists to report on.
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(vi.mocked(spawn).mock.results[0]!.type).toBe('throw')
+  })
+
+  it('U4: reports an asynchronous spawn failure (missing cwd) as a start failure', async () => {
+    const missing = join(workspacePath, 'removed-before-spawn')
+    const tool = new ShellTool(missing, 5_000, ['PATH'])
+    const result = await tool.execute({ command: 'printf never-runs' })
+    expect(result.is_error).toBe(true)
+    expect(result.content).toMatch(/^Command failed to start: .*ENOENT/)
+    expect(result.content).not.toContain('never-runs')
+    // Witness: spawn returned a child; the failure arrived on its error event.
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(vi.mocked(spawn).mock.results[0]!.type).toBe('return')
+  })
+})

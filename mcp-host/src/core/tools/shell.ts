@@ -1,4 +1,4 @@
-import { spawn } from 'child_process'
+import { type ChildProcess, spawn } from 'child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { recordGfsShellOutputLimit } from '../../internalTools/gfsDownloadMetrics'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../llm/registryCore'
@@ -215,12 +215,25 @@ export class ShellTool implements Tool {
     return new Promise<ToolOutput>(resolve => {
       // detached: true makes the child a process group leader so we can kill
       // the whole group (shell + grandchildren like `sleep`) with -pid signal.
-      const child = spawn('/bin/sh', ['-c', command], {
-        cwd: this.workspacePath,
-        env: safeEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: true,
-      })
+      let child: ChildProcess
+      try {
+        child = spawn('/bin/sh', ['-c', command], {
+          cwd: this.workspacePath,
+          env: safeEnv,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: true,
+        })
+      } catch (error) {
+        // spawn() throws synchronously for invalid arguments, e.g. a NUL byte in
+        // a dynamic env value that BasicSafety never sees (#1020). No process
+        // exists, so this is a start failure reported as an error result.
+        resolve({
+          content: `Command failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          duration_ms: Date.now() - startTime,
+          is_error: true,
+        })
+        return
+      }
 
       const stdoutBuf: Buffer[] = []
       const stderrBuf: Buffer[] = []
