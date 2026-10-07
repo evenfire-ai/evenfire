@@ -168,6 +168,7 @@ export default defineConfig({
         '**/gfs-upload-v2.test.ts',
         '**/codex-image-input.spec.ts',
         '**/subscription-image-input.spec.ts',
+        '**/native-tool-discovery.spec.ts',
       ],
     },
     {
