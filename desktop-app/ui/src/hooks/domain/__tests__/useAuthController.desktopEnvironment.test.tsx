@@ -522,6 +522,59 @@ describe('Desktop environment handoff', () => {
     expect(screen.getByTestId('pending-rpc')).toHaveTextContent('none')
   })
 
+  it('rejects ambiguous saved REST profiles before asking to sign out', async () => {
+    const duplicateProfiles = [
+      {
+        appName: 'Example tenant duplicate one',
+        externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v2`,
+        rpcProxyBaseUrl: 'https://rpc-duplicate-one.example.test',
+      },
+      {
+        appName: 'Example tenant duplicate two',
+        externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v3`,
+        rpcProxyBaseUrl: 'https://rpc-duplicate-two.example.test',
+      },
+    ]
+    for (const profile of duplicateProfiles)
+      await runtimeConfigModule!.saveDesktopRuntimeConfig(profile)
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    for (const profile of duplicateProfiles) {
+      const option = state.options.find(candidate => candidate.appName === profile.appName)
+      if (!option?.configPath)
+        throw new Error('The runtime config producer did not persist profile')
+      const contents = JSON.parse(await fsp.readFile(option.configPath, 'utf8')) as {
+        externalRestApiBaseUrl: string
+      }
+      contents.externalRestApiBaseUrl = `${targetEnvironment.externalRestApiBaseUrl}/api/v1/`
+      await fsp.writeFile(option.configPath, JSON.stringify(contents), 'utf8')
+    }
+    vi.resetModules()
+    runtimeConfigModule = await import('../../../../../src/config')
+    const reloadedState = await runtimeConfigModule.getDesktopRuntimeConfigState()
+    const otherOption = reloadedState.options.find(
+      option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+    )
+    if (!otherOption) throw new Error('The runtime config producer did not return the other target')
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(otherOption.id)
+
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await act(async () => setAuthenticatedForTest?.(true))
+    mocks.logoutForEnvironmentMismatch.mockClear()
+
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(screen.getByTestId('pending-environment-switch')).toHaveTextContent('none')
+    expect(mocks.logoutForEnvironmentMismatch).not.toHaveBeenCalled()
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'Desktop setup link rejected because multiple saved environments use this REST API.',
+      'error'
+    )
+  })
+
   it('keeps the current session when the user cancels a REST environment switch', async () => {
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
