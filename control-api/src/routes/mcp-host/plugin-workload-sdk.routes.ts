@@ -1,12 +1,14 @@
 import { type NextFunction, type Request, type Response, Router } from 'express'
-import { rateLimit } from 'express-rate-limit'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import {
+  createPluginWorkloadSdkAnonymousPreauthRateLimit,
+  createPluginWorkloadSdkAuthenticatedPreauthRateLimit,
   createPluginWorkloadSdkRequestRateLimit,
+  createPluginWorkloadSdkVerificationBudgetRateLimit,
   pluginWorkloadSdkCredentialBucketKey,
 } from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
@@ -80,7 +82,7 @@ export const PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION = 2
 // grant rate/quota remains the product-level invocation limit.
 const pluginWorkloadSdkCredentialRateLimit = rateLimitMiddleware({
   bucketType: 'plugin_workload_sdk_credential',
-  maxPerMinute: 120,
+  maxPerMinute: config.pluginSdkCredentialRlPerMin,
   getBucketKey: pluginWorkloadSdkCredentialBucketKey,
   onBackendUnavailable: 'process-memory',
 })
@@ -626,15 +628,13 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
   // recipe-scoped PG limiter (the outer app bounds JSON bodies).
   router.use(
     '/mcp-host/plugin-workload-sdk',
-    rateLimit({
-      windowMs: 60_000,
-      // ENV-tunable pre-auth flood guard (issue #348):
-      // CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN.
-      limit: config.pluginSdkPreauthRlPerMin,
-      standardHeaders: 'draft-8',
-      legacyHeaders: false,
-      message: { error: 'Too Many Requests', retryable: true },
-    }),
+    // Invalid or missing credentials stay on the anonymous source-IP gate.
+    // Verified Host principals use a separate pre-auth allowance, then the
+    // recipe-scoped request bucket after authentication. The verification
+    // budget runs first because both pre-auth gates verify to pick a bucket.
+    createPluginWorkloadSdkVerificationBudgetRateLimit(),
+    createPluginWorkloadSdkAnonymousPreauthRateLimit(),
+    createPluginWorkloadSdkAuthenticatedPreauthRateLimit(),
     requireMcpHostJwt,
     requirePluginWorkloadSdkScope,
     createPluginWorkloadSdkRequestRateLimit()

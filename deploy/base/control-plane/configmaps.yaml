@@ -60,18 +60,44 @@ data:
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED: "true"
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_INTERVAL_MS: "5000"
   WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_BATCH_SIZE: "10"
-  APPROVAL_RL_REQUEST_PER_MIN: "120"
+  APPROVAL_RL_REQUEST_PER_MIN: "600"
+  APPROVAL_RL_REFRESH_PER_MIN: "100"
+  APPROVAL_RL_REISSUE_PER_MIN: "25"
+  CONTROL_API_OAUTH_BROKER_RL_PER_MIN: "300"
+  CONTROL_API_HOST_WAKE_RL_PER_MIN: "150"
   # Plugin Workload SDK platform rate limits (issue #348). Per-run SDK quotas
   # (maxRequestsPerRun / maxNotificationsPerRun) are deprecated and ignored;
-  # limits are enforced over a trailing 60s window (no fixed reset); once
-  # traffic slows below the limit the window drains within ~60s — stepless
-  # recipes are never permanently trapped. Values MUST equal the code defaults
-  # in control-api/src/config.ts (150/120/600/600) — the config deploy-mirror
-  # test fails on drift.
-  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "150"
-  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "120"
-  CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "600"
+  # Method quotas use their existing trailing 60s window. Authenticated request
+  # and edge budgets use the PG calendar minute; anonymous IP backstops retain
+  # first-hit windows. Defaults below mirror control-api/src/config.ts.
+  # Healthy static prompts cost three credential operations and six/seven SDK
+  # API requests; the 1800/6000 defaults keep the prompt600 allowance reachable
+  # without removing fresh capability proof, either Secret check or redemption.
+  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "750"
+  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "6000"
   CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN: "6000"
+  CONTROL_API_PLUGIN_SDK_ADMIN_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_INTERNAL_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_CREDENTIAL_PER_MIN: "1800"
+  CONTROL_API_ADMIN_WORKFLOW_READ_PER_MIN: "300"
+  CONTROL_API_ADMIN_WORKFLOW_GRANT_READ_PER_MIN: "300"
+  CONTROL_API_ADMIN_WORKFLOW_GRANT_WRITE_PER_MIN: "100"
+  CONTROL_API_ADMIN_WORKFLOW_TRIGGER_PER_MIN: "50"
+  CONTROL_API_ADMIN_OUTPUTS_READ_PER_MIN: "150"
+  CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MIN: "300"
+  CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_ANONYMOUS_IP_PER_MIN: "60"
+  CONTROL_API_ADMIN_REGISTRY_KEYS_PER_MIN: "150"
+  CONTROL_API_ADMIN_REGISTRY_GRANTS_PER_MIN: "150"
+  CONTROL_API_ADMIN_REGISTRY_CONNECT_STATUS_PER_MIN: "150"
+  CONTROL_API_ADMIN_REGISTRY_CONNECT_REQUEST_PER_MIN: "15"
+  CONTROL_API_ADMIN_REGISTRY_CONNECT_RECOVERY_PER_MIN: "50"
+  CONTROL_API_ADMIN_CONNECTOR_DELETE_EDGE_PER_MIN: "300"
+  CONTROL_API_ADMIN_CONNECTOR_DELETE_PER_MIN: "150"
+  CONTROL_API_ADMIN_GFS_GRANTS_PER_MIN: "150"
+  CONTROL_API_ADMIN_GFS_SHARES_PER_MIN: "150"
+  CONTROL_API_ADMIN_GFS_LEGACY_GRANT_REPORT_PER_MIN: "150"
   # Hard ceiling for caller-provided ttlSeconds. Defaults to 48h so a client
   # asking for ttlSeconds=604800 (code default) can't freeze a workflow step
   # for a full week. Overlays may tighten further for stricter environments.
