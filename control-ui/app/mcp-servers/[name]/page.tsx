@@ -88,7 +88,9 @@ export default function McpServerDetailPage() {
   const router = useRouter()
   const params = useParams<{ name: string; tab?: string | string[] }>()
   const name = decodeURIComponent(params?.name ?? '')
-  const activeTab = parseConnectorDetailTab(params?.tab)
+  const [activeTab, setActiveTab] = useState<ConnectorDetailTab>(() =>
+    parseConnectorDetailTab(params?.tab)
+  )
   const [server, setServer] = useState<McpServerResource | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -108,16 +110,16 @@ export default function McpServerDetailPage() {
   }, [name])
 
   function selectTab(next: ConnectorDetailTab) {
-    if (next === CONNECTOR_DETAIL_DEFAULT_TAB) {
-      router.replace(CONTROL_ROUTES.connectors.detail(name))
-    } else {
-      router.replace(CONTROL_ROUTES.connectors.detailTab(name, next))
-    }
+    setActiveTab(next)
   }
 
   useEffect(() => {
     if (name) void load()
   }, [load, name])
+
+  useEffect(() => {
+    setActiveTab(parseConnectorDetailTab(params?.tab))
+  }, [params?.tab])
 
   const spec = server?.spec ?? {}
   const conditions = server?.status?.conditions ?? []
@@ -144,6 +146,7 @@ export default function McpServerDetailPage() {
             tab === CONNECTOR_DETAIL_DEFAULT_TAB
               ? CONTROL_ROUTES.connectors.detail(name)
               : CONTROL_ROUTES.connectors.detailTab(name, tab),
+          onLinkActivate: () => selectTab(tab),
         }))}
         contentMode="plain"
         contentClassName="cu-detail-content-stack--panel-continuation"

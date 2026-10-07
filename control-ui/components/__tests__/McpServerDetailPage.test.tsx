@@ -5,13 +5,12 @@ import * as api from '../../lib/api'
 
 const navigation = vi.hoisted(() => ({
   push: vi.fn(),
-  replace: vi.fn(),
   params: { name: 'search' } as { name: string; tab?: string },
 }))
 
 vi.mock('next/navigation', () => ({
   useParams: () => navigation.params,
-  useRouter: () => ({ push: navigation.push, replace: navigation.replace }),
+  useRouter: () => ({ push: navigation.push }),
 }))
 vi.mock('@components/AuthGate', () => ({
   AuthGate: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -76,7 +75,6 @@ describe('McpServerDetailPage', () => {
   })
 
   it('shows runtime status on the route-backed runtime tab without rendering editable controls', async () => {
-    navigation.params = { name: 'search', tab: 'runtime' }
     vi.mocked(api.getMcpServer).mockResolvedValue({
       metadata: { name: 'search' },
       spec: {},
@@ -92,7 +90,10 @@ describe('McpServerDetailPage', () => {
         ],
       },
     })
-    render(<McpServerDetailPage />)
+    const { rerender } = render(<McpServerDetailPage />)
+    expect(await screen.findByRole('heading', { name: 'Configuration' })).toBeVisible()
+    navigation.params = { name: 'search', tab: 'runtime' }
+    rerender(<McpServerDetailPage />)
 
     expect(await screen.findByRole('heading', { name: 'Runtime status' })).toBeVisible()
     expect(screen.getByRole('tab', { name: 'Runtime status' })).toHaveAttribute(
@@ -104,6 +105,36 @@ describe('McpServerDetailPage', () => {
     expect(screen.getByText('Connector is ready.')).toBeVisible()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument()
+  })
+
+  it('switches to runtime status when its route-backed tab is activated', async () => {
+    vi.mocked(api.getMcpServer).mockResolvedValue({
+      metadata: { name: 'search' },
+      spec: { description: 'Search the public web' },
+      status: {
+        conditions: [
+          {
+            type: 'Ready',
+            status: 'True',
+            reason: 'Available',
+            message: 'Connector is ready.',
+            lastTransitionTime: '2026-09-23T00:00:00Z',
+          },
+        ],
+      },
+    })
+    render(<McpServerDetailPage />)
+
+    expect(await screen.findByText('Search the public web')).toBeVisible()
+    fireEvent.click(screen.getByRole('tab', { name: 'Runtime status' }))
+
+    expect(await screen.findByRole('heading', { name: 'Runtime status' })).toBeVisible()
+    expect(screen.getByRole('tab', { name: 'Runtime status' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+    expect(screen.queryByText('Search the public web')).not.toBeInTheDocument()
+    expect(screen.getByText('Connector is ready.')).toBeVisible()
   })
 
   it('refreshes in place and keeps failures on the detail page', async () => {
