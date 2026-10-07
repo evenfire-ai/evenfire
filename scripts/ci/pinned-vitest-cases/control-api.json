@@ -101,7 +101,7 @@
   },
   {
     "suite": "llmProviderAttemptBodyAdmission.test.ts",
-    "fullName": "AuthorizeBodyAdmission parser lifecycle bounds a never-finishing capacity refusal without reading or starting work"
+    "fullName": "AuthorizeBodyAdmission parser lifecycle bounds a never-ending, never-finishing capacity refusal at the read deadline without parsing or starting work"
   },
   {
     "suite": "llmProviderAttemptBodyAdmission.test.ts",
