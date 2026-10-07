@@ -210,3 +210,90 @@ describe('attachment pages are redacted against the whole text (jozer-rami M2)',
     }
   })
 })
+
+describe('a private key split across attachment pages (#1034)', () => {
+  // Interpolated so the repository's public-boundary scanner does not read a
+  // private key header in this file.
+  const LABEL = 'OPENSSH '
+  const HEADER = `-----BEGIN ${LABEL}PRIVATE KEY-----`
+  const FOOTER = `-----END ${LABEL}PRIVATE KEY-----`
+  // Synthetic OpenSSH-width body: 70-column lines, then a short last line.
+  const LINES = [0, 1, 2, 3, 4].map(n => {
+    const line = [0, 1]
+      .map(half => createHash('sha256').update(`key-${n}-${half}`).digest('base64'))
+      .join('')
+      .replace(/=/g, '')
+    return line.slice(0, n === 4 ? 30 : 70)
+  })
+  const BODY = LINES.join('\n')
+  const at = (text: string, part: string) => Buffer.byteLength(text.slice(0, text.indexOf(part)))
+
+  /** Pages ending at each byte in `cuts`, then the rest of the file. */
+  async function pagesAt(text: string, cuts: number[]) {
+    const tool = toolFor(admitted('file-1', Buffer.from(text)))
+    const pages: Awaited<ReturnType<typeof readPage>>[] = []
+    let offset = 0
+    for (const cut of [...cuts, undefined]) {
+      const page = await readPage(tool, {
+        attachmentId: 'file-1',
+        offset,
+        ...(cut === undefined ? {} : { maxBytes: cut - offset }),
+      })
+      expect(page.body.kind).toBe('text')
+      // The page starts where the previous one ended and ends at the cut.
+      expect(page.body.byteRange!.offset).toBe(offset)
+      if (cut !== undefined) expect(page.body.nextOffset).toBe(cut)
+      pages.push(page)
+      offset = page.body.nextOffset ?? offset + page.body.byteRange!.length
+    }
+    expect(pages[pages.length - 1]!.body.truncated).toBe(false)
+    expect(offset).toBe(Buffer.byteLength(text))
+    return pages
+  }
+
+  function expectNoKeyPiece(pages: Awaited<ReturnType<typeof readPage>>[]) {
+    for (const page of pages) {
+      for (const line of LINES) expect(leakedPiece(page.visible, line, 8)).toBeNull()
+      // Every page here holds key material, and the whole-text ranges masked
+      // it before the per-page pass ran.
+      expect(page.visible).toContain('[REDACTED]')
+    }
+  }
+
+  it('a cut inside a body line leaks neither half', async () => {
+    const text = `${BEFORE}${HEADER}\n${BODY}\n${FOOTER}${AFTER}`
+    const pages = await pagesAt(text, [at(text, LINES[1]!) + 30])
+    expectNoKeyPiece(pages)
+    expect(pages[0]!.body.text).toContain('intro text line')
+    expect(pages[1]!.body.text).toContain('trailing words here')
+  })
+
+  it('a cut right after the header leaks no body', async () => {
+    const text = `${BEFORE}${HEADER}\n${BODY}\n${FOOTER}${AFTER}`
+    const pages = await pagesAt(text, [at(text, HEADER) + HEADER.length])
+    expectNoKeyPiece(pages)
+    expect(pages[0]!.body.text).toContain('intro text line')
+    expect(pages[1]!.body.text).toContain('trailing words here')
+  })
+
+  it.each([true, false])(
+    'a middle page holding only body leaks nothing (footer: %s)',
+    async withFooter => {
+      const text = `${BEFORE}${HEADER}\n${BODY}${withFooter ? `\n${FOOTER}` : ''}${AFTER}`
+      const pages = await pagesAt(text, [at(text, LINES[0]!) + 10, at(text, LINES[3]!) + 10])
+      expect(pages).toHaveLength(3)
+      // Precondition: the middle page holds neither marker.
+      expect(pages[1]!.body.text).not.toContain('PRIVATE KEY')
+      expectNoKeyPiece(pages)
+      expect(pages[0]!.body.text).toContain('intro text line')
+      expect(pages[2]!.body.text).toContain('trailing words here')
+    }
+  )
+
+  it('a file that starts mid-key leaks none of the tail before the footer', async () => {
+    const text = `${BODY.slice(20)}\n${FOOTER}${AFTER}`
+    const pages = await pagesAt(text, [at(text, LINES[2]!) + 10])
+    expectNoKeyPiece(pages)
+    expect(pages[1]!.body.text).toContain('trailing words here')
+  })
+})

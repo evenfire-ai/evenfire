@@ -1027,4 +1027,399 @@ describe('BasicSafety', () => {
       expect(r3.content).toContain('rev-1-secret')
     })
   })
+
+  describe('private key blocks (#1034)', () => {
+    const SECRET_WARNING = 'Potential secret detected in shell_exec output'
+    const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+    // Markers are interpolated so the repository's public-boundary scanner
+    // does not read a private key header in this file.
+    const header = (label = 'RSA ', block = '') => `-----BEGIN ${label}PRIVATE KEY${block}-----`
+    const footer = (label = 'RSA ', block = '') => `-----END ${label}PRIVATE KEY${block}-----`
+    const PGP_HEADER = header('PGP ', ' BLOCK')
+    const PGP_FOOTER = footer('PGP ', ' BLOCK')
+
+    /** A deterministic synthetic base64 line, distinct for each seed. */
+    function bodyLine(seed: number, width: number, first = 'M'): string {
+      let x = (seed * 2654435761) >>> 0
+      let line = first
+      while (line.length < width) {
+        x = (Math.imul(x, 1103515245) + 12345) >>> 0
+        line += ALPHABET[(x >>> 16) & 63]
+      }
+      return line
+    }
+
+    /** `count` full lines of `width`, then a last line of `lastWidth`. */
+    function bodyLines(seed: number, count = 4, width = 64, lastWidth = 24): string[] {
+      const lines = Array.from({ length: count }, (_, n) => bodyLine(seed * 100 + n, width))
+      return [...lines, bodyLine(seed * 100 + count, lastWidth)]
+    }
+
+    function pem(
+      lines: string[],
+      options: { label?: string; separator?: string; end?: boolean } = {}
+    ) {
+      const { label = 'RSA ', separator = '\n', end = true } = options
+      const parts = [header(label), ...lines]
+      if (end) parts.push(footer(label))
+      return parts.join(separator)
+    }
+
+    /** The first 8-character piece of any body line found in `content`, or null. */
+    function leakedFragment(content: string, lines: string[]): string | null {
+      for (const line of lines) {
+        for (let at = 0; at + 8 <= line.length; at++) {
+          const piece = line.slice(at, at + 8)
+          if (content.includes(piece)) return piece
+        }
+      }
+      return null
+    }
+
+    /** No fragment leaks, and the rule fired (the liveness witness). */
+    function expectRedacted(content: string, lines: string[]) {
+      const result = safety.sanitizeOutput('shell_exec', content)
+      expect(leakedFragment(result.content, lines)).toBeNull()
+      expect(result.was_modified).toBe(true)
+      expect(result.warnings).toContain(SECRET_WARNING)
+      return result
+    }
+
+    it.each([
+      ['RSA', 'RSA ', '', 64],
+      ['PKCS#8', '', '', 64],
+      ['OPENSSH', 'OPENSSH ', '', 70],
+      ['ENCRYPTED', 'ENCRYPTED ', '', 64],
+      ['EC', 'EC ', '', 64],
+      ['DSA', 'DSA ', '', 64],
+      ['PGP', 'PGP ', ' BLOCK', 64],
+    ])('redacts a whole %s key', (_name, label, block, width) => {
+      const lines = bodyLines(1, 4, width)
+      const text =
+        block === ''
+          ? pem(lines, { label })
+          : [PGP_HEADER, '', ...lines, '=Q1w2', PGP_FOOTER].join('\n')
+      const result = safety.sanitizeOutput('shell_exec', text)
+      expect(result.content).toBe('[REDACTED]')
+      expect(result.warnings).toContain(SECRET_WARNING)
+    })
+
+    it('keeps the prose around a key', () => {
+      const text = `Line one of prose\n${pem(bodyLines(2))}\nLine two of prose`
+      const result = safety.sanitizeOutput('shell_exec', text)
+      expect(result.content).toBe('Line one of prose\n[REDACTED]\nLine two of prose')
+    })
+
+    it('redacts two keys and keeps the text between them', () => {
+      const text = `${pem(bodyLines(3))}\nbetween text\n${pem(bodyLines(4), { label: 'EC ' })}`
+      const result = safety.sanitizeOutput('shell_exec', text)
+      expect(result.content).toBe('[REDACTED]\nbetween text\n[REDACTED]')
+    })
+
+    it('ends a key without a footer at its short last line', () => {
+      const text = `${pem(bodyLines(5), { end: false })}\nThanks\nAlfredo\nBest regards`
+      const result = safety.sanitizeOutput('shell_exec', text)
+      expect(result.content).toBe('[REDACTED]\nThanks\nAlfredo\nBest regards')
+    })
+
+    it('takes one more line after a key without a footer whose last line is full (D1)', () => {
+      const lines = bodyLines(6).slice(0, 4)
+      const text = `${pem(lines, { end: false })}\nThanks\nBest regards`
+      const result = safety.sanitizeOutput('shell_exec', text)
+      expect(result.content).toBe('[REDACTED]\nBest regards')
+    })
+
+    it.each(['Status: keep this', 'Note Result'])(
+      'reads a tail without a header back to the prose line %j',
+      prose => {
+        const text = `${prose}\n${bodyLines(7).join('\n')}\n${footer()}`
+        const result = safety.sanitizeOutput('shell_exec', text)
+        expect(result.content).toBe(`${prose}\n[REDACTED]`)
+      }
+    )
+
+    it('takes a short first line when the tail starts the text (D1)', () => {
+      const lines = bodyLines(8)
+      const text = `Result\n${lines.join('\n')}\n${footer()}`
+      expectRedacted(text, lines)
+      expect(safety.sanitizeOutput('shell_exec', text).content).toBe('[REDACTED]')
+    })
+
+    it.each([',', ';', '.', ':', '\\', '-', '|', '*', '`'])(
+      'stops at the character %j glued to the body',
+      punctuation => {
+        const lines = bodyLines(9)
+        const backward = `keep this${punctuation}${lines.join('\n')}\n${footer()}`
+        expect(expectRedacted(backward, lines).content).toBe(`keep this${punctuation}[REDACTED]`)
+
+        const forward = `${header()}\n${lines.join('\n')}${punctuation} keep this`
+        expect(expectRedacted(forward, lines).content).toBe(`[REDACTED]${punctuation} keep this`)
+      }
+    )
+
+    const LAYOUTS: Array<[string, (lines: string[], end: boolean) => string]> = [
+      ['CRLF', (lines, end) => pem(lines, { separator: '\r\n', end })],
+      ['CR', (lines, end) => pem(lines, { separator: '\r', end })],
+      ['double-spaced LF', (lines, end) => pem(lines, { separator: '\n\n', end })],
+      ['double-spaced CR CRLF', (lines, end) => pem(lines, { separator: '\r\r\n', end })],
+      [
+        'trailing blanks',
+        (lines, end) =>
+          pem(
+            lines.map(line => `${line}  \t`),
+            { end }
+          ),
+      ],
+      [
+        'YAML indentation',
+        (lines, end) =>
+          'key: |\n' +
+          [header(), ...lines, ...(end ? [footer()] : [])].map(line => `  ${line}`).join('\n'),
+      ],
+      [
+        'blanks after the header',
+        (lines, end) => pem([...lines], { end }).replace('-----\n', '-----   \n'),
+      ],
+      ['a blank line after the header', (lines, end) => pem(['', ...lines], { end })],
+    ]
+
+    it.each(
+      LAYOUTS.flatMap(([name, build]) => [true, false].map(end => [name, end, build] as const))
+    )('redacts a %s key (footer: %s)', (_name, end, build) => {
+      const lines = bodyLines(10)
+      expectRedacted(build(lines, end), lines)
+    })
+
+    it('redacts an encrypted PEM key with Proc-Type and DEK-Info and no footer', () => {
+      const lines = bodyLines(11)
+      const text = [
+        header(),
+        'Proc-Type: 4,ENCRYPTED',
+        'DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF',
+        '',
+        ...lines,
+      ].join('\n')
+      expect(expectRedacted(text, lines).content).toBe('[REDACTED]')
+    })
+
+    it.each(
+      [false, true].flatMap(metadata =>
+        [false, true].flatMap(end => [false, true].map(crc => [metadata, end, crc] as const))
+      )
+    )('redacts a PGP key (armor headers: %s, footer: %s, checksum: %s)', (metadata, end, crc) => {
+      const lines = bodyLines(12)
+      const text = [
+        PGP_HEADER,
+        ...(metadata ? ['Version: GnuPG v2', 'Comment: synthetic test key', 'Charset: UTF-8'] : []),
+        '',
+        ...lines,
+        ...(crc ? ['=Q1w2'] : []),
+        ...(end ? [PGP_FOOTER] : []),
+      ].join('\n')
+      const result = expectRedacted(text, lines)
+      expect(result.content).toBe('[REDACTED]')
+    })
+
+    it('reads a PGP tail with a checksum back past its short last line', () => {
+      const lines = bodyLines(13)
+      const text = `keep this,${lines.join('\n')}\n=Q1w2\n${PGP_FOOTER}`
+      expect(expectRedacted(text, lines).content).toBe('keep this,[REDACTED]')
+    })
+
+    it('keeps a metadata-like line after a body without a footer', () => {
+      const text = `${pem(bodyLines(14), { end: false })}\nSummary: keep this`
+      expect(safety.sanitizeOutput('shell_exec', text).content).toBe(
+        '[REDACTED]\nSummary: keep this'
+      )
+    })
+
+    it('keeps prose between a body and its footer', () => {
+      const lines = bodyLines(15)
+      const text = `${pem(lines, { end: false })}\n\nThanks everyone\n${footer()}`
+      const result = expectRedacted(text, lines)
+      expect(result.content).toBe('[REDACTED]\n\nThanks everyone\n[REDACTED]')
+    })
+
+    it('redacts interleaved keys of different labels', () => {
+      const rsa = bodyLines(16).slice(0, 2)
+      const ec = bodyLines(17)
+      const text = [
+        header('RSA '),
+        ...rsa,
+        header('EC '),
+        ...ec.slice(0, 2),
+        footer('RSA '),
+        ...ec.slice(2),
+        footer('EC '),
+      ].join('\n')
+      const result = expectRedacted(text, [...rsa, ...ec])
+      expect(result.content).toBe('[REDACTED]\n[REDACTED]\n[REDACTED]')
+    })
+
+    it.each([
+      [
+        'flattened with a footer',
+        (l: string[]) => `${header()} ${l.join(' ')} ${footer()}`,
+        '[REDACTED]',
+      ],
+      [
+        'flattened without a footer',
+        (l: string[]) => `${header()} ${l.join(' ')}\nok`,
+        '[REDACTED]\nok',
+      ],
+      [
+        'unseparated with a footer',
+        (l: string[]) => `${header()}${l.join('')}${footer()}`,
+        '[REDACTED]',
+      ],
+      ['unseparated without a footer', (l: string[]) => `${header()}${l.join('')}`, '[REDACTED]'],
+      [
+        'one-line Ed25519 with a footer',
+        (l: string[]) => pem([l[0]], { label: 'OPENSSH ' }),
+        '[REDACTED]',
+      ],
+      [
+        'one-line Ed25519 without a footer',
+        (l: string[]) => pem([l[0]], { label: 'OPENSSH ', end: false }),
+        '[REDACTED]',
+      ],
+    ])('redacts a %s key', (_name, build, expected) => {
+      const lines = bodyLines(18, 4, 70)
+      const text = build(lines)
+      const result = expectRedacted(text, text.includes(lines[1]) ? lines : [lines[0]])
+      expect(result.content).toBe(expected)
+    })
+
+    const nrt = (seed: number) =>
+      ['n', 'r', 't', 'n', 'r'].map((first, n) => bodyLine(seed * 10 + n, n === 4 ? 24 : 64, first))
+
+    it.each([
+      ['LF with a footer', (l: string[]) => pem(l)],
+      ['LF without a footer', (l: string[]) => pem(l, { end: false })],
+      ['CRLF with a footer', (l: string[]) => pem(l, { separator: '\r\n' })],
+      ['CRLF without a footer', (l: string[]) => pem(l, { separator: '\r\n', end: false })],
+      ['tab-indented', (l: string[]) => pem(l.map(line => `\t${line}`))],
+      ['lines starting with n, r and t', (l: string[], seed: number) => pem(nrt(seed))],
+      [
+        'lines starting with n, r and t, CRLF, no footer',
+        (l: string[], seed: number) => pem(nrt(seed), { separator: '\r\n', end: false }),
+      ],
+    ])('redacts a key inside a JSON string (%s)', (_name, build) => {
+      const text = build(bodyLines(19), 19)
+      const output = JSON.stringify({ a: text })
+      const result = safety.sanitizeOutput('shell_exec', output)
+      expect(JSON.parse(result.content)).toEqual({ a: '[REDACTED]' })
+      expect(result.warnings).toContain(SECRET_WARNING)
+    })
+
+    it.each([true, false])('redacts a key on the in-place JSON path (footer: %s)', end => {
+      const lines = bodyLines(20)
+      // `b` makes the text pass break the JSON, so the in-place path runs.
+      const output = JSON.stringify({ a: pem(lines, { end }), b: 'password=abcdefgh' })
+      const textPass = safety.sanitizeFreeformContent(output, { secretWarning: SECRET_WARNING })
+      expect(() => JSON.parse(textPass.content)).toThrow()
+
+      const result = safety.sanitizeOutput('shell_exec', output)
+      expect(JSON.parse(result.content)).toEqual({ a: '[REDACTED]', b: '[REDACTED]' })
+      expect(leakedFragment(result.content, lines)).toBeNull()
+    })
+
+    it.each([
+      ['a truncated body', (l: string[]) => pem(l.slice(0, 3), { end: false })],
+      ['Proc-Type', () => `${header()}\nProc-Type: 4,ENCRYPTED`],
+      [
+        'DEK-Info',
+        () => `${header()}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF`,
+      ],
+      ['Version', () => `${PGP_HEADER}\nVersion: GnuPG v2`],
+      ['Comment', () => `${PGP_HEADER}\nVersion: GnuPG v2\nComment: synthetic`],
+    ])('keeps the next JSON field after a key cut at %s', (_name, build) => {
+      const truncated = bodyLines(21)
+      const whole = bodyLines(22)
+      const output = JSON.stringify({ a: build(truncated), b: 'KEEP THIS PROSE', c: pem(whole) })
+      const result = safety.sanitizeOutput('shell_exec', output)
+      expect(JSON.parse(result.content)).toEqual({
+        a: '[REDACTED]',
+        b: 'KEEP THIS PROSE',
+        c: '[REDACTED]',
+      })
+      expect(leakedFragment(result.content, [...truncated, ...whole])).toBeNull()
+    })
+
+    it('redacts a key in an assistant response', () => {
+      const result = safety.sanitizeAssistantResponse(
+        `Here is the key:\n${pem(bodyLines(23, 4, 70), { label: 'OPENSSH ' })}\nDone`
+      )
+      expect(result.content).toBe('Here is the key:\n[REDACTED]\nDone')
+      expect(result.warnings).toContain('Potential secret detected in assistant response')
+    })
+
+    function timed(content: string) {
+      const started = performance.now()
+      const result = safety.sanitizeOutput('shell_exec', content)
+      return { result, elapsedMs: performance.now() - started }
+    }
+
+    /**
+     * `toBe` on strings of megabytes builds a diff that does not finish, so a
+     * failure would hang the run. This reports the first difference instead.
+     */
+    function expectSameText(actual: string | undefined, expected: string) {
+      let at = 0
+      const text = actual ?? ''
+      while (at < expected.length && text.charCodeAt(at) === expected.charCodeAt(at)) at++
+      const same = actual !== undefined && at === expected.length && text.length === expected.length
+      expect(
+        same
+          ? null
+          : {
+              at,
+              length: text.length,
+              expectedLength: expected.length,
+              near: text.slice(at, at + 40),
+            }
+      ).toBeNull()
+    }
+
+    it('redacts 200,000 headers without footers in linear time', () => {
+      const [full, short] = [bodyLine(1, 64), bodyLine(2, 24)]
+      const { result, elapsedMs } = timed(`${header()}\n${full}\n${short}\n`.repeat(200_000))
+      expectSameText(result.content, '[REDACTED]\n'.repeat(200_000))
+      expect(result.was_modified).toBe(true)
+      expect(elapsedMs).toBeLessThan(2_000)
+    }, 60_000)
+
+    it('redacts 200,000 footers without headers in linear time', () => {
+      const [full, short] = [bodyLine(3, 64), bodyLine(4, 24)]
+      const { result, elapsedMs } = timed(`${full}\n${short}\n${footer()}\n`.repeat(200_000))
+      expectSameText(result.content, '[REDACTED]\n'.repeat(200_000))
+      expect(result.was_modified).toBe(true)
+      expect(elapsedMs).toBeLessThan(2_000)
+    }, 60_000)
+
+    it('redacts a 10M-character body line without a footer', () => {
+      let outcome: ReturnType<typeof timed> | undefined
+      expect(() => {
+        outcome = timed(`${header()}\n${'A'.repeat(10_000_000)}`)
+      }).not.toThrow()
+      expectSameText(outcome?.result.content, '[REDACTED]')
+      expect(outcome?.elapsedMs).toBeLessThan(2_000)
+    }, 60_000)
+
+    it.each(['-----BEGIN ', '-----END '])(
+      'scans %j and 5M label words in linear time',
+      marker => {
+        const content = marker + 'A '.repeat(5_000_000)
+        let outcome: ReturnType<typeof timed> | undefined
+        expect(() => {
+          outcome = timed(content)
+        }).not.toThrow()
+        // Witness: the text came back whole, so the scan ran to the end.
+        expectSameText(outcome?.result.content, content)
+        expect(outcome?.elapsedMs).toBeLessThan(2_000)
+      },
+      60_000
+    )
+  })
 })

@@ -2362,6 +2362,151 @@ describe('executeSingleTool — progress watcher', () => {
     expect(reporter.reportToolProgress.mock.calls.length).toBe(before)
     vi.useRealTimers()
   })
+
+  describe('private key blocks in the preview (#1034)', () => {
+    const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    // Interpolated so the repository's public-boundary scanner does not read a
+    // private key header in this file.
+    const HEADER = `-----BEGIN ${'RSA '}PRIVATE KEY-----`
+    const FOOTER = `-----END ${'RSA '}PRIVATE KEY-----`
+
+    /** Synthetic 64-column base64 lines, distinct for each index. */
+    function bodyLines(seed: number, count: number): string[] {
+      let x = (seed * 2654435761) >>> 0
+      return Array.from({ length: count }, () => {
+        let line = 'M'
+        while (line.length < 64) {
+          x = (Math.imul(x, 1103515245) + 12345) >>> 0
+          line += ALPHABET[(x >>> 16) & 63]
+        }
+        return line
+      })
+    }
+
+    /** 20 chunks of 64 lines: about 83 KB, more than the 64 KiB buffer. */
+    function bodyChunks(lines: string[]): string[] {
+      const chunks: string[] = []
+      for (let at = 0; at < lines.length; at += 64) {
+        chunks.push(lines.slice(at, at + 64).join('\n') + '\n')
+      }
+      return chunks
+    }
+
+    /**
+     * Runs a tool that emits each group of chunks and then waits one watcher
+     * tick, with the production buffer and a real `BasicSafety`. Returns the
+     * preview published on each tick.
+     */
+    async function previews(groups: string[][]) {
+      vi.useFakeTimers()
+      try {
+        const reporter = makeReporterMock()
+        let ctx: { onOutput: (chunk: string) => void } | undefined
+        let resolveTool: (v: any) => void = () => {}
+        const tool = {
+          name: () => 'shell_exec',
+          execute: vi.fn((_args: any, context: any) => {
+            ctx = context
+            return new Promise<any>(r => {
+              resolveTool = r
+            })
+          }),
+          requiresSanitization: () => false,
+          supportsProgressOutput: () => true,
+        }
+        const config = makeConfig({
+          tool,
+          progressReporter: reporter,
+          toolProgressInterval: 1000,
+          safety: new BasicSafety(),
+        })
+        const p = executeSingleTool(makeCall(), config)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(ctx).toBeDefined()
+        for (const group of groups) {
+          for (const chunk of group) ctx!.onOutput(chunk)
+          await vi.advanceTimersByTimeAsync(1000)
+        }
+        resolveTool({ content: 'done', is_error: false, duration_ms: 1 })
+        await p
+        // One tick per group, and nothing else published progress.
+        expect(reporter.reportToolProgress).toHaveBeenCalledTimes(groups.length)
+        return reporter.reportToolProgress.mock.calls.map(call => call[0].outputPreview)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+
+    /** The first 8-character piece of any body line in a preview, or null. */
+    function leakedPiece(published: unknown[], lines: string[]): string | null {
+      const pieces = new Set<string>()
+      for (const line of lines) {
+        for (let at = 0; at + 8 <= line.length; at++) pieces.add(line.slice(at, at + 8))
+      }
+      const text = JSON.stringify(published)
+      for (let at = 0; at + 8 <= text.length; at++) {
+        if (pieces.has(text.slice(at, at + 8))) return text.slice(at, at + 8)
+      }
+      return null
+    }
+
+    const shown = (preview: any): string =>
+      preview ? [...preview.headLines, ...preview.tailLines].join('\n') : ''
+
+    it('hides the body once the buffer has evicted its header', async () => {
+      const lines = bodyLines(1, 1280)
+      const published = await previews([
+        ['starting build\n'],
+        [`${HEADER}\n`],
+        ...bodyChunks(lines).map(chunk => [chunk]),
+      ])
+      expect(leakedPiece(published, lines)).toBeNull()
+      // Witnesses: the preview ran before the key, masked it while the header
+      // was in the buffer, and was skipped once the header was evicted.
+      expect(shown(published[0])).toContain('starting build')
+      expect(shown(published[2])).toContain('[REDACTED]')
+      expect(published[published.length - 1]).toBeUndefined()
+    })
+
+    it('finds a header that arrives one character per chunk', async () => {
+      const lines = bodyLines(2, 1280)
+      const published = await previews([
+        ['starting build\n'],
+        [...`${HEADER}\n`],
+        ...bodyChunks(lines).map(chunk => [chunk]),
+      ])
+      expect(leakedPiece(published, lines)).toBeNull()
+      expect(shown(published[0])).toContain('starting build')
+      expect(published[published.length - 1]).toBeUndefined()
+    })
+
+    it('finds a header at the start of a chunk after an earlier closed key', async () => {
+      const first = bodyLines(3, 2)
+      const lines = bodyLines(4, 1280)
+      const [head, ...rest] = bodyChunks(lines)
+      const published = await previews([
+        [`${'log line\n'.repeat(300)}${HEADER}`, `\n${first.join('\n')}\n${FOOTER}\n`],
+        [`${HEADER}\n${head}`],
+        ...rest.map(chunk => [chunk]),
+      ])
+      expect(leakedPiece(published, [...first, ...lines])).toBeNull()
+      expect(shown(published[0])).toContain('log line')
+      expect(published[published.length - 1]).toBeUndefined()
+    })
+
+    it('publishes the preview again after the footer', async () => {
+      const lines = bodyLines(5, 1280)
+      const published = await previews([
+        [`${HEADER}\n`],
+        ...bodyChunks(lines).map(chunk => [chunk]),
+        [`${FOOTER}\nall done\n`],
+      ])
+      expect(leakedPiece(published, lines)).toBeNull()
+      // Precondition: the preview was skipped while the block was open.
+      expect(published[published.length - 2]).toBeUndefined()
+      expect(shown(published[published.length - 1])).toContain('all done')
+    })
+  })
 })
 
 describe('executeSingleTool — failed visual leftovers', () => {

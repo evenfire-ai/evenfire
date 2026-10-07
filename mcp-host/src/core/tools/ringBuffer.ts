@@ -40,15 +40,19 @@ export class RingBuffer {
     // Keep at least one chunk — never evict the last chunk, even if it alone
     // exceeds capacity. This ensures a single oversized append is preserved
     // (trimmed at the first newline below if needed).
+    let evicted = false
     while (this.totalBytes > this.maxBytes && this.chunks.length > 1) {
       const oldest = this.chunks.shift()!
       this.totalBytes -= Buffer.byteLength(oldest, 'utf8')
+      evicted = true
     }
     // After dropping whole chunks, the new head chunk may start mid-line. Trim
     // it at the first newline so snapshot() / contents() never return a partial
     // line at the head. If no newline exists in the new head chunk, leave it —
     // the next newline-bearing chunk will realign on the following eviction.
-    if (this.chunks.length > 0) {
+    // Without an eviction the head is the first chunk ever appended, which
+    // starts a line, so it stays whole.
+    if (evicted) {
       const head = this.chunks[0]
       const firstNewline = head.indexOf('\n')
       // Only trim if there's a newline AND there's content after it (otherwise

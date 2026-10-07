@@ -64,6 +64,16 @@ describe('RingBuffer', () => {
     expect(contents).not.toContain('partOfLine1')
   })
 
+  it('keeps the first line of the first chunk when nothing was evicted (#1034)', () => {
+    // A trim without an eviction drops a line that starts the buffer, such as
+    // a private key header, and leaves its body without a delimiter.
+    const buf = new RingBuffer(1024)
+    buf.append('line1\nline2\n')
+    expect(buf.snapshot()).toBe('line1\nline2\n')
+    buf.append('line3\n')
+    expect(buf.contents()).toBe('line1\nline2\nline3\n')
+  })
+
   it('leaves head unchanged when new head chunk has no newline', () => {
     // Edge case: if the head chunk has no newline at all, leave it — eventually
     // another newline-bearing chunk will arrive and alignment will recover.

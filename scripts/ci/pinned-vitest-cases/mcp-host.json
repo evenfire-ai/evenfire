@@ -70,5 +70,73 @@
   {
     "suite": "codexLlmProxyClient.test.ts",
     "fullName": "CodexLlmProxyClient keeps wire malformed_json separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "toolUseLoop.test.ts",
+    "fullName": "executeSingleTool — progress watcher private key blocks in the preview (#1034) hides the body once the buffer has evicted its header"
+  },
+  {
+    "suite": "toolUseLoop.test.ts",
+    "fullName": "executeSingleTool — progress watcher private key blocks in the preview (#1034) finds a header that arrives one character per chunk"
+  },
+  {
+    "suite": "toolUseLoop.test.ts",
+    "fullName": "executeSingleTool — progress watcher private key blocks in the preview (#1034) finds a header at the start of a chunk after an earlier closed key"
+  },
+  {
+    "suite": "toolUseLoop.test.ts",
+    "fullName": "executeSingleTool — progress watcher private key blocks in the preview (#1034) publishes the preview again after the footer"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a whole RSA key"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a whole OPENSSH key"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a whole PGP key"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) reads a tail without a header back to the prose line \"Status: keep this\""
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) stops at the character \",\" glued to the body"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) reads a PGP tail with a checksum back past its short last line"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts a key on the in-place JSON path (footer: false)"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) keeps the next JSON field after a key cut at Proc-Type"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts 200,000 headers without footers in linear time"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) redacts 200,000 footers without headers in linear time"
+  },
+  {
+    "suite": "attachmentRead.redaction.test.ts",
+    "fullName": "a private key split across attachment pages (#1034) a middle page holding only body leaks nothing (footer: false)"
+  },
+  {
+    "suite": "attachmentRead.redaction.test.ts",
+    "fullName": "a private key split across attachment pages (#1034) a file that starts mid-key leaks none of the tail before the footer"
+  },
+  {
+    "suite": "ringBuffer.test.ts",
+    "fullName": "RingBuffer keeps the first line of the first chunk when nothing was evicted (#1034)"
   }
 ]

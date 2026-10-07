@@ -7,6 +7,7 @@ import {
 import type { ToolCallTokens } from '../../progress/types.js'
 import { ToolError } from '../errors'
 import type { ExecutionContext } from '../interfaces'
+import { createPrivateKeyBlockTracker } from '../safety/safety'
 import { RingBuffer } from '../tools/ringBuffer'
 import type { TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
@@ -97,8 +98,15 @@ export async function executeSingleTool(
   })
 
   let ringBuffer: RingBuffer | null = null
+  // Once the buffer evicts a private key's header, the body left in the
+  // snapshot no longer looks like a key, so the preview is skipped until the
+  // footer arrives.
+  let keyBlocks: ReturnType<typeof createPrivateKeyBlockTracker> | null = null
   const executionContext: ExecutionContext = {
-    onOutput: chunk => ringBuffer?.append(chunk),
+    onOutput: chunk => {
+      ringBuffer?.append(chunk)
+      keyBlocks?.observe(chunk)
+    },
     visualInput: config.visualInput,
     measureResult: config.measureToolMessage
       ? content => measureContent(renderContent(content))
@@ -121,13 +129,16 @@ export async function executeSingleTool(
 
   if (wantsWatcher) {
     ringBuffer = new RingBuffer(64 * 1024)
+    keyBlocks = createPrivateKeyBlockTracker()
     const buf = ringBuffer
+    const blocks = keyBlocks
     watcherId = setInterval(() => {
       try {
         const snapshot = buf.snapshot()
-        const sanitized = snapshot
-          ? config.safety.sanitizeOutput(call.name, snapshot).content
-          : undefined
+        const sanitized =
+          snapshot && !blocks.hidesPreview(snapshot)
+            ? config.safety.sanitizeOutput(call.name, snapshot).content
+            : undefined
         const outputPreview = sanitized ? buildOutputPreview(sanitized) : undefined
         config.progressReporter!.reportToolProgress({
           taskId: '',
