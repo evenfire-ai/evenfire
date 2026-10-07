@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
+import { BRIDGE_TOOL_NAMES } from '../capabilities/toolCatalogTools'
 import { config as appConfig } from '../config'
 import { bindTaskSignal, withAbort } from '../core/adapters/abortableLlmPort'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
@@ -43,9 +44,13 @@ import type { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
 import { buildLoopConfig } from '../core/orchestration/loopConfig'
 import type { LoopConfig } from '../core/orchestration/loopConfig'
 import { DefaultLoopController } from '../core/orchestration/loopConfig'
+import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
-import { resolveToolPresentation } from '../core/orchestration/toolPresentationPolicy'
+import {
+  resolveToolPresentation,
+  selectDeferredNatives,
+} from '../core/orchestration/toolPresentationPolicy'
 import {
   buildOutputPreview,
   executeSingleTool,
@@ -71,8 +76,8 @@ import {
   GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MCP_SERVER_SELECTION_TEXT,
   MEMORY_GUIDANCE_TEXT,
-  TOOL_DISCOVERY_TEXT,
   WORKFLOW_RECIPES_TEXT,
+  toolDiscoveryText,
 } from '../core/reasoning/promptBuilder'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
 import { BasicSafety } from '../core/safety/safety'
@@ -290,6 +295,8 @@ interface TaskToolRegistry {
   registry: ToolRegistry
   nativeRegistry: NativeToolRegistry
   loopController: LoopController
+  /** Natives hidden from `tools[]` by native `auto`; empty in `direct`. */
+  discoverableNatives: ToolDefinition[]
   bridge?: LoopConfig['bridge']
 }
 
@@ -1612,7 +1619,7 @@ export class TaskExecutor {
       }
     }
 
-    const { registry, loopController, bridge } = await this.buildToolRegistry()
+    const { registry, loopController, bridge, discoverableNatives } = await this.buildToolRegistry()
     const applicableToolCounters = registry
       .listDefinitions()
       .some(tool => tool.name === 'clerum__attachment_read')
@@ -1630,7 +1637,10 @@ export class TaskExecutor {
     // single-string identity built by `buildSystemIdentity`.
     const reasoningFactory = new DefaultReasoningFactory(
       hookedLlmPort,
-      undefined,
+      new DefaultPromptBuilder({
+        nativeToolPresentation: appConfig.nativeToolPresentation,
+        discoverableNatives,
+      }),
       metadata,
       // F1.4 — wire the send-time context-window-breakdown capture. The sink is
       // bound to the captured `conversation` local (not `this.conversation!`) so
@@ -1657,7 +1667,10 @@ export class TaskExecutor {
       const cachedPrompt = [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
       systemPromptFor = () => cachedPrompt
     } else {
-      const promptBuilder = new DefaultPromptBuilder()
+      const promptBuilder = new DefaultPromptBuilder({
+        nativeToolPresentation: appConfig.nativeToolPresentation,
+        discoverableNatives,
+      })
       systemPromptFor = tools => promptBuilder.buildSystemPrompt(tools, identity, metadata).content
     }
 
@@ -1749,7 +1762,8 @@ export class TaskExecutor {
     loopConfig.measureToolMessage = message =>
       Math.max(...toolCounters.map(counter => toolMessageBudgetTokens(message, counter, false)))
     // F3 (dynamic-tool-loading): context the `clerum__tool_call` bridge intercept
-    // needs in `executeToolCalls`. Undefined when no McpManager is wired.
+    // needs in `executeToolCalls`. Undefined when the registry registered no
+    // bridge tools (no MCP discovery with an McpManager, and native `direct`).
     loopConfig.bridge = bridge
     // P2 token budgets (§5.2): wire the per-task emergency brake when the P1
     // verdict carried a per-task cap AND we captured a start-of-task baseline.
@@ -2062,6 +2076,8 @@ export class TaskExecutor {
       tools.some(t => t.name === 'clerum__gfs_download'),
       tools.some(t => t.name.includes('__')),
       tools.some(t => t.name === 'clerum__tool_search'),
+      // #1003 — the discovery guidance text depends on the native presentation.
+      appConfig.nativeToolPresentation,
     ])
     // R2 — the system prompt embeds the model name, so a cache entry built for a
     // different (e.g. just-swapped) model is a miss: rebuild, but keep the frozen
@@ -2077,7 +2093,9 @@ export class TaskExecutor {
     const dailyLogSnapshot =
       cached?.dailyLogSnapshot ?? (await this.deps.workspaceService.snapshotDailyLogs(2))
     const identityFiles = await this.deps.workspaceService.readIdentityFiles()
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({
+      nativeToolPresentation: appConfig.nativeToolPresentation,
+    })
     const hasMemoryTools = tools.some(t => t.name.startsWith('memory_'))
     const hasCapabilities = tools.some(t => t.name === 'clerum__get_capabilities')
     const hasDesktopTools = tools.some(
@@ -2115,7 +2133,9 @@ export class TaskExecutor {
       workflowGuidance: hasWorkflowTools ? WORKFLOW_RECIPES_TEXT : '',
       gfsWorkspaceGuidance: hasGfsDownloadTool ? GFS_WORKSPACE_FILE_GUIDANCE_TEXT : '',
       mcpServerGuidance: hasMcpTools ? MCP_SERVER_SELECTION_TEXT : '',
-      toolDiscoveryGuidance: hasToolDiscovery ? TOOL_DISCOVERY_TEXT : '',
+      toolDiscoveryGuidance: hasToolDiscovery
+        ? toolDiscoveryText(appConfig.nativeToolPresentation)
+        : '',
       memoryGuidance: hasMemoryTools ? MEMORY_GUIDANCE_TEXT : '',
     })
     this.deps.promptCache.set(sessionKey, {
@@ -2205,6 +2225,9 @@ export class TaskExecutor {
       appConfig,
       this.deps.failover?.policy.fallbacks
     )
+    // #1003 — native-tool presentation is host-wide and provider-independent:
+    // it never depends on the MCP presentation resolved above.
+    const nativeAuto = appConfig.nativeToolPresentation === 'auto'
     const gfsCallerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
     const gfsProcessingLeaseProvider =
       this.deps.gfsProcessingLeaseProvider ??
@@ -2260,7 +2283,9 @@ export class TaskExecutor {
       // (clerum__tool_search / clerum__tool_describe). Reuses the same manager
       // already threaded into the MCP tool registry below.
       this.deps.mcpManager ?? undefined,
-      presentation.bridgeEnabled,
+      // #1003 — MCP discovery and native discovery are separate decisions;
+      // either one registers the bridge tools.
+      { mcpDiscovery: presentation.bridgeEnabled, nativeDiscovery: nativeAuto },
       // §13 (stateless agents): the active provider's credential slot is the
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
@@ -2337,13 +2362,59 @@ export class TaskExecutor {
       : baseController
 
     const mcpManager = this.deps.mcpManager
+    // Exact native membership preserves every native/plugin capability.
+    const nativeDefinitions = nativeRegistry.listDefinitions()
+    const nativeNames = new Set(nativeDefinitions.map(d => d.name))
+
+    // #1003 — native presentation wraps OUTSIDE the MCP decision on every
+    // return, so it can only remove natives from the list the MCP presentation
+    // produced. In `direct` it returns that list unchanged.
+    const withNativePresentation = (controller: LoopController): LoopController =>
+      new NativeToolPresentationController(controller, nativeDefinitions, {
+        mode: appConfig.nativeToolPresentation,
+        discoveryBytes: appConfig.nativeToolDiscoveryBytes,
+      })
+    // The natives that controller hides, for the prompt builder's guidance.
+    const deferredNatives = nativeAuto
+      ? selectDeferredNatives(nativeDefinitions, appConfig.nativeToolDiscoveryBytes)
+      : new Set<string>()
+    const discoverableNatives = nativeDefinitions.filter(d => deferredNatives.has(d.name))
+
+    // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
+    // deferrable catalog. It exists exactly when NativeToolRegistry registered
+    // the bridge tools (MCP discovery with an McpManager, or native `auto`), so
+    // it is derived from the registry rather than repeating that predicate.
+    // Codex direct with native `direct` observes presentation without
+    // installing discovery interception or registering bridge tools.
+    const bridge: LoopConfig['bridge'] = [...BRIDGE_TOOL_NAMES].every(name => nativeNames.has(name))
+      ? {
+          nativeNames,
+          getDeferrableCatalogNames: () =>
+            mcpManager
+              ? new Set(
+                  mcpManager
+                    .getAllTools()
+                    .map(t => t.name)
+                    .filter(name => !nativeNames.has(name))
+                )
+              : new Set<string>(),
+          nativeTargets: nativeAuto,
+        }
+      : undefined
+
     // Codex direct still observes the live catalog; observation must not enable discovery.
     if (!presentation.bridgeEnabled && presentation.codexMode === undefined) {
-      return { registry: compositeRegistry, nativeRegistry, loopController: innerController }
+      return {
+        registry: compositeRegistry,
+        nativeRegistry,
+        loopController: withNativePresentation(innerController),
+        discoverableNatives,
+        // Native `auto` only: MCP presentation is unchanged (no MCP decision on
+        // this path) but the bridge serves natives and keeps MCP tools callable.
+        bridge,
+      }
     }
 
-    // Exact native membership preserves every native/plugin capability.
-    const nativeNames = new Set(nativeRegistry.listDefinitions().map(d => d.name))
     // LOCKED #6: the latch lives on the session-scoped Conversation, NOT on the
     // per-task controller, so a server connecting/disconnecting BETWEEN turns
     // cannot flip `tools[]` and re-introduce cache invalidation. Ephemeral RAM
@@ -2366,24 +2437,13 @@ export class TaskExecutor {
       }
     )
 
-    // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
-    // deferrable catalog. Direct mode observes presentation without installing
-    // discovery interception or registering bridge tools.
-    const bridge: LoopConfig['bridge'] =
-      presentation.bridgeEnabled && mcpManager
-        ? {
-            nativeNames,
-            getDeferrableCatalogNames: () =>
-              new Set(
-                mcpManager
-                  .getAllTools()
-                  .map(t => t.name)
-                  .filter(name => !nativeNames.has(name))
-              ),
-          }
-        : undefined
-
-    return { registry: compositeRegistry, nativeRegistry, loopController, bridge }
+    return {
+      registry: compositeRegistry,
+      nativeRegistry,
+      loopController: withNativePresentation(loopController),
+      discoverableNatives,
+      bridge,
+    }
   }
 
   private async prepareChannelWorkflowCallerContext(): Promise<

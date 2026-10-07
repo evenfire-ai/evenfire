@@ -558,8 +558,9 @@ export interface ContextBreakdown {
      * active (the stable bridge), this reflects natives + the 3 bridge tools
      * only — deferrable MCP schemas LEAVE this array and instead appear
      * transiently in `messages` via `clerum__tool_describe` / `clerum__tool_call`
-     * outputs. So a sharp drop here when the bridge engages is expected, not a
-     * breakdown bug.
+     * outputs. With native `auto` (#1003) the natives larger than the native
+     * discovery budget leave it the same way. So a sharp drop here when either
+     * engages is expected, not a breakdown bug.
      */
     systemTools: number
     metaContext: number

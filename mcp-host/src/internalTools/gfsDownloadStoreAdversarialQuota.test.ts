@@ -274,7 +274,9 @@ describe('GFS download store adversarial quota', () => {
     ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
     expect(store.debugUsage()).toMatchObject({ files: 64 })
     for (const caller of callers) await store.releaseReceiptOwner(`${caller}-owner`, caller)
-  })
+    // 64 durable publications at 5 fsyncs each measured 2.2-4.7 s on a loaded
+    // host, which leaves no margin inside Vitest's 5 s default.
+  }, 30_000)
 
   it('rolls back charge, owner pins, and active slots when mkdir fails with proven absence', async () => {
     await fs.chmod(callerRoot, 0o500)
