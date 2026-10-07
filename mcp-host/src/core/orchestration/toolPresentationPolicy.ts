@@ -31,7 +31,9 @@ export type NativeToolPresentation = 'direct' | 'auto'
 export function parseNativeToolPresentation(raw: string | undefined): NativeToolPresentation {
   if (raw === undefined) return 'direct'
   if (raw === 'direct' || raw === 'auto') return raw
-  throw new Error('CLERUM_NATIVE_TOOL_PRESENTATION must be direct or auto')
+  throw new Error(
+    `CLERUM_NATIVE_TOOL_PRESENTATION must be direct or auto (got ${JSON.stringify(raw)})`
+  )
 }
 
 export const DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES = 2_048
@@ -43,27 +45,32 @@ export const DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES = 2_048
 export function parseNativeToolDiscoveryBytes(raw: string | undefined): number {
   if (raw === undefined) return DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES
   if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
-    throw new Error('CLERUM_NATIVE_TOOL_DISCOVERY_BYTES must be a positive safe integer')
+    throw new Error(
+      `CLERUM_NATIVE_TOOL_DISCOVERY_BYTES must be a positive safe integer (got ${JSON.stringify(raw)})`
+    )
   }
   return Number(raw)
 }
 
 /**
  * Names of the natives that native `auto` removes from `tools[]`: every native
- * whose FULL serialized definition (name + description + parameters, exactly
- * what `tools[]` costs) exceeds `budget`. Size-driven, never name-driven. The
- * bridge tools are never selected: they are the access path to everything else.
+ * whose serialized definition (`{name, description, parameters}` JSON, the
+ * provider-neutral shape each driver wraps) exceeds `budget`. Size-driven, never
+ * name-driven. The bridge tools are never selected: they are the access path to
+ * everything else.
+ *
+ * `nativeDefinitions` must be the native registry's OWN definitions, never the
+ * presented list: an MCP tool sharing a native's name must not change whether
+ * that native is hidden (I1).
  */
 export function selectDeferredNatives(
-  definitions: ReadonlyArray<ToolDefinition>,
-  nativeNames: ReadonlySet<string>,
+  nativeDefinitions: ReadonlyArray<ToolDefinition>,
   budget: number
 ): Set<string> {
   return new Set(
-    definitions
+    nativeDefinitions
       .filter(
         def =>
-          nativeNames.has(def.name) &&
           !BRIDGE_TOOL_NAMES.has(def.name) &&
           Buffer.byteLength(JSON.stringify(def), 'utf8') > budget
       )

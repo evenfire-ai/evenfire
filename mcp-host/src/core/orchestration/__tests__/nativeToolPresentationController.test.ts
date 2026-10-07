@@ -14,7 +14,7 @@ const BRIDGE = [...BRIDGE_TOOL_NAMES].map(name => tool(name))
 const BIG = tool('clerum__generate_pptx', 3000)
 const SMALL = tool('shell_exec')
 const MCP_BIG = tool('alpha__huge', 5000)
-const nativeNames = new Set([BIG.name, SMALL.name, ...BRIDGE.map(t => t.name)])
+const nativeDefinitions = [BIG, SMALL, ...BRIDGE]
 
 function delegateReturning(list: ToolDefinition[]) {
   const refreshTools = vi.fn(async () => list)
@@ -35,7 +35,7 @@ describe('NativeToolPresentationController', () => {
     const upstream = [BIG, SMALL, MCP_BIG]
     const { delegate, refreshTools } = delegateReturning(upstream)
     const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
-    const controller = new NativeToolPresentationController(delegate, nativeNames, {
+    const controller = new NativeToolPresentationController(delegate, nativeDefinitions, {
       mode: 'direct',
       discoveryBytes: 2048,
     })
@@ -48,7 +48,7 @@ describe('NativeToolPresentationController', () => {
   it('auto hides only oversized natives and never touches MCP tools', async () => {
     const { delegate } = delegateReturning([BIG, SMALL, MCP_BIG, ...BRIDGE])
     vi.spyOn(logger, 'info').mockImplementation(() => {})
-    const controller = new NativeToolPresentationController(delegate, nativeNames, {
+    const controller = new NativeToolPresentationController(delegate, nativeDefinitions, {
       mode: 'auto',
       discoveryBytes: 2048,
     })
@@ -59,6 +59,21 @@ describe('NativeToolPresentationController', () => {
     ])
   })
 
+  it('auto measures the native definition, not a same-named MCP definition (I1)', async () => {
+    // An MCP server exposing a tool under a native's name with an oversized schema.
+    const mcpHomonym = tool(SMALL.name, 5000)
+    const { delegate } = delegateReturning([BIG, SMALL, mcpHomonym, ...BRIDGE])
+    vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const controller = new NativeToolPresentationController(delegate, nativeDefinitions, {
+      mode: 'auto',
+      discoveryBytes: 2048,
+    })
+    const names = (await controller.refreshTools([])).map(t => t.name)
+    // Witness: the oversized native generator is hidden in the same refresh.
+    expect(names).not.toContain(BIG.name)
+    expect(names).toContain(SMALL.name)
+  })
+
   it('auto throws instead of hiding a native while a bridge tool is missing', async () => {
     for (const missing of BRIDGE_TOOL_NAMES) {
       const { delegate } = delegateReturning([
@@ -66,7 +81,7 @@ describe('NativeToolPresentationController', () => {
         SMALL,
         ...BRIDGE.filter(t => t.name !== missing),
       ])
-      const controller = new NativeToolPresentationController(delegate, nativeNames, {
+      const controller = new NativeToolPresentationController(delegate, nativeDefinitions, {
         mode: 'auto',
         discoveryBytes: 2048,
       })
@@ -77,7 +92,7 @@ describe('NativeToolPresentationController', () => {
     // Witness: the same list with every bridge tool hides the generator.
     vi.spyOn(logger, 'info').mockImplementation(() => {})
     const { delegate } = delegateReturning([BIG, SMALL, ...BRIDGE])
-    const controller = new NativeToolPresentationController(delegate, nativeNames, {
+    const controller = new NativeToolPresentationController(delegate, nativeDefinitions, {
       mode: 'auto',
       discoveryBytes: 2048,
     })
@@ -87,7 +102,7 @@ describe('NativeToolPresentationController', () => {
   it('auto without anything to hide does not need the bridge', async () => {
     const { delegate } = delegateReturning([SMALL, MCP_BIG])
     vi.spyOn(logger, 'info').mockImplementation(() => {})
-    const controller = new NativeToolPresentationController(delegate, nativeNames, {
+    const controller = new NativeToolPresentationController(delegate, nativeDefinitions, {
       mode: 'auto',
       discoveryBytes: 2048,
     })
@@ -98,7 +113,7 @@ describe('NativeToolPresentationController', () => {
     const list = [BIG, SMALL, ...BRIDGE]
     const { delegate, refreshTools } = delegateReturning(list)
     const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
-    const controller = new NativeToolPresentationController(delegate, nativeNames, {
+    const controller = new NativeToolPresentationController(delegate, nativeDefinitions, {
       mode: 'auto',
       discoveryBytes: 2048,
     })
@@ -127,7 +142,7 @@ describe('NativeToolPresentationController', () => {
 
   it('passes every other hook through to the delegate', () => {
     const { delegate } = delegateReturning([])
-    const controller = new NativeToolPresentationController(delegate, nativeNames, {
+    const controller = new NativeToolPresentationController(delegate, nativeDefinitions, {
       mode: 'auto',
       discoveryBytes: 2048,
     })

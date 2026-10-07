@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
+import { BRIDGE_TOOL_NAMES } from '../capabilities/toolCatalogTools'
 import { config as appConfig } from '../config'
 import { bindTaskSignal, withAbort } from '../core/adapters/abortableLlmPort'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
@@ -1595,7 +1596,8 @@ export class TaskExecutor {
     loopConfig.spilloverStorage = this.deps.spilloverStorage
     loopConfig.taskId = this.taskId
     // F3 (dynamic-tool-loading): context the `clerum__tool_call` bridge intercept
-    // needs in `executeToolCalls`. Undefined when no McpManager is wired.
+    // needs in `executeToolCalls`. Undefined when the registry registered no
+    // bridge tools (no MCP discovery with an McpManager, and native `direct`).
     loopConfig.bridge = bridge
     // P2 token budgets (§5.2): wire the per-task emergency brake when the P1
     // verdict carried a per-task cap AND we captured a start-of-task baseline.
@@ -2158,38 +2160,39 @@ export class TaskExecutor {
 
     const mcpManager = this.deps.mcpManager
     // Exact native membership preserves every native/plugin capability.
-    const nativeNames = new Set(nativeRegistry.listDefinitions().map(d => d.name))
+    const nativeDefinitions = nativeRegistry.listDefinitions()
+    const nativeNames = new Set(nativeDefinitions.map(d => d.name))
 
     // #1003 — native presentation wraps OUTSIDE the MCP decision on every
     // return, so it can only remove natives from the list the MCP presentation
     // produced. In `direct` it returns that list unchanged.
     const withNativePresentation = (controller: LoopController): LoopController =>
-      new NativeToolPresentationController(controller, nativeNames, {
+      new NativeToolPresentationController(controller, nativeDefinitions, {
         mode: appConfig.nativeToolPresentation,
         discoveryBytes: appConfig.nativeToolDiscoveryBytes,
       })
 
     // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
     // deferrable catalog. It exists exactly when NativeToolRegistry registered
-    // the bridge tools: MCP discovery with an McpManager, or native `auto`.
+    // the bridge tools (MCP discovery with an McpManager, or native `auto`), so
+    // it is derived from the registry rather than repeating that predicate.
     // Codex direct with native `direct` observes presentation without
     // installing discovery interception or registering bridge tools.
-    const bridge: LoopConfig['bridge'] =
-      (presentation.bridgeEnabled && mcpManager) || nativeAuto
-        ? {
-            nativeNames,
-            getDeferrableCatalogNames: () =>
-              mcpManager
-                ? new Set(
-                    mcpManager
-                      .getAllTools()
-                      .map(t => t.name)
-                      .filter(name => !nativeNames.has(name))
-                  )
-                : new Set<string>(),
-            nativeTargets: nativeAuto,
-          }
-        : undefined
+    const bridge: LoopConfig['bridge'] = [...BRIDGE_TOOL_NAMES].every(name => nativeNames.has(name))
+      ? {
+          nativeNames,
+          getDeferrableCatalogNames: () =>
+            mcpManager
+              ? new Set(
+                  mcpManager
+                    .getAllTools()
+                    .map(t => t.name)
+                    .filter(name => !nativeNames.has(name))
+                )
+              : new Set<string>(),
+          nativeTargets: nativeAuto,
+        }
+      : undefined
 
     // Codex direct still observes the live catalog; observation must not enable discovery.
     if (!presentation.bridgeEnabled && presentation.codexMode === undefined) {

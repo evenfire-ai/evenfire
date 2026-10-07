@@ -751,7 +751,8 @@ never targets itself. When an MCP tool and a native share a name, the native win
 The native decision runs after the MCP decision and only removes natives, so MCP
 tools in `tools[]` are the same for both native modes. When `auto` hides a
 native, all 3 bridge tools must be presented; otherwise mcp-host throws instead
-of presenting an unreachable native. In Codex `direct` with native `auto`, the
+of presenting an unreachable native. Wherever dev registers no bridge tools
+(Codex/Grok `direct`, or no MCP manager at all) and native mode is `auto`, the
 `tool-presentation` diagnostic counts the 3 bridge tools: `nativeCount` and
 `presentedCount` are 3 higher than with native `direct`, and every MCP field is
 unchanged. The final list is reported by the separate `native-tool-presentation`

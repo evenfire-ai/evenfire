@@ -8,8 +8,10 @@
  * MCP decision already produced and never adds or removes an MCP tool.
  *
  * - `direct`: returns the upstream list unchanged (identity).
- * - `auto`: removes the natives selected by `selectDeferredNatives` (definition
- *   larger than the byte budget; bridge tools never selected). Those natives
+ * - `auto`: removes the natives selected by `selectDeferredNatives` over the
+ *   native registry's own definitions (definition larger than the byte budget;
+ *   bridge tools never selected), so a same-named MCP definition in the
+ *   presented list cannot change the selection. Those natives
  *   stay callable through `clerum__tool_search` / `clerum__tool_describe` /
  *   `clerum__tool_call`. If any bridge tool is missing from the presented list,
  *   hiding a native would make it unreachable, so it throws instead.
@@ -22,12 +24,15 @@ import { type NativeToolPresentation, selectDeferredNatives } from './toolPresen
 
 export class NativeToolPresentationController implements LoopController {
   private lastPresentation: string | undefined
+  private readonly deferrable: ReadonlySet<string>
 
   constructor(
     private readonly delegate: LoopController,
-    private readonly nativeNames: ReadonlySet<string>,
+    nativeDefinitions: ReadonlyArray<ToolDefinition>,
     private readonly config: { mode: NativeToolPresentation; discoveryBytes: number }
-  ) {}
+  ) {
+    this.deferrable = selectDeferredNatives(nativeDefinitions, config.discoveryBytes)
+  }
 
   shouldAccept(content: string, iteration: number): boolean {
     return this.delegate.shouldAccept(content, iteration)
@@ -52,7 +57,7 @@ export class NativeToolPresentationController implements LoopController {
     const upstream = await this.delegate.refreshTools(currentTools)
     if (this.config.mode === 'direct') return upstream
 
-    const hidden = selectDeferredNatives(upstream, this.nativeNames, this.config.discoveryBytes)
+    const hidden = new Set(upstream.map(t => t.name).filter(name => this.deferrable.has(name)))
     if (hidden.size > 0) {
       const presentedNames = new Set(upstream.map(t => t.name))
       const missingBridge = [...BRIDGE_TOOL_NAMES].filter(name => !presentedNames.has(name))

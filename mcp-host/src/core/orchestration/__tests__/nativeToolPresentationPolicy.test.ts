@@ -44,7 +44,7 @@ describe('CLERUM_NATIVE_TOOL_PRESENTATION parsing', () => {
 
   it.each(['', ' ', 'AUTO', ' auto', 'discovery', 'off'])('rejects %j', value => {
     expect(() => parseNativeToolPresentation(value)).toThrow(
-      'CLERUM_NATIVE_TOOL_PRESENTATION must be direct or auto'
+      `CLERUM_NATIVE_TOOL_PRESENTATION must be direct or auto (got ${JSON.stringify(value)})`
     )
   })
 })
@@ -63,7 +63,7 @@ describe('CLERUM_NATIVE_TOOL_DISCOVERY_BYTES parsing', () => {
     'rejects %j',
     value => {
       expect(() => parseNativeToolDiscoveryBytes(value)).toThrow(
-        'CLERUM_NATIVE_TOOL_DISCOVERY_BYTES must be a positive safe integer'
+        `CLERUM_NATIVE_TOOL_DISCOVERY_BYTES must be a positive safe integer (got ${JSON.stringify(value)})`
       )
     }
   )
@@ -72,15 +72,12 @@ describe('CLERUM_NATIVE_TOOL_DISCOVERY_BYTES parsing', () => {
 describe('selectDeferredNatives on the production native registry', () => {
   const registry = productionRegistry({ mcpDiscovery: false, nativeDiscovery: true })
   const definitions = registry.listDefinitions()
-  const nativeNames = new Set(definitions.map(def => def.name))
   const bytes = (name: string) =>
     Buffer.byteLength(JSON.stringify(definitions.find(def => def.name === name)), 'utf8')
 
   it('hides exactly the five generators at the 2048 B default', () => {
     expect(
-      [
-        ...selectDeferredNatives(definitions, nativeNames, DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES),
-      ].sort()
+      [...selectDeferredNatives(definitions, DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES)].sort()
     ).toEqual([
       'clerum__generate_chart',
       'clerum__generate_dashboard',
@@ -101,14 +98,12 @@ describe('selectDeferredNatives on the production native registry', () => {
     )
   })
 
-  it('never selects bridge tools or MCP tools, whatever the budget', () => {
+  it('never selects bridge tools, whatever the budget', () => {
     expect(definitions.map(def => def.name)).toEqual(expect.arrayContaining([...BRIDGE_TOOL_NAMES]))
-    const mcp = { name: 'alpha__huge', description: 'x'.repeat(10_000), parameters: {} }
-    const selected = selectDeferredNatives([...definitions, mcp], nativeNames, 1)
+    const selected = selectDeferredNatives(definitions, 1)
     // Witness: a 1 B budget selects every other native.
     expect(selected.size).toBe(definitions.length - BRIDGE_TOOL_NAMES.size)
     for (const bridge of BRIDGE_TOOL_NAMES) expect(selected.has(bridge)).toBe(false)
-    expect(selected.has('alpha__huge')).toBe(false)
   })
 
   it('registers no bridge tools without a discovery argument (main.ts tool-name snapshot)', () => {

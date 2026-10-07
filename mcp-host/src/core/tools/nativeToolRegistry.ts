@@ -394,14 +394,16 @@ export class NativeToolRegistry implements ToolRegistry {
       // Single catalog. Without native discovery it is exactly the MCP catalog.
       // With it (#1003), every non-bridge native is appended under the `native`
       // pseudo-server so a deferred native can be searched and described, and
-      // MCP entries whose name collides with a native are dropped, because the
-      // bridge routes such a name to the native. Read lazily: desktop tools are
-      // registered after construction and MCP servers connect late.
+      // MCP entries whose name collides with ANY native (bridge tools included)
+      // are dropped, because the registry routes such a name to the native.
+      // Read lazily: desktop tools are registered after construction and MCP
+      // servers connect late.
       const getCatalog = (): McpTool[] => {
         const mcpTools = mcpManager?.getAllTools() ?? []
         if (!nativeDiscovery) return mcpTools
-        const natives = this.listDefinitions().filter(def => !BRIDGE_TOOL_NAMES.has(def.name))
-        const nativeNames = new Set(natives.map(def => def.name))
+        const allNatives = this.listDefinitions()
+        const nativeNames = new Set(allNatives.map(def => def.name))
+        const natives = allNatives.filter(def => !BRIDGE_TOOL_NAMES.has(def.name))
         return [
           ...mcpTools.filter(tool => !nativeNames.has(tool.name)),
           ...natives.map(def => ({

@@ -15,6 +15,7 @@ import { TaskExecutor, type TaskExecutorDeps } from '../../../agent/taskExecutor
 import { BRIDGE_TOOL_NAMES } from '../../../capabilities/toolCatalogTools'
 import { config as appConfig } from '../../../config'
 import { TaskLifecycle } from '../../../lifecycle/taskLifecycle'
+import { PromptCache } from '../../../llm/promptCache'
 import type { SingleTurnProvider } from '../../../llm/types'
 import { logger } from '../../../logger'
 import { McpManager } from '../../../mcp/manager'
@@ -23,7 +24,11 @@ import { ConversationManager } from '../../conversation/conversation'
 import { NATIVE_TOOL_DISCOVERY_TEXT, TOOL_DISCOVERY_TEXT } from '../../reasoning/promptBuilder'
 import { type ChatMessage, FinishReason, type ToolCall, type ToolDefinition } from '../../types'
 import { SimpleEventEmitter } from '../eventEmitter'
-import type { CodexToolPresentation, NativeToolPresentation } from '../toolPresentationPolicy'
+import {
+  type CodexToolPresentation,
+  DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES,
+  type NativeToolPresentation,
+} from '../toolPresentationPolicy'
 import { validateToolLinkages } from '../toolUseLoopLinkages'
 import { NATIVE_DIRECT_DEV_BASELINE } from './nativeDirectDevBaseline'
 
@@ -105,6 +110,10 @@ interface Scenario {
   /** MCP tool count split over alpha/beta, explicit catalogs, or `null` for no McpManager. */
   mcp: number | Record<string, RemoteTool[]> | null
   approval?: boolean
+  /** `CLERUM_NATIVE_TOOL_DISCOVERY_BYTES`; the 2048 B default when omitted. */
+  discoveryBytes?: number
+  /** Production default path: tiered prompt parts built and cached per session. */
+  promptCache?: boolean
 }
 type ProviderCall = { messages: ChatMessage[]; tools: ToolDefinition[] }
 type Turn = (call: ProviderCall) => { content?: string; tool_calls?: ToolCall[] }
@@ -171,8 +180,9 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
     codexToolPresentation: scenario.codexMode ?? 'direct',
     dynamicToolsEnabled: scenario.legacy === true,
     nativeToolPresentation: scenario.native,
+    nativeToolDiscoveryBytes: scenario.discoveryBytes ?? DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES,
     contextMaxTokens: 100000,
-    promptCacheEnabled: false,
+    promptCacheEnabled: scenario.promptCache === true,
   })
   const manager =
     scenario.mcp === null
@@ -241,11 +251,18 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
   }
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
+  const workspaceService = scenario.promptCache
+    ? {
+        readIdentityFiles: vi.fn(async () => ({ identity: '', soul: '', agents: '', user: '' })),
+        snapshotDailyLogs: vi.fn(async () => 'daily snapshot'),
+      }
+    : undefined
   const deps: TaskExecutorDeps = {
     conversationManager: new ConversationManager(),
     llmProvider: provider,
     mcpManager: manager,
-    workspaceService: undefined,
+    workspaceService: workspaceService as unknown as TaskExecutorDeps['workspaceService'],
+    promptCache: scenario.promptCache ? new PromptCache() : undefined,
     modelName: 'gpt-5.6-luna',
     approvalConfig: undefined,
     config: {
@@ -265,7 +282,7 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
   }
   const executor = new TaskExecutor(task, deps)
   await executor.run()
-  return { executor, deps, providerCalls, responses }
+  return { executor, deps, providerCalls, responses, workspaceService }
 }
 
 /** Search → describe → bridged call for the pptx generator, then a final answer. */
@@ -438,6 +455,64 @@ describe('T1 — native discovery journeys through TaskExecutor.run()', () => {
     expect(events('native-tool-presentation')).toEqual([])
     expectPptxDelivered(run, 2)
   })
+
+  it('the default prompt-cache path carries the native-aware guidance in auto and the dev text in direct', async () => {
+    const run = await runScenario(
+      {
+        provider: 'codex-subscription',
+        codexMode: 'direct',
+        native: 'auto',
+        mcp: 2,
+        promptCache: true,
+      },
+      pptxJourney(NATIVE_TOOL_DISCOVERY_TEXT)
+    )
+    // Witness: the system prompt came from the cached tiered parts, not the legacy builder.
+    expect(run.workspaceService!.snapshotDailyLogs).toHaveBeenCalledTimes(1)
+    expect(systemText(run.providerCalls[0].messages)).toContain('daily snapshot')
+    expectPptxDelivered(run)
+
+    // Same cache path in native direct, with the MCP bridge on: the pre-#1003 text.
+    await Promise.all(managers.splice(0).map(manager => manager.close()))
+    const direct = await runScenario(
+      {
+        provider: 'codex-subscription',
+        codexMode: 'discovery',
+        native: 'direct',
+        mcp: 2,
+        promptCache: true,
+      },
+      [() => ({ content: 'ok' })]
+    )
+    expect(direct.workspaceService!.snapshotDailyLogs).toHaveBeenCalledTimes(1)
+    const directText = systemText(direct.providerCalls[0].messages)
+    expect(directText).toContain(TOOL_DISCOVERY_TEXT)
+    expect(directText).not.toContain(NATIVE_TOOL_DISCOVERY_TEXT)
+  })
+
+  it('CLERUM_NATIVE_TOOL_DISCOVERY_BYTES reaches the controller and decides what is hidden', async () => {
+    const firstTools = async (discoveryBytes: number) => {
+      logEvents.length = 0
+      const run = await runScenario(
+        { provider: 'openai', legacy: false, native: 'auto', mcp: null, discoveryBytes },
+        [() => ({ content: 'ok' })]
+      )
+      expect(run.providerCalls).toHaveLength(1)
+      return names(run.providerCalls[0].tools)
+    }
+    // A budget above every native hides nothing.
+    const roomy = await firstTools(100_000)
+    expect(roomy).toEqual(expect.arrayContaining([...GENERATORS, ...BRIDGE]))
+    expect(events('native-tool-presentation')).toEqual([
+      expect.objectContaining({ budget: 100_000, hiddenNames: [] }),
+    ])
+    // A 1 B budget leaves only the bridge tools.
+    const tight = await firstTools(1)
+    expect(tight.sort()).toEqual(BRIDGE)
+    expect(events('native-tool-presentation')).toEqual([
+      expect.objectContaining({ budget: 1, presentedCount: BRIDGE.length }),
+    ])
+  })
 })
 
 describe('T2 — independence matrix (I1, I2 with deviation D1)', () => {
@@ -446,6 +521,8 @@ describe('T2 — independence matrix (I1, I2 with deviation D1)', () => {
     { label: 'codex direct', provider: 'codex-subscription', codexMode: 'direct' },
     { label: 'codex auto', provider: 'codex-subscription', codexMode: 'auto' },
     { label: 'codex discovery', provider: 'codex-subscription', codexMode: 'discovery' },
+    { label: 'grok direct', provider: 'grok-subscription', codexMode: 'direct' },
+    { label: 'grok auto', provider: 'grok-subscription', codexMode: 'auto' },
     { label: 'legacy on', provider: 'openai', legacy: true },
     { label: 'legacy off', provider: 'openai', legacy: false },
   ]
@@ -454,8 +531,18 @@ describe('T2 — independence matrix (I1, I2 with deviation D1)', () => {
     cell.codexMode === 'direct' ||
     cell.legacy === false ||
     (mcp === 2 && (cell.codexMode === 'auto' || cell.legacy === true))
+  /** Whether origin/dev registers the bridge tools: MCP discovery with an McpManager. */
+  const devRegistersBridge = (cell: Cell, mcp: number | null) =>
+    mcp !== null && (cell.legacy === true || (cell.codexMode ?? 'direct') !== 'direct')
+  /**
+   * The non-bridge natives origin/dev presents (pinned by the I4 baseline), so each
+   * matrix cell checks I1 against a fixed reference instead of against other tests.
+   */
+  const DEV_NATIVES = NATIVE_DIRECT_DEV_BASELINE['legacy-off/2'].toolNames
+    .filter(name => !isMcp(name) && !BRIDGE_TOOL_NAMES.has(name))
+    .sort()
 
-  async function firstTurn(cell: Cell, native: NativeToolPresentation, mcp: number) {
+  async function firstTurn(cell: Cell, native: NativeToolPresentation, mcp: number | null) {
     logEvents.length = 0
     const run = await runScenario({ ...cell, native, mcp }, [() => ({ content: 'ok' })])
     expect(run.executor.executorState).toBe('completed')
@@ -471,42 +558,41 @@ describe('T2 — independence matrix (I1, I2 with deviation D1)', () => {
     return { tools, log }
   }
 
-  const nativeSubsets: Record<NativeToolPresentation, string[][]> = { direct: [], auto: [] }
-
   for (const cell of cells) {
-    for (const mcp of [2, 83]) {
-      it(`${cell.label}, ${mcp} MCP: MCP presentation is identical for native direct and auto`, async () => {
+    for (const mcp of [2, 83, null]) {
+      const mcpLabel = mcp === null ? 'no McpManager' : `${mcp} MCP`
+      it(`${cell.label}, ${mcpLabel}: MCP presentation is identical for native direct and auto`, async () => {
         const direct = await firstTurn(cell, 'direct', mcp)
         const auto = await firstTurn(cell, 'auto', mcp)
 
         // I2 (a): the MCP tools sent to the model are the same list.
         const mcpDirect = direct.tools.filter(isMcp)
         expect(auto.tools.filter(isMcp)).toEqual(mcpDirect)
-        expect(mcpDirect).toHaveLength(devListsMcp(cell, mcp) ? mcp : 0)
+        expect(mcpDirect).toHaveLength(mcp !== null && devListsMcp(cell, mcp) ? mcp : 0)
 
-        // I2 (b)/(c): MCP log fields equal; native counters +3 only in Codex direct.
+        // I2 (b)/(c): MCP log fields equal; native counters +3 exactly where
+        // origin/dev registered no bridge tools (deviation D1).
         expect(auto.log.legacy).toEqual(direct.log.legacy)
         expect(auto.log.presentation).toHaveLength(direct.log.presentation.length)
         direct.log.presentation.forEach((before, index) => {
           const after = auto.log.presentation[index]
           for (const field of ['mode', 'strategy', 'mcpCount', 'deferredCount'])
             expect(after[field]).toBe(before[field])
-          const delta = cell.codexMode === 'direct' ? BRIDGE.length : 0
+          const delta = devRegistersBridge(cell, mcp) ? 0 : BRIDGE.length
           expect(after.nativeCount).toBe((before.nativeCount as number) + delta)
           expect(after.presentedCount).toBe((before.presentedCount as number) + delta)
         })
-        if (cell.provider === 'codex-subscription') expect(direct.log.presentation).toHaveLength(1)
-        if (cell.legacy === true) expect(direct.log.legacy).toHaveLength(1)
+        if (cell.codexMode !== undefined) expect(direct.log.presentation).toHaveLength(1)
+        if (cell.legacy === true && mcp !== null) expect(direct.log.legacy).toHaveLength(1)
 
         // I1: natives depend on native mode only; auto hides exactly the generators.
         const nonBridgeNatives = (tools: string[]) =>
           tools.filter(name => !isMcp(name) && !BRIDGE_TOOL_NAMES.has(name)).sort()
-        nativeSubsets.direct.push(nonBridgeNatives(direct.tools))
-        nativeSubsets.auto.push(nonBridgeNatives(auto.tools))
-        expect(direct.tools).toEqual(expect.arrayContaining(GENERATORS))
-        expect(nonBridgeNatives(direct.tools).filter(name => !auto.tools.includes(name))).toEqual(
-          GENERATORS
+        expect(nonBridgeNatives(direct.tools)).toEqual(DEV_NATIVES)
+        expect(nonBridgeNatives(auto.tools)).toEqual(
+          DEV_NATIVES.filter(name => !GENERATORS.includes(name))
         )
+        expect(DEV_NATIVES).toEqual(expect.arrayContaining(GENERATORS))
         expect(auto.tools).toEqual(expect.arrayContaining(BRIDGE))
         expect(direct.log.native).toEqual([])
         expect(auto.log.native).toEqual([
@@ -515,14 +601,6 @@ describe('T2 — independence matrix (I1, I2 with deviation D1)', () => {
       })
     }
   }
-
-  it('I1: the non-bridge native subset is the same in every MCP cell for each native mode', () => {
-    expect(nativeSubsets.direct).toHaveLength(cells.length * 2)
-    expect(nativeSubsets.auto).toHaveLength(cells.length * 2)
-    for (const mode of ['direct', 'auto'] as const)
-      for (const subset of nativeSubsets[mode]) expect(subset).toEqual(nativeSubsets[mode][0])
-    expect(nativeSubsets.direct[0].length - nativeSubsets.auto[0].length).toBe(GENERATORS.length)
-  })
 })
 
 describe('I4 — native direct sends exactly what origin/dev sends', () => {
@@ -531,6 +609,14 @@ describe('I4 — native direct sends exactly what origin/dev sends', () => {
   afterEach(() => {
     vi.useRealTimers()
     appConfig.nativeTool.workspacePath = savedWorkspacePath
+  })
+
+  it('the baseline covers exactly the ten dev cells (a dropped cell cannot pass silently)', () => {
+    expect(Object.keys(NATIVE_DIRECT_DEV_BASELINE).sort()).toEqual(
+      ['codex-auto', 'codex-direct', 'codex-discovery', 'legacy-off', 'legacy-on']
+        .flatMap(label => [`${label}/2`, `${label}/83`])
+        .sort()
+    )
   })
 
   it.each(Object.keys(NATIVE_DIRECT_DEV_BASELINE))(
@@ -715,5 +801,85 @@ describe('T3 — negative guards with liveness witnesses (through TaskExecutor.r
     expect(pptxFiles()).toEqual(['bridged-deck.pptx'])
     // Witness: the MCP-only name reached MCP, and the colliding name never did.
     expect(remote.calls.mock.calls).toEqual([['clerum', { name: 'mcp_only', arguments: {} }]])
+  })
+
+  it('MCP tools named like the bridge tools never enter the discovery catalog', async () => {
+    // `clerum` + `tool_search` flattens to the native bridge name `clerum__tool_search`.
+    const impostor = (name: string) => ({
+      name,
+      description: `Impostor ${name}`,
+      inputSchema: { type: 'object' },
+    })
+    const catalogs = {
+      clerum: [
+        impostor('tool_search'),
+        impostor('tool_describe'),
+        impostor('tool_call'),
+        {
+          name: 'mcp_only',
+          description: 'MCP only record',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        },
+      ],
+    }
+    let listed: string[] = []
+    let described: Record<string, unknown> = {}
+    await runScenario(
+      { provider: 'codex-subscription', codexMode: 'discovery', native: 'auto', mcp: catalogs },
+      [
+        () =>
+          toolCalls(
+            {
+              id: 'enumerate-call',
+              name: 'clerum__tool_search',
+              arguments: { query: '', enumerate: true, server: 'clerum', limit: 50 },
+            },
+            {
+              id: 'describe-call',
+              name: 'clerum__tool_describe',
+              arguments: { name: 'clerum__tool_call' },
+            }
+          ),
+        ({ messages }) => {
+          listed = JSON.parse(toolResult(messages, 'enumerate-call')).results.map(
+            (entry: { name: string }) => entry.name
+          )
+          described = JSON.parse(toolResult(messages, 'describe-call'))
+          return { content: 'done' }
+        },
+      ]
+    )
+    // Witness: the same server's non-colliding tool is listed.
+    expect(listed).toEqual(['clerum__mcp_only'])
+    expect(described).toEqual({ found: false })
+  })
+
+  it('bridge tool descriptions name internal tools only in native auto', async () => {
+    const bridgeDescriptions = async (native: NativeToolPresentation) => {
+      const run = await runScenario(
+        { provider: 'codex-subscription', codexMode: 'discovery', native, mcp: 2 },
+        [() => ({ content: 'ok' })]
+      )
+      await Promise.all(managers.splice(0).map(manager => manager.close()))
+      const tools = run.providerCalls[0].tools
+      const find = (name: string) => {
+        const tool = tools.find(t => t.name === name)
+        if (!tool) throw new Error(`${name} is not presented`)
+        return tool
+      }
+      const search = find('clerum__tool_search').parameters as {
+        properties: { server: { description: string } }
+      }
+      return {
+        call: find('clerum__tool_call').description,
+        server: search.properties.server.description,
+      }
+    }
+    const direct = await bridgeDescriptions('direct')
+    const auto = await bridgeDescriptions('auto')
+    expect(direct.call).toContain('native tools are called directly')
+    expect(direct.server).not.toContain('`native`')
+    expect(auto.call).toContain('including internal tools')
+    expect(auto.server).toContain('`native` for internal tools')
   })
 })

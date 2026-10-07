@@ -148,10 +148,10 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
     const textContent = parts.map(p => p.text ?? '').join('') || null
 
     // Gemini function calls carry no opaque id (it matches responses by name);
-    // synthesize a stable per-response id so the normalized ToolCall shape and
-    // the downstream tool loop keep working. On the next turn the round-trip
-    // recovers the function name from the assistant message we emit (or the
-    // tool message's own `name`), so the synthetic id never has to survive.
+    // synthesize a per-response id so the normalized ToolCall shape and the
+    // downstream tool loop keep working. The ids restart at `call_0` on every
+    // response, so they are unique only within one assistant turn; the
+    // round-trip (toGeminiContents) resolves them against that turn alone.
     let callIndex = 0
     const toolCalls = parts
       .filter(p => p.functionCall)
@@ -174,20 +174,15 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
   /**
    * Convert the normalized ChatMessage[] into Gemini `contents` + a joined
    * `systemInstruction`. Tool results are matched back to their function name
-   * via the id→name map built from the assistant tool_calls in the SAME
-   * history (Gemini keys function responses by name, not by id).
+   * via the id→name map of the PRECEDING assistant turn (Gemini keys function
+   * responses by name, not by id). The map is per turn because the driver's
+   * synthetic ids restart at `call_0` on every response.
    */
   private toGeminiContents(messages: CoreChatMessage[]): {
     systemInstruction: string
     contents: GeminiContent[]
   } {
-    const idToName = new Map<string, string>()
-    for (const m of messages) {
-      if (m.role === 'assistant' && m.tool_calls) {
-        for (const tc of m.tool_calls) idToName.set(tc.id, tc.name)
-      }
-    }
-
+    let turnIdToName = new Map<string, string>()
     const systemParts: string[] = []
     const contents: GeminiContent[] = []
 
@@ -199,7 +194,9 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
       if (m.role === 'assistant') {
         const parts: GeminiPart[] = []
         if (m.content) parts.push({ text: m.content })
+        turnIdToName = new Map()
         for (const tc of m.tool_calls ?? []) {
+          turnIdToName.set(tc.id, tc.name)
           parts.push({ functionCall: { name: tc.name, args: tc.arguments } })
         }
         contents.push({ role: 'model', parts: parts.length > 0 ? parts : [{ text: '' }] })
@@ -209,7 +206,8 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
         // The functionCall's own name wins: a call routed through
         // `clerum__tool_call` produces a result named after the REAL tool, but
         // Gemini pairs the response with the `clerum__tool_call` functionCall.
-        const name = (m.tool_call_id ? idToName.get(m.tool_call_id) : undefined) ?? m.name ?? 'tool'
+        const name =
+          (m.tool_call_id ? turnIdToName.get(m.tool_call_id) : undefined) ?? m.name ?? 'tool'
         contents.push({
           role: 'user',
           parts: [{ functionResponse: { name, response: { result: m.content } } }],

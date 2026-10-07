@@ -171,6 +171,67 @@ describe('GoogleGenerativeDriver — tool round-trip', () => {
     expect(call.functionCall).toEqual({ name: 'clerum__tool_call', args: bridged })
     expect(responses).toEqual(['clerum__tool_call', 'orphan_tool'])
   })
+
+  it('names each result after its own turn when the driver reuses call ids across turns', async () => {
+    const callResponse = (name: string) => ({
+      candidates: [
+        { content: { parts: [{ functionCall: { name, args: {} } }] }, finishReason: 'STOP' },
+      ],
+    })
+    const { client, generateContent } = mockClient({
+      candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+    })
+    generateContent
+      .mockResolvedValueOnce(callResponse('web_search'))
+      .mockResolvedValueOnce(callResponse('file_read'))
+    const driver = new GoogleGenerativeDriver(client, 'gemini-2.5-pro')
+
+    // Drive three real turns, appending history the way the tool loop does.
+    const history: ChatMessage[] = [{ role: 'user', content: 'research and read' }]
+    const results: Record<string, string> = {
+      web_search: 'search result',
+      file_read: 'file content',
+    }
+    const mintedIds: string[] = []
+    for (let turn = 0; turn < 2; turn++) {
+      const res = await driver.completeSingleTurnWithTools(history, [])
+      const toolCalls = res.tool_calls ?? []
+      expect(toolCalls).toHaveLength(1)
+      mintedIds.push(toolCalls[0].id)
+      history.push({ role: 'assistant', content: '', tool_calls: toolCalls })
+      history.push({
+        role: 'tool',
+        name: toolCalls[0].name,
+        content: results[toolCalls[0].name],
+        tool_call_id: toolCalls[0].id,
+      })
+    }
+    await driver.completeSingleTurnWithTools(history, [])
+
+    // Witness: the driver really minted the same id in both turns.
+    expect(mintedIds).toEqual(['call_0', 'call_0'])
+    const wire = generateContent.mock.calls[2][0].contents.flatMap(
+      (c: {
+        parts: Array<{
+          functionCall?: { name: string }
+          functionResponse?: { name: string; response: { result: string } }
+        }>
+      }) =>
+        c.parts.flatMap(p =>
+          p.functionCall
+            ? [`call:${p.functionCall.name}`]
+            : p.functionResponse
+              ? [`resp:${p.functionResponse.name}=${p.functionResponse.response.result}`]
+              : []
+        )
+    )
+    expect(wire).toEqual([
+      'call:web_search',
+      'resp:web_search=search result',
+      'call:file_read',
+      'resp:file_read=file content',
+    ])
+  })
 })
 
 describe('GoogleGenerativeDriver — finish reasons', () => {

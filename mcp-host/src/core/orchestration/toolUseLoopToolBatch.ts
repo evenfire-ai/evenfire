@@ -174,9 +174,11 @@ function resolveBridgeCall(
     // preserved id, so the provider pairs it with the model's tool_call block.
     //
     // The synthetic call (and its eventual ToolResult) intentionally carries the
-    // REAL tool name, NOT `clerum__tool_call`. Provider pairing is by
-    // `tool_call_id` ONLY, so preserving `call.id` is what matters — do NOT
-    // re-mint the id (a fresh id would orphan the model's tool_use block).
+    // REAL tool name, NOT `clerum__tool_call`. Providers pair the result by
+    // `tool_call_id`; drivers whose wire pairs by name (Gemini) resolve the
+    // name from that id against the preceding assistant turn. Preserving
+    // `call.id` is what matters — do NOT re-mint the id (a fresh id would
+    // orphan the model's tool_use block).
     return {
       id: call.id,
       name,
@@ -193,8 +195,9 @@ function resolveBridgeCall(
   // catalog == the full MCP universe, so this matches the registry's own
   // `Tool not found` — but enforcing the gate explicitly here means a future
   // per-host catalog subset cannot be bypassed by a direct call. Native names
-  // (and non-MCP names) pass through untouched — they are always advertised and
-  // resolved by the native registry. Stateless: nothing is recorded.
+  // (and non-MCP names) pass through untouched — the native registry resolves
+  // them whether or not native `auto` removed them from `tools[]`. Stateless:
+  // nothing is recorded.
   //
   // The `__` heuristic is safe because of the `serverName__toolName` naming
   // invariant (double underscore, see CLAUDE.md): natives are excluded first via
