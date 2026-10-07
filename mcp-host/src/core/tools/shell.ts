@@ -6,6 +6,7 @@ import { verifyManagedCallerRootPath } from '../../workspace/callerRootBinding'
 import { ToolError, ToolErrorCode } from '../errors'
 import { ExecutionContext, Tool } from '../interfaces'
 import { ToolOutput } from '../types'
+import { SHELL_SIGKILL_GRACE_MS, SHELL_TIMEOUT_CLEANUP_MS } from './shellTimeouts'
 
 // D3 (stateless-agents) §1.2 — lexical defense-in-depth: reject commands that
 // reference the session state database (state.db + WAL laterals) or the
@@ -68,7 +69,7 @@ export class ShellTool implements Tool {
   /** Leaves room for status text, XML wrapping, and message serialization. */
   private static readonly MAX_RESULT_BYTES = ShellTool.MAX_TOTAL_BYTES - 2048
   private static readonly MAX_PROGRESS_BYTES = 64 * 1024
-  static readonly SIGKILL_GRACE_MS = 5000
+  static readonly SIGKILL_GRACE_MS = SHELL_SIGKILL_GRACE_MS
 
   /**
    * `dynamicEnvProvider` returns operator-managed env vars from the
@@ -137,8 +138,7 @@ export class ShellTool implements Tool {
   }
 
   timeoutCleanupMs(): number {
-    // Termination has an existing 5s SIGKILL grace; allow 1s for close/output delivery.
-    return ShellTool.SIGKILL_GRACE_MS + 1000
+    return SHELL_TIMEOUT_CLEANUP_MS
   }
 
   joinsAbortSettlement(): boolean {

@@ -10,6 +10,7 @@ import {
   parseCodexToolDiscoveryBytes,
   parseCodexToolPresentation,
 } from './core/orchestration/toolPresentationPolicy'
+import { SHELL_TIMEOUT_CLEANUP_MS } from './core/tools/shellTimeouts'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import type { McpCatalogBootstrapConfig } from './mcp/grantProbe'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
@@ -328,7 +329,22 @@ function getEnv(key: string, defaultValue?: string): string | undefined {
   return process.env[key] ?? defaultValue
 }
 
-function getExecutionLimit(key: string, defaultValue: number, allowZero = false): number {
+/** Largest delay, in ms, that a Node.js timer accepts. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
+ * Upper bound for a tool timeout: executeWithTimeout arms the shell's cleanup
+ * timer on top of the execution deadline and rejects a sum above the timer
+ * range, so a larger value would fail every shell call at runtime (#1021).
+ */
+const MAX_TOOL_TIMEOUT_MS = MAX_TIMER_DELAY_MS - SHELL_TIMEOUT_CLEANUP_MS
+
+function getExecutionLimit(
+  key: string,
+  defaultValue: number,
+  allowZero = false,
+  maximum = MAX_TIMER_DELAY_MS
+): number {
   const raw = getEnv(key)
   if (raw === undefined) return defaultValue
   const value = Number(raw)
@@ -336,7 +352,7 @@ function getExecutionLimit(key: string, defaultValue: number, allowZero = false)
     !/^\d+$/.test(raw) ||
     !Number.isSafeInteger(value) ||
     value < (allowZero ? 0 : 1) ||
-    value > 2_147_483_647
+    value > maximum
   ) {
     throw new Error(`${key} must be a valid bounded integer`)
   }
@@ -1013,8 +1029,8 @@ export const config: Config = {
   // Native tool configuration
   nativeTool: {
     workspacePath: process.env.CLERUM_WORKSPACE_PATH || process.cwd(),
-    shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000),
-    toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000),
+    shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000, false, MAX_TOOL_TIMEOUT_MS),
+    toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000, false, MAX_TOOL_TIMEOUT_MS),
     toolProgressInterval: parseInt(getEnv('CLERUM_TOOL_PROGRESS_INTERVAL_MS', '30000')!, 10),
     httpAllowlist: (process.env.CLERUM_HTTP_ALLOWLIST || '')
       .split(',')
