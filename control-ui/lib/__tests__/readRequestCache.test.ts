@@ -118,7 +118,17 @@ describe('bounded metadata read reuse', () => {
     }
     expect(fetchMock).toHaveBeenCalledTimes(129)
 
+    // The newest and the oldest retained entries are served from the cache, so
+    // the bound evicts exactly one entry rather than caching nothing.
     fetchMock.mockClear()
+    await expect(apiGet('/api/v1/admin/metadata/128', {}, metadataOptions)).resolves.toEqual({
+      index: 128,
+    })
+    await expect(apiGet('/api/v1/admin/metadata/1', {}, metadataOptions)).resolves.toEqual({
+      index: 1,
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+
     fetchMock.mockResolvedValueOnce(success({ index: 'fresh-first' }))
     await expect(apiGet('/api/v1/admin/metadata/0', {}, metadataOptions)).resolves.toEqual({
       index: 'fresh-first',

@@ -17,8 +17,11 @@ import {
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
-// Invalid credentials still use the original source-IP abuse budgets. Raised
-// administrative capacity applies only after the existing signature check.
+// Invalid credentials still use the original source-IP abuse budgets, and raised
+// administrative capacity applies only after the existing signature check. The
+// unauthenticated subscription OAuth callback has no credential to verify: it
+// selects its budget by whether a `state` is present (see
+// subscriptionOAuthCallbackRateLimits).
 const UNVERIFIED_WORKFLOW_GRANT_READ_PER_MINUTE = 60
 const UNVERIFIED_WORKFLOW_GRANT_WRITE_PER_MINUTE = 20
 const UNVERIFIED_WORKFLOW_ADMIN_READ_PER_MINUTE = 60
@@ -32,7 +35,11 @@ function hasVerifiedAdminCredential(req: Request): boolean {
   return verifiedAdminRateLimitIdentity(adminWorkflowRateLimitCredential(req)) !== null
 }
 
-/** Reuse the existing enforcer without raising a distinct unauthenticated gate. */
+/**
+ * Reuse the existing enforcer with two budgets: `isVerified` selects the raised
+ * one. For administrative families it is a signature check; for the OAuth
+ * callback it only reports that a `state` is present.
+ */
 function withUnverifiedIpBudget(
   options: RateLimitEnforcerOptions & { getBucketKey: (req: Request) => string | null },
   unverifiedMaxPerMinute: number,
@@ -286,10 +293,31 @@ function subscriptionOAuthCallbackBucketKey(req: Request): string {
   return `subscription_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
 
+/**
+ * Callback limiters, in order:
+ * 1. A per-source-IP ceiling across every `state`, edge only, so rotating
+ *    `state` values cannot mint unbounded buckets from one address. It adds no
+ *    PostgreSQL key: a ledger-backed ceiling would add the write it bounds. The
+ *    key must not reuse `subscription_oauth_callback:ip:`, which is the
+ *    no-state bucket below.
+ * 2. The per-`state` edge limiter (the no-state IP safeguard without one).
+ * 3. The PostgreSQL gate shared across replicas.
+ */
 export function subscriptionOAuthCallbackRateLimits() {
   const hasState = (req: Request) =>
     typeof req.query.state === 'string' && req.query.state.trim().length > 0
   return [
+    rateLimit({
+      windowMs: 60_000,
+      store: new CalendarMinuteRateLimitStore(),
+      limit: config.subscriptionOAuthCallbackPerMin,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      keyGenerator: req =>
+        `subscription_oauth_callback_ip_ceiling:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`,
+      handler: (req, res) =>
+        edgeRateLimitDenied('subscription_oauth_callback_ip_ceiling_edge', req, res),
+    }),
     rateLimit({
       windowMs: 60_000,
       store: new CalendarMinuteRateLimitStore(),

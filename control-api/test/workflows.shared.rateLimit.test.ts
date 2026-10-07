@@ -3,6 +3,7 @@ import express from 'express'
 import { createHash } from 'node:crypto'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import { rateLimitHitsTotal } from '../src/observability/metrics.js'
 import {
   adminOutputsReadRateLimits,
   adminSubscriptionReadRateLimits,
@@ -239,21 +240,98 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(counts.size).toBe(2)
   })
 
-  it('enforces the 100 callback budget with retry timing', async () => {
-    countRequests()
+  function callbackApp() {
+    vi.mocked(rateLimitHitsTotal.inc).mockClear()
+    const handled = { count: 0 }
     const app = express()
-    app.get('/callback', ...subscriptionOAuthCallbackRateLimits(), (_req, res) =>
+    app.set('trust proxy', 1)
+    app.get('/callback', ...subscriptionOAuthCallbackRateLimits(), (_req, res) => {
+      handled.count += 1
       res.sendStatus(204)
-    )
+    })
+    return { app, handled }
+  }
+
+  function deniedCallbackBuckets(): unknown[] {
+    return vi
+      .mocked(rateLimitHitsTotal.inc)
+      .mock.calls.filter(([labels]) => (labels as { result?: string }).result === 'denied')
+      .map(([labels]) => (labels as { bucket_type?: string }).bucket_type)
+  }
+
+  it('enforces the 100 per-state callback budget across source addresses', async () => {
+    countRequests()
+    const { app, handled } = callbackApp()
+    // Each request comes from a different address, so the per-IP ceiling never
+    // binds and the denial below can only come from the per-state limiter.
     for (let i = 0; i < 100; i++) {
-      await request(app).get('/callback').query({ state: 'unit-callback-state' }).expect(204)
+      await request(app)
+        .get('/callback')
+        .set('X-Forwarded-For', `198.51.100.${i + 1}`)
+        .query({ state: 'unit-callback-state' })
+        .expect(204)
     }
     const denied = await request(app)
       .get('/callback')
+      .set('X-Forwarded-For', '203.0.113.200')
       .query({ state: 'unit-callback-state' })
       .expect(429)
+    expect(handled.count).toBe(100)
+    expect(deniedCallbackBuckets()).toEqual(['subscription_oauth_callback_edge'])
     expect(denied.headers['ratelimit-policy']).toBe('100;w=60')
     expect(denied.headers['retry-after']).toBeDefined()
+  })
+
+  it('bounds state rotation from one source address at the edge without a ledger key', async () => {
+    countRequests()
+    const { app, handled } = callbackApp()
+    for (let i = 0; i < 100; i++) {
+      await request(app)
+        .get('/callback')
+        .set('X-Forwarded-For', '198.51.100.7')
+        .query({ state: `rotated-state-${i}` })
+        .expect(204)
+    }
+    const denied = await request(app)
+      .get('/callback')
+      .set('X-Forwarded-For', '198.51.100.7')
+      .query({ state: 'rotated-state-100' })
+      .expect(429)
+    expect(denied.body.code).toBe('rate_limited')
+    expect(handled.count).toBe(100)
+    expect(deniedCallbackBuckets()).toEqual(['subscription_oauth_callback_ip_ceiling_edge'])
+    // Every admitted request reached the ledger, keyed by its state; the
+    // ceiling key never did.
+    const ledgerKeys = mockCheckAndIncrement.mock.calls.map(call => String(call[0]))
+    expect(ledgerKeys).toHaveLength(100)
+    expect(ledgerKeys.every(key => key.startsWith('subscription_oauth_callback:state:'))).toBe(true)
+
+    // Another source address keeps its own ceiling.
+    await request(app)
+      .get('/callback')
+      .set('X-Forwarded-For', '198.51.100.8')
+      .query({ state: 'rotated-state-other-ip' })
+      .expect(204)
+    expect(handled.count).toBe(101)
+  })
+
+  it('counts a caller-prepended forwarding address against the real source address', async () => {
+    countRequests()
+    const { app, handled } = callbackApp()
+    for (let i = 0; i < 100; i++) {
+      await request(app)
+        .get('/callback')
+        .set('X-Forwarded-For', '198.51.100.9')
+        .query({ state: `spoof-state-${i}` })
+        .expect(204)
+    }
+    await request(app)
+      .get('/callback')
+      .set('X-Forwarded-For', '9.9.9.9, 198.51.100.9')
+      .query({ state: 'spoof-state-100' })
+      .expect(429)
+    expect(handled.count).toBe(100)
+    expect(deniedCallbackBuckets()).toEqual(['subscription_oauth_callback_ip_ceiling_edge'])
   })
 
   it.each([
@@ -281,13 +359,16 @@ describe('routes/workflows/shared/rateLimit', () => {
 
   it('retains the 20-request callback IP safeguard when no state is supplied', async () => {
     countRequests()
-    const app = express()
-    app.get('/callback', ...subscriptionOAuthCallbackRateLimits(), (_req, res) =>
-      res.sendStatus(204)
-    )
+    const { app, handled } = callbackApp()
     for (let i = 0; i < 20; i++) await request(app).get('/callback').expect(204)
     await request(app).get('/callback').expect(429)
+    expect(handled.count).toBe(20)
+    expect(deniedCallbackBuckets()).toEqual(['subscription_oauth_callback_edge'])
     expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 20)).toBe(true)
+    // The no-state safeguard and the per-IP ceiling are separate buckets: the
+    // same address can still complete a callback that carries a state.
+    await request(app).get('/callback').query({ state: 'after-no-state' }).expect(204)
+    expect(handled.count).toBe(21)
   })
 
   // The Postgres gate is the counter shared across replicas, so it must enforce
@@ -570,8 +651,9 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(adminOutputsReadRateLimits()).toHaveLength(2)
     expect(adminSubscriptionReadRateLimits()).toHaveLength(2)
     expect(adminSubscriptionWriteRateLimits()).toHaveLength(2)
-    expect(subscriptionOAuthCallbackRateLimits()).toHaveLength(2)
     expect(llmProviderAttemptAuthorizeRateLimits()).toHaveLength(2)
+    // The callback adds an edge-only per-IP ceiling ahead of the pair.
+    expect(subscriptionOAuthCallbackRateLimits()).toHaveLength(3)
   })
 
   it('shouldSkipWorkflowGrantEdgeRateLimit skips anonymous callers', () => {

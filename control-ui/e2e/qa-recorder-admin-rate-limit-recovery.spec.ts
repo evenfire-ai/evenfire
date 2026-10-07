@@ -55,7 +55,9 @@ const METADATA_REUSE_MS = 30_000
 
 type AgentFixture = { secretName: string; modelName: string; draftModelName: string; quota: number }
 type OwnedAgent = { name: string; contextNames: Set<string>; hostCreated: boolean }
-type MetadataRead = { path: string; status?: number }
+// Times are taken when Playwright reports the browser's request and response,
+// so recovery timing is measured from the 429's arrival to each reread's start.
+type MetadataRead = { path: string; status?: number; startedAtMs: number; respondedAtMs?: number }
 
 function apiPath(url: string): string {
   return new URL(url).pathname.replace(/^\/control-api(?=\/)/, '')
@@ -146,12 +148,15 @@ function observeReads(page: Page) {
       (path === CAPABILITIES ||
         /^\/api\/v1\/admin\/llm\/providers\/(?:codex|grok)-subscription(?:\/|$)/.test(path))
     ) {
-      reads.set(request, { path })
+      reads.set(request, { path, startedAtMs: Date.now() })
     }
   }
   const recordResponse = (response: Response) => {
     const read = reads.get(response.request())
-    if (read) read.status = response.status()
+    if (read) {
+      read.status = response.status()
+      read.respondedAtMs = Date.now()
+    }
     const path = apiPath(response.url())
     if (path.startsWith('/api/v1/admin/') && response.status() === 429) throttles.push(path)
   }
@@ -733,7 +738,12 @@ test.describe('optional QA recorder: administrative rate-limit journeys', () => 
         expect(body.code).toBe('rate_limited')
         expect(body.retryAfterSeconds).toBe(retryAfter)
         expect(body.message).toMatch(/try again in \d+ seconds/i)
-        const retryAt = Date.now() + retryAfter * 1_000
+        // Anchor the deadline on the 429's arrival, not on the moment every
+        // initial response has settled: a slower sibling response would
+        // otherwise push the expected deadline past a correct recovery.
+        const limitedRead = coldSession.snapshot().find(read => read.status === 429)
+        expect(limitedRead?.respondedAtMs, 'The 429 arrival time was recorded').toBeDefined()
+        const retryAt = limitedRead!.respondedAtMs! + retryAfter * 1_000
         const dialog = page.getByRole('dialog', { name: 'Edit model & credentials', exact: true })
         const alert = dialog.getByRole('alert')
         await expect(alert).toContainText(/(?:try again|retry) in \d+ seconds/i)
@@ -755,24 +765,29 @@ test.describe('optional QA recorder: administrative rate-limit journeys', () => 
         // The editor recovers on its own at the deadline supplied by the real
         // guard: the shared background recovery rereads the denied inventory and
         // the alert, with its Retry button, goes away without a click. Clicking
-        // Retry here would race that recovery. The client starts its deadline
-        // when the 429 arrives, slightly before retryAt, hence the tolerance.
+        // Retry here would race that recovery. Each reread must start at or
+        // after the deadline; the tolerance covers the delay between the
+        // browser's events and Playwright reporting them.
         const readsBeforeDeadline = 3
         await expect(dialog.getByRole('alert')).toHaveCount(0, {
           timeout: retryAfter * 1_000 + 15_000,
         })
-        expect(
-          Date.now(),
-          'The automatic recovery must not read before the Retry-After deadline'
-        ).toBeGreaterThanOrEqual(retryAt - 1_000)
         await expect(
           dialog.getByRole('status').filter({ hasText: 'Loading subscription options…' })
         ).toHaveCount(0)
+        const recoveryStarts = coldSession
+          .snapshot()
+          .slice(readsBeforeDeadline)
+          .map(read => read.startedAtMs - retryAt)
+        expect(recoveryStarts.length, 'Recovery rereads the denied inventory').toBeGreaterThan(0)
+        expect(
+          Math.min(...recoveryStarts),
+          'No automatic recovery read starts before the Retry-After deadline'
+        ).toBeGreaterThanOrEqual(-1_000)
         await expect(dialog.getByLabel('Current model', { exact: true })).toContainText(
           fixture.draftModelName
         )
         const afterDeadline = coldSession.snapshot().slice(readsBeforeDeadline)
-        expect(afterDeadline.length, 'Recovery reads the denied inventory').toBeGreaterThan(0)
         expect(
           afterDeadline.map(read => read.status),
           'No read after the Retry-After deadline is throttled again'
