@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Renders the customer overlay that
 # .agents/skills/evenfire-digitalocean-doks/references/overlay-contract.md
-# specifies, for both ingress variants, against the validated release tag, and
+# specifies, for all three ingress variants, against the validated release tag, and
 # runs the same gates the guide's Phase 4 runs. Each file block in the contract
 # is preceded by an HTML comment: <!-- file: <path> variants: A B -->.
 set -uo pipefail
@@ -72,7 +72,7 @@ extract() {
   ' "$CONTRACT" "$1" "$2"
 }
 
-render_variant() { # A|B
+render_variant() { # A|B|C
   local v="$1" tree="$work/tree-$1" mode
   mkdir -p "$tree"
   git -C "$ROOT_DIR" archive "$RELEASE" deploy charts mcp-servers | tar -x -C "$tree"
@@ -195,7 +195,7 @@ render_variant() { # A|B
 
 # The guide's Phase 4 render gate, extracted verbatim (minus the env-file line),
 # must pass on each rendered variant.
-guide_gate() { # A|B
+guide_gate() { # A|B|C
   local v="$1" tree="$work/tree-$1"
   [ -f "$GUIDE" ] || { fail "guide missing"; return 1; }
   ruby -e '

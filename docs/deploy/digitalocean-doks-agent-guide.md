@@ -9,9 +9,9 @@ approve spend, secrets, and DNS when the agent stops, and do the two steps marke
 This guide does **not** create a DigitalOcean team, VPC, or cluster.
 
 **Validated release:** the env file below names the one public release this
-procedure was checked against (scripts, manifests, and both overlay variants
-rendered and linted), plus the DOKS discovery and network probes on a live DOKS
-1.36 cluster. If a newer release exists, stop and ask the human (Phase 3.1).
+procedure was checked against (scripts, manifests, and all three overlay variants
+rendered and linted), plus a live install on a DOKS 1.36 cluster through the
+internal-only variant. Variants A and B were rendered and linted, not run live. If a newer release exists, stop and ask the human (Phase 3.1).
 
 **Honesty:** this OSS tree has no certified `deploy/overlays/digitalocean-doks`.
 The overlay is customer-local and never pushed. Do not clone Evenfire's private
@@ -354,17 +354,19 @@ Run every step from `$REPO_DIR` after sourcing the env file.
 ### 5.1 Namespaces
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 kubectl --context "$CONTEXT" apply -f deploy/base/namespaces.yaml
 kubectl --context "$CONTEXT" apply -f deploy/base/ingress/namespace.yaml
 ```
 
-Create `ingress` for both variants. `bootstrap-rbac.sh` applies every `rbac.yaml`
+Create `ingress` for every variant. `bootstrap-rbac.sh` applies every `rbac.yaml`
 under `deploy/base`, including `deploy/base/ingress/rbac.yaml`, and stops partway
 if that namespace is missing.
 
 ### 5.2 CRDs
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 helm upgrade --install --kube-context "$CONTEXT" clerum-crds ./charts/clerum-crds
 kubectl --context "$CONTEXT" apply -f ./charts/clerum-crds/crds/
 ```
@@ -377,6 +379,7 @@ after a Helm install and is patched automatically.
 ### 5.3 RBAC
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 CONTEXT="$CONTEXT" bash deploy/scripts/bootstrap-rbac.sh
 ```
 
@@ -386,6 +389,7 @@ only after re-checking the context.
 ### 5.4 JWT keys and generated Secrets — once only (ask first)
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 if kubectl --context "$CONTEXT" -n control-plane get secret control-api-secrets >/dev/null 2>&1; then
   echo "control-api-secrets exists: SKIP gen-jwt-keys.sh"
 else
@@ -404,6 +408,7 @@ The password only takes effect when Postgres initializes an empty volume, so do
 this before 5.7 starts Postgres. If the PVC already exists, skip and report it.
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 if kubectl --context "$CONTEXT" -n control-plane get pvc control-postgres-data >/dev/null 2>&1; then
   echo "control-postgres-data exists: SKIP (password already initialized)"
 else
@@ -430,11 +435,22 @@ Outside minikube the script refuses to run unless
   through a file you do not print.
 
 ```bash
-CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET="$(openssl rand -hex 32)" \
-  CONTEXT="$CONTEXT" bash deploy/scripts/apply-inter-service-tokens.sh
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
+hmac_key=CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET
+if [ -n "$(kubectl --context "$CONTEXT" -n control-plane get secret control-api-internal-tokens \
+      -o jsonpath="{.data.$hmac_key}" 2>/dev/null)" ]; then
+  CONTEXT="$CONTEXT" bash deploy/scripts/apply-inter-service-tokens.sh          # keep the stored HMAC
+else
+  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET="$(openssl rand -hex 32)" \
+    CONTEXT="$CONTEXT" bash deploy/scripts/apply-inter-service-tokens.sh        # first run only
+fi
 ```
 
-The script preserves existing values on re-run and also writes
+A value passed in the environment wins over the stored one, so the block passes
+a new HMAC only when `control-api-internal-tokens` has none; otherwise a re-run
+would rotate it (harmless in hosted mode, breaks invitations with a remote
+registration service). The script preserves the other tokens on re-run and also
+writes
 `grok-llm-proxy-secrets`. In hosted mode, never set
 `CONTROL_API_MEMBER_REGISTRATION_HMAC_KID` / `…_TENANT_ID`: control-api refuses to
 start.
@@ -442,6 +458,7 @@ start.
 ### 5.7 DB migration
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" \
   bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/digitalocean-doks
 ```
@@ -452,6 +469,7 @@ and runs the schema Job. The PVC creates a billed DigitalOcean volume.
 ### 5.8 Runtime database roles and GFS credentials
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" \
   bash deploy/scripts/provision-control-api-runtime-roles.sh || { echo 'STOP: runtime roles'; exit 1; }
 GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT" CONTEXT="$CONTEXT" \
@@ -475,6 +493,7 @@ ends with `render gate: OK`.
 ### 5.10 Apply
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 ruby "$SKILL_SCRIPTS/managed-netpols.rb" < "$WORK/render.yaml" > "$WORK/managed-netpols.yaml" || exit 1
 kubectl --context "$CONTEXT" --as=evenfire-bootstrap --as-group=system:masters \
   apply -f "$WORK/managed-netpols.yaml" || { echo 'STOP: managed NetworkPolicy apply failed'; exit 1; }
@@ -495,6 +514,7 @@ apply; the impersonated step is idempotent.
 ### 5.11 Re-apply inter-service tokens
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 CONTEXT="$CONTEXT" bash deploy/scripts/apply-inter-service-tokens.sh
 ```
 
@@ -504,6 +524,7 @@ a `replace-with-*` token, so the apply overwrites the real one.
 ### 5.12 GFS runtime, auth-key sync, instances
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 ALLOWED_CONTEXTS="$CONTEXT" \
   bash deploy/scripts/provision-gfs-runtime.sh --context "$CONTEXT" --overlay deploy/overlays/digitalocean-doks
 ```
@@ -516,6 +537,7 @@ HCC, finalizes GFS credentials, and waits for `GlobalFileSystem/gfs` to be
 ### 5.13 NetworkPolicies live and enforcement preflight
 
 ```bash
+. "$HOME/.evenfire-doks/env.sh"; cd "$REPO_DIR"
 bash deploy/scripts/verify-networkpolicies.sh --overlay digitalocean-doks --context "$CONTEXT"
 CONTEXT="$CONTEXT" OVERLAY=digitalocean-doks bash deploy/scripts/np-enforce-preflight.sh
 ```
@@ -539,18 +561,23 @@ Only when all of these hold, and the human agrees:
   for `gfs` and `llm-hooks`.
 
 Then add `patches/wrc-network-policy.yaml` (see overlay-contract.md), re-render,
-re-gate, re-apply (5.9–5.11). Until then WRC stays `required` and refuses recipes
+re-gate, re-apply (5.9–5.12). Until then WRC stays `required` and refuses recipes
 with external egress. That is the intended fail-closed state.
 
 ### 5.15 Wait for the platform
 
-Run `verify-rollout.sh` (Phase 8). Fix any FAIL before continuing. HCC must be
+Run `verify-rollout.sh` (Phase 8). Fix any FAIL before continuing, with two
+expected exceptions at this point:
+
+- `mcp-host/<host>` not rolled out: HCC does not deploy a Host whose
+  `secretRef` Secret is missing, and that Secret is created only when the human
+  enters the LLM key in Phase 6. The Host stays not rolled out until the human
+  does so; Phase 8 is the clean gate. HCC must be
 Ready before WRC external egress converges; control-api and control-ui are always
 rolled out from the same render.
 
-Cloudflare Tunnel (Variant B) only: `ingress/cloudflared` cannot start until
-Phase 7 patches its credentials, so its FAIL lines are the only acceptable ones
-at this point.
+- Cloudflare Tunnel (Variant B) only: `ingress/cloudflared` cannot start until
+  Phase 7 patches its credentials.
 
 ---
 
@@ -568,8 +595,8 @@ Agent (terminal 1, leave running):
 kubectl --context "$CONTEXT" -n control-plane port-forward service/control-api 18090:8090
 ```
 
-Human (their own terminal, bash or zsh; 8–256 character password stored straight
-into their password manager). Set the two values on the first lines, paste the
+Human (their own terminal on the same machine as the agent's port-forward, bash
+or zsh; 8–256 character password stored straight into their password manager). Set the two values on the first lines, paste the
 whole block, then type the password at the prompt. The block is one `( … )`
 subshell on purpose: a pasted multi-line block otherwise feeds its own next line
 to `read` as the password.
@@ -581,10 +608,14 @@ EF_EMAIL='you@example.com'
 LOCAL=127.0.0.1:18090          # the address the agent's port-forward listens on
 printf 'New Evenfire admin password: '; stty -echo; IFS= read -r EF_PW; stty echo; echo
 [ ${#EF_PW} -ge 8 ] || { echo 'password too short (min 8); nothing sent'; exit 1; }
-jq -n --arg u "$EF_USER" --arg e "$EF_EMAIL" --arg p "$EF_PW" \
-  '{username:$u,email:$e,password:$p}' \
+export EF_USER EF_EMAIL EF_PW                 # read by jq via env, never argv
+jq -n '{username:env.EF_USER,email:env.EF_EMAIL,password:env.EF_PW}' \
 | curl -sS -o /dev/null -w 'setup HTTP %{http_code}\n' \
     -X POST "http://$LOCAL/api/v1/admin/auth/setup" \
+    -H 'content-type: application/json' --data-binary @-
+jq -n '{username:env.EF_USER,password:env.EF_PW}' \
+| curl -sS -o /dev/null -w 'login check HTTP %{http_code}\n' \
+    -X POST "http://$LOCAL/api/v1/admin/auth/login" \
     -H 'content-type: application/json' --data-binary @-
 )
 ```
@@ -595,6 +626,29 @@ password, invalid email); nothing was claimed, so fix the input and re-run.
 install means the account is already claimed. First ask the human whether they
 already ran the block (a repeat run returns 409). Otherwise treat it as a security
 incident: stop, keep ingress closed, and tell the human.
+
+Expect `setup HTTP 2xx` and `login check HTTP 200`. A setup 2xx with a failed
+login check means the stored password is not the one typed: recover before going
+further.
+
+### Recover a mis-claimed admin account
+
+Only on a fresh install, with no ingress exposed, and with the human's approval.
+Setup accepts a claim only while the bootstrap admin row has never logged in. This
+puts the single admin row back into that state without handling any password
+(`!` matches no password; the `session_version` bump ends existing sessions), then
+the human runs the claim block again. Never run `gen-jwt-keys.sh` to recover.
+
+```bash
+. "$HOME/.evenfire-doks/env.sh"
+kubectl --context "$CONTEXT" -n control-plane exec deploy/control-postgres -- \
+  psql -U postgres -d profiles -v ON_ERROR_STOP=1 -At -c "UPDATE control_admin_users
+     SET username = 'admin', email = NULL, password_hash = '!', last_login_at = NULL,
+         failed_attempts = 0, locked_until = NULL, session_version = session_version + 1,
+         updated_at = NOW()
+   WHERE (SELECT count(*) FROM control_admin_users) = 1
+  RETURNING username, (last_login_at IS NULL) AS claimable"
+```
 
 Then the human sets the LLM key: port-forward `service/control-ui` 3000, log in,
 Control UI → **Secrets → LLM** for the Host's `secretRef`.
@@ -619,7 +673,8 @@ pod"; the page then loads blank or times out). Restart it, or keep it in a loop:
 **Variant C (internal only):** skip this phase. Nothing is exposed; operators use
 `kubectl port-forward`.
 
-**Variant A (in-cluster ingress controller):** the `ingress-controller-*` patches
+**Variant A (in-cluster ingress controller; not exercised on a live cluster):** the
+`ingress-controller-*` patches
 must already be in the applied render. Create Ingress (or the controller's own
 route) objects for the five hostnames:
 
@@ -668,8 +723,9 @@ public DNS; a port-forward is acceptable only for an agreed internal pilot.
 
 ## Day-2 rules
 
-- **After any overlay change:** re-render, re-gate (Phase 4), apply, re-run 5.11
-  (tokens), then 5.12 (restores the RPC public key in `mcp-host-config`).
+- **After any overlay change:** re-render, re-gate (Phase 4), apply with both 5.10
+  commands (a new release can add a managed NetworkPolicy), re-run 5.11 (tokens),
+  then 5.12 (restores the RPC public key in `mcp-host-config`).
 - **After every DOKS upgrade or node replacement:** DigitalOcean replaces the
   control plane during upgrades and new nodes get new IP addresses
   ([upgrade a cluster](https://docs.digitalocean.com/products/kubernetes/how-to/upgrade-cluster/)).

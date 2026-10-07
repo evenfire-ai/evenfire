@@ -28,7 +28,10 @@ CONTEXT="$CONTEXT" RENDER="$WORK/render.yaml" bash "$SKILL_SCRIPTS/verify-rollou
   - `webhook-ingress`: `webhook-proxy`
   - `ingress`: `cloudflared` (Variant B only)
 - One HCC-spawned Deployment per Host (named after the Host), plus
-  `gfs/gfsc-writer` and `gfs/gfsc-reader`.
+  `gfs/gfsc-writer` and `gfs/gfsc-reader`. A Host whose `secretRef` Secret is
+  missing is pending the human (the LLM key, guide Phase 6): HCC logs "Host Secret
+  not found; Host will not be deployed" and creates no Deployment. Before Phase 6
+  that FAIL is expected; in Phase 8 it is not.
 - `GlobalFileSystem/gfs` `.status.phase` = `Ready`.
 - No container in an Evenfire namespace waiting in `CrashLoopBackOff`,
   `ImagePullBackOff`, `ErrImagePull`, `CreateContainerConfigError`, or
@@ -123,7 +126,7 @@ Evenfire DOKS install
 - cluster / region / version / HA / VPC-native:
 - kube context:
 - release: RELEASE_TAG=      (validated release: )
-- overlay: deploy/overlays/digitalocean-doks in <REPO_DIR> (customer-local, not pushed), variant A|B
+- overlay: deploy/overlays/digitalocean-doks in <REPO_DIR> (customer-local, not pushed), variant A|B|C
 - URLs: app=  profile=  api=  rpc=  webhook=   (or: internal only, port-forward)
 - load balancer: type / size units / loadBalancerSourceRanges   (Variant A)
 - Postgres: in-cluster (superuser password rotated at install) | other

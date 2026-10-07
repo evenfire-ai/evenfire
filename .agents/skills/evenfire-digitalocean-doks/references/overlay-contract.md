@@ -6,7 +6,7 @@ be exactly `digitalocean-doks`: `verify-networkpolicies.sh --overlay
 digitalocean-doks` and `np-enforce-preflight.sh` with `OVERLAY=digitalocean-doks`
 resolve `deploy/overlays/<name>`.
 
-Every file block below is rendered for both ingress variants, linted with
+Every file block below is rendered for all three ingress variants, linted with
 `deploy/scripts/lint-networkpolicies.sh`, and passed through `image-gate.rb`
 against the guide's validated release by
 `scripts/tests/test-doks-overlay-contract.sh`. If `RELEASE_TAG` differs from the
@@ -398,7 +398,7 @@ live). `REGISTRY_CONNECTION_MODE` defaults to `managed`, where the self-hosted
 connect flow never runs; `https://registry.evenfire.ai` is in control-api's
 built-in registry allowlist, and `control-api-external-egress` already allows
 outbound 443 (release doc `docs/how-to/connect-to-registry.md`). After install an
-admin connects once through Marketplace → Connect (Phase 8). Base ships
+admin connects once through Marketplace → Connect (guide Phase 6). Base ships
 `127.0.0.1` values that only work through a laptop
 port-forward. For an
 internal-only pilot use the agreed internal URLs. Leave

@@ -101,6 +101,27 @@ if command -v zsh >/dev/null; then
   zsh -n -c "$blk" 2>/dev/null || fail "admin setup block is not valid zsh"
 fi
 
+# Final-review fixes (fresh-install dead ends and re-run safety).
+guide_text="$(cat "$GUIDE")"
+blk() { ruby -e 'b=File.read(ARGV[0]).scan(/```bash\n(.*?)```/m).flatten.find{|x| x.include?(ARGV[1])}; puts b' "$GUIDE" "$1"; }
+grep -q 'not rolled out.*until the human' "$GUIDE" \
+  || fail "5.15 does not say the Host stays pending until the human sets the LLM key"
+grep -q 'pending the human' "$SKILL_DIR/references/verify.md" || fail "verify.md lacks the pending-Host note"
+hmac_blk="$(blk 'CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=')"
+printf '%s' "$hmac_blk" | grep -q 'control-api-internal-tokens' \
+  || fail "5.6 passes the HMAC secret without checking for an existing one (re-run rotates it)"
+grep -q 're-apply (5.9–5.12)' "$GUIDE" || fail "5.14 re-apply range must include 5.12"
+setup_blk2="$(blk '/api/v1/admin/auth/setup')"
+printf '%s' "$setup_blk2" | grep -q '/api/v1/admin/auth/login' || fail "admin claim block does not verify the login"
+printf '%s' "$setup_blk2" | grep -q -- '--arg p' && fail "admin password passed on jq argv"
+grep -q '### Recover a mis-claimed admin account' "$GUIDE" || fail "guide lacks the admin claim recovery"
+ruby -e '
+  g = File.read(ARGV[0])
+  p5 = g[/^## Phase 5 — Install.*?(?=^## Phase 6)/m] or abort "no Phase 5"
+  bad = p5.scan(/```bash\n(.*?)```/m).flatten.reject { |b| b.include?(".evenfire-doks/env.sh") }
+  abort "#{bad.size} Phase 5 block(s) do not source the env file" unless bad.empty?
+' "$GUIDE" 2>/dev/null || fail "Phase 5 blocks must each source the env file"
+
 # GFS credentials are reconciled before the overlay apply (docs/deploy/gfs-permission-store.md order).
 r_line="$(grep -n 'reconcile-gfs-deploy-credentials.sh' "$GUIDE" | head -1 | cut -d: -f1)"
 a_line="$(grep -n 'apply -f "$WORK/render.yaml"' "$GUIDE" | head -1 | cut -d: -f1)"
