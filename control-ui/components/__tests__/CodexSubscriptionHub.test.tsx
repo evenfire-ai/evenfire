@@ -19,8 +19,17 @@ import {
   revokeGrokSubscription,
   startGrokDeviceConnect,
 } from '@lib/grokSubscription'
+import { __resetReadRequestCacheForTests, setReadRequestPrincipal } from '@lib/readRequestCache'
 import { CodexSubscriptionHub } from '../CodexSubscriptionHub'
 import { ToastProvider } from '../Toast'
+
+// Capability consumers load only for a principal confirmed by /me (AuthContext).
+beforeEach(() => {
+  setReadRequestPrincipal('admin-one', 'admin')
+})
+afterEach(() => {
+  __resetReadRequestCacheForTests()
+})
 
 const confirmMock = vi.fn()
 
@@ -45,7 +54,15 @@ vi.mock('@lib/codexSubscriptionFeature', () => ({
 vi.mock('@lib/grokSubscriptionFeature', () => ({
   isGrokSubscriptionUiEnabled: (capability?: { enabled?: boolean } | null) =>
     capability?.enabled === true,
-  loadGrokSubscriptionCapability: () => capabilityProbes.grok(),
+}))
+
+vi.mock('@lib/subscriptionCapabilities', () => ({
+  loadSubscriptionCapabilities: async () => ({
+    providers: {
+      'codex-subscription': await capabilityProbes.codex(),
+      'grok-subscription': await capabilityProbes.grok(),
+    },
+  }),
 }))
 
 vi.mock('@lib/codexSubscription', async importOriginal => {
@@ -362,7 +379,10 @@ describe('CodexSubscriptionHub', () => {
     const signInHint = screen.getByText(/Agents authorize through this subscription/)
     expect(signInHint).toHaveTextContent('use Sync catalog to pick up models published since')
     expect(signInHint).not.toHaveTextContent('refreshes automatically')
-    expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
+    expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa', {
+      refresh: true,
+      signal: expect.any(AbortSignal),
+    })
     fireEvent.click(screen.getByLabelText('gpt-5.3-codex'))
     await waitFor(() => {
       expect(patchCodexCatalogModel).toHaveBeenCalledWith('codex-aaa', 'gpt-5.3-codex', true)
@@ -703,25 +723,50 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
     expect(screen.getByText('Team A')).toBeInTheDocument()
   })
 
-  it('surfaces a non-disabled Codex capability probe error while Grok is enabled', async () => {
-    capabilityProbes.codex.mockRejectedValue(new Error('codex probe boom'))
-    renderHub()
-    expect(await screen.findByText('Team Grok')).toBeInTheDocument()
-    expect(await screen.findByText(/codex probe boom/)).toBeInTheDocument()
-  })
-
-  it('surfaces a non-disabled Grok capability probe error while Codex is enabled', async () => {
-    capabilityProbes.grok.mockRejectedValue(new Error('grok probe boom'))
+  it('keeps both loaded provider inventories through a real throttle-shaped error and explicit recovery', async () => {
     renderHub()
     expect(await screen.findByText('Team A')).toBeInTheDocument()
-    expect(await screen.findByText(/grok probe boom/)).toBeInTheDocument()
+    expect(await screen.findByText('Team Grok')).toBeInTheDocument()
+    vi.mocked(listGrokSubscriptionConnections).mockRejectedValueOnce(
+      Object.assign(new Error('This request limit has been reached. Try again in 12 seconds.'), {
+        status: 429,
+        code: 'rate_limited',
+        retryAfterSeconds: 12,
+        body: { error: 'Too Many Requests', code: 'rate_limited', retryAfterSeconds: 12 },
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^Reload/ }))
+    expect(await screen.findByText(/Try again in 12 seconds/)).toBeInTheDocument()
+    expect(screen.getByText('Team A')).toBeInTheDocument()
+    expect(screen.getByText('Team Grok')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Reload/ }))
+    await waitFor(() => expect(screen.queryByText(/Try again in 12 seconds/)).toBeNull())
+    expect(screen.getByText('Team Grok')).toBeInTheDocument()
+    expect(startGrokDeviceConnect).not.toHaveBeenCalled()
+    expect(pollGrokDevice).not.toHaveBeenCalled()
+    expect(revokeGrokSubscription).not.toHaveBeenCalled()
   })
 
-  it('surfaces a non-disabled Grok capability probe error when Codex is disabled', async () => {
+  it('surfaces a shared capability read error without inventing provider connectivity', async () => {
+    capabilityProbes.codex.mockRejectedValue(new Error('codex probe boom'))
+    renderHub()
+    expect(await screen.findByText(/codex probe boom/)).toBeInTheDocument()
+    expect(screen.queryByText('Team Grok')).not.toBeInTheDocument()
+  })
+
+  it('surfaces a Grok capability read error without treating it as a confirmed disabled flag', async () => {
+    capabilityProbes.grok.mockRejectedValue(new Error('grok probe boom'))
+    renderHub()
+    expect(await screen.findByText(/grok probe boom/)).toBeInTheDocument()
+    expect(screen.queryByText('Team A')).not.toBeInTheDocument()
+  })
+
+  it('keeps a capability error distinct from both integrations being disabled', async () => {
     capabilityProbes.codex.mockResolvedValue({ enabled: false })
     capabilityProbes.grok.mockRejectedValue(new Error('grok probe boom'))
     renderHub()
     expect(await screen.findByText(/grok probe boom/)).toBeInTheDocument()
+    expect(screen.queryByText(/Coding-plan subscriptions are disabled/)).not.toBeInTheDocument()
   })
 
   it('keeps same-key Codex and Grok rows independent for keys, busy state and edit-close', async () => {
