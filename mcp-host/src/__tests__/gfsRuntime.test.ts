@@ -57,12 +57,42 @@ describe('GFS runtime bootstrap', () => {
       .mockImplementation(async () => {
         cleanupStarted.resolve()
       })
+    // Fake timers keep each retry out of the old writer's close(). With real
+    // timers a 25 ms retry can start verifying the in-process prior owner and
+    // see it release mid-verification; that is classified as ambiguous
+    // ownership (non-transient), the retry ends in recovery-required state and
+    // cleanup never starts. Under host load this hung the test until the 5 s
+    // timeout. Store I/O stays real; only the retry schedule is controlled.
+    vi.useFakeTimers()
+    const initialize = vi.spyOn(GfsDownloadStore.prototype, 'initialize')
     const runtime = await bootstrapGfsRuntime(value, { retryDelayMs: 25, maxRetryAttempts: 40 })
     runtimes.push(runtime)
     expect(runtime.store.isAvailable()).toBe(false)
     expect(cleanup).not.toHaveBeenCalled()
+    await expect(initialize.mock.results[0]!.value).rejects.toMatchObject({
+      code: 'writer_locked',
+      transientWriterContention: true,
+    })
+    expect(vi.getTimerCount()).toBe(1)
+
+    // A retry while the old writer still holds stays verified contention and
+    // schedules the next retry instead of ending the supervision.
+    await vi.advanceTimersByTimeAsync(25)
+    expect(initialize).toHaveBeenCalledTimes(2)
+    await expect(initialize.mock.results[1]!.value).rejects.toMatchObject({
+      code: 'writer_locked',
+      transientWriterContention: true,
+    })
+    // The settled rejection reschedules through promise callbacks only; flush
+    // microtasks without advancing the fake clock.
+    for (let turn = 0; turn < 20 && vi.getTimerCount() === 0; turn += 1) await Promise.resolve()
+    expect(vi.getTimerCount()).toBe(1)
+    expect(runtime.store.isAvailable()).toBe(false)
+    expect(cleanup).not.toHaveBeenCalled()
 
     await first.close()
+    await vi.advanceTimersByTimeAsync(25)
+    expect(initialize).toHaveBeenCalledTimes(3)
     await cleanupStarted.promise
     expect(runtime.store.isAvailable()).toBe(true)
     expect(cleanup).toHaveBeenCalledOnce()

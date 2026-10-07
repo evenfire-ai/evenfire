@@ -53,6 +53,19 @@ function future(ms = 60_000): string {
 
 const CALLER = 'caller-a'
 
+/**
+ * Timeout for tests that publish the full default host retained-file cap (64
+ * records). Each publication is durable on purpose: about 5.4 fsyncs and 6.3
+ * writer-ownership verifications per record, constant per record (no growth
+ * with ledger size). Measured on the development host for 64 one-byte
+ * publications: 3.2-8.9 s at load average 27-38, worst 13.2 s at load 37;
+ * fsync alone is 46-54% of it. In the full suite with 7 extra busy processes
+ * (load average 37-68) these tests took 11.3 s and 13.4 s. The default 5 s
+ * timeout cannot hold that work under load, and fewer records would no longer
+ * reach the default cap.
+ */
+const DEFAULT_CAP_PUBLICATION_TIMEOUT_MS = 30_000
+
 let hostRoot: string
 let callerRoot: string
 let store: GfsDownloadStore
@@ -263,31 +276,35 @@ describe('GFS download store adversarial quota', () => {
     await store.releaseReceiptOwner('byte-owner', CALLER)
   })
 
-  it('denies the 65th pinned record at the host retained-file cap', async () => {
-    const callers: string[] = []
-    for (let callerIndex = 0; callerIndex < 8; callerIndex += 1) {
-      const caller = `caller-${callerIndex}`
-      const root = await callerDirectory(hostRoot, caller)
-      callers.push(caller)
-      for (let file = 0; file < GFS_FILE_LIMITS.callerRetainedFiles; file += 1) {
-        await completedCopy(store, root, caller, callerIndex * 10 + file, 1, 1, `${caller}-owner`)
+  it(
+    'denies the 65th pinned record at the host retained-file cap',
+    async () => {
+      const callers: string[] = []
+      for (let callerIndex = 0; callerIndex < 8; callerIndex += 1) {
+        const caller = `caller-${callerIndex}`
+        const root = await callerDirectory(hostRoot, caller)
+        callers.push(caller)
+        for (let file = 0; file < GFS_FILE_LIMITS.callerRetainedFiles; file += 1) {
+          await completedCopy(store, root, caller, callerIndex * 10 + file, 1, 1, `${caller}-owner`)
+        }
       }
-    }
-    expect(store.debugUsage()).toMatchObject({ files: 64 })
+      expect(store.debugUsage()).toMatchObject({ files: 64 })
 
-    const freshRoot = await callerDirectory(hostRoot, 'caller-z')
-    await expect(
-      store.createTransfer({
-        callerIdentity: 'caller-z',
-        callerWorkspacePath: freshRoot,
-        source: sourceFor(999, 1),
-        sizeBytes: 1,
-        expiresAt: future(),
-      })
-    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
-    expect(store.debugUsage()).toMatchObject({ files: 64 })
-    for (const caller of callers) await store.releaseReceiptOwner(`${caller}-owner`, caller)
-  })
+      const freshRoot = await callerDirectory(hostRoot, 'caller-z')
+      await expect(
+        store.createTransfer({
+          callerIdentity: 'caller-z',
+          callerWorkspacePath: freshRoot,
+          source: sourceFor(999, 1),
+          sizeBytes: 1,
+          expiresAt: future(),
+        })
+      ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+      expect(store.debugUsage()).toMatchObject({ files: 64 })
+      for (const caller of callers) await store.releaseReceiptOwner(`${caller}-owner`, caller)
+    },
+    DEFAULT_CAP_PUBLICATION_TIMEOUT_MS
+  )
 
   it('rolls back charge, owner pins, and active slots when mkdir fails with proven absence', async () => {
     await fs.chmod(callerRoot, 0o500)
@@ -746,31 +763,36 @@ describe('GFS download store physical capacity and reclaim', () => {
       await target.releaseReceiptOwner(`${identity}-owner`, identity)
   })
 
-  it('keeps all default-cap small copies when current physical capacity is zero', async () => {
-    const { root, store: target } = await setup({
-      MCP_HOST_GFS_MAX_FILE_BYTES: '1024',
-      MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: String(1024 * 1024),
-      MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: String(128 * 1024),
-    })
-    const receipts = []
-    for (let index = 0; index < 8; index++) {
-      const identity = `caller-${index}`
-      const directory = await callerDirectory(root, identity)
-      for (let file = 0; file < 8; file++) receipts.push(await copy(target, directory, identity, 1))
-    }
-    await capacity(root, 0)
-    await expect(
-      target.createTransfer({
-        callerIdentity: 'caller-new',
-        callerWorkspacePath: await callerDirectory(root, 'caller-new'),
-        source: capacitySource,
-        sizeBytes: 1,
-        expiresAt: future(),
+  it(
+    'keeps all default-cap small copies when current physical capacity is zero',
+    async () => {
+      const { root, store: target } = await setup({
+        MCP_HOST_GFS_MAX_FILE_BYTES: '1024',
+        MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: String(1024 * 1024),
+        MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: String(128 * 1024),
       })
-    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
-    expect(target.debugUsage().files).toBe(64)
-    for (const receipt of receipts) expect(target.debugRecord(receipt.id)).toBeDefined()
-  })
+      const receipts = []
+      for (let index = 0; index < 8; index++) {
+        const identity = `caller-${index}`
+        const directory = await callerDirectory(root, identity)
+        for (let file = 0; file < 8; file++)
+          receipts.push(await copy(target, directory, identity, 1))
+      }
+      await capacity(root, 0)
+      await expect(
+        target.createTransfer({
+          callerIdentity: 'caller-new',
+          callerWorkspacePath: await callerDirectory(root, 'caller-new'),
+          source: capacitySource,
+          sizeBytes: 1,
+          expiresAt: future(),
+        })
+      ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+      expect(target.debugUsage().files).toBe(64)
+      for (const receipt of receipts) expect(target.debugRecord(receipt.id)).toBeDefined()
+    },
+    DEFAULT_CAP_PUBLICATION_TIMEOUT_MS
+  )
 
   it('respects pending active reservations before any cache-pressure effect', async () => {
     const { root, store: target } = await setup({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '1' })
