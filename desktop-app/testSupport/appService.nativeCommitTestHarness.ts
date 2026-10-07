@@ -32,8 +32,6 @@ export type NativeCommitTestService = {
   sessionToken: string | null
   me: { id: string } | null
   gfsScopeIdentity: { ownerId: string; environmentKey: string; baseUrl: string } | null
-  updateDesktopGfsUploadState: ReturnType<typeof vi.fn>
-  readDesktopGfsUploadState: ReturnType<typeof vi.fn>
   googleLogin: (token: string) => Promise<unknown>
   logout: () => Promise<number>
   selectRuntimeConfig: (optionId: string) => Promise<unknown>
@@ -102,9 +100,6 @@ export async function createNativeCommitTestHarness() {
     getSessionToken: vi.fn().mockResolvedValue(null),
     setSessionToken: vi.fn().mockResolvedValue(undefined),
   } as never
-  service.updateDesktopGfsUploadState = vi.fn().mockResolvedValue(undefined)
-  service.readDesktopGfsUploadState = vi.fn().mockResolvedValue({ version: 1, records: [] })
-
   return { service, runtimeConfig, restA, restB, optionA, optionB }
 }
 

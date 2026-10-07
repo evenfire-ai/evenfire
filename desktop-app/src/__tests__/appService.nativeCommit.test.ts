@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
 import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
@@ -8,6 +9,72 @@ import {
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService native auth and environment commit ordering', () => {
+  it('persists real version-2 GFS state as suspended_auth on logout', async () => {
+    const { service, runtimeConfig } = await createNativeCommitTestHarness()
+    const me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    service.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me }),
+    } as never
+    await service.googleLogin('synthetic-google-token')
+    const app = service as unknown as {
+      gfsScopeIdentity: {
+        ownerId: string
+        teamId: string | null
+        environmentKey: string
+        baseUrl: string
+      }
+      gfsAuthEpoch: number
+      persistDesktopGfsUpload(record: unknown): Promise<void>
+      desktopGfsUploadStatePath(): Promise<string>
+    }
+    const identity = app.gfsScopeIdentity
+    const uploadId = '92929292-9292-4292-8292-929292929292'
+    await app.persistDesktopGfsUpload({
+      version: 2,
+      uploadId,
+      filePath: '/tmp/payload.bin',
+      fileName: 'payload.bin',
+      fileSize: 4,
+      target: { operation: 'create', parentRid: 'parent-a' },
+      name: 'payload.bin',
+      session: {
+        uploadId,
+        drive: 'main',
+        operation: 'create',
+        expectedBytes: 4,
+        partBytes: 4,
+        partCount: 1,
+        state: 'uploading',
+        contiguousBytes: 0,
+        committedBytes: 0,
+        committedPartCount: 0,
+        activePartCount: 0,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      scope: { ...identity, drive: 'main', authEpoch: app.gfsAuthEpoch },
+      status: 'active',
+      updatedAt: new Date().toISOString(),
+    })
+
+    await service.logout()
+
+    const statePath = await app.desktopGfsUploadStatePath()
+    const state = JSON.parse(await fs.readFile(statePath, 'utf8')) as {
+      version: number
+      records: Array<{ uploadId: string; status: string }>
+    }
+    expect(state.version).toBe(2)
+    expect(state.records).toEqual([expect.objectContaining({ uploadId, status: 'suspended_auth' })])
+  })
+
   it('rejects desktop setup while preserving the active authenticated environment', async () => {
     const { service, runtimeConfig, restA, restB } = await createNativeCommitTestHarness()
     const me = { id: 'user-a', email: 'user-a@example.test', teamId: 'team-a' }
