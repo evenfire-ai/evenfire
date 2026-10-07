@@ -31,8 +31,8 @@ vi.mock('@lib/queryClient', () => ({
 const targetEnvironment = {
   appName: 'Example tenant',
   externalRestApiBaseUrl: 'https://api.example.test',
-  rpcProxyBaseUrl: 'https://rpc.example.test',
 }
+const targetRpcProxyBaseUrl = 'https://rpc.example.test'
 
 const otherEnvironment = {
   appName: 'Other tenant',
@@ -93,7 +93,9 @@ function Probe() {
   )
 }
 
-async function dispatchDesktopEnvironmentLink(payload = targetEnvironment) {
+async function dispatchDesktopEnvironmentLink(
+  payload: DesktopEnvironmentSetupPayload = targetEnvironment
+) {
   if (!desktopEnvironmentSetupListener) {
     throw new Error('Desktop environment listener was not registered')
   }
@@ -107,7 +109,7 @@ async function savedTargetOptionId(): Promise<string> {
   const option = state.options.find(
     candidate =>
       candidate.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1` &&
-      candidate.rpcProxyBaseUrl === `${targetEnvironment.rpcProxyBaseUrl}/rpc`
+      candidate.rpcProxyBaseUrl === `${targetRpcProxyBaseUrl}/rpc`
   )
   if (!option) throw new Error('The runtime config producer did not return the saved target')
   return option.id
@@ -141,7 +143,7 @@ beforeEach(async () => {
   await runtimeConfigModule.saveDesktopRuntimeConfig({
     ...targetEnvironment,
     externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
-    rpcProxyBaseUrl: `${targetEnvironment.rpcProxyBaseUrl}/rpc`,
+    rpcProxyBaseUrl: `${targetRpcProxyBaseUrl}/rpc`,
   })
   await runtimeConfigModule.saveDesktopRuntimeConfig(otherEnvironment)
 
@@ -275,11 +277,11 @@ describe('Desktop environment handoff', () => {
     )
   })
 
-  it('selects a saved REST environment without trusting the linked RPC proxy', async () => {
+  it('selects a saved environment by its REST endpoint', async () => {
     await runtimeConfigModule!.saveDesktopRuntimeConfig({
       ...targetEnvironment,
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
-      rpcProxyBaseUrl: `${targetEnvironment.rpcProxyBaseUrl}/rpc`,
+      rpcProxyBaseUrl: `${targetRpcProxyBaseUrl}/rpc`,
     })
     const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
     const otherOption = state.options.find(
@@ -293,7 +295,6 @@ describe('Desktop environment handoff', () => {
     await dispatchDesktopEnvironmentLink({
       ...targetEnvironment,
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
-      rpcProxyBaseUrl: 'https://rpc.attacker.test',
     })
 
     expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(await savedTargetOptionId(), 0)
@@ -304,13 +305,14 @@ describe('Desktop environment handoff', () => {
         option =>
           option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
       )?.rpcProxyBaseUrl
-    ).toBe(`${targetEnvironment.rpcProxyBaseUrl}/rpc`)
+    ).toBe(`${targetRpcProxyBaseUrl}/rpc`)
   })
 
   it('selects a saved REST profile without saving or rediscovering its RPC when the link omits RPC', async () => {
     await runtimeConfigModule!.saveDesktopRuntimeConfig({
       ...targetEnvironment,
       appName: 'Example base API',
+      rpcProxyBaseUrl: targetRpcProxyBaseUrl,
     })
     const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
     const pathBasedTarget = state.options.find(
@@ -324,7 +326,7 @@ describe('Desktop environment handoff', () => {
     const savedTarget = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
       option =>
         option.externalRestApiBaseUrl === targetEnvironment.externalRestApiBaseUrl &&
-        option.rpcProxyBaseUrl === targetEnvironment.rpcProxyBaseUrl
+        option.rpcProxyBaseUrl === targetRpcProxyBaseUrl
     )
     if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
     // The frozen Date.now value makes the historical slug+timestamp collision
@@ -364,7 +366,7 @@ describe('Desktop environment handoff', () => {
     const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
     expect(finalState.options.find(option => option.id === savedTarget.id)).toMatchObject({
       externalRestApiBaseUrl: targetEnvironment.externalRestApiBaseUrl,
-      rpcProxyBaseUrl: targetEnvironment.rpcProxyBaseUrl,
+      rpcProxyBaseUrl: targetRpcProxyBaseUrl,
       appName: 'Example base API',
     })
     expect(serviceInternals.authClient.getDesktopEnvironment).not.toHaveBeenCalled()
@@ -378,7 +380,6 @@ describe('Desktop environment handoff', () => {
     const linkedEnvironment = {
       appName: 'New tenant',
       externalRestApiBaseUrl: 'https://new-api.example.test',
-      rpcProxyBaseUrl: '',
     }
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
@@ -460,7 +461,6 @@ describe('Desktop environment handoff', () => {
     const linkedEnvironment = {
       appName: 'New tenant',
       externalRestApiBaseUrl: 'https://new-api.example.test',
-      rpcProxyBaseUrl: 'https://rpc.untrusted.test',
     }
     const { AppService } = await import('../../../../../src/appService')
     const service = new AppService()
@@ -505,11 +505,10 @@ describe('Desktop environment handoff', () => {
     )
   })
 
-  it('does not retain an RPC proxy supplied by a new environment link', async () => {
+  it('leaves RPC discovery to the backend for a REST-only environment link', async () => {
     const linkedEnvironment = {
       appName: 'New tenant',
       externalRestApiBaseUrl: 'https://new-api.example.test',
-      rpcProxyBaseUrl: 'https://rpc.attacker.test',
     }
 
     render(<Probe />)
@@ -714,7 +713,6 @@ describe('Desktop environment handoff', () => {
     await dispatchDesktopEnvironmentLink({
       appName: localhostOption.appName,
       externalRestApiBaseUrl: localhostOption.externalRestApiBaseUrl,
-      rpcProxyBaseUrl: localhostOption.rpcProxyBaseUrl,
     })
 
     expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
@@ -747,7 +745,6 @@ describe('Desktop environment handoff', () => {
     const linkedEnvironment = {
       appName: 'API v2 tenant',
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v2`,
-      rpcProxyBaseUrl: '',
     }
     const { AppService } = await import('../../../../../src/appService')
     const service = new AppService()
