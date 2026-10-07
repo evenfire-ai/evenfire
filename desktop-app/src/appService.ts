@@ -1645,6 +1645,10 @@ export class AppService {
         // list only its own scoped records and must explicitly resume one, at
         // which point the record is rebound to this newly activated auth epoch.
         this.activateGfsAuthScope()
+        // A successful restore publishes a new auth owner. Invalidate pending
+        // setup and other work prepared against the signed-out generation only
+        // after the restored session and its GFS scope are coherent.
+        this.sessionGeneration += 1
         return { authenticated: true, me: restoredMe }
       })
       if (session.authenticated && options.runLaunchMaintenance) {
@@ -2136,6 +2140,9 @@ export class AppService {
       }
 
       const committedGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
+        if (this.sessionToken && this.me) {
+          throw new Error('desktop_setup_requires_signout')
+        }
         this.assertSessionGeneration(setupGeneration)
         await saveDesktopRuntimeConfig({
           externalRestApiBaseUrl: activation.externalRestApiBaseUrl,
