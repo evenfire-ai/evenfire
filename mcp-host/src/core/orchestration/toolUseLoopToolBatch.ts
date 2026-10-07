@@ -58,7 +58,7 @@ function resolveBridgeCall(
   toolResults: ToolResult[],
   // Computed ONCE per batch by `executeToolCalls` and passed in, so we don't
   // re-derive the (potentially 290-entry) deferrable catalog Set on every call.
-  // `undefined` when the bridge is inactive (flag OFF) — no work to do.
+  // `undefined` when no bridge tools are registered — no work to do.
   deferrableCatalogNames: Set<string> | undefined
 ): ToolCall | 'handled' {
   const bridge = config.bridge
@@ -198,8 +198,8 @@ export async function executeToolCalls(
   const { loopController, events } = config
   const toolResults: ToolResult[] = []
   // F3.2 — derive the deferrable catalog Set ONCE for the whole batch instead of
-  // per call (it can hold ~290 names). `undefined` when the bridge is inactive
-  // (flag OFF) so `resolveBridgeCall` short-circuits with no work.
+  // per call (it can hold ~290 names). `undefined` when no bridge tools are
+  // registered, so `resolveBridgeCall` short-circuits with no work.
   const deferrableCatalogNames = config.bridge?.getDeferrableCatalogNames()
   // Crit #2: the batch shares ONE LLM call's usage — attach it to the first
   // reportToolComplete actually emitted (NOT strictly i === 0; the validation
@@ -213,7 +213,8 @@ export async function executeToolCalls(
     // Runs at the TOP of the per-call loop, BEFORE `beforeExecution` (:29) and
     // `beforeTool` (:49), so that validation and approval run against the REAL
     // target tool, not the opaque bridge envelope. The intercept unwraps the
-    // bridge call into a SYNTHETIC call against the real MCP tool, preserving
+    // bridge call into a SYNTHETIC call against the real target (an MCP tool, or a
+    // native when `bridge.nativeTargets`), preserving
     // `call.id` (LOCKED #9) so the provider pairs the tool_result by
     // tool_use_id. Direct calls to deferred MCP tools (Critical #9) are also
     // routed through the same scope gate here. A `'handled'` return means an

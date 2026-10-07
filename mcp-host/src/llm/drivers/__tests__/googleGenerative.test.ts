@@ -232,6 +232,38 @@ describe('GoogleGenerativeDriver — tool round-trip', () => {
       'resp:file_read=file content',
     ])
   })
+
+  it('resolves an id only against the preceding assistant turn', async () => {
+    const { client, generateContent } = mockClient({
+      candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+    })
+    const driver = new GoogleGenerativeDriver(client, 'gemini-2.5-pro')
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call_0', name: 'search', arguments: {} }],
+      },
+      { role: 'tool', name: 'search', content: 'r1', tool_call_id: 'call_0' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'file_read', arguments: {} }],
+      },
+      // Witness: an id of this turn resolves through the map.
+      { role: 'tool', content: 'r2', tool_call_id: 'call_1' },
+      // `call_0` belongs to the earlier turn, not this one: the message keeps its own name.
+      { role: 'tool', name: 'late_result', content: 'r3', tool_call_id: 'call_0' },
+    ]
+    await driver.completeSingleTurnWithTools(messages, [])
+
+    const responses = generateContent.mock.calls[0][0].contents
+      .flatMap((c: { parts: Array<{ functionResponse?: { name: string } }> }) => c.parts)
+      .filter((p: { functionResponse?: { name: string } }) => p.functionResponse)
+      .map((p: { functionResponse: { name: string } }) => p.functionResponse.name)
+    expect(responses).toEqual(['search', 'file_read', 'late_result'])
+  })
 })
 
 describe('GoogleGenerativeDriver — finish reasons', () => {

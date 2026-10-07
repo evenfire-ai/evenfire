@@ -718,7 +718,10 @@ the grant; revoke of one key fail-closes only that assignment.
 `CODEX_TOOL_PRESENTATION=auto|direct|discovery` controls presentation, not access.
 Direct is the default when the primary or an allowed fallback uses Codex. It
 presents all approved definitions without the search/describe/call discovery bridge,
-regardless of the discovery thresholds or legacy dynamic-tools flag.
+regardless of the discovery thresholds or legacy dynamic-tools flag. The exception is
+`CLERUM_NATIVE_TOOL_PRESENTATION=auto` (see below): it adds the three bridge tools so
+that natives hidden by the native budget stay reachable; MCP tools are still presented
+directly.
 Explicitly selecting auto uses discovery above the existing
 `CLERUM_DYNAMIC_TOOLS_THRESHOLD` (60) or `CODEX_TOOL_DISCOVERY_BYTES`
 (32768 serialized MCP definition bytes). These
