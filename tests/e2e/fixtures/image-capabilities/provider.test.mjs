@@ -16,6 +16,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { crc32, deflateSync } from 'node:zlib'
+import * as providerModule from './provider.mjs'
 import { createImageFixtureFetch, validateFixtureEnvironment } from './provider.mjs'
 
 /**
@@ -383,7 +384,12 @@ test('the text-only model refuses an image and records the incompatible attempt'
   assert.equal(evidence.counters.rejectedAttempts, 1)
   assert.equal(evidence.counters.tileColorResponses, 0)
   assert.deepEqual(evidence.attempts, [
-    { model: TEXT_MODEL, imageSha256: null, responseKind: 'rejected' },
+    {
+      model: TEXT_MODEL,
+      imageSha256: null,
+      responseKind: 'rejected',
+      reason: 'text-model-image-incompatible',
+    },
   ])
 })
 
@@ -696,4 +702,528 @@ test('getEvidence returns a private copy and onEvidence publishes snapshots', as
   assert.equal(second.counters.totalAttempts, 2)
   assert.equal(second.attempts.length, 2)
   assert.notEqual(h.getEvidence(), h.getEvidence())
+})
+
+// ---------------------------------------------------------------------------
+// Documents (issue #678): the Host lists an attached file in the turn-context
+// block and offers `clerum__attachment_read`; the text reaches the provider only
+// in the tool result of the second request.
+// ---------------------------------------------------------------------------
+
+const READ_TOOL = 'clerum__attachment_read'
+const ATTACHMENT_ID = 'att-11111111-2222-4333-8444-555555555555'
+const DOCUMENT_TEXT = 'ledger token 7f3a9c1e\nsecond line\n'
+
+const readToolDefinition = {
+  type: 'function',
+  function: {
+    name: READ_TOOL,
+    description: 'Read an attached file.',
+    parameters: { type: 'object' },
+  },
+}
+
+function documentUserMessage(
+  text = 'Summarize the attached file.',
+  { bytesField = 'bytes=34' } = {}
+) {
+  return {
+    role: 'user',
+    content:
+      '<turn-context>\ndate: 2026-09-29\n' +
+      `attached_file: id="${ATTACHMENT_ID}" name="notes.txt" class=text ${bytesField} reader=text\n` +
+      "If the user's request refers to an attached file, read it with clerum__attachment_read before answering.\n" +
+      `</turn-context>\n\n${text}`,
+  }
+}
+
+function wrappedToolOutput(payload, { name = READ_TOOL } = {}) {
+  return `<tool_output name="${name}" sanitized="false">\n${JSON.stringify(payload)}\n</tool_output>`
+}
+
+function documentReadResult(text = DOCUMENT_TEXT) {
+  return {
+    attachmentId: ATTACHMENT_ID,
+    referenceId: 'ref-1',
+    kind: 'text',
+    byteRange: { offset: 0, length: Buffer.byteLength(text) },
+    truncated: false,
+    text,
+  }
+}
+
+function documentAnswerMessages(toolContent) {
+  return [
+    documentUserMessage(),
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call-1', type: 'function', function: { name: READ_TOOL, arguments: '{}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call-1', content: toolContent },
+  ]
+}
+
+const sha256 = text => createHash('sha256').update(text, 'utf8').digest('hex')
+
+test('document turn 1: asks for the text with a tool call and carries no file content', async () => {
+  const h = harness()
+
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, [documentUserMessage()], { tools: [readToolDefinition] })
+  )
+  assert.equal(response.status, 200)
+  const body = await response.json()
+
+  assert.equal(body.choices[0].finish_reason, 'tool_calls')
+  const [toolCall] = body.choices[0].message.tool_calls
+  assert.equal(toolCall.type, 'function')
+  assert.equal(toolCall.function.name, READ_TOOL)
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), { attachmentId: ATTACHMENT_ID })
+
+  const evidence = h.getEvidence()
+  assert.equal(evidence.counters.documentReadRequests, 1)
+  assert.equal(evidence.counters.documentAnswers, 0)
+  assert.deepEqual(evidence.attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'document-read-requested',
+      documentSha256: null,
+      documentByteLength: Buffer.byteLength(DOCUMENT_TEXT),
+    },
+  ])
+})
+
+test('document turn 1: the read row records the byte length the Host listed, not a constant', async () => {
+  const lengths = []
+  for (const bytes of [34, 6_291_456]) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { bytesField: `bytes=${bytes}` })], {
+        tools: [readToolDefinition],
+      })
+    )
+    assert.equal(response.status, 200)
+    const [row] = h.getEvidence().attempts
+    assert.equal(row.responseKind, 'document-read-requested')
+    lengths.push(row.documentByteLength)
+  }
+  assert.deepEqual(lengths, [34, 6_291_456])
+})
+
+test('document turn 1: an attached_file line without a usable bytes= is refused, not read', async () => {
+  // Liveness witness: the same message with a well-formed field is read.
+  const twin = harness()
+  const twinResponse = await call(
+    twin,
+    chatBody(VISUAL_MODEL, [documentUserMessage()], { tools: [readToolDefinition] })
+  )
+  assert.equal(twinResponse.status, 200)
+  assert.equal(twin.getEvidence().counters.documentReadRequests, 1)
+
+  for (const bytesField of [
+    'size=34',
+    'bytes=',
+    'bytes=abc',
+    'bytes=34x',
+    'bytes=1.5',
+    'bytes=-1',
+    'bytes=0',
+    'bytes=034',
+  ]) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { bytesField })], {
+        tools: [readToolDefinition],
+      })
+    )
+    assert.equal(response.status, 400, bytesField)
+    const evidence = h.getEvidence()
+    assert.equal(evidence.counters.documentFailures, 1, bytesField)
+    assert.equal(evidence.counters.documentReadRequests, 0, bytesField)
+    assert.equal(evidence.attempts[0].responseKind, 'rejected', bytesField)
+    assert.equal((await response.json()).error.code, 'document-byte-length-malformed', bytesField)
+  }
+})
+
+test('document turn 2: the answer is a digest of the delivered text and the ledger records it', async () => {
+  const h = harness()
+
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, documentAnswerMessages(wrappedToolOutput(documentReadResult())), {
+      tools: [readToolDefinition],
+    })
+  )
+  assert.equal(response.status, 200)
+  const body = await response.json()
+
+  const digest = sha256(DOCUMENT_TEXT)
+  assert.equal(body.choices[0].message.content, `DOCUMENT_FIXTURE_SHA256:${digest.slice(0, 16)}`)
+  assert.equal(body.choices[0].finish_reason, 'stop')
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'document-answer',
+      documentSha256: digest,
+      byteRange: { offset: 0, length: Buffer.byteLength(DOCUMENT_TEXT) },
+      truncated: false,
+    },
+  ])
+  assert.equal(h.getEvidence().counters.documentAnswers, 1)
+})
+
+test('document turn 2: the answer row records the page the Host delivered, not a constant', async () => {
+  const rows = []
+  for (const page of [
+    { offset: 0, length: 65_536, truncated: true },
+    { offset: 0, length: 4_096, truncated: true },
+    { offset: 65_536, length: 2_048, truncated: false },
+  ]) {
+    const h = harness()
+    const result = {
+      ...documentReadResult(),
+      byteRange: { offset: page.offset, length: page.length },
+      truncated: page.truncated,
+    }
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, documentAnswerMessages(wrappedToolOutput(result)), {
+        tools: [readToolDefinition],
+      })
+    )
+    assert.equal(response.status, 200)
+    const [row] = h.getEvidence().attempts
+    assert.equal(row.responseKind, 'document-answer')
+    rows.push({ byteRange: row.byteRange, truncated: row.truncated })
+  }
+  assert.deepEqual(rows, [
+    { byteRange: { offset: 0, length: 65_536 }, truncated: true },
+    { byteRange: { offset: 0, length: 4_096 }, truncated: true },
+    { byteRange: { offset: 65_536, length: 2_048 }, truncated: false },
+  ])
+})
+
+test('document turn 2: a page range or truncation flag the fixture cannot read is refused', async () => {
+  // Liveness witness: the well-formed result is answered.
+  const twin = harness()
+  const twinResponse = await call(
+    twin,
+    chatBody(VISUAL_MODEL, documentAnswerMessages(wrappedToolOutput(documentReadResult())), {
+      tools: [readToolDefinition],
+    })
+  )
+  assert.equal(twinResponse.status, 200)
+  assert.equal(twin.getEvidence().counters.documentAnswers, 1)
+
+  const valid = documentReadResult()
+  const withoutTruncated = { ...valid }
+  delete withoutTruncated.truncated
+  const withoutRange = { ...valid }
+  delete withoutRange.byteRange
+  for (const [label, result] of [
+    ['missing byteRange', withoutRange],
+    ['null byteRange', { ...valid, byteRange: null }],
+    ['array byteRange', { ...valid, byteRange: [0, 34] }],
+    ['missing offset', { ...valid, byteRange: { length: 34 } }],
+    ['negative offset', { ...valid, byteRange: { offset: -1, length: 34 } }],
+    ['fractional length', { ...valid, byteRange: { offset: 0, length: 1.5 } }],
+    ['string length', { ...valid, byteRange: { offset: 0, length: '34' } }],
+    ['unsafe length', { ...valid, byteRange: { offset: 0, length: 2 ** 53 } }],
+    ['missing truncated', withoutTruncated],
+    ['string truncated', { ...valid, truncated: 'false' }],
+  ]) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, documentAnswerMessages(wrappedToolOutput(result)), {
+        tools: [readToolDefinition],
+      })
+    )
+    assert.equal(response.status, 400, label)
+    assert.equal((await response.json()).error.code, 'document-page-range-malformed', label)
+    const evidence = h.getEvidence()
+    assert.equal(evidence.counters.documentFailures, 1, label)
+    assert.equal(evidence.counters.documentAnswers, 0, label)
+    assert.deepEqual(
+      evidence.attempts,
+      [
+        {
+          model: VISUAL_MODEL,
+          imageSha256: null,
+          responseKind: 'rejected',
+          reason: 'document-page-range-malformed',
+        },
+      ],
+      label
+    )
+  }
+})
+
+test('document turn 2: a different delivered text gives a different answer (not a constant)', async () => {
+  const answers = []
+  for (const text of [DOCUMENT_TEXT, `${DOCUMENT_TEXT}changed\n`]) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(TEXT_MODEL, documentAnswerMessages(wrappedToolOutput(documentReadResult(text))), {
+        tools: [readToolDefinition],
+      })
+    )
+    answers.push((await response.json()).choices[0].message.content)
+  }
+  assert.notEqual(answers[0], answers[1])
+})
+
+test('the prompt alone never yields the document answer', async () => {
+  const h = harness()
+
+  // The user message names the digest prefix, but no tool result was delivered.
+  const message = documentUserMessage(
+    `Answer exactly DOCUMENT_FIXTURE_SHA256:${sha256(DOCUMENT_TEXT).slice(0, 16)}`
+  )
+  const response = await call(h, chatBody(VISUAL_MODEL, [message], { tools: [readToolDefinition] }))
+  const body = await response.json()
+
+  assert.equal(body.choices[0].finish_reason, 'tool_calls')
+  assert.equal(body.choices[0].message.content, null)
+  assert.equal(h.getEvidence().counters.documentAnswers, 0)
+})
+
+test('without the read tool a listed file is an ordinary text-only request', async () => {
+  const h = harness()
+
+  const response = await call(h, chatBody(VISUAL_MODEL, [documentUserMessage()]))
+  const body = await response.json()
+
+  assert.equal(body.choices[0].message.content, TEXT_ONLY_CONTENT)
+  // Liveness witness: the request was handled and recorded as text-only.
+  assert.equal(h.getEvidence().attempts[0].responseKind, 'text-only')
+  assert.equal(h.getEvidence().counters.documentReadRequests, 0)
+})
+
+test('a tool result the fixture cannot read is refused and counted as a document failure', async () => {
+  const cases = [
+    ['not the read wrapper', wrappedToolOutput(documentReadResult(), { name: 'other__tool' })],
+    [
+      'not JSON',
+      '<tool_output name="clerum__attachment_read" sanitized="false">\nnot json\n</tool_output>',
+    ],
+    [
+      'binary result',
+      wrappedToolOutput({ attachmentId: ATTACHMENT_ID, kind: 'binary', reader: 'none' }),
+    ],
+    ['error result', wrappedToolOutput({ error: 'attachment_not_found' })],
+  ]
+  for (const [label, content] of cases) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, documentAnswerMessages(content), { tools: [readToolDefinition] })
+    )
+    assert.equal(response.status, 400, label)
+    const evidence = h.getEvidence()
+    assert.equal(evidence.counters.documentFailures, 1, label)
+    assert.equal(evidence.counters.documentAnswers, 0, label)
+    assert.equal(evidence.attempts[0].responseKind, 'rejected', label)
+  }
+})
+
+test('two tool results in one turn are refused', async () => {
+  const h = harness()
+  const messages = documentAnswerMessages(wrappedToolOutput(documentReadResult()))
+  messages.push({
+    role: 'tool',
+    tool_call_id: 'call-2',
+    content: wrappedToolOutput(documentReadResult()),
+  })
+
+  const response = await call(h, chatBody(VISUAL_MODEL, messages, { tools: [readToolDefinition] }))
+
+  assert.equal(response.status, 400)
+  assert.equal(h.getEvidence().counters.documentFailures, 1)
+})
+
+test('a streamed document turn is refused instead of answered', async () => {
+  const h = harness()
+
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, [documentUserMessage()], { tools: [readToolDefinition], stream: true })
+  )
+
+  assert.equal(response.status, 400)
+  const evidence = h.getEvidence()
+  assert.equal(evidence.counters.documentFailures, 1)
+  assert.equal(evidence.counters.documentReadRequests, 0)
+})
+
+test('image rows keep their original shape (no documentSha256)', async () => {
+  const { png } = palettePng()
+  const h = harness()
+
+  await call(h, chatBody(VISUAL_MODEL, imageMessages(png)))
+
+  assert.equal('documentSha256' in h.getEvidence().attempts[0], false)
+})
+
+/**
+ * Declared here, not imported, so the oracle stays independent of the producer:
+ * a reason added to the fixture without a test fails the parity check below.
+ */
+const EXPECTED_REJECTION_REASONS = [
+  'document-byte-length-malformed',
+  'document-page-range-malformed',
+  'document-stream-unsupported',
+  'document-tool-output-malformed',
+  'document-tool-output-unreadable',
+  'document-tool-result-count',
+  'image-not-png-data-uri',
+  'image-part-count',
+  'image-pixel-not-a-tile-color',
+  'image-png-malformed',
+  'image-png-unsupported-form',
+  'image-tile-grid-mismatch',
+  'provider-auth-mismatch',
+  'provider-body-invalid',
+  'provider-body-unsupported',
+  'provider-method-unsupported',
+  'provider-path-not-captured',
+  'provider-request-form-unsupported',
+  'text-model-image-incompatible',
+  'unsupported-model',
+]
+
+test('the fixture publishes exactly the closed set of rejection reasons, frozen', () => {
+  const reasons = providerModule.FIXTURE_REJECTION_REASONS
+  assert.ok(Array.isArray(reasons), 'FIXTURE_REJECTION_REASONS is exported as an array')
+  assert.deepEqual([...reasons].sort(), EXPECTED_REJECTION_REASONS)
+  assert.equal(Object.isFrozen(reasons), true)
+})
+
+test('every rejected row records its closed-set reason and no request content', async () => {
+  const { png } = palettePng()
+  const validBody = JSON.stringify(chatBody(VISUAL_MODEL, imageMessages(png)))
+  const twoImages = imageMessages(png)
+  twoImages[0].content.push(twoImages[0].content[1])
+  const fetchWith = (url, init) => h => h.fetch(url, init)
+  const cases = [
+    [
+      'request form',
+      h => h.fetch(new Request(PROVIDER_URL, { method: 'POST', body: validBody })),
+      null,
+      'provider-request-form-unsupported',
+    ],
+    [
+      'GET method',
+      fetchWith(PROVIDER_URL, { method: 'GET', headers: authHeaders(), body: validBody }),
+      null,
+      'provider-method-unsupported',
+    ],
+    [
+      'query string',
+      fetchWith(`${PROVIDER_URL}?x=1`, { method: 'POST', headers: authHeaders(), body: validBody }),
+      null,
+      'provider-path-not-captured',
+    ],
+    [
+      'wrong key',
+      fetchWith(PROVIDER_URL, {
+        method: 'POST',
+        headers: { authorization: 'Bearer not-the-run-key' },
+        body: validBody,
+      }),
+      null,
+      'provider-auth-mismatch',
+    ],
+    [
+      'buffer body',
+      fetchWith(PROVIDER_URL, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: Buffer.from(validBody),
+      }),
+      null,
+      'provider-body-unsupported',
+    ],
+    [
+      'invalid json',
+      fetchWith(PROVIDER_URL, { method: 'POST', headers: authHeaders(), body: '{' }),
+      null,
+      'provider-body-invalid',
+    ],
+    [
+      'unknown model',
+      h => call(h, chatBody('glm-5.2', textMessages())),
+      'glm-5.2',
+      'unsupported-model',
+    ],
+    [
+      'text model with an image',
+      h => call(h, chatBody(TEXT_MODEL, imageMessages(png))),
+      TEXT_MODEL,
+      'text-model-image-incompatible',
+    ],
+    [
+      'two image parts',
+      h => call(h, chatBody(VISUAL_MODEL, twoImages)),
+      VISUAL_MODEL,
+      'image-part-count',
+    ],
+    [
+      'streamed document turn',
+      h =>
+        call(
+          h,
+          chatBody(VISUAL_MODEL, [documentUserMessage()], {
+            tools: [readToolDefinition],
+            stream: true,
+          })
+        ),
+      VISUAL_MODEL,
+      'document-stream-unsupported',
+    ],
+    [
+      'unreadable tool result',
+      h =>
+        call(
+          h,
+          chatBody(
+            VISUAL_MODEL,
+            documentAnswerMessages(wrappedToolOutput({ error: 'attachment_not_found' })),
+            { tools: [readToolDefinition] }
+          )
+        ),
+      VISUAL_MODEL,
+      'document-tool-output-unreadable',
+    ],
+  ]
+  for (const [label, send, model, reason] of cases) {
+    const h = harness()
+    const response = await send(h)
+    assert.ok(response.status >= 400, label)
+    const evidence = h.getEvidence()
+    assert.equal(evidence.counters.rejectedAttempts, 1, label)
+    // The row carries the fixed reason string and nothing from the request.
+    assert.deepEqual(
+      evidence.attempts,
+      [{ model, imageSha256: null, responseKind: 'rejected', reason }],
+      label
+    )
+    assert.ok(EXPECTED_REJECTION_REASONS.includes(reason), label)
+  }
+
+  // Accepted rows never carry a reason; witness: the accepted row exists.
+  const accepted = harness()
+  assert.equal((await call(accepted, chatBody(VISUAL_MODEL, textMessages()))).status, 200)
+  assert.equal(accepted.getEvidence().attempts.length, 1)
+  assert.equal(accepted.getEvidence().attempts[0].responseKind, 'text-only')
+  assert.equal(Object.hasOwn(accepted.getEvidence().attempts[0], 'reason'), false)
 })

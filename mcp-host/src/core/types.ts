@@ -9,6 +9,7 @@
 import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
+import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
 // ─── Message Types ──────────────────────────────────────────
@@ -34,6 +35,9 @@ export type MessageContentPart =
       data: string
       /** Extra source copy, omitted from the legacy view while another current frame represents it. */
       sourceIdentityOnly?: true
+      /** Producer-measured image shape; used by provider-attempt policy without redecoding. */
+      width?: number
+      height?: number
       /**
        * Optional so pre-#650 producers and provider translators keep compiling;
        * `codexSubscription` rejects an image part without a usable source
@@ -311,6 +315,8 @@ export interface ToolResult {
   is_error: boolean
   attachments?: Attachment[]
   metadata?: Record<string, unknown>
+  /** Token estimate of the final model-visible message; not part of its content. */
+  emittedMessageCost?: number
   /**
    * Pre-sanitization content for user-facing output preview.
    * WARNING: bypasses the XML safety wrapper. Do NOT use in LLM messages.
@@ -323,6 +329,12 @@ export interface ToolResult {
    * resume time. Undefined for inline results.
    */
   spillover_ref?: string
+  /**
+   * Set only by a trusted tool's `finalizeResult` (after the safety transform):
+   * the turn ends after this batch with `message` as the reply, and no further
+   * model call is made. Later calls of the batch are answered without running.
+   */
+  stopTurn?: { message: string }
 }
 
 export interface ToolOutput {
@@ -547,8 +559,9 @@ export interface ContextBreakdown {
      * active (the stable bridge), this reflects natives + the 3 bridge tools
      * only — deferrable MCP schemas LEAVE this array and instead appear
      * transiently in `messages` via `clerum__tool_describe` / `clerum__tool_call`
-     * outputs. So a sharp drop here when the bridge engages is expected, not a
-     * breakdown bug.
+     * outputs. With native `auto` (#1003) the natives larger than the native
+     * discovery budget leave it the same way. So a sharp drop here when either
+     * engages is expected, not a breakdown bug.
      */
     systemTools: number
     metaContext: number
@@ -630,12 +643,23 @@ export interface TaskExecutionBudgetSnapshot {
   maxIterations: number
   /** Cumulative source-read work; payloads are not durable task budget data. */
   visualReadBytes?: number
+  /**
+   * C15/C16 — the turn's attachment read ledger, carried inside this existing
+   * JSON column. Data-only counts; no file bytes, no content.
+   */
+  attachmentReadLedger?: AttachmentReadLedgerSnapshot
 }
 
 export interface PendingApproval {
   task_budget?: TaskExecutionBudgetSnapshot
   /** Set only by reconstruction of migration-marked legacy rows. */
   legacy_budget?: boolean
+  /**
+   * Consent expansion. New ordinary approvals use `turn_tools`; high-risk
+   * exact-call paths use `exact_invocation`. Legacy NULL rows are treated as
+   * exact because their original expansion cannot be proven.
+   */
+  authorization_scope?: 'turn_tools' | 'exact_invocation'
   /** Internal atomic replacement instruction; not persisted in the snapshot. */
   replaces_request_id?: string
   request_id: string
@@ -686,7 +710,7 @@ export type LoopResult =
   | { type: 'error'; error: Error }
   | {
       type: 'exhaustion'
-      reason?: 'iteration_limit' | 'task_budget'
+      reason?: 'iteration_limit' | 'task_budget' | 'turn_stop'
       message: string
       iterations: number
       attachments?: Attachment[]

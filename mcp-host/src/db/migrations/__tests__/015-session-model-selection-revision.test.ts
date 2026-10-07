@@ -22,8 +22,16 @@ function preMigrationDb(): Database.Database {
 }
 
 describe('migration 015 — sessions.model_selection_revision', () => {
-  it('appends last to the ordered migration list', () => {
-    expect(migrations[migrations.length - 1]?.name).toBe(migration.name)
+  it('preserves the ordered 014, 015, 016 append sequence', () => {
+    const names = migrations.map(item => item.name)
+    const index = names.indexOf(migration.name)
+    expect(index).toBeGreaterThan(0)
+    expect(names.filter(name => name === migration.name)).toHaveLength(1)
+    expect(names.slice(index - 1, index + 2)).toEqual([
+      '014-pending-approval-task-budget',
+      migration.name,
+      '016-pending-approval-authorization-scope',
+    ])
   })
 
   it('adds a NOT NULL revision that reads 0 for every pre-existing row', () => {

@@ -83,8 +83,8 @@ import {
 } from '../../services/llmAllowedModelsConfigMap.js'
 import { K8sConflictError } from '../../services/resourceService.js'
 import {
-  adminCodexReadRateLimits,
-  adminCodexWriteRateLimits,
+  adminSubscriptionReadRateLimits,
+  adminSubscriptionWriteRateLimits,
 } from '../workflows/shared/rateLimit.js'
 import { createHostValidationDeps, validateHostSpec } from './hostSpecValidation.js'
 import {
@@ -819,63 +819,81 @@ export function createAdminCodexSubscriptionRouter(
   router.get(
     `${BASE}/connection`,
     rejectGrokUnkeyed,
-    ...adminCodexReadRateLimits(),
+    ...adminSubscriptionReadRateLimits(),
     getConnectionHandler
   )
   router.post(
     `${BASE}/browser/start`,
     rejectGrokUnkeyed,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     browserStartHandler
   )
   router.post(
     `${BASE}/device/start`,
     rejectGrokUnkeyed,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     deviceStartHandler
   )
   router.get(
     `${BASE}/device/poll`,
     rejectGrokUnkeyed,
-    ...adminCodexReadRateLimits(),
+    ...adminSubscriptionReadRateLimits(),
     devicePollHandler
   )
-  router.post(`${BASE}/refresh`, rejectGrokUnkeyed, ...adminCodexWriteRateLimits(), refreshHandler)
+  router.post(
+    `${BASE}/refresh`,
+    rejectGrokUnkeyed,
+    ...adminSubscriptionWriteRateLimits(),
+    refreshHandler
+  )
   router.post(
     `${BASE}/catalog/sync`,
     rejectGrokUnkeyed,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     catalogSyncHandler
   )
-  router.post(`${BASE}/revoke`, rejectGrokUnkeyed, ...adminCodexWriteRateLimits(), revokeHandler)
-  router.get(`${BASE}/connections/:key`, ...adminCodexReadRateLimits(), getConnectionHandler)
+  router.post(
+    `${BASE}/revoke`,
+    rejectGrokUnkeyed,
+    ...adminSubscriptionWriteRateLimits(),
+    revokeHandler
+  )
+  router.get(`${BASE}/connections/:key`, ...adminSubscriptionReadRateLimits(), getConnectionHandler)
   router.post(
     `${BASE}/connections/:key/browser/start`,
     rejectGrokUnkeyed,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     browserStartHandler
   )
   router.post(
     `${BASE}/connections/:key/device/start`,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     deviceStartHandler
   )
   router.get(
     `${BASE}/connections/:key/device/poll`,
-    ...adminCodexReadRateLimits(),
+    ...adminSubscriptionReadRateLimits(),
     devicePollHandler
   )
-  router.post(`${BASE}/connections/:key/refresh`, ...adminCodexWriteRateLimits(), refreshHandler)
+  router.post(
+    `${BASE}/connections/:key/refresh`,
+    ...adminSubscriptionWriteRateLimits(),
+    refreshHandler
+  )
   router.post(
     `${BASE}/connections/:key/catalog/sync`,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     catalogSyncHandler
   )
-  router.post(`${BASE}/connections/:key/revoke`, ...adminCodexWriteRateLimits(), revokeHandler)
+  router.post(
+    `${BASE}/connections/:key/revoke`,
+    ...adminSubscriptionWriteRateLimits(),
+    revokeHandler
+  )
 
   router.get(
     `${BASE}/connections`,
-    ...adminCodexReadRateLimits(),
+    ...adminSubscriptionReadRateLimits(),
     asyncHandler(async (req, res) => {
       if (isGrokReq(req)) {
         if (!config.grokSubscriptionEnabled) {
@@ -923,7 +941,7 @@ export function createAdminCodexSubscriptionRouter(
 
   router.post(
     `${BASE}/connections`,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     asyncHandler(async (req, res) => {
       if (isGrokReq(req)) {
         if (!config.grokSubscriptionEnabled) {
@@ -1002,7 +1020,7 @@ export function createAdminCodexSubscriptionRouter(
 
   router.get(
     `${BASE}/connections/:key/models`,
-    ...adminCodexReadRateLimits(),
+    ...adminSubscriptionReadRateLimits(),
     asyncHandler(async (req, res) => {
       if (isGrokReq(req)) {
         if (!config.grokSubscriptionEnabled) {
@@ -1036,7 +1054,7 @@ export function createAdminCodexSubscriptionRouter(
 
   router.patch(
     `${BASE}/connections/:key`,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     asyncHandler(async (req, res) => {
       const grok = isGrokReq(req)
       if (grok ? !config.grokSubscriptionEnabled : !config.codexSubscriptionEnabled) {
@@ -1101,7 +1119,7 @@ export function createAdminCodexSubscriptionRouter(
 
   router.patch(
     `${BASE}/connections/:key/models/:model`,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     asyncHandler(async (req, res) => {
       const grok = isGrokReq(req)
       if (grok ? !config.grokSubscriptionEnabled : !config.codexSubscriptionEnabled) {
@@ -1145,7 +1163,7 @@ export function createAdminCodexSubscriptionRouter(
 
   router.get(
     `${BASE}/assignable-hosts`,
-    ...adminCodexReadRateLimits(),
+    ...adminSubscriptionReadRateLimits(),
     asyncHandler(async (req, res) => {
       if (isGrokReq(req) ? !config.grokSubscriptionEnabled : !config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
@@ -1260,12 +1278,12 @@ export function createAdminCodexSubscriptionRouter(
 
   router.post(
     `${BASE}/connections/:key/hosts/:hostRef/unbind`,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     bindUnbindHandler('unbind')
   )
   router.post(
     `${BASE}/connections/:key/hosts/:hostRef/bind`,
-    ...adminCodexWriteRateLimits(),
+    ...adminSubscriptionWriteRateLimits(),
     bindUnbindHandler('bind')
   )
 

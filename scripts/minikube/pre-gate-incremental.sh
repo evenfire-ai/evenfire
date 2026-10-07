@@ -459,8 +459,11 @@ incremental_build_images() {
     log "Building all images because the change cannot be safely targeted"
     (
       cd "${PROJECT_DIR}"
+      # pre-gate-sync already holds the profile lock; the target's lock wrapper
+      # must validate that lease instead of acquiring it again (PROFILE_BUSY).
+      # minikube-verify-images has no lock wrapper and needs no lease.
       T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-build-images
-      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-verify-images
+      make minikube-verify-images
     )
     return 0
   fi
@@ -493,8 +496,9 @@ incremental_build_images_ghcr() {
     log "Re-pulling the release image set (${IMAGE_TAG}) before shadowing the changed images"
     (
       cd "${PROJECT_DIR}"
+      # Same inherited lease as the full local build above.
       T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-pull-images
-      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-verify-images
+      make minikube-verify-images
     )
   fi
 

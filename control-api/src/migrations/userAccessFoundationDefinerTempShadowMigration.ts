@@ -4,7 +4,7 @@ import type { DbClient } from '../db.js'
  * Harden the installed access-foundation SECURITY DEFINER functions without
  * changing their bodies, ownership, grants, or behavior.
  * The obsolete authorization_bump_catalog_revision() routine is intentionally
- * excluded because 0128_composable_catalog_revisions drops it before this runs.
+ * excluded because 0129_composable_catalog_revisions drops it before this runs.
  */
 export async function applyUserAccessFoundationDefinerTempShadowHardening(
   db: DbClient

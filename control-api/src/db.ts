@@ -1,4 +1,4 @@
-import { Pool, type PoolClient } from 'pg'
+import { type Client, Pool, type PoolClient } from 'pg'
 import {
   type BoundedPoolBudget,
   type PoolConstructor,
@@ -17,6 +17,7 @@ import {
   applyUserAccessFoundationSchema,
   backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
+import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
@@ -91,6 +92,11 @@ export type DbClient = {
 declare const dbTransactionClientBrand: unique symbol
 export type DbTransactionClient = DbClient & {
   readonly [dbTransactionClientBrand]: 'transaction'
+}
+
+export type DbTransactionOptions = {
+  signal?: AbortSignal
+  onDatabaseFailure?: (error: unknown) => unknown
 }
 
 type DbSessionClient = DbClient & {
@@ -6476,11 +6482,16 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyEntityChangeDefinerSearchPathSchema,
   },
   {
-    // The frozen dev parent now owns every slot through 0124. Preserve each
+    version: '0125_admin_subscription_rate_limit_namespace',
+    apply: applyAdminSubscriptionRateLimitNamespace,
+  },
+  {
+    // The frozen dev parent now owns every slot through 0125. Preserve each
     // previously deployed identity as an alias so re-slotting only records a
     // canonical version and never replays an already-applied migration body.
-    version: '0125_user_access_foundation',
+    version: '0126_user_access_foundation',
     legacyVersions: [
+      '0125_user_access_foundation',
       '0109_user_access_foundation',
       '0107_user_access_foundation',
       '0101_user_access_foundation',
@@ -6488,8 +6499,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0126_invitation_delivery_commands',
+    version: '0127_invitation_delivery_commands',
     legacyVersions: [
+      '0126_invitation_delivery_commands',
       '010a_invitation_delivery_commands',
       '0108_invitation_delivery_commands',
       '0102_invitation_delivery_commands',
@@ -6497,8 +6509,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyInvitationDeliveryCommandFoundation,
   },
   {
-    version: '0127_catalog_utf8_ordering',
+    version: '0128_catalog_utf8_ordering',
     legacyVersions: [
+      '0127_catalog_utf8_ordering',
       '010b_catalog_utf8_ordering',
       '0109_catalog_utf8_ordering',
       '0103_catalog_utf8_ordering',
@@ -6506,8 +6519,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyCatalogUtf8OrderingSchema,
   },
   {
-    version: '0128_composable_catalog_revisions',
+    version: '0129_composable_catalog_revisions',
     legacyVersions: [
+      '0128_composable_catalog_revisions',
       '010c_composable_catalog_revisions',
       '010a_composable_catalog_revisions',
       '0104_composable_catalog_revisions',
@@ -6517,8 +6531,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // Fix-forward for databases that recorded the first composable-catalog
     // body before the GFS resource-component mapping was completed.
-    version: '0129_gfs_catalog_revision_components',
+    version: '012a_gfs_catalog_revision_components',
     legacyVersions: [
+      '0129_gfs_catalog_revision_components',
       '010d_gfs_catalog_revision_components',
       '010b_gfs_catalog_revision_components',
       '0105_gfs_catalog_revision_components',
@@ -6528,7 +6543,8 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // The access-foundation bodies are immutable; harden their installed
     // SECURITY DEFINER search paths without replaying those historical bodies.
-    version: '012a_user_access_foundation_definer_temp_shadow_hardening',
+    version: '012b_user_access_foundation_definer_temp_shadow_hardening',
+    legacyVersions: ['012a_user_access_foundation_definer_temp_shadow_hardening'],
     apply: applyUserAccessFoundationDefinerTempShadowHardening,
   },
   {
@@ -6994,24 +7010,32 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
-  txPoolOrOptions: Pool | { onDatabaseFailure?: (error: unknown) => unknown } = pool
+  txPoolOrOptions: Pool | DbTransactionOptions = pool,
+  explicitOptions: DbTransactionOptions = {}
 ): Promise<T> {
   // Tests may inject a Pool to exercise client lifecycle behavior. Session
-  // persistence callers may instead provide a failure mapper so database
-  // errors retain their typed provenance. Production defaults to the core pool.
+  // persistence callers may provide a failure mapper so database errors retain
+  // typed provenance; cancellable callers use the same bounded pool with signal.
   const isPool = typeof (txPoolOrOptions as Pool).connect === 'function'
   const txPool = isPool ? (txPoolOrOptions as Pool) : pool
-  const options: { onDatabaseFailure?: (error: unknown) => unknown } = isPool
-    ? {}
-    : (txPoolOrOptions as { onDatabaseFailure?: (error: unknown) => unknown })
-  let client: PoolClient
+  const options: DbTransactionOptions = isPool
+    ? explicitOptions
+    : (txPoolOrOptions as DbTransactionOptions)
+  const signal = options.signal
+  const mapDatabaseFailure = (error: unknown): unknown =>
+    options.onDatabaseFailure ? options.onDatabaseFailure(error) : error
+  signal?.throwIfAborted()
+  let client: PoolClient & Pick<Client, 'end' | 'connection'>
   try {
-    client = (await txPool.connect()) as PoolClient
+    client = (await txPool.connect()) as typeof client
   } catch (error) {
-    throw options.onDatabaseFailure ? options.onDatabaseFailure(error) : error
+    signal?.throwIfAborted()
+    throw mapDatabaseFailure(error)
   }
   let transactionStarted = false
   let commitSent = false
+  let transactionFinished = false
+  let originalIdleTimeout: string | undefined
   let releaseError: Error | boolean | undefined
 
   // pg-pool removes its idle 'error' listener while a client is checked out.
@@ -7024,39 +7048,138 @@ export async function withTransaction<T>(
   }
   client.on('error', onClientError)
 
-  const transactionClient: DbClient = options.onDatabaseFailure
-    ? Object.assign(Object.create(client) as DbClient, {
-        query: async (text: string, values?: unknown[]) => {
-          try {
-            return await client.query(text, values)
-          } catch (error) {
-            throw options.onDatabaseFailure!(error)
-          }
-        },
-      })
-    : (client as DbClient)
+  let termination: Promise<void> | undefined
+  const terminateClient = (reason: Error | boolean): void => {
+    releaseError ??= reason
+    if (termination) return
+    termination = client.end().catch(error => {
+      releaseError ??= error instanceof Error ? error : true
+    })
+    client.connection.stream.destroy()
+  }
+  const onAbort = (): void => {
+    terminateClient(signal?.reason instanceof Error ? signal.reason : true)
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  if (signal?.aborted) onAbort()
+
+  const executeQuery = async (
+    text: string,
+    values?: unknown[],
+    checkSignalAfter = true
+  ): Promise<{ rows: unknown[]; rowCount: number | null }> => {
+    signal?.throwIfAborted()
+    try {
+      const result = await client.query(text, values)
+      if (checkSignalAfter) signal?.throwIfAborted()
+      return result
+    } catch (error) {
+      signal?.throwIfAborted()
+      throw mapDatabaseFailure(error)
+    }
+  }
+
+  const transactionClient: DbClient =
+    signal || options.onDatabaseFailure
+      ? Object.assign(Object.create(client) as DbClient, {
+          query: (text: string, values?: unknown[]) => executeQuery(text, values),
+        })
+      : (client as DbClient)
   try {
-    await transactionClient.query('BEGIN')
+    signal?.throwIfAborted()
+    if (signal) {
+      const settings = await client.query<{
+        statement_timeout_ms: string | null
+        idle_timeout_ms: string | null
+      }>(`SELECT
+        (SELECT setting FROM pg_settings WHERE name = 'statement_timeout') AS statement_timeout_ms,
+        (SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout') AS idle_timeout_ms`)
+      signal.throwIfAborted()
+      const statementTimeout = settings.rows[0]?.statement_timeout_ms
+      const idleTimeout = settings.rows[0]?.idle_timeout_ms
+      const statementMs = Number(statementTimeout)
+      const idleMs = Number(idleTimeout)
+      if (
+        typeof statementTimeout !== 'string' ||
+        !/^\d+$/.test(statementTimeout) ||
+        !Number.isInteger(statementMs) ||
+        statementMs < 100 ||
+        statementMs > 30_000 ||
+        typeof idleTimeout !== 'string' ||
+        !/^\d+$/.test(idleTimeout) ||
+        !Number.isSafeInteger(idleMs)
+      ) {
+        throw new Error('Invalid effective PostgreSQL cancellation timeout bounds')
+      }
+      if (idleMs === 0 || idleMs > statementMs) {
+        originalIdleTimeout = idleTimeout
+        await client.query('SELECT set_config($1, $2, false)', [
+          'idle_in_transaction_session_timeout',
+          statementTimeout,
+        ])
+        signal.throwIfAborted()
+      }
+    }
+    await executeQuery('BEGIN', undefined, false)
     transactionStarted = true
+    signal?.throwIfAborted()
+    if (signal) {
+      signal.throwIfAborted()
+      await client.query("SET LOCAL client_connection_check_interval = '100ms'")
+    }
     // The brand is nominal-only (a declared unique symbol); the checked-out
     // client IS the transaction session, so this cast is the single blessed
     // point where the brand is minted (issue #375 M3).
+    signal?.throwIfAborted()
     const result = await work(transactionClient as unknown as DbTransactionClient)
+    signal?.throwIfAborted()
     commitSent = true
-    await transactionClient.query('COMMIT')
+    await executeQuery('COMMIT', undefined, false)
+    transactionFinished = true
     return result
   } catch (error) {
     if (commitSent || !transactionStarted) {
       releaseError = error instanceof Error ? error : true
     } else {
       try {
-        await transactionClient.query('ROLLBACK')
+        await client.query('ROLLBACK')
+        transactionFinished = true
       } catch (rollbackError) {
-        releaseError = rollbackError instanceof Error ? rollbackError : true
+        if (!signal?.aborted) {
+          releaseError = rollbackError instanceof Error ? rollbackError : true
+        }
       }
     }
+    signal?.throwIfAborted()
     throw error
   } finally {
+    if (
+      originalIdleTimeout !== undefined &&
+      transactionFinished &&
+      !releaseError &&
+      !asyncClientError &&
+      !signal?.aborted
+    ) {
+      try {
+        await client.query('SELECT set_config($1, $2, false)', [
+          'idle_in_transaction_session_timeout',
+          originalIdleTimeout,
+        ])
+      } catch (restoreError) {
+        releaseError = restoreError instanceof Error ? restoreError : true
+      }
+    }
+    if (signal && (releaseError || asyncClientError || signal.aborted)) {
+      terminateClient(
+        signal.aborted
+          ? signal.reason instanceof Error
+            ? signal.reason
+            : true
+          : (releaseError ?? asyncClientError ?? true)
+      )
+    }
+    if (termination) await termination
+    signal?.removeEventListener('abort', onAbort)
     client.removeListener('error', onClientError)
     // A client that emitted 'error' mid-checkout is poisoned; destroy it. Keep an
     // existing releaseError (the primary failure from work/commit/rollback) and

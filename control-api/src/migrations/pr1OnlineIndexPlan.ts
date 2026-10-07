@@ -6,8 +6,8 @@ import {
 
 export type OnlineIndexDefinition = Readonly<{
   migrationVersion:
-    | '0125_user_access_foundation'
-    | '0127_catalog_utf8_ordering'
+    | '0126_user_access_foundation'
+    | '0128_catalog_utf8_ordering'
     | '0131_workflow_authority_bindings'
   phase?: 'before-schema' | 'after-schema'
   name: string
@@ -18,70 +18,70 @@ export type OnlineIndexDefinition = Readonly<{
 
 export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.freeze([
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'team_members_user_active_idx',
     table: 'team_members',
     createSql: `CREATE INDEX CONCURRENTLY team_members_user_active_idx
       ON team_members (user_id, status, team_id) INCLUDE (role, updated_at)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'user_contexts_context_user_idx',
     table: 'user_contexts',
     createSql: `CREATE INDEX CONCURRENTLY user_contexts_context_user_idx
       ON user_contexts (context_id, user_id)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'team_contexts_context_team_idx',
     table: 'team_contexts',
     createSql: `CREATE INDEX CONCURRENTLY team_contexts_context_team_idx
       ON team_contexts (context_id, team_id)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'user_agents_agent_user_idx',
     table: 'user_agents',
     createSql: `CREATE INDEX CONCURRENTLY user_agents_agent_user_idx
       ON user_agents (agent_name, user_id)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'team_agents_agent_team_idx',
     table: 'team_agents',
     createSql: `CREATE INDEX CONCURRENTLY team_agents_agent_team_idx
       ON team_agents (agent_name, team_id)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'user_workflow_triggers_recipe_user_idx',
     table: 'user_workflow_triggers',
     createSql: `CREATE INDEX CONCURRENTLY user_workflow_triggers_recipe_user_idx
       ON user_workflow_triggers (recipe_namespace, recipe_name, user_id)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'team_workflow_triggers_recipe_team_idx',
     table: 'team_workflow_triggers',
     createSql: `CREATE INDEX CONCURRENTLY team_workflow_triggers_recipe_team_idx
       ON team_workflow_triggers (recipe_namespace, recipe_name, team_id)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'user_workflow_triggers_catalog_key_idx',
     table: 'user_workflow_triggers',
     createSql: `CREATE INDEX CONCURRENTLY user_workflow_triggers_catalog_key_idx
       ON user_workflow_triggers (user_id, ((recipe_namespace || '/'::text) || recipe_name))`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'team_workflow_triggers_catalog_key_idx',
     table: 'team_workflow_triggers',
     createSql: `CREATE INDEX CONCURRENTLY team_workflow_triggers_catalog_key_idx
       ON team_workflow_triggers (((recipe_namespace || '/'::text) || recipe_name), team_id)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'workflow_runs_actor_catalog_idx',
     table: 'workflow_runs',
     createSql: `CREATE INDEX CONCURRENTLY workflow_runs_actor_catalog_idx
@@ -90,7 +90,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       WHERE actor_type = 'user' AND actor_id IS NOT NULL`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'workflow_runs_team_catalog_idx',
     table: 'workflow_runs',
     createSql: `CREATE INDEX CONCURRENTLY workflow_runs_team_catalog_idx
@@ -99,7 +99,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       WHERE team_id IS NOT NULL`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'workflow_runs_usage_team_catalog_idx',
     table: 'workflow_runs',
     createSql: `CREATE INDEX CONCURRENTLY workflow_runs_usage_team_catalog_idx
@@ -108,7 +108,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       WHERE usage_team_id IS NOT NULL`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'workflow_approval_user_catalog_idx',
     table: 'workflow_approval_requests',
     createSql: `CREATE INDEX CONCURRENTLY workflow_approval_user_catalog_idx
@@ -117,7 +117,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       WHERE target_user_id IS NOT NULL`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'workflow_approval_team_catalog_idx',
     table: 'workflow_approval_requests',
     createSql: `CREATE INDEX CONCURRENTLY workflow_approval_team_catalog_idx
@@ -126,7 +126,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       WHERE target_team_id IS NOT NULL`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'notification_user_catalog_idx',
     table: 'notification_deliveries',
     createSql: `CREATE INDEX CONCURRENTLY notification_user_catalog_idx
@@ -134,7 +134,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       INCLUDE (expires_at, status, event_type) WHERE audience ? 'userId'`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'notification_team_catalog_idx',
     table: 'notification_deliveries',
     createSql: `CREATE INDEX CONCURRENTLY notification_team_catalog_idx
@@ -142,7 +142,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       INCLUDE (expires_at, status, event_type) WHERE audience ? 'teamId'`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'gfs_grants_subject_resource_catalog_idx',
     table: 'gfs_grants',
     createSql: `CREATE INDEX CONCURRENTLY gfs_grants_subject_resource_catalog_idx
@@ -150,7 +150,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       INCLUDE (id, drive, permissions, inherit)`,
   },
   {
-    migrationVersion: '0125_user_access_foundation',
+    migrationVersion: '0126_user_access_foundation',
     name: 'gfs_shares_subject_resource_catalog_idx',
     table: 'gfs_shares',
     createSql: `CREATE INDEX CONCURRENTLY gfs_shares_subject_resource_catalog_idx
@@ -158,35 +158,35 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       INCLUDE (id, drive, permissions, include_descendants)`,
   },
   {
-    migrationVersion: '0127_catalog_utf8_ordering',
+    migrationVersion: '0128_catalog_utf8_ordering',
     name: 'user_agents_catalog_utf8_idx',
     table: 'user_agents',
     createSql: `CREATE INDEX CONCURRENTLY user_agents_catalog_utf8_idx
       ON user_agents (user_id, catalog_utf8_bytes(agent_name))`,
   },
   {
-    migrationVersion: '0127_catalog_utf8_ordering',
+    migrationVersion: '0128_catalog_utf8_ordering',
     name: 'team_agents_catalog_utf8_idx',
     table: 'team_agents',
     createSql: `CREATE INDEX CONCURRENTLY team_agents_catalog_utf8_idx
       ON team_agents (catalog_utf8_bytes(agent_name), team_id)`,
   },
   {
-    migrationVersion: '0127_catalog_utf8_ordering',
+    migrationVersion: '0128_catalog_utf8_ordering',
     name: 'user_contexts_catalog_utf8_idx',
     table: 'user_contexts',
     createSql: `CREATE INDEX CONCURRENTLY user_contexts_catalog_utf8_idx
       ON user_contexts (user_id, catalog_utf8_bytes(context_id))`,
   },
   {
-    migrationVersion: '0127_catalog_utf8_ordering',
+    migrationVersion: '0128_catalog_utf8_ordering',
     name: 'team_contexts_catalog_utf8_idx',
     table: 'team_contexts',
     createSql: `CREATE INDEX CONCURRENTLY team_contexts_catalog_utf8_idx
       ON team_contexts (catalog_utf8_bytes(context_id), team_id)`,
   },
   {
-    migrationVersion: '0127_catalog_utf8_ordering',
+    migrationVersion: '0128_catalog_utf8_ordering',
     name: 'user_workflow_triggers_catalog_utf8_idx',
     table: 'user_workflow_triggers',
     createSql: `CREATE INDEX CONCURRENTLY user_workflow_triggers_catalog_utf8_idx
@@ -194,7 +194,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       (user_id, catalog_utf8_bytes(recipe_namespace || '/' || recipe_name))`,
   },
   {
-    migrationVersion: '0127_catalog_utf8_ordering',
+    migrationVersion: '0128_catalog_utf8_ordering',
     name: 'team_workflow_triggers_catalog_utf8_idx',
     table: 'team_workflow_triggers',
     createSql: `CREATE INDEX CONCURRENTLY team_workflow_triggers_catalog_utf8_idx
@@ -202,7 +202,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       (catalog_utf8_bytes(recipe_namespace || '/' || recipe_name), team_id)`,
   },
   {
-    migrationVersion: '0127_catalog_utf8_ordering',
+    migrationVersion: '0128_catalog_utf8_ordering',
     name: 'operational_relationship_catalog_utf8_target_idx',
     table: 'operational_resource_relationships',
     createSql: `CREATE INDEX CONCURRENTLY operational_relationship_catalog_utf8_target_idx
@@ -679,6 +679,6 @@ export async function preparePr1Migration(
     entry => entry.migrationVersion === version && (entry.phase ?? 'before-schema') === phase
   )
   if (indexes.length === 0) return
-  if (version === '0127_catalog_utf8_ordering') await prepareCatalogUtf8Function(db)
+  if (version === '0128_catalog_utf8_ordering') await prepareCatalogUtf8Function(db)
   for (const index of indexes) await ensureOnlineIndex(db, index)
 }

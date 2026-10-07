@@ -58,6 +58,10 @@ vi.mock('../src/config.js', () => ({
     externalGfsGrantsReadRlPerMin: 45,
     externalGfsSharesReadRlPerMin: 35,
     externalGfsOperationRlPerMin: 30,
+    // Operator GFS route budgets; production defaults from src/config.ts.
+    adminGfsGrantsPerMin: 150,
+    adminGfsSharesPerMin: 150,
+    adminGfsLegacyGrantReportPerMin: 150,
   },
 }))
 vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => ({

@@ -1,5 +1,6 @@
 import type { Request, Router } from 'express'
 import { createHash } from 'node:crypto'
+import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import type { ExternalGfsAuthority } from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId } from '../../gfs/hostSubject.js'
@@ -889,7 +890,7 @@ export function registerGfsGrantRoutes(router: Router): void {
   // first, so adminAuth.sub is always present by the time the limiter keys.
   const grantsRateLimit = rateLimitMiddleware({
     bucketType: 'gfs_grants',
-    maxPerMinute: 30,
+    maxPerMinute: config.adminGfsGrantsPerMin,
     getBucketKey: req => {
       const sub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
       return sub ? `gfsgrants:${sub}` : null

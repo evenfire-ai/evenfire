@@ -3,14 +3,14 @@ import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { hasPostSchemaOnlineIndexes, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
-  '0125_user_access_foundation',
-  '0126_invitation_delivery_commands',
-  '0127_catalog_utf8_ordering',
-  '0128_composable_catalog_revisions',
-  '0129_gfs_catalog_revision_components',
-  '012a_user_access_foundation_definer_temp_shadow_hardening',
+  '0126_user_access_foundation',
+  '0127_invitation_delivery_commands',
+  '0128_catalog_utf8_ordering',
+  '0129_composable_catalog_revisions',
+  '012a_gfs_catalog_revision_components',
+  '012b_user_access_foundation_definer_temp_shadow_hardening',
   '0130_legacy_password_security_epoch_backfill',
-  // Executed immediately after 0125 by the runner, before the remaining PR1 migrations.
+  // Executed immediately after 0126 by the runner, before the remaining PR1 migrations.
   '0138_authorization_revision_delete_compatibility',
 ] as const)
 
@@ -33,6 +33,7 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   '0122_durable_entity_change_feed',
   '0123_entity_change_checkpoint_cursor_convergence',
   '0124_entity_change_definer_search_path',
+  '0125_admin_subscription_rate_limit_namespace',
 ] as const)
 
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
@@ -59,7 +60,7 @@ export type MigrationDescriptor = {
   apply: (db: DbClient) => Promise<void>
 }
 
-const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0125_user_access_foundation'
+const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0126_user_access_foundation'
 const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
   '0138_authorization_revision_delete_compatibility'
 

@@ -1,3 +1,4 @@
+import { readAttachmentReadLedgerSnapshot } from '../core/attachments/attachmentReadBudget'
 import type { TaskExecutionBudgetSnapshot } from '../core/types'
 import { VISUAL_INPUT_LIMITS, VisualInputBudget } from '../visualInput/policy'
 
@@ -31,6 +32,11 @@ export function parseTaskExecutionBudget(value: unknown): TaskExecutionBudgetSna
   ) {
     throw new Error('Invalid task execution budget')
   }
+  // C15/C16 — this JSON column also carries the turn's attachment read ledger.
+  // The whitelist rebuild below would drop it, and the cold path has no other
+  // carrier, so an invalid value is dropped here and the restore boundary
+  // fails closed instead of guessing spend.
+  const attachmentReadLedger = readAttachmentReadLedgerSnapshot(snapshot.attachmentReadLedger)
   return {
     elapsedActiveMs: snapshot.elapsedActiveMs,
     iterationsUsed: snapshot.iterationsUsed,
@@ -39,6 +45,7 @@ export function parseTaskExecutionBudget(value: unknown): TaskExecutionBudgetSna
     ...(snapshot.visualReadBytes !== undefined
       ? { visualReadBytes: snapshot.visualReadBytes }
       : {}),
+    ...(attachmentReadLedger ? { attachmentReadLedger } : {}),
   }
 }
 
@@ -76,6 +83,9 @@ export class TaskExecutionBudget {
   }
   get remainingIterations(): number {
     return Math.max(0, this.maxIterations - this.iterationsUsed)
+  }
+  get remainingDurationMs(): number {
+    return Math.max(0, this.durationMs - this.elapsed())
   }
   private elapsed(): number {
     return (

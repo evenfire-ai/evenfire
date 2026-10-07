@@ -73,7 +73,10 @@ describe('DefaultReasoningPort.respondWithTools', () => {
       finish_reason: FinishReason.ToolUse,
     })
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.respondWithTools({
       messages: [{ role: 'user', content: 'Search' }],
       available_tools: [{ name: 'search', description: 'Search', parameters: {} }],
@@ -96,7 +99,10 @@ describe('DefaultReasoningPort.respondWithTools', () => {
       finish_reason: FinishReason.Stop,
     })
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.respondWithTools({
       messages: [{ role: 'user', content: 'What?' }],
       available_tools: [],
@@ -119,7 +125,10 @@ describe('DefaultReasoningPort.respondWithTools', () => {
       finish_reason: FinishReason.ContentFilter,
     })
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.respondWithTools({
       messages: [{ role: 'user', content: 'Bad request' }],
       available_tools: [],
@@ -141,7 +150,10 @@ describe('DefaultReasoningPort.respondWithTools', () => {
       finish_reason: FinishReason.Stop,
     })
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.respondWithTools({
       messages: [{ role: 'user', content: 'Hi' }],
       available_tools: [],
@@ -159,7 +171,10 @@ describe('DefaultReasoningPort.respondWithTools', () => {
       finish_reason: FinishReason.ToolUse,
     })
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.respondWithTools({
       messages: [{ role: 'user', content: 'Search' }],
       available_tools: [{ name: 'search', description: 'Search', parameters: {} }],
@@ -190,7 +205,10 @@ describe('DefaultReasoningPort.continueWithToolResults', () => {
       finish_reason: FinishReason.Stop,
     })
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     // Tool results are pre-appended by toolUseLoop before calling continueWithToolResults.
     // The context must already include the tool result message (see port.ts:65-66).
     const context: ReasoningContext = {
@@ -233,7 +251,10 @@ describe('DefaultReasoningPort.continueWithToolResults', () => {
     const mockLlm = createMockLlmPort()
     ;(mockLlm.completeWithTools as any).mockRejectedValue(new Error('API down'))
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.continueWithToolResults({ messages: [], available_tools: [] }, [])
 
     expect(result.type).toBe('error')
@@ -257,7 +278,7 @@ describe('DefaultReasoningPort context-breakdown capture (F1.2)', () => {
     const sink = vi.fn((_raw: ContextBreakdownRaw) => {})
     const port = new DefaultReasoningPort(
       mockLlm,
-      new DefaultPromptBuilder(),
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }),
       undefined,
       undefined,
       parts,
@@ -295,7 +316,7 @@ describe('DefaultReasoningPort context-breakdown capture (F1.2)', () => {
     const sink = vi.fn((_raw: ContextBreakdownRaw) => {})
     const port = new DefaultReasoningPort(
       mockLlm,
-      new DefaultPromptBuilder(),
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }),
       undefined,
       undefined,
       parts,
@@ -322,7 +343,7 @@ describe('DefaultReasoningPort context-breakdown capture (F1.2)', () => {
     const sink = vi.fn((_raw: ContextBreakdownRaw) => {})
     const port = new DefaultReasoningPort(
       mockLlm,
-      new DefaultPromptBuilder(),
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }),
       'You are a test agent.',
       undefined,
       undefined, // no parts → legacy path
@@ -356,7 +377,7 @@ describe('DefaultReasoningPort context-breakdown capture (F1.2)', () => {
     const sink = vi.fn((_raw: ContextBreakdownRaw) => {})
     const port = new DefaultReasoningPort(
       mockLlm,
-      new DefaultPromptBuilder(),
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }),
       undefined,
       undefined,
       parts,
@@ -377,7 +398,10 @@ describe('DefaultReasoningPort context-breakdown capture (F1.2)', () => {
   it('is a no-op when tokenCounter / sink are not wired', async () => {
     const mockLlm = createMockLlmPort()
     ;(mockLlm.completeWithTools as any).mockResolvedValue(okToolResponse)
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.respondWithTools({
       messages: [{ role: 'user', content: 'hi' }],
       available_tools: [],
@@ -388,7 +412,7 @@ describe('DefaultReasoningPort context-breakdown capture (F1.2)', () => {
 
 describe('DefaultPromptBuilder', () => {
   it('should produce system message with identity, tools, and date (Risk 3.3)', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt(
       [{ name: 'search', description: 'Search the web', parameters: {} }],
       'You are a research assistant.',
@@ -404,7 +428,7 @@ describe('DefaultPromptBuilder', () => {
   })
 
   it('emits the capability contract when clerum__get_capabilities is registered', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt(
       [{ name: 'clerum__get_capabilities', description: 'discover', parameters: {} }],
       undefined,
@@ -418,7 +442,7 @@ describe('DefaultPromptBuilder', () => {
   })
 
   it('does NOT emit the capability contract when the tool is absent', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt(
       [{ name: 'search', description: 'Search the web', parameters: {} }],
       undefined,
@@ -430,7 +454,7 @@ describe('DefaultPromptBuilder', () => {
   })
 
   it('emits the workflow recipe contract when workflow tools are registered', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt(
       [
         { name: 'workflow_list', description: 'List workflows', parameters: {} },
@@ -467,7 +491,7 @@ describe('DefaultPromptBuilder', () => {
   })
 
   it('emits exact MCP server selection guidance when MCP tools are registered', () => {
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt(
       [
         { name: 'mongodb-mcp-stack__find', description: 'Find documents', parameters: {} },

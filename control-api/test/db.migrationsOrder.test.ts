@@ -69,13 +69,15 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
   it('registers the narrow R56-B1 access-foundation definer hardening migration', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
-    const version = '012a_user_access_foundation_definer_temp_shadow_hardening'
+    const version = '012b_user_access_foundation_definer_temp_shadow_hardening'
     const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
     const versions = CONTROL_API_MIGRATIONS.map(candidate => candidate.version)
 
     expect(migration).toBeDefined()
-    expect(migration?.legacyVersions).toBeUndefined()
-    expect(versions.indexOf('0129_gfs_catalog_revision_components')).toBeLessThan(
+    expect(migration?.legacyVersions).toEqual([
+      '012a_user_access_foundation_definer_temp_shadow_hardening',
+    ])
+    expect(versions.indexOf('012a_gfs_catalog_revision_components')).toBeLessThan(
       versions.indexOf(version)
     )
     expect(versions.indexOf(version)).toBeLessThan(
@@ -111,7 +113,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       'authorization_bump_operational_relationship_revision()',
     ]
 
-    // 0128_composable_catalog_revisions removes this trigger before 012a runs.
+    // 0129_composable_catalog_revisions removes this trigger before 012b runs.
     expect(signatures).not.toContain('authorization_bump_catalog_revision()')
     expect(sql.match(/ALTER FUNCTION public\./g)).toHaveLength(signatures.length)
     for (const signature of signatures) {
@@ -278,10 +280,10 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     )
   })
 
-  it('registers the narrow 0125 team-delete compatibility successor', async () => {
+  it('registers the narrow 0126 team-delete compatibility successor', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const predecessorIndex = CONTROL_API_MIGRATIONS.findIndex(
-      candidate => candidate.version === '0125_user_access_foundation'
+      candidate => candidate.version === '0126_user_access_foundation'
     )
     const migration = CONTROL_API_MIGRATIONS.find(
       candidate => candidate.version === '0138_authorization_revision_delete_compatibility'

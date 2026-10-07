@@ -52,6 +52,14 @@ vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
     mockAuthenticateExternalUserSession(...args),
   authenticateExternalUserSessionIdentity: (...args: unknown[]) =>
     mockAuthenticateExternalUserSession(...args),
+  externalSessionUserIdForRateLimit: (token: string) =>
+    token === 'user-session-token'
+      ? 'user-123'
+      : token === 'user-session-token-b'
+        ? 'user-456'
+        : token === 'user-session-token-rotated'
+          ? 'user-123'
+          : null,
 }))
 
 vi.mock('../src/services/rateLimiterService.js', () => ({

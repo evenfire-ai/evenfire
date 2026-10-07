@@ -11,6 +11,7 @@ import {
 import {
   PR1_ONLINE_INDEX_PLAN,
   canonicalOnlineIndexDefinition,
+  hasPostSchemaOnlineIndexes,
   preparePr1Migration,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
 
@@ -31,7 +32,7 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_invitation_idx',
 ])
 
-const USER_ACCESS_FOUNDATION_VERSION = '0125_user_access_foundation'
+const USER_ACCESS_FOUNDATION_VERSION = '0126_user_access_foundation'
 const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
   '0138_authorization_revision_delete_compatibility'
 
@@ -47,13 +48,14 @@ function expectedMigrationExecutionOrder(versions: readonly string[]): string[] 
 
 describe('D34 migration execution policy', () => {
   it('classifies inherited parent migrations before the re-slotted PR1 migrations', () => {
-    expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-6)).toEqual([
+    expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-7)).toEqual([
       '0119_dynamic_clients_table',
       '0120_dynamic_clients_runtime_access',
       '0121_oauth_install_identity',
       '0122_durable_entity_change_feed',
       '0123_entity_change_checkpoint_cursor_convergence',
       '0124_entity_change_definer_search_path',
+      '0125_admin_subscription_rate_limit_namespace',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -88,8 +90,8 @@ describe('D34 migration execution policy', () => {
         ])
     )
     expect(countByMigrationVersion).toEqual({
-      '0125_user_access_foundation': 18,
-      '0127_catalog_utf8_ordering': 7,
+      '0126_user_access_foundation': 18,
+      '0128_catalog_utf8_ordering': 7,
       '0131_workflow_authority_bindings': 1,
     })
     expect(
@@ -298,8 +300,15 @@ describe('D34 PR1 migration runner', () => {
         ...PR2_MIGRATION_VERSIONS,
       ])
     )
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(34)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(34)
+    const orderedVersions = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ]
+    const expectedTransactions =
+      orderedVersions.length + orderedVersions.filter(hasPostSchemaOnlineIndexes).length
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(expectedTransactions)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(expectedTransactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
@@ -500,7 +509,7 @@ describe('D34 PR1 migration runner', () => {
     expect(recorded).toEqual(expectedOrder)
   })
 
-  it('commits 0125 and its deletion-compatible successor as one migration phase', async () => {
+  it('commits 0126 and its deletion-compatible successor as one migration phase', async () => {
     const events: string[] = []
     const transactionEvents: string[] = []
     let activeTransaction = 0
@@ -597,7 +606,7 @@ describe('D34 PR1 migration runner', () => {
     )
   })
 
-  it('repairs an applied 0125 prefix before preparing 0127 indexes', async () => {
+  it('repairs an applied 0126 prefix before preparing 0128 indexes', async () => {
     const events: string[] = []
     const migrations = [
       ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
@@ -625,7 +634,7 @@ describe('D34 PR1 migration runner', () => {
           events.push(sql)
         }
         if (sql.includes('FROM pg_class index_rel')) {
-          events.push('prepare:0127')
+          events.push('prepare:0128')
           const entry = PR1_ONLINE_INDEX_PLAN.find(index => index.name === values?.[0])
           return {
             rows: entry
@@ -648,12 +657,12 @@ describe('D34 PR1 migration runner', () => {
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS,
       USER_ACCESS_FOUNDATION_VERSION,
-      '0126_invitation_delivery_commands',
+      '0127_invitation_delivery_commands',
       ...PR1_MIGRATION_VERSIONS.filter(
         version =>
           version !== USER_ACCESS_FOUNDATION_VERSION &&
-          version !== '0126_invitation_delivery_commands' &&
-          version !== '0127_catalog_utf8_ordering' &&
+          version !== '0127_invitation_delivery_commands' &&
+          version !== '0128_catalog_utf8_ordering' &&
           version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
       ),
     ])
@@ -668,18 +677,18 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(events.indexOf(AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)).toBeLessThan(
-      events.indexOf('prepare:0127')
+      events.indexOf('prepare:0128')
     )
     expect(events.indexOf(`receipt:${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}`)).toBeLessThan(
-      events.indexOf('prepare:0127')
+      events.indexOf('prepare:0128')
     )
     expect(events.filter(event => event === 'BEGIN')).toHaveLength(3)
     expect(events.filter(event => event === 'COMMIT')).toHaveLength(3)
     const repairCommit = events.indexOf('COMMIT')
-    expect(repairCommit).toBeLessThan(events.indexOf('prepare:0127'))
+    expect(repairCommit).toBeLessThan(events.indexOf('prepare:0128'))
   })
 
-  it('preserves the 0125 alias when its 0138 successor is already recorded', async () => {
+  it('preserves the prior foundation alias when its 0138 successor is already recorded', async () => {
     const foundation = {
       version: USER_ACCESS_FOUNDATION_VERSION,
       legacyVersions: ['0109_user_access_foundation'],
@@ -729,7 +738,7 @@ describe('D34 PR1 migration runner', () => {
     expect(appliedVersions).toContain(USER_ACCESS_FOUNDATION_VERSION)
   })
 
-  it('fails closed when 0138 is recorded without the 0125 prerequisite', async () => {
+  it('fails closed when 0138 is recorded without the 0126 prerequisite', async () => {
     await expect(
       applyPendingPr1Migrations({
         db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },

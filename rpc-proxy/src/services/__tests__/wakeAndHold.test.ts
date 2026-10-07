@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
-import { config } from '../../config.js'
 import { ActionAuthorityCheckpointError } from '../../actionAuthorityV2.js'
 import type { AuthorizedActionV2 } from '../../actionAuthorityV2.js'
+import { config } from '../../config.js'
 import type { ResolvedServerConnection, RpcAccessClaims, RpcScope } from '../../types.js'
 import type { HostWakeApiResponse } from '../controlApiRestService.js'
+import { UpstreamHostError } from '../mcpHostRestService.js'
 import { UpstreamBodyReadError } from '../upstreamBody.js'
 import {
   WakeAndHoldCoordinator,
   type WakeCoordinatorDeps,
+  describeErrorForLog,
   isHostDownNetworkError,
   isHostDrainingError,
   respondWithWakeAndHold,
@@ -484,6 +486,48 @@ describe('host error classification', () => {
     expect(isHostDownNetworkError(new UpstreamBodyReadError(new Error('socket hang up')))).toBe(
       false
     )
+  })
+})
+
+describe('describeErrorForLog', () => {
+  const HOST_BODY = '{"error":"boom","detail":"user-content-describe-marker"}'
+
+  it('names an UpstreamHostError by status and never by its message', () => {
+    const error = new UpstreamHostError(500, HOST_BODY)
+    // Witness: the message really carries the Host body this helper must drop.
+    expect(error.message).toContain('user-content-describe-marker')
+
+    const described = describeErrorForLog(error)
+
+    expect(described).toBe('UpstreamHostError status=500')
+    expect(described).not.toContain('user-content')
+  })
+
+  it('names a network failure by the code on its cause', () => {
+    const error = new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })
+
+    expect(describeErrorForLog(error)).toBe('TypeError code=ECONNREFUSED')
+  })
+
+  it('names a body failure after the headers by the code of the read it wraps', () => {
+    const read = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+
+    expect(describeErrorForLog(new UpstreamBodyReadError(read))).toBe(
+      'UpstreamBodyReadError code=ECONNRESET'
+    )
+  })
+
+  it('keeps only identifier characters of a name and code', () => {
+    const error = Object.assign(new Error('x'), {
+      name: 'Bad\nName {"body"}',
+      code: 'E_CODE\r\n<script>',
+    })
+
+    expect(describeErrorForLog(error)).toBe('BadNamebody code=E_CODEscript')
+  })
+
+  it('reports a thrown non-Error by its type only', () => {
+    expect(describeErrorForLog('raw upstream text user-content')).toBe('non-error type=string')
   })
 })
 
@@ -1001,6 +1045,30 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       expect.stringContaining('wake-hold post-response failure suppressed')
     )
     expect(coordinator.trackedCoordinationCount()).toBe(0)
+  })
+
+  it('logs a Host failure raised after the response was committed by status, without its body', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const marker = 'user-content-post-response-marker'
+
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async () => {
+      res.status(200).json({ success: true, taskId: 't-committed' })
+      throw new UpstreamHostError(500, `{"error":"boom","detail":"${marker}"}`)
+    })
+    const pending = respondWithWakeAndHold(respondOptions(coordinator, res, attemptUpstream))
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await pending
+    const lines = [...warnSpy.mock.calls, ...debugSpy.mock.calls].map(args => args.join(' '))
+    const suppressed = lines.filter(line =>
+      line.includes('wake-hold post-response failure suppressed (already resolved) host=chatllm')
+    )
+    // Witness: the post-response branch ran and logged exactly once.
+    expect(suppressed).toHaveLength(1)
+    expect(lines.filter(line => line.includes(marker))).toEqual([])
+    expect(suppressed[0]).toContain('error=UpstreamHostError status=500')
   })
 
   it('refuses to park a request whose response is already committed, loudly and without waking', async () => {

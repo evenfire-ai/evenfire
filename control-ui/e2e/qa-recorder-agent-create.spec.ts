@@ -102,7 +102,8 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
       await expect(page).toHaveURL(/\/(?:hosts|agents)\/new$/)
       await expect(page.getByRole('heading', { name: 'Create agent', exact: true })).toBeVisible()
 
-      await page.getByLabel('Agent name', { exact: true }).fill(agentName)
+      // The field is required, so its accessible name carries the "*" marker.
+      await page.getByLabel(/^Agent name/).fill(agentName)
       await clickWizardNext(page)
 
       await expect(page.getByText('Model & credentials', { exact: true })).toBeVisible()

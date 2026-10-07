@@ -3,16 +3,17 @@
  * the enabled allowlist entry for the Host's provider; `models` is `[hostDefault]`
  * (name only) when the allowlist is unavailable (`degraded`).
  */
-import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
-import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import type {
   AuthorityBindingV2,
   TrustedEdgeActionContextV2,
 } from '@clerum/action-context-contracts'
+import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import type { ModelWireEntry } from '../config/modelResolution.js'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import type { Attachment, TraceContextV1 } from '../core/types'
 import type { McpServerStatusEntry } from '../mcp/serverStatus'
+import type { ApprovalInputPreview } from '../progress/types'
 import type { TaskError } from '../queue/types'
 
 export interface ProviderIdentity {
@@ -562,6 +563,7 @@ export interface SessionStateWire {
     // reason ⇒ generic approval (back-compat). Set by `sessionRouteHandlers`.
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
+    inputPreview?: ApprovalInputPreview
   }
   /** Lifetime token totals; omitted when the session has had no LLM call yet. */
   tokens?: SessionTokensWire

@@ -211,7 +211,12 @@ describeRealPostgres('rateLimitMiddleware process-memory mode (real PostgreSQL)'
     const retryAfterSeconds = Number(denied.headers['retry-after'])
     expect(retryAfterSeconds).toBeGreaterThanOrEqual(1)
     expect(retryAfterSeconds).toBeLessThanOrEqual(60)
-    expect(denied.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds })
+    expect(denied.body).toEqual({
+      error: 'Too Many Requests',
+      code: 'rate_limited',
+      message: `This request limit has been reached. Try again in ${retryAfterSeconds} seconds.`,
+      retryAfterSeconds,
+    })
     expect(denied.headers['x-ratelimit-remaining']).toBe('0')
 
     const hitsHeld = await externalUserHits()
