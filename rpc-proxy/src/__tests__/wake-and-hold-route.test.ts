@@ -53,7 +53,13 @@ const controlApiMock = vi.hoisted(() => ({
 
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
-vi.mock('../services/controlApiRestService.js', () => controlApiMock)
+vi.mock('../services/controlApiRestService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../services/controlApiRestService.js')>()
+  return {
+    ...controlApiMock,
+    ControlApiHostMessageAdmissionError: actual.ControlApiHostMessageAdmissionError,
+  }
+})
 
 // Issue #791 §11.4: a wake-eligible finite operation carries host:wake:write in
 // addition to its operation scope (Desktop adds it; the route scope guard is
