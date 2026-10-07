@@ -16,7 +16,7 @@ describe('AppService deliberate team transition ownership', () => {
     }
     app.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
-        token: 'session-a',
+        token: 'fixture-session-a',
         me: {
           id: 'user-a',
           email: 'user-a@example.test',

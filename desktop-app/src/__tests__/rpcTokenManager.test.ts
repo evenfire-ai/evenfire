@@ -26,18 +26,18 @@ describe('RpcTokenManager', () => {
     const issueRpcToken = vi
       .fn()
       .mockReturnValueOnce(pending.promise)
-      .mockResolvedValueOnce(issuedToken('new-session-token'))
+      .mockResolvedValueOnce(issuedToken('test-token-new'))
     const manager = new RpcTokenManager({ issueRpcToken } as unknown as AuthClient)
 
     const oldSessionRequest = manager.getOrIssue('old-session', ['host:activity:read'], ['chatllm'])
     manager.clear()
-    pending.resolve(issuedToken('old-session-token'))
-    await expect(oldSessionRequest).resolves.toMatchObject({ token: 'old-session-token' })
+    pending.resolve(issuedToken('test-token-old'))
+    await expect(oldSessionRequest).resolves.toMatchObject({ token: 'test-token-old' })
 
     expect(manager.getMetadata()).toEqual({ expiresAtMs: null, scopes: [], hostRefs: [] })
     await expect(
       manager.getOrIssue('new-session', ['host:activity:read'], ['chatllm'])
-    ).resolves.toMatchObject({ token: 'new-session-token' })
+    ).resolves.toMatchObject({ token: 'test-token-new' })
     expect(issueRpcToken).toHaveBeenCalledTimes(2)
   })
 })
