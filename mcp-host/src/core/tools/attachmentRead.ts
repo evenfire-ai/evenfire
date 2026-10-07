@@ -14,6 +14,11 @@
  *     page — after JSON escaping and the sanitized wrapper — into the
  *     current-turn page/turn budgets, shrinking by whole code points with
  *     measurement only; the tool is never re-executed to fit.
+ *     Redaction ranges are computed once over the whole decoded text and
+ *     every page masks the part of each range it holds before it is
+ *     measured, so a secret split by `maxBytes`, by the budget fit or by a
+ *     model-chosen `offset` is masked on both sides (jozer-rami M2). The
+ *     loop's per-page sanitizer still runs on the result.
  *   - `reader:'none'`: a typed binary result; the bytes are never decoded.
  *
  * The text-or-binary rule is the one `clerum__gfs_read` applies
@@ -32,6 +37,7 @@ import type {
   ToolEmissionContext,
   ToolTraceDescriptor,
 } from '../interfaces'
+import type { RedactionRange } from '../safety/safety'
 import type { ToolOutput, ToolResult } from '../types'
 
 export type AttachmentReadErrorCode =
@@ -44,6 +50,12 @@ export interface AttachmentReadToolOptions {
   contextWindowTokens: number
   /** Turn-owned ledger; the registry wires one per turn. */
   ledger: AttachmentReadLedger
+  /** The tool-output redaction rules, applied to the whole decoded text. */
+  redactor: AttachmentReadRedactor
+}
+
+export interface AttachmentReadRedactor {
+  toolOutputRedactionRanges(toolName: string, content: string): RedactionRange[]
 }
 
 export type AttachmentReadLimit = 'max_bytes' | 'page_budget' | 'turn_budget'
@@ -94,6 +106,69 @@ function isUtf8Continuation(byte: number): boolean {
   return (byte & 0xc0) === 0x80
 }
 
+/** A byte range of the decoded file that every overlapping page replaces. */
+interface ByteRedaction {
+  start: number
+  end: number
+  replacement: string
+}
+
+// The replacement `applyRedactionRanges` uses when overlapping ranges carry
+// different replacements.
+const MIXED_REDACTION = '[REDACTED]'
+
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff
+
+// True when UTF-16 index `i` falls between the two halves of one code point.
+function splitsSurrogatePair(text: string, i: number): boolean {
+  return (
+    i > 0 &&
+    i < text.length &&
+    isLowSurrogate(text.charCodeAt(i)) &&
+    isHighSurrogate(text.charCodeAt(i - 1))
+  )
+}
+
+/**
+ * Turns UTF-16 redaction ranges over `text` into sorted, disjoint byte ranges
+ * of its UTF-8 encoding. Each range is widened to whole code points, and
+ * overlapping ranges are merged as `applyRedactionRanges` merges them.
+ */
+function toByteRedactions(text: string, ranges: RedactionRange[]): ByteRedaction[] {
+  const widened = ranges
+    .map(range => ({
+      start: splitsSurrogatePair(text, range.start) ? range.start - 1 : range.start,
+      end: splitsSurrogatePair(text, range.end) ? range.end + 1 : range.end,
+      replacement: range.replacement,
+    }))
+    .filter(range => range.end > range.start)
+    .sort((a, b) => a.start - b.start || b.end - a.end)
+  const merged: ByteRedaction[] = []
+  for (const range of widened) {
+    const last = merged[merged.length - 1]
+    if (last && range.start < last.end) {
+      if (range.end > last.end) last.end = range.end
+      if (range.replacement !== last.replacement) last.replacement = MIXED_REDACTION
+      continue
+    }
+    merged.push({ ...range })
+  }
+  // The bounds are now ascending, so one pass maps every index to its byte.
+  let index = 0
+  let byte = 0
+  const toByte = (target: number): number => {
+    byte += Buffer.byteLength(text.slice(index, target), 'utf8')
+    index = target
+    return byte
+  }
+  return merged.map(range => ({
+    start: toByte(range.start),
+    end: toByte(range.end),
+    replacement: range.replacement,
+  }))
+}
+
 const EXHAUSTED_MESSAGE =
   'The current-turn attachment read budget is exhausted. Reattach the file in a new message to resume at the reported offset; earlier pages are not stored for re-reading.'
 
@@ -108,8 +183,14 @@ interface PendingEmission {
 }
 
 export class AttachmentReadTool implements Tool {
-  /** Decoded bytes and the whole-file text check, per attachmentId. */
-  private readonly decoded = new Map<string, { bytes: Buffer; isText: boolean }>()
+  /**
+   * Decoded bytes and the whole-file text check, per attachmentId, plus the
+   * byte redaction ranges of a text file once a page needs them.
+   */
+  private readonly decoded = new Map<
+    string,
+    { bytes: Buffer; isText: boolean; redactions?: ByteRedaction[] }
+  >()
 
   /** @param maxBytesPerCall the per-call ceiling and the default page. */
   constructor(
@@ -123,12 +204,17 @@ export class AttachmentReadTool implements Tool {
     // Reuses the ledger's validation: positive safe integer or throw here,
     // before any read can execute.
     attachmentReadBudgets(options.contextWindowTokens)
+    if (typeof options.redactor?.toolOutputRedactionRanges !== 'function') {
+      throw new Error('Attachment read options require a redactor')
+    }
     this.contextWindowTokens = options.contextWindowTokens
     this.ledger = options.ledger
+    this.redactor = options.redactor
   }
 
   private readonly contextWindowTokens: number
   private readonly ledger: AttachmentReadLedger
+  private readonly redactor: AttachmentReadRedactor
   private pending: PendingEmission | null = null
 
   name(): string {
@@ -425,6 +511,57 @@ export class AttachmentReadTool implements Tool {
     return entry
   }
 
+  // Computed once per text attachment, over the whole decoded text.
+  private redactions(attachmentId: string): ByteRedaction[] {
+    const entry = this.decoded.get(attachmentId)
+    if (!entry?.isText) {
+      throw new Error('Attachment redactions requested before the text was decoded')
+    }
+    if (entry.redactions) return entry.redactions
+    // `ignoreBOM: true` keeps a leading U+FEFF, so every UTF-16 index of the
+    // text maps to a byte of the file.
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(entry.bytes)
+    entry.redactions = toByteRedactions(
+      text,
+      this.redactor.toolOutputRedactionRanges(this.name(), text)
+    )
+    return entry.redactions
+  }
+
+  /**
+   * The text of bytes `[offset, end)` with the part of every redaction range
+   * that falls inside it replaced. Range and page bounds are code point
+   * boundaries, so every decoded segment is whole UTF-8.
+   */
+  private pageText(bytes: Buffer, attachmentId: string, offset: number, end: number): string {
+    const redactions = this.redactions(attachmentId)
+    // A byte order mark is dropped only at the start of the file; further in,
+    // U+FEFF is file content and stays.
+    const decode = (from: number, to: number): string =>
+      new TextDecoder('utf-8', { fatal: true, ignoreBOM: from > 0 }).decode(
+        bytes.subarray(from, to)
+      )
+    let lo = 0
+    let hi = redactions.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (redactions[mid]!.end <= offset) lo = mid + 1
+      else hi = mid
+    }
+    const parts: string[] = []
+    let cursor = offset
+    for (let i = lo; i < redactions.length; i++) {
+      const range = redactions[i]!
+      const from = Math.max(range.start, offset)
+      const to = Math.min(range.end, end)
+      if (from >= to) break
+      parts.push(decode(cursor, from), range.replacement)
+      cursor = to
+    }
+    parts.push(decode(cursor, end))
+    return parts.join('')
+  }
+
   private ok(
     result: AttachmentReadResult,
     start: number,
@@ -554,11 +691,7 @@ export class AttachmentReadTool implements Tool {
     truncated: boolean,
     limit: AttachmentReadLimit | null
   ): AttachmentReadResult {
-    // A byte order mark is dropped only at the start of the file; further in,
-    // U+FEFF is file content and stays.
-    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: offset > 0 }).decode(
-      bytes.subarray(offset, end)
-    )
+    const text = this.pageText(bytes, identity.attachmentId, offset, end)
     return {
       attachmentId: identity.attachmentId,
       referenceId: identity.referenceId,

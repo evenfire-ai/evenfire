@@ -71,6 +71,7 @@ function toolFor(attachments: Attachment[], limit = READ_LIMIT): AttachmentReadT
   return new AttachmentReadTool(message, limit, {
     contextWindowTokens: WINDOW_TOKENS,
     ledger: new AttachmentReadLedger(),
+    redactor: new BasicSafety(),
   })
 }
 

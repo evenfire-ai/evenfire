@@ -418,6 +418,7 @@ describe('C17 prePrune — real attachment_read producer (M1, L14)', () => {
     return new AttachmentReadTool(message, 65_536, {
       contextWindowTokens: 100_000,
       ledger: new AttachmentReadLedger(),
+      redactor: new BasicSafety(),
     })
   }
 
@@ -508,11 +509,15 @@ describe('C17 prePrune — real attachment_read producer (M1, L14)', () => {
     )
 
     // The stored output: the real wrapper around a page that still parses.
+    // The tool masks the value against the whole text (jozer-rami M2), so the
+    // loop's sanitizer finds nothing left to change.
+    const open = '<tool_output name="clerum__attachment_read" sanitized="false">\n'
     expect(result.is_error).toBe(false)
-    expect(result.content.startsWith(OPEN)).toBe(true)
+    expect(result.content.startsWith(open)).toBe(true)
     expect(result.content.endsWith(CLOSE)).toBe(true)
-    const inner = result.content.slice(OPEN.length, -CLOSE.length)
+    const inner = result.content.slice(open.length, -CLOSE.length)
     expect(parsesAsJson(inner)).toBe(true)
+    expect(JSON.parse(inner).text).toBe('DB_HOST=db.internal\n[REDACTED]')
     expect(inner).not.toContain('supersecret99')
 
     const messages: ChatMessage[] = [
@@ -524,8 +529,8 @@ describe('C17 prePrune — real attachment_read producer (M1, L14)', () => {
     const pruned = prePrune(messages, OPTIONS, PRESSURE_ON)
     expect(pruned.passesApplied).toContain('attachment_page_collapse')
     const stubContent = pruned.messages[2].content
-    expect(stubContent.startsWith(OPEN)).toBe(true)
-    const stub = JSON.parse(stubContent.slice(OPEN.length, -CLOSE.length))
+    expect(stubContent.startsWith(open)).toBe(true)
+    const stub = JSON.parse(stubContent.slice(open.length, -CLOSE.length))
     expect(stub).toEqual({
       attachmentId: ATTACHMENT_ID,
       referenceId: expect.any(String),

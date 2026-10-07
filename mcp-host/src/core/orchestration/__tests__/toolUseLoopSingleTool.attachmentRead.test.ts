@@ -154,6 +154,7 @@ describe('executeSingleTool — clerum__attachment_read pages stay inline (#666,
     return new AttachmentReadTool(message, READ_LIMIT, {
       contextWindowTokens: 100_000,
       ledger: new AttachmentReadLedger(),
+      redactor: new BasicSafety(),
     })
   }
 

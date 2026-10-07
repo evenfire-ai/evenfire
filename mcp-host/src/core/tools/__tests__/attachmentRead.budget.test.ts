@@ -72,6 +72,7 @@ function toolFor(
     tool: new AttachmentReadTool(messageFor(attachments), READ_LIMIT, {
       contextWindowTokens: options.windowTokens ?? WINDOW_TOKENS,
       ledger,
+      redactor: new BasicSafety(),
     }),
     ledger,
   }

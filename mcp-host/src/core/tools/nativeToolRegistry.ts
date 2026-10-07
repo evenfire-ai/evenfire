@@ -23,6 +23,7 @@ import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
 import type { AttachmentReadLedger } from '../attachments/attachmentReadBudget'
 import { type ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
+import { BasicSafety } from '../safety/safety'
 import type { SessionSearchService } from '../sessionSearch'
 import type { SpilloverStorage } from '../spillover'
 import { ToolDefinition, ToolOutput } from '../types'
@@ -321,8 +322,11 @@ export class NativeToolRegistry implements ToolRegistry {
       // The tool declares itself spillover-exempt: a page is bounded by
       // `maxBytes`, so the loop ships it inline whether or not this turn has
       // spillover storage (#678).
+      // Pages are redacted against the whole text with the same rules and
+      // ConfigStore secrets the loop's tool-output sanitizer applies.
+      const redactor = new BasicSafety(attachmentOptions?.secretEntriesProvider)
       this.register(
-        new AttachmentReadTool(sourceMessage, maxBytes, { contextWindowTokens, ledger })
+        new AttachmentReadTool(sourceMessage, maxBytes, { contextWindowTokens, ledger, redactor })
       )
     }
 

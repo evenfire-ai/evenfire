@@ -47,7 +47,7 @@ function parsesAsJson(text: string): boolean {
   }
 }
 
-type RedactionRange = { start: number; end: number; replacement: string }
+export type RedactionRange = { start: number; end: number; replacement: string }
 // `scalar`: the piece is a whole number or literal, replaced by a JSON string.
 type RedactionPiece = RedactionRange & { scalar: boolean }
 
@@ -869,6 +869,18 @@ export class BasicSafety implements Safety {
       })
     }
     return secrets
+  }
+
+  /**
+   * The ranges of `content` that `sanitizeOutput` redacts as plain text, in
+   * UTF-16 indices, unsorted and possibly overlapping. A caller that emits
+   * slices of a larger text computes them once over the whole text, so a
+   * match does not depend on where a slice ends. Does NOT log.
+   */
+  toolOutputRedactionRanges(toolName: string, content: string): RedactionRange[] {
+    return this.redactionPlan(content, {
+      secretWarning: `Potential secret detected in ${toolName} output`,
+    }).ranges
   }
 
   /**
