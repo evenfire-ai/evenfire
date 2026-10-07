@@ -32,6 +32,7 @@ import {
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
   HostActivityStreamEvent,
+  HostMessageAttachment,
   HostMessageRequest,
   HostStatusStreamEvent,
   TaskProgressStreamEvent,
@@ -209,6 +210,54 @@ function isSelectionRevision(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Checks the shape of every `kind:'file'` attachment (#678). mcp-host enforces
+ * the size limits and recomputes the size and the digest; an image entry keeps
+ * the contract it always had and is not inspected here.
+ */
+function parseHostMessageAttachments(attachments: unknown): HostMessageAttachment[] {
+  if (!Array.isArray(attachments)) {
+    throw new Error('Invalid host message request: attachments')
+  }
+  attachments.forEach((entry, index) => {
+    if (!isPlainObject(entry) || entry.kind !== 'file') return
+    const digest = entry.digest
+    const problem =
+      typeof entry.id !== 'string' || !entry.id.trim()
+        ? 'id'
+        : typeof entry.filename !== 'string' || !entry.filename
+          ? 'filename'
+          : typeof entry.mimeType !== 'string'
+            ? 'mimeType'
+            : typeof entry.detectedMediaType !== 'string'
+              ? 'detectedMediaType'
+              : entry.encoding !== 'base64'
+                ? 'encoding'
+                : typeof entry.dataBase64 !== 'string'
+                  ? 'dataBase64'
+                  : !Number.isSafeInteger(entry.sizeBytes) || (entry.sizeBytes as number) < 0
+                    ? 'sizeBytes'
+                    : !isPlainObject(digest) ||
+                        digest.algorithm !== 'sha256' ||
+                        typeof digest.hex !== 'string' ||
+                        !SHA256_HEX.test(digest.hex)
+                      ? 'digest'
+                      : null
+    if (problem) {
+      throw new Error(
+        `Invalid host message request: COMPOSER_FILE_ATTACHMENT_INVALID attachments[${index}].${problem}`
+      )
+    }
+  })
+  return attachments as HostMessageAttachment[]
+}
+
 function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   const parsed = raw as HostMessageRequest
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -225,6 +274,9 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
     !isSelectionRevision(parsed.modelSelectionRevision)
   ) {
     throw new Error('Invalid host message request: modelSelectionRevision')
+  }
+  if (parsed.attachments != null) {
+    parsed.attachments = parseHostMessageAttachments(parsed.attachments)
   }
   if (parsed.fileReferences !== undefined) {
     // Checks shape only; mcp-host enforces the count limit and resolves each reference.

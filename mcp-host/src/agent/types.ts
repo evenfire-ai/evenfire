@@ -30,6 +30,8 @@ export interface ExecutorFailoverSupport {
    * all name the same pair.
    */
   buildProvider: (entry: FallbackEntry) => SingleTurnProvider | null
+  /** Same per-model catalog used by the primary resolver; no provider construction. */
+  contextWindowForPair?: (provider: string, model: string) => number | undefined
 }
 
 /** Returns the current {@link ExecutorFailoverSupport}, or null when no policy. */
