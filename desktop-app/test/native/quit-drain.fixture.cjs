@@ -42,6 +42,9 @@ appService.me = { id: 'synthetic-user', teamId: 'synthetic-team' }
 
 const firstAuthFence = deferred()
 const firstAuthStarted = deferred()
+const independentTokenWriteFence = deferred()
+const independentTokenWriteStarted = deferred()
+const tokenStoreDrainStarted = deferred()
 const retryStorageFence = deferred()
 const retryStorageStarted = deferred()
 let authSuspensions = 0
@@ -54,6 +57,9 @@ let retryLogoutError = null
 let savedCredential = true
 let retryStorageHeld = false
 let retryStorageSettled = false
+let independentTokenWriteSettled = false
+let firstDrainSawIndependentWrite = false
+let firstDrainHeldForIndependentWrite = false
 let storageClearCalls = 0
 
 // Hold only GFS and the credential adapter. Keep AppService.logout, TokenStore's
@@ -74,14 +80,26 @@ appService.tokenStore.clearSessionTokenOnce = async () => {
   }
   savedCredential = false
 }
+appService.tokenStore.setSessionTokenOnce = async token => {
+  if (token !== 'synthetic-independent-token') return
+  independentTokenWriteStarted.resolve()
+  await independentTokenWriteFence.promise
+  independentTokenWriteSettled = true
+}
+const independentTokenWrite = appService.tokenStore.setSessionToken(
+  'synthetic-independent-token',
+  'fixture-000000000000'
+)
 
 let firstDrainStartedBeforeLogoutSettled = false
 let retryDrainStartedBeforeStorageSettled = false
 const tokenStoreDrain = appService.tokenStore.prepareForQuit.bind(appService.tokenStore)
 appService.tokenStore.prepareForQuit = async () => {
+  tokenStoreDrainStarted.resolve()
   if (authSuspensions > 0 && !firstLogoutSettled) {
     firstDrainStartedBeforeLogoutSettled = true
   }
+  if (!independentTokenWriteSettled) firstDrainSawIndependentWrite = true
   if (retryStorageHeld && !retryStorageSettled) {
     retryDrainStartedBeforeStorageSettled = true
   }
@@ -131,6 +149,9 @@ app.on('will-quit', () => {
     preparationCallbackCompletions !== 2 ||
     cancellationCount !== 1 ||
     !firstScenarioVerified ||
+    !firstDrainSawIndependentWrite ||
+    !firstDrainHeldForIndependentWrite ||
+    !independentTokenWriteSettled ||
     !retryScenarioVerified
   ) {
     console.error('admitted logout or canceled-attempt storage drain was not verified', {
@@ -139,6 +160,8 @@ app.on('will-quit', () => {
       preparationHeldPastDeadline,
       authStateIntactBeforeRelease,
       firstDrainStartedBeforeLogoutSettled,
+      firstDrainSawIndependentWrite,
+      firstDrainHeldForIndependentWrite,
       firstScenarioVerified,
       retryPreparationHeld,
       retryDrainStartedBeforeStorageSettled,
@@ -203,7 +226,12 @@ registerQuitDrain(
             throw new Error('injected first preparation rejection')
           }
           assert.ok(firstLogout, 'first logout producer must exist before preparation drains')
-          await Promise.all([preparation, firstLogout])
+          await firstLogout
+          await tokenStoreDrainStarted.promise
+          await sleep(25)
+          firstDrainHeldForIndependentWrite = !preparationSettled && !independentTokenWriteSettled
+          independentTokenWriteFence.resolve()
+          await Promise.all([preparation, independentTokenWrite])
         } else {
           await preparation
         }
@@ -254,6 +282,7 @@ app
     await window.webContents.executeJavaScript(
       'window.onbeforeunload = event => { event.returnValue = false; return false }; void 0'
     )
+    await independentTokenWriteStarted.promise
     firstLogout = appService.logout().then(
       () => {
         firstLogoutSettled = true
