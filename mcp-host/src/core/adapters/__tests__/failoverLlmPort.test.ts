@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SingleTurnProvider } from '../../../llm'
+import { PNG_2X2_BASE64 } from '../../../llm/__tests__/codexImageFixtures'
 import { FailoverEngine } from '../../../llm/failover/engine'
 import type { LlmPolicy } from '../../../llm/failover/types'
 import type { LlmUsageEvent } from '../../../usage/usageReporter'
@@ -235,6 +236,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
       provider,
       model,
       evidence: 'https://example.com/image-input',
+      deliveryLimits: null,
     })
 
   function visionAdapter(provider: SingleTurnProvider, model: string, providerName: string) {
@@ -277,7 +279,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
   }
 
   function imageRequest(): ToolCompletionRequest {
-    // Canonical base64 lets the transport guard reach the destination decision.
+    // Real PNG bytes and producer-measured geometry isolate destination policy.
     return {
       messages: [
         {
@@ -287,7 +289,9 @@ describe('FailoverLlmPort — visual destination failover', () => {
             {
               type: 'image',
               mimeType: 'image/png',
-              data: 'QUJD',
+              data: PNG_2X2_BASE64,
+              width: 2,
+              height: 2,
               source: GFS_SOURCE,
             },
           ],
@@ -326,7 +330,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
     expect(engine.servedBy()).toBeNull()
   })
 
-  it('reports the winner destination capability after a fallback serves the image request', async () => {
+  it('reports the winner model capability while withholding GFS pixels without its physical profile', async () => {
     // A real cross-provider fallback: the primary (Claude) proves image support
     // for its own model, and the OpenRouter entry proves it for another one.
     const imagePolicy: LlmPolicy = {
@@ -355,15 +359,21 @@ describe('FailoverLlmPort — visual destination failover', () => {
       supported('claude', 'claude-sonnet-4-6')
     )
 
-    const response = await wrapped.completeWithTools(imageRequest())
+    const canonical = imageRequest()
+    const before = structuredClone(canonical)
+    const response = await wrapped.completeWithTools(canonical)
 
     expect(response.content).toBe('served-by-meta/llama-3.2-11b-vision')
     expect(fallbackProvider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
     const [messages, , options] = fallbackProvider.completeSingleTurnWithTools.mock.calls[0]
-    expect(options.verifyImageInput).toBe(true)
+    expect(options.verifyImageInput).toBeUndefined()
     expect(
       (messages as ChatMessage[]).some(m => m.contentParts?.some(p => p.type === 'image'))
-    ).toBe(true)
+    ).toBe(false)
+    expect(JSON.stringify(messages)).not.toContain(PNG_2X2_BASE64)
+    expect(JSON.stringify(messages)).toContain('provider_visual_profile_unavailable')
+    expect(JSON.stringify(messages)).toContain(GFS_SOURCE.gfsUri)
+    expect(canonical).toEqual(before)
     expect(engine.servedBy()).toEqual({
       provider: 'openrouter',
       model: 'meta/llama-3.2-11b-vision',

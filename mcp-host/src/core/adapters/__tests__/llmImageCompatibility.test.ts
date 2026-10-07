@@ -17,16 +17,27 @@ import type {
   CodexMessagePartImageV2,
 } from '@clerum/llm-provider-attempt-contract'
 import type { SingleTurnProvider } from '../../../llm'
-import { JPEG_2X2_BASE64, PNG_2X2_BASE64 } from '../../../llm/__tests__/codexImageFixtures'
+import {
+  JPEG_2X2_BASE64,
+  PNG_2X2_BASE64,
+  realPngOfDecodedBytesBase64,
+} from '../../../llm/__tests__/codexImageFixtures'
 import {
   type CodexSubscriptionDeps,
   CodexSubscriptionProvider,
 } from '../../../llm/codexSubscription'
 import { FailoverEngine } from '../../../llm/failover/engine'
 import type { LlmPolicy } from '../../../llm/failover/types'
-import type { ImageInputResolver } from '../../../llm/imageInput'
+import {
+  type ImageInputResolver,
+  type ImageTransportOperation,
+  transportSupportsImageInput,
+} from '../../../llm/imageInput'
 import { CodexAuthorizeError } from '../../../llm/providerAttemptAuthorizer'
-import { VISUAL_INPUT_LIMITS } from '../../../visualInput/policy'
+import {
+  resolveOfficialVisualDeliveryLimits,
+  resolveVisualDeliveryLimits,
+} from '../../../visualInput/deliveryLimits'
 import { LlmErrorCode } from '../../errors'
 import { stripHistoricalMedia } from '../../extensions/prePrune'
 import { appendToolResults } from '../../orchestration/toolUseLoopMessages'
@@ -86,6 +97,14 @@ const TOOLS: ToolDefinition[] = [
 ]
 
 const EXPLANATORY_TEXT = 'Here are the screenshots from the tool results above.'
+const OPENAI_VISUAL_PROFILE = (operation: ImageTransportOperation) =>
+  resolveOfficialVisualDeliveryLimits('openai', 'https://api.openai.com/v1', operation)
+const CLAUDE_VISUAL_PROFILE = (operation: ImageTransportOperation) =>
+  resolveOfficialVisualDeliveryLimits('claude', 'https://api.anthropic.com', operation)
+const CODEX_VISUAL_PROFILE = (operation: ImageTransportOperation) =>
+  transportSupportsImageInput('codex-subscription', operation)
+    ? resolveVisualDeliveryLimits('codex-subscription')
+    : null
 
 const imageAttachment = (
   id: string,
@@ -97,6 +116,8 @@ const imageAttachment = (
   mimeType,
   encoding: 'base64',
   dataBase64: data,
+  width: 2,
+  height: 2,
 })
 
 const frameResult = (toolCallId: string, attachment: Attachment): ToolResult => ({
@@ -110,8 +131,11 @@ const frameResult = (toolCallId: string, attachment: Attachment): ToolResult => 
 const screenshotResult = (toolCallId: string, attachmentId: string): ToolResult =>
   frameResult(toolCallId, imageAttachment(attachmentId))
 
-const gfsResult = (toolCallId: string, digit: string): ToolResult => {
-  const resourceId = digit.repeat(32)
+const gfsResult = (
+  toolCallId: string,
+  digit: string,
+  resourceId = digit.repeat(32)
+): ToolResult => {
   const source = {
     kind: 'gfs' as const,
     drive: 'main',
@@ -187,11 +211,14 @@ function recordingProvider(options: {
   cache: boolean
   imageSourceIdentity?: boolean
   providerType?: string
+  /** Explicit physical contract for positive GFS cases; omission stays unknown. */
+  deliveryLimits?: SingleTurnProvider['getVisualDeliveryLimits']
 }) {
   const complete: ProviderCall[] = []
   const completeWithTools: ProviderCall[] = []
   const base = {
     getProviderType: () => (options.providerType ?? 'openai') as 'openai',
+    ...(options.deliveryLimits ? { getVisualDeliveryLimits: options.deliveryLimits } : {}),
     classifyError: () => ({
       code: LlmErrorCode.ApiCallFailed,
       retryable: true,
@@ -443,7 +470,7 @@ describe('image source identity compatibility (#650)', () => {
   it('applies the same view when the request carries no system prompt parts', async () => {
     const { messages } = repeatedFrameMessages()
 
-    const legacy = recordingProvider({ cache: false })
+    const legacy = recordingProvider({ cache: false, providerType: 'vertex' })
     await adapterFor(legacy.provider, 'gemini-2.5-pro', 'vertex').complete({ messages })
     expect(imagePartsOf(legacy.complete[0].messages)).toHaveLength(1)
 
@@ -458,26 +485,37 @@ describe('image source identity compatibility (#650)', () => {
   it('keeps a later ordinary screenshot by demoting excess historical GFS images', async () => {
     const messages: ChatMessage[] = []
     const collected: Attachment[] = []
-    for (const digit of ['1', '2', '3']) {
-      appendToolResults(messages, [gfsResult(`gfs-${digit}`, digit)], collected)
+    const profile = CLAUDE_VISUAL_PROFILE('completeWithTools')!
+    for (let index = 1; index <= profile.maxImages; index++) {
+      appendToolResults(
+        messages,
+        [gfsResult(`gfs-${index}`, String(index), index.toString(16).padStart(32, '0'))],
+        collected
+      )
     }
     appendToolResults(messages, [screenshotResult('late-shot', 'late-image')], collected)
     const snapshot = structuredClone(messages)
-    expect(imagePartsOf(messages)).toHaveLength(4)
+    expect(imagePartsOf(messages)).toHaveLength(profile.maxImages + 1)
 
-    const legacy = recordingProvider({ cache: false, providerType: 'openai' })
-    await adapterFor(legacy.provider, 'gpt-4o', 'openai').completeWithTools({
+    const legacy = recordingProvider({
+      cache: false,
+      providerType: 'claude',
+      deliveryLimits: CLAUDE_VISUAL_PROFILE,
+    })
+    await adapterFor(legacy.provider, 'claude-sonnet-4-6', 'claude').completeWithTools({
       messages,
       tools: TOOLS,
     })
 
     const sent = legacy.completeWithTools[0].messages
-    expect(imagePartsOf(sent)).toHaveLength(3)
+    expect(imagePartsOf(sent)).toHaveLength(profile.maxImages)
     expect(imagePartsOf(sent).some(part => part.source?.kind === 'tool')).toBe(true)
-    expect(imagePartsOf(sent).filter(part => part.source?.kind === 'gfs')).toHaveLength(2)
-    expect(sent.find(message => message.tool_call_id === 'gfs-3')?.content).toContain(
-      '"delivery":"reference_only"'
+    expect(imagePartsOf(sent).filter(part => part.source?.kind === 'gfs')).toHaveLength(
+      profile.maxImages - 1
     )
+    expect(
+      sent.find(message => message.tool_call_id === `gfs-${profile.maxImages}`)?.content
+    ).toContain('"delivery":"reference_only"')
     expect(messages).toEqual(snapshot)
   })
 
@@ -496,7 +534,11 @@ describe('image source identity compatibility (#650)', () => {
     const snapshot = structuredClone(messages)
     expect(imagePartsOf(messages)).toHaveLength(4)
 
-    const legacy = recordingProvider({ cache: false, providerType: 'openai' })
+    const legacy = recordingProvider({
+      cache: false,
+      providerType: 'openai',
+      deliveryLimits: OPENAI_VISUAL_PROFILE,
+    })
     await adapterFor(legacy.provider, 'gpt-4o', 'openai').completeWithTools({
       messages,
       tools: TOOLS,
@@ -507,15 +549,19 @@ describe('image source identity compatibility (#650)', () => {
       cache: false,
       providerType: 'codex-subscription',
       imageSourceIdentity: true,
+      deliveryLimits: CODEX_VISUAL_PROFILE,
     })
     await adapterFor(binding.provider, 'gpt-5.3-codex', 'codex-subscription').completeWithTools({
       messages,
       tools: TOOLS,
     })
-    expect(imagePartsOf(binding.completeWithTools[0].messages)).toHaveLength(3)
+    expect(imagePartsOf(binding.completeWithTools[0].messages)).toHaveLength(4)
     expect(
       imagePartsOf(binding.completeWithTools[0].messages).every(
-        part => part.source?.kind === 'tool'
+        part =>
+          part.source?.kind === 'tool' ||
+          part.source?.kind === 'attachment' ||
+          part.source?.kind === 'gfs'
       )
     ).toBe(true)
     expect(messages).toEqual(snapshot)
@@ -535,7 +581,11 @@ describe('image source identity compatibility (#650)', () => {
     appendToolResults(messages, [gfsResult('gfs-read', 'a')], collected, true)
     expect(imagePartsOf(messages)).toHaveLength(4)
 
-    const legacy = recordingProvider({ cache: false, providerType: 'openai' })
+    const legacy = recordingProvider({
+      cache: false,
+      providerType: 'openai',
+      deliveryLimits: OPENAI_VISUAL_PROFILE,
+    })
     await adapterFor(legacy.provider, 'gpt-4o', 'openai').completeWithTools({
       messages,
       tools: TOOLS,
@@ -549,17 +599,26 @@ describe('image source identity compatibility (#650)', () => {
   it('demotes GFS when serialized bytes exceed the visual request bound', async () => {
     const messages: ChatMessage[] = []
     const collected: Attachment[] = []
-    const largeImage = Buffer.alloc(VISUAL_INPUT_LIMITS.fileBytes).toString('base64')
+    const profile = CLAUDE_VISUAL_PROFILE('completeWithTools')!
+    const largeImage = realPngOfDecodedBytesBase64(profile.maxImageBytes!)
     for (const digit of ['1', '2', '3']) {
       const result = gfsResult(`gfs-${digit}`, digit)
       result.attachments![0].dataBase64 = largeImage
       appendToolResults(messages, [result], collected)
     }
+    messages.push({
+      role: 'user',
+      content: 'x'.repeat(profile.maxVisualRequestBytes - largeImage.length * 3 + 1),
+    })
     expect(imagePartsOf(messages)).toHaveLength(3)
     const snapshot = structuredClone(messages)
 
-    const legacy = recordingProvider({ cache: false, providerType: 'openai' })
-    await adapterFor(legacy.provider, 'gpt-4o', 'openai').completeWithTools({
+    const legacy = recordingProvider({
+      cache: false,
+      providerType: 'claude',
+      deliveryLimits: CLAUDE_VISUAL_PROFILE,
+    })
+    await adapterFor(legacy.provider, 'claude-sonnet-4-6', 'claude').completeWithTools({
       messages,
       tools: TOOLS,
     })
@@ -717,6 +776,8 @@ describe('mixed-chain pruning recovery (#650)', () => {
       type: 'image',
       mimeType: 'image/png',
       data: PNG_2X2_BASE64,
+      width: 2,
+      height: 2,
       source: { kind: 'tool', attachmentId: 'att-second', toolCallId: 'tc_second' },
     })
     expect(JSON.stringify(view)).not.toContain('sourceIdentityOnly')
@@ -893,7 +954,11 @@ describe('Codex V2 transport wiring (#650)', () => {
         hostRef: 'chatllm',
       }),
     } as unknown as CodexSubscriptionDeps)
-    const fallback = recordingProvider({ cache: false })
+    const fallback = recordingProvider({
+      cache: false,
+      providerType: 'openai',
+      deliveryLimits: OPENAI_VISUAL_PROFILE,
+    })
     const policy: LlmPolicy = {
       cooldownSeconds: 300,
       triggerOn: ['rate_limited'],
@@ -928,7 +993,7 @@ describe('Codex V2 transport wiring (#650)', () => {
     const codexImages = codexRequest.messages
       .flatMap(message => message.contentParts ?? [])
       .filter((part): part is CodexMessagePartImageV2 => part.type === 'image')
-    expect(codexImages).toHaveLength(3)
+    expect(codexImages).toHaveLength(4)
     expect(codexImages.every(part => part.source.kind === 'tool')).toBe(true)
     const openaiImages = imagePartsOf(fallback.completeWithTools[0].messages)
     expect(openaiImages).toHaveLength(2)

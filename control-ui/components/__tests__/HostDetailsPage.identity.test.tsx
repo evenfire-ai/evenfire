@@ -321,7 +321,7 @@ describe('HostDetailsPage identity integration', () => {
     )
   })
 
-  it('shows the provider model configuration and opens the linked LLM Secret modal inline', async () => {
+  it('shows the provider model configuration and routes the pencil to the secret editor page', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     const { container } = render(<HostDetailsPage />)
 
@@ -333,22 +333,28 @@ describe('HostDetailsPage identity integration', () => {
     expect(summary).toHaveTextContent('All enabled models')
     expect(screen.queryByText('Model name')).not.toBeInTheDocument()
     expect(screen.getByText('LLM Secret')).toBeInTheDocument()
-    expect(container.querySelectorAll('.cu-llm-summary__value')).toHaveLength(2)
+    // Static summary: the credential display uses the same read-only value box
+    // as the provider summary (credential + provider + current model).
+    expect(container.querySelectorAll('.cu-llm-summary__value')).toHaveLength(3)
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
     expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
     expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit LLM Secret credentials' }))
+    // The secret editor is a full-screen route opened from inside the model
+    // editor dialog; nothing stacks on this page.
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const editorDialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    fireEvent.click(
+      within(editorDialog).getByRole('button', { name: 'Edit LLM Secret credentials' })
+    )
 
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
-    expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Replace OpenAI API key' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Update secret' })).toBeInTheDocument()
-    expect(pushMock).not.toHaveBeenCalled()
+    expect(pushMock).toHaveBeenCalledWith(
+      '/secrets/llm/openai-secret/edit?from=%2Fagents%2Ffoo%2Fmodel'
+    )
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
-  it('shows the fixed LLM Secret assignment with provider icons outside the model editor', async () => {
+  it('uses a custom LLM Secret picker with the enabled provider icons', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       host,
@@ -365,38 +371,49 @@ describe('HostDetailsPage identity integration', () => {
 
     render(<HostDetailsPage />)
 
-    const picker = await screen.findByRole('button', { name: 'LLM Secret' })
-    expect(picker).toHaveTextContent('openai-secret')
-    expect(picker).toBeDisabled()
-    expect(picker.querySelectorAll('img')).toHaveLength(2)
-    expect(picker.querySelector('img')).toHaveAttribute('src', '/provider-icons/openai.svg')
-    expect(picker.querySelectorAll('img')[1]).toHaveAttribute('src', '/provider-icons/claude.svg')
+    // Summary: static value display with the provider icons — not a dropdown.
+    const summaryName = await screen.findByText('openai-secret')
+    const staticValue = summaryName.closest('.cu-llm-summary__value') as HTMLElement
+    expect(staticValue).not.toBeNull()
+    expect(staticValue.querySelectorAll('img')).toHaveLength(2)
+    expect(staticValue.querySelector('img')).toHaveAttribute('src', '/provider-icons/openai.svg')
+    expect(staticValue.querySelectorAll('img')[1]).toHaveAttribute(
+      'src',
+      '/provider-icons/claude.svg'
+    )
+    expect(screen.queryByRole('button', { name: 'LLM Secret' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Edit LLM Secret credentials' })
+    ).not.toBeInTheDocument()
     expect(screen.queryByRole('combobox')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Edit model configuration' })
-    expect(within(dialog).queryByLabelText('LLM Secret')).not.toBeInTheDocument()
-    expect(dialog.querySelector('#llm-primary-provider')).toBeInTheDocument()
-    expect(picker).toBeDisabled()
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    const editorPicker = within(dialog).getByRole('button', { name: 'LLM Secret' })
+    expect(editorPicker).toBeEnabled()
+    fireEvent.click(editorPicker)
+
+    const zaiOption = screen.getByRole('option', { name: /zai-secret/ })
+    expect(zaiOption).toHaveTextContent('Z.AI')
+    expect(zaiOption.querySelector('img')).toHaveAttribute('src', '/provider-icons/zai.svg')
   })
 
-  it('uses the shared LLM Secret editor for additional provider credentials', async () => {
+  it('links the pencil to the shared full-screen editor for the linked secret', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     render(<HostDetailsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Edit LLM Secret credentials' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    const pencil = within(dialog).getByRole('button', { name: 'Edit LLM Secret credentials' })
+    expect(pencil).toBeEnabled()
+    fireEvent.click(pencil)
 
-    expect(screen.getByText('Update LLM secret openai-secret')).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Manage LLM Secrets' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Replace OpenAI API key' })).toBeInTheDocument()
-
-    fireEvent.click(screen.getByLabelText('Add provider'))
-    fireEvent.click(screen.getByRole('option', { name: 'Anthropic' }))
-
-    expect(
-      screen.getByText('Anthropic', { selector: '.cu-llm-cred-group__title' })
-    ).toBeInTheDocument()
-    expect(screen.getByLabelText(/Claude API key/i)).toBeInTheDocument()
+    // The additional-provider credential journey itself lives on the
+    // secrets/llm/[name]/edit page suite; this page only hands off.
+    expect(pushMock).toHaveBeenCalledWith(
+      '/secrets/llm/openai-secret/edit?from=%2Fagents%2Ffoo%2Fmodel'
+    )
+    expect(screen.queryByText('Update LLM secret openai-secret')).not.toBeInTheDocument()
   })
 
   it('shows a complete ChatGPT assignment without requiring Edit', async () => {
@@ -584,8 +601,8 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
     expect(screen.queryByText('OpenAI Codex Subscription')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    const dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
-    expect(within(dialog).queryByLabelText('Credential')).not.toBeInTheDocument()
+    const dialog = screen.getByRole('dialog', { name: 'Edit model & credentials' })
+    expect(within(dialog).getByLabelText('Credential')).toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -841,7 +858,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByText('disabled')).not.toBeInTheDocument()
   })
 
-  it('keeps credential assignment controls out of the model editor with a static fallback', async () => {
+  it('keeps a second LLM Secret field in existing control-ui styles when Codex has a static fallback', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
       {
@@ -887,10 +904,39 @@ describe('HostDetailsPage identity integration', () => {
     render(<HostDetailsPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Edit model configuration' })
-    expect(within(dialog).queryByLabelText('Credential')).not.toBeInTheDocument()
-    expect(within(dialog).queryByLabelText('LLM Secret')).not.toBeInTheDocument()
-    expect(dialog.querySelectorAll('.cu-llm-secret-control')).toHaveLength(0)
-    expect(dialog.querySelector('#llm-primary-provider')).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    expect(within(dialog).getByLabelText('Credential')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('LLM Secret')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Credential')).toBeEnabled()
+    expect(within(dialog).getByLabelText('LLM Secret')).toBeEnabled()
+    expect(dialog.querySelectorAll('.cu-llm-secret-control')).toHaveLength(2)
+    expect(dialog.querySelectorAll('.cu-field__hint').length).toBeGreaterThanOrEqual(2)
+    expect(
+      within(dialog).getByRole('button', { name: 'Edit LLM Secret credentials' })
+    ).toBeInTheDocument()
+  })
+
+  it('collapses the fallback providers section by default in the model editor', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    render(<HostDetailsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+
+    // Collapsed by default: the toggle is closed and the policy editor
+    // (including its add-fallback affordance) is not rendered.
+    const toggle = within(dialog).getByRole('button', { name: /Fallback providers/ })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(
+      within(dialog).queryByRole('region', { name: 'Fallback policy' })
+    ).not.toBeInTheDocument()
+
+    // Expanding still reveals the full editor.
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(within(dialog).getByRole('region', { name: 'Fallback policy' })).toBeInTheDocument()
+    expect(
+      within(dialog).getByRole('button', { name: 'Add fallback provider' })
+    ).toBeInTheDocument()
   })
 })

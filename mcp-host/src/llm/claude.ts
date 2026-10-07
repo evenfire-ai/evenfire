@@ -17,15 +17,21 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
+import { resolveOfficialVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import { convertToClaudeMessages, separateSystemMessage } from './claude/messageTranslate'
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
+import type { ImageTransportOperation } from './imageInput'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export class ClaudeProvider implements SingleTurnProvider {
   private client: Anthropic
   private defaultModel: string
+
+  getVisualDeliveryLimits(operation: ImageTransportOperation) {
+    return resolveOfficialVisualDeliveryLimits('claude', this.client.baseURL, operation)
+  }
 
   constructor(apiKeyOrClient: string | Anthropic, defaultModel: string = 'claude-sonnet-4-6') {
     if (typeof apiKeyOrClient === 'string') {
@@ -140,6 +146,7 @@ export class ClaudeProvider implements SingleTurnProvider {
     messages: CoreChatMessage[],
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
   ): Promise<CompletionResponse> {
+    assertVisualRequestFits(messages, messages, false, this.getVisualDeliveryLimits('complete'))
     const { systemPrompt, claudeMessages } = this.separateSystemMessage(messages)
 
     const response = await this.client.messages.create(
@@ -210,7 +217,12 @@ export class ClaudeProvider implements SingleTurnProvider {
       max_tokens: options?.max_tokens ?? 4096,
       temperature: options?.temperature,
     }
-    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    assertVisualRequestFits(
+      messages,
+      request,
+      options?.verifyImageInput === true,
+      this.getVisualDeliveryLimits('completeWithTools')
+    )
     const response = await this.client.messages.create(request, { signal: options?.signal })
 
     const textContent =
@@ -299,7 +311,12 @@ export class ClaudeProvider implements SingleTurnProvider {
       max_tokens: options?.max_tokens ?? 4096,
       temperature: options?.temperature,
     }
-    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    assertVisualRequestFits(
+      messages,
+      request,
+      options?.verifyImageInput === true,
+      this.getVisualDeliveryLimits('completeWithToolsAndCache')
+    )
     const response = await this.client.messages.create(request, { signal: options?.signal })
 
     const textContent =
@@ -367,16 +384,20 @@ export class ClaudeProvider implements SingleTurnProvider {
       } as Anthropic.TextBlockParam)
     }
 
-    const response = await this.client.messages.create(
-      {
-        model: this.defaultModel,
-        system: systemBlocks.length > 0 ? systemBlocks : undefined,
-        messages: claudeMessages,
-        max_tokens: options?.max_tokens ?? 4096,
-        temperature: options?.temperature,
-      },
-      { signal: options?.signal }
+    const request: Anthropic.MessageCreateParamsNonStreaming = {
+      model: this.defaultModel,
+      system: systemBlocks.length > 0 ? systemBlocks : undefined,
+      messages: claudeMessages,
+      max_tokens: options?.max_tokens ?? 4096,
+      temperature: options?.temperature,
+    }
+    assertVisualRequestFits(
+      messages,
+      request,
+      false,
+      this.getVisualDeliveryLimits('completeAndCache')
     )
+    const response = await this.client.messages.create(request, { signal: options?.signal })
 
     const textContent = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')

@@ -245,7 +245,7 @@ describe('HostDetailsPage optional subscription throttling', () => {
     assertLoadedOverview()
     navigate('Models & creds')
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    const dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
+    const dialog = screen.getByRole('dialog', { name: 'Edit model & credentials' })
     const alert = await within(dialog).findByRole('alert')
     expect(alert).toHaveTextContent('Try again in 12 seconds.')
     expect(alert).not.toHaveTextContent(/^429$/)
@@ -311,7 +311,7 @@ describe('HostDetailsPage optional subscription throttling', () => {
     navigate('Models & creds')
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
     await flush()
-    const dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
+    const dialog = screen.getByRole('dialog', { name: 'Edit model & credentials' })
     const alert = within(dialog).getByRole('alert')
     expect(alert).toHaveTextContent('Try again in 12 seconds.')
     expect(reads.map(read => read.status)).toEqual([200, 200, 429])
@@ -424,7 +424,7 @@ describe('HostDetailsPage optional subscription throttling', () => {
       navigate('Models & creds')
       fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
       await flush()
-      let dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
+      let dialog = screen.getByRole('dialog', { name: 'Edit model & credentials' })
       expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
       fireEvent.click(
         within(dialog).getByLabelText('Current model', { selector: '#llm-primary-model' })
@@ -441,7 +441,7 @@ describe('HostDetailsPage optional subscription throttling', () => {
       navigation.name = 'quota-agent-b'
       rerenderPage()
       await flush()
-      dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
+      dialog = screen.getByRole('dialog', { name: 'Edit model & credentials' })
       expect(screen.getByRole('heading', { name: 'Agent: Operations agent' })).toBeInTheDocument()
       expect(within(dialog).getByRole('alert')).toHaveTextContent('Try again in 12 seconds.')
       expect(

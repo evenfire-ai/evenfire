@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { type TaskState, makeTaskKey, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
 import type { ApprovalDecisionTarget } from '@hooks/domain/approvalDecision'
 import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
+import type { ApprovalInputPreview } from '@/uiTypes'
 import { ProgressStepper } from '../ProgressStepper'
 
 interface Props {
@@ -28,6 +29,7 @@ interface Props {
     // suspended replays.
     reason?: string
     mcpServerName?: string
+    inputPreview?: ApprovalInputPreview
   }
 }
 
@@ -76,7 +78,11 @@ export function InFlightAssistantPlaceholder({
     <section className="chat-group assistant" data-task-id={taskId}>
       <div className="chat-bubble assistant chat-message--in-flight">
         <ProgressStepper
-          progress={progress}
+          progress={
+            si && !progress.suspendedInfo
+              ? { ...progress, status: 'suspended', suspendedInfo: si }
+              : progress
+          }
           hostRef={agentRef}
           onApprove={
             si

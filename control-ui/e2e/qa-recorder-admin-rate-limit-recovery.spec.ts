@@ -515,7 +515,7 @@ async function firstEditor(page: Page, fixture: AgentFixture): Promise<Response[
   // A disabled capability fails clearly before waiting for absent inventories.
   const completed = Promise.allSettled(reads)
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'Edit model configuration', exact: true })
+  const dialog = page.getByRole('dialog', { name: 'Edit model & credentials', exact: true })
   await expect(dialog).toBeVisible()
   await expect(dialog.getByLabel('Current model', { exact: true })).toContainText(fixture.modelName)
   await assertCapabilities(await capabilities, fixture)
@@ -532,12 +532,12 @@ async function firstEditor(page: Page, fixture: AgentFixture): Promise<Response[
 async function cancelEditor(page: Page, owned: OwnedAgent, fixture: AgentFixture): Promise<void> {
   const bundle = waitForBundle(page, owned.name)
   await page
-    .getByRole('dialog', { name: 'Edit model configuration', exact: true })
+    .getByRole('dialog', { name: 'Edit model & credentials', exact: true })
     .getByRole('button', { name: 'Cancel', exact: true })
     .click()
   await assertSavedBundle(await bundle, owned, fixture)
   await expect(
-    page.getByRole('dialog', { name: 'Edit model configuration', exact: true })
+    page.getByRole('dialog', { name: 'Edit model & credentials', exact: true })
   ).toHaveCount(0)
   await expect(
     page
@@ -656,7 +656,7 @@ test.describe('optional QA recorder: administrative rate-limit journeys', () => 
             ).toBeLessThan(METADATA_REUSE_MS)
             await page.getByRole('button', { name: 'Edit', exact: true }).click()
             const dialog = page.getByRole('dialog', {
-              name: 'Edit model configuration',
+              name: 'Edit model & credentials',
               exact: true,
             })
             await expect(dialog).toBeVisible()
@@ -734,7 +734,7 @@ test.describe('optional QA recorder: administrative rate-limit journeys', () => 
         expect(body.retryAfterSeconds).toBe(retryAfter)
         expect(body.message).toMatch(/try again in \d+ seconds/i)
         const retryAt = Date.now() + retryAfter * 1_000
-        const dialog = page.getByRole('dialog', { name: 'Edit model configuration', exact: true })
+        const dialog = page.getByRole('dialog', { name: 'Edit model & credentials', exact: true })
         const alert = dialog.getByRole('alert')
         await expect(alert).toContainText(/(?:try again|retry) in \d+ seconds/i)
         await expect(alert.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
