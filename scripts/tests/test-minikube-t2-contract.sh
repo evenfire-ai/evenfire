@@ -113,10 +113,17 @@ unwrapped_t0_children="$(printf '%s\n' "$run_t0_body" | grep -E '^[[:space:]]*(b
   printf 'FAIL: run_t0 starts a child without t2_run_outside_lease:\n%s\n' "$unwrapped_t0_children" >&2
   exit 1
 }
-[ "$(printf '%s\n' "$run_t0_body" | grep -Ec '^[[:space:]]*t2_run_outside_lease ')" -eq 4 ] || {
-  printf 'FAIL: run_t0 must start t0.sh, T2_T0_COMMAND, the contract test and the setup-handoff test through t2_run_outside_lease\n' >&2
+wrapped_t0_children="$(printf '%s\n' "$run_t0_body" | grep -E '^[[:space:]]*t2_run_outside_lease ')"
+[ "$(printf '%s\n' "$wrapped_t0_children" | wc -l | tr -d '[:space:]')" -eq 6 ] || {
+  printf 'FAIL: run_t0 must start t0.sh, T2_T0_COMMAND, the contract, both Registry tests and the setup-handoff test through t2_run_outside_lease\n' >&2
   exit 1
 }
+for registry_test in test-minikube-registry-optin.sh test-minikube-registry-cleanup.sh; do
+  printf '%s\n' "$wrapped_t0_children" | grep -Fq "bash \"\$T2_PROJECT_DIR/scripts/tests/$registry_test\"" || {
+    printf 'FAIL: run_t0 must start %s through t2_run_outside_lease\n' "$registry_test" >&2
+    exit 1
+  }
+done
 
 required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED REAL_PG_REPORT_INCOMPLETE UNSUPPORTED_T1_CONCURRENCY ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED PLAYWRIGHT_FAILED"
 for code in $required_codes; do
