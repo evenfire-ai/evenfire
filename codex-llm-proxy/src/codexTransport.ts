@@ -5,7 +5,11 @@ import {
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { chatgptUpstreamHeaders } from './chatgptUpstreamHeaders.js'
-import type { FinalizeAttemptSuccess, RedeemAttemptSuccess } from './controlApiClient.js'
+import {
+  type FinalizeAttemptSuccess,
+  type RedeemAttemptSuccess,
+  fetchCauseCode,
+} from './controlApiClient.js'
 import { logger } from './logger.js'
 import {
   CODEX_CATALOG_ORIGIN,
@@ -42,11 +46,27 @@ export class CodexTransportError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly details?: Readonly<Record<string, number | string>>
+    readonly details?: Readonly<Record<string, number | string>>,
+    options?: ErrorOptions
   ) {
-    super(message)
+    super(message, options)
     this.name = 'CodexTransportError'
   }
+}
+
+/**
+ * Review R3-L1/R4-L1: a rejected undici fetch and a failed dns.lookup wrapped
+ * by origin policy both carry a code-shaped cause. It becomes a mapped
+ * transport error that keeps only the cause code, so the attempt line logs
+ * `causeCode` and never the error itself. An error with no code-shaped cause
+ * is returned undefined and stays unmapped, which logs it as a handler defect.
+ */
+function upstreamFetchFailure(err: unknown): CodexTransportError | undefined {
+  const code = fetchCauseCode(err)
+  if (code === undefined) return undefined
+  return new CodexTransportError('provider_unavailable', 'upstream fetch failed', undefined, {
+    cause: { code },
+  })
 }
 
 /**
@@ -116,9 +136,23 @@ export type StreamCodexCompletionResult = {
   usage?: SafeUsage
 }
 
-export async function streamCodexCompletion(
-  input: StreamCodexCompletionInput
-): Promise<StreamCodexCompletionResult> {
+/**
+ * The validated request, handed from the pre-dispatch checks to the upstream
+ * write. It is emptied as soon as the upstream body is built, so a live stream
+ * never keeps the parsed tree (up to LIMITS.maxRequestElements values) alive.
+ */
+type HeldRequest = { request: CodexCompletionRequest | undefined; requestId: string }
+
+/**
+ * Every check that needs the whole request, in a synchronous function: its
+ * locals end with the call, and only the model, the bounded deadline and the
+ * holder survive into the long-lived async frame of the stream.
+ */
+function prepareCodexCompletion(input: StreamCodexCompletionInput): {
+  held: HeldRequest
+  model: string
+  boundedDeadlineMs: number
+} {
   const parsed = parseCodexCompletionRequest(input.request)
   if (!parsed.ok) {
     throw new CodexTransportError(
@@ -146,6 +180,17 @@ export async function streamCodexCompletion(
     input.deadlineMs ?? request.deadlineMs,
     input.maxDeadlineMs
   )
+  return {
+    held: { request, requestId: request.requestId },
+    model: request.model,
+    boundedDeadlineMs,
+  }
+}
+
+export async function streamCodexCompletion(
+  input: StreamCodexCompletionInput
+): Promise<StreamCodexCompletionResult> {
+  const { held, model, boundedDeadlineMs } = prepareCodexCompletion(input)
   // A client that disconnected before dispatch must not consume the ticket:
   // nothing was redeemed, so there is no attempt receipt to finalize.
   if (input.signal?.aborted) {
@@ -154,11 +199,11 @@ export async function streamCodexCompletion(
   const redeemed = await input.redeem({
     executionTicket: input.executionTicket,
     requestHash: input.requestHash,
-    model: request.model,
+    model,
     hostRef: input.ticket.hostRef,
     operation: 'completion_stream',
   })
-  if (redeemed.transport.servedModel !== request.model) {
+  if (redeemed.transport.servedModel !== model) {
     await finalizeQuietly(input, redeemed, 'error')
     throw new CodexTransportError('model_not_allowed', 'served model does not match the request')
   }
@@ -172,7 +217,7 @@ export async function streamCodexCompletion(
   const started = Date.now()
   try {
     const streamed = await readUpstreamStream({
-      request,
+      held,
       accessToken,
       chatgptAccountId: redeemed.chatgptAccountId,
       deadlineMs,
@@ -200,7 +245,7 @@ export async function streamCodexCompletion(
       throw err
     }
     outcome = 'error'
-    throw err
+    throw upstreamFetchFailure(err) ?? err
   } finally {
     void accessToken
     await finalizeQuietly(input, redeemed, outcome, usage)
@@ -243,7 +288,7 @@ async function finalizeQuietly(
 }
 
 async function readUpstreamStream(input: {
-  request: CodexCompletionRequest
+  held: HeldRequest
   accessToken: string
   chatgptAccountId?: string
   deadlineMs: number
@@ -329,6 +374,25 @@ class UpstreamDeadline {
   }
 }
 
+/**
+ * Serialize the upstream body and empty the holder. Synchronous, so the tree
+ * and the intermediate payload are unreachable once it returns; only the
+ * serialized string and the tool-name map outlive the call.
+ */
+function buildUpstreamBody(held: HeldRequest): { names: ToolNameMap; body: string } {
+  const request = held.request
+  if (!request) throw new Error('the upstream request was already released')
+  const names = new ToolNameMap([
+    ...(request.tools ?? []).map(tool => tool.name),
+    ...request.messages.flatMap(message =>
+      message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
+    ),
+  ])
+  const body = JSON.stringify(toUpstreamPayload(request, names))
+  held.request = undefined
+  return { names, body }
+}
+
 async function dispatchUpstreamStream(
   input: Parameters<typeof readUpstreamStream>[0],
   deadline: UpstreamDeadline
@@ -338,7 +402,7 @@ async function dispatchUpstreamStream(
   const headers = chatgptUpstreamHeaders(input.accessToken, {
     'content-type': 'application/json',
     accept: 'text/event-stream',
-    session_id: input.request.requestId,
+    session_id: input.held.requestId,
     ...(input.chatgptAccountId ? { 'chatgpt-account-id': input.chatgptAccountId } : {}),
   })
   if (!headers['chatgpt-account-id']) {
@@ -347,12 +411,7 @@ async function dispatchUpstreamStream(
       'Codex access token is missing ChatGPT account id'
     )
   }
-  const names = new ToolNameMap([
-    ...(input.request.tools ?? []).map(tool => tool.name),
-    ...input.request.messages.flatMap(message =>
-      message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
-    ),
-  ])
+  const { names, body } = buildUpstreamBody(input.held)
   const response = await deadline.waitUpstream(
     fetchFrozenOrigin({
       url,
@@ -362,7 +421,7 @@ async function dispatchUpstreamStream(
         method: 'POST',
         signal,
         headers,
-        body: JSON.stringify(toUpstreamPayload(input.request, names)),
+        body,
       },
     }),
     signal
@@ -960,7 +1019,7 @@ export async function listCodexModels(input: {
     })
   } catch (err) {
     if (signal.aborted) throw catalogTimeoutError()
-    throw err
+    throw catalogFetchFailure(err)
   }
   if (response.status === 401 || response.status === 403)
     return { outcome: 'auth-rejected', models: [] }
@@ -976,7 +1035,16 @@ export async function listCodexModels(input: {
     return { outcome: 'unavailable', models: [] }
   }
   const raw = await readBoundedCatalogBody(response, signal)
-  const body = JSON.parse(raw) as unknown
+  let body: unknown
+  try {
+    body = JSON.parse(raw)
+  } catch {
+    logger.warn(
+      { event: 'codex_catalog_upstream', reason: 'invalid_json' },
+      'Codex catalog upstream returned a body that is not JSON'
+    )
+    throw new CodexTransportError('provider_unavailable', 'catalog upstream body is not JSON')
+  }
   return { outcome: 'ready', models: normalizeModels(body) }
 }
 
@@ -1042,6 +1110,19 @@ function normalizeModels(body: unknown): CatalogModel[] {
   return models
 }
 
+// Review R3-L9: the admin route answers a catalog failure with a refusal line
+// that carries only the code, so the cause code of a failed fetch is logged
+// here before the mapped error is thrown.
+function catalogFetchFailure(err: unknown): unknown {
+  const failure = upstreamFetchFailure(err)
+  if (!failure) return err
+  logger.warn(
+    { event: 'codex_catalog_upstream', causeCode: fetchCauseCode(err) },
+    'Codex catalog upstream fetch failed'
+  )
+  return failure
+}
+
 function catalogTimeoutError(): CodexTransportError {
   return new CodexTransportError('provider_unavailable', 'catalog upstream deadline exceeded')
 }
@@ -1073,7 +1154,7 @@ async function readBoundedCatalogBody(response: Response, signal: AbortSignal): 
     await reader.cancel().catch(() => undefined)
     if (err instanceof CodexTransportError) throw err
     if (signal.aborted) throw catalogTimeoutError()
-    throw err
+    throw catalogFetchFailure(err)
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort)
     try {

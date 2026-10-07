@@ -102,6 +102,21 @@ describe('FailoverEngine', () => {
     expect(metricInc).not.toHaveBeenCalled()
   })
 
+  it('keeps the primary eligible after a local admission failure', async () => {
+    const e = engine()
+    const local = llmError(LlmErrorCode.ApiCallFailed, false)
+    const firstBuild = vi.fn(() => () => Promise.reject(local))
+    await expect(e.run(PRIMARY, firstBuild, classify)).rejects.toBe(local)
+    expect(firstBuild).toHaveBeenCalledTimes(1)
+    expect(onSwitch).not.toHaveBeenCalled()
+    expect(metricInc).not.toHaveBeenCalled()
+
+    const nextBuild = vi.fn(target => () => Promise.resolve(target.kind))
+    await expect(e.run(PRIMARY, nextBuild, classify)).resolves.toBe('primary')
+    expect(nextBuild).toHaveBeenCalledTimes(1)
+    expect(e.servedBy()).toEqual({ ...PRIMARY, fallback: false })
+  })
+
   it('respects a restricted triggerOn: an out-of-set class propagates', async () => {
     const e = engine(policy({ triggerOn: ['auth'] }))
     const err = llmError(LlmErrorCode.RateLimited, true) // rate_limited not in triggerOn

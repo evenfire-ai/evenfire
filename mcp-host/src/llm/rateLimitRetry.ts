@@ -19,7 +19,27 @@ export function rateLimitRetryDelayMs(
   code: string,
   retryAfterMs: number | undefined
 ): number | undefined {
-  if (code !== 'rate_limited' || retryAfterMs === undefined) return undefined
+  return code === 'rate_limited' ? boundedRetryDelayMs(retryAfterMs) : undefined
+}
+
+/**
+ * The wait before the single retry of an authorize error: a `rate_limited`
+ * as in {@link rateLimitRetryDelayMs}, or control-api's
+ * `authorize_capacity_exceeded` with its Retry-After, on the same bound.
+ * Nothing was read or recorded for that refusal, so the retry stays with the
+ * same provider; a second refusal is terminal and never fails over.
+ */
+export function authorizeRetryDelayMs(
+  code: string,
+  retryAfterMs: number | undefined
+): number | undefined {
+  return code === 'rate_limited' || code === 'authorize_capacity_exceeded'
+    ? boundedRetryDelayMs(retryAfterMs)
+    : undefined
+}
+
+function boundedRetryDelayMs(retryAfterMs: number | undefined): number | undefined {
+  if (retryAfterMs === undefined) return undefined
   return retryAfterMs > 0 && retryAfterMs <= RATE_LIMIT_RETRY_MAX_WAIT_MS ? retryAfterMs : undefined
 }
 

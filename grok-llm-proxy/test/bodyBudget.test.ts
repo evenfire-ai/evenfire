@@ -117,6 +117,7 @@ describe('BodyBudget admission deadline (#739 D1)', () => {
       await vi.advanceTimersByTimeAsync(1)
       expect(outcome).toBeInstanceOf(RequestLimitError)
       expect((outcome as Error).message).toBe('body admission wait exceeded')
+      expect((outcome as RequestLimitError).kind).toBe('deadline')
       expect(budget.queued).toBe(0)
       expect(budget.inFlightBytes).toBe(30)
     } finally {

@@ -9,6 +9,9 @@
  * decode pixels, verify PNG CRCs, validate entropy-coded JPEG data, or prove
  * that the image renders. "Valid" here means "syntactically well-formed
  * container inside the local budget", never "decoded and visually correct".
+ * The readers are stricter than the formats: they also refuse some rare valid
+ * images, such as a JPEG whose SOF declares height 0 and defers it to a DNL
+ * marker, or a PNG with bytes after IEND.
  *
  * The budget below is a conservative local safety/product decision. It is not
  * an upstream capability fact; the frozen ChatGPT endpoint is not certified by

@@ -6,6 +6,7 @@ import {
   ENVELOPE_ALLOWANCE_BYTES as CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   VISUAL_LIMITS,
+  hashCodexCompletionRequest,
   hashCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
 import { streamCodexCompletion } from '../../codex-llm-proxy/src/codexTransport'
@@ -720,6 +721,50 @@ describe('authorizeLlmProviderAttempt', () => {
     })
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
+
+  // Review R3-L3: V2 text sits in content and in its text parts; the
+  // non-image budget counts it once, as the same text counts in V1.
+  it('R3-L3 authorizes a 4.5 MiB prompt beside an image and refuses parts that do not repeat content', async () => {
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(
+          '../../packages/llm-provider-attempt-contract/fixtures/visual-requests.json',
+          import.meta.url
+        ),
+        'utf8'
+      )
+    ) as { png: { messages: Array<{ contentParts: Array<{ type: string }> }> } }
+    const png = fixture.png.messages[0]!.contentParts.find(part => part.type === 'image')
+    expect(png).toBeDefined()
+    const text = 'x'.repeat(4.5 * 1024 * 1024)
+    const withParts = (content: string, textPart: string) => ({
+      ...REQUEST,
+      schemaVersion: 'codex-completion-request.v2',
+      messages: [
+        {
+          role: 'user' as const,
+          content,
+          contentParts: [{ type: 'text' as const, text: textPart }, png],
+        },
+      ],
+    })
+    const request = withParts(text, text)
+    const result = await authorizeLlmProviderAttempt(claims(), body({ request }), current)
+    expect(result).toMatchObject({
+      executionTicket: 'ticket.jwt',
+      requestHash: hashCodexCompletionRequest(request),
+    })
+    expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    // Parts that do not repeat content keep both copies on the budget.
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({ request: withParts(`${text.slice(1)}y`, text) }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+  }, 30_000)
 
   it('maps an over-dimension image to payload_too_large', async () => {
     const current = deps()
