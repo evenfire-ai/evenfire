@@ -197,12 +197,19 @@ export async function executeAdmittedTool(
   config: LoopConfig,
   iteration: number
 ): Promise<ToolResult> {
-  const toolResult = await executeSingleTool(admission.call, config, iteration)
-  if (!config.guardrails?.transformResult || !admission.toolIdentity) return toolResult
-  const view = await config.guardrails.transformResult(
-    admission.toolIdentity,
-    admission.call.arguments,
-    { content: toolResult.content, isError: toolResult.is_error }
-  )
-  return view.content === toolResult.content ? toolResult : { ...toolResult, content: view.content }
+  const { guardrails } = config
+  const { toolIdentity } = admission
+  // The transform runs inside executeSingleTool so a tool's finalizeResult
+  // fence measures and publishes the transformed content, not the raw output.
+  const transformResult =
+    guardrails?.transformResult && toolIdentity
+      ? async (result: ToolResult): Promise<ToolResult> => {
+          const view = await guardrails.transformResult!(toolIdentity, admission.call.arguments, {
+            content: result.content,
+            isError: result.is_error,
+          })
+          return view.content === result.content ? result : { ...result, content: view.content }
+        }
+      : undefined
+  return executeSingleTool(admission.call, config, iteration, transformResult)
 }

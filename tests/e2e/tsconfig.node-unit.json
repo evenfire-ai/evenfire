@@ -4,5 +4,9 @@
     "noEmit": true
   },
   "include": [],
-  "files": ["gfsUploadV2Fixtures.test.ts", "integration/codex-subscription-contract-freeze.test.ts"]
+  "files": [
+    "gfsUploadV2Fixtures.test.ts",
+    "integration/codex-subscription-contract-freeze.test.ts",
+    "integration/chat-body-budget-parity.test.ts"
+  ]
 }

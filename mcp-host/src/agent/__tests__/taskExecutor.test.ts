@@ -2191,6 +2191,78 @@ describe('TaskExecutor exhaustion and cancellation contracts', () => {
     })
     expect(deps.onFail).not.toHaveBeenCalled()
   })
+  it('completes a turn stopped by a tool result with its message (A15 U1)', async () => {
+    const deps = createDeps(),
+      task = createTask()
+    vi.mocked(runToolUseLoop).mockResolvedValue({
+      type: 'exhaustion',
+      reason: 'turn_stop',
+      message: 'Stopped reading for this turn',
+      iterations: 3,
+    })
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
+    // Witness: the loop ran and its result was delivered.
+    expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+    expect(task.responseCallback).toHaveBeenCalledWith({
+      response: 'Stopped reading for this turn',
+      attachments: undefined,
+    })
+    expect(deps.onComplete).toHaveBeenCalledTimes(1)
+    expect(executor.executorState).toBe('completed')
+    expect(deps.onFail).not.toHaveBeenCalled()
+  })
+  it('ends a resumed turn when the approved tool stops it, without another loop (A15 U1)', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({
+      type: 'need_approval',
+      approval: {
+        request_id: 'req-stop',
+        tool_name: 'clerum__attachment_read',
+        parameters: { attachmentId: 'file-1' },
+        description: 'Guardrail requires approval (ask)',
+        tool_call_id: 'tc_read',
+        context_snapshot: [
+          { role: 'user', content: 'Read the file' },
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                id: 'tc_read',
+                name: 'clerum__attachment_read',
+                arguments: { attachmentId: 'file-1' },
+              },
+            ],
+          },
+        ],
+      },
+    } as any)
+    vi.mocked(executeSingleTool).mockResolvedValueOnce({
+      tool_call_id: 'tc_read',
+      name: 'clerum__attachment_read',
+      content: '{"kind":"read_budget_exhausted"}',
+      is_error: false,
+      stopTurn: { message: 'Stopped reading for this turn' },
+    })
+    const deps = createDeps()
+    const task = createTask('Read the file')
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
+    expect(executor.executorState).toBe('waiting_approval')
+
+    await executor.resumeAfterApproval(false)
+
+    // Witness: the approved call executed on resume.
+    expect(executeSingleTool).toHaveBeenCalledTimes(1)
+    expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+    expect(task.responseCallback).toHaveBeenCalledWith({
+      response: 'Stopped reading for this turn',
+      attachments: undefined,
+    })
+    expect(executor.executorState).toBe('completed')
+    expect(deps.onComplete).toHaveBeenCalledTimes(1)
+    expect(deps.onFail).not.toHaveBeenCalled()
+  })
   it('does not resurrect a cancelled legacy approval', async () => {
     const task = createTask(),
       deps = createDeps()

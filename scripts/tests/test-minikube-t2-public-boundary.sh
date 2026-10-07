@@ -148,12 +148,49 @@ for line in diff.splitlines():
     # under secret-named keys. The exemption applies in any file, and only when
     # the whole value is the marker; a value that merely contains it is flagged.
     redaction_marker = re.compile(r"(?i)\[redacted\]")
+    code_after_literal = re.compile(r"\s*[,)\]};+]")
+
+    def open_quote_before(text, end):
+        """The quote of the string literal still open at `end`, or None."""
+        open_quote = None
+        escaped = False
+        for char in text[:end]:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif open_quote is None and char in "\"'":
+                open_quote = char
+            elif char == open_quote:
+                open_quote = None
+        return open_quote
+
     # Every match on the line is checked: an exempt first match must not hide a
     # real value later on the same line.
     for expression, reason in patterns:
         flagged = False
-        for match in re.finditer(expression, value):
+        compiled = re.compile(expression)
+        position = 0
+        while True:
+            match = compiled.search(value, position)
+            if match is None:
+                break
+            position = match.end()
             if reason == "private key" and "evidence-scanner" in current:
+                continue
+            # A key inside a string literal ending in `=` or `:` (for example
+            # `label: 'password='`) is data: the quote after it closes that
+            # literal, and the captured text is code up to the next literal.
+            # Resume just after the closing quote, so a real assignment later
+            # on the line is still read.
+            if (
+                reason == "credential assignment"
+                and match.group(1)
+                and value[match.start(1) - 1] in "\"'"
+                and open_quote_before(value, match.start()) == value[match.start(1) - 1]
+                and code_after_literal.match(match.group(1))
+            ):
+                position = match.start(1)
                 continue
             if (
                 reason == "credential assignment"
