@@ -131,6 +131,9 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 const CONTEXT = 'ctx-a'
+// users.id is a UUID: the membership reader (#989) also reads user_agents and
+// team_members, which reject a non-UUID subject.
+const USER_ID = '00000000-0000-4000-8000-000000000009'
 const KEY = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
 const DCR_CLIENT_ID = DCR_PUBLIC_REGISTRATION_RESPONSE.client_id
 
@@ -213,7 +216,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       .post('/api/v1/internal/mcp-oauth/authorize-url')
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: name, userId: 'user-9' })
+      .send({ mcpServerName: name, userId: USER_ID })
     if (res.status !== 200)
       throw new Error(`mint failed: ${res.status} ${JSON.stringify(res.body)}`)
     const url = new URL(res.body.authorizeUrl)
@@ -342,7 +345,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       .post('/api/v1/internal/mcp-oauth/authorize-url')
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'legacy', userId: 'user-9' })
+      .send({ mcpServerName: 'legacy', userId: USER_ID })
     expect(mintRes.status).toBe(503)
 
     const state = await signedStateFor('legacy')
@@ -423,7 +426,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     return signOAuthState(config.oauthStateHmacSecret, {
       subjectKind: 'mcp',
       mcpServerName: name,
-      userId: 'user-9',
+      userId: USER_ID,
       oauthClientId: cr.spec.oauth.id,
       grantKind: 'user',
       background: false,
