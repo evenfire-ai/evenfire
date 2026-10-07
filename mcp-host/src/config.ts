@@ -372,6 +372,33 @@ function getExecutionLimit(
   return value
 }
 
+/** Progress snapshots are never scheduled more than once per second. */
+const MIN_TOOL_PROGRESS_INTERVAL_MS = 1000
+
+/**
+ * Milliseconds between native-tool progress snapshots. Unset keeps 30000; 0
+ * disables periodic snapshots; any other value must be a whole decimal integer
+ * from 1000 to the Node.js timer range. Anything else stops the Host at
+ * startup: a larger value would fire every millisecond and NaN would silently
+ * disable progress. The raw value is never echoed.
+ */
+function getToolProgressIntervalMs(): number {
+  const key = 'CLERUM_TOOL_PROGRESS_INTERVAL_MS'
+  const raw = getEnv(key)
+  if (raw === undefined) return 30000
+  const value = Number(raw)
+  if (
+    !/^\d+$/.test(raw) ||
+    !Number.isSafeInteger(value) ||
+    (value !== 0 && (value < MIN_TOOL_PROGRESS_INTERVAL_MS || value > MAX_TIMER_DELAY_MS))
+  ) {
+    throw new Error(
+      `${key} must be 0 (disables tool progress streaming) or an integer from ${MIN_TOOL_PROGRESS_INTERVAL_MS} to ${MAX_TIMER_DELAY_MS} (inclusive)`
+    )
+  }
+  return value
+}
+
 function getEnvBool(key: string, defaultValue: boolean): boolean {
   const value = process.env[key]
   if (!value) return defaultValue
@@ -1067,7 +1094,7 @@ export const config: Config = {
     workspacePath: process.env.CLERUM_WORKSPACE_PATH || process.cwd(),
     shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000, false, MAX_TOOL_TIMEOUT_MS),
     toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000, false, MAX_TOOL_TIMEOUT_MS),
-    toolProgressInterval: parseInt(getEnv('CLERUM_TOOL_PROGRESS_INTERVAL_MS', '30000')!, 10),
+    toolProgressInterval: getToolProgressIntervalMs(),
     httpAllowlist: (process.env.CLERUM_HTTP_ALLOWLIST || '')
       .split(',')
       .map(s => s.trim())
