@@ -542,9 +542,9 @@ export class ConversationManager {
    * Resume after approval.
    * Transitions: AwaitingApproval → Processing
    *
-   * Per-server approval: any approval of an MCP tool auto-approves all tools
-   * from the same MCP server for the rest of the conversation. This prevents
-   * repeated approval prompts when the LLM calls multiple tools from the same server.
+   * Proven turn-wide consent keeps the legacy expansion: all tools in this turn,
+   * plus the MCP server prefix for future turns. Exact-call and legacy unknown
+   * scopes authorize only the frozen invocation being resumed.
    *
    * When alwaysApprove=true, also stores the individual tool name (backwards compat).
    *
@@ -561,19 +561,21 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
+      const turnWide = conversation.pending_approval.authorization_scope === 'turn_tools'
 
-      // "Approve once, run all" — any approval auto-approves all subsequent tools in this turn.
-      // The user only needs to approve once per task, not per tool call.
-      conversation.auto_approved_tools.add('*')
+      // Only proven turn-wide consent expands. Exact-call and legacy unknown
+      // scopes authorize just the frozen invocation being resumed.
+      if (turnWide) conversation.auto_approved_tools.add('*')
+      else conversation.auto_approved_tools.delete('*')
 
       // MCP tools: also auto-approve the entire server for future turns
-      if (isMcpToolName(toolName)) {
+      if (turnWide && isMcpToolName(toolName)) {
         const serverPrefix = toolName.split('__')[0]
         conversation.auto_approved_tools.add(serverPrefix)
       }
 
       // alwaysApprove also stores the individual tool name (for future turns)
-      if (alwaysApprove) {
+      if (turnWide && alwaysApprove) {
         conversation.auto_approved_tools.add(toolName)
       }
     }

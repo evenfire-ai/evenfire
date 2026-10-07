@@ -77,6 +77,9 @@ export class TaskExecutionBudget {
   get remainingIterations(): number {
     return Math.max(0, this.maxIterations - this.iterationsUsed)
   }
+  get remainingDurationMs(): number {
+    return Math.max(0, this.durationMs - this.elapsed())
+  }
   private elapsed(): number {
     return (
       this.elapsedActiveMs +

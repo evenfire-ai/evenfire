@@ -1,20 +1,25 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
 import { createServer } from 'node:http'
 import { connect as connectTcp } from 'node:net'
-import jwt from 'jsonwebtoken'
-import { afterEach, describe, expect, it } from 'vitest'
 import {
   hashCodexCompletionRequest,
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { type CodexLlmProxyConfig } from '../src/config.js'
-import { createProxyApps } from '../src/server.js'
+import { logger } from '../src/logger.js'
 import {
+  RequestLimitError,
   STREAM_LIMITS,
+  VISUAL_PER_HOST_MAX_ADMITTED,
   VISUAL_STREAM_LIMITS,
   streamGate,
   visualStreamGate,
 } from '../src/requestLimits.js'
+import { createProxyApps } from '../src/server.js'
+
+const COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
@@ -52,11 +57,14 @@ function sign(payload: Record<string, unknown>, audience: string): string {
   })
 }
 
-function platformToken(): string {
+function platformToken(
+  hostRefs: string[] = ['research-host'],
+  sub = 'default/research-host'
+): string {
   return sign(
     {
-      sub: 'default/research-host',
-      hostRefs: ['research-host'],
+      sub,
+      hostRefs,
       workflowControlScopes: ['llm:codex:execute'],
       scope: 'workflow:approval:request',
     },
@@ -139,13 +147,14 @@ function completionPayload(
 async function postCompletion(
   port: number,
   schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2',
-  content = 'hi'
+  content = 'hi',
+  hostRefs: string[] = ['research-host']
 ): Promise<Response> {
-  const { token, body } = completionPayload(schemaVersion, content)
+  const { body } = completionPayload(schemaVersion, content)
   return fetch(`http://127.0.0.1:${port}/internal/runtime/v1/codex/completions`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${platformToken(hostRefs)}`,
       'content-type': 'application/json',
     },
     body,
@@ -197,21 +206,102 @@ function postChunked(port: number, token: string): Promise<number> {
   })
 }
 
+function postBody(port: number, bearerToken: string, body: string): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${bearerToken}`,
+      'content-type': 'application/json',
+    },
+    body,
+  })
+}
+
+// Declares `declared` body bytes, sends `sent` of them and then stalls, so the
+// server has to answer before the body completes.
+function postStalled(
+  port: number,
+  bearerToken: string,
+  declared: number,
+  sent: string
+): Promise<{ status: number; head: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = connectTcp(port, '127.0.0.1', () => {
+      socket.write(
+        `POST ${COMPLETIONS_PATH} HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${port}\r\n` +
+          `Authorization: Bearer ${bearerToken}\r\n` +
+          `Content-Type: application/json\r\n` +
+          `Content-Length: ${declared}\r\n` +
+          `\r\n` +
+          sent
+      )
+    })
+    const chunks: Buffer[] = []
+    socket.setTimeout(3_000, () => {
+      socket.destroy()
+      reject(new Error('the server did not answer a stalled visual body'))
+    })
+    socket.on('data', data => {
+      chunks.push(data)
+      const raw = Buffer.concat(chunks).toString('utf8')
+      const end = raw.indexOf('\r\n\r\n')
+      if (end === -1) return
+      socket.destroy()
+      const match = /^HTTP\/1\.1 (\d+)/.exec(raw)
+      if (!match) {
+        reject(new Error(`no status in ${raw.slice(0, 180)}`))
+        return
+      }
+      resolve({ status: Number(match[1]), head: raw.slice(0, end) })
+    })
+    socket.on('error', err => {
+      if ((err as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(err)
+    })
+  })
+}
+
+// A large V2 with an unusable ticket: admitted through the visual gate, then
+// refused at the ticket check. It can only answer 403 when a visual slot is free.
+async function expectNextVisualAdmitted(port: number, maxBodyBytes: number): Promise<void> {
+  const body = JSON.stringify({
+    executionTicket: 'invalid-ticket',
+    requestHash: 'a'.repeat(64),
+    request: completionRequest('codex-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+  })
+  expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+  const res = await postBody(port, platformToken(), body)
+  expect(res.status).toBe(403)
+  expect(await res.json()).toEqual({ error: 'ticket_invalid' })
+}
+
 describe('visual stream-gate handoff', () => {
   const hangs: Array<{ release: () => void }> = []
   const serversToClose: Array<{ close: () => Promise<void> }> = []
   const listeners: Array<ReturnType<typeof createServer>> = []
 
+  function listen(servers: ReturnType<typeof createProxyApps>): number {
+    serversToClose.push(servers)
+    const listener = createServer(servers.runtimeApp).listen(0)
+    listeners.push(listener)
+    const address = listener.address()
+    if (!address || typeof address === 'string') throw new Error('listener has no port')
+    return address.port
+  }
+
   afterEach(async () => {
+    vi.restoreAllMocks()
     for (const hang of hangs.splice(0)) hang.release()
     for (const server of serversToClose.splice(0)) await server.close()
     await Promise.all(
-      listeners.splice(0).map(
-        listener =>
-          new Promise<void>((resolve, reject) =>
-            listener.close(err => (err ? reject(err) : resolve()))
-          )
-      )
+      listeners
+        .splice(0)
+        .map(
+          listener =>
+            new Promise<void>((resolve, reject) =>
+              listener.close(err => (err ? reject(err) : resolve()))
+            )
+        )
     )
     await waitFor(
       () =>
@@ -258,8 +348,11 @@ describe('visual stream-gate handoff', () => {
       'small V1 waited on the visual gate instead of the ordinary stream gate'
     )
 
-    const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, () =>
-      postCompletion(port, 'codex-completion-request.v2', largeContent)
+    // One principal can hold at most four visual entries, so each queued
+    // request mints a distinct principal; the subject here is the global gate
+    // width, not the per-host share.
+    const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, (_, index) =>
+      postCompletion(port, 'codex-completion-request.v2', largeContent, [`visual-queue-${index}`])
     )
     await waitFor(
       () => visualStreamGate.snapshot().queued === VISUAL_STREAM_LIMITS.maxQueuedRequests,
@@ -267,7 +360,7 @@ describe('visual stream-gate handoff', () => {
     )
     const overflow = await postCompletion(port, 'codex-completion-request.v2', largeContent)
     expect(overflow.status).toBe(503)
-    expect(await overflow.json()).toEqual({ error: 'provider_unavailable' })
+    expect(await overflow.json()).toEqual({ error: 'visual_gate' })
 
     const textWhileSaturated = postCompletion(port, 'codex-completion-request.v1')
     await waitFor(
@@ -372,7 +465,786 @@ describe('visual stream-gate handoff', () => {
       () => streamGate.snapshot().running === 1 && visualStreamGate.snapshot().running === 0,
       'padded small V2 kept the visual slot instead of the ordinary stream gate'
     )
+
+    // #871 / r11-M2: demotion must release the principal share too. While
+    // the demoted body is still resident, four more entries from this
+    // principal fill Codex's share of four; the fifth must answer
+    // visual_host_share.
+    const warn = vi.spyOn(logger, 'warn')
+    const largeContent = 'x'.repeat(maxBodyBytes)
+    const queued = Array.from({ length: VISUAL_PER_HOST_MAX_ADMITTED }, () =>
+      postCompletion(port, 'codex-completion-request.v2', largeContent)
+    )
+    await waitFor(
+      () => visualStreamGate.snapshot().running === 2 && visualStreamGate.snapshot().queued === 2,
+      'a leaked demotion share stopped the same principal from filling its quota'
+    )
+    const fifth = await postCompletion(port, 'codex-completion-request.v2', largeContent)
+    expect(fifth.status).toBe(503)
+    expect(await fifth.json()).toEqual({ error: 'visual_host_share' })
+    expect(warn).toHaveBeenCalledWith(
+      {
+        event: 'codex_proxy_admission_refused',
+        reason: 'visual_host_share',
+        limit: VISUAL_PER_HOST_MAX_ADMITTED,
+        sub: 'default/research-host',
+        hostRefs: ['research-host'],
+      },
+      'admission refused'
+    )
+
     hang.release()
     await response
+    for (const queuedResponse of await Promise.all(queued)) {
+      expect(queuedResponse.status).toBe(200)
+    }
+    await waitFor(
+      () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+      'the visual gate did not drain after demotion'
+    )
+    await expectNextVisualAdmitted(port, maxBodyBytes)
+  })
+
+  describe('visual per-host share', () => {
+    function invalidTicketBody(maxBodyBytes: number): string {
+      const body = JSON.stringify({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: completionRequest('codex-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+      })
+      expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+      return body
+    }
+
+    it('refuses a platform token whose sub is not a non-empty string with 401', async () => {
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
+      const claims = {
+        hostRefs: ['research-host'],
+        workflowControlScopes: ['llm:codex:execute'],
+        scope: 'workflow:approval:request',
+      }
+      // Each body is large enough to take the visual gate once its token passes.
+      for (const bearerToken of [
+        sign(claims, 'workflow-approvals'),
+        sign({ ...claims, sub: '' }, 'workflow-approvals'),
+        sign({ ...claims, sub: 403 }, 'workflow-approvals'),
+      ]) {
+        const res = await postBody(port, bearerToken, invalidTicketBody(maxBodyBytes))
+        expect(res.status).toBe(401)
+        expect(await res.json()).toEqual({ error: 'Unauthorized' })
+      }
+      expect(acquire).not.toHaveBeenCalled()
+
+      // Positive control: the same body with a valid sub reaches the visual
+      // gate and then the ticket check.
+      const admitted = await postBody(
+        port,
+        sign({ ...claims, sub: 'default/research-host' }, 'workflow-approvals'),
+        invalidTicketBody(maxBodyBytes)
+      )
+      expect(admitted.status).toBe(403)
+      expect(await admitted.json()).toEqual({ error: 'ticket_invalid' })
+      expect(acquire).toHaveBeenCalledTimes(1)
+    })
+
+    it('logs an error and completes the release when the principal share is missing', async () => {
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const error = vi.spyOn(logger, 'error')
+      const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
+
+      // Liveness witness: a normal visual request takes and releases its share
+      // without the error.
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+      expect(acquire).toHaveBeenCalledTimes(1)
+      expect(error).not.toHaveBeenCalled()
+
+      // Force the defect: the share is counted at admission but never stored,
+      // so the release finds no entry for the principal.
+      const principal = JSON.stringify(['default/research-host', 'research-host'])
+      const originalSet = Map.prototype.set
+      const set = vi
+        .spyOn(Map.prototype, 'set')
+        .mockImplementation(function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+          if (key === principal) return this
+          return originalSet.call(this, key, value)
+        })
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+      expect(set).toHaveBeenCalledWith(principal, 1)
+      expect(acquire).toHaveBeenCalledTimes(2)
+      expect(error).toHaveBeenCalledTimes(1)
+      expect(error).toHaveBeenCalledWith(
+        { event: 'codex_proxy_error', reason: 'principal_share_missing', sub: 'default/research-host' },
+        'visual principal share missing at release'
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual slot was not released after the missing share'
+      )
+    })
+
+    it('admits at most four visual entries per principal while another principal proceeds', async () => {
+      expect(VISUAL_PER_HOST_MAX_ADMITTED).toBe(4)
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const hang = hangStream()
+      hangs.push(hang)
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const warn = vi.spyOn(logger, 'warn')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+
+      // Host A's first two entries run and its next two queue; all four count
+      // against the same principal (sub plus hostRefs).
+      const first = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      const second = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 2,
+        'host A did not take both running visual slots'
+      )
+      const third = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      const fourth = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 2,
+        'host A did not take two queued visual entries'
+      )
+      expect(acquire).toHaveBeenCalledTimes(4)
+
+      const fifth = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      expect(fifth.status).toBe(503)
+      expect(await fifth.json()).toEqual({ error: 'visual_host_share' })
+      // The refusal names the principal it applied to, so an operator can tell
+      // which host was throttled.
+      expect(warn).toHaveBeenCalledWith(
+        {
+          event: 'codex_proxy_admission_refused',
+          reason: 'visual_host_share',
+          limit: VISUAL_PER_HOST_MAX_ADMITTED,
+          sub: 'default/research-host',
+          hostRefs: ['research-host'],
+        },
+        'admission refused'
+      )
+      // The share refusal happens before the global gate is touched.
+      expect(acquire).toHaveBeenCalledTimes(4)
+
+      const otherHost = postBody(
+        port,
+        platformToken(['other-host']),
+        invalidTicketBody(maxBodyBytes)
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 3,
+        'host B was not admitted while host A held its full share'
+      )
+
+      hang.release()
+      await first
+      await second
+      const thirdRes = await third
+      expect(thirdRes.status).toBe(403)
+      expect(await thirdRes.json()).toEqual({ error: 'ticket_invalid' })
+      const fourthRes = await fourth
+      expect(fourthRes.status).toBe(403)
+      expect(await fourthRes.json()).toEqual({ error: 'ticket_invalid' })
+      const otherRes = await otherHost
+      expect(otherRes.status).toBe(403)
+      expect(await otherRes.json()).toEqual({ error: 'ticket_invalid' })
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual gate did not drain'
+      )
+      // Host A's share was released with its entries, so a fresh A request is
+      // admitted again and reaches the ticket check.
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+
+    it('releases the principal share when the visual queue is full before grant', async () => {
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const warn = vi.spyOn(logger, 'warn')
+      const held: Array<() => void> = []
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
+      )
+      const fillers: Array<Promise<Response>> = []
+      try {
+        for (let i = 0; i < VISUAL_STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+          held.push(await visualStreamGate.acquire())
+        }
+        for (let i = 0; i < VISUAL_STREAM_LIMITS.maxQueuedRequests; i += 1) {
+          fillers.push(
+            postBody(
+              port,
+              platformToken(['research-host'], `default/visual-queue-full-${i}`),
+              invalidTicketBody(maxBodyBytes)
+            )
+          )
+        }
+        await waitFor(
+          () =>
+            visualStreamGate.snapshot().running === VISUAL_STREAM_LIMITS.maxConcurrentStreams &&
+            visualStreamGate.snapshot().queued === VISUAL_STREAM_LIMITS.maxQueuedRequests,
+          'the visual queue did not fill with distinct principals'
+        )
+
+        // Five same-principal refusals back to back: every pre-grant
+        // visual_gate refusal must release that request's share, or the fifth
+        // would be refused visual_host_share instead.
+        const targetCount = VISUAL_PER_HOST_MAX_ADMITTED + 1
+        for (let i = 0; i < targetCount; i += 1) {
+          const res = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+          expect(res.status).toBe(503)
+          expect(await res.json()).toEqual({ error: 'visual_gate' })
+        }
+        expect(acquire).toHaveBeenCalledTimes(
+          VISUAL_STREAM_LIMITS.maxConcurrentStreams +
+            VISUAL_STREAM_LIMITS.maxQueuedRequests +
+            targetCount
+        )
+        const reasons = warn.mock.calls
+          .map(call => call[0] as unknown as Record<string, unknown>)
+          .filter(entry => entry?.event === 'codex_proxy_admission_refused')
+          .map(entry => entry.reason)
+        expect(reasons).toEqual(Array.from({ length: targetCount }, () => 'visual_gate'))
+      } finally {
+        for (const release of held.splice(0)) release()
+        for (const filler of fillers) await filler
+      }
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual gate did not drain after queue-full refusals'
+      )
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+    // Review R3-L8: the share key sorts hostRefs, so one principal cannot
+    // double its share by listing the same hosts in another order.
+    it('counts one principal once whatever order its hostRefs arrive in', async () => {
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const hang = hangStream()
+      hangs.push(hang)
+      const warn = vi.spyOn(logger, 'warn')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      const forward = ['research-host', 'zeta-host']
+      const reversed = ['zeta-host', 'research-host']
+
+      // Two running entries, one per order, then two queued, one per order.
+      const first = postCompletion(
+        port,
+        'codex-completion-request.v2',
+        'x'.repeat(maxBodyBytes),
+        forward
+      )
+      const second = postCompletion(
+        port,
+        'codex-completion-request.v2',
+        'x'.repeat(maxBodyBytes),
+        reversed
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 2,
+        'the two entries did not take both running visual slots'
+      )
+      const third = postBody(port, platformToken(forward), invalidTicketBody(maxBodyBytes))
+      const fourth = postBody(port, platformToken(reversed), invalidTicketBody(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 2,
+        'the two entries did not take two queued visual entries'
+      )
+
+      // Without the sort, each order is a key holding two entries, and this
+      // request would be admitted.
+      // Wait for an answer or a queue place, so an admission fails on the
+      // assertion below rather than hanging behind the held stream.
+      let refused: Response | undefined
+      const refusedRequest = postBody(
+        port,
+        platformToken(reversed),
+        invalidTicketBody(maxBodyBytes)
+      ).then(res => {
+        refused = res
+        return res
+      })
+      await waitFor(
+        () => refused !== undefined || visualStreamGate.snapshot().queued > 2,
+        'the request over the share neither answered nor took a queue place'
+      )
+      expect(
+        visualStreamGate.snapshot().queued,
+        'the reversed hostRefs order was admitted as another principal'
+      ).toBe(2)
+      const fifth = await refusedRequest
+      expect(fifth.status).toBe(503)
+      expect(await fifth.json()).toEqual({ error: 'visual_host_share' })
+      expect(warn).toHaveBeenCalledWith(
+        {
+          event: 'codex_proxy_admission_refused',
+          reason: 'visual_host_share',
+          limit: VISUAL_PER_HOST_MAX_ADMITTED,
+          sub: 'default/research-host',
+          hostRefs: forward,
+        },
+        'admission refused'
+      )
+      expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 2 })
+
+      // Witness: another sub with the same hosts in the same order is another
+      // principal, and is admitted while the first holds its full share.
+      const otherSub = postBody(
+        port,
+        platformToken(forward, 'default/other-host'),
+        invalidTicketBody(maxBodyBytes)
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 3,
+        'another sub was not admitted while the first principal held its full share'
+      )
+
+      hang.release()
+      await first
+      await second
+      for (const pending of [third, fourth, otherSub]) {
+        const res = await pending
+        expect(res.status).toBe(403)
+        expect(await res.json()).toEqual({ error: 'ticket_invalid' })
+      }
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual gate did not drain'
+      )
+    })
+  })
+
+  describe('visual slot lifetime', () => {
+    function smallCaps(): number {
+      return Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+    }
+
+    async function expectGateEmpty(): Promise<void> {
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual slot was not released'
+      )
+      expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    }
+
+    it('answers 400 to a deeply nested visual body and frees the slot', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
+      )
+      // JSON.parse accepts this depth; JSON.stringify and the contract's byte
+      // measurement throw RangeError on it.
+      const depth = 20_000
+      const body =
+        `{"executionTicket":"invalid-ticket","requestHash":"${'a'.repeat(64)}",` +
+        `"request":{"schemaVersion":"codex-completion-request.v2",` +
+        `"deep":${'['.repeat(depth)}${']'.repeat(depth)}}}`
+      expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+
+      const res = await postBody(port, platformToken(), body)
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({ error: 'invalid_request' })
+      expect(acquire).toHaveBeenCalledTimes(1)
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    it('frees the slot when the handler throws before releasing it', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
+      )
+      const body = JSON.stringify({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: completionRequest('codex-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+        poison: true,
+      })
+      expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+      // Any throw between the grant and the handler's explicit releases reaches
+      // the error handler; only the response's close event can free the slot.
+      const stringify = JSON.stringify.bind(JSON)
+      const poisoned = vi.spyOn(JSON, 'stringify').mockImplementation(((
+        value: unknown,
+        ...rest: unknown[]
+      ) => {
+        if (value !== null && typeof value === 'object' && 'poison' in value) {
+          throw new RangeError('Maximum call stack size exceeded')
+        }
+        return (stringify as (...args: unknown[]) => string)(value, ...rest)
+      }) as typeof JSON.stringify)
+
+      const res = await postBody(port, platformToken(), body)
+      expect(res.status).toBe(500)
+      expect(await res.json()).toEqual({ error: 'internal_error' })
+      expect(poisoned).toHaveBeenCalledWith(expect.objectContaining({ poison: true }))
+      expect(acquire).toHaveBeenCalledTimes(1)
+      poisoned.mockRestore()
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    it('answers 408 to a stalled visual body within the read deadline and frees the slot', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          bodyReadDeadlineMs: 100,
+        })
+      )
+      const declared = maxBodyBytes + 1024
+      const answer = await postStalled(port, platformToken(), declared, '{"executionTicket":')
+      expect(answer.status).toBe(408)
+      expect(answer.head).toMatch(/^connection: close$/im)
+      expect(acquire).toHaveBeenCalledTimes(1)
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    type RefusalRow = {
+      name: string
+      status: number
+      error: string
+      overrides?: Partial<CodexLlmProxyConfig>
+      body: (maxBodyBytes: number) => { auth: string; body: string }
+    }
+
+    const largeValid = (maxBodyBytes: number) =>
+      completionPayload('codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+
+    const refusals: RefusalRow[] = [
+      {
+        name: 'malformed JSON',
+        status: 400,
+        error: 'invalid_request',
+        body: maxBodyBytes => ({
+          auth: platformToken(),
+          body: `{"pad":"${'x'.repeat(maxBodyBytes)}`,
+        }),
+      },
+      {
+        name: 'an unknown envelope field',
+        status: 400,
+        error: 'unknown_field',
+        body: maxBodyBytes => {
+          const valid = largeValid(maxBodyBytes)
+          return {
+            auth: valid.token,
+            body: JSON.stringify({ ...JSON.parse(valid.body), extra: 1 }),
+          }
+        },
+      },
+      {
+        name: 'an invalid ticket',
+        status: 403,
+        error: 'ticket_invalid',
+        body: maxBodyBytes => {
+          const valid = largeValid(maxBodyBytes)
+          return {
+            auth: valid.token,
+            body: JSON.stringify({ ...JSON.parse(valid.body), executionTicket: 'invalid-ticket' }),
+          }
+        },
+      },
+      {
+        name: 'a host binding mismatch',
+        status: 403,
+        error: 'host_binding_mismatch',
+        body: maxBodyBytes => ({
+          auth: platformToken(['other-host']),
+          body: largeValid(maxBodyBytes).body,
+        }),
+      },
+      {
+        name: 'execution disabled',
+        status: 404,
+        error: 'disabled',
+        overrides: { executionEnabled: false },
+        body: maxBodyBytes => {
+          const valid = largeValid(maxBodyBytes)
+          return { auth: valid.token, body: valid.body }
+        },
+      },
+    ]
+
+    it.each(refusals)('frees the visual slot after refusing $name', async row => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024, ...row.overrides }))
+      )
+      const payload = row.body(maxBodyBytes)
+      expect(Buffer.byteLength(payload.body)).toBeGreaterThan(maxBodyBytes)
+
+      const res = await postBody(port, payload.auth, payload.body)
+      expect(res.status).toBe(row.status)
+      expect(await res.json()).toEqual({ error: row.error })
+      expect(acquire).toHaveBeenCalledTimes(1)
+      await expectGateEmpty()
+      // The ticket check runs before the execution flag, so this also holds
+      // for the disabled row.
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    // A body this small fits the socket buffer Node keeps reading, so the
+    // client's disconnect fires `aborted` while it waits. A larger body is the
+    // next test.
+    it('frees the queue place of a visual request aborted while it waited', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      // Codex admits two visual streams, so both entries must be held before a
+      // third request can queue behind them.
+      const holderA = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      const holderB = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 2,
+        'no pair of streams held the gate'
+      )
+
+      const abort = new AbortController()
+      const payload = largeValid(maxBodyBytes)
+      const waiting = fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${payload.token}`, 'content-type': 'application/json' },
+        body: payload.body,
+        signal: abort.signal,
+      }).catch((err: unknown) => err)
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the second request did not queue'
+      )
+      const warn = vi.spyOn(logger, 'warn')
+      abort.abort()
+      expect(await waiting).toBeInstanceOf(Error)
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 0,
+        'the aborted waiter kept its place'
+      )
+      expect(acquire).toHaveBeenCalledTimes(3)
+      // Witness: the waiter's acquire ended on the client's abort, so the
+      // catch around it ran. A departed client is not gate saturation and
+      // must not be logged as `visual_gate`.
+      const waiterAcquire = acquire.mock.results[2]?.value as Promise<unknown>
+      const acquireError = await waiterAcquire.catch((err: unknown) => err)
+      expect(acquireError).toBeInstanceOf(RequestLimitError)
+      expect((acquireError as RequestLimitError).kind).toBe('aborted')
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'codex_proxy_admission_refused', reason: 'visual_gate' }),
+        'admission refused'
+      )
+
+      // #871 / r11-M3: the aborted waiter's share must be released before
+      // any slot frees. Both holders still run, so two fresh requests from
+      // the same principal must fill the remaining share and queue.
+      const reprobeBody = JSON.stringify({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: completionRequest('codex-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+      })
+      expect(Buffer.byteLength(reprobeBody)).toBeGreaterThan(maxBodyBytes)
+      const reprobes = Array.from(
+        { length: VISUAL_PER_HOST_MAX_ADMITTED - VISUAL_STREAM_LIMITS.maxConcurrentStreams },
+        () => postBody(port, platformToken(), reprobeBody)
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 2,
+        'the aborted waiter leaked its principal share'
+      )
+      expect(acquire).toHaveBeenCalledTimes(5)
+
+      hang.release()
+      await holderA
+      await holderB
+      for (const reprobe of await Promise.all(reprobes)) {
+        expect(reprobe.status).toBe(403)
+        expect(await reprobe.json()).toEqual({ error: 'ticket_invalid' })
+      }
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    // Once the unread body exceeds the request's buffer, Node stops reading the
+    // socket, so a queued client's disconnect is not seen and `aborted` never
+    // fires. The place is held until the grant or the admission deadline. At the
+    // grant the parser reads the bytes that already reached the server. Usually
+    // that is only part of the body, so raw-body fails with `request.aborted`
+    // and the parser's error callback frees the slot; if the whole body arrived
+    // before the disconnect, the request runs through the handler, which frees
+    // it. Either way the slot is freed only at the grant; this pins that bound.
+    it('holds the queue place of a disconnected large-body waiter until its grant', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 4 * 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      const holderA = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      const holderB = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 2,
+        'no pair of streams held the gate'
+      )
+
+      const payload = largeValid(2 * 1024 * 1024)
+      const waiter = connectTcp(port, '127.0.0.1', () => {
+        waiter.write(
+          `POST ${COMPLETIONS_PATH} HTTP/1.1\r\n` +
+            `Host: 127.0.0.1:${port}\r\n` +
+            `Authorization: Bearer ${payload.token}\r\n` +
+            `Content-Type: application/json\r\n` +
+            `Content-Length: ${Buffer.byteLength(payload.body)}\r\n` +
+            `\r\n`
+        )
+        waiter.write(payload.body)
+      })
+      waiter.on('error', err => {
+        const code = (err as NodeJS.ErrnoException).code
+        if (code !== 'ECONNRESET' && code !== 'EPIPE') throw err
+      })
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the large waiter did not queue'
+      )
+      const closed = new Promise<void>(resolve => waiter.once('close', () => resolve()))
+      waiter.destroy()
+      await closed
+      expect(waiter.destroyed).toBe(true)
+
+      // r11-L15: with the unread body paused there is no pre-grant server
+      // observable for this close. The snapshot records the state at the
+      // observed client close only; it is not a server-disconnect witness.
+      const waiterAcquire = acquire.mock.results[2]?.value as Promise<() => void>
+      expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 1 })
+      expect(acquire).toHaveBeenCalledTimes(3)
+
+      hang.release()
+      await holderA
+      await holderB
+      // The positive proof is the grant itself: a premature abort or removal
+      // rejects or strands this acquire. After grant, resumed body processing
+      // releases the slot through an aborted read or a completed handler.
+      await waiterAcquire
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    it('refuses a declared length past the visual ceiling with 413 without queueing', async () => {
+      const maxBodyBytes = smallCaps()
+      const maxVisualBodyBytes = 64 * 1024
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      const holder = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(() => visualStreamGate.snapshot().running === 1, 'no stream held the gate')
+
+      // With the slot held, a body that reached the gate would queue and wait;
+      // the declared length alone must answer 413 first.
+      const over = largeValid(maxVisualBodyBytes)
+      expect(Buffer.byteLength(over.body)).toBeGreaterThan(maxVisualBodyBytes)
+      const res = await postBody(port, over.token, over.body)
+      expect(res.status).toBe(413)
+      expect(await res.json()).toEqual({ error: 'payload_too_large' })
+      expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 0 })
+      expect(acquire).toHaveBeenCalledTimes(1)
+
+      hang.release()
+      await holder
+    })
+
+    // After the handler takes a visual slot for the stream (hand-off), a
+    // client disconnect must not free the slot or the principal share early.
+    // The close handler releases only while the slot is still held in
+    // selectTransportBudget; once the handler owns it the slot is freed
+    // by the handler's own `finally` when it finishes unwinding. Freeing it on
+    // close after hand-off would admit another large body over the gate width
+    // while the disconnected request's parsed body is still resident.
+    it('keeps the visual slot held when the streaming client disconnects after hand-off', async () => {
+      expect(VISUAL_STREAM_LIMITS.maxConcurrentStreams).toBe(2)
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      // Fill both visual slots: A hands off under an abortable client, B under
+      // a normal one. Both use the default host so they clear host-binding and
+      // reach the stream. Two admissions for one principal stay under the
+      // per-host share of four.
+      const payloadA = largeValid(maxBodyBytes)
+      const abort = new AbortController()
+      const holderA = fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${payloadA.token}`,
+          'content-type': 'application/json',
+        },
+        body: payloadA.body,
+        signal: abort.signal,
+      }).catch((err: unknown) => err)
+      const holderB = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 2,
+        'the two large V2 bodies did not hold both visual slots'
+      )
+      // A third large V2 queues behind the two slots, so the queue depth is a
+      // live witness of whether a slot stays held. It is the third admission for
+      // the principal, still under the per-host share of four.
+      const waiter = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the third large V2 did not queue behind the held slots'
+      )
+
+      // Holder A's client disconnects while its handler is still unwinding (the
+      // hang holds it). Its slot and the queue place must both persist.
+      abort.abort()
+      expect(await holderA).toBeInstanceOf(Error)
+      // Wait long enough for the close handler to run before the assertion; it
+      // must find the slot handed off and release nothing.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 1 })
+      expect(acquire).toHaveBeenCalledTimes(3)
+
+      // Releasing the handlers frees the slots; only then is the waiter admitted.
+      hang.release()
+      await Promise.all([holderB, waiter])
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
   })
 })

@@ -177,12 +177,16 @@ describe('selecting a chat session across a route change', () => {
 
     await waitFor(() => expect(result.current.chatMessagesLoading).toBe(false))
     expect(result.current.activeChatId).toBe('c-old')
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-      'agent-x',
-      'agent-x',
-      'c-old',
-      undefined,
-      { limit: 40 }
+    // Cached messages can hide the spinner before background reconciliation
+    // reaches the RPC. Wait for that observable call independently.
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+        'agent-x',
+        'agent-x',
+        'c-old',
+        undefined,
+        { limit: 40 }
+      )
     )
   })
 
