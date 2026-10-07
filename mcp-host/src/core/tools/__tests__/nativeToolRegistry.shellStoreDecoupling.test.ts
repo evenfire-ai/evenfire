@@ -11,6 +11,13 @@ import { NativeToolRegistry } from '../nativeToolRegistry'
 // GFS download store. These tests run shell_exec through the real registry with
 // a real initialized store, and through the same timeout boundary the tool loop
 // uses (toolUseLoopSingleTool -> executeWithTimeout).
+//
+// They are unit coverage of the decoupled registry contract only. The registry
+// is given no processing-lease provider here, so they stay green when #1019 is
+// reverted: before #1019 TaskExecutor built that provider. The vacuity
+// falsifiers that do go red under that revert are the TaskExecutor-level
+// X1-shell, X1-delivery, U5-TE and X3-TE in
+// src/agent/__tests__/taskExecutor.gfsExecutionSafety.test.ts.
 
 const hosts: string[] = []
 const stores: GfsDownloadStore[] = []
@@ -81,7 +88,7 @@ function storeMethodNames(): string[] {
   )
 }
 
-describe('managed shell_exec without the GFS download store (#1019)', () => {
+describe('managed shell_exec without the GFS download store (#1019), registry-level unit coverage', () => {
   it.each([
     ['just under one hour', 3_594_000, 3_594_000],
     ['exactly one hour', 3_600_000, 3_600_000],

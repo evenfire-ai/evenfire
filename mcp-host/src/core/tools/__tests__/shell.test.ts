@@ -587,10 +587,25 @@ describe('ShellTool without the GFS download store (#1019)', () => {
       const pidFile = join(workspacePath, 'cancel.pid')
       const controller = new AbortController()
       const tool = new ShellTool(workspacePath, 30_000, ['PATH'])
+      // The pid file is written before `printf started`, so aborting as soon as
+      // it exists can race the stdout read. Abort only after the tool has
+      // streamed "started", which it retains before calling onOutput.
+      let streamed = ''
+      let markStarted!: () => void
+      const started = new Promise<void>(resolve => {
+        markStarted = resolve
+      })
       const execution = tool.execute(
         { command: `${background(pidFile)} wait` },
-        { signal: controller.signal, onOutput: () => {} }
+        {
+          signal: controller.signal,
+          onOutput: chunk => {
+            streamed += chunk
+            if (streamed.includes('started')) markStarted()
+          },
+        }
       )
+      await started
       const grandchild = Number(await waitForFile(pidFile))
       controller.abort(new Error('user cancelled'))
       const result = await execution

@@ -205,13 +205,14 @@ describe('legacy processing leases after #1019', () => {
     const before = await counterValue(DISCARDED_COUNTER)
     const reopened = freshStore()
     await reopened.initialize()
+    // The persisted discard is the claim; the counter and the log follow it.
+    const onDisk = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+    expect(onDisk.records).toEqual({})
+    expect(onDisk).not.toHaveProperty('processingLeases')
     expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
     expect(discardWarnings(warn.mock.calls)).toEqual([
       [{ discarded: 1 }, 'GFS download store discarded 1 legacy processing lease(s) at initialize'],
     ])
-    const onDisk = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
-    expect(onDisk.records).toEqual({})
-    expect(onDisk).not.toHaveProperty('processingLeases')
     expect(reopened.isAvailable()).toBe(true)
     const receipt = await fixture(reopened)
     expect(reopened.debugRecord(receipt.id)?.state).toBe('completed')
@@ -234,6 +235,9 @@ describe('legacy processing leases after #1019', () => {
     const before = await counterValue(DISCARDED_COUNTER)
     const reopened = freshStore()
     await reopened.initialize()
+    const onDisk = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+    expect(onDisk).not.toHaveProperty('processingLeases')
+    expect(Object.keys(onDisk.records).sort()).toEqual([intact.id, altered.id].sort())
     expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
     expect(reopened.isAvailable()).toBe(true)
     expect(await reopened.reusableReceipt('caller-a', source, 7)).toMatchObject({
@@ -276,6 +280,9 @@ describe('legacy processing leases after #1019', () => {
     await reopened.initialize()
     expect(reopened.isAvailable()).toBe(true)
     expect(reopened.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
+    const onDisk = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+    expect(onDisk).not.toHaveProperty('processingLeases')
+    expect(Object.keys(onDisk.records)).toHaveLength(1)
     expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(0)
     expect(discardWarnings(warn.mock.calls)).toEqual([])
   })
@@ -338,11 +345,11 @@ describe('legacy processing leases after #1019', () => {
     const retried = freshStore()
     await retried.initialize()
     expect(retried.isAvailable()).toBe(true)
-    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
-    expect(discardWarnings(warn.mock.calls)).toHaveLength(1)
     expect(JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))).not.toHaveProperty(
       'processingLeases'
     )
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
+    expect(discardWarnings(warn.mock.calls)).toHaveLength(1)
   })
 
   it('S9: counts and logs records an earlier boot quarantined', async () => {

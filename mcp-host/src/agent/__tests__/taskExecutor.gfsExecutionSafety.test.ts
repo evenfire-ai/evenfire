@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawn } from 'child_process'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import { ShellTool } from '../../core/tools/shell'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
@@ -57,8 +58,11 @@ const savedConfig = {
   dynamicToolsEnabled: appConfig.dynamicToolsEnabled,
   promptCacheEnabled: appConfig.promptCacheEnabled,
 }
+const savedNativeTool = { ...appConfig.nativeTool }
 const roots: string[] = []
 const stores: GfsDownloadStore[] = []
+/** Spies installed with vi.spyOn by a test; restored before the stores close. */
+const installedSpies: Array<{ mockRestore: () => void }> = []
 
 beforeEach(() => {
   Object.assign(appConfig, {
@@ -85,9 +89,11 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  for (const spy of installedSpies.splice(0)) spy.mockRestore()
   for (const store of stores.splice(0)) await store.close().catch(() => undefined)
   for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true })
   Object.assign(appConfig, savedConfig)
+  Object.assign(appConfig.nativeTool, savedNativeTool)
 })
 
 async function unavailableStore() {
@@ -366,3 +372,139 @@ it.each(['cron', 'internal'] as const)(
     expect(spawn).not.toHaveBeenCalled()
   }
 )
+
+// ---------------------------------------------------------------------------
+// Vacuity falsifiers (#1019 / #1021). Before #1019, TaskExecutor built a
+// processing-lease provider from the store and handed it to the shell, so a
+// registry-level test cannot reproduce the pre-#1019 behaviour on its own.
+// These four tests drive TaskExecutor.run() and must go red when every #1019
+// production file is reverted.
+// ---------------------------------------------------------------------------
+
+/**
+ * Spy on every GfsDownloadStore method, enumerated at runtime so a method that
+ * exists only in another revision (the pre-#1019 acquireProcessingLease, for
+ * example) is still covered.
+ */
+function storeSpyNet(store: GfsDownloadStore) {
+  const names = Object.getOwnPropertyNames(GfsDownloadStore.prototype).filter(
+    name =>
+      name !== 'constructor' &&
+      typeof Object.getOwnPropertyDescriptor(GfsDownloadStore.prototype, name)?.value === 'function'
+  )
+  const spies = new Map(
+    names.map(name => {
+      const spy = vi.spyOn(
+        store as unknown as Record<string, (...args: unknown[]) => unknown>,
+        name
+      )
+      installedSpies.push(spy)
+      return [name, spy] as const
+    })
+  )
+  const counts = () => new Map([...spies].map(([name, spy]) => [name, spy.mock.calls.length]))
+  return { names, spies, counts }
+}
+
+/**
+ * Record, for every ShellTool.execute call, the timeout the executor passed and
+ * the store methods called between entering and leaving execute.
+ */
+function shellExecuteWindows(net: ReturnType<typeof storeSpyNet>) {
+  const windows: Array<{ timeoutMs: number | undefined; storeCalls: string[] }> = []
+  const original = ShellTool.prototype.execute
+  const spy = vi.spyOn(ShellTool.prototype, 'execute').mockImplementation(async function (
+    this: ShellTool,
+    params,
+    context
+  ) {
+    const before = net.counts()
+    try {
+      return await original.call(this, params, context)
+    } finally {
+      const after = net.counts()
+      windows.push({
+        timeoutMs: context?.timeoutMs,
+        storeCalls: [...after]
+          .filter(([name, calls]) => calls > (before.get(name) ?? 0))
+          .map(([name]) => name),
+      })
+    }
+  })
+  installedSpies.push(spy)
+  return windows
+}
+
+it('X1-shell: an inherited legacy lease does not stop an approved shell (#1019)', async () => {
+  const scenario = await shellScenario({
+    source: 'channel',
+    legacyLease: true,
+    channelCaller: true,
+  })
+  await scenario.executor.run()
+  // Witness: the executor reached the live approval gate for shell_exec.
+  expect(scenario.onApprovalNeeded).toHaveBeenCalledTimes(1)
+
+  await scenario.executor.resumeAfterApproval(false)
+
+  // Claim: the approved command spawned in the caller root and its stdout returned.
+  expect(spawn).toHaveBeenCalledOnce()
+  expect(vi.mocked(spawn).mock.calls[0]![2]).toMatchObject({ cwd: scenario.callerWorkspace })
+  expect(JSON.stringify(scenario.providerCalls.at(-1))).toContain(scenario.callerWorkspace)
+  expect(scenario.onFail).not.toHaveBeenCalled()
+})
+
+it('X1-delivery: an inherited legacy lease is discarded and GFS delivery stays advertised (#1019)', async () => {
+  const scenario = await shellScenario({
+    source: 'channel',
+    legacyLease: true,
+    channelCaller: true,
+  })
+  await scenario.executor.run()
+  // Witness: the provider received a tool list built by the executor's registry.
+  expect(scenario.advertisedTools.length).toBeGreaterThan(0)
+  expect(scenario.advertisedTools[0]).toContain('shell_exec')
+  // Claim: delivery is advertised because the store came up available.
+  expect(scenario.advertisedTools[0]).toContain('clerum__gfs_download')
+  expect(scenario.store.isAvailable()).toBe(true)
+})
+
+describe('U5-TE: TaskExecutor runs a managed shell with a timeout above the former lease ceiling (#1021)', () => {
+  it.each([
+    ['exactly one hour', 3_600_000],
+    ['one millisecond over one hour', 3_600_001],
+  ])('%s', async (_label, timeoutMs) => {
+    Object.assign(appConfig.nativeTool, { shellTimeout: timeoutMs, toolTimeout: timeoutMs })
+    const scenario = await shellScenario({ source: 'cron', healthy: true })
+    const windows = shellExecuteWindows(storeSpyNet(scenario.store))
+
+    await scenario.executor.run()
+
+    // Witness: the effective timeout reached ShellTool.execute unchanged.
+    expect(windows).toHaveLength(1)
+    expect(windows[0]!.timeoutMs).toBe(timeoutMs)
+    // Claim: the command spawned and its stdout reached the model.
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(JSON.stringify(scenario.providerCalls.at(-1))).toContain(scenario.callerWorkspace)
+    expect(scenario.onFail).not.toHaveBeenCalled()
+  })
+})
+
+it('X3-TE: a shell run inside TaskExecutor makes zero GFS download store calls (#1019)', async () => {
+  const scenario = await shellScenario({ source: 'cron', healthy: true })
+  const net = storeSpyNet(scenario.store)
+  const windows = shellExecuteWindows(net)
+
+  await scenario.executor.run()
+
+  // Witnesses: the net is attached to the store instance the executor wired
+  // (isAvailable is read while the registry is built), the shell window opened
+  // once, and the command's stdout reached the model.
+  expect(net.names).toContain('isAvailable')
+  expect(net.spies.get('isAvailable')!.mock.calls.length).toBeGreaterThan(0)
+  expect(windows).toHaveLength(1)
+  expect(spawn).toHaveBeenCalledOnce()
+  expect(JSON.stringify(scenario.providerCalls.at(-1))).toContain(scenario.callerWorkspace)
+  // Claim: no store method ran while the shell executed.
+  expect(windows[0]!.storeCalls).toEqual([])
+})
