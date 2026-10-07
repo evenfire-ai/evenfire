@@ -57,11 +57,13 @@ environment at the forwarded External REST API.
 When Profile-to-Desktop handoff is enabled, a member can open the environment
 from **Profile UI → Settings → Setup desktop app**. Desktop selects a single
 saved environment with the exact External REST API URL. If the current session
-uses another REST URL, Desktop signs out before switching. If no exact match is
-saved, Desktop asks before adding the environment; after confirmation, the
-External REST API supplies the RPC proxy URL. Multiple saved exact matches are
-rejected for manual resolution, unless the already-active environment itself
-matches the requested REST endpoint; that exact active environment is retained.
+uses another REST URL, Desktop asks before switching. Cancel keeps the current
+session signed in; confirming signs out and then selects the matching saved
+environment. If no exact match is saved, Desktop asks before adding the
+environment; after confirmation, the External REST API supplies the RPC proxy
+URL. Multiple saved exact matches are rejected for manual resolution, unless the
+already-active environment itself matches the requested REST endpoint; that
+exact active environment is retained.
 
 The handoff is disabled by default. A release operator can enable it by setting
 the `PROFILE_DESKTOP_HANDOFF_ENABLED` repository variable to `true` when
