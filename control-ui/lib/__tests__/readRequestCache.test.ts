@@ -617,6 +617,56 @@ describe('bounded metadata read reuse', () => {
     expect(retry).toHaveBeenCalledOnce()
   })
 
+  it('waits for the family recovery already rereading before it re-runs the consumer', async () => {
+    const path = '/api/v1/admin/connections'
+    const connections = { metadataRead: 'subscription-connections' } as const
+    // The recovery's reread stays in flight until released, and rejects on
+    // abort the way a browser fetch does.
+    let releaseReread!: () => void
+    let rereadAborted = false
+    fetchMock.mockResolvedValueOnce(throttled(12)).mockImplementationOnce(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          releaseReread = () => resolve(success({ connections: ['recovered'] }))
+          init?.signal?.addEventListener('abort', () => {
+            rereadAborted = true
+            reject(new DOMException('The read was cancelled', 'AbortError'))
+          })
+        })
+    )
+    // The consumer's effect: its cleanup aborts the signal registered as the
+    // recovery's interest, then the effect reads again.
+    const effect = new AbortController()
+    let denial: unknown
+    await apiGet(path, {}, { ...connections, signal: effect.signal }).catch(error => {
+      denial = error
+    })
+    expect(denial).toMatchObject({ status: 429 })
+    const rerun = vi.fn(() => {
+      effect.abort()
+      return apiGet(path, {}, connections)
+    })
+    // Scheduled after the recovery, as the consumer does, so at the shared
+    // deadline the recovery's timer fires first and its reread is in flight
+    // when this one fires.
+    scheduleReadRequestRetry(denial as Parameters<typeof scheduleReadRequestRetry>[0], rerun)
+
+    await vi.advanceTimersByTimeAsync(12_000)
+    // Witness: the recovery is rereading at the deadline.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(rerun).not.toHaveBeenCalled()
+    expect(rereadAborted).toBe(false)
+
+    releaseReread()
+    await vi.advanceTimersByTimeAsync(0)
+    // The consumer re-runs once the recovery settled, and the recovered entry
+    // serves its read.
+    expect(rerun).toHaveBeenCalledOnce()
+    await expect(rerun.mock.results[0]?.value).resolves.toEqual({ connections: ['recovered'] })
+    expect(rereadAborted).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('changes the session identity only when the confirmed principal changes', () => {
     const start = getReadRequestSessionIdentity()
     setReadRequestCacheEntry('entry', { value: 1 }, 30_000)

@@ -43,6 +43,9 @@ const READ_REQUEST_INVALIDATION_CHANNEL = 'control-ui-read-metadata-invalidation
 const entries = new Map<string, CacheEntry>()
 const cooldowns = new Map<string, CooldownEntry>()
 const recoveries = new Map<string, RecoveryEntry>()
+// The family each denial belongs to, so a consumer's automatic retry can find
+// the recovery scheduled for that denial without knowing the family key.
+const denialFamilies = new WeakMap<ApiRequestError, string>()
 let principal: PrincipalContext | null = null
 let invalidationChannel: BroadcastChannel | null = null
 let invalidationHandler: ((remote?: boolean) => void) | null = null
@@ -217,6 +220,7 @@ export function setReadRequestCooldown(
   const retryAtMs = Math.max(nowMs + delayMs, current?.retryAtMs ?? 0)
   const issued = current?.issued ?? new Set<ApiRequestError>()
   issued.add(error)
+  denialFamilies.set(error, key)
   for (const denied of issued) denied.retryAtMs = retryAtMs
   while (cooldowns.size >= METADATA_READ_CACHE_MAX_ENTRIES && !cooldowns.has(key)) {
     const oldest = cooldowns.keys().next().value
@@ -391,23 +395,39 @@ export function completeReadRequestRecovery(key: string, memberKey: string): voi
  * Run `retry` once a denial's retry time has passed. A later denial in the same
  * family can extend that time on the error itself (setReadRequestCooldown), so
  * the timer re-arms until the extended time is reached instead of firing into
- * the cooldown. Returns the cancel function.
+ * the cooldown. When the denial's family recovery is due or already rereading,
+ * `retry` runs only once it settles: re-running the consumer earlier would
+ * release the recovery's registered interest, cancel its reread and spend a
+ * read of its own. Returns the cancel function.
  */
 export function scheduleReadRequestRetry(error: ApiRequestError, retry: () => void): () => void {
   const untimedRetryAtMs = Date.now() + METADATA_READ_UNTIMED_COOLDOWN_MS
   let timer: ReturnType<typeof setTimeout>
+  let cancelled = false
+  const runRetry = () => {
+    if (!cancelled) retry()
+  }
   const arm = () => {
     const delayMs = (error.retryAtMs ?? untimedRetryAtMs) - Date.now()
     timer = setTimeout(
       () => {
-        if (Date.now() < (error.retryAtMs ?? untimedRetryAtMs)) arm()
-        else retry()
+        if (Date.now() < (error.retryAtMs ?? untimedRetryAtMs)) {
+          arm()
+          return
+        }
+        const family = denialFamilies.get(error)
+        const recovery = family ? getReadRequestRecovery(family) : undefined
+        if (recovery) recovery.then(runRetry, runRetry)
+        else runRetry()
       },
       Math.min(2_147_483_647, Math.max(0, delayMs))
     )
   }
   arm()
-  return () => clearTimeout(timer)
+  return () => {
+    cancelled = true
+    clearTimeout(timer)
+  }
 }
 
 export function __resetReadRequestCacheForTests(): void {
