@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import { mkdtemp, readFile, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
 import { config, getActiveEnvKey } from '../config.js'
 import { DesktopUploadCapabilityError, normalizeUploadProductMaxBytes } from '../gfs/upload.js'
@@ -293,7 +293,9 @@ type UploadScopeTestService = {
 }
 
 function authenticatedUploadService(statePath: string): UploadScopeTestService {
-  const service = new AppService() as unknown as UploadScopeTestService
+  const service = new AppService({
+    getUserDataDirectory: () => dirname(statePath),
+  }) as unknown as UploadScopeTestService
   service.sessionToken = 'token-a'
   service.me = {
     id: 'user-a',

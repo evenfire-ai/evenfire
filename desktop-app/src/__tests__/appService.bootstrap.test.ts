@@ -67,7 +67,9 @@ describe('AppService invitation configuration lookup', () => {
     ] = await Promise.all([import('../appService.js'), import('../config.js')])
     const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
 
-    const service = new AppService() as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: {
         passwordLogin: ReturnType<typeof vi.fn>
         getDesktopEnvironment: ReturnType<typeof vi.fn>
@@ -207,13 +209,16 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('does not contact member-registration-service when runtime config is already set', async () => {
+    const configPath = await createTempConfigPath('clerum-desktop-config-already-set')
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
     const { AppService } = await import('../appService.js')
-    const service = new AppService() as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: { passwordLogin: ReturnType<typeof vi.fn> }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       tokenStore: { setSessionToken: ReturnType<typeof vi.fn> }
@@ -272,7 +277,9 @@ describe('AppService invitation configuration lookup', () => {
     const { AppService } = await import('../appService.js')
     const getSessionToken = vi.fn().mockResolvedValue('stored-token')
     const clearSessionToken = vi.fn().mockResolvedValue(undefined)
-    const service = new AppService() as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
       tokenStore: {
         getSessionToken: ReturnType<typeof vi.fn>
@@ -329,13 +336,16 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('fails closed when the saved-token store cannot be read', async () => {
+    const configPath = await createTempConfigPath('clerum-desktop-token-read-failure')
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     vi.resetModules()
 
     const { AppService } = await import('../appService.js')
     const getMe = vi.fn()
-    const service = new AppService() as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
       tokenStore: {
         getSessionToken: ReturnType<typeof vi.fn>

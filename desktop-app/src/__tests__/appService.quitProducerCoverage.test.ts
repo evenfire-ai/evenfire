@@ -43,6 +43,7 @@ function createService() {
     restoreSavedSessionOnce: ReturnType<typeof vi.fn>
     installAuthenticatedLoginOnce: ReturnType<typeof vi.fn>
     applyRuntimeEnvironmentChangeOnce: ReturnType<typeof vi.fn>
+    getUserDataDirectory: () => string
     requireSessionToken: () => string
     getCurrentSessionTeamId: (token: string) => Promise<string>
     switchSessionToTeam: ReturnType<typeof vi.fn>
@@ -63,6 +64,7 @@ function createService() {
   service.restoreSavedSessionOnce = vi.fn().mockResolvedValue(undefined)
   service.installAuthenticatedLoginOnce = vi.fn().mockResolvedValue(undefined)
   service.applyRuntimeEnvironmentChangeOnce = vi.fn().mockResolvedValue(undefined)
+  service.getUserDataDirectory = () => path.dirname(isolatedConfigPath)
   service.requireSessionToken = vi.fn(() => 'session-token')
   service.getCurrentSessionTeamId = vi.fn(async () => 'team-a')
   service.switchSessionToTeam = vi.fn().mockResolvedValue('switched-token')
