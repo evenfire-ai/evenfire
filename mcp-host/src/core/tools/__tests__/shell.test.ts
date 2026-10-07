@@ -1,9 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { spawn } from 'child_process'
+import { existsSync } from 'fs'
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../../llm/registryCore'
+import { executeWithTimeout } from '../../orchestration/toolExecutionTimeout'
 import { ShellTool } from '../shell'
+
+// Real processes run; the spy only observes whether a process was started.
+vi.mock('child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 let workspacePath: string
 
@@ -447,6 +456,206 @@ describe('ShellTool', () => {
       const result = await tool.execute({ command: 'echo "$UNRELATED_VAR"' })
       expect(result.is_error).toBe(false)
       expect(result.content).toContain('kept')
+    })
+  })
+
+  // PR #1005 pins the sha256 of the native tools[] baseline, which includes
+  // shell_exec. Decoupling the shell from the GFS download store (#1019) must
+  // not change the advertised name, description or schema. The two
+  // machine-specific paths are normalized so the pin is portable.
+  it('keeps the advertised shell_exec definition byte-identical to the pre-#1019 contract', () => {
+    const tool = new ShellTool(workspacePath, 5000, ['PATH'])
+    const description = tool
+      .description()
+      .replace(JSON.stringify(process.execPath), '<NODE_EXEC_PATH>')
+      .replace(JSON.stringify(require.resolve('exceljs')), '<EXCELJS_PATH>')
+    expect(tool.name()).toBe('shell_exec')
+    expect(description).toBe(
+      'Execute a shell command in the workspace directory. ' +
+        'Supports full shell syntax (pipes, redirects, &&, etc.). ' +
+        'Commands run with a timeout and restricted environment. ' +
+        'Node.js executable: <NODE_EXEC_PATH>. ' +
+        "Resolve installed Host libraries with require('node:module').createRequire(<EXCELJS_PATH>); load fast-csv through that resolver and use parseStream for streaming CSV parsing (exceljs.csv is not available). " +
+        'Verify any other executable or library before using it. ' +
+        'This tool requires approval before execution.'
+    )
+    expect(JSON.stringify(tool.parametersSchema())).toBe(
+      JSON.stringify({
+        type: 'object',
+        properties: {
+          command: {
+            type: 'string',
+            description:
+              "The shell command to execute (e.g., 'ls -la', 'echo hello | wc -c', 'git status')",
+          },
+        },
+        required: ['command'],
+      })
+    )
+  })
+})
+
+/** A Host-managed per-user root: `<host>/users/<caller>`. */
+async function managedCallerRoot(): Promise<{ host: string; callerRoot: string }> {
+  const host = await mkdtemp(join(tmpdir(), 'clerum-shell-managed-'))
+  const callerRoot = join(host, 'users', 'caller')
+  await mkdir(callerRoot, { recursive: true })
+  return { host, callerRoot }
+}
+
+async function waitForFile(file: string, timeoutMs = 5_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (existsSync(file)) {
+      const content = (await readFile(file, 'utf8')).trim()
+      if (content.length > 0) return content
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`Timed out waiting for ${file}`)
+}
+
+function processIsGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH'
+  }
+}
+
+describe('ShellTool without the GFS download store (#1019)', () => {
+  const hosts: string[] = []
+  beforeEach(() => {
+    vi.mocked(spawn).mockClear()
+  })
+  afterEach(async () => {
+    for (const host of hosts.splice(0)) await rm(host, { recursive: true, force: true })
+  })
+
+  it('U1: runs in the verified caller root with no store dependency', async () => {
+    const { host, callerRoot } = await managedCallerRoot()
+    hosts.push(host)
+    const tool = new ShellTool(callerRoot, 5_000, ['PATH'], () => ({}), undefined, true)
+
+    const result = await tool.execute({ command: 'printf ok' })
+
+    expect(result).toMatchObject({ is_error: false, content: 'stdout:\nok' })
+    expect(vi.mocked(spawn).mock.calls[0][2]).toMatchObject({ cwd: callerRoot })
+  })
+
+  it('U2: fails closed when the caller root is no longer canonical', async () => {
+    const { host, callerRoot } = await managedCallerRoot()
+    hosts.push(host)
+    const tool = new ShellTool(callerRoot, 5_000, ['PATH'], () => ({}), undefined, true)
+    // Witness: the same tool runs while the root is still canonical.
+    expect(await tool.execute({ command: 'printf canonical' })).toMatchObject({
+      is_error: false,
+      content: 'stdout:\ncanonical',
+    })
+    expect(spawn).toHaveBeenCalledTimes(1)
+
+    const moved = join(host, 'moved-caller')
+    await rename(callerRoot, moved)
+    await symlink(moved, callerRoot)
+    const result = await tool.execute({ command: 'printf escaped' })
+
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe(
+      'Managed shell unavailable: the verified caller workspace root is no longer canonical.'
+    )
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
+  describe('U6: process-group termination is unchanged', () => {
+    const background = (pidFile: string) =>
+      `sleep 30 & echo $! > ${JSON.stringify(pidFile)}; printf started;`
+
+    it('kills the whole group on timeout', async () => {
+      const pidFile = join(workspacePath, 'timeout.pid')
+      const tool = new ShellTool(workspacePath, 500, ['PATH'])
+      const result = await tool.execute({ command: `${background(pidFile)} wait` })
+
+      expect(result.is_error).toBe(true)
+      expect(result.content).toContain('[Command killed after 500ms timeout')
+      const grandchild = Number(await waitForFile(pidFile))
+      expect(grandchild).toBeGreaterThan(0)
+      expect(processIsGone(grandchild)).toBe(true)
+    })
+
+    it('kills the whole group on cancellation', async () => {
+      const pidFile = join(workspacePath, 'cancel.pid')
+      const controller = new AbortController()
+      const tool = new ShellTool(workspacePath, 30_000, ['PATH'])
+      const execution = tool.execute(
+        { command: `${background(pidFile)} wait` },
+        { signal: controller.signal, onOutput: () => {} }
+      )
+      const grandchild = Number(await waitForFile(pidFile))
+      controller.abort(new Error('user cancelled'))
+      const result = await execution
+
+      expect(result.is_error).toBe(true)
+      expect(result.content).toContain('[Command cancelled — partial output above]')
+      expect(result.content).toContain('started')
+      expect(processIsGone(grandchild)).toBe(true)
+    })
+
+    it('kills the whole group when output exceeds the bound', async () => {
+      const pidFile = join(workspacePath, 'maxbuffer.pid')
+      const tool = new ShellTool(workspacePath, 30_000, ['PATH'])
+      const result = await tool.execute({ command: `${background(pidFile)} yes` })
+
+      expect(result.is_error).toBe(true)
+      expect(result.content).toContain('output_limit_exceeded')
+      const grandchild = Number(await waitForFile(pidFile))
+      expect(processIsGone(grandchild)).toBe(true)
+    })
+
+    it('does not spawn when cancellation precedes process start', async () => {
+      const tool = new ShellTool(workspacePath, 5_000, ['PATH'])
+      const reason = new Error('cancelled before start')
+      const controller = new AbortController()
+      controller.abort(reason)
+
+      await expect(
+        tool.execute({ command: 'printf late' }, { signal: controller.signal, onOutput: () => {} })
+      ).rejects.toBe(reason)
+      expect(spawn).not.toHaveBeenCalled()
+
+      // Witness: the same tool with a live signal does start the process.
+      const live = await tool.execute(
+        { command: 'printf live' },
+        { signal: new AbortController().signal, onOutput: () => {} }
+      )
+      expect(live).toMatchObject({ is_error: false, content: 'stdout:\nlive' })
+      expect(spawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('joins the outer cancellation boundary until the group has exited', async () => {
+      const pidFile = join(workspacePath, 'join.pid')
+      const tool = new ShellTool(workspacePath, 30_000, ['PATH'])
+      expect(tool.joinsAbortSettlement()).toBe(true)
+      const parent = new AbortController()
+      let settled = false
+      const execution = executeWithTimeout(
+        tool,
+        { command: `${background(pidFile)} wait` },
+        { onOutput: () => {} },
+        30_000,
+        parent.signal
+      ).finally(() => {
+        settled = true
+      })
+      const grandchild = Number(await waitForFile(pidFile))
+      parent.abort(new Error('outer cancellation'))
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(settled).toBe(false)
+
+      const result = await execution
+      expect(result.is_error).toBe(true)
+      expect(result.content).toContain('[Command cancelled — partial output above]')
+      expect(processIsGone(grandchild)).toBe(true)
     })
   })
 })

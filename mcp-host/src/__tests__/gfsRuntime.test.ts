@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type GfsRuntime, bootstrapGfsRuntime } from '../gfsRuntime'
 import { GfsDownloadStore, GfsDownloadStoreError } from '../internalTools/gfsDownloadStore'
+import { logger } from '../logger'
 
 const roots: string[] = []
 const stores: GfsDownloadStore[] = []
@@ -156,6 +157,26 @@ describe('GFS runtime bootstrap', () => {
 
     expect(close).toHaveBeenCalledOnce()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('U9: logs that recovery is required when initialize succeeds but the store is unavailable', async () => {
+    const initialize = vi.spyOn(GfsDownloadStore.prototype, 'initialize')
+    vi.spyOn(GfsDownloadStore.prototype, 'isAvailable').mockReturnValue(false)
+    const error = vi.spyOn(logger, 'error')
+    const runtime = await bootstrapGfsRuntime(await root())
+    runtimes.push(runtime)
+
+    expect(initialize).toHaveBeenCalledOnce()
+    await expect(initialize.mock.results[0]!.value).resolves.toBeUndefined()
+    const recoveryLogs = error.mock.calls.filter(([, message]) =>
+      message.includes('operator recovery is required')
+    )
+    expect(recoveryLogs).toEqual([
+      [
+        { component: 'gfs-runtime', available: false },
+        'GFS download store initialized but is not available; operator recovery is required and managed GFS delivery is disabled',
+      ],
+    ])
   })
 
   it('closes initialized ownership even when quarantine makes the store unavailable', async () => {

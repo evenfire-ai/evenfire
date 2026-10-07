@@ -2,18 +2,19 @@ import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
+import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
-import { recordGfsDownloadExpiry, recordGfsDownloadQuota } from './gfsDownloadMetrics'
+import {
+  recordGfsDownloadExpiry,
+  recordGfsDownloadQuota,
+  recordGfsInheritedQuarantinedRecords,
+  recordGfsLegacyProcessingLeasesDiscarded,
+} from './gfsDownloadMetrics'
 import {
   GFS_FILE_LIMITS,
   GFS_HOST_ACTIVE_DOWNLOADS,
   GFS_HOST_RETAINED_FILES,
 } from './gfsFilePolicy'
-import type {
-  GfsProcessingLease,
-  GfsProcessingLeaseAcquisition,
-  GfsProcessingLeaseProvider,
-} from './gfsProcessingLease'
 import { openPrivateStoreObject, verifyPrivateStoreDirectory } from './gfsStorePrivateFiles'
 import { GfsStoreWriterLease, GfsStoreWriterOwnershipError } from './gfsStoreWriterLease'
 
@@ -77,11 +78,15 @@ export interface GfsDownloadReceipt {
 export interface StoreLedger {
   schemaVersion: 1
   records: Record<string, GfsDownloadRecord>
-  processingLeases?: Record<string, GfsProcessingLeaseRecord>
+  /**
+   * Legacy shell processing leases written before #1019. Still validated when
+   * a ledger carries them, discarded at initialize, and never written again.
+   */
+  processingLeases?: Record<string, LegacyProcessingLeaseRecord>
   retentionOwners?: Record<string, GfsReceiptOwnerRecord>
 }
 
-interface GfsProcessingLeaseRecord {
+interface LegacyProcessingLeaseRecord {
   leaseId: string
   callerIdentity: string
   recordIds: string[]
@@ -121,7 +126,6 @@ export function parseLedger(raw: string): StoreLedger {
   const result: StoreLedger = {
     schemaVersion: 1,
     records: {},
-    processingLeases: {},
     retentionOwners: {},
   }
   for (const [id, value] of Object.entries(records)) {
@@ -176,8 +180,9 @@ export function parseLedger(raw: string): StoreLedger {
       Array.isArray(rawProcessingLeases)
     )
       throw new GfsDownloadStoreError('corrupt_store_ledger')
+    result.processingLeases = {}
     for (const [id, value] of Object.entries(rawProcessingLeases)) {
-      const lease = value as GfsProcessingLeaseRecord
+      const lease = value as LegacyProcessingLeaseRecord
       if (
         !UUID_RE.test(id) ||
         typeof value !== 'object' ||
@@ -197,7 +202,7 @@ export function parseLedger(raw: string): StoreLedger {
         Date.parse(lease.expiresAt) <= Date.parse(lease.acquiredAt)
       )
         throw new GfsDownloadStoreError('corrupt_store_ledger')
-      result.processingLeases![id] = lease
+      result.processingLeases[id] = lease
     }
   }
   const owners = (parsed as { retentionOwners?: unknown }).retentionOwners
@@ -301,12 +306,10 @@ export class GfsDownloadStore {
   private ledger: StoreLedger = {
     schemaVersion: 1,
     records: {},
-    processingLeases: {},
     retentionOwners: {},
   }
   private readonly activeByCaller = new Map<string, number>()
   private readonly activeIds = new Set<string>()
-  private readonly liveProcessingLeases = new Set<string>()
   private active = 0
   private mutationTail = Promise.resolve()
   private initialized = false
@@ -321,8 +324,7 @@ export class GfsDownloadStore {
   }
 
   isAvailable(): boolean {
-    if (!this.initialized || this.unsafe || !this.writerLease || this.hasInheritedExecutors())
-      return false
+    if (!this.initialized || this.unsafe || !this.writerLease) return false
     try {
       this.writerLease.assertHeld()
       return true
@@ -384,6 +386,8 @@ export class GfsDownloadStore {
         // A successful read must always parse, including empty content, so a
         // truncated ledger fails closed.
         this.ledger = parseLedger(raw)
+        await this.discardLegacyProcessingLeases()
+        this.reportInheritedQuarantine()
       } else if (createdStoreRoot) {
         // Genuinely new store directory: make the durable schema-1 ledger exist
         // before reconciliation or any transfer exposure, so a ledger missing
@@ -482,18 +486,15 @@ export class GfsDownloadStore {
         input.retentionOwnerId === undefined
           ? undefined
           : this.ledger.retentionOwners?.[input.retentionOwnerId]
-      const previousLeases = this.ledger.processingLeases
       try {
         if (input.retentionOwnerId !== undefined)
           this.retainReceiptRecord(record, input.retentionOwnerId)
         this.ledger.records[id] = record
-        this.protectFutureRecord(record)
         await this.persist()
       } catch (error) {
         // No filesystem transfer or worker has been exposed. In-memory
         // admission rolls back; an uncertain durable write stays fail-closed.
         delete this.ledger.records[id]
-        this.ledger.processingLeases = previousLeases
         if (input.retentionOwnerId !== undefined) {
           if (previousOwner) this.ledger.retentionOwners![input.retentionOwnerId] = previousOwner
           else delete this.ledger.retentionOwners![input.retentionOwnerId]
@@ -529,16 +530,10 @@ export class GfsDownloadStore {
     } catch (error) {
       try {
         await this.serialize(async () => {
-          // Other already-running commands can observe this new path too.
-          // Producer settlement releases its active slot, never their protection.
           record.state = 'cleanup_failed'
-          // The producer's new pin has never exposed a transfer or receipt.
-          // With no executor protection, proven absence can roll it back too.
-          if (this.hasProcessingLease(id)) {
-            await this.persist()
-            return
-          }
-          // Delete/prove absence before releasing the durable reservation.
+          // The producer's new pin has never exposed a transfer or receipt, so
+          // proven absence rolls it back. Delete/prove absence before
+          // releasing the durable reservation.
           if (!(await this.removeRecordDirectory(record))) {
             await this.persist()
             throw new GfsDownloadStoreError('storage_write_failed')
@@ -725,7 +720,7 @@ export class GfsDownloadStore {
         )
           throw new GfsDownloadStoreError('download_busy')
         record.state = 'cleanup_failed'
-        if (this.hasProcessingLease(id) || this.hasReceiptOwner(id)) {
+        if (this.hasReceiptOwner(id)) {
           await this.persist()
           return
         }
@@ -737,7 +732,7 @@ export class GfsDownloadStore {
       })
     } finally {
       // The caller invokes failure only after its stream/descriptor is settled.
-      // Uncertain bytes stay charged; an older executor has its separate lease.
+      // Uncertain bytes stay charged.
       this.releaseActive(record)
     }
   }
@@ -867,127 +862,6 @@ export class GfsDownloadStore {
     }
   }
 
-  processingLeaseProvider(callerIdentity: string): GfsProcessingLeaseProvider {
-    return {
-      acquireProcessingLease: (options?: GfsProcessingLeaseAcquisition) =>
-        this.acquireProcessingLease(callerIdentity, options),
-      releaseProcessingLease: (lease: GfsProcessingLease) =>
-        this.releaseProcessingLease(callerIdentity, lease),
-    }
-  }
-
-  private async acquireProcessingLease(
-    callerIdentity: string,
-    options?: GfsProcessingLeaseAcquisition
-  ): Promise<GfsProcessingLease> {
-    this.assertInitialized()
-    if (this.closing) throw new GfsDownloadStoreError('download_busy')
-    if (typeof callerIdentity !== 'string' || callerIdentity.length === 0)
-      throw new GfsDownloadStoreError('caller_mismatch')
-    const requestedMs = options?.durationMs ?? 60_000
-    if (!Number.isSafeInteger(requestedMs) || requestedMs <= 0 || requestedMs > 3_600_000)
-      throw new GfsDownloadStoreError('download_busy')
-
-    return this.serialize(async () => {
-      this.assertInitialized()
-      if (this.closing) throw new GfsDownloadStoreError('download_busy')
-      const now = Date.now()
-      await this.cleanupUnconsumedForAdmission(callerIdentity, now)
-      const retained = Object.values(this.ledger.records).filter(
-        record => record.callerIdentity === callerIdentity
-      )
-      // Admission covers this caller's retained files without parsing the
-      // command. Expired bytes can remain while an existing execution holds
-      // them, but they must not authorize another execution before cleanup.
-      if (retained.some(record => Date.parse(record.expiresAt) <= now))
-        throw new GfsDownloadStoreError('download_expired')
-      if (retained.some(record => record.state === 'quarantined'))
-        throw new GfsDownloadStoreError('download_busy')
-      const candidates = retained.filter(
-        record => record.state === 'completed' && record.sha256 !== undefined
-      )
-      // An execution admitted before the first download can still write this
-      // caller's future paths. Keep empty leases durable and owner-bound too.
-      for (const record of candidates) await this.inspect(record.path, callerIdentity)
-      if (this.closing) throw new GfsDownloadStoreError('download_busy')
-      const admittedAt = Date.now()
-      if (retained.some(record => Date.parse(record.expiresAt) <= admittedAt))
-        throw new GfsDownloadStoreError('download_expired')
-      const leaseId = randomUUID()
-      const expiresAt = new Date(admittedAt + requestedMs).toISOString()
-      const lease: GfsProcessingLeaseRecord = {
-        leaseId,
-        callerIdentity,
-        recordIds: retained.map(record => record.id),
-        acquiredAt: new Date(admittedAt).toISOString(),
-        expiresAt,
-        writerSessionId: this.writerSessionId,
-      }
-      this.ledger.processingLeases ??= {}
-      this.ledger.processingLeases[leaseId] = lease
-      try {
-        await this.persist()
-      } catch (error) {
-        delete this.ledger.processingLeases[leaseId]
-        throw error
-      }
-      // Hashing and durable publication can outlast either deadline. Only
-      // return a new lease while both remain valid; an already admitted
-      // execution keeps its existing protection after the file's expiry.
-      const publishedAt = Date.now()
-      const denial = retained.some(record => Date.parse(record.expiresAt) <= publishedAt)
-        ? 'download_expired'
-        : this.closing || Date.parse(expiresAt) <= publishedAt
-          ? 'download_busy'
-          : undefined
-      if (denial) {
-        delete this.ledger.processingLeases[leaseId]
-        try {
-          await this.persist()
-        } catch (error) {
-          // A failed rollback retains the durable reservation until its
-          // deadline, without registering an execution that never started.
-          this.ledger.processingLeases[leaseId] = lease
-          throw error
-        }
-        throw new GfsDownloadStoreError(denial)
-      }
-      this.liveProcessingLeases.add(leaseId)
-      return { leaseId, expiresAt }
-    })
-  }
-
-  private async releaseProcessingLease(
-    callerIdentity: string,
-    lease: GfsProcessingLease
-  ): Promise<void> {
-    this.assertInitialized()
-    await this.serialize(async () => {
-      const record = this.ledger.processingLeases?.[lease.leaseId]
-      if (!record) {
-        this.liveProcessingLeases.delete(lease.leaseId)
-        return
-      }
-      if (record.callerIdentity !== callerIdentity || record.expiresAt !== lease.expiresAt)
-        throw new GfsDownloadStoreError('caller_mismatch')
-      if (
-        record.writerSessionId !== this.writerSessionId ||
-        !this.liveProcessingLeases.has(lease.leaseId)
-      )
-        throw new GfsDownloadStoreError('download_busy')
-      delete this.ledger.processingLeases![lease.leaseId]
-      try {
-        await this.persist()
-      } catch (error) {
-        this.ledger.processingLeases![lease.leaseId] = record
-        this.liveProcessingLeases.add(lease.leaseId)
-        throw error
-      }
-      this.liveProcessingLeases.delete(lease.leaseId)
-      await this.cleanupSettledFailedTransfers(callerIdentity)
-    })
-  }
-
   /** Caller/task lifecycle must prove consumer settlement before invoking this. */
   async releaseReceiptOwner(ownerId: string, callerIdentity: string): Promise<void> {
     this.assertInitialized()
@@ -1072,30 +946,17 @@ export class GfsDownloadStore {
     if (!this.initialized) return
     this.closing = true
     const deadline = Date.now() + drainTimeoutMs
-    while (
-      (this.activeIds.size > 0 ||
-        this.liveProcessingLeases.size > 0 ||
-        this.hasLiveReceiptOwners()) &&
-      Date.now() < deadline
-    ) {
+    while ((this.activeIds.size > 0 || this.hasLiveReceiptOwners()) && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 25))
     }
-    if (
-      this.activeIds.size > 0 ||
-      this.liveProcessingLeases.size > 0 ||
-      this.hasLiveReceiptOwners()
-    ) {
+    if (this.activeIds.size > 0 || this.hasLiveReceiptOwners()) {
       this.closing = false
       throw new GfsDownloadStoreError('download_busy')
     }
     await this.mutationTail
     // Work already queued before shutdown can finish admission while close
     // waits. Never release writer ownership over a newly active operation.
-    if (
-      this.activeIds.size > 0 ||
-      this.liveProcessingLeases.size > 0 ||
-      this.hasLiveReceiptOwners()
-    ) {
+    if (this.activeIds.size > 0 || this.hasLiveReceiptOwners()) {
       this.closing = false
       throw new GfsDownloadStoreError('download_busy')
     }
@@ -1111,15 +972,13 @@ export class GfsDownloadStore {
   }
 
   async cleanupExpired(now = Date.now()): Promise<void> {
-    this.assertInitialized(true)
-    if (this.hasInheritedExecutors()) return
+    this.assertInitialized()
     try {
       await this.serialize(async () => {
         for (const record of Object.values(this.ledger.records)) {
           if (
             Date.parse(record.expiresAt) > now ||
             this.activeIds.has(record.id) ||
-            this.hasProcessingLease(record.id) ||
             this.hasReceiptOwner(record.id) ||
             record.state === 'quarantined'
           )
@@ -1140,66 +999,12 @@ export class GfsDownloadStore {
     }
   }
 
-  private async cleanupUnconsumedForAdmission(callerIdentity: string, now: number): Promise<void> {
-    for (const record of Object.values(this.ledger.records)) {
-      if (
-        record.callerIdentity !== callerIdentity ||
-        Date.parse(record.expiresAt) > now ||
-        this.activeIds.has(record.id) ||
-        this.hasProcessingLease(record.id) ||
-        this.hasReceiptOwner(record.id) ||
-        record.state === 'quarantined' ||
-        !['completed', 'missing'].includes(record.state)
-      )
-        continue
-      let safe = false
-      if (record.state === 'completed') {
-        try {
-          await this.verifyRecordContent(record)
-          safe = true
-        } catch {
-          /* Verify absence below. */
-        }
-      }
-      if (!safe) {
-        const directory = path.join(this.hostRoot, record.directory)
-        try {
-          // An empty, owned directory or its positive absence has no remaining
-          // copy to consume; unknown bytes, partials and inaccessible state stay charged.
-          await this.verifyManagedDirectory(record)
-          safe = (await fs.readdir(directory)).length === 0
-        } catch (error) {
-          safe = (error as NodeJS.ErrnoException).code === 'ENOENT'
-        }
-      }
-      if (!safe || !(await this.removeRecordDirectory(record))) continue
-      await this.releaseRecordCharge(record)
-      recordGfsDownloadExpiry('expired_removed')
-    }
-  }
-
-  private protectFutureRecord(record: GfsDownloadRecord): void {
-    const next = { ...this.ledger.processingLeases }
-    for (const [leaseId, lease] of Object.entries(next)) {
-      if (
-        lease.callerIdentity !== record.callerIdentity ||
-        lease.writerSessionId !== this.writerSessionId ||
-        !this.liveProcessingLeases.has(leaseId)
-      )
-        continue
-      next[leaseId] = { ...lease, recordIds: [...new Set([...lease.recordIds, record.id])] }
-    }
-    // Committed atomically with the reservation, before its path is exposed.
-    this.ledger.processingLeases = next
-  }
-
   private async cleanupSettledFailedTransfers(callerIdentity: string): Promise<void> {
     for (const record of Object.values(this.ledger.records)) {
       if (
         record.callerIdentity !== callerIdentity ||
         record.state !== 'cleanup_failed' ||
         this.activeIds.has(record.id) ||
-        this.hasProcessingLease(record.id) ||
         this.hasReceiptOwner(record.id)
       )
         continue
@@ -1258,7 +1063,6 @@ export class GfsDownloadStore {
         record =>
           record.state === 'completed' &&
           !this.activeIds.has(record.id) &&
-          !this.hasProcessingLease(record.id) &&
           !this.hasReceiptOwner(record.id)
       )
       .sort(
@@ -1371,16 +1175,58 @@ export class GfsDownloadStore {
     }
   }
 
+  /**
+   * #1019: shell_exec no longer holds processing leases, so no lease in a
+   * ledger written by an earlier build protects an executor of this boot. A
+   * lease left by a crashed Host would otherwise fence the store forever. The
+   * field is removed durably before reconciliation; the warning and the
+   * counter are emitted only after that removal is persisted, so a failed
+   * persist leaves the ledger untouched and initialize rejects.
+   */
+  private async discardLegacyProcessingLeases(): Promise<void> {
+    const legacy = this.ledger.processingLeases
+    if (legacy === undefined) return
+    const discarded = Object.keys(legacy).length
+    delete this.ledger.processingLeases
+    // An empty legacy map is dropped by the final initialize persist.
+    if (discarded === 0) return
+    try {
+      await this.persist()
+    } catch (error) {
+      this.ledger.processingLeases = legacy
+      throw error
+    }
+    logger.warn(
+      { discarded },
+      `GFS download store discarded ${discarded} legacy processing lease(s) at initialize`
+    )
+    recordGfsLegacyProcessingLeasesDiscarded(discarded)
+  }
+
+  /**
+   * Records an earlier boot quarantined stay charged to quota (`usageFor`).
+   * They are reported so an operator can recover them; this boot never
+   * reuses or deletes them.
+   */
+  private reportInheritedQuarantine(): void {
+    const quarantined = Object.values(this.ledger.records).filter(
+      record => record.state === 'quarantined'
+    ).length
+    if (quarantined === 0) return
+    logger.warn(
+      { quarantined },
+      `GFS download store found ${quarantined} record(s) quarantined by an earlier boot; they stay charged to quota until operator recovery`
+    )
+    recordGfsInheritedQuarantinedRecords(quarantined)
+  }
+
   private async reconcile(): Promise<void> {
     for (const record of Object.values(this.ledger.records)) {
       // Kernel ownership recovery proves only the previous Host writer exited.
-      // A detached executor can survive it, and may still read/write its paths.
-      // Keep all inherited executions and unfinished/uncertain transfers charged.
-      if (
-        this.hasInheritedExecutors() ||
-        record.state !== 'completed' ||
-        this.hasProcessingLease(record.id)
-      ) {
+      // Unfinished/uncertain transfers stay charged. A completed copy is reused
+      // only after its content re-verifies: a shell command can have altered it
+      // (#1019 accepted risk), and an altered copy is quarantined.
+      if (record.state !== 'completed') {
         record.state = 'quarantined'
         continue
       }
@@ -1499,19 +1345,6 @@ export class GfsDownloadStore {
     return record
   }
 
-  private hasInheritedExecutors(): boolean {
-    return Object.values(this.ledger.processingLeases ?? {}).some(
-      lease => lease.writerSessionId !== this.writerSessionId
-    )
-  }
-
-  private hasProcessingLease(recordId: string): boolean {
-    // Deadline is admission/output budgeting, never physical-termination proof.
-    return Object.values(this.ledger.processingLeases ?? {}).some(lease =>
-      lease.recordIds.includes(recordId)
-    )
-  }
-
   private releaseActive(record: GfsDownloadRecord): void {
     if (!this.activeIds.has(record.id)) return
     this.active = Math.max(0, this.active - 1)
@@ -1545,14 +1378,9 @@ export class GfsDownloadStore {
       throw new GfsDownloadStoreError('publication_cancelled')
   }
 
-  private assertInitialized(allowRecovery = false): void {
+  private assertInitialized(): void {
     if (!this.initialized) throw new GfsDownloadStoreError('workspace_unavailable')
     if (this.unsafe) throw new GfsDownloadStoreError('storage_write_failed')
-    // Stage 1 executors share the Host UID. Their surviving process can reach
-    // future paths beyond its caller cwd, so recovery fences managed work for
-    // the entire Host until physical settlement has been established.
-    if (!allowRecovery && this.hasInheritedExecutors())
-      throw new GfsDownloadStoreError('download_busy')
     try {
       this.writerLease?.assertHeld()
     } catch {

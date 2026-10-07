@@ -97,7 +97,6 @@ import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
-import type { GfsProcessingLeaseProvider } from '../internalTools/gfsProcessingLease'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
@@ -186,8 +185,6 @@ export interface TaskExecutorDeps {
   gfsDownloadStore?: GfsDownloadStore
   /** Trusted caller workspace root, separate from memory-tool availability. */
   gfsCallerWorkspacePath?: string
-  /** Required fail-closed lease boundary for approved local processing. */
-  gfsProcessingLeaseProvider?: GfsProcessingLeaseProvider
   config: AgentConfig
   modelName: string
   /**
@@ -2131,18 +2128,12 @@ export class TaskExecutor {
       this.deps.failover?.policy.fallbacks
     )
     const gfsCallerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
-    const gfsProcessingLeaseProvider =
-      this.deps.gfsProcessingLeaseProvider ??
-      (this.deps.gfsDownloadStore && gfsCallerIdentity
-        ? this.deps.gfsDownloadStore.processingLeaseProvider(gfsCallerIdentity)
-        : undefined)
     const gfsWorkspace = gfsManagedWorkspaceExecution({
       approvalEnabled: appConfig.enableApproval,
       source: this.task.source,
       callerIdentity: gfsCallerIdentity,
       store: this.deps.gfsDownloadStore,
       callerWorkspacePath: this.deps.gfsCallerWorkspacePath,
-      processingLeaseProvider: gfsProcessingLeaseProvider,
       approvalConfig: this.deps.approvalConfig,
       retentionOwnerId: this.taskId,
     })
@@ -2153,7 +2144,6 @@ export class TaskExecutor {
           callerIdentity: this.task.sourceMessage?.sender,
           store: gfsWorkspace.store,
           callerWorkspacePath: gfsWorkspace.callerWorkspacePath,
-          processingLeaseProvider: gfsWorkspace.processingLeaseProvider,
           approvalConfig: this.deps.approvalConfig,
           retentionOwnerId: this.taskId,
         })

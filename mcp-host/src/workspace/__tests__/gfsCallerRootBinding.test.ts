@@ -73,7 +73,6 @@ describe('NativeRegistry GFS caller file-tool binding', () => {
         deliveryAvailable,
         callerIdentity: 'alice',
         callerWorkspacePath: callerRoot,
-        processingLeaseProvider: store.processingLeaseProvider('alice'),
         retentionOwnerId: '11111111-1111-4111-8111-111111111111',
       }
     )

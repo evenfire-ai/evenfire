@@ -3,16 +3,26 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
+import { ShellTool } from '../core/tools/shell'
 import { GfsDownloadStore } from './gfsDownloadStore'
 import { GFS_FILE_LIMITS } from './gfsFilePolicy'
+
+const { statfsBoundary } = vi.hoisted(() => ({ statfsBoundary: vi.fn() }))
+// Physical capacity is a deterministic filesystem boundary for the capacity
+// block below. Every other call, and every other test, uses the real statfs.
+vi.mock('node:fs/promises', async original => ({
+  ...(await original<typeof fs>()),
+  statfs: statfsBoundary,
+}))
+let nativeFs: typeof fs
 
 /**
  * Adversarial quota/reuse/rollback regression probes.
  *
  * These are mutation-sensitive on purpose: each block fails when its guard is
  * removed from gfsDownloadStore.ts. Pressure eviction is expected, so every
- * denial assertion keeps its targets protected with an explicit receipt owner
- * or a live processing lease; positive blocks assert the earliest-created
+ * denial assertion keeps its targets protected with an explicit receipt owner;
+ * a shell run never protects a copy (#1019). Positive blocks assert the earliest-created
  * eligible copy is the one reclaimed.
  */
 
@@ -150,6 +160,9 @@ async function seedCrossCallerPressure(
 }
 
 beforeEach(async () => {
+  nativeFs = await vi.importActual<typeof fs>('node:fs/promises')
+  statfsBoundary.mockReset()
+  statfsBoundary.mockImplementation(nativeFs.statfs)
   hostRoot = await fs.mkdtemp(path.join(tmpdir(), 'gfs-adversarial-quota-'))
   callerRoot = await callerDirectory(hostRoot, CALLER)
   store = new GfsDownloadStore(hostRoot)
@@ -381,29 +394,31 @@ describe('GFS download store adversarial quota', () => {
     await store.releaseReceiptOwner('filler-owner', CALLER)
   })
 
-  it('protects copies held by a live processing lease from pressure eviction', async () => {
+  it('evicts a copy a shell has just read: a shell run holds no protection (#1019)', async () => {
     const size = GFS_FILE_LIMITS.inlineTextBytes + 1
     const receipts = []
     for (let index = 1; index <= GFS_FILE_LIMITS.callerRetainedFiles; index += 1)
       receipts.push(await completedCopy(store, callerRoot, CALLER, index, 1, size))
+    const ids = receipts.map(receipt => receipt.id)
+    await forceAgeOrder(store, ids)
 
-    const provider = store.processingLeaseProvider(CALLER)
-    const lease = await provider.acquireProcessingLease({ durationMs: 60_000 })
-    const pressure = {
+    const shell = new ShellTool(callerRoot, 5_000, ['PATH'], () => ({}), undefined, true)
+    const read = await shell.execute({
+      command: `wc -c < ${JSON.stringify(receipts[0]!.path)}`,
+    })
+    expect(read.is_error).toBe(false)
+    expect(read.content).toMatch(new RegExp(`\\b${size}\\b`))
+
+    const next = await store.createTransfer({
       callerIdentity: CALLER,
       callerWorkspacePath: callerRoot,
       source: sourceFor(92, 1),
       sizeBytes: size,
       expiresAt: future(),
-    }
-    await expect(store.createTransfer(pressure)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
     })
-    for (const receipt of receipts)
-      expect(store.debugRecord(receipt.id)).toMatchObject({ state: 'completed' })
-
-    await provider.releaseProcessingLease(lease)
-    const next = await store.createTransfer(pressure)
+    expect(store.debugRecord(ids[0]!)).toBeUndefined()
+    for (const id of ids.slice(1))
+      expect(store.debugRecord(id)).toMatchObject({ state: 'completed' })
     expect(store.debugUsage()).toMatchObject({ files: GFS_FILE_LIMITS.callerRetainedFiles })
     await store.fail(next.id, CALLER)
   })
@@ -434,7 +449,7 @@ describe('GFS download store adversarial quota', () => {
     await store.fail(next.id, CALLER)
   })
 
-  it('fences the host on an inherited executor and adopts a verified inherited pin only after revalidation', async () => {
+  it('discards inherited legacy leases and adopts a verified inherited pin only after revalidation', async () => {
     const receipt = await completedCopy(store, callerRoot, CALLER, 1, 1, 7)
     await store.close()
 
@@ -443,8 +458,8 @@ describe('GFS download store adversarial quota', () => {
     const writeLedger = async (value: unknown) => fs.writeFile(ledgerPath, JSON.stringify(value))
     const foreignSession = '00000000-0000-4000-8000-000000000000'
 
-    // Phase 1: an inherited PROCESSING LEASE is an unknown executor. The Host
-    // fences, every managed copy quarantines, and no admission or release runs.
+    // Phase 1: a legacy PROCESSING LEASE written before #1019 that protected a
+    // copy. It is discarded at initialize; the copy re-verifies and stays usable.
     let ledger = await readLedger()
     ledger.processingLeases = {
       '11111111-1111-4111-8111-111111111111': {
@@ -460,29 +475,25 @@ describe('GFS download store adversarial quota', () => {
 
     let reopened = new GfsDownloadStore(hostRoot)
     await reopened.initialize()
-    expect(reopened.debugRecord(receipt.id)).toMatchObject({ state: 'quarantined' })
-    expect(reopened.isAvailable()).toBe(false)
+    expect(reopened.isAvailable()).toBe(true)
+    expect(reopened.debugRecord(receipt.id)).toMatchObject({ state: 'completed' })
     expect(reopened.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
-    await expect(reopened.reusableReceipt(CALLER, sourceFor(1, 1), 7)).rejects.toMatchObject({
-      code: 'download_busy',
+    expect(await readLedger()).not.toHaveProperty('processingLeases')
+    await expect(reopened.reusableReceipt(CALLER, sourceFor(1, 1), 7)).resolves.toMatchObject({
+      id: receipt.id,
     })
-    await expect(
-      reopened.createTransfer({
-        callerIdentity: CALLER,
-        callerWorkspacePath: callerRoot,
-        source: sourceFor(2, 1),
-        sizeBytes: 7,
-        expiresAt: future(),
-      })
-    ).rejects.toMatchObject({ code: 'download_busy' })
-    await expect(reopened.releaseReceiptOwner('carry-owner', CALLER)).rejects.toMatchObject({
-      code: 'download_busy',
+    const admitted = await reopened.createTransfer({
+      callerIdentity: CALLER,
+      callerWorkspacePath: callerRoot,
+      source: sourceFor(2, 1),
+      sizeBytes: 7,
+      expiresAt: future(),
     })
-    await reopened.cleanupExpired(Date.now() + GFS_FILE_LIMITS.retentionMs * 10)
-    expect(reopened.debugRecord(receipt.id)).toMatchObject({ state: 'quarantined' })
+    await reopened.fail(admitted.id, CALLER)
     await reopened.close()
 
-    // Phase 2: even an empty inherited lease fences the Host.
+    // Phase 2: an empty inherited lease, the shape that fenced the Host forever
+    // before #1019, is discarded the same way.
     ledger = await readLedger()
     ledger.processingLeases = {
       '22222222-2222-4222-8222-222222222222': {
@@ -497,8 +508,9 @@ describe('GFS download store adversarial quota', () => {
     await writeLedger(ledger)
     reopened = new GfsDownloadStore(hostRoot)
     await reopened.initialize()
-    expect(reopened.isAvailable()).toBe(false)
-    expect(reopened.debugRecord(receipt.id)).toMatchObject({ state: 'quarantined' })
+    expect(reopened.isAvailable()).toBe(true)
+    expect(reopened.debugRecord(receipt.id)).toMatchObject({ state: 'completed' })
+    expect(await readLedger()).not.toHaveProperty('processingLeases')
     await reopened.close()
 
     // Phase 3: receipt-only inherited pins are not executors. Integrity-checked
@@ -640,5 +652,237 @@ describe('GFS download store adversarial quota', () => {
       expect(limited.debugUsage()).toMatchObject({ bytes: 100, files: 5 })
       await limited.fail(next.id, 'caller-new')
     })
+  })
+})
+
+const MARGIN = 16 * 1024 * 1024
+const capacitySource = sourceFor(200, 7)
+
+/** Physical-capacity admission, ported from the deleted lease-capacity suite (#1019). */
+describe('GFS download store physical capacity and reclaim', () => {
+  const capacityStores: GfsDownloadStore[] = []
+  const capacityRoots: string[] = []
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    statfsBoundary.mockImplementation(nativeFs.statfs)
+    for (const target of capacityStores.splice(0))
+      await target.close(0).catch(async () => {
+        await (
+          target as unknown as { writerLease?: { release(): Promise<void> } }
+        ).writerLease?.release()
+      })
+    for (const root of capacityRoots.splice(0))
+      await nativeFs.rm(root, { recursive: true, force: true })
+  })
+
+  async function setup(extra: Record<string, string> = {}) {
+    const { Store } = await loadLimitedStore({
+      MCP_HOST_GFS_MAX_FILE_BYTES: '20',
+      MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '100',
+      MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '50',
+      ...extra,
+    })
+    const root = await nativeFs.mkdtemp(path.join(tmpdir(), 'gfs-capacity-'))
+    capacityRoots.push(root)
+    const target = new Store(root)
+    capacityStores.push(target)
+    await target.initialize()
+    return { root, store: target }
+  }
+
+  async function copy(
+    target: GfsDownloadStore,
+    root: string,
+    identity: string,
+    bytes = 7,
+    owner?: string
+  ) {
+    const transfer = await target.createTransfer({
+      callerIdentity: identity,
+      callerWorkspacePath: root,
+      source: capacitySource,
+      sizeBytes: bytes,
+      expiresAt: future(),
+      retentionOwnerId: owner,
+    })
+    const body = Buffer.alloc(bytes, 65)
+    await nativeFs.writeFile(path.join(root, transfer.partialPath), body)
+    return target.publish(transfer.id, identity, createHash('sha256').update(body).digest('hex'))
+  }
+
+  async function capacity(root: string, bytes: number) {
+    const observed = await nativeFs.statfs(root, { bigint: true })
+    statfsBoundary.mockResolvedValue({
+      ...observed,
+      bsize: 4096n,
+      bavail: BigInt(Math.floor(bytes / 4096)),
+    })
+  }
+
+  it('rejects impossible physical margin before evicting another caller at a logical quota boundary', async () => {
+    const { root, store: target } = await setup()
+    const otherRoot = await callerDirectory(root, 'caller-b')
+    const receipts = []
+    for (let index = 0; index < 5; index++)
+      receipts.push(await copy(target, otherRoot, 'caller-b', 10))
+    const requestRoot = await callerDirectory(root, 'caller-a')
+    // Add durable, protected charges to make aggregate 100 while requester has room.
+    for (const identity of ['caller-c', 'caller-d', 'caller-e', 'caller-f', 'caller-g'])
+      await copy(target, await callerDirectory(root, identity), identity, 10, `${identity}-owner`)
+    await capacity(root, 0)
+    await expect(
+      target.createTransfer({
+        callerIdentity: 'caller-a',
+        callerWorkspacePath: requestRoot,
+        source: capacitySource,
+        sizeBytes: 20,
+        expiresAt: future(),
+      })
+    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+    expect(target.debugUsage()).toMatchObject({ bytes: 100, files: 10 })
+    for (const receipt of receipts) expect(target.debugRecord(receipt.id)).toBeDefined()
+    for (const identity of ['caller-c', 'caller-d', 'caller-e', 'caller-f', 'caller-g'])
+      await target.releaseReceiptOwner(`${identity}-owner`, identity)
+  })
+
+  it('keeps all default-cap small copies when current physical capacity is zero', async () => {
+    const { root, store: target } = await setup({
+      MCP_HOST_GFS_MAX_FILE_BYTES: '1024',
+      MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: String(1024 * 1024),
+      MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: String(128 * 1024),
+    })
+    const receipts = []
+    for (let index = 0; index < 8; index++) {
+      const identity = `caller-${index}`
+      const directory = await callerDirectory(root, identity)
+      for (let file = 0; file < 8; file++) receipts.push(await copy(target, directory, identity, 1))
+    }
+    await capacity(root, 0)
+    await expect(
+      target.createTransfer({
+        callerIdentity: 'caller-new',
+        callerWorkspacePath: await callerDirectory(root, 'caller-new'),
+        source: capacitySource,
+        sizeBytes: 1,
+        expiresAt: future(),
+      })
+    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+    expect(target.debugUsage().files).toBe(64)
+    for (const receipt of receipts) expect(target.debugRecord(receipt.id)).toBeDefined()
+  })
+
+  it('respects pending active reservations before any cache-pressure effect', async () => {
+    const { root, store: target } = await setup({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '1' })
+    const cachedRoot = await callerDirectory(root, 'caller-a')
+    const receipt = await copy(target, cachedRoot, 'caller-a', 7)
+    const active = await target.createTransfer({
+      callerIdentity: 'caller-b',
+      callerWorkspacePath: await callerDirectory(root, 'caller-b'),
+      source: capacitySource,
+      sizeBytes: 7,
+      expiresAt: future(),
+    })
+    await capacity(root, MARGIN + 4096)
+    await expect(
+      target.createTransfer({
+        callerIdentity: 'caller-a',
+        callerWorkspacePath: cachedRoot,
+        source: capacitySource,
+        sizeBytes: 7,
+        expiresAt: future(),
+      })
+    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+    expect(target.debugRecord(receipt.id)).toBeDefined()
+    await target.fail(active.id, 'caller-b')
+  })
+
+  it('never credits sparse apparent bytes as available physical capacity', async () => {
+    const bytes = 16 * 1024 * 1024
+    const { root, store: target } = await setup({
+      MCP_HOST_GFS_MAX_FILE_BYTES: String(bytes),
+      MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: String(bytes * 4),
+      MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: String(bytes * 2),
+      MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '1',
+    })
+    const sparseRoot = await callerDirectory(root, 'caller-a')
+    const transfer = await target.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: sparseRoot,
+      source: capacitySource,
+      sizeBytes: bytes,
+      expiresAt: future(),
+    })
+    const handle = await nativeFs.open(path.join(sparseRoot, transfer.partialPath), 'r+')
+    await handle.truncate(bytes)
+    await handle.close()
+    const sparse = await nativeFs.stat(path.join(sparseRoot, transfer.partialPath))
+    expect(sparse.blocks * 512).toBeLessThan(sparse.size)
+    const receipt = await target.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update(Buffer.alloc(bytes)).digest('hex')
+    )
+    await capacity(root, 0)
+    await expect(
+      target.createTransfer({
+        callerIdentity: 'caller-a',
+        callerWorkspacePath: sparseRoot,
+        source: capacitySource,
+        sizeBytes: 7,
+        expiresAt: future(),
+      })
+    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+    expect(target.debugRecord(receipt.id)).toBeDefined()
+    expect((await nativeFs.stat(path.join(sparseRoot, receipt.path))).size).toBe(bytes)
+  })
+
+  it('refuses admission if real capacity changes after a positively settled victim', async () => {
+    const { root, store: target } = await setup({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '1' })
+    const victimRoot = await callerDirectory(root, 'caller-a')
+    const receipt = await copy(target, victimRoot, 'caller-a', 7)
+    const directory = path.join(victimRoot, path.dirname(receipt.path))
+    const observed = await nativeFs.statfs(root, { bigint: true })
+    statfsBoundary.mockImplementation(async () => {
+      try {
+        await nativeFs.lstat(directory)
+        return observed
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        return { ...observed, bavail: 0n }
+      }
+    })
+    await expect(
+      target.createTransfer({
+        callerIdentity: 'caller-a',
+        callerWorkspacePath: victimRoot,
+        source: capacitySource,
+        sizeBytes: 7,
+        expiresAt: future(),
+      })
+    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+    expect(target.debugUsage().files).toBe(0)
+    await expect(nativeFs.lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('reclaims logical quota and admits when real physical capacity is already sufficient', async () => {
+    const { root, store: target } = await setup({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '1' })
+    const reclaimRoot = await callerDirectory(root, 'caller-a')
+    const receipt = await copy(target, reclaimRoot, 'caller-a', 7)
+    const before = await nativeFs.statfs(root, { bigint: true })
+    expect(before.bavail * before.bsize).toBeGreaterThan(BigInt(MARGIN + 4096))
+    const next = await target.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: reclaimRoot,
+      source: capacitySource,
+      sizeBytes: 7,
+      expiresAt: future(),
+    })
+    expect(target.debugRecord(receipt.id)).toBeUndefined()
+    await expect(
+      nativeFs.lstat(path.join(reclaimRoot, path.dirname(receipt.path)))
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(target.debugRecord(next.id)).toBeDefined()
+    await target.fail(next.id, 'caller-a')
   })
 })

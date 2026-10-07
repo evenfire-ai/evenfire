@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type ChildProcess, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
@@ -6,6 +6,9 @@ import * as fs from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
+import { register } from 'prom-client'
+import { ShellTool } from '../core/tools/shell'
+import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
 import { GfsDownloadStore } from './gfsDownloadStore'
 
@@ -35,29 +38,23 @@ const { createHash } = require('node:crypto');
   const mode = process.argv[3];
   const store = new GfsDownloadStore(root);
   await store.initialize();
-  if (mode === 'lease' || mode === 'emptyLease' || mode === 'pin') {
+  if (mode === 'pin' || mode === 'transfer') {
     const callerRoot = path.join(root, 'users', 'caller-a');
     fs.mkdirSync(callerRoot, { recursive: true, mode: 0o700 });
-    let receipt;
-    if (mode === 'lease' || mode === 'pin') {
     const bytes = Buffer.from('fixture');
     const transfer = await store.createTransfer({ callerIdentity: 'caller-a', callerWorkspacePath: callerRoot,
-      source: ${JSON.stringify(source)}, sizeBytes: bytes.length, expiresAt: new Date(Date.now() + (mode === 'pin' ? 60000 : 1000)).toISOString(),
+      source: ${JSON.stringify(source)}, sizeBytes: bytes.length, expiresAt: new Date(Date.now() + 60000).toISOString(),
       retentionOwnerId: mode === 'pin' ? '11111111-1111-4111-8111-111111111111' : undefined });
-    fs.writeFileSync(path.join(callerRoot, transfer.partialPath), bytes);
-    receipt = await store.publish(transfer.id, 'caller-a', createHash('sha256').update(bytes).digest('hex'));
-    }
-    if (mode === 'pin') {
-      await store.reusableReceipt('caller-a', ${JSON.stringify(source)}, 7, { retentionOwnerId: '22222222-2222-4222-8222-222222222222' });
-      process.send({ receipt });
+    if (mode === 'transfer') {
+      // The Host dies here, mid-transfer: the record stays 'transferring'.
+      process.send({ transferId: transfer.id });
       setInterval(() => {}, 1000);
       return;
     }
-    const lease = await store.processingLeaseProvider('caller-a').acquireProcessingLease({ durationMs: 500 });
-    const executor = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
-      { detached: true, stdio: 'ignore' });
-    executor.unref();
-    process.send({ receipt, lease, executorPid: executor.pid });
+    fs.writeFileSync(path.join(callerRoot, transfer.partialPath), bytes);
+    const receipt = await store.publish(transfer.id, 'caller-a', createHash('sha256').update(bytes).digest('hex'));
+    await store.reusableReceipt('caller-a', ${JSON.stringify(source)}, 7, { retentionOwnerId: '22222222-2222-4222-8222-222222222222' });
+    process.send({ receipt });
   } else process.send({ ready: true });
   setInterval(() => {}, 1000);
 })().catch(error => { process.send({ error: error.code || String(error), transientWriterContention: error.transientWriterContention === true }); process.exit(1); });
@@ -117,13 +114,17 @@ function freshStore(): GfsDownloadStore {
   stores.push(store)
   return store
 }
-async function fixture(store: GfsDownloadStore, retentionOwnerId?: string) {
+async function fixture(
+  store: GfsDownloadStore,
+  retentionOwnerId?: string,
+  fixtureSource: GfsImageSource = source
+) {
   const callerRoot = path.join(root, 'users', 'caller-a')
   await fs.mkdir(callerRoot, { recursive: true, mode: 0o700 })
   const transfer = await store.createTransfer({
     callerIdentity: 'caller-a',
     callerWorkspacePath: callerRoot,
-    source,
+    source: fixtureSource,
     sizeBytes: 7,
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
     retentionOwnerId,
@@ -135,6 +136,238 @@ async function fixture(store: GfsDownloadStore, retentionOwnerId?: string) {
     createHash('sha256').update('fixture').digest('hex')
   )
 }
+
+const DISCARDED_COUNTER = 'clerum_gfs_legacy_processing_leases_discarded_total'
+const QUARANTINED_COUNTER = 'clerum_gfs_inherited_quarantined_records_total'
+const FOREIGN_WRITER_SESSION = '33333333-3333-4333-8333-333333333333'
+const LEGACY_LEASE_ID = '44444444-4444-4444-8444-444444444444'
+const otherSource: GfsImageSource = {
+  ...source,
+  resourceId: 'b'.repeat(32),
+  gfsUri: `gfs://main/${'b'.repeat(32)}`,
+  name: 'other.csv',
+}
+
+function ledgerFile(): string {
+  return path.join(root, '.gfs-download-store', 'ledger-v1.json')
+}
+
+async function counterValue(name: string): Promise<number> {
+  const metric = register.getSingleMetric(name)
+  if (metric === undefined) throw new Error(`metric ${name} is not registered`)
+  const { values } = await metric.get()
+  return values.reduce((sum, sample) => sum + sample.value, 0)
+}
+
+/** A processing lease exactly as a pre-#1019 Host wrote it, by default expired and empty. */
+function legacyLease(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    leaseId: LEGACY_LEASE_ID,
+    callerIdentity: 'caller-a',
+    recordIds: [],
+    acquiredAt: new Date(Date.now() - 120_000).toISOString(),
+    expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    writerSessionId: FOREIGN_WRITER_SESSION,
+    ...overrides,
+  }
+}
+
+/** Writes legacy leases into the ledger of a closed store, as an older build left them. */
+async function seedLegacyLeases(leases: Record<string, unknown>[]): Promise<string> {
+  const ledger = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+  ledger.processingLeases = Object.fromEntries(leases.map(lease => [lease.leaseId, lease]))
+  const raw = JSON.stringify(ledger)
+  await fs.writeFile(ledgerFile(), raw, { mode: 0o600 })
+  return raw
+}
+
+async function closedStore(): Promise<void> {
+  const store = freshStore()
+  await store.initialize()
+  await store.close()
+}
+
+function discardWarnings(calls: unknown[][]): unknown[][] {
+  return calls.filter(
+    call => typeof call[1] === 'string' && call[1].includes('legacy processing lease')
+  )
+}
+
+describe('legacy processing leases after #1019', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('S1: discards an expired foreign-session lease left by a crashed Host and admits downloads', async () => {
+    await closedStore()
+    await seedLegacyLeases([legacyLease()])
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue(DISCARDED_COUNTER)
+    const reopened = freshStore()
+    await reopened.initialize()
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
+    expect(discardWarnings(warn.mock.calls)).toEqual([
+      [{ discarded: 1 }, 'GFS download store discarded 1 legacy processing lease(s) at initialize'],
+    ])
+    const onDisk = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+    expect(onDisk.records).toEqual({})
+    expect(onDisk).not.toHaveProperty('processingLeases')
+    expect(reopened.isAvailable()).toBe(true)
+    const receipt = await fixture(reopened)
+    expect(reopened.debugRecord(receipt.id)?.state).toBe('completed')
+    expect(reopened.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
+  })
+
+  it('S2: re-verifies records a discarded lease protected, reusing the intact copy and quarantining the altered one', async () => {
+    const store = freshStore()
+    await store.initialize()
+    const intact = await fixture(store)
+    const altered = await fixture(store, undefined, otherSource)
+    await store.close()
+    await seedLegacyLeases([
+      legacyLease({
+        recordIds: [intact.id, altered.id],
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      }),
+    ])
+    await fs.writeFile(path.join(root, 'users', 'caller-a', altered.path), 'changed')
+    const before = await counterValue(DISCARDED_COUNTER)
+    const reopened = freshStore()
+    await reopened.initialize()
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
+    expect(reopened.isAvailable()).toBe(true)
+    expect(await reopened.reusableReceipt('caller-a', source, 7)).toMatchObject({
+      id: intact.id,
+      sha256: intact.sha256,
+    })
+    expect(reopened.debugRecord(intact.id)?.state).toBe('completed')
+    expect(reopened.debugRecord(altered.id)?.state).toBe('quarantined')
+    expect(await reopened.reusableReceipt('caller-a', otherSource, 7)).toBeUndefined()
+  })
+
+  it.each([
+    ['a lease id that is not a UUID', { leaseId: 'not-a-uuid' }],
+    [
+      'an expiry that does not follow acquisition',
+      { acquiredAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-01T00:00:00.000Z' },
+    ],
+  ])(
+    'S3: fails closed on a malformed legacy lease (%s) without touching the ledger',
+    async (_label, overrides) => {
+      await closedStore()
+      const raw = await seedLegacyLeases([legacyLease(overrides)])
+      const before = await counterValue(DISCARDED_COUNTER)
+      await expect(freshStore().initialize()).rejects.toMatchObject({
+        code: 'corrupt_store_ledger',
+      })
+      expect(await fs.readFile(ledgerFile(), 'utf8')).toBe(raw)
+      expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(0)
+    }
+  )
+
+  it('S4: a clean restart discards nothing', async () => {
+    const store = freshStore()
+    await store.initialize()
+    await fixture(store)
+    await store.close()
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue(DISCARDED_COUNTER)
+    const reopened = freshStore()
+    await reopened.initialize()
+    expect(reopened.isAvailable()).toBe(true)
+    expect(reopened.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(0)
+    expect(discardWarnings(warn.mock.calls)).toEqual([])
+  })
+
+  it('S5: close() is blocked only by its own transfers, never by a running shell', async () => {
+    const store = freshStore()
+    await store.initialize()
+    const callerRoot = path.join(root, 'users', 'caller-a')
+    await fs.mkdir(callerRoot, { recursive: true, mode: 0o700 })
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await expect(store.close(0)).rejects.toMatchObject({ code: 'download_busy' })
+    expect(store.isAvailable()).toBe(true)
+    await store.fail(transfer.id, 'caller-a')
+
+    const shell = new ShellTool(callerRoot, 30_000, ['PATH'], () => ({}), undefined, true)
+    const controller = new AbortController()
+    const pidFile = path.join(callerRoot, 'shell.pid')
+    const running = shell.execute(
+      { command: `echo $$ > ${JSON.stringify(pidFile)}; exec sleep 30` },
+      { signal: controller.signal, onOutput: () => undefined }
+    )
+    let pid = ''
+    for (const deadline = Date.now() + 5_000; pid === '' && Date.now() < deadline; ) {
+      pid = (await fs.readFile(pidFile, 'utf8').catch(() => '')).trim()
+      if (pid === '') await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(pid).toMatch(/^[0-9]+$/)
+    await store.close(0)
+    expect(store.isAvailable()).toBe(false)
+    // Witness: the shell was still running when close() resolved.
+    expect(() => process.kill(Number(pid), 0)).not.toThrow()
+    controller.abort()
+    const result = await running
+    expect(result.is_error).toBe(true)
+  })
+
+  it('S8: an interrupted discard leaves the ledger byte-identical and is retried by the next initialize', async () => {
+    await closedStore()
+    const raw = await seedLegacyLeases([legacyLease()])
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue(DISCARDED_COUNTER)
+    const interrupted = freshStore()
+    const persist = vi
+      .spyOn(interrupted as unknown as { persist: () => Promise<void> }, 'persist')
+      .mockRejectedValueOnce(new Error('injected persist failure'))
+    await expect(interrupted.initialize()).rejects.toThrow('injected persist failure')
+    expect(persist).toHaveBeenCalledTimes(1)
+    expect(interrupted.isAvailable()).toBe(false)
+    expect(await fs.readFile(ledgerFile(), 'utf8')).toBe(raw)
+    expect(JSON.parse(raw).processingLeases[LEGACY_LEASE_ID]).toBeDefined()
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(0)
+    expect(discardWarnings(warn.mock.calls)).toEqual([])
+
+    const retried = freshStore()
+    await retried.initialize()
+    expect(retried.isAvailable()).toBe(true)
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
+    expect(discardWarnings(warn.mock.calls)).toHaveLength(1)
+    expect(JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))).not.toHaveProperty(
+      'processingLeases'
+    )
+  })
+
+  it('S9: counts and logs records an earlier boot quarantined', async () => {
+    const { child, message } = await childStore('transfer')
+    expect(message.transferId).toMatch(/^[0-9a-f-]{36}$/)
+    await kill(child)
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue(QUARANTINED_COUNTER)
+    const recovering = freshStore()
+    await recovering.initialize()
+    // This boot quarantines the interrupted transfer; it inherited none.
+    expect(recovering.debugRecord(message.transferId)?.state).toBe('quarantined')
+    expect((await counterValue(QUARANTINED_COUNTER)) - before).toBe(0)
+    await recovering.close()
+
+    const next = freshStore()
+    await next.initialize()
+    expect((await counterValue(QUARANTINED_COUNTER)) - before).toBe(1)
+    expect(
+      warn.mock.calls.filter(call => JSON.stringify(call[0]) === JSON.stringify({ quarantined: 1 }))
+    ).toHaveLength(1)
+    expect(next.debugRecord(message.transferId)?.state).toBe('quarantined')
+    expect(next.debugUsage().bytes).toBe(7)
+  })
+})
 
 describe('GFS writer recovery and filesystem invariants', () => {
   it.each(['SIGKILL', 'SIGTERM'] as const)(
@@ -218,31 +451,6 @@ describe('GFS writer recovery and filesystem invariants', () => {
     }
   )
 
-  it('preserves inherited copies while a detached executor survives Host death past both deadlines', async () => {
-    const { child, message } = await childStore('lease')
-    expect(message.error).toBeUndefined()
-    executors.push(message.executorPid)
-    await kill(child)
-    expect(() => process.kill(message.executorPid, 0)).not.toThrow()
-    const reopened = freshStore()
-    await reopened.initialize()
-    await reopened.cleanupExpired(
-      Math.max(Date.parse(message.receipt.expiresAt), Date.parse(message.lease.expiresAt)) + 1
-    )
-    expect(() => process.kill(message.executorPid, 0)).not.toThrow()
-    expect(reopened.debugRecord(message.receipt.id)).toMatchObject({
-      state: 'quarantined',
-      sizeBytes: 7,
-    })
-    expect(reopened.debugUsage().bytes).toBe(7)
-    expect(
-      await fs.readFile(path.join(root, 'users', 'caller-a', message.receipt.path), 'utf8')
-    ).toBe('fixture')
-    await expect(
-      reopened.processingLeaseProvider('caller-a').releaseProcessingLease(message.lease)
-    ).rejects.toMatchObject({ code: 'download_busy' })
-  })
-
   it('reauthorizes a clean v2 cold-resume copy for the exact task owner and preserves every other pin', async () => {
     const { child, message } = await childStore('pin')
     await kill(child)
@@ -306,63 +514,6 @@ describe('GFS writer recovery and filesystem invariants', () => {
       expect(reopened.debugUsage().bytes).toBe(7)
     }
   )
-
-  it('durably protects an execution admitted before the first retained download', async () => {
-    const store = freshStore()
-    await store.initialize()
-    const provider = store.processingLeaseProvider('caller-a')
-    const lease = await provider.acquireProcessingLease({ durationMs: 500 })
-    const ledger = JSON.parse(
-      await fs.readFile(path.join(root, '.gfs-download-store', 'ledger-v1.json'), 'utf8')
-    )
-    expect(ledger.processingLeases[lease.leaseId].recordIds).toEqual([])
-    await expect(store.close(0)).rejects.toMatchObject({ code: 'download_busy' })
-    await provider.releaseProcessingLease(lease)
-    await store.close()
-  })
-
-  it('fences Host-wide managed work after an inherited empty execution', async () => {
-    const { child, message } = await childStore('emptyLease')
-    expect(message.error).toBeUndefined()
-    executors.push(message.executorPid)
-    await kill(child)
-    const reopened = freshStore()
-    await reopened.initialize()
-    const callerRoot = path.join(root, 'users', 'caller-a')
-    const input = {
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    }
-    await reopened.cleanupExpired(Date.parse(message.lease.expiresAt) + 1)
-    expect(() => process.kill(message.executorPid, 0)).not.toThrow()
-    await expect(reopened.createTransfer(input)).rejects.toMatchObject({ code: 'download_busy' })
-    await expect(reopened.reusableReceipt('caller-a', source, 7)).rejects.toMatchObject({
-      code: 'download_busy',
-    })
-    await expect(
-      reopened.processingLeaseProvider('caller-a').acquireProcessingLease()
-    ).rejects.toMatchObject({ code: 'download_busy' })
-    await expect(fs.stat(path.join(callerRoot, '.gfs-downloads'))).rejects.toMatchObject({
-      code: 'ENOENT',
-    })
-    const callerBRoot = path.join(root, 'users', 'caller-b')
-    await fs.mkdir(callerBRoot, { recursive: true, mode: 0o700 })
-    await expect(
-      reopened.createTransfer({
-        ...input,
-        callerIdentity: 'caller-b',
-        callerWorkspacePath: callerBRoot,
-      })
-    ).rejects.toMatchObject({ code: 'download_busy' })
-    await expect(
-      reopened.processingLeaseProvider('caller-b').acquireProcessingLease()
-    ).rejects.toMatchObject({ code: 'download_busy' })
-    expect(reopened.isAvailable()).toBe(false)
-    expect(reopened.debugUsage().bytes).toBe(0)
-  })
 
   it('keeps kernel ownership after busy close and admits another process only after consumers settle', async () => {
     const store = freshStore()

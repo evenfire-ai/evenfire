@@ -1,6 +1,5 @@
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
-import type { GfsProcessingLeaseProvider } from '../internalTools/gfsProcessingLease'
 import type { TaskSource } from '../queue/types'
 
 export interface GfsManagedWorkspaceExecution {
@@ -10,7 +9,6 @@ export interface GfsManagedWorkspaceExecution {
   store?: GfsDownloadStore
   /** Undefined only when no trusted caller root can be derived; shell must then fail closed. */
   callerWorkspacePath?: string
-  processingLeaseProvider: GfsProcessingLeaseProvider
   retentionOwnerId?: string
   deliveryAvailable: boolean
 }
@@ -23,7 +21,6 @@ export interface GfsExecutionCapabilityInput {
   callerIdentity: string | undefined
   store: GfsDownloadStore | undefined
   callerWorkspacePath: string | undefined
-  processingLeaseProvider: GfsProcessingLeaseProvider | undefined
   approvalConfig: ApprovalConfig | undefined
   retentionOwnerId?: string
 }
@@ -40,7 +37,6 @@ export function gfsWorkspaceExecutionEnabled(
   callerIdentity: string
   store: GfsDownloadStore
   callerWorkspacePath: string
-  processingLeaseProvider: GfsProcessingLeaseProvider
 } {
   return Boolean(
     input.approvalEnabled &&
@@ -48,7 +44,6 @@ export function gfsWorkspaceExecutionEnabled(
     input.callerIdentity &&
     input.store?.isAvailable() &&
     input.callerWorkspacePath &&
-    input.processingLeaseProvider &&
     input.retentionOwnerId &&
     input.approvalConfig?.tools?.shell_exec !== false
   )
@@ -57,7 +52,8 @@ export function gfsWorkspaceExecutionEnabled(
 /**
  * Associate every executable registry with the Host GFS store independently of
  * download eligibility. Shell never falls back to the shared Host root while a
- * store exists; recovery-required or missing caller roots fail closed.
+ * store exists and fails closed without a caller root. Shell never calls the
+ * store (#1019), so a recovery-required store only disables delivery.
  */
 export function gfsManagedWorkspaceExecution(
   input: GfsExecutionCapabilityInput
@@ -69,8 +65,6 @@ export function gfsManagedWorkspaceExecution(
     callerIdentity,
     store: storeAvailable ? input.store : undefined,
     callerWorkspacePath: input.callerWorkspacePath,
-    processingLeaseProvider:
-      input.processingLeaseProvider ?? input.store.processingLeaseProvider(callerIdentity),
     retentionOwnerId: input.retentionOwnerId,
     deliveryAvailable: storeAvailable,
   }

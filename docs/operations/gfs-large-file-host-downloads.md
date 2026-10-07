@@ -110,8 +110,7 @@ releases its pin only after its executions settle. A positively absent copy may
 release its charge; corrupt or ambiguous copies remain charged until recovery.
 A replacement needs fresh GFS authorization.
 
-After a clean v2 writer restart with no unknown inherited execution, pins alone
-do not disable delivery. Fresh remote authorization and source version, size,
+After a clean v2 writer restart, pins alone do not disable delivery. Fresh remote authorization and source version, size,
 checksum and caller validation can rebind the exact restored task owner to the
 new writer session. Other tasks keep their pins. A task ID alone is insufficient
 to recover access.
@@ -126,20 +125,36 @@ to recover access.
   proven scope. Persisted approvals without a scope are treated as individual
   invocations.
 - Combined retained command output is bounded to 1 MiB. Live progress is bounded to 64 KiB. Exceeding the output bound terminates the process group and returns a truthful `output_limit_exceeded` result.
-- A processing lease is acquired after approval and before the child process is created. Integrity checks precede its processing budget, and file expiry, lease expiry and shutdown are rechecked after durable admission. If admission becomes unavailable, it is rolled back and no process starts.
-- The lease is released only after process-group termination and output settlement. A live execution protects its copy even if the durable deadline has elapsed; a timer alone does not prove physical termination. If release fails, the result is an error and cleanup protection remains.
-- Every execution lease is durable, including a command admitted before any
-  download exists. Recovery retains inherited executions and their protected
-  copies until physical settlement is proved. Neither a deadline, a PID probe
-  nor acquisition of the writer lock proves that a detached child terminated.
-  Unknown inherited executors disable managed downloads and execution for the
-  whole Host because Stage 1 executors share one UID. A failed admission rollback
-  remains charged when persistence is uncertain; it does not invent a running
-  execution.
+- `shell_exec` never calls the GFS download store (#1019). It does not acquire
+  a processing lease, does not depend on `store.isAvailable()`, and keeps
+  running while the store is recovery-required. When a Host-owned store exists,
+  the shell stays bound to the verified caller root and keeps forced live
+  approval; before every command it re-verifies that the caller root is still
+  canonical. That check is per-user directory scoping, not store state.
+- The store's lifecycle (expiry, pressure eviction, quota, `close()`) counts
+  only its own transfers and task receipt owners. A running shell does not
+  protect a copy and does not delay `close()`.
+
+Accepted risks of this decoupling:
+
+1. Expiry or eviction can remove a retained copy while a command is using it.
+   A file descriptor that is already open keeps reading; a later open gets
+   `ENOENT`.
+2. A command can alter a retained copy. SHA-256 re-verification in
+   `reusableReceipt` and at startup reconciliation quarantines an altered copy
+   instead of reusing it.
+3. The processing lease was never a security boundary: executors share the Host
+   UID and run without a sandbox. Live approval, `BasicSafety` validation and
+   credential-slot stripping remain the shell's controls.
+4. Admission cleanup no longer runs before a shell, so a command can read an
+   expired copy until the hourly sweep removes it.
+
+Partial reads are not possible, because publication is an atomic `rename` of
+`source.partial`.
 
 Unix directory modes and random directory names do not provide cross-caller OS isolation when a Host shares one UID. Approved arbitrary shell access remains a documented Stage 1 residual; stronger executor isolation is separate Stage 2 work.
 
-Shell cleanup signals and waits for the detached process group before releasing a processing lease. Operating systems may reuse a process-group identifier after the original leader has been reaped; Stage 1 narrows that window by signaling immediately on leader close, but stronger executor identity is required to eliminate it.
+Shell cleanup signals and waits for the detached process group before the tool result is returned. Operating systems may reuse a process-group identifier after the original leader has been reaped; Stage 1 narrows that window by signaling immediately on leader close, but stronger executor identity is required to eliminate it.
 
 Generic workspace tools reject direct and symlink-resolved access to
 `.gfs-downloads` and the complete `.gfs-download-store` accounting namespace
@@ -152,7 +167,7 @@ Caller binding canonicalizes the configured Host base, then verifies real
 caller child. Redirected caller namespaces produce unavailable bindings;
 ordinary text tasks continue while managed tools remain denied. A legitimate
 platform alias on the configured Host base is retained. Managed shell also
-revalidates its actual canonical root before lease acquisition and spawning.
+revalidates its actual canonical root before spawning.
 These checks prevent a known redirected root from granting generic tool access
 to accounting. They do not provide FD-anchored executor isolation against all
 shared-UID filesystem races; that remains the Stage 2 boundary.
@@ -160,14 +175,14 @@ shared-UID filesystem races; that remains the Stage 2 boundary.
 ## Retention, quotas, and recovery
 
 - Completed copies have a configured maximum retention time, seven days by
-  default. Active executions and task receipt pins protect a copy past its TTL
-  until the consumer physically settles.
+  default. Task receipt pins protect a copy past its TTL until the task
+  releases them. A shell execution does not protect a copy (accepted risk 1).
 - Host and caller quotas account for partial and completed files. Unknown or corrupt accounting fails closed rather than reporting zero usage.
-- A new store publishes an atomic schema-1 ledger before accepting transfers. Every existing ledger is parsed, including empty content; invalid record or lease maps are rejected.
+- A new store publishes an atomic schema-1 ledger before accepting transfers. Every existing ledger is parsed, including empty content; invalid record or owner maps, and malformed legacy processing-lease maps, are rejected with `corrupt_store_ledger`.
 - A pre-existing store directory with a missing ledger is unknown accounting, including an interrupted first initialization before ledger publication. Startup rejects it and preserves retained bytes for operator recovery instead of silently resetting quota. This can require recovery after a bootstrap interruption.
 - Startup does not reconstruct an accounting directory deleted in its entirety while caller copies remain. Approved shell commands share the Host UID and can destroy this state; whole-store deletion remains outside the recovery guarantee and requires operator inventory of retained copies.
 - Admission may evict the oldest verified completed copies that have no active
-  transfer, execution lease or task receipt owner. The complete eviction plan
+  transfer or task receipt owner. The complete eviction plan
   must satisfy both Host and caller quotas before any copy is removed. An
   impossible or invalid request cannot evict another caller's files. Active,
   pinned, inherited, corrupt and ambiguous entries are never pressure victims.
@@ -184,7 +199,21 @@ shared-UID filesystem races; that remains the Stage 2 boundary.
   Quota charges are released only after positive filesystem absence. A cleanup
   failure remains charged and is observable for recovery.
 - Startup reconciles the ledger and partial files before the capability is advertised.
-- Shutdown stops new admission, drains active work where possible, and leaves unproven lease/recovery state protected.
+- Legacy processing leases written by builds before #1019 are discarded at
+  initialize, after the ledger is parsed and before reconciliation. No lease in
+  an older ledger can protect an executor of the current boot, and a lease left
+  by a crashed Host would otherwise fence the store forever. The removal is
+  persisted first; only after that persist succeeds does the Host log a warning
+  with the count and increment
+  `clerum_gfs_legacy_processing_leases_discarded_total`. If the persist fails,
+  initialize rejects, the ledger keeps the lease, and nothing is logged or
+  counted; the next initialize retries. Records that protected copies are then
+  reconciled like any other: an intact completed copy is reusable, an altered
+  or unfinished one is quarantined.
+- Records an earlier boot left quarantined are counted at initialize, logged
+  and added to `clerum_gfs_inherited_quarantined_records_total`. They stay
+  charged to quota until operator recovery.
+- Shutdown stops new admission, drains active transfers where possible, and leaves unproven recovery state protected.
 - Pending and queued admission rechecks shutdown after asynchronous validation and persistence. Shutdown rechecks active ownership before releasing the writer lease.
 
 Writer exclusion uses the existing SQLite dependency with a kernel-held
@@ -204,8 +233,10 @@ owners, groups, symlinks and hard links remain errors.
 
 A store initialization failure leaves safe RPC capabilities running and records
 a recovery-required download state. Caller workspace binding remains in force.
-Managed shell execution fails before spawning a process; it cannot fall back to
-the Host's shared workspace or omit the processing lease.
+Managed shell execution keeps the verified caller root and continues; it cannot
+fall back to the Host's shared workspace. When initialization succeeds but the
+store is not available, the runtime logs an error that operator recovery is
+required and managed GFS delivery is disabled.
 
 Verified contention with an active v2 writer and a valid unchanged ledger is a
 temporary state. The runtime retries that case up to 60 times at two-second
@@ -216,11 +247,10 @@ starts after successful acquisition, including acquisition after retry.
 Shutdown cancels scheduling, joins outstanding work and closes held writer
 ownership even when delivery is unavailable.
 
-Lease admission verifies the checksum of every retained completed caller copy
-under store serialization. Its cost grows with retained caller bytes; the
-default caller budget is 256 MiB. This correctness check has not been benchmarked
-on every supported PVC. Stage 2 must measure concurrency and evaluate verified
-descriptor/state revalidation outside the mutex before changing that contract.
+Reuse verifies the checksum of a retained completed copy under store
+serialization, and startup reconciliation verifies every retained completed
+copy. Their cost grows with retained caller bytes; the default caller budget is
+256 MiB. This correctness check has not been benchmarked on every supported PVC.
 
 A pending task pin can survive a Host restart and protect bytes beyond TTL.
 If the task never resumes, use the operator inventory and exact terminal-owner
@@ -228,10 +258,11 @@ recovery protocol. A time limit or cache pressure cannot prove that owner is
 unused. Monitor bounded counts and retained bytes; do not label metrics with
 owner or caller IDs.
 
-Execution safety binding is independent of delivery eligibility. Cron,
-internal and approval-disabled tasks associated with this store cannot obtain
-an unleased shared-root shell during recovery. Trusted system tasks use the
-existing system workspace contract; a missing verified root denies spawning.
+Execution safety binding is independent of delivery eligibility and of store
+availability. Cron, internal and approval-disabled tasks associated with this
+store cannot obtain a shared-root shell, during recovery or otherwise. Trusted
+system tasks use the existing system workspace contract; a missing verified
+root denies spawning.
 Healthy unattended execution keeps its existing policy, while large workspace
 delivery still requires its attended caller and approval capability.
 
@@ -246,6 +277,8 @@ The global `/metrics` endpoint exposes fixed-cardinality instruments:
 - `clerum_gfs_download_quota_total{scope,reason}`
 - `clerum_gfs_download_expiry_total{outcome}`
 - `clerum_gfs_shell_output_limits_total{outcome}`
+- `clerum_gfs_legacy_processing_leases_discarded_total` (legacy leases removed at initialize)
+- `clerum_gfs_inherited_quarantined_records_total` (records an earlier boot quarantined)
 
 Labels contain bounded enums only. Caller, resource, download, command, path, correlation IDs, filenames, credentials, and raw output are prohibited as metric labels.
 
@@ -286,18 +319,22 @@ contents, filenames, caller identities, commands or credentials.
    whole operation and recheck it before filesystem effects.
 3. Inspect and review the three hashes and exact selection IDs. Unknown or
    unjournaled caches fail inventory even with an empty ledger. Select only
-   executions proved settled, task owners proved terminal, and explicitly
-   approved unused partial copies. The default preserves copies and charges.
+   task owners proved terminal and explicitly approved unused partial copies.
+   The default preserves copies and charges. Since #1019 the Host discards
+   legacy processing leases itself at initialize, so the operator no longer
+   settles them to restore availability; `settledProcessingLeaseIds` remains
+   accepted only for a ledger written by an older build that is inspected
+   before any current Host opens it.
 4. Call `recoverGfsStoreUnderPhysicalFence` with those expected hashes,
-   `settledProcessingLeaseIds`, optional `terminalReceiptOwnerIds` and
+   any `settledProcessingLeaseIds` from step 3, optional `terminalReceiptOwnerIds` and
    `removeSettledTransferIds`, and the real `withPhysicalFence` provider.
    A constant successful callback or an environment flag is not a provider.
 5. Verify the returned before/after receipt and preserved published copies.
    Only an exact verified partial directory can be removed; its charge is
    released after positive absence. A published `source` remains protected even
    when a crash left its ledger entry without a completed state or checksum.
-   Verified copies with their original checksum can become reusable after all
-   unknown executions settle; corrupt copies remain charged and quarantined.
+   Verified copies with their original checksum can become reusable; corrupt
+   copies remain charged and quarantined.
 6. Reopen the Host on the same retained PVC. Prove availability, authenticated
    reuse, source/version equality and quotas before restoring ordinary traffic.
    On interruption, preserve the last receipt and accounting objects, obtain a

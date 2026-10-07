@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
+import { ShellTool } from '../core/tools/shell'
 import type { GfsImageSource } from '../visualInput/policy'
 import { GfsDownloadStore } from './gfsDownloadStore'
 import { GFS_FILE_LIMITS } from './gfsFilePolicy'
@@ -669,4 +670,168 @@ describe('GFS download store', () => {
       expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
     }
   )
+})
+
+describe('S6: expiry and admission without processing-lease exemptions (#1019)', () => {
+  async function publishFixture(
+    expiresAt = new Date(Date.now() + 60_000).toISOString(),
+    retentionOwnerId?: string
+  ) {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt,
+      retentionOwnerId,
+    })
+    await fs.writeFile(path.join(callerRoot, transfer.partialPath), 'fixture')
+    return store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+  }
+
+  it('removes an expired record even after a shell read it', async () => {
+    const receipt = await publishFixture()
+    const shell = new ShellTool(callerRoot, 5_000, ['PATH'], () => ({}), undefined, true)
+    const read = await shell.execute({ command: `cat ${JSON.stringify(receipt.path)}` })
+    expect(read.is_error).toBe(false)
+    expect(read.content).toContain('fixture')
+    await store.cleanupExpired(Date.parse(receipt.expiresAt) + 1)
+    expect(store.debugRecord(receipt.id)).toBeUndefined()
+    await expect(fs.lstat(path.join(callerRoot, path.dirname(receipt.path)))).rejects.toMatchObject(
+      { code: 'ENOENT' }
+    )
+    expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
+  })
+
+  it('keeps an expired record only while a retention owner holds it', async () => {
+    const receipt = await publishFixture(undefined, 'waiting-approval-task')
+    await store.cleanupExpired(Date.parse(receipt.expiresAt) + 1)
+    expect(store.debugRecord(receipt.id)).toBeDefined()
+    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
+    await store.releaseReceiptOwner('waiting-approval-task', 'caller-a')
+    await store.cleanupExpired(Date.parse(receipt.expiresAt) + 1)
+    expect(store.debugRecord(receipt.id)).toBeUndefined()
+  })
+
+  it('fences a transfer whose caller validation completes after shutdown', async () => {
+    const receipt = await publishFixture()
+    let resume!: () => void
+    let entered!: () => void
+    const barrier = new Promise<void>(resolve => {
+      resume = resolve
+    })
+    const waiting = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    const validatingStore = store as unknown as {
+      validateCallerRoot: (root: string) => Promise<string>
+    }
+    const validate = validatingStore.validateCallerRoot.bind(store)
+    vi.spyOn(validatingStore, 'validateCallerRoot').mockImplementationOnce(async root => {
+      const validated = await validate(root)
+      entered()
+      await barrier
+      return validated
+    })
+    const outcome = Promise.allSettled([
+      store.createTransfer({
+        callerIdentity: 'caller-a',
+        callerWorkspacePath: callerRoot,
+        source,
+        sizeBytes: 7,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ])
+    await waiting
+    await store.close()
+    resume()
+
+    const [result] = await outcome
+    expect(result!.status).toBe('rejected')
+    if (result!.status === 'rejected')
+      expect(result!.reason).toMatchObject({ code: 'workspace_unavailable' })
+    expect(await fs.readdir(path.join(callerRoot, '.gfs-downloads'))).toEqual([
+      path.basename(path.dirname(receipt.path)),
+    ])
+    const restarted = new GfsDownloadStore(hostRoot)
+    await restarted.initialize()
+    expect(restarted.debugUsage().bytes).toBe(7)
+    await restarted.close()
+  })
+
+  it('keeps another caller admissible while one caller has an expired record', async () => {
+    const expired = await publishFixture()
+    const callerBRoot = path.join(hostRoot, 'users', 'caller-b')
+    await fs.mkdir(callerBRoot, { recursive: true, mode: 0o700 })
+    const callerBTransfer = await store.createTransfer({
+      callerIdentity: 'caller-b',
+      callerWorkspacePath: callerBRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(path.join(callerBRoot, callerBTransfer.partialPath), 'fixture')
+    const callerBReceipt = await store.publish(
+      callerBTransfer.id,
+      'caller-b',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(expired.expiresAt) + 1)
+
+    await store.cleanupExpired()
+    expect(store.debugRecord(expired.id)).toBeUndefined()
+    expect(store.isAvailable()).toBe(true)
+    expect(await store.reusableReceipt('caller-b', source, 7)).toMatchObject({
+      id: callerBReceipt.id,
+    })
+  })
+
+  it('rechecks failed-transfer ownership after a queued publication', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(path.join(callerRoot, transfer.partialPath), 'fixture')
+    const persistedStore = store as unknown as { persist: () => Promise<void> }
+    const persist = persistedStore.persist.bind(store)
+    let resume!: () => void
+    let entered!: () => void
+    const barrier = new Promise<void>(resolve => {
+      resume = resolve
+    })
+    const waiting = new Promise<void>(resolve => {
+      entered = resolve
+    })
+    vi.spyOn(persistedStore, 'persist').mockImplementationOnce(async () => {
+      await persist()
+      entered()
+      await barrier
+    })
+    const published = store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    await waiting
+    const failed = expect(store.fail(transfer.id, 'caller-a')).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    resume()
+    const receipt = await published
+    await failed
+    expect(store.debugRecord(receipt.id)).toMatchObject({ state: 'completed' })
+    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
+    const ledger = JSON.parse(
+      await fs.readFile(path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json'), 'utf8')
+    )
+    expect(ledger.records[receipt.id].state).toBe('completed')
+    expect(ledger).not.toHaveProperty('processingLeases')
+  })
 })

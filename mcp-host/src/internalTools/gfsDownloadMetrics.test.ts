@@ -7,8 +7,17 @@ import {
   recordGfsDownloadExpiry,
   recordGfsDownloadQuota,
   recordGfsDownloadTransfer,
+  recordGfsInheritedQuarantinedRecords,
+  recordGfsLegacyProcessingLeasesDiscarded,
   recordGfsShellOutputLimit,
 } from './gfsDownloadMetrics'
+
+async function counterValue(name: string): Promise<number> {
+  const metric = register.getSingleMetric(name)
+  if (metric === undefined) throw new Error(`metric ${name} is not registered`)
+  const { values } = await metric.get()
+  return values.reduce((sum, sample) => sum + sample.value, 0)
+}
 
 describe('GFS download metrics', () => {
   it('registers fixed-cardinality instruments on the global metrics endpoint', async () => {
@@ -42,5 +51,23 @@ describe('GFS download metrics', () => {
       'clerum_gfs_download_quota_total{scope="caller",reason="storage_bytes"}'
     )
     expect(scraped).toContain('clerum_gfs_download_expiry_total{outcome="cleanup_failed"}')
+  })
+
+  it('U10: registers the legacy-lease discard and inherited-quarantine counters', async () => {
+    const scraped = await register.metrics()
+    expect(scraped).toContain('# TYPE clerum_gfs_legacy_processing_leases_discarded_total counter')
+    expect(scraped).toContain('# TYPE clerum_gfs_inherited_quarantined_records_total counter')
+    const discardedBefore = await counterValue(
+      'clerum_gfs_legacy_processing_leases_discarded_total'
+    )
+    const quarantinedBefore = await counterValue('clerum_gfs_inherited_quarantined_records_total')
+    recordGfsLegacyProcessingLeasesDiscarded(2)
+    recordGfsInheritedQuarantinedRecords(3)
+    expect(await counterValue('clerum_gfs_legacy_processing_leases_discarded_total')).toBe(
+      discardedBefore + 2
+    )
+    expect(await counterValue('clerum_gfs_inherited_quarantined_records_total')).toBe(
+      quarantinedBefore + 3
+    )
   })
 })

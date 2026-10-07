@@ -89,6 +89,26 @@ const gfsDownloadExpiryTotal = getOrCreateCounter({
   labelNames: ['outcome'] as const as Array<'outcome'>,
 })
 
+const gfsLegacyProcessingLeasesDiscardedTotal = getOrCreateCounter({
+  name: 'clerum_gfs_legacy_processing_leases_discarded_total',
+  help: 'Legacy shell processing leases discarded from the GFS download store ledger at initialize.',
+  labelNames: [] as const as Array<never>,
+})
+
+const gfsInheritedQuarantinedRecordsTotal = getOrCreateCounter({
+  name: 'clerum_gfs_inherited_quarantined_records_total',
+  help: 'GFS download store records found quarantined by an earlier boot at initialize; they stay charged to quota until operator recovery.',
+  labelNames: [] as const as Array<never>,
+})
+
+export function recordGfsLegacyProcessingLeasesDiscarded(count: number): void {
+  gfsLegacyProcessingLeasesDiscardedTotal.inc(count)
+}
+
+export function recordGfsInheritedQuarantinedRecords(count: number): void {
+  gfsInheritedQuarantinedRecordsTotal.inc(count)
+}
+
 export function recordGfsDownloadAdmission(outcome: GfsDownloadAdmissionOutcome): void {
   gfsDownloadAdmissionsTotal.labels(outcome).inc()
 }

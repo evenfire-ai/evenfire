@@ -118,6 +118,11 @@ export async function bootstrapGfsRuntime(
   try {
     await store.initialize()
     if (store.isAvailable()) startCycle('cleanup')
+    else
+      logger.error(
+        { component: 'gfs-runtime', available: false },
+        'GFS download store initialized but is not available; operator recovery is required and managed GFS delivery is disabled'
+      )
   } catch (error) {
     if (transientWriterContention(error)) {
       logger.warn(

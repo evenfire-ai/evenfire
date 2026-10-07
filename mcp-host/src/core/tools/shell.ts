@@ -1,10 +1,6 @@
 import { spawn } from 'child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { recordGfsShellOutputLimit } from '../../internalTools/gfsDownloadMetrics'
-import type {
-  GfsProcessingLease,
-  GfsProcessingLeaseProvider,
-} from '../../internalTools/gfsProcessingLease'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../llm/registryCore'
 import { verifyManagedCallerRootPath } from '../../workspace/callerRootBinding'
 import { ToolError, ToolErrorCode } from '../errors'
@@ -90,8 +86,12 @@ export class ShellTool implements Tool {
     // child env; every other provider slot is deleted. Undefined (tool-name
     // listing registry, legacy tests) strips ALL slots — the secure default.
     private readonly activeLlmProvider?: LlmProvider,
-    /** Caller-bound cleanup protection for retained GFS downloads. */
-    private readonly processingLeases?: GfsProcessingLeaseProvider
+    /**
+     * Re-verify that the caller workspace root is still canonical before every
+     * command. Set for Host-managed per-user roots; this is per-user directory
+     * scoping and never touches the GFS download store.
+     */
+    private readonly verifyCallerRoot: boolean = false
   ) {}
 
   name() {
@@ -150,7 +150,7 @@ export class ShellTool implements Tool {
     const timeout = Math.min(this.timeout, context?.timeoutMs ?? this.timeout)
     const startTime = Date.now()
     const command = params.command as string
-    if (this.processingLeases && this.workspacePath) {
+    if (this.verifyCallerRoot && this.workspacePath) {
       if (verifyManagedCallerRootPath(this.workspacePath) === undefined) {
         return this.managedRootUnavailable(startTime)
       }
@@ -212,36 +212,6 @@ export class ShellTool implements Tool {
       }
     }
 
-    let processingLease: GfsProcessingLease | undefined
-    if (this.processingLeases) {
-      try {
-        processingLease = await this.processingLeases.acquireProcessingLease({
-          durationMs: timeout + ShellTool.SIGKILL_GRACE_MS + 1_000,
-        })
-      } catch (err) {
-        return {
-          content: `Processing lease failed before command start: ${(err as Error).message}`,
-          duration_ms: Date.now() - startTime,
-          is_error: true,
-        }
-      }
-    }
-
-    if (context?.signal?.aborted) {
-      if (processingLease && this.processingLeases) {
-        try {
-          await this.processingLeases.releaseProcessingLease(processingLease)
-        } catch {
-          return {
-            content: 'Command cancelled before process start [processing_lease_release_failed]',
-            duration_ms: Date.now() - startTime,
-            is_error: true,
-          }
-        }
-      }
-      context.signal.throwIfAborted()
-    }
-
     return new Promise<ToolOutput>(resolve => {
       // detached: true makes the child a process group leader so we can kill
       // the whole group (shell + grandchildren like `sleep`) with -pid signal.
@@ -264,25 +234,6 @@ export class ShellTool implements Tool {
         if (resolved) return
         resolved = true
         resolve(out)
-      }
-
-      const complete = async (
-        out: ToolOutput,
-        options: { releaseLease?: boolean } = {}
-      ): Promise<void> => {
-        if (processingLease && this.processingLeases && options.releaseLease !== false) {
-          try {
-            await this.processingLeases.releaseProcessingLease(processingLease)
-          } catch {
-            const status = '\n\n[processing_lease_release_failed]'
-            out.is_error = true
-            out.content = `${truncateUtf8Bytes(
-              out.content,
-              ShellTool.MAX_RESULT_BYTES - Buffer.byteLength(status, 'utf8')
-            )}${status}`
-          }
-        }
-        resolveOnce(out)
       }
 
       const forceKill = () => {
@@ -381,7 +332,7 @@ export class ShellTool implements Tool {
       }
       const handleClose = async (exitCode: number | null): Promise<void> => {
         // Leader/stdio close does not prove descendants exited. Always complete
-        // group termination before releasing a processing lease or resolving.
+        // group termination before resolving.
         const processGroupId = child.pid
         const groupTerminated =
           typeof processGroupId === 'number' && processGroupId > 0
@@ -439,10 +390,8 @@ export class ShellTool implements Tool {
             duration_ms: Date.now() - startTime,
             is_error: true,
           }
-          await complete(out, { releaseLease: false })
-          return
         }
-        await complete(out)
+        resolveOnce(out)
       }
 
       child.on('close', exitCode => {
@@ -451,7 +400,7 @@ export class ShellTool implements Tool {
 
       child.on('error', err => {
         cleanup()
-        void complete({
+        resolveOnce({
           content: `Command failed to start: ${err.message}`,
           duration_ms: Date.now() - startTime,
           is_error: true,

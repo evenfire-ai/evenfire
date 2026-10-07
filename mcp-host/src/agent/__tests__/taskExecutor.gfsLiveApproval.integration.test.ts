@@ -24,7 +24,7 @@ import { CronScheduler } from '../cronScheduler'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 
 // Observe process admission while retaining the real shell, registry, approval
-// controllers, conversation manager and caller-bound processing lease provider.
+// controllers, conversation manager and caller-bound GFS store.
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>()
   return { ...actual, spawn: vi.fn(actual.spawn) }
@@ -111,9 +111,6 @@ async function scenario(
     throw new Error(`Test caller binding failed: ${callerBinding.failureCode}`)
   const callerWorkspace = callerBinding.root
   const releaseReceiptOwner = vi.spyOn(store, 'releaseReceiptOwner')
-  const processingLeases = store.processingLeaseProvider('gfs-caller')
-  const acquireLease = vi.spyOn(processingLeases, 'acquireProcessingLease')
-  const releaseLease = vi.spyOn(processingLeases, 'releaseProcessingLease')
   const providerCalls: ChatMessage[][] = []
   const provider: SingleTurnProvider = {
     getProviderType: () => 'codex-subscription',
@@ -157,7 +154,6 @@ async function scenario(
     workspaceService: undefined,
     gfsDownloadStore: store,
     gfsCallerWorkspacePath: callerWorkspace,
-    gfsProcessingLeaseProvider: processingLeases,
     modelName: 'fixture-model',
     approvalConfig: { defaultPolicy: 'channel_users', channels: {} },
     guardrailsConfig: guardrailAsk
@@ -194,8 +190,6 @@ async function scenario(
     conversation,
     executor: new TaskExecutor(task, deps),
     providerCalls,
-    acquireLease,
-    releaseLease,
     releaseReceiptOwner,
     onApprovalNeeded,
     onComplete,
@@ -219,7 +213,6 @@ it('requires live shell approval despite persistent shell auto-approval', async 
   expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
   expect(s.providerCalls).toHaveLength(1)
   expect(spawn).not.toHaveBeenCalled()
-  expect(s.acquireLease).not.toHaveBeenCalled()
 })
 
 it.each(['http_request', 'cron_manage'] as const)(
@@ -343,7 +336,6 @@ it.each(resumeCases)(
     expect(firstApproval.tool_call_id).toBe(firstCall.id)
     expect(firstApproval.context_snapshot.length).toBeGreaterThan(0)
     expect(spawn).not.toHaveBeenCalled()
-    expect(s.acquireLease).not.toHaveBeenCalled()
 
     let executor = s.executor
     if (rehydrate) {
@@ -356,8 +348,6 @@ it.each(resumeCases)(
     expect(s.onFail).not.toHaveBeenCalled()
     expect(spawn).toHaveBeenCalledTimes(1)
     expect(vi.mocked(spawn).mock.calls[0].slice(0, 2)).toEqual(['/bin/sh', ['-c', approvedCommand]])
-    expect(s.acquireLease).toHaveBeenCalledTimes(1)
-    expect(s.releaseLease).toHaveBeenCalledTimes(1)
     expect(s.providerCalls).toHaveLength(2)
     const firstResult = s.providerCalls[1].find(
       message => message.role === 'tool' && message.tool_call_id === firstCall.id
@@ -387,8 +377,6 @@ it.each(resumeCases)(
       ['-c', approvedCommand],
       ['-c', secondCall.arguments.command],
     ])
-    expect(s.acquireLease).toHaveBeenCalledTimes(2)
-    expect(s.releaseLease).toHaveBeenCalledTimes(2)
     expect(s.providerCalls).toHaveLength(3)
     const secondResult = s.providerCalls[2].find(
       message => message.role === 'tool' && message.tool_call_id === secondCall.id
@@ -424,6 +412,5 @@ it.each([false, true])(
     expect(s.executor.pendingApproval!.request_id).not.toBe(firstApproval.request_id)
     expect(s.onApprovalNeeded).toHaveBeenCalledTimes(2)
     expect(spawn).not.toHaveBeenCalled()
-    expect(s.acquireLease).not.toHaveBeenCalled()
   }
 )

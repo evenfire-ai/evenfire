@@ -149,20 +149,30 @@ describe('local GFS operator recovery', () => {
     })
   })
 
-  it('restores only a verified published copy after explicit executor settlement', async () => {
+  it('S7: settles a legacy ledger that still carries a pre-#1019 processing lease', async () => {
     const store = fresh()
     await store.initialize()
     const receipt = await publish(store)
-    const lease = await store.processingLeaseProvider('caller-a').acquireProcessingLease()
     await simulateWriterDeath(store)
-    const disabled = fresh()
-    await disabled.initialize()
-    expect(disabled.isAvailable()).toBe(false)
-    expect(disabled.debugRecord(receipt.id)?.state).toBe('quarantined')
-    await disabled.close()
-    const input = await recoveryInput({ settledProcessingLeaseIds: [lease.leaseId] })
+    // A Host older than #1019 died holding a lease over this copy. Seed the
+    // lease exactly as that build persisted it.
+    const ledgerPath = path.join(root, '.gfs-download-store', 'ledger-v1.json')
+    const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
+    const leaseId = '55555555-5555-4555-8555-555555555555'
+    ledger.processingLeases = {
+      [leaseId]: {
+        leaseId,
+        callerIdentity: 'caller-a',
+        recordIds: [receipt.id],
+        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        writerSessionId: '66666666-6666-4666-8666-666666666666',
+      },
+    }
+    await fs.writeFile(ledgerPath, JSON.stringify(ledger), { mode: 0o600 })
+    const input = await recoveryInput({ settledProcessingLeaseIds: [leaseId] })
     const result = await recoverGfsStoreUnderPhysicalFence(input)
-    expect(result.before.selections.processingLeaseIds).toEqual([lease.leaseId])
+    expect(result.before.selections.processingLeaseIds).toEqual([leaseId])
     expect(result.after.counts).toMatchObject({ files: 1, bytes: 7, processingLeases: 0 })
     const recovered = fresh()
     await recovered.initialize()
