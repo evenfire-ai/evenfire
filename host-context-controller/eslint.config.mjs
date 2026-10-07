@@ -26,7 +26,7 @@ export default [
     },
   },
   {
-    files: ['src/k8sClient.ts', 'src/server.ts'],
+    files: ['src/k8sClient.ts', 'src/server.ts', 'src/hostReconciler.ts', 'src/metrics.ts'],
     rules: { 'no-console': 'error' },
   },
 ]

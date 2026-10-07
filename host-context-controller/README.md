@@ -529,9 +529,16 @@ npm run lint
 ```
 
 For mcp-host runtime tests, use its normal installation with lifecycle scripts
-enabled. HCC CI installs the lint prerequisite explicitly and runs the same
-command. Lint rejects unused bindings, warnings, and direct console calls in
-the watcher, which must use HCC's structured logger.
+enabled. The `sfw` prefix is this workstation's package protection wrapper;
+CI installs the lint prerequisite with plain `npm ci`. Use the equivalent
+install command required by your local package policy.
+
+HCC CI runs the same literal lint command. Lint targets `src/**/*.ts`, including
+source-colocated tests, and rejects unused bindings and warnings in that scope.
+It also rejects direct console calls in `k8sClient.ts`, `server.ts`,
+`hostReconciler.ts`, and `metrics.ts`, which use HCC's structured logger.
+The lifecycle tests under `test/` run through `npm test` and are outside the
+lint command's `src` target.
 
 ### Dev Mode (without Kubernetes)
 
