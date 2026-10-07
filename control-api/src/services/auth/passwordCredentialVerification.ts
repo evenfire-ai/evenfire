@@ -178,8 +178,9 @@ export async function verifyMemberPassword(
       )
       if (!lease.backendAvailable) throw new PasswordAdmissionError(503, 2)
       if (!lease.allowed) denied(policy.paceMs)
+      const user = capture.user
+      let authenticated = false
       try {
-        const user = capture.user
         const eligible =
           !!user &&
           user.lifecycle_state === 'active' &&
@@ -203,12 +204,13 @@ export async function verifyMemberPassword(
           password,
           supported ? user!.password_hash! : PASSWORD_DUMMY_HASH
         )
-        const authenticated = eligible && supported && match
-        const current = await completePasswordEvaluation(capture, authenticated)
-        return current && authenticated ? user : null
+        authenticated = eligible && supported && match
       } finally {
         await lease.release()
       }
+      // Bcrypt is finished. Release its pool session before completion borrows a client.
+      const current = await completePasswordEvaluation(capture, authenticated)
+      return current && authenticated ? user : null
     } finally {
       busy = false
     }
