@@ -9,9 +9,11 @@ type EvenfireDeepLinkRouterOptions<TWindow extends RendererTarget> = {
   appProtocol: string
   focusMainWindow: () => void
   getWindow: () => TWindow | null
+  getSessionState: () => Promise<{ authenticated: boolean }>
   handleSandboxUiDeepLink: (rawUrl: string) => boolean
   isRendererReady: () => boolean
   logout: () => Promise<unknown>
+  reportLogoutFailure: (error: unknown) => void
   maxPendingUrls?: number
   requestMainWindow: () => void
   sandboxUiDeepLinkHost: string
@@ -86,6 +88,33 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
     options.requestMainWindow()
   }
 
+  const reportLogoutFailure = async (error: unknown): Promise<void> => {
+    try {
+      options.reportLogoutFailure(error)
+    } catch {
+      // Logging must not turn this fire-and-forget protocol into an unhandled
+      // rejection or prevent the renderer from reflecting the auth state.
+    }
+
+    let authenticated: boolean
+    try {
+      authenticated = (await options.getSessionState()).authenticated
+    } catch (stateError) {
+      try {
+        options.reportLogoutFailure(stateError)
+      } catch {
+        // The protocol has no failure response channel.
+      }
+      return
+    }
+    if (authenticated) return
+
+    const window = options.getWindow()
+    if (!window || window.isDestroyed()) return
+    options.focusMainWindow()
+    window.webContents.send('auth:externalLogout')
+  }
+
   const handle = (rawUrl: string): void => {
     let parsed: URL
     try {
@@ -110,9 +139,11 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
           options.focusMainWindow()
           window.webContents.send('auth:externalLogout')
         },
-        () => {
-          // Protocol links are fire-and-forget and have no failure response
-          // channel. Consume rejection without changing auth state or sending success.
+        error => {
+          // The in-memory session can already be cleared when persisted-token
+          // deletion fails. Report that state change to the renderer, but never
+          // emit success while the service still considers the user signed in.
+          void reportLogoutFailure(error)
         }
       )
       return

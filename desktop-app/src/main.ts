@@ -306,9 +306,18 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   appProtocol: DESKTOP_SETUP_PROTOCOL,
   focusMainWindow,
   getWindow: () => mainWindow,
+  getSessionState: async () => ({
+    authenticated: (await appService.getSessionState()).authenticated,
+  }),
   handleSandboxUiDeepLink,
   isRendererReady: () => mainWindowRendererReady,
   logout: () => appService.logout(),
+  reportLogoutFailure: error => {
+    // The main-process bootstrap has no service logger; log only the safe error
+    // name because native storage errors must not leak credential or URL data.
+    const errorName = error instanceof Error ? error.name : typeof error
+    console.error('[Desktop] External logout failed', { errorName })
+  },
   requestMainWindow,
   sandboxUiDeepLinkHost: SANDBOX_UI_DEEP_LINK_HOST,
   shouldAcceptSandboxUiProtocolLink,

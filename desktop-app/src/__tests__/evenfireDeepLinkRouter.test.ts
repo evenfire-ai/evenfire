@@ -34,9 +34,12 @@ function createHarness() {
   const sent: SentMessage[] = []
   let currentWindow: TestWindow | null = createWindow('initial', sent)
   let rendererReady = false
+  let authenticated = true
   const focusWindow = vi.fn()
   const requestMainWindow = vi.fn()
   const logout = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+  const getSessionState = vi.fn(async () => ({ authenticated }))
+  const reportLogoutFailure = vi.fn()
   const handleSandboxUiDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
   const shouldAcceptSandboxUiProtocolLink = vi
     .fn<(rawUrl: string) => boolean>()
@@ -49,6 +52,8 @@ function createHarness() {
     handleSandboxUiDeepLink,
     isRendererReady: () => rendererReady,
     logout,
+    getSessionState,
+    reportLogoutFailure,
     requestMainWindow,
     shouldAcceptSandboxUiProtocolLink,
   })
@@ -58,11 +63,16 @@ function createHarness() {
     focusWindow,
     handleSandboxUiDeepLink,
     logout,
+    getSessionState,
+    reportLogoutFailure,
     requestMainWindow,
     router,
     sent,
     setRendererReady: (ready: boolean) => {
       rendererReady = ready
+    },
+    setAuthenticated: (value: boolean) => {
+      authenticated = value
     },
     replaceWindow: (id: string) => {
       currentWindow = createWindow(id, sent)
@@ -267,8 +277,26 @@ describe('evenfire deep-link router', () => {
       expect(unhandledRejections).toEqual([])
       expect(harness.sent).toEqual([])
       expect(harness.focusWindow).not.toHaveBeenCalled()
+      expect(harness.reportLogoutFailure).toHaveBeenCalledOnce()
     } finally {
       process.off('unhandledRejection', observeUnhandledRejection)
     }
+  })
+
+  it('reports external logout after a failure that already cleared authentication', async () => {
+    const harness = createHarness()
+    const error = new Error('credential deletion failed')
+    harness.setAuthenticated(false)
+    harness.logout.mockRejectedValue(error)
+
+    harness.router.handle('evenfire://logout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(harness.reportLogoutFailure).toHaveBeenCalledWith(error)
+    expect(harness.getSessionState).toHaveBeenCalledOnce()
+    expect(harness.sent).toEqual([
+      { channel: 'auth:externalLogout', payload: undefined, window: 'initial' },
+    ])
+    expect(harness.focusWindow).toHaveBeenCalledOnce()
   })
 })
