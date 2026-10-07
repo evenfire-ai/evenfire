@@ -75,10 +75,11 @@ export function registerQuitDrain(
     window.webContents.on('will-prevent-unload', event => {
       if (!quitDrainComplete) return
 
-      // The native beforeunload prompt blocks the event loop until the user
-      // decides. Once it returns, a live window means the user canceled quit.
+      // Electron's defaultPrevented flag records whether another listener
+      // allowed the page to unload. Window destruction is not reliable at this
+      // point, so use the event outcome to detect a still-active page veto.
       setImmediate(() => {
-        if (!event.defaultPrevented && !window.isDestroyed()) reopenQuitAttempt()
+        if (!event.defaultPrevented) reopenQuitAttempt()
       })
     })
   })
