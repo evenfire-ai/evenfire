@@ -6,6 +6,7 @@ import path from 'node:path'
 const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
 let isolatedConfigPath = ''
 let AppServiceClass: typeof import('../appService.js').AppService
+let TokenStoreClass: typeof import('../tokenStore.js').TokenStore
 let getDesktopRuntimeConfigState: typeof import('../config.js').getDesktopRuntimeConfigState
 
 beforeAll(async () => {
@@ -14,11 +15,13 @@ beforeAll(async () => {
   process.env.CLERUM_DESKTOP_CONFIG_PATH = isolatedConfigPath
   vi.resetModules()
 
-  const [{ AppService }, configModule] = await Promise.all([
+  const [{ AppService }, configModule, tokenStoreModule] = await Promise.all([
     import('../appService.js'),
     import('../config.js'),
+    import('../tokenStore.js'),
   ])
   AppServiceClass = AppService
+  TokenStoreClass = tokenStoreModule.TokenStore
   getDesktopRuntimeConfigState = configModule.getDesktopRuntimeConfigState
 })
 
@@ -44,14 +47,11 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function createService(tokenStore: {
-  prepareForQuit: ReturnType<typeof vi.fn>
-  reopenAdmission: ReturnType<typeof vi.fn>
-}) {
+function createService(tokenStore = new TokenStoreClass()) {
   const service = Object.create(AppServiceClass.prototype) as {
     pendingCredentialProducers: Set<Promise<unknown>>
     quitPreparationStarted: boolean
-    tokenStore: typeof tokenStore
+    tokenStore: InstanceType<typeof TokenStoreClass>
     logoutOnce: ReturnType<typeof vi.fn>
     prepareForQuit: () => Promise<void>
     cancelQuitPreparation: () => void
@@ -70,10 +70,9 @@ describe('AppService quit preparation', () => {
   })
 
   it('reopens credential admission when Electron cancels a quit attempt', async () => {
-    const tokenStore = {
-      prepareForQuit: vi.fn().mockResolvedValue(undefined),
-      reopenAdmission: vi.fn(),
-    }
+    const tokenStore = new TokenStoreClass()
+    const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
+    const reopenAdmission = vi.spyOn(tokenStore, 'reopenAdmission')
     const service = createService(tokenStore)
 
     await service.prepareForQuit()
@@ -82,25 +81,24 @@ describe('AppService quit preparation', () => {
     service.cancelQuitPreparation()
     await expect(service.logout()).resolves.toBeUndefined()
     expect(service.logoutOnce).toHaveBeenCalledOnce()
-    expect(tokenStore.reopenAdmission).toHaveBeenCalledOnce()
+    expect(reopenAdmission).toHaveBeenCalledOnce()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
   })
 
   it('keeps an admitted logout pending beyond a two-minute producer bound', async () => {
     vi.useFakeTimers()
     const pendingAuthFence = deferred<void>()
-    let storeAdmissionClosed = false
     let persistedSession = true
-    const prepareForQuit = vi.fn(async () => {
-      storeAdmissionClosed = true
-    })
-    const clearSessionToken = vi.fn(async () => {
-      if (storeAdmissionClosed) throw new Error('Application is shutting down')
-      persistedSession = false
-    })
-    const tokenStore = {
-      prepareForQuit,
-      clearSessionToken,
+    const tokenStore = new TokenStoreClass()
+    const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
+    const tokenStoreSeam = tokenStore as unknown as {
+      clearSessionTokenOnce: (...args: never[]) => Promise<void>
     }
+    const clearSessionToken = vi
+      .spyOn(tokenStoreSeam, 'clearSessionTokenOnce')
+      .mockImplementation(async () => {
+        persistedSession = false
+      })
     const service = Object.create(AppServiceClass.prototype) as {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
@@ -159,20 +157,18 @@ describe('AppService quit preparation', () => {
 
   it('waits for an admitted producer before starting the TokenStore drain', async () => {
     const producer = deferred<void>()
-    const tokenStore = {
-      prepareForQuit: vi.fn().mockResolvedValue(undefined),
-      reopenAdmission: vi.fn(),
-    }
+    const tokenStore = new TokenStoreClass()
+    const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
     const service = createService(tokenStore)
     service.logoutOnce.mockReturnValue(producer.promise)
     const logout = service.logout()
     const preparation = service.prepareForQuit()
 
     try {
-      expect(tokenStore.prepareForQuit).not.toHaveBeenCalled()
+      expect(prepareForQuit).not.toHaveBeenCalled()
       producer.resolve()
       await Promise.all([logout, preparation])
-      expect(tokenStore.prepareForQuit).toHaveBeenCalledOnce()
+      expect(prepareForQuit).toHaveBeenCalledOnce()
     } finally {
       producer.resolve()
       await Promise.allSettled([logout, preparation])
@@ -182,10 +178,8 @@ describe('AppService quit preparation', () => {
   it('waits for remaining admitted producers after one producer rejects', async () => {
     const rejectedProducer = deferred<void>()
     const pendingProducer = deferred<void>()
-    const tokenStore = {
-      prepareForQuit: vi.fn().mockResolvedValue(undefined),
-      reopenAdmission: vi.fn(),
-    }
+    const tokenStore = new TokenStoreClass()
+    const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
     const service = createService(tokenStore)
     service.logoutOnce
       .mockImplementationOnce(() => rejectedProducer.promise)
@@ -197,11 +191,11 @@ describe('AppService quit preparation', () => {
 
     rejectedProducer.reject(new Error('first producer failed'))
     await first
-    expect(tokenStore.prepareForQuit).not.toHaveBeenCalled()
+    expect(prepareForQuit).not.toHaveBeenCalled()
 
     pendingProducer.resolve()
     await Promise.all([second, preparation])
-    expect(tokenStore.prepareForQuit).toHaveBeenCalledOnce()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
   })
 
   it('does not gate a runWithTeamContext call that has no team credential hop', async () => {
@@ -229,17 +223,15 @@ describe('AppService quit preparation', () => {
   it('does not hold quit for a same-team operation that does not change credentials', async () => {
     const request = deferred<string>()
     const requestStarted = deferred<void>()
-    const tokenStore = {
-      prepareForQuit: vi.fn().mockResolvedValue(undefined),
-      reopenAdmission: vi.fn(),
-    }
+    const tokenStore = new TokenStoreClass()
+    const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
     const service = Object.create(AppServiceClass.prototype) as {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
       teamContextQueue: Promise<void>
       sessionToken: string | null
       me: { id: string; teamId: string }
-      tokenStore: typeof tokenStore
+      tokenStore: InstanceType<typeof TokenStoreClass>
       requireSessionToken: () => string
       getCurrentSessionTeamId: (token: string) => Promise<string>
       runWithTeamContext: <T>(
@@ -264,7 +256,7 @@ describe('AppService quit preparation', () => {
     await requestStarted.promise
 
     const preparation = service.prepareForQuit()
-    expect(tokenStore.prepareForQuit).toHaveBeenCalledOnce()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
     await expect(preparation).resolves.toBeUndefined()
 
     request.resolve('request-complete')
