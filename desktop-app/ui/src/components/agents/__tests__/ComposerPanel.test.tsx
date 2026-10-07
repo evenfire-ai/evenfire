@@ -10,6 +10,7 @@ import {
   COMPOSER_MAX_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
   COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+  GROK_COMPOSER_MAX_IMAGE_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
 import { readComposerFile } from '@lib/composerFileAdmission'
@@ -985,28 +986,6 @@ describe('ComposerPanel Codex image budgets', () => {
     expect(expectSinglePreparedImage().name).toBe('next.png')
   })
 
-  it('refuses a new image with a visible error when an attached image holds malformed base64', async () => {
-    // A chip restored from a failed send keeps the stored base64 as it is; one
-    // whose length is not a multiple of four cannot be measured in decoded bytes.
-    const restored = attachedImage('restored', 'restored.png', 8)
-    composerState.composerImageAttachments = [
-      { ...restored, dataBase64: restored.dataBase64.slice(0, -1) },
-    ]
-    const { container } = render(<ComposerPanel inline />)
-
-    fireEvent.change(pickerInput(container), {
-      target: { files: [pngOfSize('next.png', 64, 1)] },
-    })
-
-    // Liveness witness: the refusal reached the user and names the chip at fault.
-    await waitFor(() =>
-      expect(screen.queryByRole('alert')?.textContent).toBe(
-        'restored.png could not be measured against the image limit (Image data is not canonical base64.). Remove it and attach it again.'
-      )
-    )
-    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
-  })
-
   it('refuses an annotation save that would push the decoded images past 16 MiB', () => {
     const already = attachedImage('already', 'already.png', 8 * MIB)
     const editing = attachedImage('editing', 'edit.png', 8 * MIB - 3)
@@ -1026,6 +1005,140 @@ describe('ComposerPanel Codex image budgets', () => {
     const fits = attachedImage('editing', 'edit.png', 8 * MIB)
     annotationCanvasMock.onSave?.(fits)
     expect(actionsMock.handleUpdateComposerImageAttachment).toHaveBeenCalledWith(fits)
+  })
+})
+
+describe('ComposerPanel Grok image budget', () => {
+  beforeEach(() => {
+    composerModelState.data = {
+      provider: 'grok-subscription',
+      hostDefault: 'grok-4.6',
+      sessionModel: 'grok-4.6',
+      degraded: false,
+      models: [{ name: 'grok-4.6', displayName: 'Grok 4.6' }],
+    }
+    composerModelState.effectiveModel = 'grok-4.6'
+    Object.assign(composerModelState, SUPPORTED_CAPABILITY)
+  })
+
+  // The budget sums the decoded `sizeBytes` of each image against the
+  // ingress's 16 MiB decoded total, and the copy names that figure.
+  it('names the 16 MiB decoded total when an annotation save exceeds it', () => {
+    const already: ComposerImageAttachment = {
+      id: 'already-attached',
+      name: 'already.png',
+      mimeType: 'image/png',
+      dataBase64: 'AAAA',
+      sizeBytes: GROK_COMPOSER_MAX_IMAGE_BYTES - 32,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    const editing: ComposerImageAttachment = {
+      id: 'editing',
+      name: 'edit.png',
+      mimeType: 'image/png',
+      dataBase64: 'BBBB',
+      sizeBytes: 16,
+      previewDataUrl: 'data:image/png;base64,BBBB',
+    }
+    composerState.composerImageAttachments = [already, editing]
+    render(<ComposerPanel inline />)
+    fireEvent.click(screen.getByText('edit.png'))
+    expect(annotationCanvasMock.onSave).toEqual(expect.any(Function))
+
+    // Liveness witness: a save that keeps the total at the limit is applied.
+    annotationCanvasMock.onSave?.({ ...editing, sizeBytes: 32 })
+    expect(actionsMock.handleUpdateComposerImageAttachment).toHaveBeenCalledTimes(1)
+
+    expect(() => annotationCanvasMock.onSave?.({ ...editing, sizeBytes: 33 })).toThrow(
+      'edit.png was kept unchanged. The images in one message are limited to 16 MiB in total.'
+    )
+    // Still the one call from the accepted save: the refused save never called through.
+    expect(actionsMock.handleUpdateComposerImageAttachment).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a picked image that would push the message past the 16 MiB ingress total', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    const rawBytes = Math.floor(GROK_COMPOSER_MAX_IMAGE_BYTES / 2)
+    expect(rawBytes * 2).toBeLessThanOrEqual(GROK_COMPOSER_MAX_IMAGE_BYTES)
+    expect(rawBytes * 3).toBeGreaterThan(GROK_COMPOSER_MAX_IMAGE_BYTES)
+    const files = ['first.png', 'second.png', 'third.png'].map((name, index) => {
+      const bytes = new Uint8Array(rawBytes)
+      bytes.set(PNG_BYTES)
+      bytes[PNG_BYTES.length] = index
+      return imageFile(name, 'image/png', bytes)
+    })
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(['first.png', 'second.png'])
+    expect(screen.getByRole('alert').textContent).toBe(
+      'third.png does not fit in this message: the images in one message are limited to 16 MiB in total. Send the attached images first or remove one.'
+    )
+  })
+})
+
+describe('ComposerPanel Grok image total counts decoded bytes', () => {
+  beforeEach(() => {
+    composerModelState.data = {
+      provider: 'grok-subscription',
+      hostDefault: 'grok-4.6',
+      sessionModel: 'grok-4.6',
+      degraded: false,
+      models: [{ name: 'grok-4.6', displayName: 'Grok 4.6' }],
+    }
+    composerModelState.effectiveModel = 'grok-4.6'
+    Object.assign(composerModelState, SUPPORTED_CAPABILITY)
+  })
+
+  // The ingress counts decoded bytes. 8,388,609 + 8,388,608 decoded bytes is
+  // one byte over 16 MiB, while the base64 characters of the two files sum to
+  // exactly the 22,369,624 the base64 rule allowed, so only a decoded sum
+  // refuses the second image.
+  it('refuses the image that takes the decoded total one byte past 16 MiB', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    const sizes = [8 * 1024 * 1024 + 1, 8 * 1024 * 1024]
+    const files = ['first.png', 'second.png'].map((name, index) => {
+      const bytes = new Uint8Array(sizes[index] as number)
+      bytes.set(PNG_BYTES)
+      return imageFile(name, 'image/png', bytes)
+    })
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => [attachment.name, attachment.sizeBytes])).toEqual([
+      ['first.png', 8 * 1024 * 1024 + 1],
+    ])
+    expect(screen.getByRole('alert').textContent).toBe(
+      'second.png does not fit in this message: the images in one message are limited to 16 MiB in total. Send the attached images first or remove one.'
+    )
+  })
+
+  it('accepts two images whose decoded sizes sum to exactly 16 MiB', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    const files = ['first.png', 'second.png'].map(name => {
+      const bytes = new Uint8Array(8 * 1024 * 1024)
+      bytes.set(PNG_BYTES)
+      return imageFile(name, 'image/png', bytes)
+    })
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    expect(addedBatches()[0]?.map(attachment => attachment.name)).toEqual([
+      'first.png',
+      'second.png',
+    ])
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
 

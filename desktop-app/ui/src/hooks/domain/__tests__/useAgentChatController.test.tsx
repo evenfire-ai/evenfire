@@ -56,25 +56,9 @@ async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
 }
 
-// Sending now persists the optimistic turn through the filesystem-backed
-// ChatStore before subscribing. Under the full parallel Desktop suite, that
-// disk work can exceed Testing Library's one-second default timeout.
-const CHAT_STORE_IO_TIMEOUT_MS = 10_000
-
-async function waitForProgressHandler(taskId: string) {
-  await waitFor(
-    () => expect(clerum.hasProgressHandler(taskId)).toBe(true),
-    CHAT_STORE_IO_TIMEOUT_MS
-  )
-}
-
-function waitForWithFakeTimers<T>(assertion: () => T | Promise<T>) {
-  return vi.waitFor(assertion, { timeout: CHAT_STORE_IO_TIMEOUT_MS })
-}
-
 /** Real ChatStore-backed effects can exceed Testing Library's 1s default on CI runners. */
-function waitFor<T>(callback: () => T | Promise<T>, timeout = ASYNC_WAIT_TIMEOUT_MS) {
-  return rtlWaitFor(callback, { timeout })
+function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof rtlWaitFor>[1]) {
+  return rtlWaitFor(callback, { timeout: ASYNC_WAIT_TIMEOUT_MS, ...options })
 }
 
 function deferred<T>() {
@@ -85,6 +69,39 @@ function deferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+// A send writes the user turn to the real ChatStore (disk I/O) before it wires
+// the progress subscription. On a loaded CI runner that write can take longer
+// than the 1000 ms waitFor default (#958), so the wiring waits get this bound.
+const WIRING_TIMEOUT_MS = 10_000
+// Captured at module load, before any test installs fake timers.
+const realSetTimeout = globalThis.setTimeout
+
+async function waitForProgressHandler(taskId: string) {
+  await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true), {
+    timeout: WIRING_TIMEOUT_MS,
+  })
+}
+
+/**
+ * Fake-timer variant. `vi.waitFor` advances the fake clock by its interval on
+ * every check, which would move it toward the watchdog and connection timeouts
+ * the test advances to explicitly. This polls in real time and only runs the
+ * timers that are already due, so the fake clock does not move.
+ */
+async function waitForProgressHandlerUnderFakeTimers(taskId: string) {
+  const intervalMs = 50
+  for (let waitedMs = 0; waitedMs < WIRING_TIMEOUT_MS; waitedMs += intervalMs) {
+    await vi.advanceTimersByTimeAsync(0)
+    if (clerum.hasProgressHandler(taskId)) return
+    await new Promise(resolve => realSetTimeout(resolve, intervalMs))
+  }
+  expect(clerum.hasProgressHandler(taskId)).toBe(true)
+}
+
+function waitForWithFakeTimers<T>(assertion: () => T | Promise<T>) {
+  return vi.waitFor(assertion, { timeout: WIRING_TIMEOUT_MS })
 }
 
 describe('useAgentChatController — characterization (D.0)', () => {
@@ -342,8 +359,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       let sendResolved = false
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
+      const sendPromise = result.current.handleSendAgentMessage('hola').then(() => {
         sendResolved = true
       })
 
@@ -359,7 +375,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(sendResolved).toBe(true)
       // The user message is upserted before the POST and the assistant reply is
@@ -385,9 +403,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
       expect(result.current.activeChatId).toBeNull()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('first message')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('first message')
       await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -395,7 +411,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(clerum.chat.create).toHaveBeenCalled()
       const createOrder = clerum.chat.create.mock.invocationCallOrder[0]!
@@ -428,9 +446,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       // First send — leave it in flight (no terminal emitted yet).
-      const firstSend = act(async () => {
-        await result.current.handleSendAgentMessage('m1')
-      })
+      const firstSend = result.current.handleSendAgentMessage('m1')
       await waitForProgressHandler('task-abc')
 
       // Second send while first is in flight — should be silently rejected.
@@ -446,7 +462,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await firstSend
+      await act(async () => {
+        await firstSend
+      })
     })
 
     it('4.5 surfaces a failed terminal as an error assistant message', async () => {
@@ -454,9 +472,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result, spies } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('hola')
       await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -468,7 +484,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       // The failure toast follows the store write of the error reply.
       await waitFor(() =>
@@ -530,9 +548,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('hola')
       await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -540,7 +556,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'cancelled', reason: 'user_cancelled' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(clerum.rpc.getTaskResult).not.toHaveBeenCalled()
       const progress = result.current.progressByAgentMessage['agent-x']
@@ -616,7 +634,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // send persists the user turn to the real ChatStore first, which is disk
       // I/O that fake timers do not advance: poll for the subscription instead.
       await act(async () => {
-        await waitForWithFakeTimers(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+        await waitForProgressHandlerUnderFakeTimers('task-abc')
       })
 
       await act(async () => {
@@ -692,7 +710,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // The user turn is persisted to the real ChatStore (disk I/O fake timers do
       // not advance) before the subscription is wired: poll for it.
       await act(async () => {
-        await waitForWithFakeTimers(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+        await waitForProgressHandlerUnderFakeTimers('task-abc')
       })
 
       await act(async () => {
@@ -1158,7 +1176,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasActivityHandler('agent-x')).toBe(true))
+      await waitFor(() => expect(clerum.hasActivityHandler('agent-x')).toBe(true), {
+        timeout: WIRING_TIMEOUT_MS,
+      })
 
       // Read via the production-consumed selected-agent slice (`activityByMessageId`)
       // instead of the removed cross-agent `activityByAgentMessage` map (B18 dead
@@ -1821,9 +1841,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('persist me')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('persist me')
       await waitForProgressHandler('task-ga')
       await act(async () => {
         clerum.emitTaskProgress('task-ga', { type: 'open', taskId: 'task-ga', hostRef: 'agent-x' })
@@ -1832,7 +1850,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-ga', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       // The user message was persisted (a chat was auto-created and the typed
       // input written to it) — the input is durable across reload.
@@ -1869,9 +1889,7 @@ describe('interrupted generated-file contract', () => {
     })
     const { result } = renderController()
     await settleMount()
-    const send = act(async () => {
-      await result.current.handleSendAgentMessage('Create a report')
-    })
+    const send = result.current.handleSendAgentMessage('Create a report')
     await waitForProgressHandler('task-file')
     await act(async () => {
       clerum.emitTaskProgress('task-file', {
@@ -1883,7 +1901,9 @@ describe('interrupted generated-file contract', () => {
         },
       })
     })
-    await send
+    await act(async () => {
+      await send
+    })
     const saved = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]
     expect(saved).toEqual([
       expect.objectContaining({

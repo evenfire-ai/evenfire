@@ -22,8 +22,10 @@ import {
 import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_ATTACHMENTS,
+  type ComposerImageBudget,
+  type ComposerImageTotalBudget,
   composerImageBudget,
-  composerImageBudgetBytes,
+  composerImageCountedBytes,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -66,6 +68,14 @@ function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
 
 function formatComposerMebibytes(bytes: number): number {
   return Math.round(bytes / (1024 * 1024))
+}
+
+/** The label bytes travel with the total, so the impossible state is not representable. */
+function composerTotalLimitLabel(
+  total: ComposerImageTotalBudget,
+  sizeUnit: ComposerImageBudget['sizeUnit']
+): string {
+  return `${formatComposerMebibytes(total.labelBytes)} ${sizeUnit}`
 }
 
 function bytesFromBase64(data: string): Uint8Array | null {
@@ -228,8 +238,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const hostModelSelection = useHostModels(selectedAgent ?? '', activeChatId ?? '')
   const imageAttachmentBlockMessage = hostModelSelection.imageBlockMessage
   // Size ceilings follow the host provider: Codex keeps #650 (16 MiB / 2048 /
-  // hop-owned aggregate). Every other image-capable host keeps #669 (3 MiB +
-  // 8 MB combined). Capability still comes from the host projection, not this.
+  // hop-owned aggregate). Grok is 16 MiB per image and 16 MiB decoded in total
+  // (#784). Every other image-capable host keeps #669 (3 MiB + 8 MB combined).
+  // Capability still comes from the host projection, not this.
   const imageBudget = composerImageBudget(hostModelSelection.data?.provider)
   const selectedAgentContext = selectedAgent
     ? String(agentContextByName[selectedAgent] || '').trim()
@@ -577,26 +588,15 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           } not added.`
         )
       }
-      // Non-Codex images keep the #669 base64 ceiling; Codex images are held
-      // to the decoded image quota rpc-proxy and mcp-host enforce (#650).
-      const totalMeasure = imageBudget.maxTotal.measure
-      // This callback runs under `void`, so a throw here would be an unhandled
-      // rejection the user never sees. An attached image that cannot be
-      // measured (a chip restored with malformed base64) refuses the whole
-      // gesture with a visible notice: the remaining quota is unknown.
-      let totalImageBytes = 0
-      for (const attachment of composerImageAttachments) {
-        try {
-          totalImageBytes += composerImageBudgetBytes(attachment.dataBase64, totalMeasure)
-        } catch (error) {
-          setComposerAttachmentError(
-            `${attachment.name || 'Image'} could not be measured against the image limit (${
-              error instanceof Error ? error.message : String(error)
-            }). Remove it and attach it again.`
+      // General images are counted in base64 characters (#669). Codex and Grok
+      // count decoded bytes against the 16 MiB ingress total (#650, #784).
+      const totalBudget = imageBudget.total
+      let totalCountedBytes = totalBudget
+        ? composerImageAttachments.reduce(
+            (total, attachment) => total + composerImageCountedBytes(totalBudget, attachment),
+            0
           )
-          return
-        }
-      }
+        : 0
 
       for (const [index, { file, mimeType }] of selected.entries()) {
         if (composerImageExceedsPerImageBudget(file.size, imageBudget.maxImageBytes)) {
@@ -632,17 +632,24 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             revokePreviewUrl(previewUrl)
             continue
           }
-          const imageBytes = composerImageBudgetBytes(dataBase64, totalMeasure)
-          if (totalImageBytes + imageBytes > imageBudget.maxTotal.bytes) {
+          const candidate = { dataBase64, sizeBytes: file.size }
+          if (
+            totalBudget != null &&
+            totalCountedBytes + composerImageCountedBytes(totalBudget, candidate) >
+              totalBudget.maxBytes
+          ) {
             validationErrors.push(
-              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${formatComposerMebibytes(
-                imageBudget.maxTotal.bytes
-              )} ${imageBudget.sizeUnit} in total. Send the attached images first or remove one.`
+              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${composerTotalLimitLabel(
+                totalBudget,
+                imageBudget.sizeUnit
+              )} in total. Send the attached images first or remove one.`
             )
             revokePreviewUrl(previewUrl)
             continue
           }
-          totalImageBytes += imageBytes
+          if (totalBudget != null) {
+            totalCountedBytes += composerImageCountedBytes(totalBudget, candidate)
+          }
           accepted.push({
             id: crypto.randomUUID(),
             name: buildAttachmentName(file, source, mimeType, index),
@@ -721,25 +728,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         updated.dataBase64,
         imageBudget.maxDimension
       )
-      const totalMeasure = imageBudget.maxTotal.measure
-      const otherImageBytes = composerImageAttachments.reduce(
-        (total, attachment) =>
-          attachment.id === updated.id
-            ? total
-            : total + composerImageBudgetBytes(attachment.dataBase64, totalMeasure),
-        0
-      )
-      const combinedOverflow =
-        otherImageBytes + composerImageBudgetBytes(updated.dataBase64, totalMeasure) >
-        imageBudget.maxTotal.bytes
-      if (
-        !composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes) &&
-        !dimensionError &&
-        !combinedOverflow
-      ) {
-        onUpdateComposerImageAttachment(updated)
-        return
-      }
+      const totalBudget = imageBudget.total
+      const otherCountedBytes = totalBudget
+        ? composerImageAttachments.reduce(
+            (total, attachment) =>
+              attachment.id === updated.id
+                ? total
+                : total + composerImageCountedBytes(totalBudget, attachment),
+            0
+          )
+        : 0
       if (composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes)) {
         throw new Error(
           `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
@@ -752,11 +750,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           `${updated.name || 'Image'} was kept unchanged. Max resolution is ${imageBudget.maxDimension} px.`
         )
       }
-      throw new Error(
-        `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${formatComposerMebibytes(
-          imageBudget.maxTotal.bytes
-        )} ${imageBudget.sizeUnit} in total.`
-      )
+      if (
+        totalBudget != null &&
+        otherCountedBytes + composerImageCountedBytes(totalBudget, updated) > totalBudget.maxBytes
+      ) {
+        throw new Error(
+          `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${composerTotalLimitLabel(
+            totalBudget,
+            imageBudget.sizeUnit
+          )} in total.`
+        )
+      }
+      onUpdateComposerImageAttachment(updated)
     },
     [composerImageAttachments, imageBudget, onUpdateComposerImageAttachment]
   )

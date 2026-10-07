@@ -1562,3 +1562,64 @@ minikube-build-627-github: ## Build the reviewed GitHub MCP locally for the owne
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-github.sh
+
+# Experimental Control API calibration owns temporary NODE_OPTIONS and restores it
+# under the same branch-profile mutation lease. It produces no T2 verdict.
+export CONTROL_API_MEMORY_CONFIG CONTROL_API_MEMORY_READ_ONLY
+.PHONY: minikube-control-api-authorize-memory minikube-control-api-authorize-memory-body
+minikube-control-api-authorize-memory:
+	@test -n "$${CONTROL_API_MEMORY_CONFIG:-}" || { echo "CONTROL_API_MEMORY_CONFIG required"; exit 1; }
+	@if [ "$${CONTROL_API_MEMORY_READ_ONLY:-false}" = "true" ]; then \
+		node scripts/tests/measure-control-api-authorize-memory.mjs --config "$$CONTROL_API_MEMORY_CONFIG" --inspect-plan; \
+	else \
+		T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-control-api-authorize-memory-body; \
+	fi
+minikube-control-api-authorize-memory-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@T2_SKIP_LOCK=true node scripts/tests/measure-control-api-authorize-memory.mjs --config "$$CONTROL_API_MEMORY_CONFIG"
+
+# Isolated subscription image journeys use the existing branch-profile mutation lease.
+.PHONY: minikube-subscription-image-coordinated
+minikube-subscription-image-coordinated:
+	@test -n "$${SUBSCRIPTION_IMAGE_MEMORY_CONFIG:-}" || { echo "SUBSCRIPTION_IMAGE_MEMORY_CONFIG required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_RUN_ID:-}" || { echo "SUBSCRIPTION_IMAGE_RUN_ID required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_SUITE:-}" || { echo "SUBSCRIPTION_IMAGE_SUITE required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_SCRATCH:-}" || { echo "SUBSCRIPTION_IMAGE_SCRATCH required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_RED_DETECTOR:-}" || { echo "SUBSCRIPTION_IMAGE_RED_DETECTOR required"; exit 1; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		node scripts/e2e/coordinate-subscription-image-journeys.mjs \
+			--memory-config "$$SUBSCRIPTION_IMAGE_MEMORY_CONFIG" \
+			--suite "$$SUBSCRIPTION_IMAGE_SUITE" --mode fixture \
+			--profile "$$MINIKUBE_PROFILE" --run-id "$$SUBSCRIPTION_IMAGE_RUN_ID" \
+			--scratch "$$SUBSCRIPTION_IMAGE_SCRATCH" --frames - \
+			--red-detector "$$SUBSCRIPTION_IMAGE_RED_DETECTOR" \
+			$${SUBSCRIPTION_IMAGE_SFW_ARTIFACT:+--sfw-artifact "$$SUBSCRIPTION_IMAGE_SFW_ARTIFACT"}
+
+.PHONY: minikube-subscription-image-journeys
+minikube-subscription-image-journeys:
+	@test -n "$${MINIKUBE_PROFILE:-}" || { echo "MINIKUBE_PROFILE required"; exit 1; }
+	@test -n "$${CONTROL_API_REAL_PG_CONTEXT:-}" || { echo "CONTROL_API_REAL_PG_CONTEXT required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_SUITE:-}" || { echo "SUBSCRIPTION_IMAGE_SUITE required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_MODE:-}" || { echo "SUBSCRIPTION_IMAGE_MODE required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_SCRATCH:-}" || { echo "SUBSCRIPTION_IMAGE_SCRATCH required"; exit 1; }
+	@test "$${SUBSCRIPTION_IMAGE_FRAMES:-}" = "-" || { echo "SUBSCRIPTION_IMAGE_FRAMES must be - for live private stdin"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_BINDINGS:-}" || { echo "SUBSCRIPTION_IMAGE_BINDINGS required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_RED_DETECTOR:-}" || { echo "SUBSCRIPTION_IMAGE_RED_DETECTOR required"; exit 1; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		node scripts/e2e/prepare-subscription-image-admission.mjs \
+			--suite "$$SUBSCRIPTION_IMAGE_SUITE" \
+			--mode "$$SUBSCRIPTION_IMAGE_MODE" \
+			--profile "$$MINIKUBE_PROFILE" \
+			--scratch "$$SUBSCRIPTION_IMAGE_SCRATCH" \
+			--frames "$$SUBSCRIPTION_IMAGE_FRAMES" \
+			--bindings "$$SUBSCRIPTION_IMAGE_BINDINGS" \
+			--red-detector "$$SUBSCRIPTION_IMAGE_RED_DETECTOR"

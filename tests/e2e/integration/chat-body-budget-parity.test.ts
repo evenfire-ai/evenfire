@@ -188,17 +188,24 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
 
   it('the composer counts the Codex image quota in decoded bytes, as both parsers do', () => {
     const budget = functionSource(sources.composer, 'composerImageBudget', 'composer')
-    expect(soleLine(budget, 'maxTotal: { bytes: CODEX_', 'composer Codex image total')).toBe(
-      "maxTotal: { bytes: CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES, measure: 'decoded' },"
+    const codexBranch = soleMatch(
+      budget,
+      /if \(provider === CODEX_SUBSCRIPTION_PROVIDER\) \{[\s\S]*?\n {2}\}/,
+      'composer Codex branch'
+    )[0]
+    expect(soleLine(codexBranch, 'counts: ', 'composer Codex total unit')).toBe(
+      "counts: 'decoded',"
     )
-    const composerDecoded = functionSource(sources.composer, 'composerImageBudgetBytes', 'composer')
-    const serverDecoded = functionSource(sources.rpcProxy, 'decodedBase64Bytes', 'rpc-proxy')
-    // The decoded size is the same arithmetic on the same base64 on both sides.
-    for (const prefix of ['const padding = ', 'return (dataBase64.length / 4) * 3']) {
-      expect(soleLine(composerDecoded, prefix, `composer ${prefix}`)).toBe(
-        soleLine(serverDecoded, prefix, `rpc-proxy ${prefix}`)
-      )
-    }
+    expect(soleLine(codexBranch, 'maxBytes: ', 'composer Codex total limit')).toBe(
+      'maxBytes: CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES,'
+    )
+    // A decoded total sums each image's decoded size, which the composer holds as
+    // `sizeBytes` (the bytes it read from the file) and both parsers recompute
+    // from the base64 they receive.
+    const counted = functionSource(sources.composer, 'composerImageCountedBytes', 'composer')
+    expect(soleLine(counted, 'return ', 'composer counted bytes')).toBe(
+      "return total.counts === 'base64' ? attachment.dataBase64.length : attachment.sizeBytes"
+    )
     // Both refuse only above the quota: a set that fills it exactly is admitted.
     const inspect = functionSource(sources.rpcProxy, 'inspectChatImageBudget', 'rpc-proxy')
     expect(soleLine(inspect, 'if (counted >=', 'image quota condition')).toBe(
