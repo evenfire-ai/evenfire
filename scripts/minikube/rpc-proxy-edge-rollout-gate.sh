@@ -10,6 +10,8 @@ CONTROL_PLANE_NAMESPACE="control-plane"
 TIMEOUT_SECONDS="120"
 POLL_SECONDS="2"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DEADLINE_RUNNER="${RPC_PROXY_EDGE_GATE_DEADLINE_RUNNER:-${SCRIPT_DIR}/run-with-deadline.mjs}"
 PROTOCOL_LABEL='clerum.io/rpc-proxy-edge-protocol'
 STRICT_PROTOCOL='dedicated-header-v1'
 
@@ -41,11 +43,29 @@ if [[ "$MODE" != "wait-proxy" && "$MODE" != "wait-proxy-legacy" &&
   exit 2
 fi
 
+deadline=$((SECONDS + TIMEOUT_SECONDS))
+
+remaining_deadline_seconds() {
+  local remaining=$((deadline - SECONDS))
+  (( remaining > 0 )) || return 1
+  printf '%s\n' "$remaining"
+}
+
+bounded_kubectl_get() {
+  local label="$1"
+  shift
+  local remaining
+  remaining="$(remaining_deadline_seconds)" || return 1
+  node "$DEADLINE_RUNNER" --timeout-seconds "$remaining" --heartbeat-seconds 1 \
+    --kill-grace-seconds 1 --label "rpc-proxy-edge-${label}" -- \
+    "$KUBECTL_BIN" --context="$CONTEXT" get "$@"
+}
+
 proxy_cohort_ready() {
   local deployment pods
-  deployment="$("$KUBECTL_BIN" --context="$CONTEXT" get deployment rpc-proxy \
+  deployment="$(bounded_kubectl_get proxy-deployment deployment rpc-proxy \
     -n "$RPC_PROXY_NAMESPACE" -o json 2>/dev/null)" || return 1
-  pods="$("$KUBECTL_BIN" --context="$CONTEXT" get pods -n "$RPC_PROXY_NAMESPACE" \
+  pods="$(bounded_kubectl_get proxy-pods pods -n "$RPC_PROXY_NAMESPACE" \
     -l app=rpc-proxy -o json 2>/dev/null)" || return 1
   jq -e --arg label "$PROTOCOL_LABEL" --arg protocol "$STRICT_PROTOCOL" '
     (.spec.replicas // 1) as $desired |
@@ -71,9 +91,9 @@ proxy_cohort_ready() {
 
 proxy_cohort_legacy() {
   local deployment pods
-  deployment="$("$KUBECTL_BIN" --context="$CONTEXT" get deployment rpc-proxy \
+  deployment="$(bounded_kubectl_get proxy-legacy-deployment deployment rpc-proxy \
     -n "$RPC_PROXY_NAMESPACE" -o json 2>/dev/null)" || return 1
-  pods="$("$KUBECTL_BIN" --context="$CONTEXT" get pods -n "$RPC_PROXY_NAMESPACE" \
+  pods="$(bounded_kubectl_get proxy-legacy-pods pods -n "$RPC_PROXY_NAMESPACE" \
     -l app=rpc-proxy -o json 2>/dev/null)" || return 1
   jq -e --arg label "$PROTOCOL_LABEL" --arg protocol "$STRICT_PROTOCOL" '
     (.spec.replicas // 1) as $desired |
@@ -99,14 +119,14 @@ proxy_cohort_legacy() {
 
 host_cohort_legacy() {
   local hcc hcc_pods deployments strict_pods
-  hcc="$("$KUBECTL_BIN" --context="$CONTEXT" get deployment host-context-controller \
+  hcc="$(bounded_kubectl_get host-hcc-deployment deployment host-context-controller \
     -n "$CONTROL_PLANE_NAMESPACE" -o json 2>/dev/null)" || return 1
-  hcc_pods="$("$KUBECTL_BIN" --context="$CONTEXT" get pods \
+  hcc_pods="$(bounded_kubectl_get host-hcc-pods pods \
     -n "$CONTROL_PLANE_NAMESPACE" -l app=host-context-controller -o json 2>/dev/null)" || return 1
-  deployments="$("$KUBECTL_BIN" --context="$CONTEXT" get deployments \
+  deployments="$(bounded_kubectl_get host-deployments deployments \
     -n "$HOST_NAMESPACE" -l clerum.io/managed-by=host-context-controller \
     -o json 2>/dev/null)" || return 1
-  strict_pods="$("$KUBECTL_BIN" --context="$CONTEXT" get pods -n "$HOST_NAMESPACE" \
+  strict_pods="$(bounded_kubectl_get host-strict-pods pods -n "$HOST_NAMESPACE" \
     -l "$PROTOCOL_LABEL=$STRICT_PROTOCOL" -o json 2>/dev/null)" || return 1
   jq -e --arg protocolKey 'CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL' \
     --arg markerKey 'clerum.io/host-runtime-edge-protocol' \
@@ -146,7 +166,6 @@ host_cohort_legacy() {
   jq -e '.items | length == 0' <<<"$strict_pods" >/dev/null
 }
 
-deadline=$((SECONDS + TIMEOUT_SECONDS))
 while (( SECONDS <= deadline )); do
   if [[ "$MODE" == "wait-proxy" ]] && proxy_cohort_ready; then
     echo "RPC Proxy dedicated-header cohort is fully Ready in $RPC_PROXY_NAMESPACE"

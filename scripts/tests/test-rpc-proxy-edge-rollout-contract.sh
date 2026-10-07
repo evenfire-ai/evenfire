@@ -28,6 +28,11 @@ strict='dedicated-header-v1'
 scenario="${FAKE_SCENARIO:-proxy-strict}"
 protocol="${FAKE_HCC_PROTOCOL:-dedicated-header-v1}"
 
+if [[ "$scenario" == 'blocked-read' ]]; then
+  printf '%s\n' "$$" >"${FAKE_CHILD_PID:?missing fake child pid path}"
+  sleep 10
+fi
+
 if [[ "$args" == *' kustomize '* ]]; then
   target_proxy="${FAKE_TARGET_PROXY:-dedicated-header-v1}"
   target_host="${FAKE_TARGET_HOST:-dedicated-header-v1}"
@@ -187,6 +192,22 @@ if run_gate proxy-mixed dedicated-header-v1 wait-proxy >/dev/null 2>&1; then fai
 if run_gate proxy-zero dedicated-header-v1 wait-proxy >/dev/null 2>&1; then fail 'zero Proxy replicas passed'; fi
 if run_gate proxy-terminating dedicated-header-v1 wait-proxy >/dev/null 2>&1; then fail 'terminating old Proxy pod passed'; fi
 pass 'upgrade gate accepts only the full current Ready strict Proxy cohort'
+
+blocked_pid="${TMP}/blocked-kubectl.pid"
+started="$(date +%s)"
+if FAKE_SCENARIO=blocked-read FAKE_HCC_PROTOCOL=dedicated-header-v1 FAKE_LOG="$FAKE_LOG" \
+  FAKE_CHILD_PID="$blocked_pid" KUBECTL_BIN="$FAKE_KUBECTL" \
+  bash "$GATE" wait-proxy --context fixture-context --timeout-seconds 1 --poll-seconds 1 \
+    >/dev/null 2>&1; then
+  fail 'blocking Kubernetes read unexpectedly passed'
+fi
+elapsed=$(( $(date +%s) - started ))
+(( elapsed <= 3 )) || fail "blocking Kubernetes read exceeded gate deadline: ${elapsed}s"
+[[ -s "$blocked_pid" ]] || fail 'blocking Kubernetes read did not start'
+if kill -0 "$(cat "$blocked_pid")" 2>/dev/null; then
+  fail 'deadline runner left its owned blocking Kubernetes child alive'
+fi
+pass 'gate deadline bounds and reaps a blocking Kubernetes read'
 
 run_gate hosts-legacy legacy-headers wait-hosts-legacy >/dev/null || fail 'legacy Host cohort rejected'
 if run_gate hosts-strict legacy-headers wait-hosts-legacy >/dev/null 2>&1; then fail 'strict Host cohort passed rollback gate'; fi
