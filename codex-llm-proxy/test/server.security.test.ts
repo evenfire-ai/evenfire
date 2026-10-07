@@ -2516,9 +2516,8 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
     const warn = vi.spyOn(logger, 'warn')
     const held: Array<() => void> = []
     const waiting: Array<Promise<() => void>> = []
-    // The gate grants a freed slot to whichever waiter polls first, not in
-    // queue order. Cleanup therefore aborts every waiter before it frees the
-    // held slots, so no waiter can take a slot that cleanup would then wait on.
+    // Cleanup aborts every waiter before it frees the held slots, so no
+    // waiter takes a slot that cleanup would then wait on.
     const drain = new AbortController()
     try {
       for (let i = 0; i < VISUAL_STREAM_LIMITS.maxConcurrentStreams; i += 1) {

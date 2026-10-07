@@ -191,9 +191,16 @@ export function assertBoundedIdleTimeout(idleTimeoutMs: number | undefined): num
   return Math.min(requested, STREAM_LIMITS.upstreamIdleTimeoutMs)
 }
 
+/**
+ * A queued stream-gate caller. `grant` hands it the slot a release passes on
+ * and returns false, after refusing it, when its wait already reached its
+ * bound.
+ */
+type StreamWaiter = { grant: (release: () => void) => boolean }
+
 export class StreamGate {
   private running = 0
-  private queued = 0
+  private readonly waiters: StreamWaiter[] = []
 
   constructor(
     private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
@@ -223,17 +230,21 @@ export class StreamGate {
   }
 
   /**
-   * Take a stream slot. When `signal` aborts (client disconnected) while the
-   * caller is still queued, the waiter is rejected and its queue slot freed, so
-   * a dropped client never proceeds to redeem an attempt. A waiter still
-   * queued after `maxQueueWaitMs`, or at `deadlineAt` (epoch ms) when that
-   * comes first, is rejected the same way (#739 D1). The bound is fixed when
-   * the caller queues, as the smaller of the two, and measured on the
-   * monotonic clock from then on. A deadline timer settles the waiter at the
-   * bound, and a poll that runs after the bound checks the elapsed wait before
-   * the slot count, so a slot that frees after the bound does not admit it
-   * even when the event loop stalled across the bound. A free slot is granted
-   * at once whatever the deadline; the caller checks a deadline already past.
+   * Take a stream slot. Waiters are granted in arrival order: a release hands
+   * its slot straight to the oldest waiter, and a new caller queues behind the
+   * waiters instead of taking a slot ahead of them. The returned release is
+   * idempotent. When `signal` aborts (client disconnected) while the caller is
+   * still queued, the waiter is rejected and removed, so a dropped client never
+   * proceeds to redeem an attempt. A waiter still queued after
+   * `maxQueueWaitMs`, or at `deadlineAt` (epoch ms) when that comes first, is
+   * rejected and removed the same way (#739 D1). The bound is fixed when the
+   * caller queues, as the smaller of the two, and measured on the monotonic
+   * clock from then on. A deadline timer settles the waiter at the bound, and
+   * a release that reaches a waiter after the bound checks the elapsed wait
+   * first and passes the slot on to the next waiter, so a slot that frees after
+   * the bound does not admit it even when the event loop stalled across the
+   * bound. A free slot with nobody queued is granted at once whatever the
+   * deadline; the caller checks a deadline already past.
    *
    * The refusal names which bound ran out. The gate's own bound is
    * `maxQueueWaitMs` after the enqueue, or after `queueWaitStartedAt` (epoch
@@ -261,72 +272,79 @@ export class StreamGate {
       )
     }
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted', 'aborted')
-    if (this.running >= this.maxConcurrent) {
-      if (this.queued >= this.maxQueued)
-        throw new RequestLimitError('stream queue is full', 'queue_full', this.queueCapacityCode)
-      this.queued += 1
-      try {
-        await new Promise<void>((resolve, reject) => {
-          let poll: ReturnType<typeof setTimeout> | undefined
-          const settle = () => {
-            if (poll !== undefined) clearTimeout(poll)
-            clearTimeout(deadline)
-            signal?.removeEventListener('abort', onAbort)
-          }
-          const onAbort = () => {
-            settle()
-            reject(new RequestLimitError('stream request was aborted', 'aborted'))
-          }
-          const queuedAt = performance.now()
-          const enqueuedAt = Date.now()
-          const ownBoundAt = (queueWaitStartedAt ?? enqueuedAt) + this.maxQueueWaitMs
-          const deadlineGoverns =
-            deadlineAt !== undefined &&
-            (queueWaitStartedAt === undefined ? deadlineAt <= ownBoundAt : deadlineAt < ownBoundAt)
-          // No waiter stays queued longer than maxQueueWaitMs after the enqueue.
-          const boundAt = deadlineAt !== undefined && deadlineGoverns ? deadlineAt : ownBoundAt
-          const waitBoundMs = Math.min(this.maxQueueWaitMs, boundAt - enqueuedAt)
-          const expire = () => {
-            settle()
-            reject(
-              new RequestLimitError(
-                'stream queue wait exceeded',
-                deadlineGoverns ? 'deadline' : 'queue_wait',
-                deadlineGoverns ? 'provider_unavailable' : this.queueCapacityCode
-              )
-            )
-          }
-          const deadline = setTimeout(expire, Math.max(0, waitBoundMs))
-          const wait = () => {
-            // After the event loop stalls, a poll and the deadline can both be
-            // overdue, and Node runs the poll first because it was due first.
-            if (performance.now() - queuedAt >= waitBoundMs) {
-              expire()
-              return
-            }
-            if (this.running < this.maxConcurrent) {
-              settle()
-              resolve()
-              return
-            }
-            poll = setTimeout(wait, 10)
-          }
-          signal?.addEventListener('abort', onAbort, { once: true })
-          wait()
-        })
-      } finally {
-        this.queued -= 1
-      }
+    if (this.waiters.length === 0 && this.running < this.maxConcurrent) {
+      this.running += 1
+      return this.slotRelease()
     }
-    this.running += 1
+    if (this.waiters.length >= this.maxQueued)
+      throw new RequestLimitError('stream queue is full', 'queue_full', this.queueCapacityCode)
+    return new Promise<() => void>((resolve, reject) => {
+      const leave = () => {
+        const index = this.waiters.indexOf(waiter)
+        if (index !== -1) this.waiters.splice(index, 1)
+        clearTimeout(deadline)
+        signal?.removeEventListener('abort', onAbort)
+      }
+      const onAbort = () => {
+        leave()
+        reject(new RequestLimitError('stream request was aborted', 'aborted'))
+      }
+      const queuedAt = performance.now()
+      const enqueuedAt = Date.now()
+      const ownBoundAt = (queueWaitStartedAt ?? enqueuedAt) + this.maxQueueWaitMs
+      const deadlineGoverns =
+        deadlineAt !== undefined &&
+        (queueWaitStartedAt === undefined ? deadlineAt <= ownBoundAt : deadlineAt < ownBoundAt)
+      // No waiter stays queued longer than maxQueueWaitMs after the enqueue.
+      const boundAt = deadlineAt !== undefined && deadlineGoverns ? deadlineAt : ownBoundAt
+      const waitBoundMs = Math.min(this.maxQueueWaitMs, boundAt - enqueuedAt)
+      const expire = () => {
+        leave()
+        reject(
+          new RequestLimitError(
+            'stream queue wait exceeded',
+            deadlineGoverns ? 'deadline' : 'queue_wait',
+            deadlineGoverns ? 'provider_unavailable' : this.queueCapacityCode
+          )
+        )
+      }
+      const waiter: StreamWaiter = {
+        grant: release => {
+          // After the event loop stalls, a release can run while the deadline
+          // timer is overdue but has not fired yet.
+          if (performance.now() - queuedAt >= waitBoundMs) {
+            expire()
+            return false
+          }
+          leave()
+          resolve(release)
+          return true
+        },
+      }
+      const deadline = setTimeout(expire, Math.max(0, waitBoundMs))
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.waiters.push(waiter)
+      if (waitBoundMs <= 0) expire()
+    })
+  }
+
+  private slotRelease(): () => void {
+    let released = false
     return () => {
-      this.running = Math.max(0, this.running - 1)
+      if (released) return
+      released = true
+      // The slot passes to the oldest waiter still inside its bound, so
+      // `running` stays the same; it is freed only when nobody can take it.
+      while (this.waiters.length > 0) {
+        if (this.waiters[0]!.grant(this.slotRelease())) return
+      }
+      this.running -= 1
     }
   }
 
   /** Observable occupancy for tests. Production callers must not branch on this. */
   snapshot(): { running: number; queued: number } {
-    return { running: this.running, queued: this.queued }
+    return { running: this.running, queued: this.waiters.length }
   }
 }
 
