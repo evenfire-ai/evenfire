@@ -1372,7 +1372,7 @@ export function useAgentChatController({
     }
     setChatListLoading(true)
     ;(async () => {
-      const result = await loadChatList(selectedAgent)
+      const result = await loadChatList(selectedAgent, selectionIntentRevision)
       if (cancelled || isHostAccessBlocked(selectedAgent)) return
       setChatListLoading(false)
       // A newer selection intent, including an explicit blank New chat, owns

@@ -503,7 +503,7 @@ export function useChatListController({
     async (
       agentRef: string,
       requestGeneration: number,
-      selectionIntentRevisionAtRequest: number | undefined
+      selectionIntentRevisionAtRequest: number
     ): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
       const authorityScopeGeneration = authorityScopeGenerationRef.current
       const authorityScopeAtRequest = currentAuthorityScopeRef.current
@@ -640,7 +640,6 @@ export function useChatListController({
           activeChatId !== latestServerSession.chatId &&
           serverIsNewerThanSelection &&
           currentHost.shouldAutoSelectLatest() &&
-          selectionIntentRevisionAtRequest !== undefined &&
           currentHost.getSelectionIntentRevision() === selectionIntentRevisionAtRequest &&
           !suppressAutoSelection
         ) {
@@ -815,11 +814,13 @@ export function useChatListController({
   ])
 
   const loadChatList = useCallback(
-    async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
+    async (
+      agentRef: string,
+      selectionIntentRevisionAtRequest: number
+    ): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
       const requestGeneration = ++requestGenerationRef.current
       // A retry remains part of this logical load, so it must keep the selection
       // authority captured before the first attempt rather than adopt a newer intent.
-      const selectionIntentRevisionAtRequest = host.current?.getSelectionIntentRevision()
       // One retry with a short backoff: during boot a concurrent team-switch /
       // access-catalog refresh can momentarily rebind the main-process chat
       // store, rejecting `getIndex` with "Not authenticated". Swallowing that
