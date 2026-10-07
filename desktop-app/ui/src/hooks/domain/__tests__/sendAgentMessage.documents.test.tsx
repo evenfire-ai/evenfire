@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
 import { createHash } from 'node:crypto'
-import { getComposerDraft } from '@lib/composerDraftStore'
+import { getComposerDraft, setComposerDraft } from '@lib/composerDraftStore'
 import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { HostModelsResult } from '../../../../../src/types'
 import { renderController } from './__fixtures__/controllerHarness'
@@ -320,6 +320,45 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
     expect(rendered.result.current.failedAgentSend?.files).toHaveLength(2)
   })
 
+  it('recovers only the files the Host did not receive after a partial drop', async () => {
+    const rendered = renderController()
+    await settleMount()
+    act(() => {
+      rendered.result.current.handleAddComposerFiles(
+        [
+          new File([NOTES_BYTES], 'a.txt', { type: 'text/plain' }),
+          new File([NOTES_BYTES], 'b.txt', { type: 'text/plain' }),
+        ],
+        ''
+      )
+    })
+    await waitFor(() =>
+      expect(rendered.result.current.composerFileAttachments.map(item => item.status)).toEqual([
+        'ready',
+        'ready',
+      ])
+    )
+    const [delivered, dropped] = rendered.result.current.composerFileAttachments
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({
+      response: 'done',
+      acceptedAttachmentIds: [delivered!.id],
+    })
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('Summarize these')
+    })
+    // Witness: the failure is a files-only recovery holding both documents.
+    expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
+    expect(rendered.result.current.failedAgentSend?.files).toHaveLength(2)
+
+    act(() => rendered.result.current.handleRecoverFailedAgentSend())
+
+    // The Host read a.txt already: only b.txt comes back to attach again.
+    expect(rendered.result.current.composerFileAttachments.map(item => item.id)).toEqual([
+      dropped!.id,
+    ])
+    expect(rendered.result.current.failedAgentSend).toBeNull()
+  })
+
   it('async task accepted without listing the file: keeps the snapshot after the task succeeds', async () => {
     clerum.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'all done' })
     const rendered = renderController()
@@ -364,6 +403,49 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
     expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
     // The task answered the text: only the files are left to recover.
     expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
+  })
+
+  it('async task accepted without listing the file, then failed: the text comes back with the files', async () => {
+    clerum.rpc.getTaskResult.mockResolvedValue({
+      status: 'failed',
+      error: { message: 'LLM down', code: 'provider_error' },
+    })
+    const rendered = renderController()
+    await settleMount()
+    const file = await addReadyFile(rendered)
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({
+      taskId: 'task-doc',
+      acceptedAttachmentIds: [],
+    })
+    const send = act(async () => {
+      await rendered.result.current.handleSendAgentMessage('Summarize this')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true))
+    await send
+    // Witness: the drop was recorded first, as a files-only recovery.
+    expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
+    const chat = rendered.result.current.activeChatId
+
+    await act(async () => {
+      clerum.emitTaskProgress('task-doc', {
+        type: 'terminal',
+        data: { taskId: 'task-doc', status: 'failed' },
+      })
+    })
+
+    // Witness that the failure branch ran: its message replaced the drop notice.
+    await waitFor(() => expect(rendered.result.current.failedAgentSend?.message).toBe('LLM down'))
+    // The task answered nothing, so this is a rejected send: text and files.
+    expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(false)
+    expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
+
+    act(() => rendered.result.current.handleRecoverFailedAgentSend())
+
+    expect(getComposerDraft(chat, 'agent-x')).toBe('Summarize this')
+    expect(rendered.result.current.composerFileAttachments).toEqual([
+      expect.objectContaining({ id: file.id, status: 'ready', digestHex: NOTES_DIGEST }),
+    ])
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
   })
 
   it('titles a new chat from both the images and the documents of a send without text', async () => {
@@ -489,5 +571,41 @@ describe('sendAgentMessage — a message answered without its documents', () => 
     expect(getComposerDraft(chat, 'agent-x')).toBe('')
     expect(rendered.result.current.failedAgentSend).toBeNull()
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('recovers the files next to a new draft and keeps the draft', async () => {
+    const rendered = renderController()
+    await settleMount()
+    const file = await answeredWithoutFiles(rendered)
+    const chat = rendered.result.current.activeChatId
+    act(() => setComposerDraft(chat, 'A new question', 'agent-x'))
+
+    act(() => rendered.result.current.handleRecoverFailedAgentSend())
+
+    expect(rendered.result.current.composerFileAttachments).toEqual([
+      expect.objectContaining({ id: file.id, status: 'ready' }),
+    ])
+    expect(getComposerDraft(chat, 'agent-x')).toBe('A new question')
+    expect(rendered.result.current.failedAgentSend).toBeNull()
+  })
+
+  it('does not replace documents already in the composer', async () => {
+    const rendered = renderController()
+    await settleMount()
+    const file = await answeredWithoutFiles(rendered)
+    const other = await addReadyFile(
+      rendered,
+      new File([new TextEncoder().encode('other')], 'other.txt', { type: 'text/plain' })
+    )
+
+    act(() => rendered.result.current.handleRecoverFailedAgentSend())
+
+    // Witness: the refusal was shown, so the recover path ran.
+    expect(rendered.spies.pushToast).toHaveBeenCalledWith(
+      'Remove the documents in the composer before recovering the earlier files.',
+      'error'
+    )
+    expect(rendered.result.current.composerFileAttachments.map(item => item.id)).toEqual([other.id])
+    expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
   })
 })

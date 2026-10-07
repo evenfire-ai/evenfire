@@ -3221,11 +3221,13 @@ export function useAgentChatController({
         // only in this composer, so the send keeps its snapshot and shows the
         // failure instead of looking delivered.
         let filesNotDeliveredMessage: string | null = null
+        let undeliveredFileIds: string[] = []
         if (ackOk && !ackIsEmpty && effectiveFiles.length > 0) {
           const acceptedAttachmentIds = new Set<string>(
             Array.isArray(response.acceptedAttachmentIds) ? response.acceptedAttachmentIds : []
           )
           const undelivered = effectiveFiles.filter(file => !acceptedAttachmentIds.has(file.id))
+          undeliveredFileIds = undelivered.map(file => file.id)
           if (undelivered.length > 0) {
             filesNotDeliveredMessage =
               undelivered.length === effectiveFiles.length
@@ -3319,7 +3321,8 @@ export function useAgentChatController({
               userMessageId,
               'host_files_dropped',
               filesNotDeliveredMessage,
-              'upstream'
+              'upstream',
+              undeliveredFileIds
             )
             updateMessageActivity(sendAgent, userMessageId, previous => ({
               ...previous,
@@ -3361,7 +3364,13 @@ export function useAgentChatController({
         if (filesNotDeliveredMessage) {
           // The task runs without the documents; the snapshot survives its
           // success (see releaseSucceededRetainedSendsForTask).
-          markRetainedSendReason(taskId, 'host_files_dropped', filesNotDeliveredMessage, 'upstream')
+          markRetainedSendReason(
+            taskId,
+            'host_files_dropped',
+            filesNotDeliveredMessage,
+            'upstream',
+            undeliveredFileIds
+          )
         }
         activityTaskToMessageByAgentRef.current[sendAgent] = {
           ...(activityTaskToMessageByAgentRef.current[sendAgent] || {}),
@@ -3631,6 +3640,23 @@ export function useAgentChatController({
       visibleFailure.chatId !== activeChatVisibilityRef.current.activeChatId
     )
       return
+    if (visibleFailure.answeredWithoutFiles) {
+      // The text and the other attachments were answered: bring back only the
+      // documents the Host never received, and send nothing. Restoring replaces
+      // the composer's documents, so only documents already there block it; a
+      // new draft or other attachments stay as they are.
+      if (composerFileAttachments.length) {
+        pushToast(
+          'Remove the documents in the composer before recovering the earlier files.',
+          'error'
+        )
+        return
+      }
+      const undelivered = new Set(visibleFailure.undeliveredFileIds ?? [])
+      handleRestoreComposerFiles(visibleFailure.files.filter(file => undelivered.has(file.id)))
+      handleDiscardFailedAgentSend()
+      return
+    }
     if (
       getComposerDraft(activeChatId, selectedAgent ?? undefined) ||
       composerImageAttachments.length ||
@@ -3638,13 +3664,6 @@ export function useAgentChatController({
       composerReferenceAttachments.length
     ) {
       pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
-      return
-    }
-    if (visibleFailure.answeredWithoutFiles) {
-      // The text and the other attachments were answered: bring back only the
-      // documents the Host never received, and send nothing.
-      handleRestoreComposerFiles(visibleFailure.files)
-      handleDiscardFailedAgentSend()
       return
     }
     setComposerDraft(activeChatId, visibleFailure.content, selectedAgent ?? undefined)

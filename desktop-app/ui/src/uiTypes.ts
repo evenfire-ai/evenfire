@@ -180,6 +180,11 @@ export type FailedAgentSend = {
    * Only the documents can be recovered; a retry would send the text again.
    */
   answeredWithoutFiles?: boolean
+  /**
+   * With `answeredWithoutFiles`: the documents the Host did not admit. The Host
+   * already read the others, so recovery brings back only these.
+   */
+  undeliveredFileIds?: string[]
 }
 
 export type HostConnectionTone = 'healthy' | 'degraded' | 'offline'

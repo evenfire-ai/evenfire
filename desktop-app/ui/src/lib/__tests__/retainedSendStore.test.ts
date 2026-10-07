@@ -105,9 +105,33 @@ describe('retainedSendStore — documents the Host never received (#678 D13)', (
     expect(held(store, ['chat-1/delivered'])).toEqual([])
   })
 
+  it('keeps the undelivered file ids only while the text counts as answered', () => {
+    const store = createRetainedSendStore(vi.fn())
+    store.retainSendSnapshot(
+      snapshot('with-files', 200, { reason: 'awaiting_terminal', failure: undefined })
+    )
+    store.attachTaskIdToRetainedSend('agent-x', 'chat-1', 'with-files', 'task-files')
+    store.markRetainedSendReason('task-files', 'host_files_dropped', 'Dropped.', 'upstream', ['b'])
+    // Witness: the drop recorded which document the Host did not admit.
+    const dropped = store.getRetainedSendSnapshot('agent-x', 'chat-1', 'with-files')
+    expect(dropped?.undeliveredFileIds).toEqual(['b'])
+
+    store.markRetainedSendReason('task-files', 'async_task_failed', 'Failed.', 'upstream')
+
+    // The text was not answered either: a retry sends every document again.
+    const failed = store.getRetainedSendSnapshot('agent-x', 'chat-1', 'with-files')
+    expect(failed?.reason).toBe('host_files_unsupported')
+    expect(failed).not.toHaveProperty('undeliveredFileIds')
+  })
+
   // Both reasons hold documents that exist nowhere else: a rejected send
   // (nothing answered) and a message answered without its documents.
   describe.each(['host_files_unsupported', 'host_files_dropped'] as const)('%s', reason => {
+    // A failure recorded after the drop means the text was not answered
+    // either: the snapshot becomes a rejected send, so the files stay held and
+    // the text and Retry come back.
+    const reasonAfterFailure = 'host_files_unsupported'
+
     it('keeps the snapshot of a task that succeeded without its files', () => {
       const store = createRetainedSendStore(vi.fn())
       store.retainSendSnapshot(snapshot('older', 100))
@@ -178,7 +202,7 @@ describe('retainedSendStore — documents the Host never received (#678 D13)', (
       expect(held(store, SEEDED)).toEqual(['chat-1/later'])
     })
 
-    it('a later task failure updates the message and keeps the undelivered-files reason', () => {
+    it('a later task failure updates the message and keeps the files held as a rejected send', () => {
       const store = createRetainedSendStore(vi.fn())
       store.retainSendSnapshot(
         snapshot('with-files', 200, { reason: 'awaiting_terminal', failure: undefined })
@@ -201,13 +225,13 @@ describe('retainedSendStore — documents the Host never received (#678 D13)', (
       const kept = store.getRetainedSendSnapshot('agent-x', 'chat-1', 'with-files')
       // Witness: the second mark ran and replaced the failure message.
       expect(kept?.failure).toEqual({ message: 'The task failed.', kind: 'upstream' })
-      expect(kept?.reason).toBe(reason)
+      expect(kept?.reason).toBe(reasonAfterFailure)
       // So the task's later success still keeps it.
       store.releaseSucceededRetainedSendsForTask('task-files')
       expect(held(store, ['chat-1/with-files'])).toEqual(['chat-1/with-files'])
     })
 
-    it('a later send failure updates the message and keeps the undelivered-files reason', () => {
+    it('a later send failure updates the message and keeps the files held as a rejected send', () => {
       const store = seedUndeliveredFiles()
 
       store.failRetainedSend(
@@ -221,7 +245,7 @@ describe('retainedSendStore — documents the Host never received (#678 D13)', (
 
       const kept = store.getRetainedSendSnapshot('agent-x', 'chat-1', 'undelivered')
       expect(kept?.failure).toEqual({ message: 'The stream was lost.', kind: 'network' })
-      expect(kept?.reason).toBe(reason)
+      expect(kept?.reason).toBe(reasonAfterFailure)
     })
   })
 })

@@ -42,6 +42,12 @@ export interface RetainedSendSnapshot {
   model?: string
   /** Why the snapshot is still retained (stable code for tests/telemetry). */
   reason: RetainedSendReason
+  /**
+   * Set only with `host_files_dropped`: the ids of the documents the Host did
+   * not admit. `files` keeps every document so a later failure can still retry
+   * the whole send; recovery after the answer brings back only these.
+   */
+  undeliveredFileIds?: string[]
   timestamp: number
   draftRevision: number
   failure?: { message: string; kind: FailedAgentSend['kind'] }
@@ -199,15 +205,39 @@ export function createRetainedSendStore(changed: () => void) {
   }
 
   /**
-   * A snapshot whose documents the Host never received keeps that reason when a
+   * A snapshot whose documents the Host never received keeps holding them when a
    * later failure is recorded: the reason is what stops a later success from
-   * releasing files that exist nowhere else. Only the shown failure changes.
+   * releasing files that exist nowhere else. A failure after `host_files_dropped`
+   * means the text was not answered either, so the snapshot becomes a rejected
+   * send (`host_files_unsupported`) and Retry and text recovery come back.
    */
   function nextReason(
     snapshot: RetainedSendSnapshot,
     reason: RetainedSendReason
   ): RetainedSendReason {
+    if (snapshot.reason === 'host_files_dropped' && reason !== 'host_files_dropped') {
+      return 'host_files_unsupported'
+    }
     return holdsUndeliveredFiles(snapshot.reason) ? snapshot.reason : reason
+  }
+
+  /** The failed snapshot, with the undelivered ids kept only while the text counts as answered. */
+  function withFailure(
+    snapshot: RetainedSendSnapshot,
+    reason: RetainedSendReason,
+    message: string,
+    kind: FailedAgentSend['kind'],
+    undeliveredFileIds: string[] | undefined
+  ): RetainedSendSnapshot {
+    const { undeliveredFileIds: previousIds, ...rest } = snapshot
+    const next = nextReason(snapshot, reason)
+    const ids = next === 'host_files_dropped' ? (undeliveredFileIds ?? previousIds) : undefined
+    return {
+      ...rest,
+      reason: next,
+      ...(ids ? { undeliveredFileIds: ids } : {}),
+      failure: { message, kind },
+    }
   }
 
   /**
@@ -218,15 +248,12 @@ export function createRetainedSendStore(changed: () => void) {
     taskId: string,
     reason: RetainedSendReason,
     message: string,
-    kind: FailedAgentSend['kind']
+    kind: FailedAgentSend['kind'],
+    undeliveredFileIds?: string[]
   ): void {
     for (const [key, snapshot] of snapshots) {
       if (snapshot.taskId !== taskId) continue
-      snapshots.set(key, {
-        ...snapshot,
-        reason: nextReason(snapshot, reason),
-        failure: { message, kind },
-      })
+      snapshots.set(key, withFailure(snapshot, reason, message, kind, undeliveredFileIds))
       changed()
     }
   }
@@ -243,16 +270,13 @@ export function createRetainedSendStore(changed: () => void) {
     userMessageId: string,
     reason: RetainedSendReason,
     message: string,
-    kind: FailedAgentSend['kind']
+    kind: FailedAgentSend['kind'],
+    undeliveredFileIds?: string[]
   ): void {
     const key = keyFor(agentRef, chatId, userMessageId)
     const existing = snapshots.get(key)
     if (!existing) return
-    snapshots.set(key, {
-      ...existing,
-      reason: nextReason(existing, reason),
-      failure: { message, kind },
-    })
+    snapshots.set(key, withFailure(existing, reason, message, kind, undeliveredFileIds))
     changed()
   }
   return {
