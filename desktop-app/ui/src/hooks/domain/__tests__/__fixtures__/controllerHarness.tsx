@@ -109,7 +109,12 @@ export function renderController(
       } as ControllerParams)
       useLayoutEffect(() => {
         options.onLayoutCommit?.(controller)
-      }, [controller.activeChatId, controller.chatMessages, options.onLayoutCommit])
+      }, [
+        controller.activeChatId,
+        controller.chatMessages,
+        controller.chatMessagesLoading,
+        options.onLayoutCommit,
+      ])
       return controller
     },
     {

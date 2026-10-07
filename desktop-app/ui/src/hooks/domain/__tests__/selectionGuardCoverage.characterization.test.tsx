@@ -7,8 +7,9 @@ import {
   setComposerDraft,
 } from '@lib/composerDraftStore'
 import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
+import { makeTaskKey } from '../../../contexts/AgentTaskTrackerContext/types'
 import type { ComposerImageAttachment } from '../../../uiTypes'
-import { deferred } from './__fixtures__/catalogFixtures'
+import { deferred, serverSessionMessages } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -78,6 +79,27 @@ async function startSpecificIndexLoad(
   })
   await waitFor(() => expect(clerum.chat.getIndex.mock.calls.length).toBeGreaterThan(callCount))
   return { heldIndex, chatIndex: await clerum.readIndex('agent-x') }
+}
+
+function holdSessionMessages(chatId: string) {
+  const original = clerum.rpc.loadSessionMessages.getMockImplementation()
+  if (!original) throw new Error('Expected the loadSessionMessages test mock implementation')
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  const returned = deferred<void>()
+  let held = false
+  clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+    const requestedChatId = args[2]
+    if (requestedChatId === chatId && !held) {
+      held = true
+      entered.resolve()
+      await release.promise
+    }
+    const result = await original(...args)
+    if (held && requestedChatId === chatId) returned.resolve()
+    return result
+  })
+  return { entered, release, returned }
 }
 
 function holdLastActive(chatId: string) {
@@ -201,11 +223,18 @@ describe('selection intent and continuation guards', () => {
     'does not let an older %s completion clear a newer selection spinner',
     async mode => {
       clerum.rpc.listSessions.mockResolvedValue(remoteCatalog())
-      const heldLastActive = holdLastActive('catalog-latest')
-      const controller = renderController({
-        navItem: mode === 'latest' ? 'agents' : 'chat',
-        loadMenuData: false,
-      })
+      clerum.rpc.loadSessionMessages.mockResolvedValue(
+        await serverSessionMessages('agent-x', 'catalog-latest')
+      )
+      const heldSession = holdSessionMessages('catalog-latest')
+      const observedLoading: boolean[] = []
+      const controller = renderController(
+        {
+          navItem: mode === 'latest' ? 'agents' : 'chat',
+          loadMenuData: false,
+        },
+        { onLayoutCommit: view => observedLoading.push(view.chatMessagesLoading) }
+      )
       if (mode === 'latest') {
         await waitForListIdle(controller)
         await act(async () => {
@@ -216,24 +245,33 @@ describe('selection intent and continuation guards', () => {
         })
       }
       try {
-        await heldLastActive.entered.promise
+        await heldSession.entered.promise
+        const latestKey = makeTaskKey('agent-x', 'catalog-latest')
+        expect(controller.result.current.sessionStateByChatKey[latestKey]?.syncing).toBe(true)
         expect(controller.result.current.activeChatId).toBe('catalog-latest')
-        expect(controller.result.current.chatMessagesLoading).toBe(true)
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
 
+        const loadingObservationStart = observedLoading.length
         act(() => controller.result.current.setPendingChatSelection('agent-x', 'newer-chat'))
         expect(controller.result.current.activeChatId).toBe('newer-chat')
         expect(controller.result.current.chatMessagesLoading).toBe(true)
 
         await act(async () => {
-          heldLastActive.release.resolve()
-          await heldLastActive.returned.promise
+          heldSession.release.resolve()
+          await heldSession.returned.promise
+        })
+        await waitFor(() =>
+          expect(controller.result.current.sessionStateByChatKey[latestKey]?.syncing).toBe(false)
+        )
+        await act(async () => {
           await new Promise(resolve => setTimeout(resolve, 0))
         })
         expect(controller.result.current.activeChatId).toBe('newer-chat')
         expect(controller.result.current.chatMessages).toEqual([])
         expect(controller.result.current.chatMessagesLoading).toBe(true)
+        expect(observedLoading.slice(loadingObservationStart)).not.toContain(false)
       } finally {
-        heldLastActive.release.resolve()
+        heldSession.release.resolve()
         controller.unmount()
       }
     }
