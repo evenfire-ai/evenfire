@@ -15,8 +15,8 @@ import { SimpleEventEmitter } from '../eventEmitter'
 import { buildLoopConfig } from '../loopConfig'
 import { runToolUseLoop } from '../toolUseLoop'
 
-const TOKEN = 'ghp_Q1w2E3r4T5y6U7i8O9p0A1s2D3f4G5h6J7k8'
-const TOKEN_BODY = TOKEN.slice('ghp_'.length)
+const GITHUB_PAT = 'ghp_Q1w2E3r4T5y6U7i8O9p0A1s2D3f4G5h6J7k8'
+const GITHUB_PAT_BODY = GITHUB_PAT.slice('ghp_'.length)
 const UPSTREAM = 'upstream refused the request with credential'
 
 function throwingTool(): Tool & { execute: ReturnType<typeof vi.fn> } {
@@ -25,7 +25,7 @@ function throwingTool(): Tool & { execute: ReturnType<typeof vi.fn> } {
     description: () => 'Fetch a repository',
     parametersSchema: () => ({ type: 'object', properties: {} }),
     execute: vi.fn(async (): Promise<ToolOutput> => {
-      throw new Error(`${UPSTREAM} ${TOKEN}`)
+      throw new Error(`${UPSTREAM} ${GITHUB_PAT}`)
     }),
     requiresSanitization: () => true,
     requiresApproval: () => false,
@@ -94,16 +94,16 @@ describe('executeSingleTool — thrown error text is sanitized (A15 item 6)', ()
     expect(transformed.isError).toBe(true)
     expect(transformed.content).toContain(`Tool execution failed: ${UPSTREAM}`)
     expect(transformed.content).toContain('[REDACTED]')
-    expect(transformed.content).not.toContain(TOKEN_BODY)
+    expect(transformed.content).not.toContain(GITHUB_PAT_BODY)
 
     // The result and the messages the model receives.
     const toModel = resultsForModel[0]![0]!
     expect(toModel).toMatchObject({ tool_call_id: 'tc_1', is_error: true })
     expect(toModel.content).toContain(`Tool execution failed: ${UPSTREAM}`)
-    expect(toModel.content).not.toContain(TOKEN_BODY)
+    expect(toModel.content).not.toContain(GITHUB_PAT_BODY)
     const toolMessages = messagesForModel[0]!.filter(message => message.role === 'tool')
     expect(toolMessages).toHaveLength(1)
     expect(JSON.stringify(toolMessages[0])).toContain(UPSTREAM)
-    expect(JSON.stringify(messagesForModel[0])).not.toContain(TOKEN_BODY)
+    expect(JSON.stringify(messagesForModel[0])).not.toContain(GITHUB_PAT_BODY)
   })
 })

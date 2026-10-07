@@ -263,8 +263,8 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
   // unless the tool masked it against the whole text first.
   it('masks a ConfigStore secret split across pages with the turn secretEntriesProvider', async () => {
     const TOOL = 'clerum__attachment_read'
-    const secret = 'CfgLiteralSecretValue9f8e7d'
-    const secretEntriesProvider = () => [{ name: 'CFG_TOKEN', value: secret }]
+    const configLiteral = 'CfgLiteralSecretValue9f8e7d'
+    const secretEntriesProvider = () => [{ name: 'CFG_TOKEN', value: configLiteral }]
     // What the loop applies to every page: the same ConfigStore secrets.
     const loopSafety = new BasicSafety(secretEntriesProvider)
     const context = {
@@ -273,7 +273,7 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
         Math.ceil(Buffer.byteLength(loopSafety.previewOutputForLlm(TOOL, raw), 'utf8') / 4) + 4,
     }
     const before = 'intro text line\n'
-    const text = before + secret + '\ntrailing words here\n'
+    const text = before + configLiteral + '\ntrailing words here\n'
     const bytes = Buffer.from(text)
     const validated = validateIncomingAttachments(
       [
@@ -320,8 +320,8 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
     }
     /** The first 6-character piece of the secret that `visible` shows, if any. */
     const leakedPiece = (visible: string): string | null => {
-      for (let i = 0; i + 6 <= secret.length; i++) {
-        if (visible.includes(secret.slice(i, i + 6))) return secret.slice(i, i + 6)
+      for (let i = 0; i + 6 <= configLiteral.length; i++) {
+        if (visible.includes(configLiteral.slice(i, i + 6))) return configLiteral.slice(i, i + 6)
       }
       return null
     }
@@ -337,7 +337,7 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
     expect(leakedPiece(whole.visible)).toBeNull()
 
     // Split: the first page ends in the middle of the literal.
-    const splitAt = Buffer.byteLength(before) + Math.floor(secret.length / 2)
+    const splitAt = Buffer.byteLength(before) + Math.floor(configLiteral.length / 2)
     const pages: Awaited<ReturnType<typeof readPage>>[] = []
     let offset = 0
     for (;;) {
