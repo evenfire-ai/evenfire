@@ -1,8 +1,9 @@
 // Business receipt contract shared by the approved-tools fixtures. The MCP
 // fixture server creates the receipt, the workflow fixture persists it as its
-// result artifact, and the fixture model
-// (codex-llm-proxy/test/approvedToolsUpstream.ts) reads it back from the Host.
-// One definition keeps the three from drifting apart.
+// result artifact, and the fixture models
+// (codex-llm-proxy/test/approvedToolsUpstream.ts and
+// grok-llm-proxy/test/approvedToolsUpstream.ts) read it back from the Host.
+// One definition keeps them from drifting apart.
 
 export const RECEIPT_TOOL = 'workitem_read_receipt'
 

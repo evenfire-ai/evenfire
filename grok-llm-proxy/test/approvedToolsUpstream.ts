@@ -1,6 +1,9 @@
 /** External model boundary for the isolated approved-tools E2E image only. */
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+// Shared with the MCP fixture server that creates the receipt and with the
+// Codex fixture upstream, so the three cannot drift apart.
+import { businessReceiptProblem } from '../../tests/e2e/fixtures/codex-subscription/approved-tools/business-receipt.mjs'
 
 type Row = Record<string, unknown>
 const COMPLETIONS = 'https://cli-chat-proxy.grok.com/v1/responses'
@@ -100,13 +103,11 @@ function receipt(exchange: Exchange, candidate: string): Row {
   )
     throw new Error('invocation_target_mismatch')
   const value = exchange.result
+  // callId is the MCP JSON-RPC request id: an integer from the Host's SDK
+  // client, a string from others. It is never used for correlation.
   if (
-    typeof value.businessId !== 'string' ||
-    !value.businessId ||
-    typeof value.runId !== 'string' ||
-    typeof value.callId !== 'string' ||
-    typeof value.tool !== 'string' ||
-    !candidate.endsWith(`__${value.tool}`)
+    businessReceiptProblem(value, 'mcp') !== null ||
+    !candidate.endsWith(`__${String(value.tool)}`)
   )
     throw new Error('missing_business_result')
   return value

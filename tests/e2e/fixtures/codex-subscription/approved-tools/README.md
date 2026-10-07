@@ -61,9 +61,10 @@ The fixture does not claim user or agent identity from model arguments.
 
 `business-receipt.mjs` holds this receipt contract. The server creates records
 with it, the approved-tools workflow fixture validates the receipt it persists
-with it, and the fixture model (`codex-llm-proxy/test/approvedToolsUpstream.ts`)
-rejects a business result that breaks it. Every image that runs one of them
-copies the module next to it.
+with it, and the fixture models (`codex-llm-proxy/test/approvedToolsUpstream.ts`
+and `grok-llm-proxy/test/approvedToolsUpstream.ts`) reject a business result
+that breaks it. Every image that runs one of them copies the module next to it;
+no image ships the Grok fixture model, which runs only in its unit tests.
 
 ## Responsibility and false-positive review
 
