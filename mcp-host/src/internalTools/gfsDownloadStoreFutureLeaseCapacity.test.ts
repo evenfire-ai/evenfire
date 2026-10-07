@@ -310,6 +310,8 @@ describe('future execution protection and whole admission capacity', () => {
       await store.releaseReceiptOwner(`${identity}-owner`, identity)
   })
 
+  // Seeding 64 durable copies can exhaust the generic 5s deadline on APFS.
+  // The fixture still performs real IO and verifies the unchanged default cap.
   it('keeps all default-cap small copies when current physical capacity is zero', async () => {
     const { root, store } = await setup({
       MCP_HOST_GFS_MAX_FILE_BYTES: '1024',
@@ -334,7 +336,7 @@ describe('future execution protection and whole admission capacity', () => {
     ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
     expect(store.debugUsage().files).toBe(64)
     for (const receipt of receipts) expect(store.debugRecord(receipt.id)).toBeDefined()
-  })
+  }, 15_000)
 
   it('respects pending active reservations before any cache-pressure effect', async () => {
     const { root, store } = await setup({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '1' })

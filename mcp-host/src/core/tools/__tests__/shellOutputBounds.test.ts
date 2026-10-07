@@ -135,11 +135,13 @@ it('releases the processing lease only after process-group termination', async (
   const marker = path.join(workspace, 'group-settled')
   const script = path.join(workspace, 'spawn-group-child.js')
   const releaseSawSettledMarker: boolean[] = []
+  // The leader must not exit while the descendant's ready marker is still
+  // open and empty: ShellTool then terminates the remaining process group.
   fs.writeFileSync(
     script,
     `const cp = require('child_process')\n` +
       `cp.spawn(process.execPath, ['-e', ${JSON.stringify(
-        `require('fs').writeFileSync(${JSON.stringify(marker)}, 'yes'); setInterval(() => {}, 1000)`
+        `const fs = require('fs'); const marker = ${JSON.stringify(marker)}; const pending = marker + '.tmp'; fs.writeFileSync(pending, 'yes'); fs.renameSync(pending, marker); setInterval(() => {}, 1000)`
       )}], { stdio: 'ignore' })\n` +
       `const timer = setInterval(() => {\n` +
       `  if (require('fs').existsSync(${JSON.stringify(marker)})) { clearInterval(timer); process.exit(0) }\n` +
@@ -152,7 +154,9 @@ it('releases the processing lease only after process-group termination', async (
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     }),
     releaseProcessingLease: async () => {
-      releaseSawSettledMarker.push(fs.existsSync(marker))
+      releaseSawSettledMarker.push(
+        fs.existsSync(marker) && fs.readFileSync(marker, 'utf8') === 'yes'
+      )
     },
   }
   const tool = new ShellTool(workspace, 5_000, ['PATH'], () => ({}), undefined, leases)

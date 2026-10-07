@@ -250,6 +250,8 @@ describe('GFS download store adversarial quota', () => {
     await store.releaseReceiptOwner('byte-owner', CALLER)
   })
 
+  // Seeding 64 durable copies approaches the generic 5s deadline on APFS.
+  // Keep real persistence and the default cap with a bounded fixture budget.
   it('denies the 65th pinned record at the host retained-file cap', async () => {
     const callers: string[] = []
     for (let callerIndex = 0; callerIndex < 8; callerIndex += 1) {
@@ -274,7 +276,7 @@ describe('GFS download store adversarial quota', () => {
     ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
     expect(store.debugUsage()).toMatchObject({ files: 64 })
     for (const caller of callers) await store.releaseReceiptOwner(`${caller}-owner`, caller)
-  })
+  }, 15_000)
 
   it('rolls back charge, owner pins, and active slots when mkdir fails with proven absence', async () => {
     await fs.chmod(callerRoot, 0o500)
