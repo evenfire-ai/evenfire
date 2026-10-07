@@ -22,7 +22,9 @@ import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
+import type { AttachmentReadLedger } from '../attachments/attachmentReadBudget'
 import { type ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
+import { BasicSafety } from '../safety/safety'
 import type { SessionSearchService } from '../sessionSearch'
 import type { SpilloverStorage } from '../spillover'
 import { ToolDefinition, ToolOutput } from '../types'
@@ -170,6 +172,16 @@ export class NativeToolRegistry implements ToolRegistry {
     attachmentOptions?: {
       maxBytes?: number
       secretEntriesProvider?: () => Array<{ name: string; value: string }>
+      /**
+       * C15/C16 — the turn-owned read ledger. Required (with
+       * `contextWindowTokens`) whenever a file attachment registers
+       * `clerum__attachment_read`: the tool refuses to run without an exact
+       * measurement and a bound, so a missing ledger must fail here, at
+       * registration, instead of mid-turn.
+       */
+      ledger?: AttachmentReadLedger
+      /** C15/C16 — effective context window the ledger derives its envelope from. */
+      contextWindowTokens?: number
     },
     spilloverStorage?: SpilloverStorage,
     sessionSearchService?: SessionSearchService,
@@ -304,19 +316,21 @@ export class NativeToolRegistry implements ToolRegistry {
           'NativeToolConfig.attachmentTextReadMaxBytes is required for file attachments'
         )
       }
-      const spilloverThresholdBytes = config.toolSpilloverThresholdBytes
-      if (spilloverThresholdBytes === undefined) {
+      const ledger = attachmentOptions?.ledger
+      const contextWindowTokens = attachmentOptions?.contextWindowTokens
+      if (!ledger || contextWindowTokens === undefined) {
         throw new Error(
-          'NativeToolConfig.toolSpilloverThresholdBytes is required for file attachments'
+          'NativeToolConfig attachment read wiring requires a turn ledger and contextWindowTokens for file attachments'
         )
       }
-      // The description names the threshold only where the loop can spill.
+      // The tool declares itself spillover-exempt: a page is bounded by
+      // `maxBytes`, so the loop ships it inline whether or not this turn has
+      // spillover storage (#678).
+      // Pages are redacted against the whole text with the same rules and
+      // ConfigStore secrets the loop's tool-output sanitizer applies.
+      const redactor = new BasicSafety(attachmentOptions?.secretEntriesProvider)
       this.register(
-        new AttachmentReadTool(
-          sourceMessage,
-          maxBytes,
-          spilloverStorage ? spilloverThresholdBytes : null
-        )
+        new AttachmentReadTool(sourceMessage, maxBytes, { contextWindowTokens, ledger, redactor })
       )
     }
 

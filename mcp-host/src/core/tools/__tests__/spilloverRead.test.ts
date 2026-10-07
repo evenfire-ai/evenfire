@@ -32,6 +32,10 @@ describe('SpilloverReadTool', () => {
     expect(tool.requiresApproval()).toBe(false)
   })
 
+  it('declares its output exempt from spillover, so reading a blob back never re-persists it', () => {
+    expect(tool.spilloverExempt?.()).toBe(true)
+  })
+
   it('returns the full blob content for a valid ref', async () => {
     const body = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
     const summary = await storage.maybePersist({

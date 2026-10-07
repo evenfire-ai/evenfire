@@ -745,6 +745,39 @@ for leaked in \
     exit 1
   fi
 done
+# A key that is the content of a string literal ending in `=` or `:` is test
+# data, not an assignment: the quote after it closes that literal, so the text
+# up to the next quote is code. A real assignment later on the line, or a key
+# inside a literal of the other quote type, is still a credential.
+string_key="password="
+printf "const shape = { label: '%s', value: '%s' }\n" "$string_key" "$marker_value" >"$marker_repo/client.ts"
+if ! T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/marker-boundary.out" 2>"$tmp/marker-boundary.err"; then
+  echo 'FAIL: public boundary read a key inside a string literal as a credential assignment' >&2
+  cat "$tmp/marker-boundary.err" >&2
+  exit 1
+fi
+if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/marker-boundary.out"; then
+  echo 'FAIL: public boundary accepted the string-literal key without reporting PUBLIC_BOUNDARY_PASS' >&2
+  exit 1
+fi
+for leaked in \
+  "const shape = { label: '$string_key', password: '$marker_value' }" \
+  "const line = \"$string_key'$marker_value'\"" \
+  "// it's $string_key'$marker_value'"; do
+  printf '%s\n' "$leaked" >"$marker_repo/client.ts"
+  if T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary accepted a credential assignment ($leaked)" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- '- client.ts: credential assignment' "$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary rejected ($leaked) for another reason" >&2
+    cat "$tmp/marker-boundary.err" >&2
+    exit 1
+  fi
+done
+echo 'PASS: public boundary reads a string-literal key as data and still rejects real assignments'
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh"

@@ -194,6 +194,7 @@ export async function executeToolCalls(
   toolResults: ToolResult[]
   pendingApproval?: PendingApproval
   cancelled?: boolean
+  stopTurn?: { message: string }
 }> {
   const { loopController, events } = config
   const toolResults: ToolResult[] = []
@@ -360,6 +361,20 @@ export async function executeToolCalls(
       usageEmitted ? undefined : usage
     )
     usageEmitted = true
+
+    // A trusted tool ended the turn (A15 U1): answer the rest of the batch
+    // without running it, so the tool linkage holds and no model call follows.
+    if (toolResult.stopTurn) {
+      for (let k = i + 1; k < calls.length; k++) {
+        toolResults.push({
+          tool_call_id: calls[k].id,
+          name: calls[k].name,
+          content: 'Not executed — the turn stopped. Re-request if needed.',
+          is_error: true,
+        })
+      }
+      return { toolResults, stopTurn: toolResult.stopTurn }
+    }
 
     if (isWorkflowTriggerNotFoundToolResult(toolResult)) {
       for (let k = i + 1; k < calls.length; k++) {

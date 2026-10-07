@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import {
   openOwnedFile,
+  readOwnedDescriptor,
   readOwnedFile,
   validateRunDirectory,
 } from './prepare-codex-approved-tools.mjs'
@@ -21,6 +22,97 @@ export const fixtureConfigKeys = [
   'MINIKUBE_PROFILE',
   'CONTROL_API_REAL_PG_CONTEXT',
 ]
+
+/**
+ * The Playwright journeys this runner can drive against the swapped Host. The
+ * lane is chosen by `IMAGE_CAPABILITIES_LANE` and only from this closed set, so
+ * an environment value can never name an arbitrary config path.
+ */
+export const playwrightLanes = {
+  // `grep` selects the lane's fixture journey. The image spec also holds the
+  // real-provider smoke, which skips itself in fixture mode; selecting by title
+  // keeps it out of the run instead of reporting it as skipped.
+  image: {
+    config: 'desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
+    label: 'image-capabilities-playwright',
+    grep: 'image-capabilities fixture: ',
+  },
+  'document-upload': {
+    config: 'desktop-app/test/e2e-playwright/playwright.document-upload.config.ts',
+    label: 'document-upload-playwright',
+    grep: 'document-upload fixture: ',
+  },
+}
+
+export function playwrightLaneConfig(env) {
+  const lane = env.IMAGE_CAPABILITIES_LANE ?? 'image'
+  if (!Object.hasOwn(playwrightLanes, lane))
+    throw new Error(
+      `IMAGE_CAPABILITIES_LANE must be one of ${Object.keys(playwrightLanes).join(', ')} (received ${JSON.stringify(lane)})`
+    )
+  return { lane, ...playwrightLanes[lane] }
+}
+
+/**
+ * Only `run` drives Playwright, so only `run` resolves the lane. `restore`
+ * must reach the owned runtime even when the lane variable is stale or wrong.
+ */
+export function selectFixtureAction(argument, env) {
+  const action = argument ?? 'run'
+  if (!['run', 'restore'].includes(action)) throw new Error('Expected run or restore')
+  if (action === 'restore') return { action }
+  return { action, ...playwrightLaneConfig(env) }
+}
+
+const isCount = value => Number.isSafeInteger(value) && value >= 0
+
+/**
+ * A zero exit from the Playwright CLI is not a verdict on its own: a run that
+ * collected nothing, skipped everything or retried into a pass also exits 0.
+ * PASS needs the JSON report of this lane's config with at least one expected
+ * test and no unexpected, skipped or flaky outcome.
+ */
+export function playwrightVerdict(report, { lane, configFile }) {
+  const { grep } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
+  const reported = report?.config?.configFile
+  if (typeof reported !== 'string' || fs.realpathSync(reported) !== fs.realpathSync(configFile))
+    throw new Error('Playwright report config mismatch')
+  const stats = report.stats ?? {}
+  if (!isCount(stats.expected) || stats.expected < 1)
+    throw new Error('Playwright ran no expected tests')
+  for (const outcome of ['unexpected', 'skipped', 'flaky'])
+    if (stats[outcome] !== 0)
+      throw new Error(`Playwright report is not clean: ${outcome}=${String(stats[outcome])}`)
+  if (!Array.isArray(report.errors) || report.errors.length)
+    throw new Error('Playwright report has global errors')
+  const titles = []
+  const collect = suites => {
+    if (!Array.isArray(suites)) throw new Error('Incomplete Playwright suites')
+    for (const suite of suites) {
+      for (const spec of suite.specs ?? []) titles.push(spec.title)
+      collect(suite.suites ?? [])
+    }
+  }
+  collect(report.suites)
+  // The counters alone cannot vouch for the run: a truncated or empty suite tree
+  // with the same counters must not pass as the lane's journeys.
+  if (titles.length !== stats.expected)
+    throw new Error(
+      `Playwright report lists ${titles.length} specs for ${stats.expected} expected tests`
+    )
+  if (titles.some(title => !title.startsWith(grep)))
+    throw new Error(`Playwright report has specs outside the ${lane} lane`)
+  return 'PASS'
+}
+
+/** The PASS line is printed from the persisted state, never from memory. */
+export function fixturePassLine(state, { lane, evidence }) {
+  if (!Object.hasOwn(state, 'lane') || state.lane !== lane)
+    throw new Error('Run state lane mismatch')
+  if (state.playwright !== 'PASS') throw new Error('Run state has no Playwright PASS')
+  if (state.restored !== true) throw new Error('Run state was not restored')
+  return `IMAGE_CAPABILITIES_E2E_PASS lane=${lane} evidence=${evidence}\n`
+}
 
 export function proveImages(manifest, observed, head, profile) {
   if (!/^[a-f0-9]{40}$/.test(head) || manifest.profile !== profile)
@@ -157,6 +249,13 @@ async function main() {
   )
     throw new Error('Matching branch profile and context required')
   command('bash', ['scripts/minikube/require-t2-mutation-lock.sh'])
+  const {
+    action,
+    lane,
+    config: laneConfig,
+    label: laneLabel,
+    grep: laneGrep,
+  } = selectFixtureAction(process.argv[2], process.env)
   const head = command('git', ['rev-parse', 'HEAD']).trim()
   const branch = command('git', ['branch', '--show-current']).trim()
   if (command('git', ['status', '--porcelain']).trim()) throw new Error('Clean checkout required')
@@ -222,8 +321,6 @@ async function main() {
     }
     throw new Error('HCC did not reconcile the expected Host image')
   }
-  const action = process.argv[2] ?? 'run'
-  if (!['run', 'restore'].includes(action)) throw new Error('Expected run or restore')
   const runRoot = path.join(canonical, '.local-notes/infra/runs')
   fs.mkdirSync(runRoot, { recursive: true })
   const runId = `image-capabilities-${randomBytes(6).toString('hex')}`
@@ -237,6 +334,7 @@ async function main() {
       ? JSON.parse(readOwnedFile(evidence, 'state.json'))
       : {
           runId,
+          lane,
           branch,
           profile,
           head,
@@ -715,29 +813,51 @@ async function main() {
       QA_RECORDER_ROOT: evidence,
     }
     command('npm', ['run', 'verify:electron', '--prefix', 'desktop-app'])
-    process.stdout.write(`Image capability fixture ready: ${state.runId}\n`)
-    const output = command(
-      'node',
-      [
-        'scripts/minikube/run-with-deadline.mjs',
-        '--timeout-seconds',
-        '900',
-        '--heartbeat-seconds',
-        '20',
-        '--kill-grace-seconds',
-        '5',
-        '--label',
-        'image-capabilities-playwright',
-        '--',
+    process.stdout.write(`Image capability fixture ready: ${state.runId} (lane ${lane})\n`)
+    // Playwright's JSON reporter writes this reserved inode with writeFile. Keep
+    // the descriptor until the verdict; a replacement path cannot supply proof.
+    const reportFile = openOwnedFile(evidence, 'playwright-report.json', {
+      create: true,
+      maxBytes: 16 * 1024 * 1024,
+    })
+    try {
+      const output = command(
         'node',
-        'desktop-app/node_modules/@playwright/test/cli.js',
-        'test',
-        '--config=desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
-      ],
-      { env: environment, timeout: 930_000 }
-    )
-    report(output)
-    state.playwright = 'PASS'
+        [
+          'scripts/minikube/run-with-deadline.mjs',
+          '--timeout-seconds',
+          '900',
+          '--heartbeat-seconds',
+          '20',
+          '--kill-grace-seconds',
+          '5',
+          '--label',
+          laneLabel,
+          '--',
+          'node',
+          'desktop-app/node_modules/@playwright/test/cli.js',
+          'test',
+          `--config=${laneConfig}`,
+          `--grep=${laneGrep}`,
+          // `list` keeps the configured console output; `json` is the verdict.
+          '--reporter=list,json',
+        ],
+        {
+          env: {
+            ...environment,
+            PLAYWRIGHT_JSON_OUTPUT_FILE: path.join(evidence, 'playwright-report.json'),
+          },
+          timeout: 930_000,
+        }
+      )
+      report(output)
+      state.playwright = playwrightVerdict(JSON.parse(readOwnedDescriptor(reportFile)), {
+        lane,
+        configFile: path.join(root, laneConfig),
+      })
+    } finally {
+      fs.closeSync(reportFile.fd)
+    }
     save()
   } catch (error) {
     failure = error
@@ -783,7 +903,9 @@ async function main() {
   }
   uninstallSignalRestore()
   if (failure) throw failure
-  process.stdout.write(`IMAGE_CAPABILITIES_E2E_PASS evidence=${evidence}\n`)
+  process.stdout.write(
+    fixturePassLine(JSON.parse(readOwnedFile(evidence, 'state.json')), { lane, evidence })
+  )
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
