@@ -333,9 +333,11 @@ function passwordValueMatches(text: string): Array<[number, number]> {
   return matches
 }
 
-// Private key armor (#1034): PEM `-----BEGIN <label>PRIVATE KEY-----` and PGP
-// `-----BEGIN PGP PRIVATE KEY BLOCK-----`. Labels are bounded so a label
-// millions of characters long cannot overflow the regex engine's stack.
+// Private key armor (#1034): PEM `-----BEGIN <label>PRIVATE KEY-----` and the
+// PGP form, whose label is `PGP ` and which ends in `PRIVATE KEY BLOCK`. The
+// PGP marker is not spelled out whole here because secret scanners read it,
+// together with the length expression below, as a key. Labels are bounded so
+// a label millions of characters long cannot overflow the regex engine's stack.
 const LABEL_WORDS_MAX = 4
 const LABEL_WORD_MAX = 16
 const PRIVATE_KEY_LABEL = `((?:[A-Z0-9]{1,${LABEL_WORD_MAX}} ){0,${LABEL_WORDS_MAX}})PRIVATE KEY( BLOCK)?-----`
