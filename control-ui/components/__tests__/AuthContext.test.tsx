@@ -1,6 +1,6 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { apiGet } from '../../lib/api'
 import {
   PublishScopeProvider,
@@ -11,6 +11,10 @@ import {
   __resetRegistryCapabilityCacheForTests,
   useRegistryCapability,
 } from '../../lib/hooks/useRegistryCapability'
+import {
+  __resetReadRequestCacheForTests,
+  getReadRequestPrincipal,
+} from '../../lib/readRequestCache'
 import { AuthProvider, useAuth } from '../AuthContext'
 import { ToastProvider } from '../Toast'
 
@@ -70,6 +74,25 @@ function AuthUserProbe() {
   return <div data-testid="auth-user">{authState.username || 'signed-out'}</div>
 }
 
+function AuthIdentityProbe() {
+  const { authState } = useAuth()
+  return (
+    <>
+      <div data-testid="auth-id">{authState.id}</div>
+      <div data-testid="auth-username">{authState.username}</div>
+      <div data-testid="auth-email">{authState.email}</div>
+      <div data-testid="auth-logged-in">{String(authState.isLoggedIn)}</div>
+    </>
+  )
+}
+
+function meResponse(me: Record<string, unknown>): Response {
+  return new Response(JSON.stringify({ me }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
 function AuthProbe() {
   useAuth()
   return <div>Auth mounted</div>
@@ -104,6 +127,7 @@ afterEach(() => {
   __resetRegistryCapabilityCacheForTests()
   window.localStorage.clear()
   vi.unstubAllGlobals()
+  __resetReadRequestCacheForTests()
 })
 
 describe('AuthProvider session expiry handling', () => {
@@ -412,6 +436,185 @@ describe('AuthProvider session expiry handling', () => {
     expect(replaceMock).toHaveBeenCalledWith('/')
     expect(window.localStorage.getItem('controlUiAdminToken')).toBeNull()
   })
+
+  it('reverifies a remote cookie-session change once without an invalidation loop', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, { me: { id: 'admin-a', username: 'admin-a', role: 'admin' } })
+      )
+      .mockResolvedValueOnce(
+        response(200, { me: { id: 'admin-b', username: 'admin-b', role: 'admin' } })
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <AuthUserProbe />
+        </AuthProvider>
+      </ToastProvider>
+    )
+    await waitFor(() => expect(screen.getByTestId('auth-user')).toHaveTextContent('admin-a'))
+    const otherTab = new BroadcastChannel('control-ui-read-metadata-invalidation')
+    const loopMessages: unknown[] = []
+    otherTab.onmessage = event => loopMessages.push(event.data)
+    await act(async () => {
+      otherTab.postMessage({ type: 'session-invalidation' })
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    await waitFor(() => expect(screen.getByTestId('auth-user')).toHaveTextContent('admin-b'))
+    expect(getReadRequestPrincipal()?.principalId).toBe('admin-b')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(loopMessages).toEqual([])
+    otherTab.close()
+  })
+
+  it.each([null, '', undefined])(
+    'clears the previous identity fields after remote sign-in with email %s',
+    async email => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          meResponse({
+            id: 'admin-a',
+            username: 'username-a',
+            email: 'admin-a@example.test',
+            role: 'admin',
+          })
+        )
+        .mockResolvedValueOnce(meResponse({ id: 'admin-b', email, role: 'admin' }))
+      vi.stubGlobal('fetch', fetchMock)
+      render(
+        <ToastProvider>
+          <AuthProvider>
+            <AuthIdentityProbe />
+          </AuthProvider>
+        </ToastProvider>
+      )
+      await waitFor(() => expect(screen.getByTestId('auth-id')).toHaveTextContent('admin-a'))
+      expect(screen.getByTestId('auth-email')).toHaveTextContent('admin-a@example.test')
+      const otherTab = new BroadcastChannel('control-ui-read-metadata-invalidation')
+      try {
+        await act(async () => {
+          otherTab.postMessage({ type: 'session-invalidation' })
+          await new Promise(resolve => setTimeout(resolve, 0))
+        })
+        await waitFor(() => expect(screen.getByTestId('auth-id')).toHaveTextContent('admin-b'))
+        expect(screen.getByTestId('auth-email')).toBeEmptyDOMElement()
+        expect(screen.getByTestId('auth-username')).toBeEmptyDOMElement()
+        expect(screen.queryByText('admin-a@example.test')).toBeNull()
+        expect(getReadRequestPrincipal()?.principalId).toBe('admin-b')
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+      } finally {
+        otherTab.close()
+      }
+    }
+  )
+
+  it('preserves omitted fields for the same identity and clears an explicitly null email', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        meResponse({
+          id: 'admin-a',
+          username: 'username-a',
+          email: 'admin-a@example.test',
+          role: 'admin',
+        })
+      )
+      .mockResolvedValueOnce(meResponse({ id: 'admin-a', role: 'admin' }))
+      .mockResolvedValueOnce(meResponse({ id: 'admin-a', email: null, role: 'admin' }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <AuthIdentityProbe />
+          <CheckAuthButton />
+        </AuthProvider>
+      </ToastProvider>
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('auth-email')).toHaveTextContent('admin-a@example.test')
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Check auth' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(screen.getByTestId('auth-username')).toHaveTextContent('username-a')
+    expect(screen.getByTestId('auth-email')).toHaveTextContent('admin-a@example.test')
+    fireEvent.click(screen.getByRole('button', { name: 'Check auth' }))
+    await waitFor(() => expect(screen.getByTestId('auth-email')).toBeEmptyDOMElement())
+    expect(screen.getByTestId('auth-username')).toHaveTextContent('username-a')
+  })
+
+  it.each(['response', 'body'] as const)(
+    'does not let an obsolete %s clear a newer confirmed login, and still honors a current 401',
+    async phase => {
+      let completeOld!: () => void
+      let oldBodyStarted = false
+      const oldResponse = meResponse({
+        id: 'admin-a',
+        username: 'username-a',
+        email: 'admin-a@example.test',
+        role: 'admin',
+      })
+      const deferredResponse = new Promise<Response>(resolve => {
+        if (phase === 'response') completeOld = () => resolve(oldResponse)
+        else resolve(oldResponse)
+      })
+      if (phase === 'body') {
+        vi.spyOn(oldResponse, 'text').mockImplementation(() => {
+          oldBodyStarted = true
+          return new Promise((_resolve, reject) => {
+            completeOld = () => reject(new Error('Old body failed'))
+          })
+        })
+      }
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          meResponse({
+            id: 'admin-a',
+            username: 'username-a',
+            email: 'admin-a@example.test',
+            role: 'admin',
+          })
+        )
+        // Deliberately ignore AbortSignal at this network/body seam: the UI
+        // operation fence must hold even when a transport completion is late.
+        .mockReturnValueOnce(deferredResponse)
+        .mockResolvedValueOnce(
+          meResponse({ id: 'admin-b', username: 'username-b', email: null, role: 'admin' })
+        )
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'expired' }), { status: 401 }))
+      vi.stubGlobal('fetch', fetchMock)
+      render(
+        <ToastProvider>
+          <AuthProvider>
+            <AuthIdentityProbe />
+            <CheckAuthButton />
+            <LoginButton />
+          </AuthProvider>
+        </ToastProvider>
+      )
+      await waitFor(() => expect(screen.getByTestId('auth-id')).toHaveTextContent('admin-a'))
+      fireEvent.click(screen.getByRole('button', { name: 'Check auth' }))
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+      if (phase === 'body') await waitFor(() => expect(oldBodyStarted).toBe(true))
+      fireEvent.click(screen.getByRole('button', { name: 'Log in' }))
+      await waitFor(() => expect(screen.getByTestId('auth-id')).toHaveTextContent('admin-b'))
+      await act(async () => {
+        completeOld()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(screen.getByTestId('auth-id')).toHaveTextContent('admin-b')
+      expect(screen.getByTestId('auth-logged-in')).toHaveTextContent('true')
+      expect(getReadRequestPrincipal()?.principalId).toBe('admin-b')
+      expect(screen.queryByText('admin-a@example.test')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'Check auth' }))
+      await waitFor(() => expect(screen.getByTestId('auth-logged-in')).toHaveTextContent('false'))
+      expect(getReadRequestPrincipal()).toBeNull()
+    }
+  )
 
   it('redirects after logout even when token revocation fails', async () => {
     window.localStorage.setItem('controlUiAdminToken', 'valid-token')

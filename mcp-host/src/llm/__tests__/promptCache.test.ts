@@ -22,7 +22,7 @@ function makeMockClient() {
 }
 
 function makeParts(): SystemPromptParts {
-  const builder = new DefaultPromptBuilder()
+  const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
   return builder.buildParts({
     identityFiles: { identity: 'I', soul: 'S', agents: 'A', user: 'U' },
     dailyLogSnapshot: '## Today\nentry',

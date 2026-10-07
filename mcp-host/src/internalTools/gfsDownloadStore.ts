@@ -14,7 +14,11 @@ import type {
   GfsProcessingLeaseAcquisition,
   GfsProcessingLeaseProvider,
 } from './gfsProcessingLease'
-import { openPrivateStoreObject, verifyPrivateStoreDirectory } from './gfsStorePrivateFiles'
+import {
+  PrivateStoreNameMovedError,
+  openPrivateStoreObject,
+  verifyPrivateStoreDirectory,
+} from './gfsStorePrivateFiles'
 import { GfsStoreWriterLease, GfsStoreWriterOwnershipError } from './gfsStoreWriterLease'
 
 export type GfsDownloadStoreErrorCode =
@@ -1447,8 +1451,12 @@ export class GfsDownloadStore {
               false
             )
             parseLedger(await handle.readFile('utf8'))
-          } catch {
-            throw new GfsDownloadStoreError('corrupt_store_ledger')
+          } catch (readError) {
+            // The live writer publishes every ledger by renaming a new inode over
+            // this name, so a name that moved between open and lstat is that
+            // writer at work, not corruption. The next retry judges the new ledger.
+            if (!(readError instanceof PrivateStoreNameMovedError))
+              throw new GfsDownloadStoreError('corrupt_store_ledger')
           } finally {
             await handle?.close()
           }

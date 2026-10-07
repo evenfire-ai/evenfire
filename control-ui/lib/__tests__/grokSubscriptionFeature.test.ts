@@ -1,38 +1,40 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { isAllowedGrokVerificationUri, listGrokSubscriptionConnections } from '../grokSubscription'
+import { isAllowedGrokVerificationUri } from '../grokSubscription'
 import { loadGrokSubscriptionCapability } from '../grokSubscriptionFeature'
+import { loadSubscriptionCapabilities } from '../subscriptionCapabilities'
 
-vi.mock('../grokSubscription', async importOriginal => {
-  const actual = await importOriginal<typeof import('../grokSubscription')>()
-  return {
-    ...actual,
-    listGrokSubscriptionConnections: vi.fn(),
-  }
-})
+vi.mock('../subscriptionCapabilities', () => ({
+  loadSubscriptionCapabilities: vi.fn(),
+}))
 
 afterEach(() => {
   vi.clearAllMocks()
 })
 
 describe('loadGrokSubscriptionCapability', () => {
-  it('is enabled only after the keyed connections list succeeds', async () => {
-    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([])
+  it('reads only the shared Grok integration flag', async () => {
+    vi.mocked(loadSubscriptionCapabilities).mockResolvedValue({
+      providers: {
+        'codex-subscription': { enabled: false },
+        'grok-subscription': { enabled: true },
+      },
+    })
     await expect(loadGrokSubscriptionCapability()).resolves.toEqual({ enabled: true })
   })
 
-  it('maps a 404 or a disabled code to the disabled capability', async () => {
-    vi.mocked(listGrokSubscriptionConnections).mockRejectedValueOnce({ status: 404 })
-    await expect(loadGrokSubscriptionCapability()).resolves.toEqual({ enabled: false })
-    vi.mocked(listGrokSubscriptionConnections).mockRejectedValueOnce({
-      status: 403,
-      code: 'disabled',
+  it('reports disabled when the integration flag is false', async () => {
+    vi.mocked(loadSubscriptionCapabilities).mockResolvedValue({
+      providers: {
+        'codex-subscription': { enabled: true },
+        'grok-subscription': { enabled: false },
+      },
     })
     await expect(loadGrokSubscriptionCapability()).resolves.toEqual({ enabled: false })
   })
 
-  it('rethrows non-disabled probe failures instead of reporting the flag as off', async () => {
-    const failure = Object.assign(new Error('control-api unavailable'), { status: 500 })
-    vi.mocked(listGrokSubscriptionConnections).mockRejectedValueOnce(failure)
+  it('rethrows transient discovery failures instead of reporting the flag as off', async () => {
+    const failure = Object.assign(new Error('capability read unavailable'), { status: 429 })
+    vi.mocked(loadSubscriptionCapabilities).mockRejectedValueOnce(failure)
     await expect(loadGrokSubscriptionCapability()).rejects.toBe(failure)
   })
 })
@@ -48,11 +50,6 @@ describe('isAllowedGrokVerificationUri', () => {
     expect(isAllowedGrokVerificationUri('https://accounts.x.ai/oauth2/device?user_code=ABCD')).toBe(
       true
     )
-    expect(isAllowedGrokVerificationUri('http://accounts.x.ai/oauth2/device')).toBe(false)
-    expect(isAllowedGrokVerificationUri('https://accounts.x.ai.evil.example/oauth2/device')).toBe(
-      false
-    )
-    expect(isAllowedGrokVerificationUri('https://evil.x.ai/oauth2/device')).toBe(false)
   })
 
   it('rejects other schemes, hosts and look-alike hosts', () => {

@@ -425,7 +425,10 @@ jobs:
             routes.externalGfsRateLimitStress.realPostgres.integration.test.ts \
             routes.externalGfsRateLimitFailClosed.realPostgres.integration.test.ts \
             routes.rateLimitProcessMemory.realPostgres.integration.test.ts \
+            services.rateLimiter.realPostgres.integration.test.ts \
             services.rateLimiterPoolSaturation.realPostgres.integration.test.ts \
+            services.adminSubscriptionRateLimitMigration.realPostgres.integration.test.ts \
+            pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts \
             entityChangeFeed.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts
 
