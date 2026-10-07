@@ -290,6 +290,123 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 20)).toBe(true)
   })
 
+  // The Postgres gate is the counter shared across replicas, so it must enforce
+  // the unverified budget on its own. Rotation tests stop at the edge limiter
+  // first and never observe the limit this gate receives.
+  it.each([
+    [
+      'workflow grant read',
+      () => workflowGrantReadRateLimits()[1],
+      60,
+      () => config.adminWorkflowGrantReadPerMin,
+    ],
+    [
+      'workflow grant write',
+      () => workflowGrantWriteRateLimits()[1],
+      20,
+      () => config.adminWorkflowGrantWritePerMin,
+    ],
+    [
+      'workflow administrative read',
+      () => workflowAdminReadRateLimits()[1],
+      60,
+      () => config.adminWorkflowReadPerMin,
+    ],
+    [
+      'administrative output read',
+      () => adminOutputsReadRateLimits()[1],
+      30,
+      () => config.adminOutputsReadPerMin,
+    ],
+    [
+      'subscription read',
+      () => adminSubscriptionReadRateLimits()[1],
+      30,
+      () => config.adminSubscriptionReadPerMin,
+    ],
+    [
+      'subscription write',
+      () => adminSubscriptionWriteRateLimits()[1],
+      20,
+      () => config.adminSubscriptionWritePerMin,
+    ],
+    [
+      'administrative workflow trigger',
+      () => adminWorkflowTriggerRateLimit(),
+      10,
+      () => config.adminWorkflowTriggerPerMin,
+    ],
+  ] as const)(
+    'passes the unverified %s budget to the Postgres gate for a forged cookie',
+    async (_family, gate, unverifiedLimit, verifiedLimit) => {
+      expect(verifiedLimit()).not.toBe(unverifiedLimit)
+      mockCheckAndIncrement.mockReset()
+      pgAllows()
+      const app = express()
+      app.get('/gate', gate(), (_req, res) => res.sendStatus(204))
+      await request(app).get('/gate').set('Cookie', 'control_ui_admin_session=forged-a').expect(204)
+      await request(app)
+        .get('/gate')
+        .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+        .expect(204)
+
+      expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+      const [forged, signed] = mockCheckAndIncrement.mock.calls
+      expect(forged?.[0]).toMatch(/:ip:/)
+      expect(forged?.[1]).toBe(unverifiedLimit)
+      expect(signed?.[0]).not.toMatch(/:ip:/)
+      expect(signed?.[1]).toBe(verifiedLimit())
+    }
+  )
+
+  it('passes the anonymous IP budget to the Postgres gate for a forged attempt bearer', async () => {
+    expect(config.llmProviderAttemptAuthorizePerMin).not.toBe(
+      config.llmProviderAttemptAuthorizeAnonymousIpPerMin
+    )
+    mockCheckAndIncrement.mockReset()
+    pgAllows()
+    const app = express()
+    app.post('/authorize', llmProviderAttemptAuthorizeRateLimits()[1], (_req, res) =>
+      res.sendStatus(204)
+    )
+    const token = issueMcpHostAccessJwt('default', 'research-host', ['research-host'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    await request(app).post('/authorize').set('Authorization', 'Bearer forged-a').expect(204)
+    await request(app).post('/authorize').set('Authorization', `Bearer ${token}`).expect(204)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    const [forged, verified] = mockCheckAndIncrement.mock.calls
+    expect(forged?.[0]).toMatch(/^llm_provider_attempt:ip:/)
+    expect(forged?.[1]).toBe(config.llmProviderAttemptAuthorizeAnonymousIpPerMin)
+    expect(verified?.[0]).toBe('llm_provider_attempt:default/research-host')
+    expect(verified?.[1]).toBe(config.llmProviderAttemptAuthorizePerMin)
+  })
+
+  it('denies the 31st forged subscription read through the edge and the Postgres gate', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_800_000_000_000)
+    countRequests()
+    const app = express()
+    app.get('/codex/connections', ...adminSubscriptionReadRateLimits(), (_req, res) =>
+      res.sendStatus(204)
+    )
+    for (let i = 0; i < 30; i++) {
+      await request(app)
+        .get('/codex/connections')
+        .set('Cookie', `control_ui_admin_session=forged-${i}`)
+        .expect(204)
+    }
+    const denied = await request(app)
+      .get('/codex/connections')
+      .set('Cookie', 'control_ui_admin_session=forged-final')
+      .expect(429)
+
+    expect(denied.headers['retry-after']).toBeDefined()
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(30)
+    expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 30)).toBe(true)
+  })
+
   beforeEach(() => {
     mockVerifyAdminToken.mockImplementation((token: string) =>
       token.startsWith('signed-') ? signedClaims(token.slice('signed-'.length)) : null
