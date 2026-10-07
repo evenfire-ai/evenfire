@@ -198,4 +198,50 @@ describe('AppService quit preparation', () => {
     expect(read).toHaveBeenCalledOnce()
     expect(service.pendingCredentialProducers.size).toBe(0)
   })
+
+  it('does not hold quit for a same-team operation that does not change credentials', async () => {
+    const request = deferred<string>()
+    const requestStarted = deferred<void>()
+    const tokenStore = {
+      prepareForQuit: vi.fn().mockResolvedValue(undefined),
+      reopenAdmission: vi.fn(),
+    }
+    const service = Object.create(AppServiceClass.prototype) as {
+      pendingCredentialProducers: Set<Promise<unknown>>
+      quitPreparationStarted: boolean
+      teamContextQueue: Promise<void>
+      sessionToken: string | null
+      me: { id: string; teamId: string }
+      tokenStore: typeof tokenStore
+      requireSessionToken: () => string
+      getCurrentSessionTeamId: (token: string) => Promise<string>
+      runWithTeamContext: <T>(
+        teamId: string | null | undefined,
+        operation: (sessionToken: string) => Promise<T>
+      ) => Promise<T>
+      prepareForQuit: () => Promise<void>
+    }
+    service.pendingCredentialProducers = new Set()
+    service.quitPreparationStarted = false
+    service.teamContextQueue = Promise.resolve()
+    service.sessionToken = 'session-token'
+    service.me = { id: 'user-1', teamId: 'team-a' }
+    service.tokenStore = tokenStore
+    service.requireSessionToken = vi.fn(() => 'session-token')
+    service.getCurrentSessionTeamId = vi.fn(async () => 'team-a')
+
+    const operation = service.runWithTeamContext('team-a', async () => {
+      requestStarted.resolve()
+      return request.promise
+    })
+    await requestStarted.promise
+
+    const preparation = service.prepareForQuit()
+    expect(tokenStore.prepareForQuit).toHaveBeenCalledOnce()
+    await expect(preparation).resolves.toBeUndefined()
+
+    request.resolve('request-complete')
+    await expect(operation).resolves.toBe('request-complete')
+    expect(service.pendingCredentialProducers.size).toBe(0)
+  })
 })

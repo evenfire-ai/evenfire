@@ -1232,10 +1232,7 @@ export class AppService {
     teamId: string | null | undefined,
     operation: (sessionToken: string) => Promise<T>
   ): Promise<T> {
-    if (!String(teamId || '').trim()) {
-      return this.runWithTeamContextOnce(teamId, operation)
-    }
-    return this.runCredentialProducer(() => this.runWithTeamContextOnce(teamId, operation))
+    return this.runWithTeamContextOnce(teamId, operation)
   }
 
   private async runWithTeamContextOnce<T>(
@@ -1268,71 +1265,77 @@ export class AppService {
       let activeToken = originalToken
       const shouldSwitch = originalTeamId !== targetTeamId
       const shouldRestore = Boolean(originalTeamId && shouldSwitch)
-      let restoredOriginalTeam = false
-      const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
-      if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
-
-      try {
-        if (shouldSwitch) {
-          activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
-        }
+      const runOperation = async (): Promise<T> => {
+        let restoredOriginalTeam = false
+        const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
+        if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
 
         try {
-          return await operation(activeToken)
-        } catch (error) {
-          operationError = error
-          throw error
+          if (shouldSwitch) {
+            activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
+          }
+
+          try {
+            return await operation(activeToken)
+          } catch (error) {
+            operationError = error
+            throw error
+          } finally {
+            if (shouldRestore) {
+              try {
+                await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
+                restoredOriginalTeam = true
+              } catch (restoreError) {
+                if (!operationError) throw restoreError
+                console.warn(
+                  '[AppService] Failed to restore team context after operation:',
+                  restoreError
+                )
+              }
+            }
+            if (restoredOriginalTeam && this.sessionToken) {
+              this.updateEntityChangeSessionToken(this.sessionToken)
+              this.restartEntityChangeStreamForSessionReplacement()
+            } else if (
+              shouldRestore &&
+              this.sessionToken &&
+              this.me &&
+              this.me.teamId !== originalTeamId
+            ) {
+              // A failed restore leaves the hop team as the actual committed
+              // session. Rebind now that the restore attempt is over; the stream
+              // must not remain attached to the replaced pre-hop token.
+              this.updateEntityChangeSessionToken(this.sessionToken)
+              this.restartEntityChangeStreamForSessionReplacement()
+            }
+          }
         } finally {
           if (shouldRestore) {
-            try {
-              await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
-              restoredOriginalTeam = true
-            } catch (restoreError) {
-              if (!operationError) throw restoreError
-              console.warn(
-                '[AppService] Failed to restore team context after operation:',
-                restoreError
-              )
+            this.chatStoreHomeTeamId = null
+            // A failed switch back leaves the session on the hop team while the
+            // store is still bound to the pinned home team. Rebind so the store
+            // scope and the delete-fence authority (both derived from
+            // chatStoreTeamId) agree again. A rebind failure is logged and never
+            // replaces the error of the operation or of the failed restore.
+            const sessionUserId = this.me?.id
+            if (sessionUserId && this.me?.teamId !== originalTeamId) {
+              try {
+                await this.bindCurrentChatStore(sessionUserId)
+              } catch (rebindError) {
+                console.error(
+                  '[AppService] Failed to rebind the chat store after a failed team restore:',
+                  rebindError
+                )
+              }
             }
           }
-          if (restoredOriginalTeam && this.sessionToken) {
-            this.updateEntityChangeSessionToken(this.sessionToken)
-            this.restartEntityChangeStreamForSessionReplacement()
-          } else if (
-            shouldRestore &&
-            this.sessionToken &&
-            this.me &&
-            this.me.teamId !== originalTeamId
-          ) {
-            // A failed restore leaves the hop team as the actual committed
-            // session. Rebind now that the restore attempt is over; the stream
-            // must not remain attached to the replaced pre-hop token.
-            this.updateEntityChangeSessionToken(this.sessionToken)
-            this.restartEntityChangeStreamForSessionReplacement()
-          }
+          releaseTransientHop?.()
         }
-      } finally {
-        if (shouldRestore) {
-          this.chatStoreHomeTeamId = null
-          // A failed switch back leaves the session on the hop team while the
-          // store is still bound to the pinned home team. Rebind so the store
-          // scope and the delete-fence authority (both derived from
-          // chatStoreTeamId) agree again. A rebind failure is logged and never
-          // replaces the error of the operation or of the failed restore.
-          const sessionUserId = this.me?.id
-          if (sessionUserId && this.me?.teamId !== originalTeamId) {
-            try {
-              await this.bindCurrentChatStore(sessionUserId)
-            } catch (rebindError) {
-              console.error(
-                '[AppService] Failed to rebind the chat store after a failed team restore:',
-                rebindError
-              )
-            }
-          }
-        }
-        releaseTransientHop?.()
       }
+
+      // Only a real session hop can write credentials. Same-team operations
+      // reuse the active token and must not hold Cmd+Q while doing request work.
+      return shouldSwitch ? await this.runCredentialProducer(runOperation) : await runOperation()
     } finally {
       releaseQueue()
     }
