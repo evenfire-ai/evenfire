@@ -1026,11 +1026,33 @@ export function useChatListController({
   const handleCreateChat = useCallback(async () => {
     const agentRef = selectedAgentRef.current
     if (!agentRef) return
+    const pendingSelection = readPendingSelection(agentRef)
     const selectionIntentRevision = host.current?.beginSelectionIntent()
     host.current?.clearPendingSelection(agentRef)
     const requestGeneration = requestGenerationRef.current
     const chatId = crypto.randomUUID()
-    const meta = await chatStore.createChat(agentRef, chatId)
+    let meta: ChatMetadata
+    try {
+      meta = await chatStore.createChat(agentRef, chatId)
+    } catch (error) {
+      // The blank New chat intent invalidated an older specific load. If creation
+      // failed without a newer navigation or scope taking ownership, restore the
+      // requested conversation through the controller's authorized switch path.
+      if (
+        pendingSelection?.mode === 'specific' &&
+        selectedAgentRef.current === agentRef &&
+        requestGenerationRef.current === requestGeneration &&
+        selectionIntentRevision !== undefined &&
+        host.current?.getSelectionIntentRevision() === selectionIntentRevision
+      ) {
+        try {
+          await host.current?.switchToChat(agentRef, pendingSelection.chatId)
+        } catch {
+          // Preserve the original create error for the caller.
+        }
+      }
+      throw error
+    }
     chatStore.clearCachedRemoteData()
     if (selectedAgentRef.current !== agentRef || requestGenerationRef.current !== requestGeneration)
       return
@@ -1043,7 +1065,7 @@ export function useChatListController({
     host.current?.markAutoSelectedChat(null)
     await host.current?.switchToChat(agentRef, chatId)
     host.current?.scrollChatToBottom()
-  }, [chatStore, appendNewEntry, host])
+  }, [chatStore, appendNewEntry, host, readPendingSelection])
 
   /**
    * Optimistic LOCAL-only title update (spec 15 §2.5 / B19). Persists to the
