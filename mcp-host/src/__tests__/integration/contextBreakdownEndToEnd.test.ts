@@ -16,6 +16,7 @@ import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../../core/conversation/conversation'
 import type { SessionTokenUsage } from '../../core/conversation/conversationStore'
 import { DefaultReasoningFactory } from '../../core/reasoning/factory'
+import { DefaultPromptBuilder } from '../../core/reasoning/promptBuilder'
 import type { SystemPromptParts } from '../../core/reasoning/systemPrompt'
 import { OpenAITokenCounter } from '../../core/tokenizer/openaiTokenCounter'
 import { FinishReason } from '../../core/types'
@@ -71,7 +72,7 @@ describe('F1 — context breakdown end-to-end (factory → port → sink → pro
     // Wire the factory EXACTLY like taskExecutor:885 + F1.4.
     const factory = new DefaultReasoningFactory(
       llmPort,
-      undefined,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' }),
       {},
       tokenCounter,
       raw => manager.recordContextBreakdown(conversation, raw),
