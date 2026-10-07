@@ -85,7 +85,10 @@
     "disabled",
     "Unauthorized",
     "not_found",
-    "internal_error"
+    "internal_error",
+    "visual_host_share",
+    "visual_gate",
+    "proxy_capacity_exceeded"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,

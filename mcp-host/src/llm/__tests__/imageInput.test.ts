@@ -66,6 +66,13 @@ const EXPECTED_MATRIX: Record<string, Record<ImageTransportOperation, boolean>> 
     completeAndCache: false,
     completeWithToolsAndCache: false,
   },
+  // #784: Grok V2 carries ordered user image parts; no cache variants.
+  'grok-subscription': {
+    complete: true,
+    completeWithTools: true,
+    completeAndCache: false,
+    completeWithToolsAndCache: false,
+  },
 }
 
 function userImageMessage(): ChatMessage {
@@ -123,6 +130,7 @@ describe('#654 transport matrix', () => {
     expect(imageWireFamilyFor('zai')).toBe('openai-compatible')
     expect(imageWireFamilyFor('claude')).toBe('claude')
     expect(imageWireFamilyFor('codex-subscription')).toBe('codex')
+    expect(imageWireFamilyFor('grok-subscription')).toBe('grok')
   })
 
   it('authorizes NO transport for an unregistered or invented provider id', () => {
@@ -150,6 +158,7 @@ describe('#654 transport matrix', () => {
         'vertex',
         'bedrock',
         'codex-subscription',
+        'grok-subscription',
       ].includes(provider)
       // `provider` is interpolated into the assertion message by the expect
       // failure, so a future divergent provider that inherits coverage fails
@@ -167,6 +176,8 @@ describe('#654 transport matrix', () => {
     expect(chatTransportSupportsImageInput('bedrock')).toBe(true)
     // #650: Codex V2 carries images on the chat tool-bearing path.
     expect(chatTransportSupportsImageInput('codex-subscription')).toBe(true)
+    // #784: Grok V2 carries images on the same paths.
+    expect(chatTransportSupportsImageInput('grok-subscription')).toBe(true)
   })
 
   it('rejects assistant/system images and honors per-family role support', () => {
@@ -177,6 +188,9 @@ describe('#654 transport matrix', () => {
     expect(roleReason('vertex', 'assistant')).toBe('transport_unsupported')
     expect(roleReason('codex-subscription', 'user')).toBe('supported')
     expect(roleReason('codex-subscription', 'tool')).toBe('transport_unsupported')
+    expect(roleReason('grok-subscription', 'user')).toBe('supported')
+    expect(roleReason('grok-subscription', 'tool')).toBe('transport_unsupported')
+    expect(roleReason('grok-subscription', 'assistant')).toBe('transport_unsupported')
   })
 })
 
@@ -333,6 +347,58 @@ describe('#654 decideImageInput intersection', () => {
       reason: 'evidence_expired',
       validUntil: '2026-10-01T00:00:00.000Z',
       evidence: expired.evidence,
+    })
+  })
+
+  it('treats a live Grok catalog row with no imageInput as supported (#784)', () => {
+    // The recorded Grok catalog carries no modality field, like Codex.
+    expect(
+      decideImageInput({
+        providerType: 'grok-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: undefined,
+      })
+    ).toEqual({ state: 'supported', reason: 'supported' })
+    // The upgrade needs transport support: a tool-role image is still refused.
+    expect(
+      decideImageInput({
+        providerType: 'grok-subscription',
+        method: 'completeWithTools',
+        roles: ['tool'],
+        capability: undefined,
+      }).state
+    ).not.toBe('supported')
+  })
+
+  it('does not upgrade a stored unknown or curated-unsupported Grok imageInput (#784)', () => {
+    expect(
+      decideImageInput({
+        providerType: 'grok-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: { state: 'unknown' },
+      })
+    ).toEqual({ state: 'unknown', reason: 'model_unknown' })
+    const unsupported = {
+      state: 'unsupported' as const,
+      evidence: {
+        source: 'curated' as const,
+        reference: 'evidence:grok-text-only',
+        checkedAt: '2026-09-24T00:00:00Z',
+      },
+    }
+    expect(
+      decideImageInput({
+        providerType: 'grok-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: unsupported,
+      })
+    ).toEqual({
+      state: 'unsupported',
+      reason: 'model_unsupported',
+      evidence: unsupported.evidence,
     })
   })
 

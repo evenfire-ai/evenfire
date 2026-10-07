@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { prePrune } from '../core/extensions/prePrune'
 import { appendToolResults } from '../core/orchestration/toolUseLoopMessages'
 import type { Attachment, ChatMessage, PendingApproval, ToolResult } from '../core/types'
+import { GFS_TOOL_RESULT_IMAGE_TEXT } from './messageProjection'
 import { projectGfsApproval } from './suspension'
 
 const source = {
@@ -188,7 +189,7 @@ describe('current-turn GFS image lifecycle', () => {
       delivery: 'reference_only',
       reason: 'new_gfs_read_required_after_suspension',
     })
-    expect(carrier.content).not.toContain('Images read by the tools above')
+    expect(carrier.content).not.toContain(GFS_TOOL_RESULT_IMAGE_TEXT)
     expect(carrier.content).toContain('new_gfs_read_required_after_suspension')
     expect(images).toEqual([
       expect.objectContaining({ data: 'QUJD', source: expect.objectContaining({ kind: 'tool' }) }),
