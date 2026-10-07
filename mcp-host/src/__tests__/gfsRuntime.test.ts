@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type GfsRuntime, bootstrapGfsRuntime } from '../gfsRuntime'
@@ -191,27 +193,92 @@ describe('GFS runtime bootstrap', () => {
 
   it('U9: logs an error and stops the periodic lifecycle when the store becomes unavailable after initialize', async () => {
     vi.useFakeTimers()
+    const value = await root()
     const initialize = vi.spyOn(GfsDownloadStore.prototype, 'initialize')
     const error = vi.spyOn(logger, 'error')
-    let sweeps = 0
-    // The first sweep runs against the real, available store; a failed persist
-    // during it is what makes a real store unavailable (`unsafe`).
-    const cleanup = vi
-      .spyOn(GfsDownloadStore.prototype, 'cleanupExpired')
-      .mockImplementation(async () => {
-        sweeps += 1
-      })
-    const runtime = await bootstrapGfsRuntime(await root())
+    const warn = vi.spyOn(logger, 'warn')
+    // Real sweeps throughout: the store becomes unavailable only because a real
+    // persist fails during a periodic sweep, which marks the store `unsafe`.
+    const cleanup = vi.spyOn(GfsDownloadStore.prototype, 'cleanupExpired')
+    const runtime = await bootstrapGfsRuntime(value)
     runtimes.push(runtime)
     await expect(initialize.mock.results[0]!.value).resolves.toBeUndefined()
     // initialize() sweeps once itself; the lifecycle's first sweep is the second.
-    for (let turn = 0; turn < 20 && sweeps < 2; turn += 1) await Promise.resolve()
+    for (let turn = 0; turn < 20 && cleanup.mock.calls.length < 2; turn += 1)
+      await Promise.resolve()
     expect(cleanup).toHaveBeenCalledTimes(2)
+    await cleanup.mock.results[1]!.value
+    // The settled sweep schedules the next one through promise callbacks only;
+    // flush microtasks without advancing the fake clock.
+    for (let turn = 0; turn < 20 && vi.getTimerCount() === 0; turn += 1) await Promise.resolve()
     expect(runtime.store.isAvailable()).toBe(true)
     expect(vi.getTimerCount()).toBe(1)
 
-    vi.spyOn(runtime.store, 'isAvailable').mockReturnValue(false)
+    // A published record that expires before the next periodic sweep, so that
+    // sweep must remove it and persist the released charge.
+    const callerRoot = join(value, 'users', 'caller-a')
+    await fs.mkdir(callerRoot, { recursive: true, mode: 0o700 })
+    const transfer = await runtime.store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source: {
+        kind: 'gfs',
+        drive: 'main',
+        resourceId: 'a'.repeat(32),
+        gfsUri: `gfs://main/${'a'.repeat(32)}`,
+        name: 'input.csv',
+        version: 7,
+      },
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(join(callerRoot, transfer.partialPath), 'fixture')
+    const receipt = await runtime.store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    expect(runtime.store.debugRecord(receipt.id)?.state).toBe('completed')
+
+    // The next ledger write fails at the filesystem layer, before its rename.
+    const probe = await fs.open(join(value, '.gfs-download-store', 'ledger-v1.json'), 'r')
+    const prototype = Object.getPrototypeOf(probe) as FileHandle
+    await probe.close()
+    const originalWriteFile = prototype.writeFile
+    const failedLedgerWrites: Record<string, Record<string, unknown>>[] = []
+    vi.spyOn(prototype, 'writeFile').mockImplementation(async function (
+      this: FileHandle,
+      ...args: Parameters<FileHandle['writeFile']>
+    ) {
+      const [data] = args
+      if (
+        failedLedgerWrites.length === 0 &&
+        typeof data === 'string' &&
+        data.includes('"records"')
+      ) {
+        failedLedgerWrites.push(JSON.parse(data))
+        throw Object.assign(new Error('injected ledger write failure'), { code: 'EIO' })
+      }
+      return originalWriteFile.apply(this, args)
+    })
+
     await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    // Witness: the periodic sweep ran and its persist is the write that failed,
+    // releasing the expired record's charge. The sweep does real I/O, so wait
+    // for it to settle rather than for the fake clock.
+    expect(cleanup).toHaveBeenCalledTimes(3)
+    await expect(cleanup.mock.results[2]!.value).rejects.toThrow('injected ledger write failure')
+    const stopLogged = () =>
+      error.mock.calls.some(
+        ([, message]) => typeof message === 'string' && message.includes('no longer available')
+      )
+    for (let turn = 0; turn < 20 && !stopLogged(); turn += 1) await Promise.resolve()
+    expect(failedLedgerWrites).toHaveLength(1)
+    expect(failedLedgerWrites[0]!.records).not.toHaveProperty(receipt.id)
+    expect(
+      warn.mock.calls.filter(([, message]) => message === 'GFS download cleanup failed')
+    ).toHaveLength(1)
+    expect(runtime.store.isAvailable()).toBe(false)
     const stopLogs = error.mock.calls.filter(
       ([, message]) => typeof message === 'string' && message.includes('no longer available')
     )
@@ -221,9 +288,10 @@ describe('GFS runtime bootstrap', () => {
         'GFS download store is no longer available; periodic cleanup stopped and managed GFS operations are disabled',
       ],
     ])
-    // Witness: the lifecycle ran its first sweep; it sweeps and schedules nothing more.
-    expect(cleanup).toHaveBeenCalledTimes(2)
+    // The lifecycle schedules nothing more: another period passes without a sweep.
     expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    expect(cleanup).toHaveBeenCalledTimes(3)
   })
 
   it('closes initialized ownership even when a failed persist has made the store unavailable', async () => {

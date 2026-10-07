@@ -11,6 +11,7 @@ import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import { GfsDownloadStore, GfsDownloadStoreError } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
+import { logger } from '../../logger'
 import type { Task, TaskSource } from '../../queue/types'
 import { resolveCallerRootBinding } from '../../workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from '../../workspace/scopedWorkspace'
@@ -169,6 +170,7 @@ async function shellScenario({
   missingCallerRoot = false,
   calls = [{ id: 'shell-safety', name: 'shell_exec', arguments: { command: 'pwd' } }],
   turnObserver,
+  dynamicEnv = {},
 }: {
   source: TaskSource
   approvalEnabled?: boolean
@@ -179,6 +181,8 @@ async function shellScenario({
   missingCallerRoot?: boolean
   calls?: ToolCall[]
   turnObserver?: TurnObserver
+  /** Operator-managed env the shell receives through `dynamicEnvProvider`. */
+  dynamicEnv?: Record<string, string>
 }) {
   appConfig.enableApproval = approvalEnabled
   const fixture = legacyLease
@@ -273,7 +277,7 @@ async function shellScenario({
     onApprovalNeeded,
     onComplete: vi.fn(),
     onFail,
-    dynamicEnvProvider: () => ({}),
+    dynamicEnvProvider: () => ({ ...dynamicEnv }),
   }
   return {
     executor: new TaskExecutor(task, deps),
@@ -363,6 +367,92 @@ it('X2: a store at corrupt_store_ledger keeps shell and GFS reads but withdraws 
   expect(JSON.stringify(scenario.providerCalls[1])).toContain('workspace_delivery_unavailable')
   expect(spawn).toHaveBeenCalledOnce()
   expect(JSON.stringify(scenario.providerCalls.at(-1))).toContain(scenario.callerWorkspace)
+})
+
+it('X2b: a store at corrupt_store_ledger still answers admitted inline reads, accessible and resolve', async () => {
+  const smallResourceId = 'd'.repeat(32)
+  const smallSource = {
+    kind: 'gfs' as const,
+    drive: 'main',
+    resourceId: smallResourceId,
+    gfsUri: `gfs://main/${smallResourceId}`,
+    name: 'small.txt',
+    version: 3,
+  }
+  const smallText = 'inline-admitted-sentinel region=north total=42'
+  const accessibleUri = 'gfs://main/accessible-sentinel'
+  const resolvedPath = '/reports/resolve-sentinel'
+  gfsClient.readMetadata.mockImplementation(async () => ({
+    source: structuredClone(smallSource),
+    size: Buffer.byteLength(smallText),
+  }))
+  const releaseReservation = vi.fn()
+  gfsClient.read.mockImplementation(async () => ({
+    source: structuredClone(smallSource),
+    bytes: Buffer.from(smallText, 'utf8'),
+    reservation: { release: releaseReservation },
+  }))
+  gfsClient.accessible.mockImplementation(async () => ({
+    items: [{ gfsUri: accessibleUri, permissions: ['read'] }],
+  }))
+  gfsClient.resolve.mockImplementation(async () => ({
+    gfsUri: accessibleUri,
+    pathCache: resolvedPath,
+  }))
+  const scenario = await shellScenario({
+    source: 'cron',
+    calls: [
+      {
+        id: 'gfs-read-small',
+        name: 'clerum__gfs_read',
+        arguments: { drive: 'main', resourceId: smallResourceId },
+      },
+      { id: 'gfs-accessible', name: 'clerum__gfs_accessible', arguments: { drive: 'main' } },
+      { id: 'gfs-resolve', name: 'clerum__gfs_resolve', arguments: { uri: accessibleUri } },
+    ],
+  })
+  // Same fixture as X2: the store refused to initialize with corrupt_store_ledger.
+  expect(scenario.storeInitError).toBeInstanceOf(GfsDownloadStoreError)
+  expect(scenario.storeInitError).toMatchObject({ code: 'corrupt_store_ledger' })
+  expect(scenario.store.isAvailable()).toBe(false)
+  await scenario.executor.run()
+
+  expect(scenario.onFail).not.toHaveBeenCalled()
+  const firstTools = scenario.advertisedTools[0]!
+  expect(firstTools).toEqual(
+    expect.arrayContaining(['clerum__gfs_read', 'clerum__gfs_accessible', 'clerum__gfs_resolve'])
+  )
+  expect(firstTools).not.toContain('clerum__gfs_download')
+  // Four model turns: three tool calls and the closing answer.
+  expect(scenario.providerCalls).toHaveLength(4)
+
+  const toolResult = (turn: number, toolCallId: string) => {
+    const message = scenario.providerCalls[turn]!.find(
+      m => m.role === 'tool' && m.tool_call_id === toolCallId
+    )
+    if (!message) throw new Error(`No tool result for ${toolCallId} in turn ${turn}`)
+    return typeof message.content === 'string' ? message.content : JSON.stringify(message.content)
+  }
+
+  // (a) The inline read went through metadata admission, then the in-memory
+  // read, and its exact text reached the model; delivery was never attempted.
+  expect(gfsClient.readMetadata).toHaveBeenCalledOnce()
+  expect(gfsClient.readMetadata.mock.calls[0]![0]).toMatchObject({ resourceId: smallResourceId })
+  expect(gfsClient.read).toHaveBeenCalledOnce()
+  expect(gfsClient.read.mock.calls[0]![0]).toMatchObject({ resourceId: smallResourceId })
+  expect(releaseReservation).toHaveBeenCalledOnce()
+  expect(gfsClient.download).not.toHaveBeenCalled()
+  const readResult = toolResult(1, 'gfs-read-small')
+  expect(readResult).toContain(smallText)
+  expect(readResult).not.toContain('workspace_delivery_unavailable')
+
+  // (b) accessible and resolve return their normal client result.
+  expect(gfsClient.accessible).toHaveBeenCalledOnce()
+  expect(gfsClient.accessible.mock.calls[0]![0]).toMatchObject({ drive: 'main' })
+  expect(toolResult(2, 'gfs-accessible')).toContain(accessibleUri)
+  expect(gfsClient.resolve).toHaveBeenCalledOnce()
+  expect(gfsClient.resolve.mock.calls[0]![0]).toMatchObject({ uri: accessibleUri })
+  expect(toolResult(3, 'gfs-resolve')).toContain(resolvedPath)
 })
 
 it.each([
@@ -605,4 +695,74 @@ it('X3-TE: a shell dispatch inside TaskExecutor makes zero GFS download store ca
   // call until it returned the shell result to the model.
   expect(dispatch.windows[0]!.storeCalls).toEqual([])
   expect(executeWindows[0]!.storeCalls).toEqual([])
+})
+
+it('X5-env: a NUL secret in the dynamic shell environment fails to start without exposing its value (#1020)', async () => {
+  const secretTail = 's3cr3t-marker-1028'
+  const secretFragments = ['s3cr3t', 'marker-1028', secretTail]
+  const envCall: ToolCall = {
+    id: 'shell-env-nul',
+    name: 'shell_exec',
+    arguments: { command: 'printf "%s" "$CLERUM_TEST_SECRET"' },
+  }
+  const logCalls: unknown[][] = []
+  for (const level of ['error', 'warn', 'info', 'debug'] as const) {
+    const spy = vi.spyOn(logger, level)
+    installedSpies.push(spy)
+    logCalls.push(spy.mock.calls as unknown as unknown[])
+  }
+  const loggedText = () =>
+    JSON.stringify(logCalls.flat(), (_key, value) =>
+      value instanceof Error ? { message: value.message, stack: value.stack } : value
+    )
+  const toolResult = (providerCalls: ChatMessage[][]) => {
+    const message = providerCalls[1]?.find(m => m.role === 'tool' && m.tool_call_id === envCall.id)
+    if (!message) throw new Error(`No tool result for ${envCall.id} in turn 1`)
+    return typeof message.content === 'string' ? message.content : JSON.stringify(message.content)
+  }
+
+  // Witness: the same dynamic variable without the NUL reaches the shell, so the
+  // provider is wired and the command would print the secret if it could start.
+  const clean = await shellScenario({
+    source: 'cron',
+    healthy: true,
+    calls: [envCall],
+    dynamicEnv: { CLERUM_TEST_SECRET: `a${secretTail}` },
+  })
+  await clean.executor.run()
+  expect(clean.onFail).not.toHaveBeenCalled()
+  expect(spawn).toHaveBeenCalledOnce()
+  expect(toolResult(clean.providerCalls)).toContain(`a${secretTail}`)
+
+  vi.mocked(spawn).mockClear()
+  for (const calls of logCalls) calls.splice(0)
+  const scenario = await shellScenario({
+    source: 'cron',
+    healthy: true,
+    calls: [envCall],
+    dynamicEnv: { CLERUM_TEST_SECRET: `a\0${secretTail}` },
+  })
+  await scenario.executor.run()
+
+  expect(scenario.onFail).not.toHaveBeenCalled()
+  // The model sees only the key, never the value, inside the tool-output envelope.
+  const result = toolResult(scenario.providerCalls)
+  expect(result).toBe(
+    [
+      '<tool_output name="shell_exec" sanitized="false">',
+      'Command failed to start: environment variable CLERUM_TEST_SECRET contains a NUL character',
+      '</tool_output>',
+    ].join('\n')
+  )
+  expect(result).not.toContain('Tool execution failed:')
+  const modelVisible = JSON.stringify(scenario.providerCalls)
+  // Witness for the log assertions: the shell logged its own start failure.
+  expect(loggedText()).toContain('ENV_VALUE_CONTAINS_NUL')
+  for (const fragment of secretFragments) {
+    expect(result).not.toContain(fragment)
+    expect(modelVisible).not.toContain(fragment)
+    expect(loggedText()).not.toContain(fragment)
+  }
+  expect(loggedText()).not.toContain('Tool execution failed')
+  expect(spawn).not.toHaveBeenCalled()
 })

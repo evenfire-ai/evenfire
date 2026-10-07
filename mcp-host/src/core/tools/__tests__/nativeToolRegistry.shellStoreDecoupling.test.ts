@@ -94,7 +94,6 @@ describe('managed shell_exec without the GFS download store (#1019), registry-le
     ['exactly one hour', 3_600_000, 3_600_000],
     ['one millisecond over one hour', 3_600_001, 3_600_001],
     ['the default shell timeout', 1_500_000, 1_500_000],
-    ['a context timeout shorter than the shell timeout', 3_600_001, 60_000],
   ])('U5: runs with an effective timeout of %s', async (_label, shellTimeout, effectiveTimeout) => {
     const { store, callerRoot } = await managedHost()
     const shell = managedRegistry(shellTimeout, store, callerRoot).get('shell_exec')
@@ -108,6 +107,25 @@ describe('managed shell_exec without the GFS download store (#1019), registry-le
     expect(output.is_error).toBe(false)
     expect(output.content).toContain('u5-ok')
     expect(output.content).toContain(callerRoot)
+  })
+
+  it('U5: a context timeout shorter than the shell timeout kills a command that outlives it', async () => {
+    const { store, callerRoot } = await managedHost()
+    const shell = managedRegistry(3_600_001, store, callerRoot).get('shell_exec')
+    expect(shell).not.toBeNull()
+    const startedAt = performance.now()
+    const output = await executeWithTimeout(
+      shell!,
+      { command: 'printf u5-started; sleep 5' },
+      { onOutput: () => undefined },
+      300
+    )
+    const elapsedMs = performance.now() - startedAt
+    // Witness: the command really started before the context timeout ended it.
+    expect(output.content).toContain('u5-started')
+    expect(output.is_error).toBe(true)
+    expect(output.content).toContain('[Command killed after 300ms timeout')
+    expect(elapsedMs).toBeLessThan(4_000)
   })
 
   it('X3: a shell run makes zero calls on the GFS download store', async () => {

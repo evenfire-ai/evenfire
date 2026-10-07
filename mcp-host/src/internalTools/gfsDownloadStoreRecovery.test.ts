@@ -222,6 +222,35 @@ describe('legacy processing leases after #1019', () => {
     expect(reopened.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
   })
 
+  it('S1b: discards a non-expired foreign-session lease left by a crashed Host and admits downloads', async () => {
+    await closedStore()
+    const raw = await seedLegacyLeases([
+      legacyLease({ expiresAt: new Date(Date.now() + 600_000).toISOString() }),
+    ])
+    // Witness: the seeded lease is still live by its own expiry, so the discard
+    // below cannot be explained by expiry.
+    const seeded = JSON.parse(raw).processingLeases[LEGACY_LEASE_ID]
+    expect(Date.parse(seeded.expiresAt)).toBeGreaterThan(Date.now())
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue(DISCARDED_COUNTER)
+    const reopened = freshStore()
+    await reopened.initialize()
+    const onDisk = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+    expect(onDisk.records).toEqual({})
+    expect(onDisk).not.toHaveProperty('processingLeases')
+    expect((await counterValue(DISCARDED_COUNTER)) - before).toBe(1)
+    expect(discardWarnings(warn.mock.calls)).toEqual([
+      [
+        { component: 'GfsDownloadStore', discarded: 1 },
+        'GFS download store discarded 1 legacy processing lease(s) at initialize',
+      ],
+    ])
+    expect(reopened.isAvailable()).toBe(true)
+    const receipt = await fixture(reopened)
+    expect(reopened.debugRecord(receipt.id)?.state).toBe('completed')
+    expect(reopened.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
+  })
+
   it('S2: re-verifies records a discarded lease protected, reusing the intact copy and quarantining the altered one', async () => {
     const store = freshStore()
     await store.initialize()
@@ -334,25 +363,40 @@ describe('legacy processing leases after #1019', () => {
   it('S8: a discard whose persist fails before the rename leaves the ledger byte-identical and is retried by the next initialize', async () => {
     await closedStore()
     const raw = await seedLegacyLeases([legacyLease()])
+    const probe = await fs.open(ledgerFile(), 'r')
+    const prototype = Object.getPrototypeOf(probe) as FileHandle
+    await probe.close()
+    const originalWriteFile = prototype.writeFile
+    // The real persist runs; only the temporary-ledger write of the discard
+    // fails, before the rename can make anything visible.
+    let failedLedgerWrite: Record<string, unknown> | undefined
+    vi.spyOn(prototype, 'writeFile').mockImplementation(async function (
+      this: FileHandle,
+      ...args: Parameters<FileHandle['writeFile']>
+    ) {
+      const [data] = args
+      if (failedLedgerWrite === undefined && typeof data === 'string') {
+        const written = JSON.parse(data) as Record<string, unknown>
+        if ('records' in written && !('processingLeases' in written)) {
+          failedLedgerWrite = written
+          throw Object.assign(new Error('injected ledger write failure'), { code: 'EIO' })
+        }
+      }
+      return originalWriteFile.apply(this, args)
+    })
     const warn = vi.spyOn(logger, 'warn')
     const before = await counterValue(DISCARDED_COUNTER)
     const interrupted = freshStore()
     const privateStore = interrupted as unknown as {
       ledger: { processingLeases?: Record<string, unknown> }
-      persist: () => Promise<void>
       reconcile: () => Promise<void>
     }
-    let leasesAtFailedPersist: unknown = 'persist not reached'
-    const persist = vi.spyOn(privateStore, 'persist').mockImplementationOnce(async () => {
-      leasesAtFailedPersist = privateStore.ledger.processingLeases
-      throw new Error('injected persist failure')
-    })
     const reconcile = vi.spyOn(privateStore, 'reconcile')
-    await expect(interrupted.initialize()).rejects.toThrow('injected persist failure')
-    expect(persist).toHaveBeenCalledTimes(1)
-    // The failing persist is the discard's own: the lease map was already
-    // removed from memory when it ran, and initialize stopped before reconcile.
-    expect(leasesAtFailedPersist).toBeUndefined()
+    await expect(interrupted.initialize()).rejects.toThrow('injected ledger write failure')
+    // Witness: the failing write is the discard's own lease-free ledger, and
+    // initialize stopped before reconcile.
+    expect(failedLedgerWrite).toBeDefined()
+    expect(failedLedgerWrite).not.toHaveProperty('processingLeases')
     expect(reconcile).not.toHaveBeenCalled()
     expect(privateStore.ledger.processingLeases?.[LEGACY_LEASE_ID]).toBeDefined()
     expect(interrupted.isAvailable()).toBe(false)
