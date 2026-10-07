@@ -1,5 +1,11 @@
+import { vi } from 'vitest'
 import { parseSessionsListResult } from '../../../../../../src/rpcProxyClient'
-import type { ChatIndex, SessionsListResult } from '../../../../../../src/types'
+import { RpcProxyClient } from '../../../../../../src/rpcProxyClient'
+import type {
+  ChatIndex,
+  SessionMessagesResult,
+  SessionsListResult,
+} from '../../../../../../src/types'
 
 export const CATALOG_NOW = '2026-09-12T00:00:00.000Z'
 
@@ -29,6 +35,24 @@ export function serverSessions(
     })),
     ...(nextCursor !== undefined ? { nextCursor } : {}),
   })
+}
+
+/** A server transcript parsed through the real RPC client and wire parser. */
+export async function serverSessionMessages(
+  agent: string,
+  chatId: string,
+  fields: Partial<Pick<SessionMessagesResult, 'state' | 'totalTurns'>> = {}
+): Promise<SessionMessagesResult> {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+    ok: true,
+    status: 200,
+    json: async () => ({ agent, chatId, state: 'idle', turns: [], ...fields }),
+  } as Response)
+  try {
+    return await new RpcProxyClient().loadSessionMessages('test-token', 'test-host', agent, chatId)
+  } finally {
+    fetchMock.mockRestore()
+  }
 }
 
 /** A local chat index whose tombstones carry the harness's authority scope. */

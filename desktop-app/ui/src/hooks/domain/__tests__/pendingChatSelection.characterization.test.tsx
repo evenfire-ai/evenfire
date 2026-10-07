@@ -16,8 +16,7 @@ import {
   resetComposerDraftStore,
   setComposerDraft,
 } from '@lib/composerDraftStore'
-import { RpcProxyClient } from '../../../../../src/rpcProxyClient'
-import { serverSessions } from './__fixtures__/catalogFixtures'
+import { serverSessionMessages, serverSessions } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -44,19 +43,6 @@ afterEach(() => {
 
 async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
-}
-
-async function parsedSessionMessages(agent: string, chatId: string) {
-  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
-    ok: true,
-    status: 200,
-    json: async () => ({ agent, chatId, state: 'idle', turns: [] }),
-  } as Response)
-  try {
-    return await new RpcProxyClient().loadSessionMessages('test-token', 'test-host', agent, chatId)
-  } finally {
-    fetchMock.mockRestore()
-  }
 }
 
 const chatMeta = (id: string, title = id) => ({
@@ -273,7 +259,7 @@ describe('pendingChatSelection effect', () => {
       ])
     )
     clerum.rpc.loadSessionMessages.mockResolvedValue(
-      await parsedSessionMessages('agent-x', 'prior-server')
+      await serverSessionMessages('agent-x', 'prior-server')
     )
     clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'accepted reply' })
 

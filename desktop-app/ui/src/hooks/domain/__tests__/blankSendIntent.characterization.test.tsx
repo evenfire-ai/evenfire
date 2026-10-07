@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
-import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
-import { deferred } from './__fixtures__/catalogFixtures'
+import { deferred, serverSessionMessages, serverSessions } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -35,24 +34,19 @@ describe('blank-send selection intent', () => {
       })
       .mockImplementation(agentRef => clerum.readIndex(agentRef))
     clerum.rpc.listSessions.mockResolvedValue(
-      parseSessionsListResult({
-        items: [
-          {
-            agent: 'agent-x',
-            chatId: 'prior-server',
-            turnCount: 1,
-            messageCount: 2,
-            lastActivityAt: '2099-05-03T00:00:00Z',
-          },
-        ],
-      })
+      serverSessions([
+        {
+          agent: 'agent-x',
+          chatId: 'prior-server',
+          turnCount: 1,
+          messageCount: 2,
+          lastActivityAt: '2099-05-03T00:00:00Z',
+        },
+      ])
     )
-    clerum.rpc.loadSessionMessages.mockResolvedValue({
-      agent: 'agent-x',
-      chatId: 'prior-server',
-      state: 'idle',
-      turns: [],
-    })
+    clerum.rpc.loadSessionMessages.mockResolvedValue(
+      await serverSessionMessages('agent-x', 'prior-server')
+    )
     clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'accepted reply' })
 
     const createChat = clerum.chat.create.getMockImplementation()

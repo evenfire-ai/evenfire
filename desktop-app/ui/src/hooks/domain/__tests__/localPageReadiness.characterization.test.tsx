@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
-import { deferred } from './__fixtures__/catalogFixtures'
+import { deferred, serverSessionMessages } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -31,13 +31,9 @@ describe('same-chat local page readiness', () => {
         serverTurnNumber: 5,
       },
     ])
-    clerum.rpc.loadSessionMessages.mockResolvedValue({
-      agent: 'agent-x',
-      chatId,
-      state: 'idle',
-      totalTurns: 5,
-      turns: [],
-    })
+    clerum.rpc.loadSessionMessages.mockResolvedValue(
+      await serverSessionMessages('agent-x', chatId, { totalTurns: 5 })
+    )
 
     const originalSetLastActive = clerum.chat.setLastActive.getMockImplementation()
     if (!originalSetLastActive) throw new Error('Expected the ChatStore setLastActive producer')
