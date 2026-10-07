@@ -12,6 +12,12 @@ data:
   CLERUM_CONTEXT_MAPPER_POLL_INTERVAL: '30000'
   MCP_PROXY_ENABLED: 'false'
   MCP_HOST_CODEX_SUBSCRIPTION_ENABLED: 'true'
+  # Subscription-model turns (Codex and Grok) present approved tools through
+  # the discovery bridges once a context exceeds the dynamic-tools threshold
+  # (CLERUM_DYNAMIC_TOOLS_THRESHOLD, default 60). The approved-tools lane and its
+  # fixture model require this mode; prepare-codex-approved-tools refuses to
+  # run without it. The application default stays `direct`. See issue #718.
+  CODEX_TOOL_PRESENTATION: 'auto'
   # e2e lane pin: 60s keeps the revoke-on-staleness scenario fast and
   # deterministic. Production defaults to 180s (bounded 600s) in
   # mcp-host/src/config.ts so a normal HCC rollout (~77s in clerum-dev) does not

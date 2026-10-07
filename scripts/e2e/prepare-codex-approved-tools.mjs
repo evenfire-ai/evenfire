@@ -754,6 +754,40 @@ export function boundedOperationFailure(operation, result) {
   return `FIXTURE_OPERATION_FAILED: bounded fixture operation '${operation}' ${outcome}`
 }
 
+// The fixture model scripts search, describe and call through the discovery
+// bridges, which the Host presents only under CODEX_TOOL_PRESENTATION=auto once
+// a context exceeds CLERUM_DYNAMIC_TOOLS_THRESHOLD (mcp-host config.ts:936-942).
+// A native presentation other than direct adds natives to the discovery
+// catalog and changes the search results the fixture expects. Every fixture
+// Host loads mcp-host-config through envFrom, so the ConfigMap data is the
+// presentation the run uses. Values are matched exactly and never echoed.
+export function resolveHostPresentation(data) {
+  if (data === null || typeof data !== 'object' || Array.isArray(data))
+    throw new Error('HOST_PRESENTATION_MISMATCH: mcp-host-config has no data')
+  const declared = key => (Object.hasOwn(data, key) ? data[key] : undefined)
+  if (declared('CODEX_TOOL_PRESENTATION') !== 'auto')
+    throw new Error(
+      'HOST_PRESENTATION_MISMATCH: mcp-host-config must set CODEX_TOOL_PRESENTATION to auto'
+    )
+  const threshold = declared('CLERUM_DYNAMIC_TOOLS_THRESHOLD')
+  if (threshold !== undefined && threshold !== '60')
+    throw new Error(
+      'HOST_PRESENTATION_MISMATCH: CLERUM_DYNAMIC_TOOLS_THRESHOLD must be unset or 60'
+    )
+  const native = declared('CLERUM_NATIVE_TOOL_PRESENTATION')
+  if (native !== undefined && native !== 'direct')
+    throw new Error(
+      'HOST_PRESENTATION_MISMATCH: CLERUM_NATIVE_TOOL_PRESENTATION must be unset or direct'
+    )
+  return {
+    codexToolPresentation: 'auto',
+    dynamicToolsThreshold: 60,
+    dynamicToolsThresholdSource: threshold === undefined ? 'default' : 'configmap',
+    nativeToolPresentation: 'direct',
+    nativeToolPresentationSource: native === undefined ? 'default' : 'configmap',
+  }
+}
+
 const PREPARATION_FAILURE_MAX_CHARS = 600
 
 // One line for the operator. Messages raised by this harness are fixed text,
@@ -1331,6 +1365,8 @@ async function main() {
   )
   if (hostFlags.data?.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true')
     throw new Error('Host Codex feature gate is not enabled by the Minikube overlay')
+  // Refuse before any fixture resource exists; the result goes into the state.
+  const hostPresentation = resolveHostPresentation(hostFlags.data)
   if (
     kubectl([
       '-n',
@@ -1427,6 +1463,7 @@ async function main() {
     worktree: repo,
     head,
     imageProof,
+    hostPresentation,
     run,
     scenarios,
     workflowScenario,

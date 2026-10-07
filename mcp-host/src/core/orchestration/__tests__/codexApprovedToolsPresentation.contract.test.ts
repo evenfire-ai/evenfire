@@ -22,8 +22,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { type RequestListener, type Server, createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { resolve } from 'node:path'
 import { LlmError, LlmErrorCode } from '../../../core/errors'
 import { CodexLlmProxyClient } from '../../../llm/codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../../../llm/codexSubscription'
@@ -97,6 +99,7 @@ const SERVER = 'fixture'
 const MODEL = 'gpt-5.3-codex'
 const HOST_REF = 'approved-tools-host'
 const REPO = '../../../../../'
+const OVERLAY = resolve(__dirname, REPO, 'deploy/overlays/minikube/configmaps/mcp-host-config.yaml')
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
   publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -123,6 +126,26 @@ async function listen(handler: RequestListener | Server): Promise<number> {
     )
   })
   return (server.address() as AddressInfo).port
+}
+
+/** Reads only the presentation keys of the Minikube Host ConfigMap overlay. */
+function overlayPresentation(): Presentation {
+  const text = readFileSync(OVERLAY, 'utf8')
+  const data = text.split('\n').indexOf('data:')
+  expect(data, 'the overlay has a top-level data: section').toBeGreaterThan(0)
+  const values = {} as Presentation
+  for (const key of PRESENTATION_KEYS) {
+    const lines = text.split('\n').filter(line => new RegExp(`^\\s*${key}\\s*:`).test(line))
+    expect(lines.length, `${key} is declared at most once`).toBeLessThanOrEqual(1)
+    if (lines.length === 0) {
+      values[key] = undefined
+      continue
+    }
+    const match = new RegExp(`^  ${key}: (?:'([^']*)'|"([^"]*)")$`).exec(lines[0]!)
+    expect(match, `${key} is a quoted string entry of data:`).not.toBeNull()
+    values[key] = match![1] ?? match![2]
+  }
+  return values
 }
 
 /** Loads the Host configuration exactly as a process started with `env` would. */
@@ -433,6 +456,29 @@ describe('approved-tools presentation contract (Host -> proxy -> fixture model)'
       businessCalls: 0,
     })
     expect(await target.businessCalls()).toEqual([])
+  })
+
+  it('the Minikube overlay declares auto, threshold 60 and native direct, and runs the receipt journey', async () => {
+    const declared = overlayPresentation()
+    const target = await host(declared, 83)
+    // The journey runs first, so a wrong declaration fails with the fixture
+    // model's own rejection reason rather than only a configuration mismatch.
+    const result = await target.turn('Show my verification receipt and its business ID.')
+    expect(target.simulator.evidence()).toMatchObject({ rejected: 0, rejections: [] })
+    expect(result.type).toBe('response')
+    expect(declared.CODEX_TOOL_PRESENTATION).toBe('auto')
+    // The threshold stays the application default (60) unless declared as 60.
+    expect([undefined, '60']).toContain(declared.CLERUM_DYNAMIC_TOOLS_THRESHOLD)
+    // Native auto would add natives to the discovery catalog the fixture searches.
+    expect([undefined, 'direct']).toContain(declared.CLERUM_NATIVE_TOOL_PRESENTATION)
+    expect(target.appConfig.codexToolPresentation).toBe('auto')
+    expect(target.appConfig.dynamicToolsThreshold).toBe(60)
+    const calls = await target.businessCalls()
+    expect(calls).toHaveLength(1)
+    expect(JSON.parse((result as { content: string }).content)).toEqual(calls[0])
+    const evidence = target.simulator.evidence()
+    expect(evidence.requests.map(request => request.stage)).toEqual([...BRIDGES, 'final'])
+    expectBridgedRequests(evidence)
   })
 
   it.each([83, 150, 250])(

@@ -23,6 +23,7 @@ import {
   preparationFailureLine,
   readOwnedDescriptor,
   readOwnedFile,
+  resolveHostPresentation,
   validateKubectlArgs,
   validateOwnerArgs,
   validateProfile,
@@ -515,4 +516,70 @@ test('the CLI prints the failure reason instead of a generic sentence', () => {
     result.stderr,
     'Approved tools preparation failed: PREPARATION_FAILED: Expected prepare, run, or restore; no fixture evidence was written\n'
   )
+})
+
+test('the Host presentation must be auto with threshold 60 and direct native tools', () => {
+  const overlay = { MCP_HOST_CODEX_SUBSCRIPTION_ENABLED: 'true', CODEX_TOOL_PRESENTATION: 'auto' }
+  // Liveness witness: the accepted shapes resolve and name where each value came from.
+  assert.deepEqual(resolveHostPresentation(overlay), {
+    codexToolPresentation: 'auto',
+    dynamicToolsThreshold: 60,
+    dynamicToolsThresholdSource: 'default',
+    nativeToolPresentation: 'direct',
+    nativeToolPresentationSource: 'default',
+  })
+  assert.deepEqual(
+    resolveHostPresentation({
+      ...overlay,
+      CLERUM_DYNAMIC_TOOLS_THRESHOLD: '60',
+      CLERUM_NATIVE_TOOL_PRESENTATION: 'direct',
+    }),
+    {
+      codexToolPresentation: 'auto',
+      dynamicToolsThreshold: 60,
+      dynamicToolsThresholdSource: 'configmap',
+      nativeToolPresentation: 'direct',
+      nativeToolPresentationSource: 'configmap',
+    }
+  )
+  for (const [data, key] of [
+    [undefined, 'has no data'],
+    [null, 'has no data'],
+    [[], 'has no data'],
+    [{}, 'CODEX_TOOL_PRESENTATION'],
+    [{ CODEX_TOOL_PRESENTATION: 'direct' }, 'CODEX_TOOL_PRESENTATION'],
+    [{ CODEX_TOOL_PRESENTATION: 'discovery' }, 'CODEX_TOOL_PRESENTATION'],
+    [{ CODEX_TOOL_PRESENTATION: 'AUTO' }, 'CODEX_TOOL_PRESENTATION'],
+    [{ ...overlay, CLERUM_DYNAMIC_TOOLS_THRESHOLD: '61' }, 'CLERUM_DYNAMIC_TOOLS_THRESHOLD'],
+    [{ ...overlay, CLERUM_DYNAMIC_TOOLS_THRESHOLD: '' }, 'CLERUM_DYNAMIC_TOOLS_THRESHOLD'],
+    [{ ...overlay, CLERUM_DYNAMIC_TOOLS_THRESHOLD: '060' }, 'CLERUM_DYNAMIC_TOOLS_THRESHOLD'],
+    [{ ...overlay, CLERUM_NATIVE_TOOL_PRESENTATION: 'auto' }, 'CLERUM_NATIVE_TOOL_PRESENTATION'],
+    [{ ...overlay, CLERUM_NATIVE_TOOL_PRESENTATION: '' }, 'CLERUM_NATIVE_TOOL_PRESENTATION'],
+  ])
+    assert.throws(
+      () => resolveHostPresentation(data),
+      error =>
+        error.message.startsWith('HOST_PRESENTATION_MISMATCH: ') && error.message.includes(key),
+      JSON.stringify(data)
+    )
+  // A declared value is matched, never echoed into the failure line.
+  assert.throws(
+    () => resolveHostPresentation({ CODEX_TOOL_PRESENTATION: 'secret-looking-value' }),
+    error => !error.message.includes('secret-looking-value')
+  )
+})
+
+test('prepare resolves the Host presentation before the fixture state exists and records it', () => {
+  const source = fs.readFileSync(
+    path.resolve(import.meta.dirname, 'prepare-codex-approved-tools.mjs'),
+    'utf8'
+  )
+  const read = source.indexOf("'configmap/mcp-host-config'")
+  const resolved = source.indexOf('const hostPresentation = resolveHostPresentation(hostFlags.data)')
+  const created = source.indexOf("openOwnedFile(evidence, 'fixture-state.json', { create: true })")
+  const firstCreate = source.indexOf("kubectl(['create', '-f', '-'")
+  for (const index of [read, resolved, created, firstCreate]) assert.ok(index > 0)
+  assert.ok(read < resolved && resolved < created && created < firstCreate)
+  const state = source.slice(source.lastIndexOf('state = {', created), created)
+  assert.match(state, /\n {4}hostPresentation,\n/)
 })
