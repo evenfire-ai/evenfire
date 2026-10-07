@@ -514,7 +514,7 @@ describe('GFS binary content snapshots', () => {
 
   it('rejects an oversized snapshot before downloading it', async () => {
     const { client, fetchFn, budget } = contentHarness(Buffer.alloc(0), {
-      metadata: { bytes: VISUAL_INPUT_LIMITS.fileBytes + 1 },
+      metadata: { bytes: 16 * 1024 * 1024 + 1 },
     })
     await expect(client.read(READ_ARGS, { budget })).rejects.toMatchObject({
       code: 'limit_exceeded',

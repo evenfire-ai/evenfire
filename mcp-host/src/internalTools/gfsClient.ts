@@ -3,7 +3,13 @@ import { readFile } from 'node:fs/promises'
 import { withAbort } from '../core/adapters/abortableLlmPort'
 import { decodeRuntimeJwtScopes } from '../workflow/mcpHostRuntimeJwt'
 import type { GfscCallOptions, GfscWriteClient } from './gfs'
-import { boundedGfsErrorDetail, readGfsContent } from './gfsContentRead'
+import { downloadGfsContent } from './gfsContentDownload'
+import {
+  type GfsMetadataSnapshot,
+  boundedGfsErrorDetail,
+  readGfsContent,
+  readGfsMetadata,
+} from './gfsContentRead'
 
 const DIRECT_KEY = 'MCP_HOST_GFS_TOKEN'
 const FILE_KEY = 'MCP_HOST_GFS_TOKEN_FILE'
@@ -280,6 +286,32 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
     },
     read: (args, options = {}) =>
       readGfsContent(
+        (path, init, deadlineMs) =>
+          responseWithRetry(
+            readerBase,
+            path,
+            init,
+            { signal: init.signal as AbortSignal, deadlineMs },
+            true
+          ),
+        args,
+        options
+      ),
+    readMetadata: (args, options = {}) =>
+      readGfsMetadata(
+        (path, init, deadlineMs) =>
+          responseWithRetry(
+            readerBase,
+            path,
+            init,
+            { signal: init.signal as AbortSignal, deadlineMs },
+            true
+          ),
+        args,
+        options
+      ),
+    download: (args, options) =>
+      downloadGfsContent(
         (path, init, deadlineMs) =>
           responseWithRetry(
             readerBase,

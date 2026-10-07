@@ -53,6 +53,82 @@ function expandDetails() {
   fireEvent.click(screen.getByText('More details'))
 }
 
+describe('ProgressStepper approval input preview', () => {
+  it('shows the pending command as text before approval and does not decide automatically', () => {
+    const onApprove = vi.fn()
+    const onDeny = vi.fn()
+    const command = `node -e 'console.log("<img src=x onerror=alert(1)>")'`
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: {
+            requestId: 'preview-request',
+            displayName: 'Shell',
+            inputPreview: { text: command, truncated: false },
+          },
+        })}
+        onApprove={onApprove}
+        onDeny={onDeny}
+      />
+    )
+    const preview = screen.getByTestId('approval-input-preview')
+    expect(preview.textContent).toBe(command)
+    expect(preview.querySelector('img')).toBeNull()
+    expect(onApprove).not.toHaveBeenCalled()
+    expect(onDeny).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('approval-approve-btn'))
+    expect(onApprove).toHaveBeenCalledTimes(1)
+    expect(onDeny).not.toHaveBeenCalled()
+  })
+
+  it('labels a shortened or redacted command as an incomplete preview', () => {
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: {
+            requestId: 'preview-request',
+            displayName: 'Shell',
+            inputPreview: { text: 'node', truncated: true },
+          },
+        })}
+        onDeny={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('approval-input-preview').textContent).toContain(
+      'incomplete or changed by redaction'
+    )
+  })
+
+  it('associates completed and live output panels with their own tool call', () => {
+    const preview = {
+      headLines: ['bounded-output'],
+      tailLines: [],
+      totalLines: 1,
+      truncated: false,
+    }
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          steps: [
+            makeStep({ toolCallId: 'completed-call', outputPreview: preview }),
+            makeStep({ toolCallId: 'live-call', state: 'running', liveOutputPreview: preview }),
+          ],
+        })}
+      />
+    )
+    expandDetails()
+    fireEvent.click(screen.getByTestId('step-row-completed-call'))
+    fireEvent.click(screen.getByTestId('step-row-live-call'))
+    expect(
+      screen
+        .getAllByTestId('step-output-panel')
+        .map(panel => panel.getAttribute('data-tool-call-id'))
+    ).toEqual(['completed-call', 'live-call'])
+  })
+})
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('ProgressStepper — null/empty states', () => {
