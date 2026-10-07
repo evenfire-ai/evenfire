@@ -747,6 +747,33 @@ test('visualPayload: marker-fill and IHDR-length edges return exact verdicts', (
       ],
       invalid('PNG first chunk must be a 13-byte IHDR'),
     ],
+    // Eight or more bytes with one wrong signature byte and otherwise valid
+    // chunks: the signature check alone must refuse it.
+    [
+      'wrong last PNG signature byte',
+      'image/png',
+      [
+        ...SIG.slice(0, 7),
+        0x0b,
+        ...chunk('IHDR', [...u32(3), ...u32(2), 8, 6, 0, 0, 0]),
+        ...chunk('IDAT', [0x78, 0x9c]),
+        ...chunk('IEND'),
+      ],
+      invalid('PNG signature is missing'),
+    ],
+    // SOF length boundary: 7 is one byte short of length+P+Y+X+Nf, 8 is the minimum.
+    [
+      '7-byte JPEG frame header',
+      'image/jpeg',
+      [...SOI, 0xff, 0xc0, 0x00, 0x07, 0x08, 0x00, 0x06, 0x00, 0x08, ...sos, 0x12, 0x34, ...EOI],
+      invalid('JPEG frame header is truncated'),
+    ],
+    [
+      '8-byte JPEG frame header is the minimum accepted',
+      'image/jpeg',
+      [...SOI, 0xff, 0xc0, 0x00, 0x08, 0x08, 0x00, 0x06, 0x00, 0x08, 0x01, ...sos, 0x12, 0x34, ...EOI],
+      accepted(2 + 10 + 14 + 2 + 2, 8, 6),
+    ],
   ]
   for (const [name, mimeType, bytes, expected] of corpus) {
     assert.deepEqual(
