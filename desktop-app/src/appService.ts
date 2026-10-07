@@ -894,6 +894,7 @@ export class AppService {
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
+  private interactiveLoginAttempts = 0
   private logoutInProgress = false
   private nativeAuthEnvironmentCommitQueue: Promise<void> = Promise.resolve()
   private gfsAuthEpoch = 0
@@ -1560,7 +1561,7 @@ export class AppService {
 
   private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
     const reservation = await this.withNativeAuthEnvironmentCommit(async () => {
-      if (this.logoutInProgress) return null
+      if (this.logoutInProgress || this.interactiveLoginAttempts > 0) return null
       hydrateDesktopRuntimeConfig()
       const environment = this.captureAuthEnvironmentBinding()
       const legacyEnvKeys = getActiveLegacyEnvKeys()
@@ -1585,11 +1586,17 @@ export class AppService {
         tokenReadFailed,
       }
     })
-    if (!reservation) return { authenticated: false, me: null }
+    if (!reservation) {
+      return this.withNativeAuthEnvironmentCommit(async () => ({
+        authenticated: Boolean(this.sessionToken && this.me),
+        me: this.me,
+      }))
+    }
 
     const ownsRestore = () =>
       this.sessionGeneration === reservation.sessionGeneration &&
       !this.logoutInProgress &&
+      this.interactiveLoginAttempts === 0 &&
       getActiveEnvKey() === reservation.environment.environmentKey &&
       normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) ===
         reservation.environment.restBaseUrl
@@ -1984,20 +1991,31 @@ export class AppService {
 
   async googleLogin(idToken: string): Promise<SessionState> {
     let loginRequest: ReturnType<AuthClient['googleLogin']> | undefined
-    const attempt = await this.withNativeAuthEnvironmentCommit(async () => {
-      if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
-      const sessionGeneration = ++this.sessionGeneration
-      const binding = this.captureAuthEnvironmentBinding()
-      loginRequest = this.authClient.googleLogin(idToken)
-      return { sessionGeneration, binding }
-    })
-    if (!loginRequest) throw new Error('Google login request was not dispatched')
-    const result = await loginRequest
-    return this.withNativeAuthEnvironmentCommit(async () => {
-      this.assertSessionGeneration(attempt.sessionGeneration)
-      this.assertAuthEnvironmentBinding(attempt.binding)
-      return this.installAuthenticatedLogin(result, attempt.sessionGeneration)
-    })
+    let registered = false
+    try {
+      const attempt = await this.withNativeAuthEnvironmentCommit(async () => {
+        if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
+        const sessionGeneration = ++this.sessionGeneration
+        const binding = this.captureAuthEnvironmentBinding()
+        loginRequest = this.authClient.googleLogin(idToken)
+        this.interactiveLoginAttempts += 1
+        registered = true
+        return { sessionGeneration, binding }
+      })
+      if (!loginRequest) throw new Error('Google login request was not dispatched')
+      const result = await loginRequest
+      return await this.withNativeAuthEnvironmentCommit(async () => {
+        this.assertSessionGeneration(attempt.sessionGeneration)
+        this.assertAuthEnvironmentBinding(attempt.binding)
+        return this.installAuthenticatedLogin(result, attempt.sessionGeneration)
+      })
+    } finally {
+      if (registered) {
+        await this.withNativeAuthEnvironmentCommit(async () => {
+          this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
+        })
+      }
+    }
   }
 
   private async openProfileDesktopSetup(email: string): Promise<{
@@ -2168,22 +2186,33 @@ export class AppService {
   }
 
   async passwordLogin(email: string, password: string): Promise<PasswordLoginResult> {
-    const loginGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
-      if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
-      const generation = ++this.sessionGeneration
-      hydrateDesktopRuntimeConfig()
-      if (!isDesktopRuntimeConfigured()) {
-        throw new Error('desktop_setup_required')
-      }
-      return generation
-    })
-    await this.withNativeAuthEnvironmentCommit(async () => {
+    let registered = false
+    try {
+      const loginGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
+        if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
+        const generation = ++this.sessionGeneration
+        hydrateDesktopRuntimeConfig()
+        if (!isDesktopRuntimeConfigured()) {
+          throw new Error('desktop_setup_required')
+        }
+        this.interactiveLoginAttempts += 1
+        registered = true
+        return generation
+      })
+      await this.withNativeAuthEnvironmentCommit(async () => {
+        this.assertSessionGeneration(loginGeneration)
+        await this.resolveRuntimeConfigIfNeeded()
+      })
       this.assertSessionGeneration(loginGeneration)
-      await this.resolveRuntimeConfigIfNeeded()
-    })
-    this.assertSessionGeneration(loginGeneration)
-    const normalizedEmail = email.trim().toLowerCase()
-    return this.completePasswordLogin(normalizedEmail, password, loginGeneration)
+      const normalizedEmail = email.trim().toLowerCase()
+      return await this.completePasswordLogin(normalizedEmail, password, loginGeneration)
+    } finally {
+      if (registered) {
+        await this.withNativeAuthEnvironmentCommit(async () => {
+          this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
+        })
+      }
+    }
   }
 
   /**

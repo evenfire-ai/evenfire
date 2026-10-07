@@ -4,6 +4,7 @@ import {
   createNativeCommitTestHarness,
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
+import type { SessionMe } from '../types.js'
 
 afterEach(cleanupNativeCommitTestHarness)
 
@@ -16,6 +17,64 @@ type SetupActivation = {
 }
 
 describe('AppService setup and saved-session ownership', () => {
+  it.each(['Google', 'password'] as const)(
+    'lets a pending %s login win over a background saved-session restore',
+    async provider => {
+      const { service } = await createNativeCommitTestHarness()
+      const restoredUser = {
+        id: 'user-a',
+        email: 'user-a@example.test',
+        name: 'User A',
+        picture: null,
+        teamId: 'team-a',
+        teamName: 'Team A',
+        role: 'member',
+      }
+      const loginResponse = deferred<{ token: string; me: SessionMe }>()
+      const loginUser = {
+        id: 'user-b',
+        email: 'user-b@example.test',
+        name: 'User B',
+        picture: null,
+        teamId: 'team-b',
+        teamName: 'Team B',
+        role: 'member',
+      }
+      const app = service as unknown as {
+        authClient: {
+          googleLogin: ReturnType<typeof vi.fn>
+          passwordLogin: ReturnType<typeof vi.fn>
+          getMe: ReturnType<typeof vi.fn>
+        }
+        tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
+        sessionToken: string | null
+        me: { id: string } | null
+      }
+      app.authClient = {
+        googleLogin: vi.fn(() => loginResponse.promise),
+        passwordLogin: vi.fn(() => loginResponse.promise),
+        getMe: vi.fn().mockResolvedValue(restoredUser),
+      }
+      app.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session-a')
+
+      const login =
+        provider === 'Google'
+          ? service.googleLogin('synthetic-google-login-b')
+          : service.passwordLogin('user-b@example.test', 'synthetic-password-b')
+      await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+      expect(app.authClient.getMe).not.toHaveBeenCalled()
+
+      loginResponse.resolve({ token: 'synthetic-login-session-b', me: loginUser })
+      await expect(login).resolves.toMatchObject({ authenticated: true, me: loginUser })
+      await expect(service.getSessionState()).resolves.toMatchObject({
+        authenticated: true,
+        me: loginUser,
+      })
+      expect(app.sessionToken).toBe('synthetic-login-session-b')
+      expect(app.me).toMatchObject({ id: 'user-b' })
+    }
+  )
+
   it('keeps a restored session when its saved-session commit beats pending setup', async () => {
     const { service, runtimeConfig, restA, restB } = await createNativeCommitTestHarness()
     const setupActivation = deferred<SetupActivation>()
