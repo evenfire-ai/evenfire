@@ -7,8 +7,11 @@ import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
 import {
   type CodexToolPresentation,
+  type NativeToolPresentation,
   parseCodexToolDiscoveryBytes,
   parseCodexToolPresentation,
+  parseNativeToolDiscoveryBytes,
+  parseNativeToolPresentation,
 } from './core/orchestration/toolPresentationPolicy'
 import { SHELL_TIMEOUT_CLEANUP_MS } from './core/tools/shellTimeouts'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
@@ -177,6 +180,11 @@ export interface Config {
   // Codex presentation is independent of the legacy bridge opt-in.
   codexToolPresentation: CodexToolPresentation
   codexToolDiscoveryBytes: number
+  // #1003 — Native-tool presentation, independent of the Codex/Grok and legacy
+  // MCP presentation above. `auto` moves natives larger than the byte budget
+  // out of `tools[]` into search/describe/call; `direct` (default) keeps them.
+  nativeToolPresentation: NativeToolPresentation
+  nativeToolDiscoveryBytes: number
   // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
   // OFF; set true per-host to enable; see
   // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
@@ -951,6 +959,10 @@ export const config: Config = {
   // Codex optimization is independent of the legacy dynamic-tools opt-in.
   codexToolPresentation: parseCodexToolPresentation(process.env.CODEX_TOOL_PRESENTATION),
   codexToolDiscoveryBytes: parseCodexToolDiscoveryBytes(process.env.CODEX_TOOL_DISCOVERY_BYTES),
+  nativeToolPresentation: parseNativeToolPresentation(process.env.CLERUM_NATIVE_TOOL_PRESENTATION),
+  nativeToolDiscoveryBytes: parseNativeToolDiscoveryBytes(
+    process.env.CLERUM_NATIVE_TOOL_DISCOVERY_BYTES
+  ),
   // Legacy dynamic tools remain opt-in for other providers.
   dynamicToolsEnabled: getEnvBool('CLERUM_DYNAMIC_TOOLS_ENABLED', false),
   // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which

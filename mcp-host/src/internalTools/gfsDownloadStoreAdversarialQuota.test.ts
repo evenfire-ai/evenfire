@@ -761,7 +761,8 @@ describe('GFS download store physical capacity and reclaim', () => {
     for (const receipt of receipts) expect(target.debugRecord(receipt.id)).toBeDefined()
     for (const identity of ['caller-c', 'caller-d', 'caller-e', 'caller-f', 'caller-g'])
       await target.releaseReceiptOwner(`${identity}-owner`, identity)
-  })
+    // 10 durable publications measured 3.3 s on a loaded host, inside Vitest's 5 s default.
+  }, 30_000)
 
   it(
     'keeps all default-cap small copies when current physical capacity is zero',

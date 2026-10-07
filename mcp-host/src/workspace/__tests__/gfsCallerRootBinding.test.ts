@@ -66,7 +66,7 @@ describe('NativeRegistry GFS caller file-tool binding', () => {
       undefined,
       undefined,
       undefined,
-      false,
+      { mcpDiscovery: false, nativeDiscovery: false },
       undefined,
       {
         store,

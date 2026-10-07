@@ -133,22 +133,27 @@ export interface LoopConfig {
 
   /**
    * F3 (dynamic-tool-loading) — context the `clerum__tool_call` bridge intercept
-   * needs in `executeToolCalls`. Present only when the host wired the
-   * `McpManager` AND the discovery bridge is registered. When undefined, the
-   * intercept is inert: `clerum__tool_call` falls through to the native
-   * safety-net tool (which errors), and there is no auto-recover scope gate.
+   * needs in `executeToolCalls`. Present whenever the 3 bridge tools are
+   * registered: MCP discovery with an `McpManager` wired, or native `auto`
+   * (#1003, with or without an `McpManager`). When undefined, the intercept is
+   * inert: `clerum__tool_call` falls through to the native safety-net tool
+   * (which errors), and there is no auto-recover scope gate.
    *
    * - `nativeNames` — the exact set of native tool names (incl. the 3 bridges).
    *   Used to reject recursion (LOCKED #11) and to distinguish native from
    *   deferrable MCP names (membership, NOT a string heuristic).
    * - `getDeferrableCatalogNames` — returns the live set of deferrable MCP tool
-   *   names (`McpManager.getAllTools()` names, minus natives). Re-derived per
-   *   call so it tracks servers connecting/disconnecting (stateless; the scope
-   *   gate, LOCKED #7 / Critical #7, rejects out-of-catalog names).
+   *   names (`McpManager.getAllTools()` names, minus natives; empty without an
+   *   `McpManager`). Re-derived per call so it tracks servers
+   *   connecting/disconnecting (stateless; the scope gate, LOCKED #7 /
+   *   Critical #7, rejects out-of-catalog names).
+   * - `nativeTargets` — native `auto` (#1003): `clerum__tool_call` may target a
+   *   native tool. False keeps the pre-#1003 rejection of native targets.
    */
   bridge?: {
     nativeNames: Set<string>
     getDeferrableCatalogNames: () => Set<string>
+    nativeTargets: boolean
   }
 }
 
