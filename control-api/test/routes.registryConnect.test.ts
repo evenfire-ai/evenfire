@@ -8,6 +8,9 @@ import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 
 const { cfg } = vi.hoisted(() => ({
   cfg: {
+    adminRegistryConnectStatusPerMin: 150,
+    adminRegistryConnectRequestPerMin: 15,
+    adminRegistryConnectRecoveryPerMin: 50,
     registryConnectionMode: 'self-hosted',
     registryUrl: 'https://example.com',
     registryAuthEnabled: true,
@@ -513,8 +516,8 @@ describe('registry connect flow', () => {
     connDb.getRegistryConnection.mockResolvedValue(null)
     const res = await request(app()).get('/admin/registry/connect').expect(200)
     expect(res.body.state).toBe('disconnected')
-    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_status:admin-uuid-123', 30)
-    expect(res.headers['x-ratelimit-limit']).toBe('30')
+    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_status:admin-uuid-123', 150)
+    expect(res.headers['x-ratelimit-limit']).toBe('150')
   })
 
   // Proves the limiter blocks BEFORE any DB/registry work: a denied admin
@@ -549,8 +552,8 @@ describe('registry connect flow', () => {
       .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
       .expect(202)
     expect(res.body.state).toBe('pending')
-    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_request:admin-uuid-123', 3)
-    expect(res.headers['x-ratelimit-limit']).toBe('3')
+    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_request:admin-uuid-123', 15)
+    expect(res.headers['x-ratelimit-limit']).toBe('15')
   })
 
   // Proves the limiter blocks BEFORE any registry work: a denied admin must
@@ -1018,8 +1021,8 @@ describe('POST recover', () => {
     })
     const res = await request(app()).post('/admin/registry/connect/recover').expect(200)
     expect(res.body).toMatchObject({ state: 'connected', org: 'acme' })
-    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_recover:admin-uuid-123', 10)
-    expect(res.headers['x-ratelimit-limit']).toBe('10')
+    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_recover:admin-uuid-123', 50)
+    expect(res.headers['x-ratelimit-limit']).toBe('50')
   })
 
   // Proves the limiter actually blocks, and blocks BEFORE any registry work:
