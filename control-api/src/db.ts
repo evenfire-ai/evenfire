@@ -6332,7 +6332,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyAdminSubscriptionRateLimitNamespace,
   },
   {
-    version: '0125_bug192_password_admission',
+    version: '0126_bug192_password_admission',
+    // Preserve the deployed identity after dev assigned slot 0125 to admin admission.
+    legacyVersions: ['0125_bug192_password_admission'],
     apply: applyPasswordAdmissionSchema,
   },
 ]

@@ -122,7 +122,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     expect(permissions).toEqual({ state: true, pace: true })
     const migrations = (
       await holder.pool.query(
-        "SELECT version FROM schema_migrations WHERE version='0125_bug192_password_admission'"
+        "SELECT version FROM schema_migrations WHERE version='0126_bug192_password_admission'"
       )
     ).rows
     expect(migrations).toHaveLength(1)
