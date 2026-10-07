@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CODEX_COMPOSER_MAX_IMAGE_BYTES,
   CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
+  CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES,
   COMPOSER_MAX_IMAGE_BYTES,
   COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
   composerImageBudget,
@@ -34,14 +35,19 @@ describe('composerImageBudget', () => {
     expect(17 * MIB).toBeGreaterThan(budget.maxImageBytes)
   })
 
-  it('keeps the Codex budget unchanged', () => {
+  it('holds Codex to the decoded 16 MiB image total that rpc-proxy and mcp-host enforce', () => {
     expect(composerImageBudget('codex-subscription')).toEqual({
       maxImageBytes: CODEX_COMPOSER_MAX_IMAGE_BYTES,
-      total: null,
+      total: {
+        counts: 'decoded',
+        maxBytes: CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES,
+        labelBytes: CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES,
+      },
       maxDimension: CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
       sizeUnit: 'MiB',
     })
     expect(CODEX_COMPOSER_MAX_IMAGE_BYTES).toBe(16 * MIB)
+    expect(CODEX_COMPOSER_MAX_TOTAL_IMAGE_DECODED_BYTES).toBe(16 * MIB)
     expect(CODEX_COMPOSER_MAX_IMAGE_DIMENSION).toBe(2048)
   })
 

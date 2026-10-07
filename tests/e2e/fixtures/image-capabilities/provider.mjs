@@ -25,15 +25,29 @@
  * the six tile centers. A run that never delivered the image cannot pass by
  * guessing, and a request that carries no image never receives a color list.
  *
+ * Documents (issue #678). The Host never puts an attached document's text in the
+ * prompt: the first request lists the file by id and offers the
+ * `clerum__attachment_read` tool. So the one tool call this fixture ever makes
+ * is that read, answered with `finish_reason: 'tool_calls'`; the second request
+ * carries the tool result, and the answer is `DOCUMENT_FIXTURE_SHA256:` plus the
+ * first 16 hex characters of the SHA-256 of the delivered text. A run whose
+ * document never reached the provider cannot produce that digest. Document rows
+ * add `documentSha256` (the digest of the delivered text, never the text); the
+ * answer row also records the page the Host delivered (`byteRange` and
+ * `truncated`), so the oracle hashes that exact slice of the file. Rejected rows
+ * add a `reason` drawn from `FIXTURE_REJECTION_REASONS`, a closed set of fixed
+ * strings that never carries request content.
+ *
  * Determinism and sanitation. Responses carry a synthetic completion id derived
- * from the run id, a fixed test usage block, `finish_reason: 'stop'`, and never a
- * tool call. Both accepted models answer a text-only request with
- * `IMAGE_FIXTURE_TEXT_OK`, so a legitimate title or summary call is never turned
- * into a false failure; only a delivered image can produce a color list. Evidence
- * is limited to the run id, counters, per-model counts, a per-call ledger
- * (model, nullable image digest, response kind), and SHA-256 digests of the
- * delivered image bytes. Headers, auth values, prompts, and raw image bytes are
- * never recorded.
+ * from the run id, a fixed test usage block, and `finish_reason: 'stop'` (or
+ * `'tool_calls'` for the document read). Both accepted models answer a text-only
+ * request with `IMAGE_FIXTURE_TEXT_OK`, so a legitimate title or summary call is
+ * never turned into a false failure; only a delivered image can produce a color
+ * list. Evidence is limited to the run id, counters, per-model counts, a per-call
+ * ledger (model, nullable image digest, response kind, and for documents the
+ * digest of the delivered text), and SHA-256 digests of the delivered image bytes
+ * and document text. Headers, auth values, prompts, raw image bytes, and document
+ * text are never recorded.
  *
  * Authentication. This fixture never holds the runner's ZAI key. It holds only
  * the SHA-256 digest of that key, hashes the bearer token it receives, and
@@ -120,6 +134,33 @@ const TILE_PALETTE = [
 const TILE_COLOR_NAMES = new Map(
   TILE_PALETTE.map(([name, red, green, blue]) => [`${red},${green},${blue}`, name])
 )
+
+/**
+ * Every reason a rejected ledger row may carry. Each is a fixed string chosen by
+ * the fixture, so a rejected row can never echo a header, prompt or payload.
+ */
+export const FIXTURE_REJECTION_REASONS = Object.freeze([
+  'provider-request-form-unsupported',
+  'provider-path-not-captured',
+  'provider-method-unsupported',
+  'provider-auth-mismatch',
+  'provider-body-unsupported',
+  'provider-body-invalid',
+  'unsupported-model',
+  'text-model-image-incompatible',
+  'image-not-png-data-uri',
+  'image-part-count',
+  'image-png-malformed',
+  'image-png-unsupported-form',
+  'image-tile-grid-mismatch',
+  'image-pixel-not-a-tile-color',
+  'document-byte-length-malformed',
+  'document-tool-result-count',
+  'document-tool-output-malformed',
+  'document-tool-output-unreadable',
+  'document-page-range-malformed',
+  'document-stream-unsupported',
+])
 
 /** A refusal with a stable machine-readable reason code for the evidence tally. */
 class FixtureImageError extends Error {
@@ -330,6 +371,149 @@ function extractPngBytes(messages) {
   return Buffer.from(payload, 'base64')
 }
 
+/** The Host tool that returns the text of an attached document (issue #678). */
+const ATTACHMENT_READ_TOOL = 'clerum__attachment_read'
+
+/** Prefix of the document answer; the digest after it is computed from the delivered text. */
+const DOCUMENT_ANSWER_PREFIX = 'DOCUMENT_FIXTURE_SHA256:'
+
+/** Length of the digest prefix echoed in the answer. */
+const DOCUMENT_ANSWER_DIGEST_CHARS = 16
+
+/** The `attached_file` line the Host writes into the turn-context block. */
+const ATTACHED_FILE_LINE = /^attached_file: id="([^"\n]+)"[^\n]*$/m
+
+/**
+ * The trailing fields of that line (`turnContext.ts`): the byte length the Host
+ * verified, then the reader, then the optional media-type mismatch tail. The
+ * declared type in that tail is written with `quotePromptValue`, a JSON string
+ * literal that may contain spaces and escaped quotes. Anchored to the end of the
+ * line, so a file name that contains the same text cannot supply the value.
+ */
+const ATTACHED_FILE_BYTES =
+  / bytes=(\S*) reader=\S+(?: mismatch=true(?: declared="(?:[^"\\]|\\.)*")? detected=\S+)?$/
+
+/** A positive decimal integer without leading zeros. */
+const POSITIVE_DECIMAL = /^[1-9][0-9]*$/
+
+/** The wrapper the Host puts around a tool result (`BasicSafety.wrapForLlm`). */
+const ATTACHMENT_TOOL_OUTPUT = new RegExp(
+  `^<tool_output name="${ATTACHMENT_READ_TOOL}" sanitized="(?:true|false)">\\n([\\s\\S]*)\\n</tool_output>$`
+)
+
+/** A document turn the fixture cannot read pixel-exactly gets a stable reason code. */
+class FixtureDocumentError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'FixtureDocumentError'
+    this.code = code
+  }
+}
+
+function lastUserIndex(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') return index
+  }
+  return -1
+}
+
+/** The byte length the Host listed for the attached file; anything else is refused. */
+function attachedFileByteLength(line) {
+  const field = ATTACHED_FILE_BYTES.exec(line)
+  const value = field?.[1]
+  if (value === undefined || !POSITIVE_DECIMAL.test(value) || !Number.isSafeInteger(Number(value)))
+    throw new FixtureDocumentError(
+      'document-byte-length-malformed',
+      'the attached_file line does not carry a positive bytes= value'
+    )
+  return Number(value)
+}
+
+/**
+ * Classifies the request as one of the two turns of an attachment read.
+ *
+ * - `null`: not a document turn (no `attached_file` line, or the read tool is not offered).
+ * - `{ stage: 'read', attachmentId, byteLength }`: the user message lists a readable file
+ *   and no tool result follows it yet, so the model has to ask for the text. `byteLength`
+ *   is the size the Host listed for the file.
+ * - `{ stage: 'answer', text }`: a `role:'tool'` message after the last user message carries
+ *   the wrapped tool result, so the model can answer from what was delivered.
+ *
+ * The fixture is stateless: both turns are recognised from the message list alone.
+ */
+function classifyDocumentTurn(body) {
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  const offered = tools.some(tool => tool?.function?.name === ATTACHMENT_READ_TOOL)
+  if (!offered) return null
+
+  const userIndex = lastUserIndex(body.messages)
+  if (userIndex < 0) return null
+  const user = body.messages[userIndex]
+  if (typeof user.content !== 'string') return null
+  const attached = ATTACHED_FILE_LINE.exec(user.content)
+  if (!attached) return null
+
+  const toolMessages = body.messages
+    .slice(userIndex + 1)
+    .filter(message => message?.role === 'tool' && typeof message.content === 'string')
+  if (toolMessages.length === 0)
+    return {
+      stage: 'read',
+      attachmentId: attached[1],
+      byteLength: attachedFileByteLength(attached[0]),
+    }
+  if (toolMessages.length > 1)
+    throw new FixtureDocumentError(
+      'document-tool-result-count',
+      `exactly one attachment read is supported, received ${toolMessages.length}`
+    )
+
+  const wrapped = ATTACHMENT_TOOL_OUTPUT.exec(toolMessages[0].content)
+  if (!wrapped)
+    throw new FixtureDocumentError(
+      'document-tool-output-malformed',
+      'the tool result is not a clerum__attachment_read wrapper'
+    )
+  let result
+  try {
+    result = JSON.parse(wrapped[1])
+  } catch {
+    throw new FixtureDocumentError('document-tool-output-malformed', 'the tool result is not JSON')
+  }
+  if (
+    !result ||
+    typeof result !== 'object' ||
+    result.kind !== 'text' ||
+    typeof result.text !== 'string'
+  )
+    throw new FixtureDocumentError(
+      'document-tool-output-unreadable',
+      'the tool result does not carry the document text'
+    )
+  const range = result.byteRange
+  if (
+    !range ||
+    typeof range !== 'object' ||
+    Array.isArray(range) ||
+    !isByteCount(range.offset) ||
+    !isByteCount(range.length) ||
+    typeof result.truncated !== 'boolean'
+  )
+    throw new FixtureDocumentError(
+      'document-page-range-malformed',
+      'the tool result does not carry a readable byteRange and truncated flag'
+    )
+  // Only the two integers and the flag are copied: the ledger never holds text.
+  return {
+    stage: 'answer',
+    text: result.text,
+    byteRange: { offset: range.offset, length: range.length },
+    truncated: result.truncated,
+  }
+}
+
+const isByteCount = value => Number.isSafeInteger(value) && value >= 0
+
 const INTERNAL_HOST_SUFFIXES = [
   '.svc.cluster.local',
   '.svc',
@@ -457,6 +641,36 @@ function completionBody(completionId, model, content) {
   }
 }
 
+/** An assistant turn that asks the Host to run `name` with `args` (non-stream only). */
+function toolCallCompletionBody(completionId, model, name, args) {
+  return {
+    id: completionId,
+    object: 'chat.completion',
+    created: FIXTURE_CREATED,
+    model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: `call-${completionId}`,
+              type: 'function',
+              function: { name, arguments: JSON.stringify(args) },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+        logprobs: null,
+      },
+    ],
+    usage: FIXTURE_USAGE,
+    system_fingerprint: FIXTURE_SYSTEM_FINGERPRINT,
+  }
+}
+
 function streamResponse(completionId, model, content) {
   const chunk = (delta, finishReason, withUsage) => ({
     id: completionId,
@@ -541,6 +755,9 @@ export function createImageFixtureFetch(
       blockedEgress: 0,
       imageDecodeFailures: 0,
       unauthorizedAttempts: 0,
+      documentReadRequests: 0,
+      documentAnswers: 0,
+      documentFailures: 0,
     },
     attempts: [],
   }
@@ -555,19 +772,29 @@ export function createImageFixtureFetch(
    * request was refused before its body was parsed, and `imageSha256` is null
    * whenever the attempt carried no usable image.
    */
-  const recordCall = (model, imageSha256, responseKind) => {
-    state.attempts.push({ model, imageSha256, responseKind })
+  const recordCall = (model, imageSha256, responseKind, fields = {}) => {
+    // Only document rows carry document fields and only rejected rows carry a
+    // `reason`, so the image rows keep the exact shape they always had.
+    state.attempts.push({ model, imageSha256, responseKind, ...fields })
   }
   const refuse = (model, reason, { status = 400, code = reason, imageSha256 = null } = {}) => {
+    // The ledger records a fixed string from the closed set, never request text.
+    if (!FIXTURE_REJECTION_REASONS.includes(reason))
+      throw new Error(`Fixture rejection reason is not in the closed set: ${reason}`)
     state.counters.rejectedAttempts += 1
-    recordCall(model, imageSha256, 'rejected')
+    recordCall(model, imageSha256, 'rejected', { reason })
     publish()
     return fixtureErrorResponse(status, code, reason)
   }
-  const answer = (model, content, responseKind, { imageSha256 = null, stream = false } = {}) => {
+  const answer = (
+    model,
+    content,
+    responseKind,
+    { imageSha256 = null, document, stream = false } = {}
+  ) => {
     sequence += 1
     const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
-    recordCall(model, imageSha256, responseKind)
+    recordCall(model, imageSha256, responseKind, document)
     publish()
     return stream
       ? streamResponse(completionId, model, content)
@@ -631,6 +858,59 @@ export function createImageFixtureFetch(
       // request without pixels can ever receive a color list.
       if (model !== UNSUPPORTED_MODEL && model !== SUPPORTED_MODEL)
         return refuse(model, 'unsupported-model', { code: 'unsupported_model' })
+
+      let documentTurn
+      try {
+        documentTurn = classifyDocumentTurn(body)
+      } catch (error) {
+        if (!(error instanceof FixtureDocumentError)) throw error
+        state.counters.documentFailures += 1
+        return refuse(model, error.code, { code: error.code })
+      }
+      if (documentTurn) {
+        if (stream) {
+          // The Host reads the provider without streaming; a stream here means the
+          // wiring changed, and a tool call cannot be answered in this fixture's SSE.
+          state.counters.documentFailures += 1
+          return refuse(model, 'document-stream-unsupported', {
+            code: 'document_stream_unsupported',
+          })
+        }
+        if (documentTurn.stage === 'read') {
+          // Ask for the text. The answer to this request carries no file content:
+          // the only way the text reaches the next request is the Host's own tool.
+          state.counters.documentReadRequests += 1
+          sequence += 1
+          const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
+          recordCall(model, null, 'document-read-requested', {
+            documentSha256: null,
+            documentByteLength: documentTurn.byteLength,
+          })
+          publish()
+          return jsonResponse(
+            toolCallCompletionBody(completionId, model, ATTACHMENT_READ_TOOL, {
+              attachmentId: documentTurn.attachmentId,
+            })
+          )
+        }
+        // The digest in the answer is derived from the delivered text and from
+        // nothing else: the prompt and the file name never contribute to it.
+        const documentSha256 = createHash('sha256').update(documentTurn.text, 'utf8').digest('hex')
+        state.counters.documentAnswers += 1
+        return answer(
+          model,
+          `${DOCUMENT_ANSWER_PREFIX}${documentSha256.slice(0, DOCUMENT_ANSWER_DIGEST_CHARS)}`,
+          'document-answer',
+          {
+            // The page the Host delivered, so the oracle hashes that exact slice.
+            document: {
+              documentSha256,
+              byteRange: documentTurn.byteRange,
+              truncated: documentTurn.truncated,
+            },
+          }
+        )
+      }
       state.counters.textOnlyResponses += 1
       return answer(model, TEXT_ONLY_CONTENT, 'text-only', { stream })
     }

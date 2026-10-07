@@ -598,7 +598,8 @@ export function useChatListController({
         // "Remote ·" label, no isRemote branch; switchToChat's unified path
         // hydrates them.
         setChatList(previous => {
-          if (isHostAccessBlocked(agentRef)) return []
+          // The hold is a read-time mask; keep the prior catalog for recovery.
+          if (isHostAccessBlocked(agentRef)) return previous
           const visibleSessions = serverSessions.filter(
             session => !deletedChatIdsByAgentRef.current.get(agentRef)?.has(session.chatId)
           )
@@ -772,7 +773,8 @@ export function useChatListController({
       setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
       seedSessionSnapshots(fsm, agentRef, serverSessions)
       setChatList(previous => {
-        if (isHostAccessBlocked(agentRef)) return []
+        // The hold is a read-time mask; keep the prior catalog for recovery.
+        if (isHostAccessBlocked(agentRef)) return previous
         const visibleSessions = serverSessions.filter(
           session => !deletedChatIdsByAgentRef.current.get(agentRef)?.has(session.chatId)
         )
