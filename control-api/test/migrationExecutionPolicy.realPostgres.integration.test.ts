@@ -55,7 +55,7 @@ async function versions(pool: Pool): Promise<string[]> {
 
 async function removeMigrationReceiptForReplay(pool: Pool, version: string): Promise<void> {
   const versionsToRemove =
-    version === '0125_user_access_foundation'
+    version === '0126_user_access_foundation'
       ? [version, '0138_authorization_revision_delete_compatibility']
       : [version]
   await pool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
@@ -202,7 +202,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     for (const candidate of cases) {
       await databasePool.query(`CREATE INDEX ${candidate.name} ON ${table} ${candidate.actual}`)
       const entry: OnlineIndexDefinition = {
-        migrationVersion: '0125_user_access_foundation',
+        migrationVersion: '0126_user_access_foundation',
         name: candidate.name,
         table,
         createSql: `CREATE INDEX CONCURRENTLY ${candidate.name} ON ${table} ${candidate.expected}`,
@@ -216,7 +216,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     await databasePool.query(`CREATE INDEX ${uniqueName} ON ${table} (userid)`)
     await expect(
       ensureOnlineIndex(databasePool, {
-        migrationVersion: '0125_user_access_foundation',
+        migrationVersion: '0126_user_access_foundation',
         name: uniqueName,
         table,
         unique: true,
@@ -228,7 +228,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   it('repairs an equivalent interrupted index and enforces the online bound', async () => {
     const name = `d34_interrupted_${randomBytes(4).toString('hex')}`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0125_user_access_foundation',
+      migrationVersion: '0126_user_access_foundation',
       name,
       table: 'd34_interrupted_index',
       unique: true,
@@ -277,7 +277,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const functionName = `d34_slow_index_value_${suffix}`
     const name = `d34_slow_index_${suffix}_idx`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0125_user_access_foundation',
+      migrationVersion: '0126_user_access_foundation',
       name,
       table,
       createSql: `CREATE INDEX CONCURRENTLY ${name} ON ${table} (${functionName}(value))`,
@@ -391,7 +391,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const locker = await databasePool.connect()
     await databasePool.query(
       `DELETE FROM schema_migrations
-        WHERE version IN ('0128_composable_catalog_revisions', '0129_gfs_catalog_revision_components')`
+        WHERE version IN ('0129_composable_catalog_revisions', '012a_gfs_catalog_revision_components')`
     )
     await locker.query('BEGIN')
     await locker.query('LOCK TABLE team_members IN ACCESS EXCLUSIVE MODE')
@@ -407,8 +407,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
     expect(Date.now() - started).toBeLessThan(15_000)
     const failedVersions = await versions(databasePool)
-    expect(failedVersions).not.toContain('0128_composable_catalog_revisions')
-    expect(failedVersions).not.toContain('0129_gfs_catalog_revision_components')
+    expect(failedVersions).not.toContain('0129_composable_catalog_revisions')
+    expect(failedVersions).not.toContain('012a_gfs_catalog_revision_components')
     await initDb({ connect: () => databasePool.connect() })
   }, 20_000)
 
@@ -429,7 +429,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ...PR1_MIGRATION_VERSIONS.map(version => ({
         version,
         apply: async (db: DbClient) => {
-          if (version === '0128_composable_catalog_revisions') {
+          if (version === '0129_composable_catalog_revisions') {
             await db.query('SELECT pg_sleep(20)')
           }
         },
@@ -453,7 +453,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         `SELECT version FROM ${recordTable} ORDER BY version`
       )
       expect(recorded.rows).toEqual([])
-      expect(appliedVersions).not.toContain('0129_gfs_catalog_revision_components')
+      expect(appliedVersions).not.toContain('012a_gfs_catalog_revision_components')
     } finally {
       client.release(true)
     }

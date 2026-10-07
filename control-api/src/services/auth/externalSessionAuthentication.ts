@@ -80,6 +80,15 @@ export type ExternalSessionAuthorityContext = Readonly<
     }
 >
 
+/**
+ * Return a signed V1 subject solely for pre-authentication rate-limit bucketing.
+ * This does not establish current session authority; protected work must still
+ * pass through authenticateExternalUserSession and its live lifecycle checks.
+ */
+export function externalSessionUserIdForRateLimit(token: string): string | null {
+  return verifyExternalSessionToken(token)?.userId ?? null
+}
+
 function clientMeetsMinimum(
   client: ExternalSessionClient | undefined,
   policy: EffectiveUserAccessPolicy

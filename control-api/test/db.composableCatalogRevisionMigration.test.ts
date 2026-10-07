@@ -8,7 +8,7 @@ describe('010c composable catalog revisions migration', () => {
   it('replaces the singleton trigger class with scoped transactional writers', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0128_composable_catalog_revisions'
+      candidate => candidate.version === '0129_composable_catalog_revisions'
     )
     expect(migration).toBeDefined()
 

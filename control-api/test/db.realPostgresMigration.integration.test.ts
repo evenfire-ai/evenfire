@@ -2004,7 +2004,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
   it('prevents temp-type shadowing in access-foundation SECURITY DEFINER triggers', async () => {
     const { initDb } = await import('../src/db.js')
     const connector = { connect: () => dbPool.connect() }
-    const hardeningVersion = '012a_user_access_foundation_definer_temp_shadow_hardening'
+    const hardeningVersion = '012b_user_access_foundation_definer_temp_shadow_hardening'
 
     const preUpgradeFunctions = await readAccessFoundationDefinerState(dbPool)
     expect(preUpgradeFunctions.rows.map(row => row.function_name)).toEqual(

@@ -8,7 +8,7 @@ describe('0127 catalog UTF-8 ordering migration', () => {
   it('installs the immutable byte function and complete supporting index class', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0127_catalog_utf8_ordering'
+      candidate => candidate.version === '0128_catalog_utf8_ordering'
     )
     expect(migration).toBeDefined()
 
