@@ -745,8 +745,10 @@ integer, default 2048; `0` is rejected at startup). At the default that is the
 pdf, xlsx, pptx, chart and dashboard generators. A removed native stays reachable:
 `clerum__tool_search` lists natives under the `native` server,
 `clerum__tool_describe` returns their schema, and `clerum__tool_call` runs them
-by their real name, so validation and approval apply to that name. The bridge
-never targets itself. When an MCP tool and a native share a name, the native wins.
+by their real name, so the admission checks of a direct call (safety parameter
+checks, guardrails, approval) apply to that name. Neither path validates native
+arguments against the native's own schema (#1017). The bridge never targets
+itself. When an MCP tool and a native share a name, the native wins.
 
 The native decision runs after the MCP decision and only removes natives, so MCP
 tools in `tools[]` are the same for both native modes. When `auto` hides a

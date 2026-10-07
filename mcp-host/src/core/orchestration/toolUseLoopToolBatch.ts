@@ -101,8 +101,10 @@ function resolveBridgeCall(
     // #1003 — native `auto`: a native target is valid. Its scope gate is
     // membership in the native registry (deferred natives are not in the MCP
     // catalog). The rewrite keeps `call.id` and the normal gate below then
-    // validates and approves the REAL native, exactly like a direct call, so
-    // the bridge never widens what the model could call directly.
+    // admits the REAL native exactly like a direct call (safety parameter
+    // checks, guardrails, approval; no native schema validation on either
+    // path, #1017), so the bridge never widens what the model could call
+    // directly.
     if (bridge.nativeTargets && bridge.nativeNames.has(name)) {
       return {
         id: call.id,

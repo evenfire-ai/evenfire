@@ -22,7 +22,11 @@ import { logger } from '../../../logger'
 import { McpManager } from '../../../mcp/manager'
 import type { Task, TaskResponsePayload } from '../../../queue/types'
 import { ConversationManager } from '../../conversation/conversation'
-import { NATIVE_TOOL_DISCOVERY_TEXT, TOOL_DISCOVERY_TEXT } from '../../reasoning/promptBuilder'
+import {
+  CAPABILITY_CONTRACT_TEXT,
+  NATIVE_TOOL_DISCOVERY_TEXT,
+  TOOL_DISCOVERY_TEXT,
+} from '../../reasoning/promptBuilder'
 import { type ChatMessage, FinishReason, type ToolCall, type ToolDefinition } from '../../types'
 import { SimpleEventEmitter } from '../eventEmitter'
 import {
@@ -291,6 +295,15 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
     dynamicEnvProvider: () => ({}),
   }
   const executor = new TaskExecutor(task, deps)
+  // `tool:called` is emitted once per execution, after admission. The call ids
+  // per tool prove exactly-once execution; an artifact on disk cannot (a second
+  // run with the same filename overwrites it).
+  const emit = vi.spyOn(deps.coreEvents, 'emit')
+  const executed = (toolName: string) =>
+    emit.mock.calls
+      .map(([event]) => event)
+      .filter(event => event.type === 'tool:called' && event.data.toolName === toolName)
+      .map(event => event.data.toolCallId)
   /**
    * Fails the test with the first turn-callback error, or if the task failed.
    * Once the task has settled without suspending, every scripted turn must have
@@ -305,7 +318,7 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
   }
   await executor.run()
   settle()
-  return { executor, deps, providerCalls, responses, workspaceService, settle }
+  return { executor, deps, providerCalls, responses, workspaceService, settle, executed }
 }
 
 /** Search → describe → bridged call for the pptx generator, then a final answer. */
@@ -354,6 +367,7 @@ function expectPptxDelivered(run: Awaited<ReturnType<typeof runScenario>>, provi
   expect(run.executor.executorState).toBe('completed')
   expect(run.providerCalls).toHaveLength(providerCalls)
   expect(pptxFiles()).toEqual(['bridged-deck.pptx'])
+  expect(run.executed('clerum__generate_pptx')).toEqual(['pptx-call'])
   expect(run.responses).toHaveLength(1)
   expect(run.responses[0].response).toBe('The deck is attached.')
   expect(run.responses[0].attachments).toEqual([
@@ -408,10 +422,12 @@ describe('T1 — native discovery journeys through TaskExecutor.run()', () => {
     // Suspended before execution: the provider has not seen any tool result.
     expect(run.providerCalls).toHaveLength(1)
     expect(run.deps.onApprovalNeeded).toHaveBeenCalledTimes(1)
+    expect(run.executed('shell_exec')).toEqual([])
 
     await run.executor.resumeAfterApproval(false)
     run.settle()
     expect(run.executor.executorState).toBe('completed')
+    expect(run.executed('shell_exec')).toEqual(['shell-call'])
     expect(run.providerCalls).toHaveLength(2)
     expect(
       run.providerCalls[1].messages.filter(
@@ -536,6 +552,33 @@ describe('T1 — native discovery journeys through TaskExecutor.run()', () => {
     expect(events('native-tool-presentation')).toEqual([
       expect.objectContaining({ budget: 1, presentedCount: BRIDGE.length }),
     ])
+  })
+
+  it('a native hidden by a low budget keeps its prompt guidance without being described (uncached path)', async () => {
+    const capabilities = 'clerum__get_capabilities'
+    const firstTurn = async (native: NativeToolPresentation) => {
+      const run = await runScenario(
+        { provider: 'openai', legacy: false, native, mcp: null, discoveryBytes: 300 },
+        [() => ({ content: 'ok' })]
+      )
+      // Witness: the uncached builder produced this prompt (no cache snapshot).
+      expect(run.workspaceService).toBeUndefined()
+      return {
+        tools: names(run.providerCalls[0].tools),
+        text: systemText(run.providerCalls[0].messages),
+      }
+    }
+    const hidden = await firstTurn('auto')
+    // clerum__get_capabilities (391 B) is over the 300 B budget: off tools[], still callable.
+    expect(hidden.tools).not.toContain(capabilities)
+    expect(hidden.tools).toEqual(expect.arrayContaining(BRIDGE))
+    expect(hidden.text).toContain(CAPABILITY_CONTRACT_TEXT)
+    expect(hidden.text).not.toContain(`**${capabilities}**`)
+    // Witness: listed directly in native direct, with the same guidance.
+    const listed = await firstTurn('direct')
+    expect(listed.tools).toContain(capabilities)
+    expect(listed.text).toContain(CAPABILITY_CONTRACT_TEXT)
+    expect(listed.text).toContain(`**${capabilities}**`)
   })
 })
 
@@ -711,11 +754,12 @@ describe('T3 — negative guards with liveness witnesses (through TaskExecutor.r
     )
     expect(pptxFiles()).toEqual([])
     // Witness: the identical call executes once in native auto.
-    await runScenario(
+    const bridgedRun = await runScenario(
       { provider: 'codex-subscription', codexMode: 'discovery', native: 'auto', mcp: 2 },
       turns(false)
     )
     expect(pptxFiles()).toEqual(['bridged-deck.pptx'])
+    expect(bridgedRun.executed('clerum__generate_pptx')).toEqual(['pptx-call'])
   })
 
   it('native direct: search lists no native entries while MCP entries are found', async () => {
@@ -751,7 +795,7 @@ describe('T3 — negative guards with liveness witnesses (through TaskExecutor.r
   })
 
   it('bridge recursion is rejected for every bridge tool while a native target executes', async () => {
-    await runScenario(
+    const bridgedRun = await runScenario(
       { provider: 'codex-subscription', codexMode: 'direct', native: 'auto', mcp: 2 },
       [
         () =>
@@ -771,6 +815,7 @@ describe('T3 — negative guards with liveness witnesses (through TaskExecutor.r
       ]
     )
     expect(pptxFiles()).toEqual(['bridged-deck.pptx'])
+    expect(bridgedRun.executed('clerum__generate_pptx')).toEqual(['pptx-call'])
   })
 
   it('a bridged native call passes the same parameter validation as a direct one', async () => {
@@ -805,6 +850,7 @@ describe('T3 — negative guards with liveness witnesses (through TaskExecutor.r
     expect(run.deps.onApprovalNeeded).not.toHaveBeenCalled()
     expect(run.executor.executorState).toBe('completed')
     expect(pptxFiles()).toEqual(['bridged-deck.pptx'])
+    expect(run.executed('clerum__generate_pptx')).toEqual(['pptx-call'])
   })
 
   it('the catalog never lists bridge tools while it lists the hidden generators', async () => {
@@ -846,7 +892,7 @@ describe('T3 — negative guards with liveness witnesses (through TaskExecutor.r
       ],
     }
     let described: Record<string, unknown> = {}
-    await runScenario(
+    const bridgedRun = await runScenario(
       { provider: 'codex-subscription', codexMode: 'discovery', native: 'auto', mcp: catalogs },
       [
         () =>
@@ -872,6 +918,7 @@ describe('T3 — negative guards with liveness witnesses (through TaskExecutor.r
     expect(described).toMatchObject({ found: true, server: 'native' })
     expect(described.description).not.toBe('Impostor deck builder')
     expect(pptxFiles()).toEqual(['bridged-deck.pptx'])
+    expect(bridgedRun.executed('clerum__generate_pptx')).toEqual(['pptx-call'])
     // Witness: the MCP-only name reached MCP, and the colliding name never did.
     expect(remote.calls.mock.calls).toEqual([['clerum', { name: 'mcp_only', arguments: {} }]])
   })

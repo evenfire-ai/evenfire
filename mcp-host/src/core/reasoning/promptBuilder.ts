@@ -170,17 +170,34 @@ export function toolDiscoveryText(nativeToolPresentation: NativeToolPresentation
  */
 export class DefaultPromptBuilder implements PromptBuilder {
   private readonly discoveryText: string
+  private readonly discoverableNatives: ReadonlyArray<ToolDefinition>
 
-  constructor(options: { nativeToolPresentation: NativeToolPresentation }) {
+  /**
+   * `discoverableNatives` (#1003): natives that native `auto` keeps out of
+   * `tools[]` and serves through the bridge. They still select capability
+   * guidance (a hidden tool stays callable), but are never described in the
+   * "Available tools" section. Empty in native `direct`.
+   */
+  constructor(options: {
+    nativeToolPresentation: NativeToolPresentation
+    discoverableNatives?: ReadonlyArray<ToolDefinition>
+  }) {
     this.discoveryText = toolDiscoveryText(options.nativeToolPresentation)
+    this.discoverableNatives = options.discoverableNatives ?? []
   }
 
   buildSystemPrompt(
-    tools: ToolDefinition[],
+    presentedTools: ToolDefinition[],
     identity?: string,
     metadata?: Record<string, unknown>
   ): ChatMessage {
     const sections: string[] = []
+    const presentedNames = new Set(presentedTools.map(t => t.name))
+    // Guidance is chosen from every callable tool; only presented tools are described.
+    const tools = [
+      ...presentedTools,
+      ...this.discoverableNatives.filter(t => !presentedNames.has(t.name)),
+    ]
 
     // 1. Identity / base system prompt
     if (identity) {
@@ -193,8 +210,8 @@ export class DefaultPromptBuilder implements PromptBuilder {
     }
 
     // 2. Tool capabilities description
-    if (tools.length > 0) {
-      sections.push(this.buildToolsDescription(tools))
+    if (presentedTools.length > 0) {
+      sections.push(this.buildToolsDescription(presentedTools))
     }
 
     // 2a. Capability discovery contract. Always emitted when
@@ -270,7 +287,7 @@ export class DefaultPromptBuilder implements PromptBuilder {
     logger.debug(
       {
         component: 'PromptBuilder',
-        toolCount: tools.length,
+        toolCount: presentedTools.length,
         promptLength: content.length,
         metadataKeys: metaKeys,
       },

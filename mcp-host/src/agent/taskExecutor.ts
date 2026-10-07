@@ -41,7 +41,10 @@ import { DefaultLoopController } from '../core/orchestration/loopConfig'
 import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
-import { resolveToolPresentation } from '../core/orchestration/toolPresentationPolicy'
+import {
+  resolveToolPresentation,
+  selectDeferredNatives,
+} from '../core/orchestration/toolPresentationPolicy'
 import {
   buildOutputPreview,
   executeSingleTool,
@@ -284,6 +287,8 @@ interface TaskToolRegistry {
   registry: ToolRegistry
   nativeRegistry: NativeToolRegistry
   loopController: LoopController
+  /** Natives hidden from `tools[]` by native `auto`; empty in `direct`. */
+  discoverableNatives: ToolDefinition[]
   bridge?: LoopConfig['bridge']
 }
 
@@ -1556,7 +1561,7 @@ export class TaskExecutor {
       }
     }
 
-    const { registry, loopController, bridge } = await this.buildToolRegistry()
+    const { registry, loopController, bridge, discoverableNatives } = await this.buildToolRegistry()
 
     // T2.2 — when the prompt-cache flag is ON and we have the dependencies
     // wired (PromptCache + WorkspaceService), build the tiered
@@ -1565,7 +1570,10 @@ export class TaskExecutor {
     // single-string identity built by `buildSystemIdentity`.
     const reasoningFactory = new DefaultReasoningFactory(
       hookedLlmPort,
-      new DefaultPromptBuilder({ nativeToolPresentation: appConfig.nativeToolPresentation }),
+      new DefaultPromptBuilder({
+        nativeToolPresentation: appConfig.nativeToolPresentation,
+        discoverableNatives,
+      }),
       metadata,
       // F1.4 — wire the send-time context-window-breakdown capture. The sink is
       // bound to the captured `conversation` local (not `this.conversation!`) so
@@ -1594,6 +1602,7 @@ export class TaskExecutor {
     } else {
       const promptBuilder = new DefaultPromptBuilder({
         nativeToolPresentation: appConfig.nativeToolPresentation,
+        discoverableNatives,
       })
       systemPromptFor = tools => promptBuilder.buildSystemPrompt(tools, identity, metadata).content
     }
@@ -2286,6 +2295,11 @@ export class TaskExecutor {
         mode: appConfig.nativeToolPresentation,
         discoveryBytes: appConfig.nativeToolDiscoveryBytes,
       })
+    // The natives that controller hides, for the prompt builder's guidance.
+    const deferredNatives = nativeAuto
+      ? selectDeferredNatives(nativeDefinitions, appConfig.nativeToolDiscoveryBytes)
+      : new Set<string>()
+    const discoverableNatives = nativeDefinitions.filter(d => deferredNatives.has(d.name))
 
     // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
     // deferrable catalog. It exists exactly when NativeToolRegistry registered
@@ -2315,6 +2329,7 @@ export class TaskExecutor {
         registry: compositeRegistry,
         nativeRegistry,
         loopController: withNativePresentation(innerController),
+        discoverableNatives,
         // Native `auto` only: MCP presentation is unchanged (no MCP decision on
         // this path) but the bridge serves natives and keeps MCP tools callable.
         bridge,
@@ -2347,6 +2362,7 @@ export class TaskExecutor {
       registry: compositeRegistry,
       nativeRegistry,
       loopController: withNativePresentation(loopController),
+      discoverableNatives,
       bridge,
     }
   }
