@@ -132,6 +132,77 @@ describe('AppService deliberate team transition ownership', () => {
     expect(app.sessionToken).toBeNull()
   })
 
+  it('lets logout commit during teamless session scope discovery', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const meResponse = deferred<{
+      id: string
+      email: string
+      name: string
+      picture: null
+      teamId: string
+      teamName: string
+      role: string
+    }>()
+    const discoveryStarted = deferred<void>()
+    const logoutStarted = deferred<void>()
+    const app = service as unknown as {
+      sessionToken: string | null
+      me: {
+        id: string
+        email: string
+        name: string
+        picture: null
+        teamId: string | null
+        teamName: string | null
+        role: string
+      } | null
+      authClient: unknown
+      runWithTeamContext<T>(teamId: string, operation: (token: string) => Promise<T>): Promise<T>
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    app.sessionToken = 'session-a'
+    app.me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: null,
+      teamName: null,
+      role: 'member',
+    }
+    app.authClient = {
+      getMe: vi.fn(() => {
+        discoveryStarted.resolve()
+        return meResponse.promise
+      }),
+    }
+    app.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => logoutStarted.resolve())
+    const operation = vi.fn(async () => 'team result')
+    const contextRequest = app.runWithTeamContext('team-a', operation)
+    await discoveryStarted.promise
+
+    const logout = service.logout()
+    const logoutWasResponsive = await Promise.race([
+      logoutStarted.promise.then(() => true),
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 50)),
+    ])
+    meResponse.resolve({
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    })
+
+    await expect(contextRequest).rejects.toThrow(/stale_(auth_epoch|session_generation)/)
+    await expect(logout).resolves.toBeTypeOf('number')
+    expect(logoutWasResponsive).toBe(true)
+    expect(operation).not.toHaveBeenCalled()
+    expect(app.sessionToken).toBeNull()
+  })
+
   it('finishes GFS activation before a queued workflow read borrows another team', async () => {
     const { service, restA } = await createNativeCommitTestHarness()
     const teamBResponse = deferred<{

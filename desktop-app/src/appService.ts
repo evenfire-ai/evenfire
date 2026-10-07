@@ -1151,14 +1151,6 @@ export class AppService {
     }
   }
 
-  private async getCurrentSessionTeamId(token: string): Promise<string> {
-    if (this.me?.teamId) return this.me.teamId
-    this.me = await this.authClient.getMe(token)
-    await this.bindCurrentChatStore(this.me.id)
-    this.updateCachedCurrentTeam(this.me.teamId)
-    return this.me.teamId || ''
-  }
-
   /** Caller must hold the native auth/environment commit owner. */
   private async switchSessionToTeam(teamId: string, token: string) {
     const releaseTransientHop = this.enterGfsTransientTeamHop()
@@ -1271,16 +1263,31 @@ export class AppService {
     await previousQueue.catch(() => undefined)
 
     try {
-      const context = await this.withNativeAuthEnvironmentCommit(async () => {
+      const session = await this.withNativeAuthEnvironmentCommit(async () => {
         const sessionToken = this.requireSessionToken()
-        const teamId = await this.getCurrentSessionTeamId(sessionToken)
         return {
           sessionToken,
-          teamId,
+          teamId: String(this.me?.teamId || '').trim(),
           sessionGeneration: this.sessionGeneration,
           environmentBinding: this.captureAuthEnvironmentBinding(),
         }
       })
+
+      let context = session
+      if (!context.teamId) {
+        const me = await this.authClient.getMe(session.sessionToken)
+        context = await this.withNativeAuthEnvironmentCommit(async () => {
+          this.assertSessionGeneration(session.sessionGeneration)
+          if (this.sessionToken !== session.sessionToken) {
+            throw new Error('stale_auth_epoch: authenticated team scope changed during discovery')
+          }
+          this.assertAuthEnvironmentBinding(session.environmentBinding)
+          this.me = me
+          await this.bindCurrentChatStore(me.id)
+          this.updateCachedCurrentTeam(me.teamId)
+          return { ...session, teamId: String(me.teamId || '').trim() }
+        })
+      }
 
       const assertContextIsCurrent = () => {
         this.assertSessionGeneration(context.sessionGeneration)
