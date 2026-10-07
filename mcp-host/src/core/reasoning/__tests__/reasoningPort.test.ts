@@ -58,7 +58,10 @@ describe('DefaultReasoningPort.respondWithTools', () => {
     const authorityError = new RuntimeActionAuthorityError('authority_unavailable')
     ;(mockLlm.completeWithTools as any).mockRejectedValue(authorityError)
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.respondWithTools({ messages: [], available_tools: [] })
 
     expect(result).toEqual({ type: 'error', error: authorityError })
@@ -190,7 +193,10 @@ describe('DefaultReasoningPort.continueWithToolResults', () => {
     const authorityError = new RuntimeActionAuthorityError('access_path_stale')
     ;(mockLlm.completeWithTools as any).mockRejectedValue(authorityError)
 
-    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const port = new DefaultReasoningPort(
+      mockLlm,
+      new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    )
     const result = await port.continueWithToolResults({ messages: [], available_tools: [] }, [])
 
     expect(result).toEqual({ type: 'error', error: authorityError })
