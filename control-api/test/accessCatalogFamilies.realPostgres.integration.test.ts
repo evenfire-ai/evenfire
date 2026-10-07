@@ -701,6 +701,38 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     }
   })
 
+  it('measures the canonical operational-family catalog work', async () => {
+    const observed: Record<string, number> = {}
+    for (const family of [
+      'host',
+      'context',
+      'mcp_server',
+      'workflow_recipe',
+      'sandbox_app',
+      'shared_filesystem',
+    ] as const) {
+      const budget = AccessExecutionBudget.create('catalog')
+      try {
+        const catalog = await buildAccessCatalog(
+          { session, families: [family], limit: 100 },
+          { transaction: transaction(databasePool), budget }
+        )
+        expect(catalog.complete).toBe(true)
+        observed[family] = 42 - budget.remaining('producerCalls')
+      } finally {
+        budget.close()
+      }
+    }
+    expect(observed).toEqual({
+      host: 12,
+      context: 11,
+      mcp_server: 11,
+      workflow_recipe: 11,
+      sandbox_app: 11,
+      shared_filesystem: 11,
+    })
+  })
+
   for (const family of CATALOG_FAMILIES) {
     it(`${family} producer paths round-trip through catalog and live resolution`, async () => {
       const catalog = await buildAccessCatalog(

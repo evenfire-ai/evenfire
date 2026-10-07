@@ -685,6 +685,27 @@ export const catalogProducers: ReadonlyMap<CatalogFamily, CatalogProducer> = new
   CATALOG_FAMILIES.map(family => [family, new SqlCatalogProducer(family)])
 )
 
+/**
+ * Measured producer-call cost of one complete operational-family hydration.
+ *
+ * The values are deliberately held beside the canonical producer plan: the
+ * RealPG catalog-family harness measures this same plan, and shadow callers
+ * must not maintain an independent operational reserve rule.
+ */
+const OPERATIONAL_SHADOW_PRODUCER_CALL_RESERVE: Readonly<Partial<Record<CatalogFamily, number>>> =
+  Object.freeze({
+    host: 12,
+    context: 11,
+    mcp_server: 11,
+    workflow_recipe: 11,
+    sandbox_app: 11,
+    shared_filesystem: 11,
+  })
+
+export function catalogShadowProducerCallReserve(family: CatalogFamily): number {
+  return OPERATIONAL_SHADOW_PRODUCER_CALL_RESERVE[family] ?? 8
+}
+
 export function requireCatalogProducer(family: CatalogFamily): CatalogProducer {
   const producer = catalogProducers.get(family)
   if (!producer) throw new CatalogProducerContractError('producer_missing')
