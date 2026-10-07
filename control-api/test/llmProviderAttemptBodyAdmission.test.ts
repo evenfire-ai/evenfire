@@ -280,9 +280,10 @@ describe('AuthorizeBodyAdmission policy and idempotence', () => {
         TypeError
       )
     }
-    // The Host only honours a Retry-After of 1-3600 whole seconds.
-    expect(() => new AuthorizeBodyAdmission({ ...valid, retryAfterSeconds: 3600 })).not.toThrow()
-    for (const value of [0, 1.5, 3601]) {
+    // The Host only retries a Retry-After of 1-30 whole seconds
+    // (RATE_LIMIT_RETRY_MAX_WAIT_MS in mcp-host `rateLimitRetry.ts`).
+    expect(() => new AuthorizeBodyAdmission({ ...valid, retryAfterSeconds: 30 })).not.toThrow()
+    for (const value of [0, 1.5, 31, 3600]) {
       expect(() => new AuthorizeBodyAdmission({ ...valid, retryAfterSeconds: value })).toThrow(
         TypeError
       )

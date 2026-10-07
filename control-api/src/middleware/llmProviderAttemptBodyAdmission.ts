@@ -79,13 +79,16 @@ export class AuthorizeBodyAdmission {
         throw new TypeError('authorize timers must be positive signed-32-bit integers')
       }
     }
-    // The Host honours 1-3600 s (mcp-host `retryAfter.ts`).
+    // The Host parses 1-3600 s (mcp-host `retryAfter.ts`) but only retries
+    // when the wait is at most RATE_LIMIT_RETRY_MAX_WAIT_MS (30 s,
+    // `rateLimitRetry.ts`). A longer value would silently turn the one
+    // same-provider retry off, so it is refused here.
     if (
       !Number.isSafeInteger(policy.retryAfterSeconds) ||
       policy.retryAfterSeconds <= 0 ||
-      policy.retryAfterSeconds > 3600
+      policy.retryAfterSeconds > 30
     ) {
-      throw new TypeError('retryAfterSeconds must be an integer from 1 to 3600')
+      throw new TypeError('retryAfterSeconds must be an integer from 1 to 30')
     }
     if (!Number.isSafeInteger(policy.maxDiscardBodyBytes) || policy.maxDiscardBodyBytes <= 0) {
       throw new TypeError('maxDiscardBodyBytes must be a positive safe integer')
