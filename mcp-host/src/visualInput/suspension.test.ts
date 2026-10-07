@@ -30,6 +30,114 @@ const result = (id = 'read-1'): ToolResult => ({
 })
 
 describe('current-turn GFS image lifecycle', () => {
+  const workspaceReceipt = {
+    delivery: 'workspace_file',
+    id: '11111111-1111-4111-8111-111111111111',
+    path: '.gfs-downloads/input-11111111-1111-4111-8111-111111111111/source',
+    sha256: 'b'.repeat(64),
+    sizeBytes: 8193,
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    source,
+    visualDelivery: 'included',
+    usage: {
+      pathSemantics: 'relative-to-caller-workspace',
+      nextTool: 'shell_exec_when_local_processing_is_needed',
+      approval: 'user-approval-required',
+      visualDelivery: 'included',
+      processLocally: true,
+      boundedOutputOnly: true,
+      wholeFileToContextAllowed: false,
+      writeOutputsTo: 'outputs/',
+    },
+  }
+  const workspaceResult = (): ToolResult => ({
+    ...result(),
+    content: JSON.stringify(workspaceReceipt),
+    rawContent: image.dataBase64,
+    spillover_ref: 'spillover://task-1/read-1',
+  })
+  const pending = (completed: ToolResult[]): PendingApproval => ({
+    request_id: 'approval-workspace',
+    tool_name: 'shell_exec',
+    tool_call_id: 'pending-shell',
+    authorization_scope: 'exact_invocation',
+    description: 'Use the retained workspace file',
+    parameters: { command: 'printf approved' },
+    context_snapshot: [],
+    completed_results: completed,
+  })
+
+  it('preserves a completed workspace receipt and ordinary attachments while stripping GFS pixels and spillover links', () => {
+    const ordinary = { ...image, id: 'ordinary-shot', visualSource: undefined, dataBase64: 'QUJD' }
+    const gfs = workspaceResult()
+    gfs.attachments = [image, ordinary]
+    const other: ToolResult = {
+      tool_call_id: 'other-1',
+      name: 'http_request',
+      content: 'ordinary result',
+      is_error: false,
+    }
+    const approval = pending([gfs, other])
+    const before = structuredClone(approval)
+    const projected = projectGfsApproval(approval)
+    const completed = projected.completed_results![0]!
+
+    expect(JSON.parse(completed.content)).toEqual({
+      ...workspaceReceipt,
+      visualDelivery: 'not_included',
+      visualReason: 'new_gfs_read_required_after_suspension',
+      usage: {
+        ...workspaceReceipt.usage,
+        visualDelivery: 'not_included',
+        visualReason: 'new_gfs_read_required_after_suspension',
+      },
+    })
+    expect(completed.rawContent).toBe(completed.content)
+    expect(completed.spillover_ref).toBeUndefined()
+    expect(completed.attachments).toEqual([ordinary])
+    expect(projected.completed_results?.map(item => item.tool_call_id)).toEqual([
+      'read-1',
+      'other-1',
+    ])
+    expect(projected.completed_results![1]).toBe(other)
+    expect(projected.request_id).toBe(approval.request_id)
+    expect(projected.parameters).toBe(approval.parameters)
+    expect(projected.authorization_scope).toBe('exact_invocation')
+    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+    expect(projectGfsApproval(projected)).toEqual(projected)
+    expect(approval).toEqual(before)
+  })
+
+  it.each([
+    { drive: 'other' },
+    { resourceId: 'b'.repeat(32) },
+    { gfsUri: `gfs://main/${'b'.repeat(32)}` },
+    { version: 4 },
+  ])('refuses to project a completed workspace receipt against another source: %j', changed => {
+    const completed = workspaceResult()
+    completed.content = JSON.stringify({ ...workspaceReceipt, source: { ...source, ...changed } })
+    const approval = pending([completed])
+    const before = structuredClone(approval)
+
+    expect(() => projectGfsApproval(approval)).toThrow('invalid_response')
+    expect(approval).toEqual(before)
+  })
+
+  it('keeps a legacy completed image receipt as a reference with no transient pixels', () => {
+    const completed = {
+      ...result(),
+      content: JSON.stringify({ delivery: 'image_input', resource: source }),
+    }
+    const projected = projectGfsApproval(pending([completed]))
+
+    expect(JSON.parse(projected.completed_results![0].content)).toMatchObject({
+      delivery: 'reference_only',
+      reason: 'new_gfs_read_required_after_suspension',
+      resource: source,
+    })
+    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+  })
+
   it('projects the GFS receipt and mixed visual carrier together on suspension', () => {
     const gfs = {
       ...result('read-gfs'),

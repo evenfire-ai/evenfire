@@ -10,6 +10,8 @@ export const GFS_TOOL_RESULT_IMAGE_TEXT =
 export type GfsReferenceReason =
   | 'image_input_limit_exceeded'
   | 'model_image_input_unavailable'
+  | 'provider_visual_profile_unavailable'
+  | 'geometry_unknown'
   | 'new_gfs_read_required_after_suspension'
 
 export type GfsImagePart = Extract<MessageContentPart, { type: 'image' }> & {
@@ -35,19 +37,25 @@ export function gfsReference(source: GfsImageSource) {
   }
 }
 
-function receiptMatchesSource(content: string, source: GfsImageSource): boolean {
+/** Demote transient pixels while preserving a source-bound workspace receipt. */
+export function projectGfsReceipt(
+  content: string,
+  source: GfsImageSource,
+  reason: GfsReferenceReason
+): string | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(content)
   } catch {
-    return false
+    return undefined
   }
-  if (typeof parsed !== 'object' || parsed === null) return false
+  if (typeof parsed !== 'object' || parsed === null) return undefined
   const receipt = parsed as Record<string, unknown>
-  if (receipt.delivery !== 'image_input') return false
-  if (typeof receipt.resource !== 'object' || receipt.resource === null)
+  if (receipt.delivery !== 'image_input' && receipt.delivery !== 'workspace_file') return undefined
+  const resourceValue = receipt.delivery === 'workspace_file' ? receipt.source : receipt.resource
+  if (typeof resourceValue !== 'object' || resourceValue === null)
     throw new VisualInputError('invalid_response')
-  const resource = receipt.resource as Record<string, unknown>
+  const resource = resourceValue as Record<string, unknown>
   if (
     resource.kind !== 'gfs' ||
     resource.drive !== source.drive ||
@@ -56,7 +64,24 @@ function receiptMatchesSource(content: string, source: GfsImageSource): boolean 
     resource.version !== source.version
   )
     throw new VisualInputError('invalid_response')
-  return true
+  if (receipt.delivery === 'workspace_file') {
+    if (
+      receipt.usage !== undefined &&
+      (!receipt.usage || typeof receipt.usage !== 'object' || Array.isArray(receipt.usage))
+    )
+      throw new VisualInputError('invalid_response')
+    return JSON.stringify({
+      ...receipt,
+      visualDelivery: 'not_included',
+      visualReason: reason,
+      usage: {
+        ...(receipt.usage as Record<string, unknown> | undefined),
+        visualDelivery: 'not_included',
+        visualReason: reason,
+      },
+    })
+  }
+  return JSON.stringify({ delivery: 'reference_only', reason, resource: gfsReference(source) })
 }
 
 /** Project only selected GFS frames; all other images and canonical inputs stay intact. */
@@ -78,7 +103,8 @@ export function projectGfsMessages(
   return messages.map(message => {
     if (message.role === 'tool' && message.name === 'clerum__gfs_read' && message.tool_call_id) {
       const source = selectedByCall.get(message.tool_call_id)
-      if (source && receiptMatchesSource(message.content, source)) {
+      const content = source ? projectGfsReceipt(message.content, source, reason) : undefined
+      if (content !== undefined) {
         const {
           spillover_ref: _spillover,
           contentParts: _parts,
@@ -87,11 +113,7 @@ export function projectGfsMessages(
         } = message
         return {
           ...rest,
-          content: JSON.stringify({
-            delivery: 'reference_only',
-            reason,
-            resource: gfsReference(source),
-          }),
+          content,
         }
       }
     }
