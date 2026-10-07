@@ -238,6 +238,137 @@ describe('pendingChatSelection effect', () => {
     )
   })
 
+  it('keeps a send-created chat selected when a retried list request finishes later', async () => {
+    const releaseIndexFailure = deferred<void>()
+    clerum.chat.getIndex
+      .mockImplementationOnce(async () => {
+        await releaseIndexFailure.promise
+        throw new Error('Not authenticated during store rebind')
+      })
+      .mockImplementation(agentRef => clerum.readIndex(agentRef))
+    clerum.rpc.listSessions.mockResolvedValue({
+      items: [
+        {
+          agent: 'agent-x',
+          chatId: 'prior-server',
+          turnCount: 1,
+          messageCount: 2,
+          lastActivityAt: '2026-05-03T00:00:00Z',
+        },
+      ],
+    })
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'prior-server',
+      state: 'idle',
+      turns: [],
+    })
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'accepted reply' })
+
+    const createChat = clerum.chat.create.getMockImplementation()
+    if (!createChat) throw new Error('Expected the real ChatStore create producer')
+    const created = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    const releaseCreate = deferred<void>()
+    let holdCreate = true
+    clerum.chat.create.mockImplementation(async (agentRef, chatId) => {
+      const meta = await createChat(agentRef, chatId)
+      if (holdCreate) {
+        holdCreate = false
+        created.resolve(meta)
+        await releaseCreate.promise
+      }
+      return meta
+    })
+
+    const controller = renderController({ navItem: 'chat', loadMenuData: false })
+    let sendPromise: Promise<void> | undefined
+    let createdChat: Awaited<ReturnType<typeof clerum.chat.create>> | undefined
+    try {
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledTimes(1))
+      await act(async () => {
+        sendPromise = controller.result.current.handleSendAgentMessage('newer blank send')
+        createdChat = await created.promise
+      })
+      if (!createdChat) throw new Error('Expected the real ChatStore create producer to resolve')
+
+      const indexBeforeRetry = await clerum.readIndex('agent-x')
+      expect(indexBeforeRetry.chats.map(chat => chat.id)).toContain(createdChat.id)
+      await act(async () => {
+        releaseIndexFailure.resolve()
+      })
+      await waitFor(() =>
+        expect(controller.result.current.chatList.map(chat => chat.id)).toContain('prior-server')
+      )
+
+      await act(async () => {
+        releaseCreate.resolve()
+        await sendPromise
+      })
+
+      const request = clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1] as
+        | { threadId?: string }
+        | undefined
+      expect(request?.threadId).toBe(createdChat.id)
+      expect(await clerum.persistedMessages('agent-x', createdChat.id)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: 'user', content: 'newer blank send' }),
+          expect.objectContaining({ role: 'assistant', content: 'accepted reply' }),
+        ])
+      )
+      expect(controller.result.current.activeChatId).toBe(createdChat.id)
+      expect(controller.result.current.chatMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ content: 'newer blank send' }),
+          expect.objectContaining({ content: 'accepted reply' }),
+        ])
+      )
+    } finally {
+      releaseIndexFailure.resolve()
+      releaseCreate.resolve()
+      await act(async () => {
+        await sendPromise?.catch(() => undefined)
+      })
+      controller.unmount()
+    }
+  })
+
+  it('still auto-selects the latest server chat after a retry with no newer intent', async () => {
+    const releaseIndexFailure = deferred<void>()
+    clerum.chat.getIndex
+      .mockImplementationOnce(async () => {
+        await releaseIndexFailure.promise
+        throw new Error('Not authenticated during store rebind')
+      })
+      .mockImplementation(agentRef => clerum.readIndex(agentRef))
+    clerum.rpc.listSessions.mockResolvedValue({
+      items: [
+        {
+          agent: 'agent-x',
+          chatId: 'server-latest-after-retry',
+          turnCount: 2,
+          messageCount: 4,
+          lastActivityAt: '2026-05-01T00:00:00Z',
+        },
+      ],
+    })
+
+    const controller = renderController({ navItem: 'chat', loadMenuData: false })
+    try {
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledTimes(1))
+      await act(async () => {
+        releaseIndexFailure.resolve()
+      })
+
+      await waitFor(() =>
+        expect(controller.result.current.activeChatId).toBe('server-latest-after-retry')
+      )
+      expect(clerum.chat.getIndex).toHaveBeenCalledTimes(2)
+    } finally {
+      releaseIndexFailure.resolve()
+      controller.unmount()
+    }
+  })
+
   it('none → selects nothing and clears the spinner', async () => {
     clerum.rpc.listSessions.mockResolvedValue({
       items: [

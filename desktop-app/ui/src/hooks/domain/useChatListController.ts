@@ -502,12 +502,12 @@ export function useChatListController({
   const loadChatListOnce = useCallback(
     async (
       agentRef: string,
-      requestGeneration: number
+      requestGeneration: number,
+      selectionIntentRevisionAtRequest: number | undefined
     ): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
       const authorityScopeGeneration = authorityScopeGenerationRef.current
       const authorityScopeAtRequest = currentAuthorityScopeRef.current
       const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
-      const selectionIntentRevisionAtRequest = host.current?.getSelectionIntentRevision()
       chatListNextCursorByAgentRef.current[agentRef] = null
       if (selectedAgentRef.current === agentRef) {
         setChatListHasMoreRemoteSessions(false)
@@ -817,6 +817,9 @@ export function useChatListController({
   const loadChatList = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
       const requestGeneration = ++requestGenerationRef.current
+      // A retry remains part of this logical load, so it must keep the selection
+      // authority captured before the first attempt rather than adopt a newer intent.
+      const selectionIntentRevisionAtRequest = host.current?.getSelectionIntentRevision()
       // One retry with a short backoff: during boot a concurrent team-switch /
       // access-catalog refresh can momentarily rebind the main-process chat
       // store, rejecting `getIndex` with "Not authenticated". Swallowing that
@@ -824,7 +827,11 @@ export function useChatListController({
       // is re-selected, so give the store one chance to settle.
       for (let attempt = 0; ; attempt++) {
         try {
-          return await loadChatListOnce(agentRef, requestGeneration)
+          return await loadChatListOnce(
+            agentRef,
+            requestGeneration,
+            selectionIntentRevisionAtRequest
+          )
         } catch (err) {
           if (attempt === 0) {
             await new Promise(resolve => setTimeout(resolve, 300))
@@ -847,7 +854,7 @@ export function useChatListController({
         }
       }
     },
-    [loadChatListOnce]
+    [host, loadChatListOnce]
   )
 
   // ─── Narrow chatList mutation API (called by the parent's remaining flows) ───
