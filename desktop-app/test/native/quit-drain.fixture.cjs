@@ -21,6 +21,7 @@ function assertOwnedPaths() {
 
 assertOwnedPaths()
 const { AppService } = require('../../dist/appService.js')
+const { TokenStore } = require('../../dist/tokenStore.js')
 assertOwnedPaths()
 const { registerQuitDrain } = require('../../dist/mainWindowCoordinator.js')
 
@@ -34,7 +35,8 @@ function deferred() {
   return { promise, resolve }
 }
 
-const appService = new AppService()
+const tokenStore = new TokenStore({ isolatedUserDataPath: expectedPaths.userData })
+const appService = new AppService({ tokenStore })
 appService.sessionToken = 'synthetic-session-token'
 appService.me = { id: 'synthetic-user', teamId: 'synthetic-team' }
 
