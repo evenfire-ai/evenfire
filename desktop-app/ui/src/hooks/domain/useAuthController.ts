@@ -45,7 +45,7 @@ function isUnauthorizedError(error: unknown) {
 
 function getDesktopSetupErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
-  if (message === 'desktop_setup_requires_signout') {
+  if (message.includes('desktop_setup_requires_signout')) {
     return 'Sign out before setting up another desktop environment.'
   }
   return 'Desktop setup could not be completed.'

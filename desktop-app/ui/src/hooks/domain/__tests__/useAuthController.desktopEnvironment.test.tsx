@@ -6,6 +6,7 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { useAuthController } from '../useAuthController'
+import { wrapLikeElectronIpc } from './__fixtures__/ipcErrors'
 
 const mocks = vi.hoisted(() => ({
   clearQueryCache: vi.fn(),
@@ -211,7 +212,9 @@ afterEach(async () => {
 
 describe('Desktop environment handoff', () => {
   it('asks the user to sign out when native desktop setup rejects an active session', async () => {
-    mocks.completeDesktopSetup.mockRejectedValue(new Error('desktop_setup_requires_signout'))
+    mocks.completeDesktopSetup.mockRejectedValue(
+      wrapLikeElectronIpc('auth:completeDesktopSetup', new Error('desktop_setup_requires_signout'))
+    )
     render(<Probe />)
 
     await waitFor(() => expect(desktopSetupTokenListener).toBeTypeOf('function'))
