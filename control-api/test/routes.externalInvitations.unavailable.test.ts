@@ -79,6 +79,7 @@ function app(): express.Express {
 describe('external invitation routes when the hub is unavailable', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    database.query.mockReset()
     database.withTransaction.mockImplementation(async work => work({ query: database.query }))
     rateLimiter.checkAndIncrement.mockResolvedValue({
       allowed: true,
@@ -123,9 +124,18 @@ describe('external invitation routes when the hub is unavailable', () => {
       })
       .mockResolvedValueOnce({ error: 'not_pending' })
       .mockResolvedValueOnce({ error: 'not_pending' })
-    database.query.mockResolvedValue({
-      rows: [{ id: '00000000-0000-4000-8000-000000000001' }],
-      rowCount: 1,
+    database.query.mockImplementation(async sql => {
+      const text = String(sql)
+      if (text.includes('SELECT id FROM users') && text.includes('FOR UPDATE')) {
+        return { rows: [{ id: '00000000-0000-4000-8000-000000000001' }], rowCount: 1 }
+      }
+      if (text.includes('SELECT lifecycle_state, lifecycle_version')) {
+        return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
+      }
+      if (text.includes('clock_timestamp()')) {
+        return { rows: [{ db_now: new Date('2026-10-07T12:00:00.000Z') }], rowCount: 1 }
+      }
+      throw new Error(`unexpected invitation session issuance query: ${text}`)
     })
 
     const first = await request(app())
@@ -145,6 +155,10 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(passwordReset.status).toBe(400)
     expect(passwordReset.body).toEqual({ error: 'not_pending' })
     expect(tokenSigner.sign).toHaveBeenCalledTimes(1)
+    expect(database.query).toHaveBeenCalledTimes(3)
+    expect(String(database.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
+    expect(String(database.query.mock.calls[1]?.[0])).toContain('lifecycle_version')
+    expect(String(database.query.mock.calls[2]?.[0])).toContain('clock_timestamp()')
   })
 
   it('binds the secret capability to the public id and never issues on password setup', async () => {

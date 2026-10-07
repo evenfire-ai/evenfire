@@ -1,11 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { Pool } from 'pg'
-import { isCurrentExternalSession as isCurrentBaseExternalSession } from '../../../base/control-api/src/middleware/externalSessionAuth.js'
-import {
-  signExternalSessionToken as signBaseExternalSessionToken,
-  verifyExternalSessionToken as verifyBaseExternalSessionToken,
-} from '../../../base/control-api/src/utils/auth/externalSessionAuthToken.js'
 import { initDb } from '../src/db.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
@@ -15,11 +11,16 @@ import {
   validateLegacyUserSession,
 } from '../src/services/auth/userSessionService.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
+import { isCurrentExternalSession as isCurrentBaseExternalSession } from './fixtures/legacyV1Base/src/middleware/externalSessionAuth.js'
+import {
+  signExternalSessionToken as signBaseExternalSessionToken,
+  verifyExternalSessionToken as verifyBaseExternalSessionToken,
+} from './fixtures/legacyV1Base/src/utils/auth/externalSessionAuthToken.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const baseDatabase = vi.hoisted(() => ({ query: vi.fn() }))
 
-vi.mock('../../../base/control-api/src/db.js', () => ({
+vi.mock('./fixtures/legacyV1Base/src/db.js', () => ({
   pool: { query: baseDatabase.query },
 }))
 
@@ -31,6 +32,32 @@ const runtimeRoles = [
   'workflow_recipes_runtime',
 ] as const
 const legacyPolicy = { issueV1: true, acceptV1: true } as EffectiveUserAccessPolicy
+
+// These full source snapshots are verbatim from the deployed reader/writer base
+// at 74e0d81d9b70bbc0e123ed2bad89f08d3e13e99e; the hashes prevent drift.
+describe('pinned deployed-base V1 source snapshot at 74e0d81d9b70bbc0e123ed2bad89f08d3e13e99e', () => {
+  it('matches the exact synchronized-dev reader and signer sources', () => {
+    const snapshots = [
+      [
+        './fixtures/legacyV1Base/src/middleware/externalSessionAuth.ts',
+        '4b7e1368f6a9cf3c71d3c1c0bca409a8c458e51f8ccd3f6a07e01173873d87ab',
+      ],
+      [
+        './fixtures/legacyV1Base/src/utils/auth/externalSessionAuthToken.ts',
+        '57663b8d7538a30c2dbf3235bc3faf45faeefcdfd73f2328ae8ff1ec8e2b9494',
+      ],
+      [
+        './fixtures/legacyV1Base/src/profileTypes.ts',
+        '85703bd09e4c584a55c4a0bd8c797ba7f62653f49df197f40068a0706a8bcd2e',
+      ],
+    ] as const
+
+    for (const [path, expectedSha256] of snapshots) {
+      const source = readFileSync(new URL(path, import.meta.url))
+      expect(createHash('sha256').update(source).digest('hex')).toBe(expectedSha256)
+    }
+  })
+})
 
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
@@ -158,9 +185,14 @@ describeRealPostgres('legacy V1 generation ordering on real PostgreSQL', () => {
       Math.floor(authority.rows[0]!.valid_after.getTime() / 1000)
     )
     expect(successorClaims.iat).toBeLessThanOrEqual(Math.floor(Date.now() / 1000))
+    expect(successorClaims.exp - successorClaims.iat).toBeGreaterThan(0)
+    expect(successorClaims.exp - successorClaims.iat).toBeLessThanOrEqual(60 * 60 * 12)
+    const basePredecessorClaims = verifyBaseExternalSessionToken(predecessor)
+    expect(basePredecessorClaims).not.toBeNull()
     await expect(
       validateLegacyUserSession(predecessor, predecessorClaims, { db: databasePool })
     ).resolves.toEqual({ status: 'revoked', reason: 'security_event' })
+    await expect(isCurrentBaseExternalSession(basePredecessorClaims!)).resolves.toBe(false)
     await expect(
       validateLegacyUserSession(successor, successorClaims, { db: databasePool })
     ).resolves.toMatchObject({ status: 'valid' })
@@ -188,6 +220,9 @@ describeRealPostgres('legacy V1 generation ordering on real PostgreSQL', () => {
     )
 
     expect(successor).not.toBe(first)
+    expect(createHash('sha256').update(successor).digest('hex')).not.toBe(
+      createHash('sha256').update(first).digest('hex')
+    )
     expect(successorClaims.jti).toEqual(expect.any(String))
     expect(Number(lifecycle.rows[0]?.lifecycle_version)).toBe(1)
     await expect(

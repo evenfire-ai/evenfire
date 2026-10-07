@@ -705,6 +705,8 @@ describe('directory privacy and atomic authorization', () => {
     let status = invitation.status
     let passwordHash: string | null = null
     let membershipWrites = 0
+    let lifecycleVersion = 1
+    let lifecycleAdvances = 0
     mocks.query.mockImplementation(async (sql: string) => {
       if (
         sql.includes('FROM invitations i') &&
@@ -751,6 +753,11 @@ describe('directory privacy and atomic authorization', () => {
         passwordHash = 'stored-hash'
         return { rows: [], rowCount: 1 }
       }
+      if (sql.includes('SET lifecycle_version = lifecycle_version + 1')) {
+        lifecycleVersion += 1
+        lifecycleAdvances += 1
+        return { rows: [{ lifecycle_version: lifecycleVersion }], rowCount: 1 }
+      }
       if (sql.includes('SELECT id') && sql.includes('FROM users') && sql.includes('FOR UPDATE')) {
         return { rows: [{ id: TARGET }], rowCount: 1 }
       }
@@ -770,6 +777,8 @@ describe('directory privacy and atomic authorization', () => {
     expect(status).toBe('accepted')
     expect(passwordHash).not.toBeNull()
     expect(membershipWrites).toBe(1)
+    expect(lifecycleVersion).toBe(2)
+    expect(lifecycleAdvances).toBe(1)
 
     await expect(
       setInvitationPasswordForEmail(
@@ -969,6 +978,7 @@ describe('directory privacy and atomic authorization', () => {
       .mockResolvedValueOnce({ rows: [{ password_hash: currentHash }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 2 })
 
@@ -981,9 +991,18 @@ describe('directory privacy and atomic authorization', () => {
     expect(passwordUpdate).toContain('AND password_hash = $4')
     expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR UPDATE')
     expect(String(mocks.query.mock.calls[3]?.[0])).toContain(
+      'SET lifecycle_version = lifecycle_version + 1'
+    )
+    expect(mocks.query.mock.calls[3]?.[1]).toEqual([MANAGER])
+    expect(String(mocks.query.mock.calls[4]?.[0])).toContain(
       'INSERT INTO external_user_session_security_epochs'
     )
-    expect(String(mocks.query.mock.calls[4]?.[0])).toContain('UPDATE external_user_sessions')
+    expect(String(mocks.query.mock.calls[5]?.[0])).toContain('UPDATE external_user_sessions')
+    expect(
+      mocks.query.mock.calls.filter(([sql]) =>
+        String(sql).includes('SET lifecycle_version = lifecycle_version + 1')
+      )
+    ).toHaveLength(1)
   })
 
   it('treats wildcard characters literally, excludes channels, and publishes a stable cursor', async () => {
