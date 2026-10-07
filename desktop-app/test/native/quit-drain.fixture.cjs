@@ -45,6 +45,7 @@ const retryStorageStarted = deferred()
 let authSuspensions = 0
 let firstLogoutSettled = false
 let firstLogoutError = null
+let firstLogout = null
 let retryLogout = null
 let retryLogoutSettled = false
 let retryLogoutError = null
@@ -87,22 +88,45 @@ appService.tokenStore.prepareForQuit = async () => {
 
 let willQuitObserved = false
 let prepareCount = 0
+let preparationCallbackCompletions = 0
 let cancellationCount = 0
 let preparationHeldPastDeadline = false
 let authStateIntactBeforeRelease = false
 let firstScenarioVerified = false
 let retryScenarioVerified = false
 let retryPreparationHeld = false
+let fixtureFailure = null
+let fixtureSucceeded = false
 let resolveCancellation
 const cancellationFinished = new Promise(resolve => {
   resolveCancellation = resolve
 })
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 
+function failFixture(error, context) {
+  if (fixtureFailure) return
+  fixtureFailure = error instanceof Error ? error : new Error(String(error))
+  console.error(`QUIT_DRAIN_FIXTURE_FAILED:${context}`, fixtureFailure)
+  app.exit(9)
+}
+
+function failPreparation(phase, error) {
+  if (!fixtureFailure) {
+    fixtureFailure = error instanceof Error ? error : new Error(String(error))
+  }
+  console.error(`QUIT_DRAIN_PREPARATION_REJECTED:${phase}`, fixtureFailure)
+  app.exit(9)
+}
+
 app.on('will-quit', () => {
   willQuitObserved = true
+  if (fixtureFailure) {
+    app.exit(9)
+    return
+  }
   if (
     prepareCount !== 2 ||
+    preparationCallbackCompletions !== 2 ||
     cancellationCount !== 1 ||
     !firstScenarioVerified ||
     !retryScenarioVerified
@@ -121,20 +145,24 @@ app.on('will-quit', () => {
       retryLogoutRejected: Boolean(retryLogoutError),
       savedCredential,
     })
-    app.exit(7)
+    failFixture(
+      new Error('admitted logout or canceled-attempt storage drain was not verified'),
+      'final-state'
+    )
     return
   }
+  fixtureSucceeded = true
   console.log('WILL_QUIT')
 })
 app.on('quit', (_event, code) => {
-  if (code === 0 && willQuitObserved) {
+  if (code === 0 && willQuitObserved && fixtureSucceeded && !fixtureFailure) {
     console.log('QUIT_DRAIN_NATIVE_FIXTURE_PASS')
   }
 })
 app.on('window-all-closed', () => {
   if (!willQuitObserved) {
     console.error('window closed without completing the native quit')
-    app.exit(7)
+    failFixture(new Error('window closed before will-quit'), 'window-close')
   }
 })
 
@@ -142,45 +170,68 @@ registerQuitDrain(
   app,
   async () => {
     prepareCount += 1
-    const preparation = appService.prepareForQuit()
-    let preparationSettled = false
-    void preparation.then(() => {
-      preparationSettled = true
-    })
+    const preparationPhase = prepareCount === 1 ? 'first' : 'retry'
+    try {
+      if (fixtureFailure) throw fixtureFailure
+      const preparation = appService.prepareForQuit()
+      let preparationSettled = false
+      void preparation.then(
+        () => {
+          preparationSettled = true
+        },
+        () => {
+          preparationSettled = true
+        }
+      )
 
-    if (prepareCount === 1) {
-      await sleep(5_100)
-      preparationHeldPastDeadline = !preparationSettled && !firstLogoutSettled
-      authStateIntactBeforeRelease =
-        appService.sessionToken === 'synthetic-session-token' &&
-        appService.me?.id === 'synthetic-user' &&
-        savedCredential
+      if (prepareCount === 1) {
+        await sleep(5_100)
+        preparationHeldPastDeadline = !preparationSettled && !firstLogoutSettled
+        authStateIntactBeforeRelease =
+          appService.sessionToken === 'synthetic-session-token' &&
+          appService.me?.id === 'synthetic-user' &&
+          savedCredential
 
-      // The old deadline resumes quit first, so the real beforeunload veto
-      // below releases this fence. The corrected path stays pending and the
-      // fixture releases it after proving the five-second wait.
-      if (!preparationSettled) {
-        firstAuthFence.resolve()
-        await Promise.all([preparation, firstLogout])
-      } else {
-        await preparation
+        // The old deadline resumes quit first, so the real beforeunload veto
+        // below releases this fence. The corrected path stays pending and the
+        // fixture releases it after proving the five-second wait.
+        if (!preparationSettled) {
+          firstAuthFence.resolve()
+          if (process.env.EVENFIRE_TEST_QUIT_DRAIN_REJECT_PREPARATION === 'first') {
+            throw new Error('injected first preparation rejection')
+          }
+          assert.ok(firstLogout, 'first logout producer must exist before preparation drains')
+          await Promise.all([preparation, firstLogout])
+        } else {
+          await preparation
+        }
+        preparationCallbackCompletions += 1
+        return
       }
-      return
-    }
 
-    await sleep(25)
-    retryPreparationHeld =
-      !preparationSettled &&
-      !retryLogoutSettled &&
-      !retryStorageSettled &&
-      !retryDrainStartedBeforeStorageSettled
-    retryStorageFence.resolve()
-    await Promise.all([preparation, retryLogout])
-    retryScenarioVerified =
-      retryPreparationHeld &&
-      !retryLogoutError &&
-      retryStorageSettled &&
-      !retryDrainStartedBeforeStorageSettled
+      await sleep(25)
+      retryPreparationHeld =
+        !preparationSettled &&
+        !retryLogoutSettled &&
+        !retryStorageSettled &&
+        !retryDrainStartedBeforeStorageSettled
+      retryStorageFence.resolve()
+      assert.ok(retryLogout, 'retry logout producer must exist before preparation drains')
+      await Promise.all([preparation, retryLogout])
+      if (process.env.EVENFIRE_TEST_QUIT_DRAIN_REJECT_PREPARATION === 'retry') {
+        throw new Error('injected retry preparation rejection')
+      }
+      retryScenarioVerified =
+        retryPreparationHeld &&
+        !retryLogoutError &&
+        retryStorageSettled &&
+        !retryDrainStartedBeforeStorageSettled
+      if (!retryScenarioVerified) throw new Error('canceled-attempt storage drain was not verified')
+      preparationCallbackCompletions += 1
+    } catch (error) {
+      failPreparation(preparationPhase, error)
+      throw error
+    }
   },
   () => {
     cancellationCount += 1
@@ -201,7 +252,7 @@ app
     await window.webContents.executeJavaScript(
       'window.onbeforeunload = event => { event.returnValue = false; return false }; void 0'
     )
-    const firstLogout = appService.logout().then(
+    firstLogout = appService.logout().then(
       () => {
         firstLogoutSettled = true
       },
@@ -243,14 +294,12 @@ app
           app.quit()
           await retryLogout
         } catch (error) {
-          console.error('canceled quit recovery failed', error)
-          app.exit(9)
+          failFixture(error, 'canceled-quit-recovery')
         }
       })
     })
     setImmediate(() => app.quit())
   })
   .catch(error => {
-    console.error(error)
-    app.exit(9)
+    failFixture(error, 'when-ready')
   })
