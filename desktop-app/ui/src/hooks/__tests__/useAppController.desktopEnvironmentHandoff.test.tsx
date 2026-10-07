@@ -59,7 +59,7 @@ describe('useAppController desktop environment handoff', () => {
   })
 
   async function openSwitchConfirmation() {
-    const { clerum, handle } = installAppControllerClerum({
+    const { handle } = installAppControllerClerum({
       runtimeConfigState: runtimeConfigState(),
     })
     const app = renderAppController()

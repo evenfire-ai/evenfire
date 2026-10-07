@@ -10,7 +10,7 @@ afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService native auth and environment commit ordering', () => {
   it('persists real version-2 GFS state as suspended_auth on logout', async () => {
-    const { service, runtimeConfig } = await createNativeCommitTestHarness()
+    const { service } = await createNativeCommitTestHarness()
     const me = {
       id: 'user-a',
       email: 'user-a@example.test',
