@@ -36,6 +36,9 @@ export class GfsStoreWriterLease {
   private markerHandle?: fs.FileHandle
   private rootHandle?: fs.FileHandle
   private localOwner = false
+  // True while this lease is acquiring or releasing. Either ends on its own,
+  // and the next attempt judges the store from scratch.
+  private inTransition = false
   private verifiedMarker?: string
   private readonly databasePath: string
   private readonly markerPath: string
@@ -60,20 +63,23 @@ export class GfsStoreWriterLease {
   private async acquireInternal(transition?: OperatorOwnershipTransition): Promise<void> {
     const priorOwner = GfsStoreWriterLease.localOwners.get(this.root)
     if (priorOwner) {
-      let transient = false
+      let transient = priorOwner.inTransition
       try {
-        if (priorOwner.verifiedMarker) {
+        if (!transient && priorOwner.verifiedMarker) {
           await priorOwner.verifyHeld()
           await priorOwner.verifyOwnershipPaths(priorOwner.verifiedMarker)
           transient = true
         }
       } catch {
-        /* Ambiguous or changed ownership is never a retry signal. */
+        // Ambiguous or changed ownership is never a retry signal, unless the
+        // owner started releasing while it was being checked.
+        transient = priorOwner.inTransition
       }
       throw new GfsStoreWriterOwnershipError('Writer already active', 'writer_locked', transient)
     }
     GfsStoreWriterLease.localOwners.set(this.root, this)
     this.localOwner = true
+    this.inTransition = true
     let contentionMarker: string | undefined
     try {
       await transition?.assertPhysicalFenceHeld()
@@ -206,6 +212,7 @@ export class GfsStoreWriterLease {
       await this.verifyHeld()
       await transition?.assertPhysicalFenceHeld()
       await this.rootHandle.sync()
+      this.inTransition = false
     } catch (error) {
       let transient = false
       if ((error as { code?: string }).code === 'SQLITE_BUSY' && contentionMarker) {
@@ -267,6 +274,7 @@ export class GfsStoreWriterLease {
   async release(): Promise<void> {
     // Closing the connection rolls back its lock-only transaction and releases
     // kernel ownership. No on-disk ownership inode is removed.
+    this.inTransition = true
     this.database?.close()
     this.database = undefined
     this.verifiedMarker = undefined
