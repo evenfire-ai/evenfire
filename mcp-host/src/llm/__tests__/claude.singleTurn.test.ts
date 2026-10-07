@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { type ChatMessage, FinishReason } from '../../core/types'
 import { TOOL_RESULT_IMAGE_TEXT } from '../../visualInput/messageProjection'
-import { VISUAL_INPUT_LIMITS } from '../../visualInput/policy'
 import { ClaudeProvider } from '../claude'
+import { PNG_2X2_BASE64 } from './codexImageFixtures'
 
 describe('Claude visual request limits', () => {
   it.each([false, true])('bounds the final serialized request with cache=%s', async cache => {
@@ -13,10 +13,15 @@ describe('Claude visual request limits', () => {
       {
         role: 'user',
         content: '',
-        contentParts: [{ type: 'image', mimeType: 'image/png', data: 'AA==' }],
+        contentParts: [
+          { type: 'image', mimeType: 'image/png', data: PNG_2X2_BASE64, width: 2, height: 2 },
+        ],
       },
     ]
-    const large = 'x'.repeat(VISUAL_INPUT_LIMITS.requestBytes)
+    const profile = provider.getVisualDeliveryLimits(
+      cache ? 'completeWithToolsAndCache' : 'completeWithTools'
+    )!
+    const large = 'x'.repeat(profile.maxVisualRequestBytes)
     const operation = cache
       ? provider.completeSingleTurnWithToolsAndCache(
           { stable: large, context: '', stableHash: 'fixture', contextHash: 'fixture' },
@@ -32,10 +37,52 @@ describe('Claude visual request limits', () => {
     await expect(operation).rejects.toMatchObject({ code: 'limit_exceeded' })
     expect(client.messages.create).not.toHaveBeenCalled()
   })
+
+  it('includes cached system blocks in the tool-less GFS wire bound', async () => {
+    const client = createMockClaudeClient()
+    const provider = new ClaudeProvider(client as never, 'claude-sonnet-4-6')
+    const messages: ChatMessage[] = [
+      {
+        role: 'user',
+        content: '',
+        contentParts: [
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: PNG_2X2_BASE64,
+            width: 2,
+            height: 2,
+            source: {
+              kind: 'gfs',
+              drive: 'main',
+              resourceId: 'a'.repeat(32),
+              gfsUri: `gfs://main/${'a'.repeat(32)}`,
+              version: 1,
+              name: 'unit.png',
+            },
+          },
+        ],
+      },
+    ]
+    const maxWireBytes = provider.getVisualDeliveryLimits('completeAndCache')!.maxVisualRequestBytes
+    await expect(
+      provider.completeSingleTurnAndCache(
+        {
+          stable: 'x'.repeat(maxWireBytes),
+          context: '',
+          stableHash: 'fixture',
+          contextHash: 'fixture',
+        },
+        messages
+      )
+    ).rejects.toMatchObject({ code: 'limit_exceeded' })
+    expect(client.messages.create).not.toHaveBeenCalled()
+  })
 })
 
 function createMockClaudeClient() {
   return {
+    baseURL: 'https://api.anthropic.com',
     messages: {
       create: vi.fn(),
     },

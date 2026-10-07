@@ -14,12 +14,14 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
+import { resolveVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import {
   attachmentBudgetRefusalMessageFor,
   buildAttachmentBudgetRefusals,
 } from './attachmentBudgetRefusal'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
+import { type ImageTransportOperation, transportSupportsImageInput } from './imageInput'
 import { IMAGE_SOURCE_INVALID, canonicalRefusalCode, projectMessage } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import { authorizeRetryDelayMs, rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
@@ -150,6 +152,11 @@ function assertTerminalCodexOutcome(result: {
 }
 
 export class CodexSubscriptionProvider implements SingleTurnProvider {
+  getVisualDeliveryLimits(operation: ImageTransportOperation) {
+    return transportSupportsImageInput('codex-subscription', operation)
+      ? resolveVisualDeliveryLimits('codex-subscription')
+      : null
+  }
   readonly requiresImageSourceIdentity =
     descriptorFor('codex-subscription').requiresImageSourceIdentity === true
   private nextProviderAttemptIndex = 1

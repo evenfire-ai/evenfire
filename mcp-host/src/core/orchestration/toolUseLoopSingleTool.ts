@@ -33,7 +33,13 @@ export async function executeSingleTool(
 ): Promise<ToolResult> {
   const { toolRegistry, toolOutputProcessor, events, toolTimeout } = config
 
-  const validation = toolOutputProcessor.beforeExecution(call.name, call.arguments)
+  const tool = toolRegistry.get(call.name)
+  let validation = toolOutputProcessor.beforeExecution(call.name, call.arguments)
+  if (validation.is_valid) {
+    // The execution boundary also receives transformed parameters and frozen
+    // approved calls. Validate the effective values, not only pre-policy input.
+    validation = (await tool?.validateParams?.(call.arguments)) ?? validation
+  }
   if (!validation.is_valid) {
     events.emit({
       type: 'safety:input_blocked',
@@ -52,7 +58,6 @@ export async function executeSingleTool(
     }
   }
 
-  const tool = toolRegistry.get(call.name)
   if (!tool) {
     return {
       tool_call_id: call.id,

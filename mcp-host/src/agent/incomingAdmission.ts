@@ -24,6 +24,7 @@ import {
   type FileReferenceResolutionResult,
   resolveFileReferences,
 } from './fileReferenceResolver'
+import type { GfsSurfaceRuntimeCapability } from './gfsReferenceSurfaces'
 import { type IncomingAttachmentLimits, validateIncomingAttachments } from './incomingAttachments'
 import type { SessionModelSelectionOptions } from './sessionModelSelection'
 
@@ -75,6 +76,8 @@ export interface IncomingAdmissionDeps {
    * called; a token that cannot be read or decoded refuses the message.
    */
   fileReferenceGfs: () => FileReferenceGfsAccess
+  /** Host-owned surface capability; omitted means every optional surface fails closed. */
+  gfsSurfaceRuntimeCapability?: (message: IncomingMessage) => GfsSurfaceRuntimeCapability
   logger: {
     info: (obj: Record<string, unknown>, msg: string) => void
     warn: (obj: Record<string, unknown>, msg: string) => void
@@ -482,12 +485,19 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       const access: FileReferenceGfsAccess = fileReferences.some(ref => ref.source.kind === 'gfs')
         ? deps.fileReferenceGfs()
         : { status: 'unsupported' }
+      const runtimeSurfaces = deps.gfsSurfaceRuntimeCapability?.(normalizedMessage) ?? {
+        workspaceFile: false,
+        localExecutor: false,
+        visual: false,
+      }
       const resolved: FileReferenceResolutionResult =
         access.status === 'credentials_failed'
           ? { ok: false, failure: 'credentials', errorClass: access.errorClass }
           : await resolveFileReferences(
               fileReferences,
-              access.status === 'available' ? access.client : null
+              access.status === 'available' ? access.client : null,
+              undefined,
+              runtimeSurfaces
             )
       if (!resolved.ok) {
         deps.logger.warn(

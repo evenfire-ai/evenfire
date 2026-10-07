@@ -783,8 +783,6 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
   const filePath = nextProfileFilePath(directoryPath, validated.appName || DEFAULT_APP_NAME)
   const timestamp = new Date().toISOString()
   const profile: StoredRuntimeProfile = {
-    // Two profiles can legitimately share an app name. A UUID keeps their
-    // identities independent even when saves occur in the same millisecond.
     id: `${toAppSlug(validated.appName || DEFAULT_APP_NAME)}-${randomUUID()}`,
     appName: validated.appName?.trim() || DEFAULT_APP_NAME,
     filePath,

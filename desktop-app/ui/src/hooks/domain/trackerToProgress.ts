@@ -1,5 +1,19 @@
 import type { TaskState, TaskStatus } from '@contexts/AgentTaskTrackerContext'
-import type { TaskProgress } from '@/uiTypes'
+import type { ApprovalInputPreview, TaskProgress } from '@/uiTypes'
+
+/** Accept only the bounded text projection, never other pending-tool fields. */
+export function readApprovalInputPreview(value: unknown): ApprovalInputPreview | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const { text, truncated } = value as Record<string, unknown>
+  if (
+    typeof text !== 'string' ||
+    typeof truncated !== 'boolean' ||
+    text.length > 64 * 1024 ||
+    new TextEncoder().encode(text).byteLength > 64 * 1024
+  )
+    return undefined
+  return { text, truncated }
+}
 
 /** Map the tracker's lifecycle status to the ProgressStepper's status union. */
 export function mapTrackerStatusToProgress(status: TaskStatus): TaskProgress['status'] {
@@ -40,6 +54,7 @@ export function trackerStateToTaskProgress(state: TaskState): TaskProgress {
           // connect_required suspension instead of the generic approval prompt.
           reason: state.pendingApproval.reason,
           mcpServerName: state.pendingApproval.mcpServerName,
+          inputPreview: readApprovalInputPreview(state.pendingApproval.inputPreview),
         }
       : undefined,
     cancelReason:
