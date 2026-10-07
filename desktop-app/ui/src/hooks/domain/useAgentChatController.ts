@@ -83,7 +83,7 @@ import {
   createSessionFsmStore,
   projectSessionState,
 } from './sessionFsm'
-import { mapTrackerStatusToProgress } from './trackerToProgress'
+import { mapTrackerStatusToProgress, readApprovalInputPreview } from './trackerToProgress'
 import type { PushNotificationInput } from './types'
 import {
   type ChatListControllerHost,
@@ -2688,6 +2688,7 @@ export function useAgentChatController({
             // generic Approve/Deny prompt. Absent on ordinary approval suspensions.
             reason: state.pendingApproval.reason,
             mcpServerName: state.pendingApproval.mcpServerName,
+            inputPreview: readApprovalInputPreview(state.pendingApproval.inputPreview),
           }
         : activeFsmApproval
           ? {
@@ -2700,6 +2701,7 @@ export function useAgentChatController({
               // branch above and InFlightAssistantPlaceholder's fallback.
               reason: activeFsmApproval.reason,
               mcpServerName: activeFsmApproval.mcpServerName,
+              inputPreview: readApprovalInputPreview(activeFsmApproval.inputPreview),
             }
           : undefined
       updateMessageProgress(selectedAgent, state.userMessageId, () => ({

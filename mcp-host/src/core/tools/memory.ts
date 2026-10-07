@@ -1,10 +1,10 @@
-import type { Workspace } from '../../workspace/service'
 import {
-  adminManagedIdentityFileMessage,
-  isLockedPath,
-  isStateDbPath,
-  stateDbProtectedMessage,
-} from '../../workspace/service'
+  ProtectedWorkspacePathError,
+  isProtectedWorkspacePath,
+  protectedWorkspacePathMessage,
+} from '../../workspace/protectedPaths'
+import type { Workspace } from '../../workspace/service'
+import { adminManagedIdentityFileMessage, isLockedPath } from '../../workspace/service'
 import { Tool } from '../interfaces'
 import { ToolOutput } from '../types'
 
@@ -16,6 +16,13 @@ function nowTime(): string {
 
 function todayDate(): string {
   return new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+}
+
+function protectedPathOutput(err: unknown, startTime: number): ToolOutput | null {
+  if (err instanceof ProtectedWorkspacePathError) {
+    return { content: err.message, duration_ms: Date.now() - startTime, is_error: true }
+  }
+  return null
 }
 
 export class MemorySearchTool implements Tool {
@@ -49,10 +56,14 @@ export class MemorySearchTool implements Tool {
 
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const startTime = Date.now()
-    const results = await this.workspace.search(
-      params.query as string,
-      (params.limit as number) || 5
-    )
+    let results
+    try {
+      results = await this.workspace.search(params.query as string, (params.limit as number) || 5)
+    } catch (err) {
+      const out = protectedPathOutput(err, startTime)
+      if (out) return out
+      throw err
+    }
     return {
       content: JSON.stringify({
         query: params.query,
@@ -112,7 +123,7 @@ export class PersistentMemoryWriteTool implements Tool {
     if (
       err instanceof Error &&
       (err.name === 'LockedFileError' ||
-        err.name === 'StateDbPathError' ||
+        err instanceof ProtectedWorkspacePathError ||
         err.name === 'MemoryScanRejectionError' ||
         err.name === 'CrossUserAccessError')
     ) {
@@ -169,10 +180,10 @@ export class PersistentMemoryWriteTool implements Tool {
       }
     }
 
-    // D3 — the session state database is platform state, never agent-writable.
-    if (isStateDbPath(filePath)) {
+    // Platform-owned state and governed GFS downloads are not memory targets.
+    if (isProtectedWorkspacePath(filePath)) {
       return {
-        content: stateDbProtectedMessage(filePath),
+        content: protectedWorkspacePathMessage(filePath),
         duration_ms: Date.now() - startTime,
         is_error: true,
       }
@@ -260,7 +271,14 @@ export class PersistentMemoryReadTool implements Tool {
         is_error: true,
       }
     }
-    const content = await this.workspace.read(path)
+    let content: string | null
+    try {
+      content = await this.workspace.read(path)
+    } catch (err) {
+      const out = protectedPathOutput(err, startTime)
+      if (out) return out
+      throw err
+    }
     if (content === null) {
       return {
         content: `File not found: ${path}`,
@@ -307,7 +325,14 @@ export class MemoryTreeTool implements Tool {
 
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const startTime = Date.now()
-    const entries = await this.workspace.list((params.path as string) || '')
+    let entries
+    try {
+      entries = await this.workspace.list((params.path as string) || '')
+    } catch (err) {
+      const out = protectedPathOutput(err, startTime)
+      if (out) return out
+      throw err
+    }
     return {
       content: JSON.stringify(entries),
       duration_ms: Date.now() - startTime,

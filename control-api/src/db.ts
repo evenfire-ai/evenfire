@@ -1,4 +1,4 @@
-import { Pool, type PoolClient } from 'pg'
+import { type Client, Pool, type PoolClient } from 'pg'
 import {
   type BoundedPoolBudget,
   type PoolConstructor,
@@ -6,6 +6,7 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import { rootLogger } from './observability/logger.js'
+import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
 import { applyPasswordAdmissionSchema } from './services/auth/passwordAdmissionSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
@@ -6327,6 +6328,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyEntityChangeDefinerSearchPathSchema,
   },
   {
+    version: '0125_admin_subscription_rate_limit_namespace',
+    apply: applyAdminSubscriptionRateLimitNamespace,
+  },
+  {
     version: '0125_bug192_password_admission',
     apply: applyPasswordAdmissionSchema,
   },
@@ -6681,7 +6686,7 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query('ROLLBACK')
       } catch (rollbackError) {
-        rootLogger.warn({ err: rollbackError }, 'database migration rollback failed')
+        rootLogger.warn({ err: rollbackError }, 'Control API migration rollback failed')
       }
     }
     throw error
@@ -6690,7 +6695,7 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query(`SELECT pg_advisory_unlock(${INIT_DB_LOCK_KEY_SQL})`)
       } catch (unlockError) {
-        rootLogger.warn({ err: unlockError }, 'database migration advisory unlock failed')
+        rootLogger.warn({ err: unlockError }, 'Control API migration advisory unlock failed')
       }
     }
     client.release()
@@ -6711,15 +6716,31 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
+export type DbTransactionOptions = { signal?: AbortSignal }
+
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
   // Injectable only so the carrier's client lifecycle can be unit-tested against
   // a fake Pool; production always uses the module-level core pool.
-  txPool: Pool = pool
+  txPool: Pool = pool,
+  options: DbTransactionOptions = {}
 ): Promise<T> {
-  const client = (await txPool.connect()) as PoolClient
+  const signal = options.signal
+  signal?.throwIfAborted()
+  // The pool's existing finite connection timeout owns a pending borrow. An
+  // abort cannot release its caller until acquisition has settled, including
+  // disposal of a client delivered after the signal fired.
+  let client: PoolClient & Pick<Client, 'end' | 'connection'>
+  try {
+    client = (await txPool.connect()) as typeof client
+  } catch (error) {
+    signal?.throwIfAborted()
+    throw error
+  }
   let transactionStarted = false
   let commitSent = false
+  let transactionFinished = false
+  let originalIdleTimeout: string | undefined
   let releaseError: Error | boolean | undefined
 
   // pg-pool detaches its own idle 'error' listener from a client while it is
@@ -6738,15 +6759,105 @@ export async function withTransaction<T>(
   }
   client.on('error', onClientError)
 
+  let termination: Promise<void> | undefined
+  const terminateClient = (reason: Error | boolean): void => {
+    releaseError ??= reason
+    if (termination) return
+    termination = client.end().catch(error => {
+      releaseError = error instanceof Error ? error : true
+    })
+    // pg Client.end() destroys an active query's socket, but an idle client
+    // waits for the peer's EOF. Explicit cancellation must also end a half-open
+    // idle checkout. Client.connection.stream is the pinned driver's typed
+    // transport; Duplex.destroy() is idempotent and its socket close drives the
+    // driver's connection end event awaited by Client.end(). Do not evict or
+    // finish the caller ahead of that event.
+    client.connection.stream.destroy()
+  }
+  const onAbort = (): void => {
+    terminateClient(signal?.reason instanceof Error ? signal.reason : true)
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  if (signal?.aborted) onAbort()
+
   try {
+    signal?.throwIfAborted()
+    if (signal) {
+      // Read normalized milliseconds from this backend, not from client startup
+      // options: a role/database default or a reused session can be different.
+      const settings = await client.query<{
+        statement_timeout_ms: string | null
+        idle_timeout_ms: string | null
+      }>(`SELECT
+        (SELECT setting FROM pg_settings WHERE name = 'statement_timeout') AS statement_timeout_ms,
+        (SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout') AS idle_timeout_ms`)
+      signal.throwIfAborted()
+      const setting = settings.rows[0]
+      const statementTimeout = setting?.statement_timeout_ms
+      const idleTimeout = setting?.idle_timeout_ms
+      const statementMs = Number(statementTimeout)
+      const idleMs = Number(idleTimeout)
+      // These are the existing createBoundedPgPoolForConnection startup bounds.
+      // An unbounded or invalid effective server setting cannot supply a finite
+      // remote cleanup backstop, so this cancellable transaction must fail loud.
+      if (
+        typeof statementTimeout !== 'string' ||
+        !/^\d+$/.test(statementTimeout) ||
+        !Number.isInteger(statementMs) ||
+        statementMs < 100 ||
+        statementMs > 30_000 ||
+        typeof idleTimeout !== 'string' ||
+        !/^\d+$/.test(idleTimeout) ||
+        !Number.isSafeInteger(idleMs)
+      ) {
+        throw new Error('Invalid effective PostgreSQL cancellation timeout bounds')
+      }
+      if (idleMs === 0 || idleMs > statementMs) {
+        // This must be SESSION scope before BEGIN. AbortTransaction restores a
+        // SET LOCAL value before entering idle-in-transaction (aborted), which
+        // would remove the very backstop needed when a blackhole hides our FIN.
+        // Record the original before sending: a missing set_config reply is also
+        // uncertain, and that checkout must be ended rather than returned healthy.
+        originalIdleTimeout = idleTimeout
+        await client.query('SELECT set_config($1, $2, false)', [
+          'idle_in_transaction_session_timeout',
+          statementTimeout,
+        ])
+        signal.throwIfAborted()
+      }
+    }
     await client.query('BEGIN')
     transactionStarted = true
+    if (signal) {
+      signal.throwIfAborted()
+      // PostgreSQL 16 on the service's Linux runtime supports socket polling
+      // during queries. Its default (0) can leave a disconnected writer running
+      // until statement_timeout; this scoped setting detects our transport stop
+      // promptly. Unsupported servers fail this transaction instead of silently
+      // omitting cancellation. The existing statement_timeout stays in force.
+      await client.query("SET LOCAL client_connection_check_interval = '100ms'")
+    }
     // The brand is nominal-only (a declared unique symbol); the checked-out
     // client IS the transaction session, so this cast is the single blessed
     // point where the brand is minted (issue #375 M3).
-    const result = await work(client as unknown as DbTransactionClient)
+    signal?.throwIfAborted()
+    const transaction = signal
+      ? ({
+          query: async (text: string, values?: unknown[]) => {
+            signal.throwIfAborted()
+            const result = await client.query(text, values)
+            signal.throwIfAborted()
+            return result
+          },
+        } as unknown as DbTransactionClient)
+      : (client as unknown as DbTransactionClient)
+    const result = await work(transaction)
+    signal?.throwIfAborted()
     commitSent = true
     await client.query('COMMIT')
+    transactionFinished = true
+    // An acknowledged COMMIT is the outcome, even if the signal aborted
+    // meanwhile: the finally still evicts the session instead of restoring it.
     return result
   } catch (error) {
     if (commitSent || !transactionStarted) {
@@ -6754,12 +6865,50 @@ export async function withTransaction<T>(
     } else {
       try {
         await client.query('ROLLBACK')
+        transactionFinished = true
       } catch (rollbackError) {
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
     }
+    // Once COMMIT was sent, a missing reply is an unknown durable outcome.
+    // Cancellation does not establish rollback, no spend or no dispatch.
+    signal?.throwIfAborted()
     throw error
   } finally {
+    // Work (including its own finally) and any rollback have already unwound.
+    // Only an acknowledged, healthy transaction may restore session state and
+    // return to the pool. Lost COMMIT/ROLLBACK replies leave the server backstop
+    // installed; local transport completion is not remote cleanup observation.
+    if (
+      originalIdleTimeout !== undefined &&
+      transactionFinished &&
+      !releaseError &&
+      !asyncClientError &&
+      !signal?.aborted
+    ) {
+      try {
+        await client.query('SELECT set_config($1, $2, false)', [
+          'idle_in_transaction_session_timeout',
+          originalIdleTimeout,
+        ])
+      } catch (restoreError) {
+        // Do not replace the work outcome or relabel an acknowledged COMMIT as
+        // a rollback. A session that failed restoration is physically ended.
+        releaseError = restoreError instanceof Error ? restoreError : true
+      }
+    }
+    if (signal && (releaseError || asyncClientError || signal.aborted)) {
+      terminateClient(
+        signal.aborted
+          ? signal.reason instanceof Error
+            ? signal.reason
+            : true
+          : (releaseError ?? asyncClientError ?? true)
+      )
+    }
+    // Keep both listeners and the checkout until physical termination completes.
+    if (termination) await termination
+    signal?.removeEventListener('abort', onAbort)
     client.removeListener('error', onClientError)
     // A client that emitted 'error' mid-checkout is poisoned; destroy it. Keep an
     // existing releaseError (the primary failure from work/commit/rollback) and
@@ -6767,6 +6916,9 @@ export async function withTransaction<T>(
     // always reaches release() and pg-pool never recycles the bad connection.
     if (asyncClientError && !releaseError) {
       releaseError = asyncClientError
+    }
+    if (signal?.aborted) {
+      releaseError = signal.reason instanceof Error ? signal.reason : true
     }
     client.release(releaseError)
   }

@@ -23,6 +23,7 @@ import { createAdminRemoteMcpRouter } from './remoteMcp.js'
 import { createAdminResourcesRouter } from './resources.js'
 import { createAdminSecretsRouter } from './secrets.js'
 import { createAdminSharedFilesystemsRouter } from './sharedFilesystems.js'
+import { createAdminSubscriptionCapabilitiesRouter } from './subscriptionCapabilities.js'
 import { createAdminTeamsRouter } from './teams.js'
 import { createAdminTracingRouter } from './tracing/index.js'
 import { createAdminUsageRouter } from './usage.js'
@@ -30,6 +31,7 @@ import { createAdminUsersRouter } from './users.js'
 
 export function createAdminRouter(gateway: K8sGateway): Router {
   const router = Router()
+  router.use(createAdminSubscriptionCapabilitiesRouter())
   router.use(createAdminHostsOverviewRouter(gateway))
   router.use(createAdminControlAdminsRouter())
   router.use(createAdminHostArtifactsRouter(gateway))

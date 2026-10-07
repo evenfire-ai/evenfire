@@ -3,10 +3,31 @@ import {
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
+import { canonicalRefusalCode } from './imageSource'
 import { rateLimitedCode, retryAfterMs } from './retryAfter'
 import { upstreamRejectedStatus } from './upstreamRejected'
 
 export const CODEX_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
+
+/**
+ * Operator-facing text for a proxy denial. The three local-capacity codes say
+ * what the caller can do; they are not upstream outage diagnostics.
+ */
+export function codexProxyErrorMessage(code: string, status?: number): string {
+  if (
+    code === 'visual_host_share' ||
+    code === 'visual_gate' ||
+    code === 'proxy_capacity_exceeded'
+  ) {
+    return 'Codex proxy admission is full. Wait for an active request to finish or send fewer concurrent requests before retrying; this is not a Codex outage.'
+  }
+  if (code === 'payload_too_large') {
+    return 'Codex request is too large; use fewer or smaller images, or reduce context'
+  }
+  return status === undefined
+    ? `proxy stream failed with ${code}`
+    : `proxy stream failed with ${status} (${code})`
+}
 
 export type CodexProxyErrorOptions = {
   /**
@@ -107,7 +128,9 @@ export class CodexLlmProxyClient {
     ) {
       const parsed = parseCodexCompletionRequest(input.request)
       if (!parsed.ok) {
-        throw new CodexProxyError('invalid_request', parsed.message, { dispatched: false })
+        throw new CodexProxyError(canonicalRefusalCode(parsed), parsed.message, {
+          dispatched: false,
+        })
       }
       if (input.deadlineMs !== undefined && input.deadlineMs !== parsed.value.deadlineMs) {
         throw new CodexProxyError(
@@ -122,12 +145,12 @@ export class CodexLlmProxyClient {
         request: parsed.value,
       })
       if (!envelope.ok) {
+        // The providers' canonical mapping (review R4-L6), so the client and
+        // the pre-dispatch checks agree; only the hash mismatch is its own code.
         const code =
-          envelope.code === 'limit'
-            ? 'payload_too_large'
-            : envelope.code === 'request_hash_mismatch'
-              ? 'request_hash_mismatch'
-              : 'invalid_request'
+          envelope.code === 'request_hash_mismatch'
+            ? 'request_hash_mismatch'
+            : canonicalRefusalCode(envelope)
         throw new CodexProxyError(code, envelope.message, { dispatched: false })
       }
       body = envelope.value
@@ -163,7 +186,9 @@ export class CodexLlmProxyClient {
         return this.streamOnce(input, false)
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
-      // A 429 is a rate limit, not a provider outage (G1-6, G1-11, #720): the
+      // Only the proxy-owned machine `error` field identifies the outcome; an
+      // upstream `reason` string is never promoted to trusted provenance. A
+      // 429 is a rate limit, not a provider outage (G1-6, G1-11, #720): the
       // proxy answers `rate_limited` itself, and a 429 with no JSON code or a
       // reason phrase is read the same way, so only a machine code a 429
       // carries replaces `rate_limited`.
@@ -175,16 +200,10 @@ export class CodexLlmProxyClient {
             : typeof payload.error === 'string'
               ? payload.error
               : 'provider_unavailable'
-      throw new CodexProxyError(
-        code,
-        code === 'payload_too_large'
-          ? 'Codex request is too large; use fewer or smaller images, or reduce context'
-          : `proxy stream failed with ${response.status} (${code})`,
-        {
-          retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined,
-          upstreamStatus: upstreamRejectedStatus(code, payload.upstreamStatus),
-        }
-      )
+      throw new CodexProxyError(code, codexProxyErrorMessage(code, response.status), {
+        retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined,
+        upstreamStatus: upstreamRejectedStatus(code, payload.upstreamStatus),
+      })
     }
     if (!response.body) {
       throw new CodexProxyError('provider_unavailable', 'proxy stream had no body')
@@ -218,7 +237,7 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<CodexProx
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as CodexProxyFrame
       if (frame.type === 'error') {
-        throw new CodexProxyError(frame.code, `proxy stream failed with ${frame.code}`, {
+        throw new CodexProxyError(frame.code, codexProxyErrorMessage(frame.code), {
           upstreamStatus: upstreamRejectedStatus(frame.code, frame.upstreamStatus),
         })
       }

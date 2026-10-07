@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  hashGrokCompletionRequestV1,
+  hashGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import {
@@ -63,7 +63,7 @@ const PROVIDERS = [
     serverHash: (wire: unknown) => {
       const parsed = parseGrokCompletionRequestV1(wire)
       if (!parsed.ok) throw new Error(parsed.message)
-      return hashGrokCompletionRequestV1(parsed.value)
+      return hashGrokCompletionRequest(parsed.value)
     },
     // Captured from the provider at a42dedf8, before canonical hashing.
     goldenToolsHash: '507c127d04e04544ce92b2417e6d30c84033aef8609b501bfe305c1e61a526af',
