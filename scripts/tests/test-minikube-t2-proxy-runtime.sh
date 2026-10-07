@@ -142,11 +142,12 @@ ps() {
   case "$*" in *lstart=*) printf 'Tue Sep 15 01:00:00 2026\n' ;; *state=*) printf 'S\n' ;; *) return 1 ;; esac
 }
 export -f ps
+T2_ORIGIN_DEV="$MINIKUBE_TEST_ORIGIN_DEV"
 t2_lock_acquire
 run_healthcheck_if_requested
 run_playwright_if_requested
 cp "$T2_LOCK_DIR/owner.env" "$tmp/owner-original"
-for key in TOKEN REPOSITORY BRANCH HEAD PROFILE CONTEXT WORKTREE_ID LOCK_KEY PROCESS_START PID; do
+for key in TOKEN REPOSITORY BRANCH HEAD PROFILE CONTEXT WORKTREE_ID LOCK_KEY ORIGIN_DEV PROCESS_START PID; do
   python3 - "$tmp/owner-original" "$T2_LOCK_DIR/owner.env" "$key" <<'PY'
 import sys
 from pathlib import Path

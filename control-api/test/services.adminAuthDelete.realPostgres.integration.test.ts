@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { deleteControlAdmin } from '../src/services/adminAuthService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
@@ -73,15 +74,15 @@ describeRealPostgres('deleteControlAdmin on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    querySpy?.mockRestore()
-    connectSpy?.mockRestore()
-    if (!adminPool) return
     try {
-      await testPool?.end()
+      querySpy?.mockRestore()
+      connectSpy?.mockRestore()
+      await endPoolAndWaitForClients(testPool)
+      if (!adminPool) return
       await waitForDatabaseConnectionsToClose(adminPool, database)
       await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
     } finally {
-      await adminPool.end()
+      await adminPool?.end()
     }
   })
 

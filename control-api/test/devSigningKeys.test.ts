@@ -348,6 +348,7 @@ describe('devSigningKeys persistence contract', () => {
 
   it('publishes the derived verifying half next to the signing material', () => {
     const store = tempStore()
+    // Capture the creation mask before the store publishes the public file.
     const expectedPublicMode = 0o644 & ~process.umask()
     const signing = loadOrGenerateDevJwtPrivateKey('rpc', store)
     loadOrGenerateDevJwtPrivateKey('rpc', store) // reuse must not republish different material

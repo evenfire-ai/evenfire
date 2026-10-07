@@ -60,6 +60,7 @@ export const CONTROL_ROUTES = {
   guardrails: {
     root: '/guardrails',
     detail: (name: string) => `/guardrails/${segment(name)}`,
+    tab: (name: string, tab: string) => `/guardrails/${segment(name)}/${segment(tab)}`,
   },
   llmModels: {
     root: '/llm-models',
@@ -123,6 +124,8 @@ export const CONTROL_ROUTES = {
     new: (query?: ControlRouteQuery) => withQuery('/secrets/new', query),
     editRecipe: (name: string, query?: ControlRouteQuery) =>
       withQuery(`/secrets/recipe/${segment(name)}/edit`, query),
+    editLlm: (name: string, query?: ControlRouteQuery) =>
+      withQuery(`/secrets/llm/${segment(name)}/edit`, query),
   },
   settings: {
     root: '/settings',

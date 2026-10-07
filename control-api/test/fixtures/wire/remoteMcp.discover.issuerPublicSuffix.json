@@ -1,0 +1,11 @@
+{
+  "status": 400,
+  "body": {
+    "error": "discovery_failed",
+    "detail": {
+      "kind": "as_endpoints_cross_site",
+      "field": "issuer",
+      "detail": "issuer has no registrable domain (public suffix, IP literal, userinfo or invalid URL)"
+    }
+  }
+}

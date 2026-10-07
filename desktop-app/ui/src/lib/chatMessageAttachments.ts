@@ -61,7 +61,28 @@ function createParsedAttachment(
     type,
     label: normalizedLabel,
     addedOrder: index,
+    ...(type === 'agent_file' ? parseAgentFileIdentity(label) : {}),
+    ...(type === 'global_file' ? parseGlobalFileIdentity(label) : {}),
   }
+}
+
+function parseAgentFileIdentity(
+  value: string
+): Pick<ChatMessageAttachment, 'filesystemName' | 'path'> {
+  const slash = value.indexOf('/')
+  return slash > 0 && slash < value.length - 1
+    ? { filesystemName: value.slice(0, slash), path: value.slice(slash + 1) }
+    : {}
+}
+
+function parseGlobalFileIdentity(
+  value: string
+): Pick<ChatMessageAttachment, 'drive' | 'resourceId' | 'gfsUri'> {
+  const gfsUri = value.match(/(?:^|\()(gfs:\/\/[^)\s]+)\)?$/i)?.[1]
+  const uriParts = gfsUri?.match(/^gfs:\/\/([^/]+)\/(.+)$/i)
+  return gfsUri && uriParts?.[1] && uriParts[2]
+    ? { gfsUri, drive: uriParts[1], resourceId: uriParts[2] }
+    : {}
 }
 
 function inferLegacyContextAttachmentType(label: string): ChatMessageAttachment['type'] {
@@ -148,6 +169,18 @@ export function buildChatMessageAttachments(
               ? 'Global File'
               : 'Agent File',
       addedOrder: attachmentOrder(attachment, index),
+      ...(attachment.type === 'agent_file'
+        ? { filesystemName: attachment.filesystemName, path: attachment.path }
+        : {}),
+      ...(attachment.type === 'global_file'
+        ? {
+            gfsUri: attachment.gfsUri,
+            drive: attachment.drive,
+            resourceId: attachment.resourceId,
+            version: attachment.version,
+            bytes: attachment.bytes,
+          }
+        : {}),
     }
   })
   const imageItems = imageAttachments.map((attachment, index): ChatMessageAttachment => {
@@ -158,6 +191,14 @@ export function buildChatMessageAttachments(
       label: attachment.name,
       tooltip: formatUploadedFileTooltip(attachment),
       addedOrder: attachmentOrder(attachment, fallbackIndex),
+      // BUG-176: keep the image bytes on the display attachment so the
+      // sent-message chip can reopen the shared image preview. Persisted with
+      // the user message (same inline-base64 contract as response_file).
+      filename: attachment.name,
+      mimeType: attachment.mimeType,
+      encoding: 'base64',
+      dataBase64: attachment.dataBase64,
+      sizeBytes: attachment.sizeBytes,
     }
   })
   return [...referenceItems, ...imageItems].sort(

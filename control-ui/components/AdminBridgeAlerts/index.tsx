@@ -107,7 +107,7 @@ export function AdminBridgeAlerts() {
     setAlert(null)
   }
 
-  function remindLater() {
+  function dismissForNow() {
     window.localStorage.setItem(
       storageKey(alert.kind, alert.status.admin.id, 'snooze'),
       String(Date.now() + REMIND_LATER_MS)
@@ -163,7 +163,7 @@ export function AdminBridgeAlerts() {
         <button
           type="button"
           className="cu-account-alert__close"
-          onClick={closeAlert}
+          onClick={dismissForNow}
           aria-label="Close account alert"
         >
           <IconX width={16} height={16} />
@@ -178,7 +178,7 @@ export function AdminBridgeAlerts() {
           >
             {copy.primaryLabel}
           </button>
-          <button type="button" className="cu-btn cu-btn--ghost cu-btn--sm" onClick={remindLater}>
+          <button type="button" className="cu-btn cu-btn--ghost cu-btn--sm" onClick={dismissForNow}>
             Remind me later
           </button>
           <button

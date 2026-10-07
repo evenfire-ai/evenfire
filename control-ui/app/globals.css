@@ -22,7 +22,9 @@
   --cu-danger: #f87171;
   --cu-danger-hover: #fca5a5;
   --cu-success: #66b88f;
+  --cu-success-muted: rgba(102, 184, 143, 0.2);
   --cu-warning: #e8c27a;
+  --cu-warning-muted: rgba(232, 194, 122, 0.2);
   --cu-accent-rgb: 67, 119, 250;
   --cu-focus-rgb: 67, 119, 250;
   --cu-success-rgb: 102, 184, 143;
@@ -149,7 +151,9 @@
   --cu-danger: #bf4d47;
   --cu-danger-hover: #a8423d;
   --cu-success: #2f8a66;
+  --cu-success-muted: rgba(47, 138, 102, 0.14);
   --cu-warning: #a16b2b;
+  --cu-warning-muted: rgba(161, 107, 43, 0.14);
   --cu-accent-rgb: 67, 119, 250;
   --cu-focus-rgb: 67, 119, 250;
   --cu-success-rgb: 47, 138, 102;
@@ -329,6 +333,11 @@ body.cu-body {
   display: grid;
   gap: 0.75rem;
   max-width: min(28rem, 100%);
+}
+
+/* A grid container overrides the UA `hidden` display; keep hidden steps hidden. */
+.cu-form-stack[hidden] {
+  display: none;
 }
 
 /* Detail-page forms that need more room for their selects and embedded cards
@@ -1134,6 +1143,17 @@ body.cu-body {
 }
 
 .cu-card--viewport-fill > .cu-card__body:has(.cu-table--profile) {
+  overflow: auto;
+}
+
+/* The usage dashboard's body is the flexed child (flex:1, min-height:0) of a
+   viewport-fill card inside a chain that caps its height (.cu-cost-layout is
+   height:100%, and the card flexes to fill it) while .cu-card's own
+   overflow: hidden clips whatever exceeds it. Without its own scroll, content
+   past the fold — the breakdown list under the fixed-height chart — is cut
+   off with no scrollbar anywhere. The body owns the overflow, so the panel
+   header stays visible while the content scrolls. */
+.cu-card--viewport-fill > .cu-card__body.cu-usage-body {
   overflow: auto;
 }
 
@@ -2886,7 +2906,7 @@ td.cu-registry-description {
 
 .cu-entity-access__intro > span {
   color: var(--cu-text-muted);
-  font-size: 0.7rem;
+  font-size: var(--cu-font-size-2xs);
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -2895,7 +2915,7 @@ td.cu-registry-description {
 .cu-entity-access__intro > p {
   margin: 0;
   color: var(--cu-text-soft);
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
   line-height: 1.45;
 }
 
@@ -2952,7 +2972,7 @@ td.cu-registry-description {
 .cu-entity-access__heading h4 {
   margin: 0;
   color: var(--cu-text);
-  font-size: 0.75rem;
+  font-size: var(--cu-font-size-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2966,20 +2986,20 @@ td.cu-registry-description {
   padding: calc(var(--cu-space-1) / 3) var(--cu-space-1);
   border: 1px solid rgba(var(--cu-accent-rgb), 0.35);
   border-radius: var(--cu-radius-pill);
-  background: rgba(var(--cu-accent-rgb), 0.14);
+  background: var(--cu-accent-muted);
   color: var(--cu-text-muted);
-  font-size: 0.75rem;
+  font-size: var(--cu-font-size-xs);
   font-variant-numeric: tabular-nums;
 }
 
 .cu-entity-access__group[data-kind='teams'] .cu-entity-access__heading span {
-  border-color: rgba(var(--cu-success-rgb), 0.35);
-  background: rgba(var(--cu-success-rgb), 0.12);
+  border-color: var(--cu-ok-border);
+  background: var(--cu-success-muted);
 }
 
 .cu-entity-access__group[data-kind='agents'] .cu-entity-access__heading span {
-  border-color: rgba(var(--cu-warning-rgb), 0.35);
-  background: rgba(var(--cu-warning-rgb), 0.12);
+  border-color: var(--cu-warn-border);
+  background: var(--cu-warning-muted);
 }
 
 .cu-entity-access__list {
@@ -2990,7 +3010,7 @@ td.cu-registry-description {
   padding: 0;
   overflow: auto;
   color: var(--cu-text-soft);
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
   list-style: none;
 }
 
@@ -3026,7 +3046,7 @@ td.cu-registry-description {
 
 .cu-entity-access__group .cu-muted {
   margin: 0;
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
 }
 
 .cu-registry-install-access-summary {
@@ -8213,9 +8233,15 @@ td.cu-registry-description {
   min-width: var(--cu-create-action-min-width);
 }
 
+/* Same content padding as the registry edit form and the create-flow step
+   panel, so this edit flow keeps its margins inside the panel like its
+   siblings instead of sitting flush against the panel edges. */
+.cu-channel-edit-form {
+  padding: var(--cu-space-7) var(--cu-space-7) var(--cu-space-4);
+}
+
 .cu-channel-edit-form .cu-create-actions {
   margin-top: var(--cu-space-3);
-  margin-bottom: var(--cu-space-4);
 }
 
 .cu-section-title {
@@ -8474,6 +8500,12 @@ td.cu-registry-description {
   min-width: 0;
 }
 
+/* A fallback-locked extra slot adds a `cu-chip` state marker beside the
+   remove control, so the row gains a fourth (auto) actions track. */
+.cu-llm-cred-extra--locked {
+  grid-template-columns: 1fr 1fr auto auto;
+}
+
 /* Chip + optional remove icon-button on the right side of a group head. */
 .cu-llm-cred-group__head-actions {
   display: flex;
@@ -8510,13 +8542,9 @@ td.cu-registry-description {
   font-size: 0.95em;
 }
 
-/* The "Add provider" picker of the additive editor (a SelectionDropdown, so
-   the width cap lands on its root element, not on a native <select>). The cap
-   also bounds the popover menu, so it stays wide enough for the longest
-   provider labels; inline mode (update modal) keeps the surface's full width. */
-.cu-selection-dropdown.cu-llm-cred-add:not(.cu-selection-dropdown--inline) {
-  max-width: 16rem;
-}
+/* The "Add provider" picker of the additive editor is a plain field on the
+   full-screen surfaces: the SelectionDropdown root is width:100%, so the
+   trigger and its popover menu match the width of the surrounding key rows. */
 
 /* The picker is a MENU (value is always empty): entries mount a provider
    section and vanish from the list, so the never-filled selection squares
@@ -12387,6 +12415,16 @@ button.cu-gfs-tree__button:focus-visible,
   opacity: 0.55;
 }
 
+.cu-gfs-list-count {
+  margin: var(--cu-space-2) 0 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-xs);
+}
+
+.cu-gfs-list-count--truncated {
+  margin-top: var(--cu-space-05);
+}
+
 .cu-gfs__load-more {
   justify-self: start;
 }
@@ -13111,6 +13149,51 @@ button.cu-gfs-tree__button:focus-visible,
   font-size: 0.875rem;
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+.cu-gfs-markdown-preview__content img {
+  max-width: 100%;
+  height: auto;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 var(--cu-space-3);
+  overscroll-behavior-x: contain;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 2px;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll th,
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll td {
+  max-width: 24rem;
+  overflow-wrap: anywhere;
+  padding: var(--cu-space-2) var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll th {
+  background: rgba(var(--cu-edge-rgb), 0.14);
+  color: var(--cu-text);
+  font-size: var(--cu-font-size-md);
+  font-weight: 600;
+  letter-spacing: normal;
+  position: static;
+  text-transform: none;
+  white-space: normal;
+  z-index: auto;
 }
 
 .cu-gfs-markdown-preview__content > :first-child {
