@@ -2472,7 +2472,8 @@ export function useAgentChatController({
             // mid-reconcile — settle without re-rendering (a reopen reconcile
             // re-derives if a newer send didn't already take over via R1).
             // #654 M6 — either way this task will never produce another terminal,
-            // so its retained payload has no reader left.
+            // so its retained payload has no reader left, except documents the
+            // Host never received (kept for Recover files).
             releaseRetainedSendsForTask(state.taskId)
             dropActivity()
             setIdle()
@@ -3622,11 +3623,14 @@ export function useAgentChatController({
         visibleFailure.userMessageId
       )
       // The visible failure is the newest one of this chat; the older failures
-      // behind it would otherwise resurface one by one after each discard.
+      // behind it would otherwise resurface one by one after each discard. An
+      // older snapshot holding documents the Host never received stays: those
+      // files exist nowhere else, so it resurfaces with Recover files.
       releaseRetainedFailuresForChat(
         visibleFailure.agentRef,
         visibleFailure.chatId ?? null,
-        visibleFailure.timestamp
+        visibleFailure.timestamp,
+        { keepUndeliveredFiles: true }
       )
     }
     setFailedAgentSend(null)
@@ -3737,7 +3741,9 @@ export function useAgentChatController({
         await window.clerum.rpc.cancelTask(hostRef, taskId)
         markCancelled('Cancelled by user.')
         // #654 M6 — a cancel is terminal by intent: the user does not want this
-        // payload resent, so nothing will read the retained snapshot again.
+        // payload resent, so nothing will read the retained snapshot again. A
+        // snapshot holding documents the Host never received stays for Recover
+        // files (see releaseRetainedSendsForTask).
         releaseRetainedSendsForTask(taskId)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)

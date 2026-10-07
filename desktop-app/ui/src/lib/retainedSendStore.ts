@@ -11,8 +11,9 @@
  * and released only on an explicit terminal outcome: its own successful reply
  * or cancel, a user-initiated discard (which also drops the older failures of
  * that chat), or a newer send for the same chat that reaches a successful
- * terminal, which supersedes every failure recorded before it except one whose
- * documents the Host never received (#678 D13). A snapshot still
+ * terminal, which supersedes every failure recorded before it. Documents the
+ * Host never received are the exception (#678 D13): only a discard, recovery or
+ * retry of that snapshot itself, or a store reset, releases them. A snapshot still
  * awaiting its own terminal is never released by another send. Receiving a
  * `taskId` is NOT a terminal acknowledgement — a started task can still fail —
  * so it never releases the snapshot by itself.
@@ -131,10 +132,15 @@ export function createRetainedSendStore(changed: () => void) {
     if (snapshots.delete(keyFor(agentRef, chatId, userMessageId))) changed()
   }
 
+  /**
+   * The task ended without a reply to recover (a cancel, or a lost stream the
+   * turn already covered). A snapshot holding documents the Host never received
+   * stays with its failure and reason: those files exist nowhere else.
+   */
   function releaseRetainedSendsForTask(taskId: string): void {
     let released = false
     for (const [key, snapshot] of snapshots) {
-      if (snapshot.taskId === taskId) {
+      if (snapshot.taskId === taskId && !holdsUndeliveredFiles(snapshot.reason)) {
         snapshots.delete(key)
         released = true
       }
@@ -146,10 +152,9 @@ export function createRetainedSendStore(changed: () => void) {
    * Releases the failed snapshots of one chat recorded at or before
    * `upToTimestamp`. Snapshots without a failure are still awaiting their own
    * terminal and stay held: that send can still fail, and then its snapshot is
-   * the only copy of the payload. A later success passes
-   * `keepUndeliveredFiles`: it supersedes an older failure, but not documents
-   * the Host never received, which exist nowhere else. A user discard releases
-   * those too.
+   * the only copy of the payload. A later success and a user discard pass
+   * `keepUndeliveredFiles`: they supersede an older failure, but not documents
+   * the Host never received, which exist nowhere else.
    */
   function releaseRetainedFailuresForChat(
     agentRef: string,
@@ -207,15 +212,22 @@ export function createRetainedSendStore(changed: () => void) {
   /**
    * A snapshot whose documents the Host never received keeps holding them when a
    * later failure is recorded: the reason is what stops a later success from
-   * releasing files that exist nowhere else. A failure after `host_files_dropped`
-   * means the text was not answered either, so the snapshot becomes a rejected
-   * send (`host_files_unsupported`) and Retry and text recovery come back.
+   * releasing files that exist nowhere else. Any other failure after
+   * `host_files_dropped` means the text was not answered either, so the snapshot
+   * becomes a rejected send (`host_files_unsupported`) and Retry and text
+   * recovery come back. A lost stream (`stream_lost`) does not say whether the
+   * text was answered, so the snapshot stays `host_files_dropped`: only the
+   * files come back, and the text is never sent again.
    */
   function nextReason(
     snapshot: RetainedSendSnapshot,
     reason: RetainedSendReason
   ): RetainedSendReason {
-    if (snapshot.reason === 'host_files_dropped' && reason !== 'host_files_dropped') {
+    if (
+      snapshot.reason === 'host_files_dropped' &&
+      reason !== 'host_files_dropped' &&
+      reason !== 'stream_lost'
+    ) {
       return 'host_files_unsupported'
     }
     return holdsUndeliveredFiles(snapshot.reason) ? snapshot.reason : reason
