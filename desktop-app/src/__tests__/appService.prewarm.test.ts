@@ -441,7 +441,8 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
 
     const firstSwitch = svc.switchTeam('team-2')
     const secondSwitch = svc.switchTeam('team-3')
-    expect(rejectSwitches).toHaveLength(2)
+    await vi.waitFor(() => expect(rejectSwitches).toHaveLength(1))
+    expect(rejectSwitches).toHaveLength(1)
     await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
       requested: false,
       skipped: 'auth-changed',
@@ -449,6 +450,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
 
     rejectSwitches[0](new Error('first switch rejected'))
     await expect(firstSwitch).rejects.toThrow('first switch rejected')
+    await vi.waitFor(() => expect(rejectSwitches).toHaveLength(2))
     await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
       requested: false,
       skipped: 'auth-changed',

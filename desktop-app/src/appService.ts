@@ -3708,29 +3708,27 @@ export class AppService {
     // Explicit team changes fence opportunistic wake immediately. A failed
     // switch can safely leave prewarm canceled; the message path remains live.
     const releasePrewarm = this.beginPrewarmAuthTransition()
-    const previousIdentity =
-      this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
     // Keep the new team token fenced until the old GFS jobs have been
-    // suspended. `switchSessionToTeam` has its own nested gate, but releases
-    // it when the token exchange returns; this outer gate closes that small
-    // interval before the auth-boundary persistence completes.
+    // suspended. The native owner spans the entire deliberate transition so
+    // another team-context operation cannot commit between token installation
+    // and GFS activation.
     const releaseTransientHop = this.enterGfsTransientTeamHop()
     try {
-      // §4.5-3 (GAP-N4 main half): a deliberate team switch tears down every live
-      // stream — the old team's progress/activity/status/notification sockets must
-      // not survive it. Done AFTER the switch SUCCEEDS (silently), mirroring the
-      // renderer, which only calls `resetChat()`/`releaseAll()` once the `team.switch`
-      // IPC resolves (so a FAILED switch leaves both the streams and the trackers
-      // intact rather than a frozen half-torn-down state). Tasks stay alive
-      // server-side and reconverge via reconcile when the user returns to that team.
-      // NOTE: only the user-initiated `switchTeam` closes streams — the transient
-      // per-operation team hops in `runWithTeamContext`/`switchSessionToTeam` (e.g.
-      // minting a cross-team RPC token to decide an approval) must NOT.
-      const switchedToken = await this.switchSessionToTeam(targetTeamId)
-      const switchedMe = this.me
-      const switchedGeneration = this.sessionGeneration
-      const switchedEnvironment = this.captureAuthEnvironmentBinding()
       return await this.withNativeAuthEnvironmentCommit(async () => {
+        const previousIdentity =
+          this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+        // §4.5-3 (GAP-N4 main half): a deliberate team switch tears down every
+        // live stream — the old team's progress/activity/status/notification
+        // sockets must not survive it. The transition owns the commit slot until
+        // GFS activation and stream/cache publication complete. Transient
+        // runWithTeamContext hops continue to reuse their existing owner and do
+        // not suspend uploads or stop streams.
+        const switchedToken = await this.switchSessionToTeam(targetTeamId, undefined, {
+          commitOwnerHeld: true,
+        })
+        const switchedMe = this.me
+        const switchedGeneration = this.sessionGeneration
+        const switchedEnvironment = this.captureAuthEnvironmentBinding()
         this.assertSessionGeneration(switchedGeneration)
         this.assertAuthEnvironmentBinding(switchedEnvironment)
         if (this.sessionToken !== switchedToken || !switchedMe || this.me !== switchedMe) {
