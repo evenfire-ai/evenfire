@@ -68,12 +68,13 @@ The Host uses the same envelope builder. V2 has no outer deadline: its deadline
 is `request.deadlineMs`, part of the authorized hash. A proxy configured below
 the shared visual envelope budget refuses to start.
 
-Desktop enforces the 16 MiB individual and 16 MiB combined hard attachment
-budgets (usual target remains 5 / 9 MiB).
+Desktop enforces the Codex image budgets of 16 MiB decoded per image and
+16 MiB decoded combined (usual target remains 5 / 9 MiB).
 RPC and Host permit a 24 MiB JSON body only on their message POST routes; chat
 text and envelope bytes stay on the 6 MiB share. Qualifying `kind:'file'`
-attachments (at most 11 MiB decoded each) have their own 16 MiB base64 quota,
-like images, and everything stays under the 24 MiB body. Non-chat rpc-proxy and Host control
+attachments (at most 11 MiB decoded each) have their own quota of 16 MiB counted
+on base64 length, separate from the image quota (which counts decoded bytes),
+and everything stays under the 24 MiB body. Non-chat rpc-proxy and Host control
 routes keep the 10 MB ordinary JSON cap. The proxy's larger
 parser requires a valid platform identity on the visual completion route.
 Admin and unauthenticated requests retain the ordinary configured body limit.
