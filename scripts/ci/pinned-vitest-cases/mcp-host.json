@@ -97,6 +97,14 @@
   },
   {
     "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "legacy processing leases after #1019 S1b: discards a non-expired foreign-session lease left by a crashed Host and admits downloads"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X2b: a store at corrupt_store_ledger still answers admitted inline reads, accessible and resolve"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
     "fullName": "legacy processing leases after #1019 S8: a discard whose persist fails before the rename leaves the ledger byte-identical and is retried by the next initialize"
   },
   {
@@ -106,5 +114,21 @@
   {
     "suite": "gfsDownloadStoreRecovery.test.ts",
     "fullName": "legacy processing leases after #1019 S9: reports the current quarantined-record count after reconcile without double counting across boots"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-a: a timeout with an escaped stdout/stderr holder settles through executeWithTimeout within the cleanup budget"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-c: a command that exits 0 after starting an escaped holder settles about one drain interval after exit, not at the execution timeout"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-g: an asynchronous start failure reports only the error code and publishes one result"
+  },
+  {
+    "suite": "config.toolProgressInterval.test.ts",
+    "fullName": "CLERUM_TOOL_PROGRESS_INTERVAL_MS (#1028 P2) P2-b: malformed and sub-second values stop startup with the exact message and do not echo the value"
   }
 ]

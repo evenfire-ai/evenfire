@@ -773,7 +773,8 @@ describe('ShellTool start failures (#1020)', () => {
     const tool = new ShellTool(missing, 5_000, ['PATH'])
     const result = await tool.execute({ command: 'printf never-runs' })
     expect(result.is_error).toBe(true)
-    expect(result.content).toMatch(/^Command failed to start: .*ENOENT/)
+    expect(result.content).toBe('Command failed to start: ENOENT')
+    expect(result.content).not.toContain(missing)
     expect(result.content).not.toContain('never-runs')
     // Witness: spawn returned a child; the failure arrived on its error event.
     expect(spawn).toHaveBeenCalledOnce()
