@@ -22,10 +22,16 @@ function preMigrationDb(): Database.Database {
 }
 
 describe('migration 015 — sessions.model_selection_revision', () => {
-  it('remains immediately before later additive migrations in the ordered list', () => {
-    const migrationIndex = migrations.findIndex(item => item.name === migration.name)
-    expect(migrationIndex).toBeGreaterThan(-1)
-    expect(migrations[migrationIndex + 1]?.name).toBe('016-canonical-store-identity')
+  it('preserves the ordered 014, 015, 016 append sequence', () => {
+    const names = migrations.map(item => item.name)
+    const index = names.indexOf(migration.name)
+    expect(index).toBeGreaterThan(0)
+    expect(names.filter(name => name === migration.name)).toHaveLength(1)
+    expect(names.slice(index - 1, index + 2)).toEqual([
+      '014-pending-approval-task-budget',
+      migration.name,
+      '016-pending-approval-authorization-scope',
+    ])
   })
 
   it('adds a NOT NULL revision that reads 0 for every pre-existing row', () => {

@@ -23,7 +23,6 @@ import { getProviderLabel, getProvidersWithCompleteCredentials } from '../lib/ll
 import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from './ConfirmDialog'
 import { LlmProviderIcon } from './LlmProviderIcon'
-import { LlmSecretUpdateModal } from './LlmSecretUpdateModal'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SecretsScopeTabs } from './SecretsScopeTabs'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -103,7 +102,6 @@ export function SecretsTable({
   }, [activeScope])
 
   // LLM secrets state
-  const [editingName, setEditingName] = useState('')
   const [deletingName, setDeletingName] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [llmSearchQuery, setLlmSearchQuery] = useState('')
@@ -129,8 +127,8 @@ export function SecretsTable({
         .sort((a, b) => a.localeCompare(b)),
     [items]
   )
-  // Secret name -> stored data-key names, so the update modal can light up the
-  // "present" chips for the row being edited (names only, never values).
+  // Secret name -> stored data-key names, so the provider chips can report
+  // which credentials each secret holds (names only, never values).
   const keysByName = useMemo(() => {
     const map = new Map<string, string[]>()
     for (const item of items) {
@@ -205,7 +203,7 @@ export function SecretsTable({
   })
 
   function openUpdate(name: string) {
-    setEditingName(name)
+    router.push(CONTROL_ROUTES.secrets.editLlm(name))
   }
 
   async function loadMcpSecretReferences() {
@@ -886,15 +884,6 @@ export function SecretsTable({
         ) : null}
       </div>
 
-      {editingName ? (
-        <LlmSecretUpdateModal
-          key={editingName}
-          secretName={editingName}
-          existingKeys={keysByName.get(editingName) ?? []}
-          onClose={() => setEditingName('')}
-          onChanged={onChanged}
-        />
-      ) : null}
       {confirmDialog}
     </>
   )

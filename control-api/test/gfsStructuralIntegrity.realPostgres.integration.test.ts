@@ -11,6 +11,7 @@ import {
 import { initDb } from '../src/db.js'
 import type { GfsCaller } from '../src/routes/gfs/grants.js'
 import { applyResourcePatch } from '../src/routes/gfs/resources.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -153,15 +154,18 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.end()
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      await endPoolAndWaitForClients(pool)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('serializes create/delete and makes delete observe the committed child', async () => {

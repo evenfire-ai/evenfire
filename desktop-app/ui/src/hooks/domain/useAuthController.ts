@@ -454,7 +454,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
           return
         }
 
-        const selectedState = await handleSelectRuntimeConfig(restOriginMatches.saved[0].id)
+        const selectedState = await handleSelectRuntimeConfig(restOriginMatches.saved[0]!.id)
         if (!selectedState) return
         setPendingDesktopEnvironmentSetup(null)
         try {

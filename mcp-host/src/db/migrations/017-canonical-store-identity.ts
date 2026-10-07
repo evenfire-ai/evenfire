@@ -1,6 +1,6 @@
 import type { Database } from 'better-sqlite3'
 
-export const name = '016-canonical-store-identity'
+export const name = '017-canonical-store-identity'
 /** The init migrator inserts the bound identity before the normal writer opens SQLite. */
 export function up(db: Database): void {
   db.exec(`

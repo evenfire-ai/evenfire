@@ -252,6 +252,7 @@ describe('canonical SQLite store', () => {
     "UPDATE messages SET tool_calls='[]'",
     'UPDATE pending_approvals SET parameters=\'{"amount":1}\'',
     "UPDATE pending_approvals SET task_budget='{}'",
+    "UPDATE pending_approvals SET authorization_scope='turn'",
     "UPDATE sqlite_sequence SET seq=20 WHERE name='messages'",
   ])('blocks one-field divergence: %s', async change => {
     const root = fixture()
@@ -933,7 +934,7 @@ describe('prepared recovery continuity', () => {
     "UPDATE sessions SET input_tokens=30 WHERE id='s1'",
     "UPDATE sessions SET model_selections='{}' WHERE id='s1'",
     'DELETE FROM pending_approvals',
-    "INSERT INTO pending_approvals SELECT 'resurrected',session_id,task_id,tool_name,tool_call_id,parameters,description,context_snapshot,completed_results,intent_summary,source_message,registered_at,expires_at,trace_context,reason,mcp_server_name,task_budget FROM pending_approvals",
+    "INSERT INTO pending_approvals SELECT 'resurrected',session_id,task_id,tool_name,tool_call_id,parameters,description,context_snapshot,completed_results,intent_summary,source_message,registered_at,expires_at,trace_context,reason,mcp_server_name,task_budget,authorization_scope FROM pending_approvals",
     "UPDATE sqlite_sequence SET seq=0 WHERE name='messages'",
   ])('blocks lost or changed current state: %s', async sql => {
     const root = fixture()

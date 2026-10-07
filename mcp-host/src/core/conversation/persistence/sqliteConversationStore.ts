@@ -1050,6 +1050,7 @@ export class SqliteConversationStore implements ConversationStore {
     const now = Date.now()
     const row: PendingApprovalRow = {
       task_budget: approval.task_budget ? JSON.stringify(approval.task_budget) : null,
+      authorization_scope: approval.authorization_scope ?? null,
       request_id: approval.request_id,
       session_id: conv.id,
       task_id: conv.activeTaskId,

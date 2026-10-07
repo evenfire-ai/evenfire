@@ -12,6 +12,7 @@
  */
 import * as fs from 'fs/promises'
 import * as path from 'path'
+import { isProtectedRealPath, isProtectedWorkspacePath } from './protectedPaths'
 import { assertStateDbPathAllowed, isStateDbPathAllowed } from './stateProtection'
 import { SearchConfig, SearchResult } from './types'
 
@@ -44,7 +45,7 @@ async function collectMarkdownFiles(
     if (dir === base && excludeTopLevel?.has(entry.name)) continue
     const full = path.join(dir, entry.name)
     const rel = path.relative(base, full)
-    if (!isStateDbPathAllowed(rel, base)) continue
+    if (isProtectedWorkspacePath(rel) || !isStateDbPathAllowed(rel, base)) continue
     if (entry.isDirectory()) {
       const sub = await collectMarkdownFiles(full, base, excludeTopLevel)
       files.push(...sub)
@@ -76,6 +77,13 @@ export async function searchWorkspace(
 
   for (const relPath of mdFiles) {
     const absPath = path.join(workspacePath, relPath)
+    try {
+      const realPath = await fs.realpath(absPath)
+      const realRoot = await fs.realpath(workspacePath)
+      if (isProtectedRealPath(realPath, realRoot)) continue
+    } catch {
+      continue
+    }
     let fileContent: string
     try {
       assertStateDbPathAllowed(relPath, workspacePath)

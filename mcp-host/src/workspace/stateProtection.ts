@@ -14,7 +14,13 @@ const STATE_BACKUP = /^state\.db(?:-(?:wal|shm|journal))?(?:\.bak|\.pre-[^.]+\.b
 export function stateDbProtectedMessage(filename: string): string {
   return `${filename} is part of the session state database and cannot be accessed by the agent.`
 }
-export class StateDbPathError extends Error {
+export class ProtectedWorkspacePathError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ProtectedWorkspacePathError'
+  }
+}
+export class StateDbPathError extends ProtectedWorkspacePathError {
   constructor(filename: string) {
     super(stateDbProtectedMessage(filename))
     this.name = 'StateDbPathError'

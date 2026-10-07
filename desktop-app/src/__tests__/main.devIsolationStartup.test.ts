@@ -78,9 +78,6 @@ function verifiedFixture() {
     console: { log: vi.fn(), error: vi.fn() },
     publicDevIsolationRecord: () => ({}),
     formatDevIsolationLogLine: () => 'synthetic public metadata',
-    bindTokenStoreIsolation: () => {
-      throw new Error('Synthetic binding failure')
-    },
     requestMainWindow: normalRequest,
     devIsolationPlan: plan,
     mainWindowLifecycleReady: false,
@@ -99,8 +96,9 @@ function verifiedFixture() {
   }
 }
 describe('actual isolated Desktop startup error path', () => {
-  it('failed verified authentication binding returns false and never reaches services/window creation', async () => {
+  it('a mismatched runtime directory never reaches services or window creation', async () => {
     const fixture = verifiedFixture()
+    const invalidPlan = { ...fixture.plan, userDataDir: path.join(fixture.directory, 'unexpected') }
     const declaration = syntax.statements.find(
       node =>
         ts.isFunctionDeclaration(node) && node.name?.text === 'verifyDevIsolationBeforeServices'
@@ -110,12 +108,12 @@ describe('actual isolated Desktop startup error path', () => {
       `function(plan) ${(declaration as ts.FunctionDeclaration).body!.getText(syntax)}`,
       fixture.globals
     )
-    expect(verify(fixture.plan)).toBe(false)
+    expect(verify(invalidPlan)).toBe(false)
     expect(fixture.app.exit).toHaveBeenCalledWith(1)
     const initialize = vi.fn()
     const run = evaluate(callback('then').getText(syntax), {
       ...fixture.globals,
-      verifyDevIsolationBeforeServices: () => verify(fixture.plan),
+      verifyDevIsolationBeforeServices: () => verify(invalidPlan),
       installDesktopTextContextMenus: initialize,
     })
     await run()

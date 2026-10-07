@@ -35,7 +35,7 @@ import {
 import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
 import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
-import { bindTokenStoreIsolation, requireTokenStoreIsolation } from './tokenStore.js'
+import { TokenStore } from './tokenStore.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
 const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
@@ -54,8 +54,6 @@ if (devIsolation.mode === 'refused') {
 const devIsolationPlan: DevIsolationPlan | null =
   devIsolation.mode === 'isolated' ? devIsolation.plan : null
 const devIsolationPolicy = devIsolationRuntimePolicy(devIsolationPlan)
-// Fail closed even if startup fails before the verified storage binding.
-if (devIsolationPlan) requireTokenStoreIsolation()
 
 process.title = devIsolationPolicy.appName ?? EVENFIRE_APP_NAME
 app.setName(devIsolationPolicy.appName ?? EVENFIRE_APP_NAME)
@@ -66,7 +64,11 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
-const appService = new AppService()
+const appService = new AppService(
+  devIsolationPlan
+    ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
+    : {}
+)
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
@@ -441,13 +443,6 @@ function verifyDevIsolationBeforeServices(plan: DevIsolationPlan): boolean {
   }
   const verdict = verifyDevIsolationRuntime(expected, observed)
   if (verdict.ok) {
-    try {
-      bindTokenStoreIsolation(observed.userDataDir)
-    } catch {
-      console.error('[Desktop] Dev isolation refused: authentication storage binding failed')
-      app.exit(1)
-      return false
-    }
     console.log(formatDevIsolationLogLine(publicDevIsolationRecord(expected, observed)))
     return true
   }

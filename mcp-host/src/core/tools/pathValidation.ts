@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { isProtectedRealPath, isProtectedWorkspacePath } from '../../workspace/protectedPaths'
 import { assertStateDbPathAllowed } from '../../workspace/stateProtection'
 
 export function isWithinDirectory(child: string, parent: string): boolean {
@@ -39,6 +40,14 @@ export function validatePath(
     }
   }
 
+  if (isProtectedWorkspacePath(requestedPath)) {
+    return {
+      valid: false,
+      resolved: '',
+      error: 'Reserved workspace path is not agent-accessible',
+    }
+  }
+
   // Resolve within workspace
   const resolved = path.resolve(workspacePath, requestedPath)
   try {
@@ -67,6 +76,13 @@ export function validatePath(
             error: 'Path resolves outside workspace',
           }
         }
+        if (isProtectedRealPath(realAncestor, realWorkspace)) {
+          return {
+            valid: false,
+            resolved: '',
+            error: 'Reserved workspace path is not agent-accessible',
+          }
+        }
         return { valid: true, resolved }
       } catch {
         ancestor = path.dirname(ancestor)
@@ -84,6 +100,14 @@ export function validatePath(
       valid: false,
       resolved: '',
       error: 'Path resolves outside workspace (symlink)',
+    }
+  }
+
+  if (isProtectedRealPath(realResolved, realWorkspace)) {
+    return {
+      valid: false,
+      resolved: '',
+      error: 'Reserved workspace path is not agent-accessible',
     }
   }
 

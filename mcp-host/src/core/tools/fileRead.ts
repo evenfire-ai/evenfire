@@ -1,5 +1,8 @@
 import * as fs from 'fs/promises'
-import { isStateDbPath, stateDbProtectedMessage } from '../../workspace/service'
+import {
+  isProtectedWorkspacePath,
+  protectedWorkspacePathMessage,
+} from '../../workspace/protectedPaths'
 import { Tool } from '../interfaces'
 import { ToolOutput } from '../types'
 import { validatePath } from './pathValidation'
@@ -47,11 +50,11 @@ export class FileReadTool implements Tool {
     const filePath = params.path as string
     const encoding = (params.encoding as BufferEncoding) || 'utf-8'
 
-    // D3 — the session state database holds every user's conversations; the
-    // agent must not read it (or its WAL laterals) through file tools.
-    if (isStateDbPath(filePath)) {
+    // Platform-owned state and governed GFS downloads are not direct file-tool
+    // inputs. Large GFS content is processed through its governed transfer flow.
+    if (isProtectedWorkspacePath(filePath)) {
       return {
-        content: stateDbProtectedMessage(filePath),
+        content: protectedWorkspacePathMessage(filePath),
         duration_ms: Date.now() - startTime,
         is_error: true,
       }

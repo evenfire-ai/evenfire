@@ -105,9 +105,33 @@ expect_code DEVELOPMENT_SCOPE_REQUIRED protected-branch protected-branch \
   env "${repo_env[@]}" bash -c 'git -C "$T2_PROJECT_DIR" switch -q main; source "$1"; t2_repo_metadata' bash "$COMMON"
 git -C "$repo" switch -q feat/scenario
 
+# Every t2_profile_scope refusal below runs t2_repo_metadata first. Without it
+# the branch is unset and every case is refused earlier, with the same code,
+# as "branch is empty or malformed"; each case therefore also asserts its own
+# message.
+# The profile directory exists without profile.env: restore it or stop and ask.
 missing_profile_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/missing-profile.env")
 expect_code PROFILE_OWNERSHIP_MISMATCH missing-profile missing-profile \
-  env "${missing_profile_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+  env "${missing_profile_env[@]}" bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+grep -Fq 'next: restore profile.env from a backup or stop and ask' "$tmp/missing-profile" ||
+  { cat "$tmp/missing-profile" >&2; fail 'missing profile.env in an existing directory did not name the restore step'; }
+
+# A profile that was never created has no directory, so there is nothing to
+# restore: the next step is to create it (#1001).
+never_created_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/profiles/never-created/profile.env"
+  T2_PORTS_ENV="$tmp/profiles/never-created/ports.env")
+expect_code PROFILE_OWNERSHIP_MISMATCH never-created-profile never-created-profile \
+  env "${never_created_env[@]}" bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+grep -Fq 'next: the profile was never created; run make -f scripts/minikube-profiles/branch.mk branch-profile-start, then retry' \
+  "$tmp/never-created-profile" ||
+  { cat "$tmp/never-created-profile" >&2; fail 'a never-created profile did not name branch-profile-start as the next step'; }
+# Witness for the negative assertion below: the refusal came from the
+# profile.env check, not from an earlier one.
+grep -Fq 'PROFILE_OWNERSHIP_MISMATCH: profile.env' "$tmp/never-created-profile" ||
+  { cat "$tmp/never-created-profile" >&2; fail 'the never-created refusal did not come from the profile.env check'; }
+if grep -Fq 'restore profile.env' "$tmp/never-created-profile"; then
+  fail 'a never-created profile was told to restore profile.env'
+fi
 
 expect_code DEVELOPMENT_SCOPE_REQUIRED shared-profile shared-profile \
   env "${repo_env[@]}" MINIKUBE_PROFILE=default CONTROL_API_REAL_PG_CONTEXT=default \
@@ -180,10 +204,13 @@ expect_code PROFILE_UNHEALTHY incomplete-profile-status incomplete-profile-statu
   env T2_PROJECT_DIR="$repo" MINIKUBE_PROFILE="$profile" T2_CONTEXT="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" T2_PROFILE_ROOT="$tmp/profiles" T2_PROFILE_ENV="$profile_root/profile.env" T2_PORTS_ENV="$profile_root/ports.env" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader T2_BRANCH=feat/scenario T2_HEAD="$feature_sha" T2_LOCK_ROOT="$tmp/locks" T2_EVIDENCE_ROOT="$tmp/evidence" bash -c 'source "$1"; t2_mk(){ printf "%s" "host: Running\nkubelet: Unknown\napiserver: Running"; return 1; }; t2_profile_status' bash "$COMMON"
 
 ownership_env=("${repo_env[@]}" T2_PROFILE_ENV="$tmp/ownership.env")
+mkdir -p "$tmp/other"
 printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=%s\nDIRTY=false\nREPO_DIR=%s\n' \
   "$profile" "$(git -C "$repo" rev-parse --short=8 HEAD)" "$tmp/other" >"$tmp/ownership.env"
 expect_code PROFILE_OWNERSHIP_MISMATCH profile-ownership profile-ownership \
-  env "${ownership_env[@]}" bash -c 'source "$1"; t2_profile_scope' bash "$COMMON"
+  env "${ownership_env[@]}" bash -c 'source "$1"; t2_repo_metadata; t2_profile_scope' bash "$COMMON"
+grep -Fq 'PROFILE_OWNERSHIP_MISMATCH: profile metadata belongs to another worktree' "$tmp/profile-ownership" ||
+  { cat "$tmp/profile-ownership" >&2; fail 'profile metadata from another worktree was not refused as such'; }
 
 stale_profile_env="$tmp/stale-profile.env"
 printf 'PROFILE=%s\nBRANCH=feat/scenario\nSHA_SHORT=deadbeef\nDIRTY=false\nREPO_DIR=%s\n' \
@@ -545,5 +572,112 @@ bash "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
+
+# The lease owner pins origin/dev once. A fetch from any worktree that shares
+# this repository moves refs/remotes/origin/dev while a lane runs; a lease
+# child must keep validating against the pin instead of the moved ref.
+expect_message() {
+  local expected="$1" message="$2" label="$3" output="$4"
+  shift 4
+  expect_code "$expected" "$label" "$output" "$@"
+  grep -Fq "$message" "$tmp/$output" || {
+    printf '%s\n' "$(sed -n '1,20p' "$tmp/$output")" >&2
+    fail "$label did not report: $message"
+  }
+}
+dev_tree="$(git -C "$repo" rev-parse "$base_sha^{tree}")"
+dev_next="$(git -C "$repo" commit-tree "$dev_tree" -p "$base_sha" -m dev-next)"
+dev_forced="$(git -C "$repo" commit-tree "$dev_tree" -p "$base_sha" -m dev-forced)"
+missing_sha="$(printf 'e%.0s' {1..40})"
+pin_env=(env -u T2_PINNED_ORIGIN_DEV -u T2_SKIP_LOCK "${repo_env[@]}")
+print_origin_dev='source "$1"; t2_repo_metadata; printf "ORIGIN_DEV=%s\n" "$T2_ORIGIN_DEV"'
+git -C "$repo" update-ref refs/remotes/origin/dev "$dev_next"
+
+"${pin_env[@]}" T2_SKIP_LOCK=true T2_PINNED_ORIGIN_DEV="$base_sha" \
+  bash -c "$print_origin_dev" bash "$COMMON" >"$tmp/pin-moved.out" 2>&1 || {
+  printf '%s\n' "$(sed -n '1,20p' "$tmp/pin-moved.out")" >&2
+  fail 'a lease child must validate against the pinned origin/dev after the local ref moved'
+}
+grep -Fqx "ORIGIN_DEV=$base_sha" "$tmp/pin-moved.out" || fail 'a lease child must adopt the pinned origin/dev'
+grep -Fq "origin/dev moved during the lane: pinned $base_sha, local ref now $dev_next" "$tmp/pin-moved.out" ||
+  fail 'a lease child must report that the local origin/dev moved'
+
+expect_message DEVELOPMENT_SCOPE_REQUIRED 'origin/dev is not an ancestor of HEAD' unpinned-moved-dev unpinned-moved-dev \
+  "${pin_env[@]}" bash -c "$print_origin_dev" bash "$COMMON"
+expect_message DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is not a full commit SHA' short-pin short-pin \
+  "${pin_env[@]}" T2_SKIP_LOCK=true T2_PINNED_ORIGIN_DEV=abc123 bash -c "$print_origin_dev" bash "$COMMON"
+expect_message DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is not a commit in this repository' missing-pin missing-pin \
+  "${pin_env[@]}" T2_SKIP_LOCK=true T2_PINNED_ORIGIN_DEV="$missing_sha" bash -c "$print_origin_dev" bash "$COMMON"
+expect_message DEVELOPMENT_SCOPE_REQUIRED 'the pinned origin/dev is not an ancestor of the current origin/dev' head-as-pin head-as-pin \
+  "${pin_env[@]}" T2_SKIP_LOCK=true T2_PINNED_ORIGIN_DEV="$feature_sha" bash -c "$print_origin_dev" bash "$COMMON"
+expect_message DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is only honored under an inherited T2 lease' pin-without-lease pin-without-lease \
+  "${pin_env[@]}" T2_PINNED_ORIGIN_DEV="$base_sha" bash -c "$print_origin_dev" bash "$COMMON"
+expect_message DEVELOPMENT_SCOPE_REQUIRED 'an inherited T2 lease carries no pinned origin/dev' lease-without-pin lease-without-pin \
+  "${pin_env[@]}" T2_SKIP_LOCK=true bash -c "$print_origin_dev" bash "$COMMON"
+
+git -C "$repo" update-ref refs/remotes/origin/dev "$dev_forced"
+expect_message DEVELOPMENT_SCOPE_REQUIRED 'the pinned origin/dev is not an ancestor of the current origin/dev' force-pushed-dev force-pushed-dev \
+  "${pin_env[@]}" T2_SKIP_LOCK=true T2_PINNED_ORIGIN_DEV="$dev_next" bash -c "$print_origin_dev" bash "$COMMON"
+
+git -C "$repo" update-ref refs/remotes/origin/dev "$base_sha"
+"${pin_env[@]}" T2_SKIP_LOCK=true T2_PINNED_ORIGIN_DEV="$base_sha" \
+  bash -c "$print_origin_dev" bash "$COMMON" >"$tmp/pin-current.out" 2>&1 || {
+  printf '%s\n' "$(sed -n '1,20p' "$tmp/pin-current.out")" >&2
+  fail 'a lease child whose pin equals the local origin/dev must pass'
+}
+grep -Fqx "ORIGIN_DEV=$base_sha" "$tmp/pin-current.out" || fail 'a lease child must adopt a pin equal to the local ref'
+grep -Fq 'origin/dev moved' "$tmp/pin-current.out" && fail 'a pin equal to the local origin/dev must not report a move'
+
+# The lease owner records the pin in owner.env and exports it; an inherited
+# lease whose pin differs from the owner's, or is empty, is refused.
+# The children are require-t2-mutation-lock.sh, the boundary that validates a
+# lease without resolving repository metadata again.
+"${pin_env[@]}" T2_LOCK_ROOT="$tmp/pin-locks" bash -c '
+  common="$1" base="$2" other="$3" out="$4" child="$5" print="$6"
+  source "$common"
+  t2_repo_metadata
+  t2_lock_acquire
+  grep -Fqx "ORIGIN_DEV=$base" "$T2_LOCK_DIR/owner.env" || { echo "owner.env does not record the pinned origin/dev" >&2; exit 11; }
+  [ "$(bash -c '\''printf %s "$T2_PINNED_ORIGIN_DEV"'\'')" = "$base" ] || { echo "the lease owner does not export the pinned origin/dev" >&2; exit 12; }
+  # T0 runs under the owner without holding the lease (no T2_SKIP_LOCK): a child
+  # that inherits the pin is refused, which is how the first lane on 6ca44cbeb
+  # died inside T0. t2_run_outside_lease starts such a child without the pin.
+  if bash -c "$print" bash "$common" >"$out/unleased-leak.out" 2>&1; then
+    echo "an unleased child that inherits the pin was accepted" >&2; exit 20
+  fi
+  grep -Fq "T2_PINNED_ORIGIN_DEV is only honored under an inherited T2 lease" "$out/unleased-leak.out" || { cat "$out/unleased-leak.out" >&2; exit 21; }
+  t2_run_outside_lease bash -c "$print" bash "$common" >"$out/unleased.out" 2>&1 ||
+    { cat "$out/unleased.out" >&2; echo "a child started through t2_run_outside_lease was refused" >&2; exit 22; }
+  grep -Fqx "ORIGIN_DEV=$base" "$out/unleased.out" || { cat "$out/unleased.out" >&2; exit 23; }
+  [ "$(t2_run_outside_lease bash -c '\''printf %s "${T2_PINNED_ORIGIN_DEV-unset}"'\'')" = unset ] ||
+    { echo "t2_run_outside_lease passed the pin to its child" >&2; exit 24; }
+  T2_LOCK_TOKEN="$T2_LOCK_TOKEN" bash "$child" ||
+    { echo "an inherited lease carrying the owner pin was refused" >&2; exit 13; }
+  if T2_LOCK_TOKEN="$T2_LOCK_TOKEN" T2_PINNED_ORIGIN_DEV="$other" bash "$child" 2>"$out/pin-mismatch.err"; then
+    echo "an inherited lease carrying another pin was accepted" >&2; exit 14
+  fi
+  grep -Fq "PROFILE_OWNERSHIP_MISMATCH: profile lock owner does not match ORIGIN_DEV" "$out/pin-mismatch.err" || { cat "$out/pin-mismatch.err" >&2; exit 15; }
+  if T2_LOCK_TOKEN="$T2_LOCK_TOKEN" T2_PINNED_ORIGIN_DEV= bash "$child" 2>"$out/pin-empty.err"; then
+    echo "an inherited lease without a pin was accepted" >&2; exit 16
+  fi
+  grep -Fq "PROFILE_OWNERSHIP_MISMATCH: profile lock owner does not match ORIGIN_DEV" "$out/pin-empty.err" || { cat "$out/pin-empty.err" >&2; exit 17; }
+  # A lock record without ORIGIN_DEV must not match an empty pin either.
+  grep -v "^ORIGIN_DEV=" "$T2_LOCK_DIR/owner.env" >"$out/owner-unpinned.env"
+  cp "$out/owner-unpinned.env" "$T2_LOCK_DIR/owner.env"
+  if T2_LOCK_TOKEN="$T2_LOCK_TOKEN" T2_PINNED_ORIGIN_DEV= bash "$child" 2>"$out/pin-unrecorded.err"; then
+    echo "a lease without a pin was accepted against a lock record without ORIGIN_DEV" >&2; exit 18
+  fi
+  grep -Fq "PROFILE_OWNERSHIP_MISMATCH: profile lock owner does not match ORIGIN_DEV" "$out/pin-unrecorded.err" || { cat "$out/pin-unrecorded.err" >&2; exit 19; }
+  t2_lock_release 0
+' bash "$COMMON" "$base_sha" "$dev_next" "$tmp" "$ROOT/scripts/minikube/require-t2-mutation-lock.sh" "$print_origin_dev" ||
+  fail 'the lease owner must record and export the pinned origin/dev, its lease children must match it, and unleased children must not inherit it'
+[ ! -e "$tmp/pin-locks/$profile.lock" ] || fail 'the pinned lease was not released'
+
+# branch-profile.sh lifecycle (preflight, start, status, pf, health, pf-health,
+# stop-pf, stop, delete, prepare-shims) is exercised end to end against a
+# fixture repository with PATH stubs for kubectl, minikube, helm, docker and
+# curl; it asserts exit codes, the stub call log and pidfile state, including
+# that pf never launches a forward over a record start_pf could not stop.
+bash "$ROOT/scripts/tests/test-branch-profile-lifecycle.sh"
 
 printf 'PASS: local Minikube T0/T1/T2 scenario checks\n'

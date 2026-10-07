@@ -77,10 +77,14 @@ describe('migration 008 — active trace context', () => {
         '013-pending-approval-connect',
         '014-pending-approval-task-budget',
         '015-session-model-selection-revision',
-        '016-canonical-store-identity',
+        '016-pending-approval-authorization-scope',
+        '017-canonical-store-identity',
       ],
       pending: [],
     })
+    expect(
+      db.prepare('SELECT name FROM migrations_meta WHERE name = ?').get('007-active-trace-context')
+    ).toEqual({ name: '007-active-trace-context' })
     const sessionColumns = db.prepare('PRAGMA table_info(sessions)').all() as Array<{
       name: string
     }>
