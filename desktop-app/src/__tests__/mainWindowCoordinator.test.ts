@@ -334,4 +334,39 @@ describe('quit drain registration', () => {
     expect(cancelQuitPreparation).not.toHaveBeenCalled()
     expect(prepareForQuit).toHaveBeenCalledOnce()
   })
+
+  it('keeps admission closed when will-prevent-unload allows the page to unload', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    let willPreventUnload: ((event: { defaultPrevented: boolean }) => void) | undefined
+    emit(
+      'browser-window-created',
+      {},
+      {
+        isDestroyed: () => false,
+        webContents: {
+          on: vi.fn((_event: string, listener: typeof willPreventUnload) => {
+            willPreventUnload = listener
+          }),
+        },
+      }
+    )
+    willPreventUnload?.({ defaultPrevented: true })
+    await nextImmediate()
+
+    expect(cancelQuitPreparation).not.toHaveBeenCalled()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
+  })
 })
