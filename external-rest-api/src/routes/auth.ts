@@ -113,21 +113,8 @@ export function createAuthRouter(): Router {
       const result = await loginWithPassword(email, password, requestedSessionContract(req), req.ip)
       sendLoginResponse(req, res, result)
     } catch (error) {
-      const message = error instanceof Error ? error.message : ''
-      if (message.includes('(409)')) {
-        res.status(409).json({ error: 'password_not_set' })
-        return
-      }
-      if (message.includes('(401)')) {
-        res.status(401).json({ error: 'Unauthorized' })
-        return
-      }
-      if (isRetiredAccountLoginDenial(error)) {
-        res.status(401).json({ error: 'Unauthorized' })
-        return
-      }
-      if (message.includes('(403)')) {
-        res.status(403).json({ error: 'Membership not found' })
+      if (error instanceof ControlApiError && [401, 403, 409].includes(error.status)) {
+        res.status(401).json({ error: 'invalid_credentials' })
         return
       }
       if (sendPasswordAuthorityError(error, res)) return

@@ -30,9 +30,13 @@ describe('routes/auth password-login', () => {
     authServiceMock.logoutUserSession.mockReset()
   })
 
-  it('propagates invalid credentials as a 401 instead of a 500', async () => {
+  it.each([
+    [401, { error: 'invalid_credentials' }],
+    [403, { error: 'membership_not_found' }],
+    [409, { error: 'password_not_set' }],
+  ] as const)('keeps upstream %s password-login outcomes opaque', async (status, body) => {
     authServiceMock.loginWithPassword.mockRejectedValueOnce(
-      new ControlApiError('control-api error (401)', 401, { error: 'Unauthorized' })
+      new ControlApiError(`control-api error (${status})`, status, body)
     )
 
     const res = await request(buildApp())
@@ -41,9 +45,14 @@ describe('routes/auth password-login', () => {
 
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'invalid_credentials' })
+    expect(res.headers['cache-control']).toBeUndefined()
+    expect(res.headers['retry-after']).toBeUndefined()
+    expect(res.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(res.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toMatch(/membership_not_found|password_not_set/)
   })
 
-  it('keeps retired accounts indistinguishable from invalid credentials', async () => {
+  it('keeps retired password accounts indistinguishable from invalid credentials', async () => {
     authServiceMock.loginWithPassword.mockRejectedValueOnce(
       new ControlApiError('private upstream detail', 403, { error: 'membership_not_found' })
     )
@@ -53,7 +62,7 @@ describe('routes/auth password-login', () => {
       .send({ email: 'retired@example.invalid', password: 'wrong-password' })
 
     expect(res.status).toBe(401)
-    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(res.body).toEqual({ error: 'invalid_credentials' })
   })
 
   it('keeps retired Google accounts indistinguishable across credential providers', async () => {
@@ -69,7 +78,7 @@ describe('routes/auth password-login', () => {
     expect(res.body).toEqual({ error: 'Unauthorized' })
   })
 
-  it('preserves the password-not-set response', async () => {
+  it('keeps password setup state opaque on password-login', async () => {
     authServiceMock.loginWithPassword.mockRejectedValueOnce(
       new ControlApiError('control-api error (409)', 409, { error: 'password_not_set' })
     )
@@ -78,8 +87,8 @@ describe('routes/auth password-login', () => {
       .post('/api/v1/auth/password-login')
       .send({ email: 'active@example.invalid', password: 'valid-password' })
 
-    expect(res.status).toBe(409)
-    expect(res.body).toEqual({ error: 'password_not_set' })
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'invalid_credentials' })
   })
 
   it('sets an HttpOnly profile session cookie and omits bearer token body for browser login', async () => {
