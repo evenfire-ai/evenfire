@@ -5,7 +5,10 @@ import {
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
 
-afterEach(cleanupNativeCommitTestHarness)
+afterEach(async () => {
+  vi.useRealTimers()
+  await cleanupNativeCommitTestHarness()
+})
 
 describe('AppService deliberate team transition ownership', () => {
   it('returns a committed same-team approval before a queued logout', async () => {
@@ -267,6 +270,8 @@ describe('AppService deliberate team transition ownership', () => {
 
   it('keeps the public session generation stable through transient team hops', async () => {
     const { service } = await createNativeCommitTestHarness()
+    const workflowResponse = deferred<{ workflow: string }>()
+    const workflowStarted = deferred<void>()
     const meA = {
       id: 'user-a',
       email: 'user-a@example.test',
@@ -279,6 +284,8 @@ describe('AppService deliberate team transition ownership', () => {
     const meB = { ...meA, teamId: 'team-b', teamName: 'Team B' }
     const app = service as unknown as {
       authClient: unknown
+      rpcClient: unknown
+      rpcTokenManager: unknown
       readWorkflow(ns: string, name: string): Promise<unknown>
       workflowTeamByKey: Map<string, string>
       workflowKey(ns: string, name: string): string
@@ -292,15 +299,43 @@ describe('AppService deliberate team transition ownership', () => {
         return { token: `session-${teamId}`, team: { id: teamId, name: teamId, role: 'member' } }
       }),
       getMe: vi.fn(async () => (currentTeamId === 'team-a' ? meA : meB)),
-      readWorkflow: vi.fn().mockResolvedValue({ workflow: 'result' }),
+      readWorkflow: vi.fn(() => {
+        workflowStarted.resolve()
+        return workflowResponse.promise
+      }),
+    }
+    const prewarmHost = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 'wake-requested' })
+      .mockResolvedValueOnce({ status: 'active' })
+    app.rpcClient = { prewarmHost }
+    app.rpcTokenManager = {
+      clear: vi.fn(),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'synthetic-rpc-token' }),
     }
     await service.googleLogin('synthetic-google-token')
     app.workflowTeamByKey.set(app.workflowKey('team-a', 'flow-a'), 'team-b')
     const sessionGeneration = app.getSessionGeneration()
+    vi.useFakeTimers()
 
-    await expect(app.readWorkflow('team-a', 'flow-a')).resolves.toEqual({ workflow: 'result' })
+    await expect(service.prewarmHost('chatllm')).resolves.toEqual({
+      requested: true,
+      status: 'wake-requested',
+    })
+    const workflowRead = app.readWorkflow('team-a', 'flow-a')
+    await workflowStarted.promise
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(prewarmHost).toHaveBeenCalledTimes(2)
+
+    workflowResponse.resolve({ workflow: 'result' })
+    await expect(workflowRead).resolves.toEqual({ workflow: 'result' })
 
     expect(app.getSessionGeneration()).toBe(sessionGeneration)
+    await expect(service.prewarmHost('chatllm')).resolves.toEqual({
+      requested: false,
+      skipped: 'cooldown',
+    })
+    expect(prewarmHost).toHaveBeenCalledTimes(2)
   })
 
   it('advances session generation when a failed restore leaves the borrowed team active', async () => {
