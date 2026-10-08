@@ -485,6 +485,34 @@ describe('AppService pending external logout', () => {
     expect(clearToken).not.toHaveBeenCalled()
   })
 
+  it('surfaces marker-write failure without claiming a quit-time logout succeeded', async () => {
+    const { service, tokenStore } = createService()
+    const state = internals(service)
+    state.sessionToken = 'active-session-token'
+    state.me = loginResult.me
+    state.quitPreparationStarted = true
+    const originalOpen = fsSync.openSync.bind(fsSync)
+    const open = vi.spyOn(fsSync, 'openSync').mockImplementation((...args) => {
+      if (String(args[0]) === markerPath()) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      }
+      return originalOpen(...args)
+    })
+    const clearToken = vi.spyOn(tokenStore, 'clearSessionTokenStrictly')
+
+    try {
+      await expect(service.logout()).rejects.toMatchObject({ code: 'EACCES' })
+
+      expect(state.sessionToken).toBe('active-session-token')
+      expect(state.me).toEqual(loginResult.me)
+      expect(clearToken).not.toHaveBeenCalled()
+      expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    } finally {
+      open.mockRestore()
+    }
+  })
+
   it('does not record a marker for an unrelated shutdown-shaped producer error', async () => {
     const { service } = createService()
     const state = service as unknown as {
