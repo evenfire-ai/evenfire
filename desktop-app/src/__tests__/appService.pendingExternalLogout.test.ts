@@ -360,6 +360,9 @@ describe('AppService pending external logout', () => {
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
     const keytar = await import('keytar')
     const account = `session-token::${activeEnvKey}`
+    const originalGet = vi.mocked(keytar.getPassword).getMockImplementation()!
+    const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
     vi.mocked(keytar.getPassword).mockRejectedValue(new Error('keychain unavailable'))
     vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain unavailable'))
     vi.mocked(keytar.deletePassword).mockImplementation(async (_service, deletedAccount) => {
@@ -367,14 +370,118 @@ describe('AppService pending external logout', () => {
       return false
     })
 
-    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
-      authenticated: true,
-      me: loginResult.me,
-    })
+    try {
+      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+        authenticated: true,
+        me: loginResult.me,
+      })
 
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-    expect(keytar.setPassword).toHaveBeenCalledWith('Evenfire', account, loginResult.token)
-    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(loginResult.token)
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+      expect(keytar.setPassword).toHaveBeenCalledWith('Evenfire', account, loginResult.token)
+      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(loginResult.token)
+    } finally {
+      vi.mocked(keytar.getPassword).mockReset().mockImplementation(originalGet)
+      vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
+  })
+
+  it('rejects file fallback when the old active Keytar credential remains readable', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const keytar = await import('keytar')
+    const account = `session-token::${activeEnvKey}`
+    const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    vi.mocked(keytar.deletePassword).mockImplementation(async (_service, deletedAccount) => {
+      if (deletedAccount === account) throw new Error('keychain temporarily locked')
+      return false
+    })
+    vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain temporarily locked'))
+
+    try {
+      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
+        'Fresh session token could not be verified after storage fallback'
+      )
+
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+      expect(internals(service).sessionToken).toBeNull()
+      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('previous-session-token')
+    } finally {
+      vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
+  })
+
+  it('fails closed when Keytar and fallback-file cleanup both fail', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const reportFailure = vi.fn()
+    const { service, tokenStore } = createService(undefined, reportFailure)
+    await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const keytar = await import('keytar')
+    const account = `session-token::${activeEnvKey}`
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    vi.mocked(keytar.deletePassword).mockImplementation(async (_service, deletedAccount) => {
+      if (deletedAccount === account) throw new Error('keychain temporarily locked')
+      return false
+    })
+    const fallbackPath = path.join(userDataDirectory, `session-token-${activeEnvKey}.json`)
+    const originalUnlink = fs.unlink.bind(fs)
+    const unlink = vi.spyOn(fs, 'unlink').mockImplementation(async filePath => {
+      if (String(filePath) === fallbackPath) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      }
+      return originalUnlink(filePath)
+    })
+    const persistToken = vi.spyOn(tokenStore, 'setSessionToken')
+
+    try {
+      await expect(
+        internals(service).installAuthenticatedLoginOnce(loginResult)
+      ).rejects.toMatchObject({
+        message: 'Failed to clear session token storage',
+      })
+
+      expect(persistToken).not.toHaveBeenCalled()
+      expect(reportFailure).toHaveBeenCalledOnce()
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('previous-session-token')
+    } finally {
+      unlink.mockRestore()
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
+  })
+
+  it('does not require active-slot replacement when only a legacy env account fails', async () => {
+    const { getActiveLegacyEnvKeys } = await import('../config.js')
+    const [legacyEnvKey] = getActiveLegacyEnvKeys()
+    expect(legacyEnvKey).toBeTruthy()
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('legacy-session-token', legacyEnvKey!)
+    const keytar = await import('keytar')
+    const legacyAccount = `session-token::${legacyEnvKey}`
+    expect(keychain.has(keyOf('Evenfire', legacyAccount))).toBe(true)
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    vi.mocked(keytar.deletePassword).mockImplementation(async (service, account) => {
+      if (account === legacyAccount) throw new Error('legacy keychain slot locked')
+      return originalDelete(service, account)
+    })
+    const persistToken = vi.spyOn(tokenStore, 'setSessionToken')
+
+    try {
+      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+        authenticated: true,
+        me: loginResult.me,
+      })
+
+      expect(persistToken).toHaveBeenCalledWith(loginResult.token, activeEnvKey)
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+      expect(keychain.get(keyOf('Evenfire', legacyAccount))).toBe('legacy-session-token')
+    } finally {
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
   })
 
   it('allows file-backed login when the whole Keytar store fails and retains the marker', async () => {
