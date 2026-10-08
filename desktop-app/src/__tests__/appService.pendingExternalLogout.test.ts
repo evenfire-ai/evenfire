@@ -13,6 +13,8 @@ let TokenStoreClass: typeof import('../tokenStore.js').TokenStore
 let markerStore: typeof import('../pendingExternalLogout.js')
 let quitLifecycle: typeof import('../mainWindowCoordinator.js')
 
+const { notifySessionChanged } = vi.hoisted(() => ({ notifySessionChanged: vi.fn() }))
+
 const keychain = new Map<string, string>()
 const keyOf = (service: string, account: string) => `${service}::${account}`
 const LEGACY_MARKER = 'pending-external-logout'
@@ -35,6 +37,10 @@ vi.mock('../chatStoreBinding.js', () => ({
   __setChatStoreBaseDirForTests: vi.fn(),
 }))
 
+vi.mock('../pluginSdkRuntime.js', () => ({
+  tryGetPluginSdkRuntime: () => ({ notifySessionChanged }),
+}))
+
 vi.mock('electron', () => ({
   app: {
     getPath: vi.fn(() => userDataDirectory),
@@ -44,6 +50,7 @@ vi.mock('electron', () => ({
 }))
 
 beforeEach(async () => {
+  notifySessionChanged.mockClear()
   userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-app-pending-logout-'))
   keychain.clear()
   vi.resetModules()
@@ -114,6 +121,16 @@ describe('AppService pending external logout', () => {
   it('clears the matching environment before restore and removes the marker on success', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
+    const state = service as unknown as {
+      sessionToken: string | null
+      me: unknown
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    state.sessionToken = 'active-session-token'
+    state.me = loginResult.me
+    const suspendUploads = vi
+      .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
+      .mockResolvedValue()
     const restore = vi.spyOn(internals(service), 'restoreSavedSessionOnce')
     const clearToken = vi.spyOn(tokenStore, 'clearSessionToken')
 
@@ -123,6 +140,8 @@ describe('AppService pending external logout', () => {
       activeEnvKey,
       expect.objectContaining({ throwOnStorageError: true })
     )
+    expect(suspendUploads).toHaveBeenCalledOnce()
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
     expect(restore).not.toHaveBeenCalled()
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
   })

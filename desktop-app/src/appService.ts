@@ -1706,9 +1706,7 @@ export class AppService {
       return true
     }
     try {
-      await this.runCredentialProducer(() =>
-        this.logoutOnce({ strictTokenClear: true, includeRuntimeSideEffects: false })
-      )
+      await this.runCredentialProducer(() => this.logoutOnce({ strictTokenClear: true }))
       clearPendingExternalLogout(userDataDirectory, envKey)
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
@@ -2419,26 +2417,21 @@ export class AppService {
     )
   }
 
-  private async logoutOnce(
-    options: { strictTokenClear?: boolean; includeRuntimeSideEffects?: boolean } = {}
-  ): Promise<void> {
+  private async logoutOnce(options: { strictTokenClear?: boolean } = {}): Promise<void> {
     this.logoutInProgress = true
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const envKey = getActiveEnvKey()
       const legacyEnvKeys = getActiveLegacyEnvKeys()
-      const includeRuntimeSideEffects = options.includeRuntimeSideEffects !== false
-      if (includeRuntimeSideEffects) await this.suspendDesktopGfsUploadsForAuthBoundary()
+      await this.suspendDesktopGfsUploadsForAuthBoundary()
       this.clearAuthenticatedSessionState()
       await this.tokenStore.clearSessionToken(envKey, {
         legacyEnvKeys,
         ...(options.strictTokenClear ? { throwOnStorageError: true } : {}),
       })
-      if (includeRuntimeSideEffects) {
-        // Grants survive logout (they are keyed by userId), but every cached SDK
-        // result must not: the next user of this machine gets nothing of this one's.
-        tryGetPluginSdkRuntime()?.notifySessionChanged(false)
-      }
+      // Grants survive logout (they are keyed by userId), but every cached SDK
+      // result must not: the next user of this machine gets nothing of this one's.
+      tryGetPluginSdkRuntime()?.notifySessionChanged(false)
     } finally {
       releasePrewarm()
       this.logoutInProgress = false
