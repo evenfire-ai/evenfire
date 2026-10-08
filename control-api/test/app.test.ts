@@ -284,6 +284,12 @@ describe('app router wiring', () => {
           rowCount: 1,
         }
       }
+      if (sql.includes('SELECT lifecycle_state, lifecycle_version')) {
+        return {
+          rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }],
+          rowCount: 1,
+        }
+      }
       if (sql.includes('JOIN team_members')) {
         return { rows: [{ role: payload.role, lifecycle_version: 1 }], rowCount: 1 }
       }
@@ -312,6 +318,8 @@ describe('app router wiring', () => {
       expect.stringContaining('clock_timestamp()'),
       expect.stringContaining('external_user_session_security_epochs'),
       expect.stringContaining('JOIN team_members'),
+      expect.stringContaining('SELECT lifecycle_state, lifecycle_version'),
+      expect.stringContaining('clock_timestamp()'),
       'COMMIT',
     ])
   })
