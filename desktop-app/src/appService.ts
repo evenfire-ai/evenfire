@@ -892,7 +892,7 @@ export class AppService {
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
-  private runtimeConfigResolutionInFlight = new Map<string, Promise<void>>()
+  private runtimeConfigResolutionInFlight = new Map<string, { promise: Promise<void> }>()
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private interactiveLoginAttempts = 0
@@ -2378,12 +2378,15 @@ export class AppService {
       request.externalRestApiBaseUrl,
     ])
     const inFlight = this.runtimeConfigResolutionInFlight.get(resolutionKey)
-    if (inFlight) return inFlight
+    if (inFlight) {
+      await inFlight.promise
+      return
+    }
 
-    const resolution = this.resolveRuntimeConfigRequest(request)
+    const resolution = { promise: this.resolveRuntimeConfigRequest(request) }
     this.runtimeConfigResolutionInFlight.set(resolutionKey, resolution)
     try {
-      await resolution
+      await resolution.promise
     } finally {
       if (this.runtimeConfigResolutionInFlight.get(resolutionKey) === resolution) {
         this.runtimeConfigResolutionInFlight.delete(resolutionKey)
