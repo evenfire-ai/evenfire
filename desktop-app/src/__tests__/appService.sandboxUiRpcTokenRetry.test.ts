@@ -149,3 +149,55 @@ describe('AppService.mintSandboxUiSession retries once with a fresh RPC token', 
     expect(mocks.clear).toHaveBeenCalledOnce()
   })
 })
+
+const AUTHORIZE_URL = 'https://accounts.example.com/o/oauth2/auth?client_id=x'
+const authorizeOk = () => rpcProxyJson(200, { authorizeUrl: AUTHORIZE_URL })
+
+describe('AppService.requestSandboxUiOauthAuthorize retries once with a fresh RPC token', () => {
+  it('re-requests after a 401 and opens the returned authorize URL', async () => {
+    fetchMock.mockResolvedValueOnce(UNAUTHORIZED()).mockResolvedValueOnce(authorizeOk())
+
+    await expect(
+      makeService().requestSandboxUiOauthAuthorize('sandbox-recipes', 'crm', 'salesforce')
+    ).resolves.toBeUndefined()
+
+    expect(mocks.openExternal).toHaveBeenCalledWith(AUTHORIZE_URL)
+    expect(bearersSent()).toEqual(['Bearer stale', 'Bearer fresh'])
+    expect(mocks.clear).toHaveBeenCalledOnce()
+  })
+
+  it('re-requests after a 403 for a missing scope', async () => {
+    fetchMock.mockResolvedValueOnce(MISSING_SCOPE()).mockResolvedValueOnce(authorizeOk())
+
+    await expect(
+      makeService().requestSandboxUiOauthAuthorize('sandbox-recipes', 'crm', 'salesforce')
+    ).resolves.toBeUndefined()
+
+    expect(mocks.openExternal).toHaveBeenCalledWith(AUTHORIZE_URL)
+    expect(bearersSent()).toEqual(['Bearer stale', 'Bearer fresh'])
+  })
+
+  it('does not retry a recipe ACL denial', async () => {
+    fetchMock.mockResolvedValueOnce(ACL_DENIED())
+
+    await expect(
+      makeService().requestSandboxUiOauthAuthorize('sandbox-recipes', 'crm', 'salesforce')
+    ).rejects.toThrow(/\(403\)/)
+
+    expect(bearersSent()).toEqual(['Bearer stale'])
+    expect(mocks.clear).not.toHaveBeenCalled()
+    expect(mocks.openExternal).not.toHaveBeenCalled()
+  })
+
+  it('retries only once when the fresh token is rejected too', async () => {
+    fetchMock.mockResolvedValueOnce(UNAUTHORIZED()).mockResolvedValueOnce(UNAUTHORIZED())
+
+    await expect(
+      makeService().requestSandboxUiOauthAuthorize('sandbox-recipes', 'crm', 'salesforce')
+    ).rejects.toThrow(/\(401\)/)
+
+    expect(bearersSent()).toEqual(['Bearer stale', 'Bearer fresh'])
+    expect(mocks.clear).toHaveBeenCalledOnce()
+    expect(mocks.openExternal).not.toHaveBeenCalled()
+  })
+})

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../httpClient.js'
 import { RpcProxyClient, SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
 
 // Mock the config module so the module-level url() helper uses a fixed base URL
@@ -801,9 +802,16 @@ describe('RpcProxyClient.requestSandboxUiOauthAuthorizeUrl', () => {
         text: async () => '{"error":"recipe_not_found"}',
       })
     )
-    await expect(client.requestSandboxUiOauthAuthorizeUrl('t', 'ns', 'r', 'cid')).rejects.toThrow(
-      /authorize-url request failed \(404\)/
+    const error = await client.requestSandboxUiOauthAuthorizeUrl('t', 'ns', 'r', 'cid').then(
+      () => null,
+      (e: unknown) => e
     )
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({
+      message: 'sandbox-ui authorize-url request failed (404): {"error":"recipe_not_found"}',
+      status: 404,
+      bodyText: '{"error":"recipe_not_found"}',
+    })
   })
 
   it('throws when the JSON response is missing authorizeUrl', async () => {

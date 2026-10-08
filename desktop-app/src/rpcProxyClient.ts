@@ -735,8 +735,12 @@ export class RpcProxyClient {
     )
     if (!response.ok) {
       const body = await response.text()
-      throw new Error(
-        `sandbox-ui authorize-url request failed (${response.status}): ${boundedErrorExcerpt(body) || '<empty>'}`
+      // An ApiError so `AppService.shouldRefreshRpcToken` can retry a 401 or a
+      // missing-scope 403 with a fresh RPC token.
+      throw new ApiError(
+        `sandbox-ui authorize-url request failed (${response.status}): ${boundedErrorExcerpt(body) || '<empty>'}`,
+        response.status,
+        body
       )
     }
     const json = (await response.json()) as { authorizeUrl?: unknown }
