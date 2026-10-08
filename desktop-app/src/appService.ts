@@ -1233,19 +1233,24 @@ export class AppService {
 
   private runWithTeamContext<T>(
     teamId: string | null | undefined,
-    operation: (sessionToken: string) => Promise<T>
+    operation: (sessionToken: string) => Promise<T>,
+    options: { mutation?: boolean } = {}
   ): Promise<T> {
     const targetTeamId = String(teamId || '').trim()
-    const run = () => this.runWithTeamContextInTeamQueue(targetTeamId, operation)
+    const run = () => this.runWithTeamContextInTeamQueue(targetTeamId, operation, options)
     return run()
   }
 
   private async runWithTeamContextInTeamQueue<T>(
     targetTeamId: string,
-    operation: (sessionToken: string) => Promise<T>
+    operation: (sessionToken: string) => Promise<T>,
+    options: { mutation?: boolean } = {}
   ): Promise<T> {
     if (!targetTeamId) {
       await this.teamContextQueue.catch(() => undefined)
+      if (options.mutation) {
+        return this.withNativeAuthEnvironmentCommit(() => operation(this.requireSessionToken()))
+      }
       return operation(this.requireSessionToken())
     }
 
@@ -1299,6 +1304,14 @@ export class AppService {
       }
 
       if (context.teamId === targetTeamId) {
+        if (options.mutation) {
+          return this.withNativeAuthEnvironmentCommit(async () => {
+            assertContextIsCurrent()
+            const result = await operation(context.sessionToken)
+            assertContextIsCurrent()
+            return result
+          })
+        }
         const { request } = await this.withNativeAuthEnvironmentCommit(async () => {
           assertContextIsCurrent()
           return { request: operation(context.sessionToken) }
@@ -3243,8 +3256,10 @@ export class AppService {
   ): Promise<WorkflowApprovalDecisionResult> {
     const targetTeamId =
       String(options.teamId || '').trim() || this.workflowApprovalTeamById.get(approvalId) || null
-    const result = await this.runWithTeamContext(targetTeamId, token =>
-      this.authClient.decideWorkflowApproval(token, approvalId, decision, note)
+    const result = await this.runWithTeamContext(
+      targetTeamId,
+      token => this.authClient.decideWorkflowApproval(token, approvalId, decision, note),
+      { mutation: true }
     )
     this.workflowApprovalTeamById.delete(approvalId)
     return result
@@ -3702,8 +3717,10 @@ export class AppService {
     const body: Record<string, unknown> = {}
     if (inputs) body.inputs = inputs
     const teamId = this.workflowTeamByKey.get(this.workflowKey(ns, name)) || null
-    return this.runWithTeamContext(teamId, token =>
-      this.authClient.triggerWorkflow(token, ns, name, body, idempotencyKey)
+    return this.runWithTeamContext(
+      teamId,
+      token => this.authClient.triggerWorkflow(token, ns, name, body, idempotencyKey),
+      { mutation: true }
     )
   }
 

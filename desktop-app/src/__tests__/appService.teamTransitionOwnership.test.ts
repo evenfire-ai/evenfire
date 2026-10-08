@@ -8,6 +8,56 @@ import {
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService deliberate team transition ownership', () => {
+  it('returns a committed same-team approval before a queued logout', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const decisionResponse = deferred<{ approvalId: string; status: string }>()
+    const decisionStarted = deferred<void>()
+    const logoutCleanupStarted = vi.fn()
+    const me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const app = service as unknown as {
+      authClient: unknown
+      decideWorkflowApproval(
+        approvalId: string,
+        decision: 'approve' | 'reject',
+        note?: string,
+        options?: { teamId?: string | null }
+      ): Promise<{ approvalId: string; status: string }>
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    app.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({ token: 'session-a', me }),
+      decideWorkflowApproval: vi.fn(() => {
+        decisionStarted.resolve()
+        return decisionResponse.promise
+      }),
+    }
+    app.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {
+      logoutCleanupStarted()
+    })
+    await service.googleLogin('synthetic-google-token')
+
+    const decision = app.decideWorkflowApproval('approval-a', 'approve', undefined, {
+      teamId: 'team-a',
+    })
+    await decisionStarted.promise
+    const logout = service.logout()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(logoutCleanupStarted).not.toHaveBeenCalled()
+
+    const committedResponse = { approvalId: 'approval-a', status: 'approved' }
+    decisionResponse.resolve(committedResponse)
+    await expect(decision).resolves.toEqual(committedResponse)
+    await expect(logout).resolves.toBeTypeOf('number')
+  })
+
   it('rejects a stale handoff generation after a public login advances the session', async () => {
     const { service, runtimeConfig, optionA } = await createNativeCommitTestHarness()
     const app = service as unknown as {
