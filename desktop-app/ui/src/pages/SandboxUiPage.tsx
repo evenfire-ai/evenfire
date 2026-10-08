@@ -44,11 +44,15 @@ function phasePill(phase: string | null): { label: string; tone: PhasePillTone }
   }
 }
 
+// `launchId` names one open request end to end: main tags every per-view event
+// (`closed`, `refreshError`, `titleChanged`) with the id of the open that
+// mounted that view. Relaunching the SAME app keeps the appRef, so only the id
+// tells a late event from the replaced view apart from the live one.
 type LaunchState =
   | { kind: 'idle' }
-  | { kind: 'minting'; appRef: string }
-  | { kind: 'mounted'; appRef: string }
-  | { kind: 'error'; appRef: string; message: string }
+  | { kind: 'minting'; appRef: string; launchId: string }
+  | { kind: 'mounted'; appRef: string; launchId: string }
+  | { kind: 'error'; appRef: string; launchId: string; message: string }
 
 function statusFromError(err: unknown): { status: number | null; message: string } {
   const message = err instanceof Error ? err.message : String(err)
@@ -237,7 +241,9 @@ export function SandboxUiPage({
     launchRef.current = next
     setLaunchState(next)
   }, [])
-  const [refreshError, setRefreshError] = useState<{ appRef: string; message: string } | null>(null)
+  const [refreshError, setRefreshError] = useState<{ launchId: string; message: string } | null>(
+    null
+  )
   const [appsPage, setAppsPage] = useState(0)
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
   const [localSearchOpen, setLocalSearchOpen] = useState(false)
@@ -282,13 +288,14 @@ export function SandboxUiPage({
   // Re-render the picker if the main process tears the view down (e.g. on
   // app quit, parent window close, or the embed's renderer crashing).
   useEffect(() => {
-    return window.clerum.sandboxUi.onClosed(({ appRef }) => {
+    return window.clerum.sandboxUi.onClosed(({ launchId }) => {
       // A closed event can land after the renderer has already launched
-      // another app (it was in flight when the switch happened). Reconciling it
-      // would drop the owner of the NEW embed, which then stays painted over
-      // every later surface. Only the launch it names may be released.
+      // another app, or relaunched the same one (it was in flight when the
+      // switch happened). Reconciling it would drop the owner of the NEW embed,
+      // which then stays painted over every later surface. Only the launch it
+      // names may be released.
       const current = launchRef.current
-      if (current.kind === 'idle' || current.appRef !== appRef) return
+      if (current.kind === 'idle' || current.launchId !== launchId) return
       if (current.kind === 'mounted' || current.kind === 'minting') {
         setLaunch({ kind: 'idle' })
       }
@@ -302,7 +309,11 @@ export function SandboxUiPage({
   // here — this is informational, not actionable beyond the user closing
   // and re-opening.
   useEffect(() => {
-    return window.clerum.sandboxUi.onRefreshError(args => setRefreshError(args))
+    return window.clerum.sandboxUi.onRefreshError(({ launchId, message }) => {
+      const current = launchRef.current
+      if (current.kind === 'idle' || current.launchId !== launchId) return
+      setRefreshError({ launchId, message })
+    })
   }, [])
 
   useEffect(() => {
@@ -421,14 +432,20 @@ export function SandboxUiPage({
       // slot, and the fallback would mount the WebContentsView full-window —
       // covering the close button until the next ResizeObserver tick).
       const seq = ++launchSeqRef.current
-      setLaunch({ kind: 'minting', appRef: app.appRef })
-      onEmbeddedAppOpening?.({
-        appRef: app.appRef,
-        label: app.label,
-        icon: app.icon,
-        defaultPath: app.defaultPath,
-        ...(app.routePath ? { routePath: app.routePath } : {}),
-      })
+      // Unique across page remounts, unlike `seq`: main echoes it on events
+      // that can outlive this component instance.
+      const launchId = crypto.randomUUID()
+      setLaunch({ kind: 'minting', appRef: app.appRef, launchId })
+      onEmbeddedAppOpening?.(
+        {
+          appRef: app.appRef,
+          label: app.label,
+          icon: app.icon,
+          defaultPath: app.defaultPath,
+          ...(app.routePath ? { routePath: app.routePath } : {}),
+        },
+        launchId
+      )
       try {
         const rect = await waitForEmbedSlotRect(embedSlotRef)
         if (!rect) {
@@ -444,9 +461,10 @@ export function SandboxUiPage({
           defaultPath: app.defaultPath,
           ...(app.routePath ? { routePath: app.routePath } : {}),
           bounds,
+          launchId,
         })
         if (seq === launchSeqRef.current) {
-          setLaunch({ kind: 'mounted', appRef: app.appRef })
+          setLaunch({ kind: 'mounted', appRef: app.appRef, launchId })
           onEmbeddedAppMounted?.()
         }
         return { status: 'mounted' }
@@ -461,7 +479,7 @@ export function SandboxUiPage({
                 ? 'This app is starting up — try again in a moment.'
                 : message
         if (seq === launchSeqRef.current) {
-          setLaunch({ kind: 'error', appRef: app.appRef, message: userFacing })
+          setLaunch({ kind: 'error', appRef: app.appRef, launchId, message: userFacing })
           onEmbeddedAppOpenFailed?.()
         }
         return { status: 'failed', message: userFacing }
@@ -598,7 +616,7 @@ export function SandboxUiPage({
 
   if (launch.kind === 'mounted' || launch.kind === 'minting') {
     const showRefreshBanner =
-      refreshError && launch.kind === 'mounted' && refreshError.appRef === launch.appRef
+      refreshError && launch.kind === 'mounted' && refreshError.launchId === launch.launchId
     // The refresh/copy pair only exists while 'mounted'. The chat-drawer toggle
     // moved to the app header (mini-spec 04a §C), so the leading slot carries no
     // drawer control any more. In the 'minting' state both are absent, so

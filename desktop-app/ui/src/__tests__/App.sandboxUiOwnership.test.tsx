@@ -435,23 +435,25 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
   })
 
-  // main tags `sandboxUi:closed` with the appRef it composed from the open
-  // request (`${recipeNs}/${recipeName}` in the `sandboxUi:open` handler).
-  // Derive it from the open() call the real page sent instead of restating it.
-  function closedEventFor(openCall: number): { appRef: string } {
+  // main tags every per-view event with the appRef it composed from the open
+  // request (`${recipeNs}/${recipeName}` in the `sandboxUi:open` handler) and
+  // echoes that request's `launchId` (pinned main-side by
+  // ipc.sandboxUiLaunchId.test.ts). Derive both from the open() call the real
+  // page sent instead of restating them.
+  type ViewEventTag = { appRef: string; launchId: string }
+  function closedEventFor(openCall: number): ViewEventTag {
     const request = sandboxUi.open.mock.calls[openCall]![0] as {
       recipeNs: string
       recipeName: string
+      launchId: string
     }
-    return { appRef: `${request.recipeNs}/${request.recipeName}` }
+    return { appRef: `${request.recipeNs}/${request.recipeName}`, launchId: request.launchId }
   }
 
-  function emitSandboxUiClosed(event: { appRef: string }) {
-    const listeners = sandboxUi.onClosed.mock.calls as unknown as Array<
-      [(args: { appRef: string }) => void]
-    >
+  function emitToSubscribed<T>(subscribe: ReturnType<typeof vi.fn>, event: T) {
+    const listeners = subscribe.mock.calls as unknown as Array<[(args: T) => void]>
     const unsubscribed = new Set(
-      sandboxUi.onClosed.mock.results
+      subscribe.mock.results
         .map((result, index) =>
           (result.value as ReturnType<typeof vi.fn>).mock.calls.length > 0 ? index : -1
         )
@@ -463,6 +465,63 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
       })
     })
   }
+
+  function emitSandboxUiClosed(event: ViewEventTag) {
+    emitToSubscribed(sandboxUi.onClosed, event)
+  }
+
+  function emitRefreshError(event: ViewEventTag & { message: string }) {
+    emitToSubscribed(sandboxUi.onRefreshError, event)
+  }
+
+  // Relaunches the live Alpha tab (open #2) and holds that open in flight, the
+  // window in which main is still tearing down the view of open #1.
+  function relaunchAlphaHeldOpen(): Promise<() => Promise<void>> {
+    return relaunchAlphaHeldOpenFrom('Alpha')
+  }
+
+  async function relaunchAlphaHeldOpenFrom(tabLabel: string): Promise<() => Promise<void>> {
+    let resolveOpen: () => void = () => {}
+    sandboxUi.open.mockImplementationOnce(
+      () => new Promise<undefined>(resolve => (resolveOpen = () => resolve(undefined)))
+    )
+    clickActiveStripTab(tabLabel)
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    expect(closedEventFor(1).appRef).toBe(ALPHA!.appRef)
+    return async () => {
+      await act(async () => {
+        resolveOpen()
+        await new Promise(resolve => window.setTimeout(resolve, 0))
+      })
+      expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
+    }
+  }
+
+  it('keeps a same-app relaunch owned when the replaced view reports closed while the relaunch is opening', async () => {
+    await renderWithLiveApp(ALPHA)
+    const finishRelaunch = await relaunchAlphaHeldOpen()
+
+    // The view of open #1 dies (crash / teardown) before open #2 resolves.
+    emitSandboxUiClosed(closedEventFor(0))
+    await finishRelaunch()
+
+    await handOffMarkdownFromPlugin()
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+  })
+
+  it("ignores a same-app relaunch's predecessor refresh failure but shows the live view's", async () => {
+    await renderWithLiveApp(ALPHA)
+    const finishRelaunch = await relaunchAlphaHeldOpen()
+
+    emitRefreshError({ ...closedEventFor(0), message: 'stale failure' })
+    await finishRelaunch()
+    expect(screen.queryByText(text => text.startsWith('Session refresh failed'))).toBeNull()
+
+    emitRefreshError({ ...closedEventFor(1), message: 'live failure' })
+    expect(
+      await screen.findByText(text => text.startsWith('Session refresh failed: live failure'))
+    ).toBeTruthy()
+  })
 
   it('keeps the live embed owned when a late closed event belongs to the app it replaced', async () => {
     await renderWithLiveApp(ALPHA)
@@ -559,12 +618,29 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     })
   }
 
-  function emitTitleChanged(event: { appRef: string; title: string }) {
-    const listeners = sandboxUi.onTitleChanged.mock.calls as unknown as Array<
-      [(args: { appRef: string; title: string }) => void]
-    >
-    act(() => listeners.forEach(([listener]) => listener(event)))
+  function emitTitleChanged(event: ViewEventTag & { title: string }) {
+    emitToSubscribed(sandboxUi.onTitleChanged, event)
   }
+
+  it('renames the live app tab after its document.title, ignoring empty titles and titles from the view a relaunch replaces', async () => {
+    await renderWithLiveApp(ALPHA)
+    emitTitleChanged({ ...closedEventFor(0), title: 'Alpha Inbox' })
+    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
+    // A mid-navigation blank title keeps the last real one.
+    emitTitleChanged({ ...closedEventFor(0), title: '   ' })
+    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
+
+    const finishRelaunch = await relaunchAlphaHeldOpenFrom('Alpha Inbox')
+    // main only forwards titles of its active view; until the relaunch replaces
+    // it, that is still the view of open #1.
+    emitTitleChanged({ ...closedEventFor(0), title: 'Alpha Stale' })
+    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Alpha Stale' })).toBeNull()
+
+    await finishRelaunch()
+    emitTitleChanged({ ...closedEventFor(1), title: 'Alpha Fresh' })
+    expect(screen.getByRole('button', { name: 'Alpha Fresh', pressed: true })).toBeTruthy()
+  })
 
   function tabByAppRef(appRef: string) {
     return currentController.workspaceTabs.tabs.find(tab => tab.app?.appRef === appRef)
@@ -599,7 +675,7 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
     expect(await screen.findByRole('button', { name: 'Open Alpha' })).toBeTruthy()
     // A late title from Alpha must not relabel B.
-    emitTitleChanged({ appRef: ALPHA!.appRef, title: 'Alpha Inbox' })
+    emitTitleChanged({ ...closedEventFor(1), title: 'Alpha Inbox' })
     const betaAfter = currentController.workspaceTabs.tabs.find(tab => tab.id === betaTab.id)
     expect(betaAfter?.title).toBe('Beta')
     expect(betaAfter?.app?.appRef).toBe(BETA!.appRef)

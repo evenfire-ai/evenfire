@@ -410,6 +410,10 @@ export function App() {
   // the tab keeps owning whatever main may still hold (see
   // `handleSandboxUiOpenFailed`).
   const liveSandboxUiTabIdRef = React.useRef<string | null>(null)
+  // Id of the most recent open request (minted by SandboxUiPage, echoed by main
+  // on per-view events). A relaunch of the same app keeps the appRef, so title
+  // events are matched on this id, not on the appRef.
+  const currentSandboxUiLaunchIdRef = React.useRef<string | null>(null)
   // Monotonic generation bumped on EVERY transition of the active embed (the
   // deactivation effect and the deep-link handoff are the only emitters). Each
   // read-then-close continuation captures this at dispatch; anything reopened or
@@ -1299,7 +1303,8 @@ export function App() {
     })
   }, [vm.authenticatedPrincipalIdentity])
 
-  const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
+  const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp, launchId: string) => {
+    currentSandboxUiLaunchIdRef.current = launchId
     setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
     // Arm the store's embed-liveness ref on EVERY open, however it was launched
@@ -1727,11 +1732,14 @@ export function App() {
 
   // Name the live app tab after the embed's `document.title` (mini-spec 06 §2).
   // Only the tab whose embed is live (`liveSandboxUiTabIdRef`) is renamed, and
-  // only when the reported `appRef` still matches it, so a late title event from
-  // a torn-down embed can't relabel whichever app is live now. The store ignores
-  // empty titles, so the tab keeps its `app.label` until a real title arrives.
+  // only when the event comes from the current launch and its `appRef` still
+  // matches the tab, so a late title event from a torn-down embed (even one of
+  // the same app being relaunched) can't relabel whichever view is live now.
+  // The store ignores empty titles, so the tab keeps its `app.label` until a
+  // real title arrives.
   React.useEffect(() => {
-    const off = window.clerum.sandboxUi.onTitleChanged?.(({ appRef, title }) => {
+    const off = window.clerum.sandboxUi.onTitleChanged?.(({ appRef, launchId, title }) => {
+      if (launchId !== currentSandboxUiLaunchIdRef.current) return
       const tabId = liveSandboxUiTabIdRef.current
       if (!tabId) return
       setWorkspaceTabs(state => {

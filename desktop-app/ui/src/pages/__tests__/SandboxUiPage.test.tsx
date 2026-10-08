@@ -236,6 +236,7 @@ describe('SandboxUiPage', () => {
           height: 300,
           dpr: expect.any(Number),
         },
+        launchId: expect.any(String),
       })
     })
     expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
@@ -571,14 +572,20 @@ describe('SandboxUiPage', () => {
           height: 300,
           dpr: expect.any(Number),
         },
+        launchId: expect.any(String),
       })
     })
-    expect(onEmbeddedAppOpening).toHaveBeenCalledWith({
-      appRef: 'sandbox-recipes/task-board',
-      label: 'Agentic Task Board',
-      defaultPath: '/',
-      routePath: '/tasks/task-42',
-    })
+    // The owner learns the same launch id main will echo on this view's events.
+    const { launchId } = sandboxUi.open.mock.calls[0]![0] as { launchId: string }
+    expect(onEmbeddedAppOpening).toHaveBeenCalledWith(
+      {
+        appRef: 'sandbox-recipes/task-board',
+        label: 'Agentic Task Board',
+        defaultPath: '/',
+        routePath: '/tasks/task-42',
+      },
+      launchId
+    )
     await waitFor(() => {
       expect(onShortcutOpenResult).toHaveBeenCalledWith(1, { status: 'mounted' })
     })

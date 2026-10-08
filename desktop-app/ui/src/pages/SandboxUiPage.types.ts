@@ -34,7 +34,7 @@ export type SandboxUiPageProps = {
   // itself, so every embed is opened against a workspace tab that owns it. The
   // app comes back through `shortcutApp` / `shortcutOpenRequestId`.
   onLaunchApp: (app: ActiveSandboxUiApp) => void
-  onEmbeddedAppOpening?: (app: ActiveSandboxUiApp) => void
+  onEmbeddedAppOpening?: (app: ActiveSandboxUiApp, launchId: string) => void
   onEmbeddedAppMounted?: () => void
   onEmbeddedAppBack?: () => void
   onEmbeddedAppOpenFailed?: () => void
