@@ -306,16 +306,19 @@ describe('GFS download store boundaries: meta.json validation', () => {
 
 describe('GFS download store boundaries: quota and capacity', () => {
   it('Q1: retained bytes exactly at the volume budget are admitted and one byte more is refused', async () => {
-    volumeOf(15)
+    // Budget 20; a caller protects at most 10, so A and B each pin half and
+    // the refused byte comes from C, which protects nothing yet.
+    volumeOf(20)
     const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
     await completedCopy(limited, rootA, A, 310, 10, { owner: 'task-q1' })
     const denied = await quotaCount('host', 'storage_bytes')
 
-    const atBudget = await completedCopy(limited, rootA, A, 311, 5, { owner: 'task-q1' })
+    const atBudget = await completedCopy(limited, rootB, B, 311, 10, { owner: 'task-q1' })
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
-    await expect(limited.readManagedFile(atBudget.receipt.path, A)).resolves.toEqual(atBudget.bytes)
+    await expect(limited.readManagedFile(atBudget.receipt.path, B)).resolves.toEqual(atBudget.bytes)
 
-    await expect(startTransfer(limited, rootA, A, 312, 1)).rejects.toMatchObject({
+    const rootC = callerDirectory(hostRoot, 'caller-c')
+    await expect(startTransfer(limited, rootC, 'caller-c', 312, 1)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
     })
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
@@ -323,13 +326,21 @@ describe('GFS download store boundaries: quota and capacity', () => {
 
   it('Q2: there is no retained-file limit: one caller keeps 65 copies and only bytes refuse', async () => {
     // 65 one-byte copies: more than the removed 8-per-caller and 64-per-Host limits.
+    // A caller protects at most half the budget, so the budget is 132: A pins
+    // 65 bytes and its 66th byte stays within its 66, while B pins 60 (six
+    // 10-byte copies, the file limit) and C pins the remaining 7.
     const files = 65
-    volumeOf(files)
+    volumeOf(132)
     const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
     const denied = await quotaCount('host', 'storage_bytes')
     for (let index = 0; index < files; index += 1)
       await completedCopy(limited, rootA, A, 400 + index, 1, { owner: 'task-q2' })
+    for (let index = 0; index < 6; index += 1)
+      await completedCopy(limited, rootB, B, 500 + index, 10, { owner: 'task-q2' })
+    const rootC = callerDirectory(hostRoot, 'caller-c')
+    await completedCopy(limited, rootC, 'caller-c', 506, 7, { owner: 'task-q2' })
     expect((await limited.debugInventory()).byCaller.get(A)).toEqual({ files, bytes: files })
+    expect((await limited.debugInventory()).bytes).toBe(132)
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
 
     // Every copy is pinned, so the byte budget is the only thing that can refuse.
@@ -427,8 +438,9 @@ describe('GFS download store boundaries: quota and capacity', () => {
     const foreign = plantComplete(rootB, B, 329, Buffer.alloc(5, 0x38))
     tick()
 
-    // 5 + 5 + 5 + 10 against 15: both adopted copies go, whoever's directory holds them.
-    await startTransfer(limited, rootA, A, 330, 10)
+    // 5 + 5 + 5 + 7 against 15: both adopted copies go, whoever's directory
+    // holds them. 7 is the most A may protect: floor(15 / 2).
+    await startTransfer(limited, rootA, A, 330, 7)
 
     expect(exists(adopted.directory)).toBe(false)
     expect(exists(foreign.directory)).toBe(false)
@@ -448,27 +460,32 @@ describe('GFS download store boundaries: quota and capacity', () => {
     })
     tick()
 
-    await startTransfer(limited, rootA, A, 333, 10)
+    // 5 + 5 + 7 against 15: one copy goes. 7 is the most A may protect: floor(15 / 2).
+    await startTransfer(limited, rootA, A, 333, 7)
 
     expect(exists(downloadDirectory(rootA, newer.receipt.id))).toBe(false)
     expect(exists(downloadDirectory(rootA, older.receipt.id))).toBe(true)
   })
 
   it('Q12: when every copy is pinned admission fails with the quota code and succeeds after release', async () => {
+    // Budget 15; a caller protects at most 7. B and C each pin 7, and A's 7
+    // would bring the Host to 21: only the host budget can refuse it.
     volumeOf(15)
     const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
-    const pinned = await completedCopy(limited, rootA, A, 334, 10, { owner: 'task-q12' })
-    const directory = downloadDirectory(rootA, pinned.receipt.id)
+    const pinned = await completedCopy(limited, rootB, B, 334, 7, { owner: 'task-q12' })
+    const rootC = callerDirectory(hostRoot, 'caller-c')
+    await completedCopy(limited, rootC, 'caller-c', 336, 7, { owner: 'task-q12' })
+    const directory = downloadDirectory(rootB, pinned.receipt.id)
     const denied = await quotaCount('host', 'storage_bytes')
 
-    await expect(startTransfer(limited, rootA, A, 335, 10)).rejects.toMatchObject({
+    await expect(startTransfer(limited, rootA, A, 335, 7)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
     })
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
     expect(exists(directory)).toBe(true)
 
-    await limited.releaseReceiptOwner('task-q12', A)
-    await expect(startTransfer(limited, rootA, A, 335, 10)).resolves.toBeDefined()
+    await limited.releaseReceiptOwner('task-q12', B)
+    await expect(startTransfer(limited, rootA, A, 335, 7)).resolves.toBeDefined()
     expect(exists(directory)).toBe(false)
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
   })

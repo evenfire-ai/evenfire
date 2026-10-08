@@ -98,15 +98,20 @@ afterEach(async () => {
 
 describe('GFS download store budget: share of the workspace volume', () => {
   it('BUD-1: the default 85% budget admits exactly up to floor(total * 85 / 100) bytes', async () => {
-    // 101 bytes of volume: 85.85 floors to 85.
+    // 101 bytes of volume: 85.85 floors to 85. A caller may protect at most
+    // floor(85 / 2) = 42 bytes, so the pinned 85 are spread over three callers:
+    // A 40 + B 40 + C 5. The refused 1-byte request leaves A at 41, under its half.
     volumeOf(101n)
     const store = await openStore()
-    await completedCopy(store, rootA, A, 1, 80, { owner: 'task-a' })
+    const C = 'caller-c'
+    const rootC = callerDirectory(hostRoot, C)
+    await completedCopy(store, rootA, A, 1, 40, { owner: 'task-a' })
+    await completedCopy(store, rootB, B, 4, 40, { owner: 'task-b' })
     const denied = await quotaCount('host', 'storage_bytes')
 
-    const atBudget = await completedCopy(store, rootA, A, 2, 5, { owner: 'task-a' })
+    const atBudget = await completedCopy(store, rootC, C, 2, 5, { owner: 'task-c' })
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
-    await expect(store.readManagedFile(atBudget.receipt.path, A)).resolves.toEqual(atBudget.bytes)
+    await expect(store.readManagedFile(atBudget.receipt.path, C)).resolves.toEqual(atBudget.bytes)
 
     await expect(startTransfer(store, rootA, A, 3, 1)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
@@ -126,9 +131,16 @@ describe('GFS download store budget: share of the workspace volume', () => {
       const store = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: percent })
       const denied = await quotaCount('host', 'storage_bytes')
 
-      await completedCopy(store, rootA, A, 10, budget, { owner: 'task-a' })
+      // A caller may protect at most half the budget, so the pinned budget is
+      // two halves held by A and B; the refused byte comes from a third caller
+      // that protects nothing yet, so only the host budget can refuse it.
+      await completedCopy(store, rootA, A, 10, budget / 2, { owner: 'task-a' })
+      await completedCopy(store, rootB, B, 12, budget - budget / 2, { owner: 'task-b' })
       expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
-      await expect(startTransfer(store, rootB, B, 11, 1)).rejects.toMatchObject({
+      const C = 'caller-c'
+      await expect(
+        startTransfer(store, callerDirectory(hostRoot, C), C, 11, 1)
+      ).rejects.toMatchObject({
         code: 'host_quota_exceeded',
       })
       expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
@@ -136,18 +148,25 @@ describe('GFS download store budget: share of the workspace volume', () => {
   )
 
   it('BUD-3: a volume resized between two admissions is used by the second, without restart', async () => {
+    // Budget 20, so each caller protects at most 10: 15 bytes pinned by A (10)
+    // and C (5), then B asks for 10. 15 + 10 > 20 is refused by the host budget;
+    // after the resize 15 + 10 fits in 25, and B's 10 stays under floor(25 / 2).
     volumeOf(20n)
     const store = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '100' })
     await completedCopy(store, rootA, A, 20, 10, { owner: 'task-a' })
+    const C = 'caller-c'
+    await completedCopy(store, callerDirectory(hostRoot, C), C, 22, 5, { owner: 'task-c' })
+    const denied = await quotaCount('host', 'storage_bytes')
 
-    await expect(startTransfer(store, rootB, B, 21, 15)).rejects.toMatchObject({
+    await expect(startTransfer(store, rootB, B, 21, 10)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
     })
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
 
     volumeOf(25n)
     statfsBoundary.mockClear()
-    const admitted = await startTransfer(store, rootB, B, 21, 15)
-    expect(admitted.transfer.sizeBytes).toBe(15)
+    const admitted = await startTransfer(store, rootB, B, 21, 10)
+    expect(admitted.transfer.sizeBytes).toBe(10)
     // Witness: the new size came from a statfs taken by this admission.
     expect(statfsBoundary).toHaveBeenCalled()
   })
@@ -181,7 +200,7 @@ describe('GFS download store budget: share of the workspace volume', () => {
   })
 })
 
-describe('GFS download store budget: no per-caller limit', () => {
+describe('GFS download store budget: no per-caller storage or file-count limit', () => {
   it('BUD-6: one caller fills the whole budget with 18 files of 16 MiB and another caller evicts its least recently used copy', async () => {
     const size = 16 * MIB
     const files = 18
@@ -225,7 +244,9 @@ describe('GFS download store budget: no per-caller limit', () => {
     const store = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '100' })
     const pinned = await completedCopy(store, rootA, A, 40, 10, { owner: 'task-a' })
     tick()
-    const unpinned = await completedCopy(store, rootA, A, 41, 10)
+    // A protects at most floor(30 / 2) = 15: the pinned 10 plus this 5-byte
+    // reservation while it is written.
+    const unpinned = await completedCopy(store, rootA, A, 41, 5)
     tick()
     const bytes = Buffer.alloc(10, 0x42)
     const plantedId = '00000000-0000-4000-8000-000000000042'
@@ -236,13 +257,14 @@ describe('GFS download store budget: no per-caller limit', () => {
     })
     tick()
 
-    // 30 retained + 10 requested against 30: one copy goes, and it is the adopted one.
+    // 25 retained + 10 requested against 30: one copy goes, and it is the adopted one.
     await startTransfer(store, rootB, B, 42, 10)
     expect(exists(planted.directory)).toBe(false)
     expect(exists(downloadDirectory(rootA, unpinned.receipt.id))).toBe(true)
     expect(exists(downloadDirectory(rootA, pinned.receipt.id))).toBe(true)
 
-    // Next: the unpinned published copy goes; the pinned one, older, never does.
+    // Next, 15 retained + B's 10 reserved + 10 requested against 30: the
+    // unpinned published copy goes; the pinned one, older, never does.
     const second = await startTransfer(
       store,
       callerDirectory(hostRoot, 'caller-c'),
@@ -261,16 +283,34 @@ describe('GFS download store budget: no per-caller limit', () => {
       try {
         const own = callerDirectory(host, A)
         const other = callerDirectory(host, `caller-${'b'.repeat(12)}`)
+        const third = callerDirectory(host, `caller-${'c'.repeat(12)}`)
         const store = await openStore(host)
-        const filler = fillOwnRoot ? own : other
-        const fillerKey = path.basename(filler)
-        await completedCopy(store, filler, fillerKey, 50, 80, { owner: 'task-fill' })
+        // 80 pinned bytes either way; no caller protects more than floor(85 / 2) = 42.
+        const fillers: Array<[string, number]> = fillOwnRoot
+          ? [
+              [own, 30],
+              [other, 40],
+              [third, 10],
+            ]
+          : [
+              [other, 40],
+              [third, 40],
+            ]
+        for (const [index, [filler, sizeBytes]] of fillers.entries())
+          await completedCopy(store, filler, path.basename(filler), 50 + index * 2, sizeBytes, {
+            owner: 'task-fill',
+          })
+        const denied = await quotaCount('host', 'storage_bytes')
         const error = await startTransfer(store, own, A, 51, 10).then(
           () => undefined,
           (rejection: unknown) => rejection
         )
-        // Witness: the refusal was the budget; releasing the pin admits the same request.
-        await store.releaseReceiptOwner('task-fill', fillerKey)
+        // The refusal came from the host budget: A stays under its own half
+        // (at most 30 + 10 = 40 of 42).
+        expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
+        // Witness: the refusal was the budget; releasing the pins admits the same request.
+        for (const [filler] of fillers)
+          await store.releaseReceiptOwner('task-fill', path.basename(filler))
         await expect(startTransfer(store, own, A, 51, 10)).resolves.toBeDefined()
         return error
       } finally {

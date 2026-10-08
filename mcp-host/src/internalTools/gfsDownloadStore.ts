@@ -543,6 +543,8 @@ export class GfsDownloadStore {
       const volume = await this.assertPhysicalCapacity(input.sizeBytes)
       await this.sweep(Date.now())
       const budget = retainedBudget(volume)
+      // The reservation itself is protected until it settles, pinned or not.
+      this.assertProtectedRoom(input.callerIdentity, budget, { sizeBytes: input.sizeBytes })
       await this.reclaimForAdmission(input.sizeBytes, budget)
       if (this.overBudget(input.sizeBytes, budget)) {
         // The code alone: whose copies fill the budget is never part of it.
@@ -766,6 +768,14 @@ export class GfsDownloadStore {
           candidate.source.version === source.version
       )
       if (!entry) return undefined
+      // Pinning a copy this caller does not protect yet adds it to the
+      // caller's protected bytes; checked before hashing, so a refusal costs
+      // no read.
+      if (bounds?.retentionOwnerId !== undefined)
+        this.assertProtectedRoom(callerIdentity, retainedBudget(await this.measureVolume()), {
+          id: entry.id,
+          sizeBytes: entry.sizeBytes,
+        })
       let verified = false
       let transient: string | undefined
       try {
@@ -1431,12 +1441,17 @@ export class GfsDownloadStore {
    * A statfs whose block size or block count is not positive cannot size
    * anything; it refuses the admission as `free_space`, like a full volume.
    */
-  private async assertPhysicalCapacity(sizeBytes: number): Promise<VolumeSpace> {
+  private async measureVolume(): Promise<VolumeSpace> {
     const space = await fs.statfs(this.hostRoot, { bigint: true })
     if (space.bsize <= 0n || space.blocks <= 0n || space.bavail < 0n) {
       recordGfsDownloadQuota('host', 'free_space')
       throw new GfsDownloadStoreError('host_quota_exceeded')
     }
+    return { bsize: space.bsize, blocks: space.blocks, bavail: space.bavail }
+  }
+
+  private async assertPhysicalCapacity(sizeBytes: number): Promise<VolumeSpace> {
+    const space = await this.measureVolume()
     const reserve = (bytes: number): bigint => {
       const amount = BigInt(bytes)
       return ((amount + space.bsize - 1n) / space.bsize) * space.bsize
@@ -1449,7 +1464,44 @@ export class GfsDownloadStore {
       recordGfsDownloadQuota('host', 'free_space')
       throw new GfsDownloadStoreError('host_quota_exceeded')
     }
-    return { bsize: space.bsize, blocks: space.blocks, bavail: space.bavail }
+    return space
+  }
+
+  /**
+   * Ids one caller holds out of eviction: its active reservations and the
+   * copies its retention owners pin, each id once.
+   */
+  private protectedIds(callerIdentity: string): Set<string> {
+    const ids = new Set<string>()
+    for (const transfer of this.active.values())
+      if (transfer.callerIdentity === callerIdentity) ids.add(transfer.id)
+    for (const [key, pinned] of this.pins)
+      if ((JSON.parse(key) as [string, string])[0] === callerIdentity)
+        for (const id of pinned) ids.add(id)
+    return ids
+  }
+
+  /**
+   * Eviction never reclaims a pinned copy or a reservation, so without a bound
+   * one caller's open tasks could hold the whole budget and refuse every other
+   * caller. A caller's protected bytes may therefore reach at most half the
+   * budget, which always leaves the other half reclaimable for anyone else.
+   * Only this caller's own usage decides; the refusal is the fixed code.
+   */
+  private assertProtectedRoom(
+    callerIdentity: string,
+    budget: bigint,
+    addition: { id?: string; sizeBytes: number }
+  ): void {
+    const ids = this.protectedIds(callerIdentity)
+    if (addition.id !== undefined && ids.has(addition.id)) return
+    let bytes = BigInt(addition.sizeBytes)
+    for (const id of ids)
+      bytes += BigInt(this.active.get(id)?.sizeBytes ?? this.entries.get(id)?.sizeBytes ?? 0)
+    if (bytes > budget / 2n) {
+      recordGfsDownloadQuota('caller', 'protected_bytes')
+      throw new GfsDownloadStoreError('host_quota_exceeded')
+    }
   }
 
   /** Retained bytes: indexed copies, active reservations and held duplicates. */

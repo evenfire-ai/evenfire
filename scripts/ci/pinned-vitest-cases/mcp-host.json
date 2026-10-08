@@ -809,15 +809,15 @@
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: no per-caller limit BUD-6: one caller fills the whole budget with 18 files of 16 MiB and another caller evicts its least recently used copy"
+    "fullName": "GFS download store budget: no per-caller storage or file-count limit BUD-6: one caller fills the whole budget with 18 files of 16 MiB and another caller evicts its least recently used copy"
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: no per-caller limit BUD-7: another caller's admission never evicts a pinned copy and takes an adopted one first"
+    "fullName": "GFS download store budget: no per-caller storage or file-count limit BUD-7: another caller's admission never evicts a pinned copy and takes an adopted one first"
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: no per-caller limit BUD-8: the quota denial is identical whoever fills the budget"
+    "fullName": "GFS download store budget: no per-caller storage or file-count limit BUD-8: the quota denial is identical whoever fills the budget"
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
@@ -902,5 +902,29 @@
   {
     "suite": "gfsDownloadStoreHeldCharges.test.ts",
     "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried directory that is now indexed is charged once, not twice"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) SOL-R3-PINS: one caller pins up to the cap, exactly, and other callers keep admitting"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a refused caller gets the same error object as a full Host budget"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) an active reservation counts, pinned or not"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) unpinned copies are not protected: one caller still fills the whole budget"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) pinning a reused copy counts it once, and only when it is not already protected"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a file larger than the cap is refused before any eviction"
   }
 ]

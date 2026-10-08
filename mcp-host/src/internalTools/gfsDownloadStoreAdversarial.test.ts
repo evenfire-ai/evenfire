@@ -391,7 +391,10 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
   })
 
   it('an eviction whose removal fails keeps the copy published and charged', async () => {
-    volume.totalBytes = 15n
+    // Budget 20, so a caller protects at most 10. KEY's unpinned 10, another
+    // caller's pinned 5 and KEY's requested 10 make 25: the unpinned copy is
+    // the only candidate, and evicting it would have made room.
+    volume.totalBytes = 20n
     const limited = await withEnvironment(
       {
         MCP_HOST_GFS_MAX_FILE_BYTES: '10',
@@ -408,6 +411,10 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
     )
     const root = callerDirectory(hostRoot, KEY)
     const { receipt, bytes } = await completedCopy(limited, root, KEY, 3, 10)
+    const otherKey = `${KEY}-other`
+    await completedCopy(limited, callerDirectory(hostRoot, otherKey), otherKey, 7, 5, {
+      owner: 'task-other',
+    })
     const failedRemovals = await expiryCount('remove_failed')
     const renames = watch('rename', `input-${receipt.id}`, 'EIO')
 
@@ -596,7 +603,8 @@ describe('GFS download store adversarial round: expiry, close, recency and remov
     await expect(limited.readManagedFile(older.receipt.path, KEY)).resolves.toEqual(older.bytes)
     tick()
 
-    await startTransfer(limited, root, KEY, 6, 10)
+    // 5 + 5 + 7 against 15: one copy goes. 7 is the most KEY may protect: floor(15 / 2).
+    await startTransfer(limited, root, KEY, 6, 7)
 
     expect(exists(path.join(root, `.gfs-downloads/input-${newer.receipt.id}`))).toBe(false)
     expect(exists(path.join(root, `.gfs-downloads/input-${older.receipt.id}`))).toBe(true)
