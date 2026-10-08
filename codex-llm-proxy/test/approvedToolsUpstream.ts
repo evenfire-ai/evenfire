@@ -16,12 +16,19 @@ const LIMIT_PROBE_CALLS = 257
 // the continuation must carry every result back before the final answer.
 const LIMIT_BOUNDARY = 'tool call limit boundary'
 const LIMIT_BOUNDARY_CALLS = 256
-// #1044 model-step retry. A user turn containing `model step retry probe <marker>` gets
-// one read-only search carrying the marker, then a 503 for the model step that
-// follows its result, then (only after Retry model step) the final answer.
-// A turn containing `model step retry followup <marker>` is a new message sent instead of
-// the retry; it gets a plain answer.
-const MODEL_STEP_PROBE = /\bmodel step retry probe ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
+// #1044 model-step retry. A user turn containing `model step retry <kind> <marker>`:
+// - `probe`: one read-only search carrying the marker, then a 503 for the model
+//   step that follows its result, then (only after Retry model step) the final
+//   answer.
+// - `twice`: like `probe`, but the first continuation also gets a 503; the
+//   second continuation gets the final answer.
+// - `zero`: a 503 for the first model step, before any tool runs.
+// A turn left on its 503 can be sent again by the user (Resend): the history
+// then carries the marker's user message twice and no tool rows, and gets a
+// plain answer. A turn containing `model step retry followup <marker>` is a new
+// message sent instead of the retry; it gets a plain answer.
+const MODEL_STEP_TURN =
+  /\bmodel step retry (probe|twice|zero) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
 const MODEL_STEP_FOLLOWUP = /\bmodel step retry followup ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
 const MODEL_STEP_PREFIX = 'model step retry '
 const MODEL_STEP_MAX_TURNS = 64
@@ -358,17 +365,22 @@ export function createApprovedToolsUpstream() {
       finalResponses: 0,
       unexpectedRetries: 0,
     },
-    // #1044 model-step retry turns: probe turns started, searches emitted with
-    // a probe marker (the only tool the turn runs), 503 answers, continuations
-    // answered, results of the original search those continuations carried,
-    // follow-up messages answered, and completions served for a stage that was
-    // already served (a retry the Host must never make).
+    // #1044 model-step retry turns: turns started, searches emitted with a
+    // marker (the only tool a turn runs), 503 answers (every kind), 503 answers
+    // given before any tool ran (`zero`), continuations that got a 503 again
+    // (`twice`), continuations answered, results of the original search those
+    // answered continuations carried, Resends answered, follow-up messages
+    // answered, and completions served for a stage that was already served (a
+    // retry the Host must never make).
     modelStepRetry: {
       turns: 0,
       markerSearches: 0,
       unavailableResponses: 0,
+      zeroToolUnavailable: 0,
+      continuationUnavailable: 0,
       continuations: 0,
       toolResults: 0,
+      resends: 0,
       followUps: 0,
       unexpectedRetries: 0,
     },
@@ -388,11 +400,17 @@ export function createApprovedToolsUpstream() {
   const answeredProbeTurns = new Set<string>()
   // Call IDs sent for each boundary turn, and whether its final answer was sent.
   const boundaryTurns = new Map<string, { sent: Set<string>; finalized: boolean }>()
-  // Model-step probe turns by marker: the search call ID emitted for the turn
-  // and the last stage served for it.
+  // Model-step turns by marker: the kind, the search call ID emitted for the
+  // turn (none for `zero`), the last stage served for it, and how many 503s it
+  // got.
   const modelStepTurns = new Map<
     string,
-    { callId: string; stage: 'searched' | 'unavailable' | 'continued' | 'followed_up' }
+    {
+      kind: 'probe' | 'twice' | 'zero'
+      callId: string | null
+      stage: 'searched' | 'unavailable' | 'continued' | 'resent' | 'followed_up'
+      unavailable: number
+    }
   >()
 
   const fetchFn: typeof fetch = async (input, init) => {
@@ -547,14 +565,39 @@ export function createApprovedToolsUpstream() {
             delta: `followup ${followUp[1]} answered`,
           })
         }
-        const probe = MODEL_STEP_PROBE.exec(text)
-        if (!probe) throw new Error('invalid_model_step_marker')
-        const marker = probe[1]!
+        const opened = MODEL_STEP_TURN.exec(text)
+        if (!opened) throw new Error('invalid_model_step_marker')
+        const kind = opened[1] as 'probe' | 'twice' | 'zero'
+        const marker = opened[2]!
         const turn = modelStepTurns.get(marker)
+        // How many user messages of the history open this same turn: one for
+        // the turn and its continuations, two once the user sent it again.
+        const openings = history.filter(row => {
+          if (row.role !== 'user' || typeof row.content !== 'string') return false
+          const match = MODEL_STEP_TURN.exec(row.content)
+          return match?.[2] === marker
+        }).length
+        const unavailable = (stage: string) => {
+          evidence.modelStepRetry.unavailableResponses++
+          evidence.completions++
+          evidence.requests.push(measured(stage))
+          return Response.json(
+            { error: { code: 'server_is_overloaded', message: 'fixture provider unavailable' } },
+            { status: 503 }
+          )
+        }
         if (!turn) {
-          if (rows.length) throw new Error('unknown_model_step_turn')
+          if (rows.length || openings !== 1) throw new Error('unknown_model_step_turn')
           if (modelStepTurns.size >= MODEL_STEP_MAX_TURNS)
             throw new Error('evidence_capacity_exceeded')
+          evidence.modelStepRetry.turns++
+          if (kind === 'zero') {
+            // The first model step fails before any tool ran: there is nothing
+            // to continue, so the Host keeps no checkpoint and offers Resend.
+            modelStepTurns.set(marker, { kind, callId: null, stage: 'unavailable', unavailable: 1 })
+            evidence.modelStepRetry.zeroToolUnavailable++
+            return unavailable('model_step_zero_unavailable')
+          }
           if (!names.has(BRIDGES[0]!)) throw new Error('unadvertised_function')
           const item = {
             type: 'function_call',
@@ -563,14 +606,36 @@ export function createApprovedToolsUpstream() {
             name: BRIDGES[0],
             arguments: JSON.stringify({ query: marker, limit: 1 }),
           }
-          modelStepTurns.set(marker, { callId: item.call_id, stage: 'searched' })
-          evidence.modelStepRetry.turns++
+          modelStepTurns.set(marker, { kind, callId: item.call_id, stage: 'searched', unavailable: 0 })
           evidence.modelStepRetry.markerSearches++
           evidence.completions++
           evidence.requests.push(measured('model_step_search'))
           return stream({ type: 'response.output_item.done', item })
         }
-        if (!rows.length || (turn.stage !== 'searched' && turn.stage !== 'unavailable')) {
+        if (turn.kind !== kind) throw new Error('unknown_model_step_turn')
+        if (!rows.length) {
+          // The user sent the turn left on its 503 again: a new turn whose
+          // history repeats the marker's message. The Host never re-sends a
+          // request by itself with a second copy of the user message, so one
+          // opening here is a retry it must not make.
+          if (turn.stage !== 'unavailable' || openings !== 2) {
+            evidence.modelStepRetry.unexpectedRetries++
+            throw new Error('unexpected_retry')
+          }
+          turn.stage = 'resent'
+          evidence.modelStepRetry.resends++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_resent'))
+          return stream({
+            type: 'response.output_text.delta',
+            delta: `resent ${marker} answered`,
+          })
+        }
+        if (
+          turn.callId === null ||
+          openings !== 1 ||
+          (turn.stage !== 'searched' && turn.stage !== 'unavailable')
+        ) {
           evidence.modelStepRetry.unexpectedRetries++
           throw new Error('unexpected_retry')
         }
@@ -580,13 +645,15 @@ export function createApprovedToolsUpstream() {
           // unavailable, so the Host keeps the turn as a resumable checkpoint.
           if (received !== 1) throw new Error('incomplete_model_step_batch')
           turn.stage = 'unavailable'
-          evidence.modelStepRetry.unavailableResponses++
-          evidence.completions++
-          evidence.requests.push(measured('model_step_unavailable'))
-          return Response.json(
-            { error: { code: 'server_is_overloaded', message: 'fixture provider unavailable' } },
-            { status: 503 }
-          )
+          turn.unavailable++
+          return unavailable('model_step_unavailable')
+        }
+        if (turn.kind === 'twice' && turn.unavailable === 1) {
+          // The first continuation of a `twice` turn meets the provider down
+          // again; the checkpoint must stay resumable for a second retry.
+          turn.unavailable++
+          evidence.modelStepRetry.continuationUnavailable++
+          return unavailable('model_step_continuation_unavailable')
         }
         // The continuation after Retry model step. The answer reports how many
         // results of the original search it carried, so a duplicated or lost
