@@ -1086,21 +1086,28 @@ export class AppService {
     return result
   }
 
-  private captureAuthEnvironmentBinding(): { environmentKey: string; restBaseUrl: string } {
+  private captureAuthEnvironmentBinding(): {
+    environmentKey: string
+    profileId: string | null
+    restBaseUrl: string
+  } {
+    const runtimeConfig = getDesktopRuntimeConfigState()
     return {
       environmentKey: getActiveEnvKey(),
-      restBaseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
+      profileId: runtimeConfig.activeOptionId,
+      restBaseUrl: canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl),
     }
   }
 
   private assertAuthEnvironmentBinding(binding: {
     environmentKey: string
+    profileId: string | null
     restBaseUrl: string
   }): void {
     const current = this.captureAuthEnvironmentBinding()
     if (
-      current.environmentKey !== binding.environmentKey ||
-      current.restBaseUrl !== binding.restBaseUrl
+      current.profileId !== binding.profileId ||
+      !sameDesktopRestEndpoint(current.restBaseUrl, binding.restBaseUrl)
     ) {
       throw new Error('stale_runtime_environment')
     }
@@ -1583,7 +1590,10 @@ export class AppService {
     if (this.restoreSavedSessionInFlight) {
       return await this.restoreSavedSessionInFlight
     }
-    const restore = this.restoreSavedSessionOnce(options)
+    const restore = (async () => {
+      await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+      return this.restoreSavedSessionOnce(options)
+    })()
     this.restoreSavedSessionInFlight = restore
     try {
       return await restore
@@ -1631,9 +1641,14 @@ export class AppService {
     const ownsRestore = () =>
       this.sessionGeneration === reservation.sessionGeneration &&
       this.interactiveLoginAttempts === 0 &&
-      getActiveEnvKey() === reservation.environment.environmentKey &&
-      normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) ===
-        reservation.environment.restBaseUrl
+      (() => {
+        try {
+          this.assertAuthEnvironmentBinding(reservation.environment)
+          return true
+        } catch {
+          return false
+        }
+      })()
     const currentSession = () => ({
       authenticated: Boolean(this.sessionToken && this.me),
       me: this.me,
@@ -1671,11 +1686,13 @@ export class AppService {
       const session = await this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         this.sessionToken = token
-        await bindChatStoreForUser(restoredMe.id, reservation.environment.environmentKey, {
-          legacyEnvKeys: reservation.legacyEnvKeys,
+        const environmentKey = getActiveEnvKey()
+        await bindChatStoreForUser(restoredMe.id, environmentKey, {
+          legacyEnvKeys: getActiveLegacyEnvKeys(),
           teamId: restoredMe.teamId,
         })
         this.me = restoredMe
+        this.savedSessionRestoreAttemptedEnvKey = environmentKey
         this.updateEntityChangeSessionToken(token)
         this.restartEntityChangeStreamForSessionReplacement()
         this.accessCatalog = null
@@ -1703,8 +1720,8 @@ export class AppService {
         if (!ownsRestore()) return currentSession()
         this.clearAuthenticatedSessionState()
         if (AppService.isRejectedStoredSessionError(error)) {
-          await this.tokenStore.clearSessionToken(reservation.environment.environmentKey, {
-            legacyEnvKeys: reservation.legacyEnvKeys,
+          await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+            legacyEnvKeys: getActiveLegacyEnvKeys(),
           })
         }
         return { authenticated: false, me: null }

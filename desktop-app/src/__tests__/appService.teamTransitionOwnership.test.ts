@@ -58,6 +58,77 @@ describe('AppService deliberate team transition ownership', () => {
     await expect(logout).resolves.toBeTypeOf('number')
   })
 
+  it('keeps a saved-session restore when RPC discovery completes before getMe', async () => {
+    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+    const discovery = deferred<{
+      externalRestApiBaseUrl: string
+      rpcProxyBaseUrl: string
+      appName: string
+    }>()
+    const discoveryStarted = deferred<void>()
+    const getMeResponse = deferred<{
+      id: string
+      email: string
+      name: string
+      picture: null
+      teamId: string
+      teamName: string
+      role: string
+    }>()
+    const getMeStarted = deferred<void>()
+    const me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const app = service as unknown as {
+      authClient: unknown
+      rpcClient: unknown
+      tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
+      getDependenciesHealth(): Promise<unknown>
+    }
+    app.tokenStore.getSessionToken.mockResolvedValue('saved-session-a')
+    const getMe = vi.fn(() => {
+      getMeStarted.resolve()
+      return getMeResponse.promise
+    })
+    const getDesktopEnvironment = vi.fn(() => {
+      discoveryStarted.resolve()
+      return discovery.promise
+    })
+    app.authClient = {
+      getDesktopEnvironment,
+      getMe,
+      health: vi.fn().mockResolvedValue({ status: 'ok' }),
+    }
+    app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
+
+    const healthRequest = app.getDependenciesHealth()
+    await discoveryStarted.promise
+    const restore = service.getSessionState()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(getMe).not.toHaveBeenCalled()
+    discovery.resolve({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+      appName: 'Environment A',
+    })
+    await healthRequest
+    await getMeStarted.promise
+    getMeResponse.resolve(me)
+
+    await expect(restore).resolves.toEqual({ authenticated: true, me })
+  })
+
   it('rejects a stale handoff generation after a public login advances the session', async () => {
     const { service, runtimeConfig, optionA } = await createNativeCommitTestHarness()
     const app = service as unknown as {
