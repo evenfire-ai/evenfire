@@ -13,7 +13,7 @@ import type {
 import type { Tone } from '../../uiTypes'
 import {
   createDesktopEnvironmentSetupHandler,
-  getDesktopEnvironmentRestMatches,
+  resolveDesktopEnvironmentRestMatch,
 } from './desktopEnvironmentHandoff'
 import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
 
@@ -625,12 +625,12 @@ export function useAuthController({
         return
       }
 
-      const restMatches = getDesktopEnvironmentRestMatches(
+      const restMatch = resolveDesktopEnvironmentRestMatch(
         currentConfigState,
         nextConfig.externalRestApiBaseUrl
       )
 
-      if (restMatches.localhost) {
+      if (restMatch.kind === 'localhost') {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
@@ -639,13 +639,13 @@ export function useAuthController({
         return
       }
 
-      if (restMatches.active) {
+      if (restMatch.kind === 'active') {
         setPendingDesktopEnvironmentSetup(null)
         setStatus('This link points to the active Evenfire Desktop environment.', 'success')
         return
       }
 
-      if (restMatches.saved.length === 0 && restMatches.sameOriginDifferentEndpoint.length > 0) {
+      if (restMatch.kind === 'path-conflict') {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
@@ -654,23 +654,17 @@ export function useAuthController({
         return
       }
 
-      if (restMatches.saved.length > 0) {
-        if (restMatches.saved.length > 1) {
-          setPendingDesktopEnvironmentSetup(null)
-          setStatus(
-            'Desktop setup link rejected because multiple saved environments use this REST API.',
-            'error'
-          )
-          return
-        }
+      if (restMatch.kind === 'ambiguous') {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop setup link rejected because multiple saved environments use this REST API.',
+          'error'
+        )
+        return
+      }
 
-        const [savedOption] = restMatches.saved
-        if (!savedOption) {
-          setPendingDesktopEnvironmentSetup(null)
-          setStatus('Could not resolve the saved desktop environment.', 'error')
-          return
-        }
-
+      if (restMatch.kind === 'saved') {
+        const savedOption = restMatch.option
         const selection = await handleSelectRuntimeConfigForHandoff(
           savedOption.id,
           expectedSessionGeneration
@@ -709,10 +703,13 @@ export function useAuthController({
       const state = await handleSaveRuntimeConfig(nextConfig, expectedSessionGeneration)
       if (!state) return
       const selectedOption = state.options.find(option => option.id === state.activeOptionId)
-      const selectedRestMatches = getDesktopEnvironmentRestMatches(
+      const selectedRestMatch = resolveDesktopEnvironmentRestMatch(
         state,
         nextConfig.externalRestApiBaseUrl
-      ).saved.some(option => option.id === state.activeOptionId)
+      )
+      const selectedRestMatches =
+        selectedRestMatch.kind === 'active' ||
+        (selectedRestMatch.kind === 'saved' && selectedRestMatch.option.id === state.activeOptionId)
       if (!selectedOption || !selectedRestMatches || !selectedOption.rpcProxyBaseUrl.trim()) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(

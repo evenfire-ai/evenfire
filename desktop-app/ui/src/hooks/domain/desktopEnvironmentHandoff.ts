@@ -6,6 +6,7 @@ import {
 import type {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
+  DesktopRuntimeConfigOption,
   DesktopRuntimeConfigState,
 } from '../../../../src/types'
 import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
@@ -73,7 +74,7 @@ function isLocalhostOption(option: DesktopRuntimeConfigState['options'][number])
   return option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID
 }
 
-export function getDesktopEnvironmentRestMatches(
+function getDesktopEnvironmentRestMatches(
   configState: DesktopRuntimeConfigState,
   externalRestApiBaseUrl: string
 ) {
@@ -94,6 +95,28 @@ export function getDesktopEnvironmentRestMatches(
       externalRestApiBaseUrl
     ),
   }
+}
+
+type DesktopEnvironmentRestMatchDecision =
+  | { kind: 'localhost'; option: DesktopRuntimeConfigOption }
+  | { kind: 'active' }
+  | { kind: 'ambiguous' }
+  | { kind: 'saved'; option: DesktopRuntimeConfigOption }
+  | { kind: 'path-conflict' }
+  | { kind: 'setup' }
+
+export function resolveDesktopEnvironmentRestMatch(
+  configState: DesktopRuntimeConfigState,
+  externalRestApiBaseUrl: string
+): DesktopEnvironmentRestMatchDecision {
+  const matches = getDesktopEnvironmentRestMatches(configState, externalRestApiBaseUrl)
+  if (matches.localhost) return { kind: 'localhost', option: matches.localhost }
+  if (matches.active) return { kind: 'active' }
+  if (matches.saved.length > 1) return { kind: 'ambiguous' }
+  const [savedOption] = matches.saved
+  if (savedOption) return { kind: 'saved', option: savedOption }
+  if (matches.sameOriginDifferentEndpoint.length > 0) return { kind: 'path-conflict' }
+  return { kind: 'setup' }
 }
 
 function isAuthenticationOperationInProgress(state: DesktopEnvironmentHandoffState): boolean {
@@ -206,11 +229,11 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
-    let restMatches = getDesktopEnvironmentRestMatches(
+    let restMatch = resolveDesktopEnvironmentRestMatch(
       configState,
       linkedConfig.externalRestApiBaseUrl
     )
-    if (restMatches.localhost) {
+    if (restMatch.kind === 'localhost') {
       setPendingDesktopEnvironmentSetup(null)
       setStatus(
         'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
@@ -219,18 +242,14 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
     authState = getAuthState()
-    let activeRestEndpointMatches = restMatches.active
-    if (
-      !activeRestEndpointMatches &&
-      restMatches.saved.length === 0 &&
-      restMatches.sameOriginDifferentEndpoint.length > 0
-    ) {
+    let activeRestEndpointMatches = restMatch.kind === 'active'
+    if (restMatch.kind === 'path-conflict') {
       setPendingDesktopEnvironmentSetup(null)
       rejectSameOriginPathConflict(setStatus)
       return
     }
 
-    if (restMatches.saved.length > 1 && !activeRestEndpointMatches) {
+    if (restMatch.kind === 'ambiguous') {
       setPendingDesktopEnvironmentSetup(null)
       setStatus(
         'Desktop setup link rejected because multiple saved environments use this REST API.',
@@ -319,11 +338,11 @@ export function createDesktopEnvironmentSetupHandler({
         reportAuthenticationStateChanged(authState, setStatus)
         return
       }
-      restMatches = getDesktopEnvironmentRestMatches(
+      restMatch = resolveDesktopEnvironmentRestMatch(
         configState,
         linkedConfig.externalRestApiBaseUrl
       )
-      if (restMatches.localhost) {
+      if (restMatch.kind === 'localhost') {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
@@ -331,17 +350,13 @@ export function createDesktopEnvironmentSetupHandler({
         )
         return
       }
-      activeRestEndpointMatches = restMatches.active
-      if (
-        !activeRestEndpointMatches &&
-        restMatches.saved.length === 0 &&
-        restMatches.sameOriginDifferentEndpoint.length > 0
-      ) {
+      activeRestEndpointMatches = restMatch.kind === 'active'
+      if (restMatch.kind === 'path-conflict') {
         setPendingDesktopEnvironmentSetup(null)
         rejectSameOriginPathConflict(setStatus)
         return
       }
-      if (restMatches.saved.length > 1 && !activeRestEndpointMatches) {
+      if (restMatch.kind === 'ambiguous') {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop setup link rejected because multiple saved environments use this REST API.',
@@ -363,13 +378,8 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
-    if (restMatches.saved.length === 1) {
-      const [savedOption] = restMatches.saved
-      if (!savedOption) {
-        setPendingDesktopEnvironmentSetup(null)
-        setStatus('Could not resolve the saved desktop environment.', 'error')
-        return
-      }
+    if (restMatch.kind === 'saved') {
+      const savedOption = restMatch.option
       setPendingDesktopEnvironmentSetup(null)
       const selection = await handleSelectRuntimeConfig(savedOption.id, sessionGeneration)
       if (!selection) return
