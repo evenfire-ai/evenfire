@@ -129,6 +129,78 @@ describe('AppService deliberate team transition ownership', () => {
     await expect(restore).resolves.toEqual({ authenticated: true, me })
   })
 
+  it('accepts Google login when RPC discovery enriches its captured REST profile', async () => {
+    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+    const discovery = deferred<{
+      externalRestApiBaseUrl: string
+      rpcProxyBaseUrl: string
+      appName: string
+    }>()
+    const discoveryStarted = deferred<void>()
+    const getDesktopEnvironment = vi.fn(() => {
+      discoveryStarted.resolve()
+      return discovery.promise
+    })
+    const loginResponse = deferred<{
+      token: string
+      me: {
+        id: string
+        email: string
+        name: string
+        picture: null
+        teamId: string
+        teamName: string
+        role: string
+      }
+    }>()
+    const loginStarted = deferred<void>()
+    const me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const app = service as unknown as {
+      authClient: unknown
+      rpcClient: unknown
+      getDependenciesHealth(): Promise<unknown>
+    }
+    const googleLogin = vi.fn(() => {
+      loginStarted.resolve()
+      return loginResponse.promise
+    })
+    app.authClient = {
+      getDesktopEnvironment,
+      googleLogin,
+      health: vi.fn().mockResolvedValue({ status: 'ok' }),
+    }
+    app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
+
+    const login = service.googleLogin('synthetic-google-token')
+    const healthRequest = app.getDependenciesHealth()
+    await discoveryStarted.promise
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(googleLogin).not.toHaveBeenCalled()
+    discovery.resolve({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+      appName: 'Environment A',
+    })
+    await healthRequest
+    await loginStarted.promise
+    loginResponse.resolve({ token: 'session-a', me })
+
+    await expect(login).resolves.toEqual({ authenticated: true, me })
+  })
+
   it('keeps the public session generation stable through transient team hops', async () => {
     const { service } = await createNativeCommitTestHarness()
     const meA = {

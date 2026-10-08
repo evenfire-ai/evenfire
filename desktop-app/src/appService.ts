@@ -2040,20 +2040,30 @@ export class AppService {
     let loginRequest: ReturnType<AuthClient['googleLogin']> | undefined
     let registered = false
     try {
-      const attempt = await this.withNativeAuthEnvironmentCommit(async () => {
+      const sessionGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
         const sessionGeneration = ++this.sessionGeneration
-        const binding = this.captureAuthEnvironmentBinding()
-        loginRequest = this.authClient.googleLogin(idToken)
         this.interactiveLoginAttempts += 1
         registered = true
-        return { sessionGeneration, binding }
+        return sessionGeneration
       })
+
+      await this.resolveRuntimeConfigIfNeeded()
+      const binding = await this.withNativeAuthEnvironmentCommit(async () => {
+        this.assertSessionGeneration(sessionGeneration)
+        return this.captureAuthEnvironmentBinding()
+      })
+      const dispatch = await this.withNativeAuthEnvironmentCommit(async () => {
+        this.assertSessionGeneration(sessionGeneration)
+        this.assertAuthEnvironmentBinding(binding)
+        return { request: this.authClient.googleLogin(idToken) }
+      })
+      loginRequest = dispatch.request
       if (!loginRequest) throw new Error('Google login request was not dispatched')
       const result = await loginRequest
       return await this.withNativeAuthEnvironmentCommit(async () => {
-        this.assertSessionGeneration(attempt.sessionGeneration)
-        this.assertAuthEnvironmentBinding(attempt.binding)
-        return this.installAuthenticatedLogin(result, attempt.sessionGeneration)
+        this.assertSessionGeneration(sessionGeneration)
+        this.assertAuthEnvironmentBinding(binding)
+        return this.installAuthenticatedLogin(result, sessionGeneration)
       })
     } finally {
       if (registered) {
