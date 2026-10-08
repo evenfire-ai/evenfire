@@ -407,7 +407,7 @@ export function App() {
   // state after an UNsolicited close — crash/quit/GC — so a later tab switch
   // does not persist or re-close a dead embed). A FAILED open does not reset it:
   // the tab keeps owning whatever main may still hold (see
-  // `handleSandboxUiRemoved`).
+  // `handleSandboxUiOpenFailed`).
   const liveSandboxUiTabIdRef = React.useRef<string | null>(null)
   // Monotonic generation bumped on EVERY transition of the active embed (the
   // deactivation effect and the deep-link handoff are the only emitters). Each
@@ -1297,14 +1297,14 @@ export function App() {
     setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
     // Arm the store's embed-liveness ref on EVERY open, however it was launched
-    // (store launch, deep link, relaunch, or the in-page picker grid opening the
-    // embed directly without changing the active tab). The deactivation effect
-    // otherwise only arms it on an active-tab CHANGE, so an embed re-mounted
-    // WITHIN the still-active app tab — after a back-to-apps / unsolicited
-    // onClosed cleared the ref — would never be tracked and would leak (the
-    // native view paints over the next tab). Guard on `null` so this never
-    // clobbers the OUTGOING id the effect still needs on an app→app switch
-    // (ref stays the old tab; the effect reads it, then re-points to the new one).
+    // (store launch from the sidebar or the picker grid, deep link, or relaunch).
+    // The deactivation effect otherwise only arms it on an active-tab CHANGE, so
+    // an embed re-mounted WITHIN the still-active app tab — a strip relaunch
+    // after a back-to-apps / unsolicited onClosed cleared the ref — would never
+    // be tracked and would leak (the native view paints over the next tab).
+    // Guard on `null` so this never clobbers the OUTGOING id the effect still
+    // needs on an app→app switch (ref stays the old tab; the effect reads it,
+    // then re-points to the new one).
     if (liveSandboxUiTabIdRef.current === null) {
       const active = activeWorkspaceTab(workspaceTabsRef.current)
       if (active?.kind === 'app') liveSandboxUiTabIdRef.current = active.id
@@ -1334,7 +1334,7 @@ export function App() {
   // the open IPC leaves the previous view live in main, and only an owner makes
   // the deactivation effect `close()` it when the user leaves the tab. When main
   // already tore the view down, that `close()` is a harmless no-op.
-  const handleSandboxUiRemoved = React.useCallback(() => {
+  const handleSandboxUiOpenFailed = React.useCallback(() => {
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
@@ -2939,10 +2939,11 @@ export function App() {
                                     shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
                                     localSearchRequestId={sandboxLocalSearchRequestId}
                                     titlebarLeadingContainer={titlebarLeadingRoot}
+                                    onLaunchApp={handleOpenSandboxUiApp}
                                     onEmbeddedAppOpening={handleSandboxUiOpening}
                                     onEmbeddedAppMounted={handleSandboxUiMounted}
                                     onEmbeddedAppBack={handleSandboxUiClosed}
-                                    onEmbeddedAppRemoved={handleSandboxUiRemoved}
+                                    onEmbeddedAppOpenFailed={handleSandboxUiOpenFailed}
                                     onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
                                     onEmbedSlotTopChange={setChatDrawerEmbedTop}
                                     onEmbedSlotRightChange={setNotificationTrayLeft}

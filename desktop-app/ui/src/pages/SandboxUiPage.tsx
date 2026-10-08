@@ -2,16 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom'
 import { IconButton, StatusBanner } from '@components/Common'
 import { joinClasses } from '@lib/classNames'
+import type { ActiveSandboxUiApp } from '@/uiTypes'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
 import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
 import { IconCopy, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
+import { toActiveSandboxUiApp } from '../lib/sandboxUiAppSelection'
 import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
-import type {
-  SandboxUiLaunchApp,
-  SandboxUiPageProps,
-  SandboxUiShortcutOpenResult,
-} from './SandboxUiPage.types'
+import type { SandboxUiPageProps, SandboxUiShortcutOpenResult } from './SandboxUiPage.types'
 
 type PhasePillTone = 'allowed' | 'warning' | 'denied' | 'info' | 'muted'
 
@@ -212,16 +210,17 @@ export function SandboxUiPage({
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
   titlebarLeadingContainer = null,
+  onLaunchApp,
   onEmbeddedAppOpening,
   onEmbeddedAppMounted,
   onEmbeddedAppBack,
-  onEmbeddedAppRemoved,
+  onEmbeddedAppOpenFailed,
   onEmbedBoundsApplied,
   onEmbedSlotTopChange,
   onEmbedSlotRightChange,
   onNotify,
   onShortcutOpenResult,
-}: SandboxUiPageProps = {}) {
+}: SandboxUiPageProps) {
   const [apps, setApps] = useState<SandboxUiAppListing[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [launch, setLaunch] = useState<LaunchState>({ kind: 'idle' })
@@ -392,10 +391,7 @@ export function SandboxUiPage({
   // quit / partition GC) and the explicit back-to-apps `closeEmbed`.
 
   const openApp = useCallback(
-    async (app: SandboxUiLaunchApp): Promise<SandboxUiShortcutOpenResult> => {
-      if (app.ready === false) {
-        return { status: 'failed', message: 'This app is starting up. Try again in a moment.' }
-      }
+    async (app: ActiveSandboxUiApp): Promise<SandboxUiShortcutOpenResult> => {
       const [recipeNs, recipeName] = app.appRef.split('/', 2)
       if (!recipeNs || !recipeName) {
         return { status: 'failed', message: 'Invalid app reference' }
@@ -443,24 +439,11 @@ export function SandboxUiPage({
                 ? 'This app is starting up — try again in a moment.'
                 : message
         setLaunch({ kind: 'error', appRef: app.appRef, message: userFacing })
-        onEmbeddedAppRemoved?.()
+        onEmbeddedAppOpenFailed?.()
         return { status: 'failed', message: userFacing }
       }
     },
-    [onEmbeddedAppMounted, onEmbeddedAppOpening, onEmbeddedAppRemoved]
-  )
-
-  const onOpen = useCallback(
-    async (app: SandboxUiAppListing) => {
-      await openApp({
-        appRef: app.appRef,
-        label: appLabel(app),
-        icon: app.icon,
-        defaultPath: app.defaultPath,
-        ready: app.ready,
-      })
-    },
-    [openApp]
+    [onEmbeddedAppMounted, onEmbeddedAppOpening, onEmbeddedAppOpenFailed]
   )
 
   const closeEmbed = useCallback(async () => {
@@ -516,7 +499,7 @@ export function SandboxUiPage({
     })
   }, [onShortcutOpenResult, openApp, shortcutApp, shortcutOpenRequestId])
 
-  // Track bounds while mounted; also during 'minting' so onOpen can read
+  // Track bounds while mounted; also during 'minting' so openApp can read
   // the slot's rect AFTER the layout pass that renders the slot div.
   useEmbedBounds(
     embedSlotRef,
@@ -773,7 +756,7 @@ export function SandboxUiPage({
             const activatable = app.ready
             const activate = (): void => {
               if (!activatable) return
-              void onOpen(app)
+              onLaunchApp(toActiveSandboxUiApp(app))
             }
             return (
               <div

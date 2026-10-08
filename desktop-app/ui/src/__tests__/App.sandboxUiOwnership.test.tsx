@@ -17,11 +17,12 @@ import { mapKindToRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
 
-// Ownership of the native sandbox-ui embed across a FAILED relaunch. The
-// WebContentsView paints above the renderer DOM, so whichever app tab owns it
-// must emit `sandboxUi.close()` when the user leaves it — even after an open on
-// that tab failed, because main may still hold a view (a failure before the
-// open IPC never reaches main at all). These cases drive the REAL SandboxUiPage
+// Ownership of the native sandbox-ui embed. The WebContentsView paints above the
+// renderer DOM, so whichever app tab owns it must emit `sandboxUi.close()` when
+// the user leaves it — even after an open on that tab failed, because main may
+// still hold a view (a failure before the open IPC never reaches main at all),
+// and also when the app was opened from the in-page picker grid, which must
+// create that owning tab. These cases drive the REAL SandboxUiPage
 // (its open/catch path is the producer under test) and the REAL tab strip; the
 // App harness in App.chatDrawer.test.tsx stubs SandboxUiPage and so cannot.
 
@@ -42,6 +43,7 @@ type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
 
 const sidebarHarness = vi.hoisted(() => ({
   props: null as null | {
+    onSelect?: (item: string) => void
     onOpenSandboxUiApp?: (app: {
       appRef: string
       label: string
@@ -188,7 +190,11 @@ function makeController(): AppController {
     isHostAccessBlocked: vi.fn(() => false),
     handleSelectChatAgent,
     handleOpenNotification: vi.fn(async () => undefined),
-    handleNavSelect: vi.fn(),
+    // Only the Apps entry matters here: like the real navigation controller it
+    // shows the instance-less picker instead of opening a tab.
+    handleNavSelect: vi.fn((item: string) => {
+      if (item === DESKTOP_ROUTES.apps) showAppsPicker()
+    }),
     handleLogout: vi.fn(),
     pushToast: vi.fn(),
     setStatus: noop,
@@ -268,9 +274,10 @@ function makeSandboxUiBridge() {
 
 type OpenGfsPayload = Awaited<ReturnType<typeof openGfsResourcePayload>>
 
-describe('App sandbox-ui ownership survives a failed relaunch', () => {
+describe('App sandbox-ui embed always has an owning app tab', () => {
   let currentController: AppController
   let openGfsResourceCb: ((resource: OpenGfsPayload) => void) | null
+  let shortcutCommandCb: ((commandId: string, source: string) => void) | null
   let sandboxUi: ReturnType<typeof makeSandboxUiBridge>
   let slotRect: ReturnType<typeof vi.spyOn>
 
@@ -278,6 +285,7 @@ describe('App sandbox-ui ownership survives a failed relaunch', () => {
     vi.clearAllMocks()
     sidebarHarness.props = null
     openGfsResourceCb = null
+    shortcutCommandCb = null
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
@@ -299,7 +307,12 @@ describe('App sandbox-ui ownership survives a failed relaunch', () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
-        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        shortcuts: {
+          onCommand: vi.fn((cb: (commandId: string, source: string) => void) => {
+            shortcutCommandCb = cb
+            return vi.fn()
+          }),
+        },
         app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
         sandboxUi,
         pluginSdk: {
@@ -391,5 +404,58 @@ describe('App sandbox-ui ownership survives a failed relaunch', () => {
     await handOffMarkdownFromPlugin()
 
     await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+  })
+
+  it('opens an app from the in-page picker grid as its own active tab that closes the embed on leave', async () => {
+    // Reach the picker from a conversation through the sidebar, as a user does.
+    currentController.selectedAgent = 'agent-a'
+    currentController.activeChatId = 'chat-1'
+    ;(currentController as { chatList: unknown }).chatList = [{ id: 'chat-1', title: 'Planning' }]
+    render(<App />)
+    await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
+    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
+    expect(currentController.appsPickerActive).toBe(true)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Alpha' }))
+
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    const activeTab = activeWorkspaceTab(currentController.workspaceTabs)
+    expect(activeTab?.kind).toBe('app')
+    expect(activeTab?.app?.appRef).toBe(ALPHA!.appRef)
+    expect(currentController.appsPickerActive).toBe(false)
+    // The drawer comes up with the conversation the picker was reached from.
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith(
+      'agent-a',
+      expect.objectContaining({ chatId: 'chat-1', keepNavItem: true })
+    )
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+
+    await handOffMarkdownFromPlugin()
+
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+  })
+
+  it('opens a grid pick shown inside an app tab after back-to-apps as its own tab, leaving that tab intact', async () => {
+    await renderWithLiveApp(ALPHA)
+    const alphaTab = activeWorkspaceTab(currentController.workspaceTabs)
+    expect(alphaTab?.kind).toBe('app')
+
+    // The in-view "Back to apps" button is gone by design; the host shortcut
+    // command is the remaining real entry point.
+    act(() => shortcutCommandCb?.('app.backToApps', 'host'))
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+    // Still inside the Alpha tab, now showing the picker grid.
+    expect(currentController.workspaceTabs.activeTabId).toBe(alphaTab!.id)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Beta' }))
+
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    const activeTab = activeWorkspaceTab(currentController.workspaceTabs)
+    expect(activeTab?.id).not.toBe(alphaTab!.id)
+    expect(activeTab?.kind).toBe('app')
+    expect(activeTab?.app?.appRef).toBe(BETA!.appRef)
+    const alphaAfter = currentController.workspaceTabs.tabs.find(tab => tab.id === alphaTab!.id)
+    expect(alphaAfter?.app?.appRef).toBe(ALPHA!.appRef)
+    expect(alphaAfter?.title).toBe(alphaTab!.title)
   })
 })

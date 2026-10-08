@@ -3,13 +3,7 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SandboxUiPage as SandboxUiPageBase } from '../SandboxUiPage'
-
-// The page portals its mounted-app actions into the title bar's leading slot.
-// In isolation there is no WindowTitleBar, so supply a container (document.body)
-// to exercise the real portal path and keep the actions queryable via `screen`.
-function SandboxUiPage(props: React.ComponentProps<typeof SandboxUiPageBase>) {
-  return <SandboxUiPageBase titlebarLeadingContainer={document.body} {...props} />
-}
+import { LaunchingSandboxUiPage as SandboxUiPage } from './__fixtures__/launchingSandboxUiPage'
 
 const sandboxUi = {
   listApps: vi.fn(),
@@ -114,6 +108,63 @@ describe('SandboxUiPage', () => {
     expect(screen.getByText('Support Desk')).toBeTruthy()
     expect(screen.queryByText('No available apps yet')).toBeNull()
     expect(screen.getAllByRole('button', { name: /^Open / })).toHaveLength(2)
+  })
+
+  it('hands a grid pick to the owner instead of opening the embed itself', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: " Andy's Sales CRM ",
+          icon: 'data:image/png;base64,icon',
+          defaultPath: '/accounts',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    const onLaunchApp = vi.fn()
+    const onEmbeddedAppOpening = vi.fn()
+
+    render(
+      <SandboxUiPageBase onLaunchApp={onLaunchApp} onEmbeddedAppOpening={onEmbeddedAppOpening} />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+
+    expect(onLaunchApp).toHaveBeenCalledExactlyOnceWith({
+      appRef: 'sandbox-recipes/sales-crm',
+      label: "Andy's Sales CRM",
+      icon: 'data:image/png;base64,icon',
+      defaultPath: '/accounts',
+    })
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+    // Without an owner feeding the app back, the page stays on the picker.
+    expect(sandboxUi.open).not.toHaveBeenCalled()
+    expect(onEmbeddedAppOpening).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
+  })
+
+  it('does not launch an app that is still starting up', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: false,
+          phase: 'deploying',
+          updatedAt: null,
+        },
+      ],
+    })
+    const onLaunchApp = vi.fn()
+
+    render(<SandboxUiPageBase onLaunchApp={onLaunchApp} />)
+    fireEvent.click(await screen.findByText("Andy's Sales CRM"))
+
+    expect(screen.queryByRole('button', { name: "Open Andy's Sales CRM" })).toBeNull()
+    expect(onLaunchApp).not.toHaveBeenCalled()
   })
 
   it('does not let an old unmount timer close an immediate replacement page', async () => {

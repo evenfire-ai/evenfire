@@ -7,10 +7,6 @@ export type SandboxUiConversationOrigin = {
   teamId?: string
 }
 
-export type SandboxUiLaunchApp = ActiveSandboxUiApp & {
-  ready?: boolean
-}
-
 export type SandboxUiShortcutOpenResult =
   | { status: 'mounted' }
   | { status: 'failed'; message: string }
@@ -30,10 +26,14 @@ export type SandboxUiPageProps = {
   shortcutOpenRequestId?: number
   localSearchRequestId?: number
   titlebarLeadingContainer?: HTMLElement | null
+  // The picker grid hands the chosen app to the owner instead of opening it
+  // itself, so every embed is opened against a workspace tab that owns it. The
+  // app comes back through `shortcutApp` / `shortcutOpenRequestId`.
+  onLaunchApp: (app: ActiveSandboxUiApp) => void
   onEmbeddedAppOpening?: (app: ActiveSandboxUiApp) => void
   onEmbeddedAppMounted?: () => void
   onEmbeddedAppBack?: () => void
-  onEmbeddedAppRemoved?: () => void
+  onEmbeddedAppOpenFailed?: () => void
   onEmbedBoundsApplied?: () => void
   onEmbedSlotTopChange?: (topPx: number) => void
   onEmbedSlotRightChange?: (rightPx: number) => void
