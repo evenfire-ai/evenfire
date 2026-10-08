@@ -747,6 +747,8 @@ describe('GFS download store adversarial round: a failed duplicate removal stays
     for (const id of ids) {
       expect(exists(downloadDirectory(owner, id))).toBe(true)
       expect(exists(downloadDirectory(planter, id))).toBe(true)
+      // The indexed copy is forgotten only once its removal succeeds.
+      expect(indexedEntry(store, id)).toBeDefined()
     }
     // The copies left on disk are still charged to the caller root holding them.
     await expect(startTransfer(store, owner, OWNER, 2, 5)).rejects.toMatchObject({
