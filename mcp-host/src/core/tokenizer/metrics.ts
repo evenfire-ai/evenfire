@@ -6,7 +6,8 @@
  * Labels:
  *   - provider: any registered LlmProvider id (see llm/registryCore.ts)
  *   - reason:   'no_native_api' | 'rate_limit' | 'count_call_failed' |
- *               'unknown_model' | 'offline' | 'no_warmup'
+ *               'unknown_model' | 'offline' | 'no_warmup' |
+ *               'bpe_estimate_failed'
  *   - tier_chosen / from / to: 'passthrough' | 'workspace' | 'summarize' | 'truncate'
  */
 import { Counter, Histogram } from 'prom-client'
@@ -44,3 +45,4 @@ export type TokenizerFallbackReason =
   | 'unknown_model'
   | 'offline'
   | 'no_warmup'
+  | 'bpe_estimate_failed'
