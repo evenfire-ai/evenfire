@@ -47,14 +47,14 @@ without discarding the path, checksum, version or retained original.
 
 ## Effective limits
 
-| Environment variable                         |      Default |             Ceiling | Meaning                                   |
-| -------------------------------------------- | -----------: | ------------------: | ----------------------------------------- |
-| `MCP_HOST_GFS_MAX_FILE_BYTES`                |   `16777216` |         `209715200` | Largest GFS source admitted by MCP Host.  |
-| `MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`        | `1073741824` | deployment-approved | Aggregate retained download budget.       |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES` |  `268435456` |    aggregate budget | Per-caller retained download budget.      |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES`     |          `8` |                `64` | Retained files per caller, in any state.  |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY`   |          `1` |                 `2` | Simultaneous active transfers per caller. |
-| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`            |        `168` |              `8760` | Retention period for a completed copy.    |
+| Environment variable                         |      Default |             Ceiling | Meaning                                                           |
+| -------------------------------------------- | -----------: | ------------------: | ----------------------------------------------------------------- |
+| `MCP_HOST_GFS_MAX_FILE_BYTES`                |   `16777216` |         `209715200` | Largest GFS source admitted by MCP Host.                          |
+| `MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`        | `1073741824` | deployment-approved | Aggregate retained download budget.                               |
+| `MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES` |  `268435456` |    aggregate budget | Per-caller retained download budget.                              |
+| `MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES`     |          `8` |                `64` | Retained files per caller, complete copies plus active transfers. |
+| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY`   |          `1` |                 `2` | Simultaneous active transfers per caller.                         |
+| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`            |        `168` |              `8760` | Retention period for a completed copy.                            |
 
 All values are parsed as positive decimal byte/count/hour integers. Empty, fractional, negative, exponent, padded, partial, non-integer, and above-ceiling values fail startup. Per-caller storage cannot exceed aggregate storage.
 
@@ -100,21 +100,22 @@ file. Preparation does not parse the format, inject original bytes or image
 parts, or grant shell execution. Its transfer uses the task's cancellation
 signal and remaining execution duration.
 
-Repeated preparation first reauthorizes the remote metadata, then verifies the
-retained caller, resource version, size, expiry, private file and checksum. A
-valid copy keeps its download ID, path and expiry without another content
-transfer or quota reservation. Preparation and downloads pin receipts to a
-trusted task owner while its model, pending approval or execution can still use
-them. Reuse adds an owner without replacing another task's pin. A task releases
-its pin when its executor reaches a terminal state. A positively absent copy may
-release its charge; corrupt or ambiguous copies remain charged (see
-[Retention, quotas, and recovery](#retention-quotas-and-recovery)).
-A replacement needs fresh GFS authorization.
+Repeated preparation first reauthorizes the remote metadata, then looks for a
+copy that this Host process published for the same caller, drive, resource,
+version and size and that has not expired. It re-hashes that copy and checks
+its private mode and the inode it published. A valid copy keeps its download
+ID, path and expiry without another content transfer or quota reservation. Any
+mismatch removes the copy and the file is downloaded again under a new ID;
+reuse never matches a copy found on disk that this process did not publish (see
+[Provenance](#provenance-and-what-survives-a-restart)). Preparation and
+downloads pin receipts to a trusted task owner while its model, pending
+approval or execution can still use them. Reuse adds an owner without replacing
+another task's pin. A task releases its pin when its executor reaches a
+terminal state. A replacement needs fresh GFS authorization.
 
-After a clean v2 writer restart, pins alone do not disable delivery. Fresh remote authorization and source version, size,
-checksum and caller validation can rebind the exact restored task owner to the
-new writer session. Other tasks keep their pins. A task ID alone is insufficient
-to recover access.
+Pins and provenance are held in memory. After a Host restart no copy is reused
+and no pin exists: a resumed task that needs the file downloads it again under
+a new ID, after fresh GFS authorization.
 
 `shell_exec` remains the trust boundary:
 
@@ -128,7 +129,7 @@ to recover access.
 - Combined retained command output is bounded to 1 MiB. Live progress is bounded to 64 KiB. Exceeding the output bound terminates the process group and returns a truthful `output_limit_exceeded` result.
 - `shell_exec` never calls the GFS download store (#1019). It does not acquire
   a processing lease, does not depend on `store.isAvailable()`, and keeps
-  running while the store is recovery-required. When a Host-owned store exists,
+  running while the store is unavailable. When a Host-owned store exists,
   the shell stays bound to the verified caller root; before every command it
   re-verifies that the caller root is still canonical. That check is per-user
   directory scoping, not store state. Live approval of `shell_exec` and
@@ -140,38 +141,73 @@ to recover access.
   only its own transfers and task receipt owners. A running shell does not
   protect a copy and does not delay `close()`.
 
-Accepted risks of this decoupling:
+### Accepted risks
 
 1. Expiry or eviction can remove a retained copy while a command is using it.
    A file descriptor that is already open keeps reading; a later open gets
    `ENOENT`.
-2. A command can alter a retained copy. Two checks prevent its reuse, and they
-   handle it differently:
-   - `reusableReceipt` checks the file type, size, `0600` mode and SHA-256
-     before reuse. On any mismatch, or when the copy cannot be opened, it sets
-     the record to `missing`, deletes its stored checksum and persists the
-     ledger. It writes no log and no metric. The record stays charged; the
-     hourly expiry sweep removes it after its TTL if the Host is still running.
-   - Startup reconciliation re-hashes every `completed` copy and sets an
-     altered one to `quarantined`, keeping its checksum. It also sets every
-     record that is not `completed`, including a `missing` one, to
-     `quarantined`. A quarantined record is never expired or evicted.
-3. The processing lease was never a security boundary: executors share the Host
-   UID and run without a sandbox. Live approval, `BasicSafety` validation and
-   credential-slot stripping remain the shell's controls.
-4. Admission cleanup no longer runs before a shell, so a command can read an
-   expired copy until the hourly sweep removes it.
+2. A command can alter or delete a retained copy. Reuse and managed reads
+   re-hash the copy against the digest this process holds in memory and check
+   that the file is still the inode it published. On any mismatch the copy is
+   removed (`incomplete_removed`) and the file is downloaded again; altered
+   bytes never reach a model. A deleted copy is a cache miss.
+3. Executors share the Host UID and run without a sandbox or chroot. Live
+   approval, `BasicSafety` validation and credential-slot stripping remain the
+   shell's controls. The store has no lease or lock that a shell holds or
+   waits on.
+4. No admission or cleanup runs before a shell, so a command can read an
+   expired copy until the next sweep removes it.
+5. Caller isolation is a property of the managed store APIs, not of the shell.
+   `createTransfer`, `publish`, `fail`, reuse, managed reads and pin release
+   answer another caller's download exactly as they answer an ID that does not
+   exist, with the same error code and message, so a caller cannot learn that
+   another user's files exist through them. `shell_exec` runs with the Host
+   UID and no chroot: an approved command can list and read other users'
+   files under `users/*`, including their `.gfs-downloads` copies. Per-user
+   isolation of the shell (a per-user UID, a chroot or a sandbox) is out of
+   scope of #1028; approval remains the shell's control.
+6. Quotas, free space and the Host-wide active-transfer limit are shared by
+   every caller on a Host. A caller can therefore observe aggregate pressure
+   from others (`host_quota_exceeded`, Host-scope `download_busy`, or a Host
+   eviction that removes one of its own unpinned copies). These signals carry
+   no identity, count, name or path of another caller's files.
+7. Check-then-use windows on paths are narrowed, not closed. Node has no
+   `openat`/`renameat`/`unlinkat`, so the store cannot hold a directory
+   descriptor across a check and the call that uses the path. It opens files
+   with `O_NOFOLLOW` and decides on the descriptor (`fstat` device and inode),
+   publishes only the inode it hashed, re-checks the input directory created at
+   admission before each rename, and removes a directory by first renaming it
+   to a private `.trash-<uuid>` name inside its verified parent, checking the
+   parent again and only then removing the private name (the rename is undone
+   if the parent moved). The windows that remain can be won only by a process
+   running with the Host UID, which can already alter or delete those files
+   directly (risk 3); winning one gives no capability beyond that.
 
 Partial reads are not possible, because publication is an atomic `rename` of
 `source.partial`.
 
-Unix directory modes and random directory names do not provide cross-caller OS isolation when a Host shares one UID. Approved arbitrary shell access remains a documented Stage 1 residual; stronger executor isolation is separate Stage 2 work.
+Unix directory modes and random directory names do not provide cross-caller OS
+isolation when a Host shares one UID: an approved shell command can create,
+overwrite or delete any file under `users/`. The store therefore never takes
+provenance from disk. Reuse and managed reads are served only for copies this
+Host process published, and their content is re-hashed against the digest held
+in memory; a mismatch deletes the copy and the file is downloaded again.
+Directories found on disk that this process did not publish (left by a previous
+process or planted by a command) are counted against the quota of the
+`users/<key>` directory that contains them and removed when they expire or are
+evicted; they are never reused, never read back into a model and never pinned.
+A Host restart therefore loses reuse for every copy, at the cost of one extra
+download per file; accounting and cleanup survive the restart. Approved
+arbitrary shell access remains a documented Stage 1 residual; stronger executor
+isolation is separate Stage 2 work.
 
 Shell cleanup signals and waits for the detached process group before the tool result is returned, or reports `process_group_termination_failed` when its termination cannot be confirmed. A process that moved outside that group (for example through `setsid` or a detached spawn) can keep stdout/stderr open after the group is gone, so the Host bounds settlement without waiting for those pipes to close. After a timeout, cancellation or output overflow, termination has 5000 ms of SIGTERM grace and the call settles at the 6000 ms cleanup budget at the latest. When the command exits on its own, the Host checks every 1000 ms whether the process group is gone and settles once it is. If the group never disappears, the execution timeout still applies, followed by the same 6000 ms cleanup budget. In both cases the Host stops output capture, the result starts with `[stdio_held_by_detached_process: <reason>; ...]` and is an error, and a `shell_stdio_held_by_detached_process` warning is logged. The escaped process is not signalled and may keep running; this bounds the call, it does not contain the process. Redirect background output to a file or `/dev/null`. Operating systems may reuse a process-group identifier after the original leader has been reaped; Stage 1 narrows that window by signaling immediately on leader close, but stronger executor identity is required to eliminate it.
 
 Generic workspace tools reject direct and symlink-resolved access to
-`.gfs-downloads` and the complete `.gfs-download-store` accounting namespace
-through `file_read`, `file_write`, memory read/write, list/tree, and search.
+`.gfs-downloads`, the pre-#1028 `.gfs-download-store` directory and every
+`.gfs-download-store.retired-*` tree through `file_read`, `file_write`, memory
+read/write, list/tree, and search. A name that only resembles them (for example
+`.gfs-download-storex`) is an ordinary workspace path.
 The protected absolute target is checked before relativizing it against a
 workspace root, including when that root itself was replaced by an alias.
 
@@ -182,120 +218,184 @@ ordinary text tasks continue while managed tools remain denied. A legitimate
 platform alias on the configured Host base is retained. Managed shell also
 revalidates its actual canonical root before spawning.
 These checks prevent a known redirected root from granting generic tool access
-to accounting. They do not provide FD-anchored executor isolation against all
+to the store. They do not provide FD-anchored executor isolation against all
 shared-UID filesystem races; that remains the Stage 2 boundary.
 
 ## Retention, quotas, and recovery
 
-- Completed copies have a configured maximum retention time, seven days by
-  default. Task receipt pins protect a copy past its TTL until the task
-  releases them. A shell execution does not protect a copy (accepted risk 1).
-- Host and caller quotas account for partial and completed files. Unknown or corrupt accounting fails closed rather than reporting zero usage.
-- A new store publishes an atomic schema-1 ledger before accepting transfers. Every existing ledger is parsed, including empty content; invalid record or owner maps, and malformed legacy processing-lease maps, are rejected with `corrupt_store_ledger`.
-- A pre-existing store directory with a missing ledger is unknown accounting, including an interrupted first initialization before ledger publication. Startup rejects it and preserves retained bytes for operator recovery instead of silently resetting quota. This can require recovery after a bootstrap interruption.
-- Startup does not reconstruct an accounting directory deleted in its entirety while caller copies remain. Approved shell commands share the Host UID and can destroy this state; whole-store deletion remains outside the recovery guarantee and requires operator inventory of retained copies.
-- Admission may evict the oldest copies whose record is `completed`, that have
-  no active transfer and no task receipt owner, and whose content re-verifies.
-  The complete eviction plan must satisfy both Host and caller quotas before any
-  copy is removed. A caller-quota denial can only evict that caller's own
-  copies. Records in any other state (`transferring`, `missing`,
-  `cleanup_failed`, `quarantined`), pinned or active copies, and copies that
-  fail verification are never pressure victims. Quota limits still reject a
-  request when no safe complete plan exists.
-- Before pressure effects, current verified filesystem capacity must cover the
-  incoming block-rounded reservation, the 16 MiB safety margin and pending
-  active reservations. Apparent file length and allocated blocks do not prove
-  how much a reflink or snapshot deletion will release. This generic policy does
-  not credit hypothetical physical reclamation; insufficient current capacity
-  rejects without deleting pressure victims. Quota eviction can still proceed
-  when current physical capacity is sufficient. Capacity is checked again after
-  settlement and before admission because external filesystem changes can race.
-- Only positively identified expired or pressure-evictable entries are deleted.
-  Quota charges are released only after positive filesystem absence. A cleanup
-  failure remains charged and is observable for recovery.
-- Startup reconciles the ledger and partial files before the capability is advertised.
-- Legacy processing leases written by builds before #1019 are discarded at
-  initialize, after the ledger is parsed and before reconciliation. No lease in
-  an older ledger can protect an executor of the current boot, and a lease left
-  by a crashed Host would otherwise fence the store forever. The removal is
-  persisted first. When that persist succeeds, the Host logs a warning with the
-  count and increments `clerum_gfs_legacy_processing_leases_discarded_total`.
-  When it fails, initialize rejects and the Host logs a `warn` with outcome
-  `unknown` and the lease count; the counter is not incremented. The outcome is
-  unknown because the persist can fail after the rename, while syncing the
-  store directory: the lease-free ledger may already be the one on disk. In
-  that case the next initialize finds no leases and reports no discard, so the
-  `unknown` warning is the only record of it. The counter therefore counts only
-  confirmed discards. Records that protected copies are then reconciled like
-  any other: an intact completed copy is reusable, an altered or unfinished one
-  is quarantined.
-- At the end of initialize, after reconciliation and the final persist, the
-  Host counts every `quarantined` record in the ledger, including those this
-  boot quarantined, and sets the gauge
-  `clerum_gfs_download_store_quarantined_records` to that count. The gauge
-  holds the current count and does not accumulate across boots. When the count
-  is above zero the Host logs the warning
-  `GFS download store holds <n> quarantined record(s) charged to quota`. Quarantined records stay charged to
-  quota and are never expired, evicted or reused. Operator recovery can return
-  one to `completed` only when its published copy still matches its stored size
-  and checksum; it cannot reclassify or remove a quarantined record whose
-  content no longer matches its checksum (recovery step 5).
-- Shutdown stops new admission, drains active transfers where possible, and leaves unproven recovery state protected.
-- Pending and queued admission rechecks shutdown after asynchronous validation and persistence. Shutdown rechecks active ownership before releasing the writer lease.
+The store keeps no ledger, lock, fence or database. Everything it needs to
+account for and clean up copies is on disk in the directory of each download;
+everything it needs to trust a copy (who downloaded it, its digest, its pins) is
+held in the memory of the Host process that published it. No state on disk can
+make a Host refuse downloads.
 
-Writer exclusion uses the existing SQLite dependency with a kernel-held
-exclusive transaction. Its database inode and permanent versioned
-`writer.lock` fence remain in place across restart. Process death releases the
-kernel lock; it does not authorize deleting the fence or database. A second
-writer is refused even when Pods overlap on a single-node ReadWriteOnce PVC.
-Missing or changed ownership objects require operator recovery.
-Kubernetes permits multiple Pods on one node to use a ReadWriteOnce volume;
-the access mode does not provide writer exclusion. See
-[persistent-volume access modes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes).
+### On-disk layout
 
-The store restores only the expected fsGroup expansion of an owned private
-inode, through an open descriptor, then revalidates its device, inode and path.
-It retains private 0700 directories and 0600 files. Unexpected permissions,
-owners, groups, symlinks and hard links remain errors.
+```
+<hostRoot>/users/<key>/.gfs-downloads/                    0700
+<hostRoot>/users/<key>/.gfs-downloads/input-<uuid>/       0700
+    source.partial         0600  while the transfer is active
+    meta.json.tmp-<uuid>   0600  during publication only
+    meta.json              0600  the receipt (schema 1)
+    source                 0600  the published copy
+```
 
-A store initialization failure leaves safe RPC capabilities running and records
-a recovery-required download state. Caller workspace binding remains in force.
+`<hostRoot>/users/<key>` is the verified caller workspace. The receipt path
+given to the model is `.gfs-downloads/input-<uuid>/source`, relative to that
+workspace. `<uuid>` is random. Names in `.gfs-downloads` that do not match
+`input-<uuid>` belong to the user and are never listed, charged or removed,
+except `.trash-<uuid>` directories, which a removal interrupted between its
+rename and its delete leaves behind and the next sweep removes.
+
+### What counts as a complete download
+
+A directory is complete when `meta.json` is a regular file of at most the
+metadata size limit, opens without following a symlink, and parses as a schema-1
+receipt for the directory's own ID; its source fields, size, digest and dates
+are well formed; the size is within the GFS admission limit; `expiresAt` is not
+before `createdAt` and not later than `createdAt` plus the retention period; and
+`createdAt` is at most 60 seconds ahead of the Host clock. `source` must be a
+regular file (not a symlink) of exactly the recorded size. Anything else inside
+an `input-<uuid>` directory that is not an active transfer of this process is
+incomplete: it is not charged and the next sweep removes it.
+
+### Provenance and what survives a restart
+
+Each complete copy the store knows about is either _published_ (written by this
+Host process) or _adopted_ (found on disk by a sweep). Only published copies are
+reused, served by managed reads or pinned, and only for the caller that
+downloaded them. Adopted copies count against the quota of the `users/<key>`
+directory that holds them, are evicted first and are removed when they expire.
+A restart turns every copy into an adopted one: the files stay charged and are
+cleaned up on schedule, and a model that needs one downloads it again.
+
+### Publication order
+
+1. The transfer streams into `source.partial`, opened with `O_NOFOLLOW`.
+2. The store re-checks the caller directory and the input directory created at
+   admission (same device and inode), hashes `source.partial` through its
+   descriptor, compares the digest and size, sets mode `0600` and syncs it.
+3. It writes `meta.json.tmp-<uuid>` (`O_EXCL`, `O_NOFOLLOW`, `0600`), syncs it
+   and renames it to `meta.json`.
+4. It renames `source.partial` to `source`, syncs the directory, and checks that
+   `source` is the inode it hashed.
+5. The copy enters the in-memory index as published and the receipt is
+   returned.
+
+A Host that stops after step 3 leaves `meta.json` without `source`; one that
+stops earlier leaves no `meta.json`. Both are incomplete and are removed by the
+next sweep. A failed publication returns `storage_write_failed` (or
+`download_missing` when the partial file is no longer the one admitted) to that
+call only; the caller removes the directory and the next admission is not
+affected.
+
+### Quotas and eviction
+
+Usage is the sum of complete copies plus the reservations of active transfers.
+A caller's usage is everything under its own `users/<key>` directory, whoever
+wrote it. Admission refuses with `caller_quota_exceeded` when the caller's bytes
+or files would exceed its limits, and with `host_quota_exceeded` when the Host
+totals would (1024 MiB and 64 files by default). Before refusing, the store
+plans an eviction of complete, unpinned copies that are not being transferred:
+adopted copies first (oldest `createdAt` first), then published copies least
+recently used first (publication, reuse or managed read). A caller-quota denial
+evicts only that caller's own copies; a Host-quota denial can evict any
+caller's. The whole plan is computed before anything is deleted: when no plan
+fits, nothing is deleted and the admission is refused. Eviction candidates are
+not hashed.
+
+Free space is checked before the plan and again after it. Free space must cover
+the block-rounded size of the new download, every active reservation and a
+16 MiB margin; otherwise the admission is refused with `host_quota_exceeded`
+(reason `free_space`). The first check runs before any eviction, so a volume
+that cannot hold the download costs no cached copy. A Host runs at most 2
+transfers at once, and a caller at most its configured concurrency; beyond that
+admission returns `download_busy`.
+
+If limits are lowered, existing copies remain charged and new admissions evict
+or are refused until usage falls below the new policy.
+
+### Expiry and sweeps
+
+A sweep runs when the store initializes, before every admission, and hourly
+after that. It walks `users/*/.gfs-downloads/input-*` without following
+symlinks. It removes incomplete directories and expired copies that no task
+pins. It never touches a directory that is an active transfer of this process,
+and it never replaces a published copy: another directory carrying the same ID
+is removed. A `.gfs-downloads` that is a symlink or not a directory is removed
+without following it and recreated on the next admission. A directory that
+cannot be listed is skipped and retried by the next sweep (`sweep_failed`). A
+removal that fails is logged with its error code (`remove_failed`) and retried
+by the next sweep; the copy stays where it is. Expiry is the boundary itself: a
+copy whose `expiresAt` equals the current time is expired for reuse, managed
+reads and the sweep.
+
+Every removal renames the directory to a private `.trash-<uuid>` name inside its
+verified parent, checks the parent again and removes only the private name; the
+removal is proven by `ENOENT` afterwards.
+
+### Retention pins and cold resume
+
+A task that prepares or downloads a copy pins it while its model, pending
+approval or execution can still use it. A pin protects the copy from expiry and
+eviction and is released when the task reaches a terminal state. Pins are per
+caller: another caller using the same owner ID holds a different pin. Pins are
+held in memory, so after a restart a resumed task finds its copy unpinned and
+not reusable, and downloads it again. A shell command never pins a copy.
+
+### Integrity
+
+Reuse re-hashes the whole copy through a descriptor whose inode must be the one
+published, and checks its size and `0600` mode. A managed read reads exactly the
+recorded size from that descriptor, refuses a longer file and compares the
+digest with the one in memory, never with `meta.json`. A mismatch removes the
+copy (`incomplete_removed`) and answers `download_missing`. A managed prefix
+read (file-type detection) checks the inode, size and mode but does not hash.
+
+### Errors visible to the model
+
+| Code                    | Meaning                                                                                                          |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `caller_quota_exceeded` | The caller's retained bytes or files would exceed its limits and eviction cannot make room.                      |
+| `host_quota_exceeded`   | The Host's bytes or files, the admission size limit or free space would be exceeded.                             |
+| `download_busy`         | Too many active transfers, the store is closed or closing, or no such transfer exists.                           |
+| `download_missing`      | No copy this process published for this caller has that path, or the copy failed verification.                   |
+| `download_expired`      | The copy or the transfer is past its expiry.                                                                     |
+| `publication_cancelled` | The task was cancelled or ran out of time while the copy was being verified or published.                        |
+| `storage_write_failed`  | A filesystem operation failed during admission, publication or removal.                                          |
+| `workspace_unavailable` | The store is not initialized, or the Host root or caller directory is not a real directory inside the Host root. |
+| `caller_mismatch`       | The request carries no caller identity or a malformed retention owner ID.                                        |
+
+Another caller's download is answered with the same code and message as an ID
+that does not exist (`download_missing` for reads and publication,
+`download_busy` for a transfer being abandoned).
+
+### Initialization and availability
+
+`initialize()` fails only when the Host root is not a usable directory
+(`workspace_unavailable`). The runtime then logs `GFS download store
+unavailable; managed GFS operations are disabled and initialization is retried
+by the hourly cycle`, keeps safe RPC capabilities running, and retries hourly.
 Managed shell execution keeps the verified caller root and continues; it cannot
-fall back to the Host's shared workspace. A store whose initialization
-succeeded is available. It becomes unavailable only afterwards, when a ledger
-persist fails or writer ownership is lost. The periodic cleanup lifecycle then
-stops, and the runtime logs the error `GFS download store is no longer
-available; periodic cleanup stopped and managed GFS operations are disabled`.
+fall back to the Host's shared workspace. A failed sweep never makes the store
+unavailable.
 
-Verified contention with an active v2 writer and a valid unchanged ledger is a
-temporary state. The runtime retries that case up to 60 times at two-second
-intervals. Missing, legacy, corrupt or changed ownership is not a transient
-retry condition. Retry and cleanup use one supervised lifecycle, so a slow
-operation cannot overlap another or be lost from the shutdown join. Cleanup
-starts after successful acquisition, including acquisition after retry.
-Shutdown cancels scheduling, joins outstanding work and closes held writer
-ownership even when delivery is unavailable.
-
-Reuse verifies the checksum of one retained completed copy under store
-serialization; its cost is the size of that one copy.
-Startup reconciliation hashes every retained completed copy of every caller, so
-its cost is bounded by the Host budget, 1024 MiB by default
-(`MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`). This correctness check has not been
-benchmarked on every supported PVC.
-
-A pending task pin can survive a Host restart and protect bytes beyond TTL.
-If the task never resumes, use the operator inventory and exact terminal-owner
-recovery protocol. A time limit or cache pressure cannot prove that owner is
-unused. Monitor bounded counts and retained bytes; do not label metrics with
-owner or caller IDs.
+`close()` stops admission, waits up to 5 seconds for active transfers and then
+closes; directories of transfers still active are removed by the next start.
 
 Execution safety binding is independent of delivery eligibility and of store
 availability. Cron, internal and approval-disabled tasks associated with this
-store cannot obtain a shared-root shell, during recovery or otherwise. Trusted
-system tasks use the existing system workspace contract; a missing verified
-root denies spawning.
-Healthy unattended execution keeps its existing policy, while large workspace
-delivery still requires its attended caller and approval capability.
+store cannot obtain a shared-root shell. Trusted system tasks use the existing
+system workspace contract; a missing verified root denies spawning. Healthy
+unattended execution keeps its existing policy, while large workspace delivery
+still requires its attended caller and approval capability.
+
+Kubernetes permits multiple Pods on one node to use a ReadWriteOnce volume, so
+two Hosts can overlap during a rolling update. The store takes no lock across
+processes. During the overlap each Host enforces the quota on its own
+reservations, so their combined usage can exceed it, and the starting Host's sweep can remove a transfer the terminating
+Host is still draining; that transfer fails with `storage_write_failed` in a
+task that is being interrupted anyway.
 
 ## Metrics
 
@@ -305,176 +405,60 @@ The global `/metrics` endpoint exposes fixed-cardinality instruments:
 - `clerum_gfs_download_transfers_total{outcome}`
 - `clerum_gfs_download_duration_seconds`
 - `clerum_gfs_download_active`
-- `clerum_gfs_download_quota_total{scope,reason}`
-- `clerum_gfs_download_expiry_total{outcome}`
+- `clerum_gfs_download_quota_total{scope,reason}`, with `reason` one of
+  `storage_bytes`, `retained_files`, `active_downloads`, `free_space`
+- `clerum_gfs_download_expiry_total{outcome}`, with `outcome` one of
+  `expired_removed` (expired or evicted), `incomplete_removed`, `remove_failed`,
+  `retired_legacy_store`, `sweep_failed`
 - `clerum_gfs_shell_output_limits_total{outcome}`
-- `clerum_gfs_legacy_processing_leases_discarded_total` (counter of legacy
-  processing leases whose discard at initialize was persisted; an unconfirmed
-  discard is logged with outcome `unknown` and not counted)
-- `clerum_gfs_download_store_quarantined_records` (gauge, no labels: GFS
-  download store records currently quarantined, set at each initialize after
-  reconcile; they stay charged to quota. Operator recovery reclassifies only
-  copies whose content still matches their recorded hash; any other
-  quarantined copy stays charged, and the operator recovery tool cannot
-  release it.)
 
-Labels contain bounded enums only. Caller, resource, download, command, path, correlation IDs, filenames, credentials, and raw output are prohibited as metric labels.
+Labels contain bounded enums only. Caller, resource, download, command, path, correlation IDs, filenames, credentials, and raw output are prohibited as metric labels and log fields.
+
+Logs from the store use the component `GfsDownloadStore`:
+
+- `info` `GFS download store initialized` with `removedIncomplete`,
+  `removedExpired`, `retainedCompleted`, `retainedBytes`, `adopted` and
+  `retiredLegacyStore`.
+- `warn` `GFS download store could not remove a download directory; the next
+sweep retries it` and `GFS download store could not list a download
+directory; the next sweep retries it`, each with an errno `code`.
+- `warn` `GFS download store closed with active transfers; their directories
+are removed at the next start` with the `active` count.
 
 ## Rollout and rollback
 
 1. Apply the ConfigMap environment values through the supported HCC rollout. Updating a ConfigMap alone does not update an existing Pod.
 2. Verify the new values and `/metrics` endpoints from newly created Hosts.
-3. Before a writer-policy transition, hold the owned runtime mutation lease,
-   stop the old Host and its executors, and prove they cannot mutate the store
-   for the entire transition. An absent legacy `writer.lock` is insufficient:
-   old empty-file execution leases were not durable. Existing legacy stores
-   therefore require an explicit operator transition; a genuinely new empty
-   store may initialize directly.
-4. To roll back, retain the versioned writer fence and database, ledger and
-   `.gfs-downloads`. An older image that does not understand the fence must
-   refuse writing. Removing that protection to run an older image requires the
-   same explicit physical fence and reviewed inventory; an image rollback
-   alone does not authorize the ownership transition.
-5. Cleanup or compaction during rollback requires separate operator authorization and a usage receipt. Do not treat an image rollback as permission to erase retained copies.
 
-If limits are lowered, existing retained copies remain charged and new admissions are rejected until usage falls below the new policy.
+No manual action is needed on a volume written by an earlier image. Every sweep,
+including the first one at startup, retires the ledger store of the pre-#1028
+image:
 
-### Writer fence versions and persistent-disk reattach (#1028)
+1. `<hostRoot>/.gfs-download-store` (its ledger, writer fence, SQLite database
+   and lease files) is renamed to `.gfs-download-store.retired-<uuid>` inside
+   the Host root. Nothing inside it is read. The Host logs `warn` `Retired the
+pre-#1028 GFS download store` with the number of files and bytes it held,
+   and `clerum_gfs_download_expiry_total{outcome="retired_legacy_store"}`
+   increments.
+2. Every `.gfs-download-store.retired-*` tree is removed the way any store
+   directory is.
+3. The sweep removes every `input-<uuid>` directory the old store left, because
+   none has a schema-1 `meta.json`; completed, transferring and quarantined
+   records of the old store all go this way. The startup `info` line reports
+   them as `removedIncomplete`, with `retiredLegacyStore: true`.
 
-`writer.lock` names the writer database by ownership and inode. The v2 fence
-(`{schemaVersion:2, ownership, databaseDevice, databaseInode}`) also recorded
-the device number, and a persistent disk reattached under another device node
-changes that number while the inode stays the same. A v2 Host whose disk came
-back on another `/dev/sdX` was refused with a permanent `writer_locked`.
+A step that fails is logged as `warn` `GFS download store could not retire the
+pre-#1028 store; the next sweep retries it` with an errno `code` and the `step`
+(`inspect`, `rename`, `list` or `remove`), and counts as `remove_failed`. The
+store stays available; the leftover costs disk space until a later sweep
+removes it. A retired tree is protected from workspace tools until then.
 
-The current image accepts a v2 or v3 fence when its ownership matches and its
-`databaseInode` equals the inode of the open writer database; the device is
-ignored. An accepted fence is never rewritten. A v3 fence
-(`{schemaVersion:3, ownership, databaseInode}`) is written only when a store is
-bootstrapped with no fence. Live writers are still excluded by the SQLite
-`BEGIN EXCLUSIVE` lock and by the descriptor/name device and inode checks.
-When a v2 fence with a stale device is accepted, the Host logs one info line,
-`GFS writer fence v2 accepted with stale device`, with `storedDevice` and
-`currentDevice`. A writer refusal is logged with `writerDetail`, a closed value
-naming the refusal branch (for example `database_identity_changed`,
-`legacy_fence`, `sqlite_busy_verified`, `ownership_lost`).
-
-Operator note: v2 remains on disk on pre-existing Hosts. Do not delete
-`writer.lock`. Inspect the store (ledger, writer-fence and source-inventory
-hashes) before any transition; the inspected fence hash stays valid because an
-accepted v2 fence is not rewritten.
-
-| Image after the fix has run               | Store with a v2 fence (pre-existing Host)                                                  | Store with a v3 fence (bootstrapped by the fix)  |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------ |
-| Production main image (no GFS store code) | Ignores the store directory; works                                                         | Ignores the store directory; works               |
-| Image with the v2 fence (before #1028)    | Works while the device number is unchanged; a reattach under another device locks it again | Refuses the v3 fence as legacy (`writer_locked`) |
-| Current image                             | Accepted by inode                                                                          | Accepted by inode                                |
-
-Deleting `writer.lock` to force a rollback does not work: with a ledger present
-the store refuses with `unsupported_store_schema`, and the fence is what keeps
-older binaries excluded.
-
-### Records quarantined by builds before the #1022 fix
-
-A build before this fix quarantined every record on any boot whose ledger held
-a processing lease from an earlier writer session, including intact completed
-copies. The fixed build discards the leases but does not reclassify those
-records. A quarantined record is never expired and never evicted, and it stays
-charged to quota. The defaults are 8 files (`MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES`)
-and 256 MiB (`MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES`) per caller, and 64
-files (fixed) and 1024 MiB (`MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`) per Host.
-Pressure eviction cannot free them. A caller whose quarantined records alone
-fill its limit gets `caller_quota_exceeded` on every new download; once
-quarantined records alone fill the Host limit, every caller gets
-`host_quota_exceeded`.
-
-After the first rollout of the fixed build:
-
-1. Read the startup warning `GFS download store holds <N> quarantined
-record(s) charged to quota` and the gauge
-   `clerum_gfs_download_store_quarantined_records`. N is the number of
-   quarantined records in the ledger after startup reconciliation; it includes
-   records the old build quarantined and any copy this boot found altered or
-   unfinished.
-2. Compare N, and the bytes those records hold, with the quotas above before
-   running any GFS download check. A caller already at a limit fails every new
-   download until its quarantined records are released.
-3. To release them, run the
-   [explicit operator recovery protocol](#explicit-operator-recovery-protocol)
-   under a physical fence. With no lease left in the ledger, every quarantined
-   record whose published copy still matches its stored size and checksum
-   returns to `completed`, and partial copies without a checksum can be
-   selected for removal. A record whose content no longer matches its checksum
-   stays quarantined and charged (step 5).
-
-## Explicit operator recovery protocol
-
-The local operator module exports `inspectGfsStoreRecovery` and
-`recoverGfsStoreUnderPhysicalFence`. It is not a Host RPC or model tool.
-Inspection returns reviewed ledger, writer-fence and source-inventory SHA-256
-values, counts and bounded opaque selection IDs. It does not return source
-contents, filenames, caller identities, commands or credentials.
-
-1. Resolve the exact Host workspace PVC, immutable workload identities, runtime
-   context and mutation-lease owner. Inventory every consumer of that PVC,
-   including terminating workloads and executors whose original Pod metadata
-   may have disappeared.
-2. Establish physical executor and writer settlement under an exclusive runtime
-   fence. Replica count, API Pod absence, PID reuse, time limits and SQLite lock
-   acquisition alone cannot establish it. Keep that fence active through the
-   whole operation and recheck it before filesystem effects.
-3. Inspect and review the three hashes and exact selection IDs. Unknown or
-   unjournaled caches fail inventory even with an empty ledger. Select only
-   task owners proved terminal and explicitly approved unused partial copies
-   (`removablePartialIds`). Select every legacy processing lease listed in
-   `processingLeaseIds` as settled. Since #1019 no executor holds a processing
-   lease, and a current Host discards any legacy lease at initialize, so a
-   legacy lease protects nothing once the fence of step 2 holds. A ledger
-   inspected after a current Host has opened it has no leases, and the list is
-   empty.
-   Leaving any lease unselected sets every record to `quarantined`, including
-   intact published copies, and writes the remaining leases back to the ledger.
-   The next Host discards those leases but keeps the quarantine, and every
-   retained copy stays charged until a second fenced recovery run.
-4. Call `recoverGfsStoreUnderPhysicalFence` with those expected hashes,
-   `settledProcessingLeaseIds` (every ID from step 3, or `[]` when the ledger
-   has none), optional `terminalReceiptOwnerIds` and
-   `removeSettledTransferIds`, and the real `withPhysicalFence` provider.
-   A constant successful callback or an environment flag is not a provider.
-5. Verify the returned before/after receipt and preserved published copies.
-   When no lease remains, a record whose published `source` matches its stored
-   size and checksum becomes `completed` and reusable, whatever its previous
-   state, including `quarantined`. Every other record becomes or stays
-   `quarantined`. Only an exact verified partial directory can be removed: a
-   record that is not `completed`, has no stored checksum and has no published
-   `source`. Its charge is released after positive absence. A published
-   `source` remains protected even when a crash left its ledger entry without a
-   completed state or checksum.
-   Recovery cannot release a quarantined record that keeps a checksum its
-   content no longer matches, or whose published `source` is gone: it neither
-   reclassifies it nor accepts it for removal (`invalid_selection`). The
-   operator module has no path that releases that charge.
-6. Reopen the Host on the same retained PVC. Prove availability, authenticated
-   reuse, source/version equality and quotas before restoring ordinary traffic.
-   On interruption, preserve the last receipt and accounting objects, obtain a
-   new inventory and repeat the physical proof. Do not blindly remove the
-   sentinel, database or remaining copies.
-
-An inherited v2 store can be delivery-disabled while still holding its kernel
-writer lock. Its old main process must settle before an operator maintenance
-executor can acquire that writer. A legacy early-initialization failure does
-not hold the new lock. These are different transitions.
-
-For an owned single-node Minikube profile, a contained node stop/start can be
-part of the proof only after every prior PVC consumer is proved unable to escape
-the node PID namespace and restarted consumers are certified to run the new
-recovery-disabled code. Preserve the profile and PVC, use the supported
-`branch-profile-stop`/`branch-profile-start` entry points, and verify immutable
-node-container termination and restarted workload identities. Stopping and
-restarting alone is insufficient. The generic module does not provide an
-automatic Kubernetes fencing implementation; source tests do not certify this
-live runtime proof.
-The conditional containment argument uses Linux's termination of a PID
-namespace when its init exits; it still requires evidence that the old
-executors could not escape that namespace. See
-[PID namespaces](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
+Rolling back to the dev image (`74e0d81d9`) is safe. That image creates a new
+`.gfs-download-store` with an empty ledger and a fresh writer fence, and ignores
+the `meta.json` directories this image left; they occupy space within the quota
+until a later image sweeps them. A retired tree left by a failed removal is not
+protected from workspace tools under that image. Rolling forward again retires
+the store the dev image created and keeps every copy that is still complete and
+unexpired, as adopted. This was checked once outside CI by starting the dev
+store on volumes this image had migrated, with and without a retired leftover,
+and admitting a download on each.
