@@ -212,4 +212,144 @@ describe('Round 7 selection loading ownership', () => {
       controller.unmount()
     }
   })
+
+  it('does not restore a pending chat after the selected agent is cleared', async () => {
+    await clerum.chat.create('agent-x', 'chat-b')
+    await clerum.chat.upsertMessages('agent-x', 'chat-b', [
+      { id: 'chat-b-message', role: 'user', content: 'chat B history', timestamp: 2 },
+    ])
+    const controller = renderController({ navItem: 'agents', loadMenuData: false })
+    const createError = new Error('local chat creation failed')
+    const createGate = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    let observedError: unknown
+    let createPromise!: Promise<void>
+
+    try {
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      act(() => {
+        controller.result.current.setPendingChatSelection('agent-x', 'chat-b')
+        clerum.chat.create.mockReturnValueOnce(createGate.promise)
+        createPromise = controller.result.current.handleCreateChat().catch(error => {
+          observedError = error
+        })
+      })
+
+      controller.rerender({ selectedAgent: null })
+      await waitFor(() => {
+        expect(controller.result.current.activeChatId).toBeNull()
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+      })
+
+      await act(async () => {
+        createGate.reject(createError)
+        await createPromise
+      })
+      expect(observedError).toBe(createError)
+      expect(controller.result.current.activeChatId).toBeNull()
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+    } finally {
+      controller.unmount()
+    }
+  })
+
+  it('does not restore a pending chat over a newer route list selection', async () => {
+    await clerum.chat.create('agent-x', 'chat-b')
+    await clerum.chat.upsertMessages('agent-x', 'chat-b', [
+      { id: 'chat-b-message', role: 'user', content: 'chat B history', timestamp: 2 },
+    ])
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await clerum.chat.create('agent-x', 'chat-a')
+    await clerum.chat.upsertMessages('agent-x', 'chat-a', [
+      { id: 'chat-a-message', role: 'user', content: 'chat A history', timestamp: 3 },
+    ])
+    clerum.chat.getIndex.mockImplementation(agentRef => clerum.readIndex(agentRef))
+    const controller = renderController({ navItem: 'agents', loadMenuData: false })
+    const createError = new Error('local chat creation failed')
+    const createGate = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    let observedError: unknown
+    let createPromise!: Promise<void>
+
+    try {
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      act(() => {
+        controller.result.current.setPendingChatSelection('agent-x', 'chat-b')
+        clerum.chat.create.mockReturnValueOnce(createGate.promise)
+        createPromise = controller.result.current.handleCreateChat().catch(error => {
+          observedError = error
+        })
+      })
+      await act(async () => {
+        controller.rerender({ navItem: 'chat' })
+      })
+      await waitFor(() => {
+        expect(controller.result.current.activeChatId).toBe('chat-a')
+        expect(controller.result.current.chatMessages).toEqual(
+          expect.arrayContaining([expect.objectContaining({ id: 'chat-a-message' })])
+        )
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+      })
+
+      await act(async () => {
+        createGate.reject(createError)
+        await createPromise
+      })
+      expect(observedError).toBe(createError)
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(controller.result.current.chatMessages).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: 'chat-a-message' })])
+      )
+      expect(controller.result.current.chatMessages).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: 'chat-b-message' })])
+      )
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+    } finally {
+      createGate.reject(createError)
+      controller.unmount()
+    }
+  })
+
+  it('does not restore a team-scoped pending chat after a team change', async () => {
+    await clerum.chat.create('agent-x', 'chat-b')
+    await clerum.chat.upsertMessages('agent-x', 'chat-b', [
+      { id: 'team-one-message', role: 'user', content: 'team one history', timestamp: 2 },
+    ])
+    const controller = renderController({ navItem: 'agents', loadMenuData: false })
+    const createError = new Error('local chat creation failed')
+    const createGate = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    let observedError: unknown
+    let createPromise!: Promise<void>
+
+    try {
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      act(() => {
+        controller.result.current.setPendingChatSelection('agent-x', 'chat-b')
+        clerum.chat.create.mockReturnValueOnce(createGate.promise)
+        createPromise = controller.result.current.handleCreateChat().catch(error => {
+          observedError = error
+        })
+      })
+      await act(async () => {
+        controller.rerender({
+          currentTeamId: 'team-2',
+          chatAuthorityTeamId: 'team-2',
+          currentTeamName: 'Team 2',
+        })
+      })
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+
+      await act(async () => {
+        createGate.reject(createError)
+        await createPromise
+      })
+      expect(observedError).toBe(createError)
+      expect(controller.result.current.chatMessages).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: 'team-one-message' })])
+      )
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+    } finally {
+      createGate.reject(createError)
+      controller.unmount()
+    }
+  })
 })
