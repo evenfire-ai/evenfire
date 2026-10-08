@@ -448,16 +448,22 @@ function url(path: string): string {
  *   409       → app is updating; try again
  *   500 / 502 → generic open failure
  */
-export class SandboxUiSessionError extends Error {
-  readonly status: number
-  readonly body: string
+export class SandboxUiSessionError extends ApiError {
+  // An ApiError so `AppService.shouldRefreshRpcToken` sees a 401 or a
+  // missing-scope 403 and re-mints with a fresh RPC token. Such a 401 comes
+  // from the short-lived RPC token, never from the user's session: it must
+  // not be read as a reason to sign the user out.
   constructor(status: number, body: string) {
     super(
-      `sandbox-ui session mint failed (${status}): ${boundedErrorExcerpt(body) || '<empty body>'}`
+      `sandbox-ui session mint failed (${status}): ${boundedErrorExcerpt(body) || '<empty body>'}`,
+      status,
+      body
     )
-    this.status = status
-    this.body = body
     this.name = 'SandboxUiSessionError'
+  }
+
+  get body(): string {
+    return this.bodyText
   }
 }
 
