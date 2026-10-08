@@ -42,14 +42,14 @@ vi.mock('../src/middleware/controlUIAuth.js', () => ({
 
 const RESOURCE_ID = '20000000-0000-4000-8000-000000000001'
 
-function allowed(remaining = 29) {
+function allowed(remaining = 149) {
   return {
     allowed: true,
     backendAvailable: true,
     remaining,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
-    count: 30 - remaining,
+    count: 150 - remaining,
   }
 }
 
@@ -60,7 +60,7 @@ function denied() {
     remaining: 0,
     resetMs: Date.now() + 30_000,
     windowStartMs: Date.now(),
-    count: 31,
+    count: 151,
   }
 }
 
@@ -104,10 +104,10 @@ describe('GET /gfs/grants/legacy-standalone rate limiting', () => {
     expect(response.status).toBe(200)
     expect(response.body.grants).toHaveLength(1)
     // Wiring proof: the route consumed the DEDICATED bucket key at the
-    // documented 30/min ceiling, not the grant-mutation bucket and not some
+    // documented 150/min ceiling, not the grant-mutation bucket and not some
     // shared/unkeyed budget.
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(1)
-    expect(mockCheckAndIncrement).toHaveBeenCalledWith(`gfsgrants-legacy:${ADMIN_SUB}`, 30)
+    expect(mockCheckAndIncrement).toHaveBeenCalledWith(`gfsgrants-legacy:${ADMIN_SUB}`, 150)
   })
 
   it('returns 429 with Retry-After and never reaches the database once the bucket is exhausted', async () => {
@@ -118,10 +118,11 @@ describe('GET /gfs/grants/legacy-standalone rate limiting', () => {
       .set('x-test-auth', 'operator')
 
     expect(response.status).toBe(429)
-    expect(response.body).toMatchObject({ error: 'Too Many Requests' })
+    expect(response.body).toMatchObject({ error: 'Too Many Requests', code: 'rate_limited' })
+    expect(response.body.message).toMatch(/try again in \d+ seconds/i)
     expect(response.body.retryAfterSeconds).toBeGreaterThan(0)
     expect(response.headers['retry-after']).toBeDefined()
-    expect(response.headers['x-ratelimit-limit']).toBe('30')
+    expect(response.headers['x-ratelimit-limit']).toBe('150')
     expect(response.headers['x-ratelimit-remaining']).toBe('0')
     // The property that makes this a DoS control rather than a cosmetic header:
     // the request is rejected BEFORE the handler runs its Postgres query.

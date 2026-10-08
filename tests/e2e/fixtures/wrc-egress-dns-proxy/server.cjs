@@ -101,6 +101,45 @@ function increment(counts, mode) {
   else throw new Error('Invalid observation mode')
 }
 
+const EPHEMERAL_PAIR_ATTEMPTS = 20
+
+function listenOnce(server, action) {
+  return new Promise((resolve, reject) => {
+    const failed = error => {
+      server.removeListener('listening', ready)
+      reject(error)
+    }
+    const ready = () => {
+      server.removeListener('error', failed)
+      resolve()
+    }
+    server.once('error', failed)
+    server.once('listening', ready)
+    action()
+  })
+}
+
+/**
+ * Binds a UDP socket and a TCP server to the same port. TCP and UDP ephemeral
+ * ports are allocated independently, so a port free for one transport can be
+ * taken for the other: with port 0 the TCP port is chosen first and UDP joins
+ * it, choosing a new pair when UDP finds it taken. An explicit port gets one
+ * attempt, and running out of attempts rethrows the last EADDRINUSE.
+ */
+async function listenDnsPair(udp, tcp, port, host) {
+  const attempts = port === 0 ? EPHEMERAL_PAIR_ATTEMPTS : 1
+  for (let attempt = 1; ; attempt++) {
+    await listenOnce(tcp, () => tcp.listen(port, host))
+    try {
+      await listenOnce(udp, () => udp.bind(tcp.address().port, host))
+      return tcp.address().port
+    } catch (error) {
+      await new Promise(resolve => tcp.close(() => resolve()))
+      if (error.code !== 'EADDRINUSE' || attempt >= attempts) throw error
+    }
+  }
+}
+
 /** A real UDP/TCP DNS fixture; ephemeral loopback ports are used only by tests. */
 function createDnsProxy({
   targets,
@@ -464,8 +503,7 @@ function createDnsProxy({
     if (started || closing) throw new Error('DNS fixture cannot be started twice')
     started = true
     try {
-      await listen(udp, () => udp.bind(dnsPort, listenHost))
-      await listen(tcp, () => tcp.listen(udp.address().port, listenHost))
+      await listenDnsPair(udp, tcp, dnsPort, listenHost)
       await listen(control, () => control.listen(controlPort, '127.0.0.1'))
       return { dnsPort: udp.address().port, controlPort: control.address().port }
     } catch (error) {
@@ -476,7 +514,7 @@ function createDnsProxy({
   return { start, close, snapshot, setMode }
 }
 
-module.exports = { createDnsProxy, readConfig, question, dnsResponse, tcpFrame }
+module.exports = { createDnsProxy, listenDnsPair, readConfig, question, dnsResponse, tcpFrame }
 if (require.main === module) {
   let proxy
   try {

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../internalTools/gfsReadTypes'
 import { logger } from '../../logger'
 import { PromptBuilder } from '../interfaces'
+import type { NativeToolPresentation } from '../orchestration/toolPresentationPolicy'
 import { ChatMessage, ToolDefinition } from '../types'
 import type { BuilderInput, SystemPromptParts } from './systemPrompt'
 
@@ -141,18 +142,62 @@ export const TOOL_DISCOVERY_TEXT =
   'do not require them.'
 
 /**
+ * #1003 — discovery guidance when native `auto` is on: large internal tools are
+ * not listed directly and are reached through the same search/describe/call
+ * flow, so the "native tools are already available directly" sentence of
+ * `TOOL_DISCOVERY_TEXT` would be false. Constant per host, cache-safe.
+ */
+export const NATIVE_TOOL_DISCOVERY_TEXT =
+  'Use directly listed tools when available. For additional approved tools, ' +
+  'including internal tools that are not listed directly, use `clerum__tool_search` ' +
+  "to find them by keyword, `clerum__tool_describe` to see one's schema, and " +
+  '`clerum__tool_call` to invoke it. Search narrowly for the current task; refine or page ' +
+  'only when needed rather than loading the whole catalog. Describe only the chosen ' +
+  'tool and reuse its schema from the conversation when available. Each invocation ' +
+  'still checks current permissions and arguments. Do not call tools for tasks that ' +
+  'do not require them.'
+
+/** Discovery guidance for the host's native-tool presentation. */
+export function toolDiscoveryText(nativeToolPresentation: NativeToolPresentation): string {
+  return nativeToolPresentation === 'auto' ? NATIVE_TOOL_DISCOVERY_TEXT : TOOL_DISCOVERY_TEXT
+}
+
+/**
  * Default prompt builder.
  *
  * Extracted from stateMachine.ts:373-409. Produces system prompts
  * with identity, tool descriptions, date/time, and channel context.
  */
 export class DefaultPromptBuilder implements PromptBuilder {
+  private readonly discoveryText: string
+  private readonly discoverableNatives: ReadonlyArray<ToolDefinition>
+
+  /**
+   * `discoverableNatives` (#1003): natives that native `auto` keeps out of
+   * `tools[]` and serves through the bridge. They still select capability
+   * guidance (a hidden tool stays callable), but are never described in the
+   * "Available tools" section. Empty in native `direct`.
+   */
+  constructor(options: {
+    nativeToolPresentation: NativeToolPresentation
+    discoverableNatives?: ReadonlyArray<ToolDefinition>
+  }) {
+    this.discoveryText = toolDiscoveryText(options.nativeToolPresentation)
+    this.discoverableNatives = options.discoverableNatives ?? []
+  }
+
   buildSystemPrompt(
-    tools: ToolDefinition[],
+    presentedTools: ToolDefinition[],
     identity?: string,
     metadata?: Record<string, unknown>
   ): ChatMessage {
     const sections: string[] = []
+    const presentedNames = new Set(presentedTools.map(t => t.name))
+    // Guidance is chosen from every callable tool; only presented tools are described.
+    const tools = [
+      ...presentedTools,
+      ...this.discoverableNatives.filter(t => !presentedNames.has(t.name)),
+    ]
 
     // 1. Identity / base system prompt
     if (identity) {
@@ -165,8 +210,8 @@ export class DefaultPromptBuilder implements PromptBuilder {
     }
 
     // 2. Tool capabilities description
-    if (tools.length > 0) {
-      sections.push(this.buildToolsDescription(tools))
+    if (presentedTools.length > 0) {
+      sections.push(this.buildToolsDescription(presentedTools))
     }
 
     // 2a. Capability discovery contract. Always emitted when
@@ -198,7 +243,7 @@ export class DefaultPromptBuilder implements PromptBuilder {
     // Tool-discovery guidance (F4.1): emitted when the stable bridge is active,
     // detected by the presence of `clerum__tool_search`.
     if (tools.some(t => t.name === 'clerum__tool_search')) {
-      sections.push(TOOL_DISCOVERY_TEXT)
+      sections.push(this.discoveryText)
     }
 
     // 2b. Desktop environment context
@@ -242,7 +287,7 @@ export class DefaultPromptBuilder implements PromptBuilder {
     logger.debug(
       {
         component: 'PromptBuilder',
-        toolCount: tools.length,
+        toolCount: presentedTools.length,
         promptLength: content.length,
         metadataKeys: metaKeys,
       },

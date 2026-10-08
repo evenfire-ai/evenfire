@@ -1,4 +1,5 @@
 import type { Request, Response, Router } from 'express'
+import { config } from '../../config.js'
 import { pool, withTransaction } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
@@ -40,7 +41,7 @@ export function registerGfsShareRoutes(router: Router): void {
   // Per-admin token bucket, same shape as the folder-grant routes above.
   const sharesRateLimit = rateLimitMiddleware({
     bucketType: 'gfs_shares',
-    maxPerMinute: 30,
+    maxPerMinute: config.adminGfsSharesPerMin,
     getBucketKey: req => {
       const sub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
       return sub ? `gfsshares:${sub}` : null

@@ -119,7 +119,7 @@ beforeEach(() => {
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
     backendAvailable: true,
-    remaining: 119,
+    remaining: 599,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
     count: 1,
@@ -153,7 +153,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     expect(res.status).toBe(200)
     expect(checkAndIncrement).toHaveBeenCalledWith(
       'plugin_workload_sdk_admin:11111111-1111-4111-8111-111111111111',
-      120
+      600
     )
   })
 
@@ -164,12 +164,12 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     await request(buildApp('admin-b')).get('/admin/plugin-workload-sdk/grants')
     await request(buildApp(null)).get('/admin/plugin-workload-sdk/grants')
 
-    expect(checkAndIncrement).toHaveBeenNthCalledWith(1, 'plugin_workload_sdk_admin:admin-a', 120)
-    expect(checkAndIncrement).toHaveBeenNthCalledWith(2, 'plugin_workload_sdk_admin:admin-b', 120)
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(1, 'plugin_workload_sdk_admin:admin-a', 600)
+    expect(checkAndIncrement).toHaveBeenNthCalledWith(2, 'plugin_workload_sdk_admin:admin-b', 600)
     expect(checkAndIncrement).toHaveBeenNthCalledWith(
       3,
       'plugin_workload_sdk_admin:unauthenticated',
-      120
+      600
     )
   })
 
