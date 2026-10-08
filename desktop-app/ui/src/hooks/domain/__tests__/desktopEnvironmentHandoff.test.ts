@@ -775,7 +775,6 @@ describe('Desktop environment REST endpoint matching', () => {
     const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
       () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false })
     )
-    const expectedGeneration = nativeProducer.getSessionGeneration()
 
     await handler(linkedEnvironment)
 
