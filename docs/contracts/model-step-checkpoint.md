@@ -34,7 +34,7 @@ optional `modelStepCheckpoint` next to `state`, `activeTaskId`, `pendingApproval
 | `originTaskId` | string | The failed task. It stays terminal. |
 | `continuationTaskId` | string, optional | Present when `status` is `claimed`. |
 | `provider`, `model` | string | The effective selection when the checkpoint was created. A continuation always uses these. |
-| `blockedReason` | enum, optional | Present when `status` is `blocked`: `principal_mismatch`, `host_mismatch`, `grant_revoked`, `model_unavailable`, `budget_exhausted`, `reference_unavailable`. |
+| `blockedReason` | enum, optional | Present when `status` is `blocked`: `principal_mismatch`, `host_mismatch`, `grant_revoked`, `model_unavailable`, `budget_exhausted`, `reference_unavailable`, `attachment_expired` (the retained bytes of an inline uploaded file expired after their 1 h TTL or are missing; Resend still works). |
 | `tools` | `{ confirmed, unknown, notDispatched }` | Counts only. `unknown` means a dispatch was recorded without a recorded result; such a tool is never re-executed. |
 | `failedAt`, `expiresAt` | ISO-8601 string | |
 

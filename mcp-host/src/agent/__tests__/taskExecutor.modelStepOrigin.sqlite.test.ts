@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
+import { toModelStepCheckpointView } from '../../core/conversation/modelStepCheckpointView'
 import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
 import { LlmErrorCode } from '../../core/errors'
@@ -21,6 +22,7 @@ import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { McpManager } from '../../mcp/manager'
 import type { Task, TaskError } from '../../queue/types'
+import { createSessionRouteHandlers } from '../../server/sessionRouteHandlers'
 import { validateIncomingAttachments } from '../incomingAttachments'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
 
@@ -244,6 +246,39 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
         expires_at: NOW + ATTACHMENT_TTL_MS,
       })
       expect(Buffer.compare(bytes[0]!.bytes, UPLOAD)).toBe(0)
+
+      // The session read serves the checkpoint under the same key the
+      // executor wrote it with.
+      expect(header.session_key).toBe('authenticated-user:rpc:isolated-channel:default')
+      const store = new ModelStepCheckpointStore(handle.persistQueue, { now: () => NOW })
+      const { handleSessionMessages } = createSessionRouteHandlers({
+        getConversationManager: () => new ConversationManager(handle.store),
+        redactToolError: (_tool, raw) => raw,
+        redactTitle: raw => raw,
+        loadModelStepCheckpoint: async sessionKey => {
+          const live = await store.loadLive(sessionKey)
+          return live ? toModelStepCheckpointView(live) : undefined
+        },
+      })
+      const page = await handleSessionMessages(
+        'authenticated-user',
+        'isolated-channel',
+        'default',
+        {}
+      )
+      expect(page?.turns).toHaveLength(1)
+      expect(page?.modelStepCheckpoint).toEqual({
+        checkpointId: header.checkpoint_id,
+        version: 2,
+        status: 'resumable',
+        retryAvailable: true,
+        originTaskId: 'model-step-origin',
+        provider: 'openai',
+        model: 'test-model',
+        tools: { confirmed: 1, unknown: 0, notDispatched: 0 },
+        failedAt: new Date(NOW).toISOString(),
+        expiresAt: new Date(NOW + RESUMABLE_TTL_MS).toISOString(),
+      })
     } finally {
       await handle.shutdown()
     }

@@ -3,6 +3,7 @@ import type {
   ConversationSessionMessages,
   ConversationSessionSummary,
 } from '../core/conversation/conversationStore'
+import type { ModelStepCheckpointView } from '../core/conversation/modelStepCheckpointContract'
 import { type Conversation, ConversationState } from '../core/types'
 import { projectApprovalInputPreview } from '../progress/approvalInputPreview'
 import { getDisplayName } from '../progress/intentExtraction'
@@ -34,10 +35,15 @@ export interface SessionRouteHandlerDeps {
    * over the operator secret list). Non-logging (unlike `redactToolError`).
    */
   redactTitle: (rawTitle: string) => string
+  /**
+   * #1043 — the session's live model-step checkpoint as the wire view, or
+   * `undefined`. Absent when checkpoints are not wired (memory store).
+   */
+  loadModelStepCheckpoint?: (sessionKey: string) => Promise<ModelStepCheckpointView | undefined>
 }
 
 export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
-  const { getConversationManager, redactToolError, redactTitle } = deps
+  const { getConversationManager, redactToolError, redactTitle, loadModelStepCheckpoint } = deps
 
   // Common projection: state + active task + pending approval + lifetime token
   // totals, shared by the list and messages handlers (RPC token exposure
@@ -159,6 +165,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     const keyPrefix = `${userSub}:rpc:`
     const page = await convManager.getSessionMessagesByKeyAsync(key, keyPrefix, query)
     if (!page) return null
+    const modelStepCheckpoint = await loadModelStepCheckpoint?.(key)
     const turns = page.turns
     const windowBounds = projectMessageWindowBounds(
       turns,
@@ -172,6 +179,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
       agent: agentName,
       chatId,
       ...sessionStateView(page),
+      ...(modelStepCheckpoint ? { modelStepCheckpoint } : {}),
       totalTurns: page.totalTurns,
       ...windowBounds,
       turns: turns.map(t => ({

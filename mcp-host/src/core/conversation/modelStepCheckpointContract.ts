@@ -35,6 +35,8 @@ export const MODEL_STEP_BLOCKED_REASONS = [
   'model_unavailable',
   'budget_exhausted',
   'reference_unavailable',
+  /** The bytes of an inline uploaded file expired or are missing (Resend still works). */
+  'attachment_expired',
 ] as const
 export type ModelStepBlockedReason = (typeof MODEL_STEP_BLOCKED_REASONS)[number]
 

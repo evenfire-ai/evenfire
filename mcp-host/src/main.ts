@@ -41,6 +41,7 @@ import {
   resolveSessionModel,
 } from './config/modelResolution'
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
+import { toModelStepCheckpointView } from './core/conversation/modelStepCheckpointView'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -2722,6 +2723,12 @@ async function startRPCServer(): Promise<void> {
 
   const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
     getConversationManager: () => agent!.getConversationManager(),
+    loadModelStepCheckpoint: async sessionKey => {
+      const support = agent!.getModelStepCheckpoints()
+      if (!support) return undefined
+      const snapshot = await support.store.loadLive(sessionKey)
+      return snapshot ? toModelStepCheckpointView(snapshot) : undefined
+    },
     redactToolError,
     redactTitle,
   })
