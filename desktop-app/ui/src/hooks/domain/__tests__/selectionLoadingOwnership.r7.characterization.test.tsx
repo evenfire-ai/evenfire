@@ -160,4 +160,56 @@ describe('Round 7 selection loading ownership', () => {
       controller.unmount()
     }
   })
+
+  it('restores a same-tick chat switch when New chat creation fails', async () => {
+    await clerum.chat.create('agent-x', 'chat-b')
+    await clerum.chat.upsertMessages('agent-x', 'chat-b', [
+      { id: 'chat-b-message', role: 'user', content: 'chat B history', timestamp: 2 },
+    ])
+    const heldSwitch = holdLastActive('chat-b')
+    const controller = renderController({ loadMenuData: false })
+    const createError = new Error('local chat creation failed')
+    clerum.chat.create.mockRejectedValueOnce(createError)
+    let switchPromise!: Promise<void>
+    let createPromise!: Promise<void>
+    let observedError: unknown
+
+    try {
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      act(() => {
+        switchPromise = controller.result.current.handleSelectChat('chat-b')
+        createPromise = controller.result.current.handleCreateChat().catch(error => {
+          observedError = error
+        })
+      })
+      await act(async () => {
+        await heldSwitch.entered.promise
+      })
+      await act(async () => {
+        await createPromise
+      })
+      expect(observedError).toBe(createError)
+
+      await waitFor(() => {
+        expect(controller.result.current.activeChatId).toBe('chat-b')
+        expect(controller.result.current.chatMessages).toEqual(
+          expect.arrayContaining([expect.objectContaining({ id: 'chat-b-message' })])
+        )
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+      })
+
+      await act(async () => {
+        heldSwitch.release.resolve()
+        await switchPromise
+      })
+      expect(controller.result.current.activeChatId).toBe('chat-b')
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+    } finally {
+      heldSwitch.release.resolve()
+      await act(async () => {
+        await switchPromise?.catch(() => undefined)
+      })
+      controller.unmount()
+    }
+  })
 })

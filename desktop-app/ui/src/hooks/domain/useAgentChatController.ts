@@ -1202,8 +1202,8 @@ export function useAgentChatController({
       scrollChatToBottom,
       dispatchSession,
       clearComposerDraft,
-      getActiveChatId: () => activeChatId,
-      getChatMessagesLoading: () => chatMessagesLoading,
+      getActiveChatId: () => activeChatVisibilityRef.current.activeChatId,
+      getChatMessagesLoading: () => chatMessagesLoadingRef.current,
       clearChatMessagesLoading: () => setChatMessagesLoading(false),
       getAutoSelectedChatId: () => autoSelectedChatIdRef.current,
       markAutoSelectedChat: chatId => {
