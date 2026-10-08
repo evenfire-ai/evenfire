@@ -36,7 +36,8 @@ describe('same-chat local page readiness', () => {
     )
 
     const originalSetLastActive = clerum.chat.setLastActive.getMockImplementation()
-    if (!originalSetLastActive) throw new Error('Expected the ChatStore setLastActive producer')
+    if (!originalSetLastActive)
+      throw new Error('Expected the setLastActive test mock implementation')
     const secondCallEntered = deferred<void>()
     const releaseSecondCall = deferred<void>()
     let setLastActiveCalls = 0
@@ -80,8 +81,9 @@ describe('same-chat local page readiness', () => {
     expect(controller.result.current.chatMessages).toEqual([
       expect.objectContaining({ id: 'local-turn-5', content: 'visible cached question' }),
     ])
+    expect(controller.result.current.hasOlderMessages).toBe(true)
     expect(clerum.chat.loadMessages).toHaveBeenCalledTimes(2)
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenLastCalledWith(
       'agent-x',
       'agent-x',
       chatId,
