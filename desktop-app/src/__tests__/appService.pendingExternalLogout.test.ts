@@ -143,6 +143,29 @@ describe('AppService pending external logout', () => {
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
   })
 
+  it('keeps startup unauthenticated when strict marker cleanup fails', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const reportFailure = vi.fn()
+    const { service, tokenStore } = createService(undefined, reportFailure)
+    await tokenStore.setSessionToken('persisted-session-token', activeEnvKey)
+    const keytar = await import('keytar')
+    vi.mocked(keytar.deletePassword).mockImplementation(async (_service, account) => {
+      if (account === `session-token::${activeEnvKey}`) {
+        throw new Error('keychain unavailable')
+      }
+      return false
+    })
+    const restore = vi.spyOn(internals(service), 'restoreSavedSessionOnce')
+
+    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+
+    expect(restore).not.toHaveBeenCalled()
+    expect(reportFailure).toHaveBeenCalledOnce()
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('persisted-session-token')
+  })
+
   it('keeps startup recoverable and skips restore when the marker cannot be inspected', async () => {
     await fs.mkdir(markerPath())
     const reportFailure = vi.fn()
