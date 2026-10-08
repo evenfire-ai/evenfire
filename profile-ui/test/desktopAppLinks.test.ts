@@ -8,6 +8,17 @@ import {
   navigateToDesktopApp,
 } from '../lib/desktopAppLinks'
 
+function withDesktopHandoffEnabled<T>(run: () => T): T {
+  const original = process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
+  try {
+    process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = 'true'
+    return run()
+  } finally {
+    if (original === undefined) delete process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
+    else process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = original
+  }
+}
+
 test('buildDesktopEnvironmentLink is disabled unless the rollout flag is enabled', () => {
   const original = process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
   const environment = {
@@ -32,29 +43,31 @@ test('buildDesktopEnvironmentLink is disabled unless the rollout flag is enabled
 })
 
 test('buildDesktopEnvironmentLink defaults the tenant name to Evenfire', () => {
-  process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = 'true'
-  const link = buildDesktopEnvironmentLink({
-    externalRestApiBaseUrl: 'https://api.example.com',
-    rpcProxyBaseUrl: '',
-    appName: '',
-  })
+  withDesktopHandoffEnabled(() => {
+    const link = buildDesktopEnvironmentLink({
+      externalRestApiBaseUrl: 'https://api.example.com',
+      rpcProxyBaseUrl: '',
+      appName: '',
+    })
 
-  assert.ok(link)
-  const parsedLink = new URL(link)
-  assert.equal(parsedLink.searchParams.get('tenantName'), 'Evenfire')
+    assert.ok(link)
+    const parsedLink = new URL(link)
+    assert.equal(parsedLink.searchParams.get('tenantName'), 'Evenfire')
+  })
 })
 
 test('buildDesktopEnvironmentLink does not include the RPC proxy URL', () => {
-  process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = 'true'
-  const link = buildDesktopEnvironmentLink({
-    externalRestApiBaseUrl: 'https://api.example.com',
-    rpcProxyBaseUrl: 'https://rpc.example.com',
-    appName: 'Example tenant',
-  })
+  withDesktopHandoffEnabled(() => {
+    const link = buildDesktopEnvironmentLink({
+      externalRestApiBaseUrl: 'https://api.example.com',
+      rpcProxyBaseUrl: 'https://rpc.example.com',
+      appName: 'Example tenant',
+    })
 
-  assert.ok(link)
-  const parsedLink = new URL(link)
-  assert.equal(parsedLink.searchParams.get('rpcProxyBaseUrl'), null)
+    assert.ok(link)
+    const parsedLink = new URL(link)
+    assert.equal(parsedLink.searchParams.get('rpcProxyBaseUrl'), null)
+  })
 })
 
 test('navigateToDesktopApp assigns the protocol URL to the browser location', () => {
