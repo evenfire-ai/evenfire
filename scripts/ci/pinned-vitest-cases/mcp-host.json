@@ -913,7 +913,11 @@
   },
   {
     "suite": "gfsDownloadStoreProtected.test.ts",
-    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) an active reservation counts, pinned or not"
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) the new reservation itself counts, pinned or not"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a caller's open reservation counts when it pins a reused copy"
   },
   {
     "suite": "gfsDownloadStoreProtected.test.ts",

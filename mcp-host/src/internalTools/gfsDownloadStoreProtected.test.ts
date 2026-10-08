@@ -140,7 +140,7 @@ describe('GFS download store: a caller protects at most half the budget (R3-F1)'
     })
   })
 
-  it('an active reservation counts, pinned or not', async () => {
+  it('the new reservation itself counts, pinned or not', async () => {
     const store = await openStore()
     await copies(store, rootA, A, 0, 8, 'task-a')
     const before = await protectedRefusals()
@@ -153,6 +153,30 @@ describe('GFS download store: a caller protects at most half the budget (R3-F1)'
     // 40 + 2 = 42 is admitted.
     const admitted = await startTransfer(store, rootA, A, 10, 2)
     await store.fail(admitted.transfer.id, A)
+  })
+
+  it("a caller's open reservation counts when it pins a reused copy", async () => {
+    const store = await openStore()
+    // 5 unpinned, then 30 pinned, then an open 10-byte reservation without
+    // owner: 40 protected. One caller holds one reservation at a time by
+    // default, so reuse is where an existing reservation meets a new pin.
+    await completedCopy(store, rootA, A, 1, 5)
+    await completedCopy(store, rootA, A, 0, 30, { owner: 'task-a' })
+    const open = await startTransfer(store, rootA, A, 2, 10)
+    const before = await protectedRefusals()
+
+    // 30 + 10 + 5 = 45: refused while the reservation is open.
+    await expect(
+      store.reusableReceipt(A, sourceFor(1), 5, { retentionOwnerId: 'task-b' })
+    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+    expect(await protectedRefusals()).toBe(before + 1)
+
+    // Once it settles, 30 + 5 = 35 is admitted.
+    await store.fail(open.transfer.id, A)
+    await expect(
+      store.reusableReceipt(A, sourceFor(1), 5, { retentionOwnerId: 'task-b' })
+    ).resolves.toMatchObject({ sizeBytes: 5 })
+    expect(await protectedRefusals()).toBe(before + 1)
   })
 
   it('unpinned copies are not protected: one caller still fills the whole budget', async () => {
