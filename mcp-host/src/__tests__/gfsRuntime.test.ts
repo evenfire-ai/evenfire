@@ -128,13 +128,37 @@ describe('GFS runtime bootstrap', () => {
 
     vi.setSystemTime(Date.now() + 120_000)
 
+    // The name disappears at the rename to `.trash-<uuid>`; the removal is
+    // counted only after the rm is proven, so both are awaited together.
     await vi.waitFor(
       async () => {
         await expect(fs.lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(await expiryCount('expired_removed')).toBe(removed + 1)
       },
       { timeout: 5_000, interval: 10 }
     )
-    expect(await expiryCount('expired_removed')).toBe(removed + 1)
+  })
+
+  it('a cleanup that throws is logged and the next cycle sweeps again', async () => {
+    const runtime = await start(await root(), 25)
+    const warn = vi.spyOn(logger, 'warn')
+    const cleanup = vi
+      .spyOn(GfsDownloadStore.prototype, 'cleanupExpired')
+      .mockImplementationOnce(async () => {
+        throw Object.assign(new Error('injected EIO'), { code: 'EIO' })
+      })
+
+    // Witness: a second cycle reached cleanup after the first one threw.
+    await vi.waitFor(() => expect(cleanup.mock.calls.length).toBeGreaterThanOrEqual(2), {
+      timeout: 5_000,
+      interval: 10,
+    })
+
+    expect(warn).toHaveBeenCalledWith(
+      { component: 'gfs-runtime', code: 'EIO' },
+      'GFS download cleanup failed; the next cycle retries it'
+    )
+    expect(runtime.store.isAvailable()).toBe(true)
   })
 
   it('stop joins the cycle in flight and closes the store', async () => {

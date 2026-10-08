@@ -138,12 +138,10 @@ describe('NativeRegistry GFS caller file-tool binding', () => {
     expect(traversal.is_error).toBe(true)
   })
 
-  it('keeps the verified caller root when delivery is recovery-required', async () => {
-    fs.mkdirSync(path.join(root, '.gfs-download-store'), { recursive: true })
-    fs.writeFileSync(path.join(root, '.gfs-download-store', 'ledger-v1.json'), '{invalid')
+  it('keeps the verified caller root when the store is unavailable', async () => {
     store = new GfsDownloadStore(root)
     stores.push(store)
-    await store.initialize().catch(() => undefined)
+    expect(store.isAvailable()).toBe(false)
     const callerRoot = new ScopedWorkspaceProvider(root).forSource(source()).userRootPath
     const degraded = registry(callerRoot, false)
 

@@ -36,7 +36,7 @@ describe('gfsWorkspaceExecutionEnabled', () => {
     ).toBe(true)
   })
 
-  it('rejects delivery while the Host store is in recovery-required state', () => {
+  it('rejects delivery while the Host store is unavailable', () => {
     expect(
       gfsWorkspaceExecutionEnabled(
         input({

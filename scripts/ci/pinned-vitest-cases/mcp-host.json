@@ -570,5 +570,41 @@
   {
     "suite": "protectedWorkspacePaths.test.ts",
     "fullName": "protected workspace paths blocks a retired pre-#1028 store tree and leaves a lookalike name readable"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap a cleanup that throws is logged and the next cycle sweeps again"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: publication F4b: a temporary meta.json that cannot be removed after a failed publish is logged, not swallowed"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: reuse F7b: another caller's reuse lookup never hashes or removes a copy it does not own"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: quotas and eviction F10b: a quota denial carries only its code, never another caller's id, path, name or usage"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: sweep F20b: a caller's unreadable download directory is counted and logged, and the store stays available"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: managed reads F23b: a kubelet fsGroup expansion is restored to the private modes after the content is re-hashed"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: managed reads F23c: an fsGroup-expanded source whose content changed is not restored or served"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: expiry E2b: a managed prefix read succeeds until one millisecond before expiry"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: path swapped between check and use K2b: a caller directory swapped between the meta.json rename and the source rename publishes nothing"
   }
 ]

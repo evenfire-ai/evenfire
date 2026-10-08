@@ -205,7 +205,7 @@ export class NativeToolRegistry implements ToolRegistry {
     // existing positional call sites stay valid; only taskExecutor passes it.
     activeLlmProvider?: LlmProvider,
     gfsDownload?: {
-      /** Omitted when the durable store is recovery-required; delivery then fails closed. */
+      /** Omitted when the Host has no download store or it is unavailable; delivery then fails closed. */
       store?: GfsDownloadStore
       /** True only for attended, policy-eligible, healthy workspace delivery. */
       deliveryAvailable: boolean

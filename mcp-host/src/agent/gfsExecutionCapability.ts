@@ -53,7 +53,7 @@ export function gfsWorkspaceExecutionEnabled(
  * Associate every executable registry with the Host GFS store independently of
  * download eligibility. Shell never falls back to the shared Host root while a
  * store exists and fails closed without a caller root. Shell never calls the
- * store (#1019), so a recovery-required store only disables delivery.
+ * store (#1019), so an unavailable store only disables delivery.
  */
 export function gfsManagedWorkspaceExecution(
   input: GfsExecutionCapabilityInput

@@ -306,6 +306,42 @@ describe('GFS download store: publication', () => {
     expect(next.receipt.sha256).toBe(digest(next.bytes))
     await expect(store.readManagedFile(next.receipt.path, CALLER)).resolves.toEqual(next.bytes)
   })
+
+  it('F4b: a temporary meta.json that cannot be removed after a failed publish is logged, not swallowed', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 3, 16)
+    renameBoundary.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('injected EIO'), { code: 'EIO' })
+    })
+    rmBoundary.mockImplementation(async (target: string, options: unknown) => {
+      if (path.basename(target).startsWith('meta.json.tmp-'))
+        throw Object.assign(new Error('injected EACCES'), { code: 'EACCES' })
+      return nativeFs.rm(target, options as Parameters<typeof nativeFs.rm>[1])
+    })
+    const warn = vi.spyOn(logger, 'warn')
+
+    await expect(store.publish(transfer.id, CALLER, digest(bytes))).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+
+    // Witness: the cleanup attempted the temporary file and failed.
+    const directory = downloadDirectory(callerRoot, transfer.id)
+    const leftover = (await nativeFs.readdir(directory)).filter(name =>
+      name.startsWith('meta.json.tmp-')
+    )
+    expect(leftover).toHaveLength(1)
+    expect(rmBoundary).toHaveBeenCalledWith(
+      expect.stringMatching(new RegExp(`/input-${transfer.id}/${leftover[0]!}$`)),
+      { force: true }
+    )
+    // The log line carries the errno code only, never the path.
+    expect(warn).toHaveBeenCalledWith(
+      { component: 'GfsDownloadStore', code: 'EACCES' },
+      expect.stringContaining('could not remove a temporary meta.json')
+    )
+    rmBoundary.mockImplementation(nativeFs.rm)
+    await store.fail(transfer.id, CALLER)
+    expect(await exists(directory)).toBe(false)
+  })
 })
 
 describe('GFS download store: reuse', () => {
@@ -338,6 +374,28 @@ describe('GFS download store: reuse', () => {
     })
     vi.setSystemTime(Date.now() + 2 * 60 * 60_000)
     await expect(store.reusableReceipt(CALLER, sourceFor(8), 12)).resolves.toBeUndefined()
+  })
+
+  it("F7b: another caller's reuse lookup never hashes or removes a copy it does not own", async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 9, 24)
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    // Same size, different content: only a hash can tell the copy is corrupt.
+    await nativeFs.writeFile(path.join(directory, 'source'), Buffer.alloc(24, 0xee))
+    const removedBefore = await expiryCount('incomplete_removed')
+    hashBoundary.mockClear()
+
+    await expect(store.reusableReceipt('caller-b', sourceFor(9), 24)).resolves.toBeUndefined()
+
+    expect(hashBoundary).not.toHaveBeenCalled()
+    expect(await exists(path.join(directory, 'source'))).toBe(true)
+    expect(await expiryCount('incomplete_removed')).toBe(removedBefore)
+
+    // Witness: the owner's identical lookup reaches the copy, hashes it and
+    // removes it, so the lookup above was answered by the caller filter.
+    await expect(store.reusableReceipt(CALLER, sourceFor(9), 24)).resolves.toBeUndefined()
+    expect(hashBoundary).toHaveBeenCalledTimes(1)
+    expect(await exists(directory)).toBe(false)
+    expect(await expiryCount('incomplete_removed')).toBe(removedBefore + 1)
   })
 })
 
@@ -407,6 +465,46 @@ describe('GFS download store: quotas and eviction', () => {
     expect((await nativeFs.readdir(downloads)).sort()).toEqual(before)
     expect(before).toHaveLength(2)
     expect(await quotaCount('caller', 'retained_files')).toBe(denied + 1)
+  })
+
+  it("F10b: a quota denial carries only its code, never another caller's id, path, name or usage", async () => {
+    const { limited } = await limitedStore(HOST_30_CALLER_15)
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
+    const other = await completedCopy(limited, otherRoot, 'caller-b', 24, 10, { owner: 'task-b' })
+    const third = await completedCopy(limited, thirdRoot, 'caller-c', 25, 10, { owner: 'task-c' })
+    await completedCopy(limited, callerRoot, CALLER, 28, 5, { owner: 'task-a' })
+
+    // Within maxFileBytes (10) and caller-a's 15; the Host would reach 35 of 30
+    // and every copy is pinned, so only the Host quota decision can refuse it.
+    const error = await startTransfer(limited, callerRoot, CALLER, 26, 10).then(
+      () => undefined,
+      (rejection: unknown) => rejection
+    )
+
+    // The re-imported module registers its metrics elsewhere; the fitting
+    // admission at the end is the witness that this was the quota decision.
+    expect(error).toMatchObject({ code: 'host_quota_exceeded' })
+    const visible = error as Error & Record<string, unknown>
+    expect(Object.keys(visible).sort()).toEqual(['code', 'name'])
+    expect(visible.message).toBe('GFS download store failed (host_quota_exceeded)')
+    const serialized = JSON.stringify({ ...visible, message: visible.message })
+    for (const secret of [
+      'caller-b',
+      'caller-c',
+      otherRoot,
+      thirdRoot,
+      other.receipt.id,
+      third.receipt.id,
+      'fixture-24',
+      'fixture-25',
+      'task-b',
+      'task-c',
+    ])
+      expect(serialized).not.toContain(secret)
+    expect(await exists(downloadDirectory(otherRoot, other.receipt.id))).toBe(true)
+    // Neither size nor free space was the cause: 5 bytes fit the Host's 30 exactly.
+    await expect(startTransfer(limited, callerRoot, CALLER, 27, 5)).resolves.toBeDefined()
   })
 
   it('F11: pinned and active downloads are never evicted', async () => {
@@ -523,24 +621,33 @@ describe('GFS download store: sweep', () => {
     const wrongSize = await handMadeDirectory(callerRoot)
     await writeMeta(wrongSize.directory, metaFor(wrongSize.id, bytes))
     await nativeFs.writeFile(path.join(wrongSize.directory, 'source'), Buffer.alloc(21, 3))
+    // A crash while meta.json was being written leaves its temporary name.
+    const temporaryMeta = await handMadeDirectory(callerRoot)
+    await nativeFs.writeFile(path.join(temporaryMeta.directory, 'source.partial'), bytes)
+    await nativeFs.writeFile(
+      path.join(temporaryMeta.directory, `meta.json.tmp-${nativeCrypto.randomUUID()}`),
+      JSON.stringify(metaFor(temporaryMeta.id, bytes)),
+      { mode: 0o600 }
+    )
     for (const shape of [
       orphanPartial,
       metaWithoutSource,
       sourceWithoutMeta,
       invalidMeta,
       wrongSize,
+      temporaryMeta,
     ])
       shapes.push(shape.directory)
     const removed = await expiryCount('incomplete_removed')
 
     await expect(store.cleanupExpired()).resolves.toEqual({
       removedExpired: 0,
-      removedIncomplete: 5,
+      removedIncomplete: 6,
       removeFailed: 0,
     })
 
     for (const directory of shapes) expect(await exists(directory)).toBe(false)
-    expect(await expiryCount('incomplete_removed')).toBe(removed + 5)
+    expect(await expiryCount('incomplete_removed')).toBe(removed + 6)
     // Witness: the complete download stays on disk and readable through the index.
     await expect(store.readManagedFile(kept.receipt.path, CALLER)).resolves.toEqual(kept.bytes)
   })
@@ -633,6 +740,32 @@ describe('GFS download store: sweep', () => {
     await expect(store.cleanupExpired()).resolves.toMatchObject({ removedIncomplete: 1 })
     expect(await exists(path.join(downloads, leftover[0]!))).toBe(false)
   })
+
+  it("F20b: a caller's unreadable download directory is counted and logged, and the store stays available", async () => {
+    const downloads = path.join(callerRoot, '.gfs-downloads')
+    await nativeFs.mkdir(downloads, { mode: 0o700 })
+    const warn = vi.spyOn(logger, 'warn')
+    const failed = await expiryCount('sweep_failed')
+    await nativeFs.chmod(downloads, 0o000)
+    try {
+      await expect(store.cleanupExpired()).resolves.toMatchObject({ removeFailed: 0 })
+
+      expect(await expiryCount('sweep_failed')).toBe(failed + 1)
+      expect(warn).toHaveBeenCalledWith(
+        { component: 'GfsDownloadStore', code: 'EACCES' },
+        expect.stringContaining('could not list a download directory')
+      )
+      expect(store.isAvailable()).toBe(true)
+      // Witness: another caller still gets a download admitted and published.
+      const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+      const other = await completedCopy(store, otherRoot, 'caller-b', 112, 8)
+      await expect(store.readManagedFile(other.receipt.path, 'caller-b')).resolves.toEqual(
+        other.bytes
+      )
+    } finally {
+      await nativeFs.chmod(downloads, 0o700)
+    }
+  })
 })
 
 describe('GFS download store: managed reads', () => {
@@ -691,6 +824,49 @@ describe('GFS download store: managed reads', () => {
     await expect(store.readManagedFilePrefix(receipt.path, CALLER, 4)).rejects.toMatchObject({
       code: 'download_missing',
     })
+  })
+
+  it('F23b: a kubelet fsGroup expansion is restored to the private modes after the content is re-hashed', async () => {
+    const { receipt, bytes } = await completedCopy(store, callerRoot, CALLER, 124, 20)
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    const source = path.join(directory, 'source')
+    await nativeFs.chmod(source, 0o660)
+    await nativeFs.chmod(directory, 0o2770)
+    hashBoundary.mockClear()
+
+    // The prefix read hashes nothing on its own, so a hash here is the
+    // fsGroup branch verifying the content before it restores the mode.
+    await expect(store.readManagedFilePrefix(receipt.path, CALLER, 8)).resolves.toEqual(
+      bytes.subarray(0, 8)
+    )
+
+    expect(hashBoundary).toHaveBeenCalledTimes(1)
+    expect((await nativeFs.stat(source)).mode & 0o7777).toBe(0o600)
+    expect((await nativeFs.stat(directory)).mode & 0o7777).toBe(0o700)
+    await expect(store.readManagedFile(receipt.path, CALLER)).resolves.toEqual(bytes)
+  })
+
+  it('F23c: an fsGroup-expanded source whose content changed is not restored or served', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 125, 20)
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    const source = path.join(directory, 'source')
+    await nativeFs.writeFile(source, Buffer.alloc(20, 0xcd))
+    await nativeFs.chmod(source, 0o660)
+    hashBoundary.mockClear()
+
+    await expect(store.readManagedFilePrefix(receipt.path, CALLER, 8)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+
+    // Witness: the content was hashed, and the mismatch kept the group mode.
+    expect(hashBoundary).toHaveBeenCalledTimes(1)
+    expect((await nativeFs.stat(source)).mode & 0o7777).toBe(0o660)
+
+    // Reuse reaches the same check and removes the copy.
+    const removed = await expiryCount('incomplete_removed')
+    await expect(store.reusableReceipt(CALLER, sourceFor(125), 20)).resolves.toBeUndefined()
+    expect(await exists(directory)).toBe(false)
+    expect(await expiryCount('incomplete_removed')).toBe(removed + 1)
   })
 })
 

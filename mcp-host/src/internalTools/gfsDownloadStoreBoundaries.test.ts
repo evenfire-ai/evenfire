@@ -367,7 +367,10 @@ describe('GFS download store boundaries: quota and capacity', () => {
       startTransfer(store, callerDirectory(hostRoot, fresh), fresh, index + 1, 1)
     ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
     expect(await quotaCount('host', 'retained_files')).toBe(denied + 1)
-  })
+    // 64 real publications: the bound is the Host file limit, which is a
+    // constant, so the timeout is explicit rather than the 5 s default that a
+    // loaded machine can exceed.
+  }, 60_000)
 
   it('Q5: free space exactly at the threshold is admitted and one byte less is refused', async () => {
     const observed = await nativeFs.statfs(hostRoot, { bigint: true })
@@ -510,6 +513,20 @@ describe('GFS download store boundaries: expiry', () => {
     }
   })
 
+  it('E2b: a managed prefix read succeeds until one millisecond before expiry', async () => {
+    const copy = await expiringCopy(343)
+    vi.setSystemTime(copy.expiresAtMs - 1)
+    await expect(store.readManagedFilePrefix(copy.receipt.path, A, 4)).resolves.toEqual(
+      copy.bytes.subarray(0, 4)
+    )
+    for (const instant of [copy.expiresAtMs, copy.expiresAtMs + 1]) {
+      vi.setSystemTime(instant)
+      await expect(store.readManagedFilePrefix(copy.receipt.path, A, 4)).rejects.toMatchObject({
+        code: 'download_expired',
+      })
+    }
+  })
+
   it('E3: the sweep removes a copy exactly at its expiry', async () => {
     const copy = await expiringCopy(342)
     await expect(store.cleanupExpired(copy.expiresAtMs - 1)).resolves.toMatchObject({
@@ -566,6 +583,16 @@ describe('GFS download store boundaries: in-process concurrency', () => {
 
   it('C4: a sweep requested during publication runs after it and keeps the copy', async () => {
     const { transfer, bytes } = await startTransfer(store, rootA, A, 353, 12)
+    const source = path.join(downloadDirectory(rootA, transfer.id), 'source')
+    // The private sweep is observed, not replaced: it records whether the
+    // publication had finished when the sweep actually started.
+    const internals = store as unknown as { sweep: (now: number) => Promise<unknown> }
+    const realSweep = internals.sweep.bind(store)
+    const sourceAtSweepStart: boolean[] = []
+    vi.spyOn(internals, 'sweep').mockImplementation(async (now: number) => {
+      sourceAtSweepStart.push(exists(source))
+      return realSweep(now)
+    })
     let sweep: ReturnType<GfsDownloadStore['cleanupExpired']> | undefined
     renameBoundary.mockImplementation(async (from: string, to: string) => {
       await nativeFs.rename(from, to)
@@ -577,20 +604,31 @@ describe('GFS download store boundaries: in-process concurrency', () => {
 
     expect(sweep).toBeDefined()
     await expect(sweep).resolves.toMatchObject({ removedIncomplete: 0, removedExpired: 0 })
+    // Witness: the requested sweep ran once, after source was in place.
+    expect(sourceAtSweepStart).toEqual([true])
     await expect(store.readManagedFile(receipt.path, A)).resolves.toEqual(bytes)
   })
 
   it('C5: close requested during publication waits for it', async () => {
     const { transfer, bytes } = await startTransfer(store, rootA, A, 354, 12)
     let closing: Promise<void> | undefined
+    let closed = false
+    let closedAtSourceRename: boolean | undefined
     renameBoundary.mockImplementation(async (from: string, to: string) => {
+      if (path.basename(to) === 'source') closedAtSourceRename = closed
       await nativeFs.rename(from, to)
-      if (path.basename(to) === 'meta.json') closing = store.close(5_000)
+      if (path.basename(to) === 'meta.json')
+        closing = store.close(5_000).then(() => {
+          closed = true
+        })
     })
 
     const receipt = await store.publish(transfer.id, A, digestOf(bytes))
     expect(closing).toBeDefined()
     await closing
+
+    // Witness: the last rename of the publication ran before close resolved.
+    expect(closedAtSourceRename).toBe(false)
 
     expect(store.isAvailable()).toBe(false)
     expect(syncFs.readFileSync(path.join(rootA, receipt.path))).toEqual(bytes)
@@ -850,6 +888,40 @@ describe('GFS download store boundaries: path swapped between check and use', ()
     expect(opened.some(target => target.endsWith(`input-${transfer.id}/source.partial`))).toBe(true)
     expect(syncFs.readdirSync(decoy)).toEqual(['source.partial'])
     expect(syncFs.readFileSync(path.join(decoy, 'source.partial'))).toEqual(bytes)
+  })
+
+  it('K2b: a caller directory swapped between the meta.json rename and the source rename publishes nothing', async () => {
+    const { transfer, bytes } = await startTransfer(store, rootB, B, 83, 8)
+    const outside = outsideDirectory()
+    const decoy = downloadDirectory(outside, transfer.id)
+    syncFs.mkdirSync(decoy, { recursive: true, mode: 0o700 })
+    syncFs.chmodSync(path.dirname(decoy), 0o700)
+    const decoyBytes = Buffer.alloc(8, 0x6d)
+    syncFs.writeFileSync(path.join(decoy, 'source.partial'), decoyBytes, { mode: 0o600 })
+    let swapped = false
+    renameBoundary.mockImplementation(async (from: string, to: string) => {
+      await nativeFs.rename(from, to)
+      if (!swapped && path.basename(String(to)) === 'meta.json') {
+        swapped = true
+        syncFs.renameSync(rootB, `${rootB}-moved`)
+        syncFs.symlinkSync(outside, rootB)
+      }
+    })
+
+    await expect(store.publish(transfer.id, B, digestOf(bytes))).rejects.toMatchObject({
+      code: 'workspace_unavailable',
+    })
+
+    // Witness: meta.json was renamed into place, then the swap happened.
+    expect(swapped).toBe(true)
+    const targets = renameBoundary.mock.calls.map(([, to]) => path.basename(String(to)))
+    expect(targets).toContain('meta.json')
+    expect(targets).not.toContain('source')
+    // The swap target is untouched and the real directory holds no source.
+    expect(syncFs.readdirSync(decoy)).toEqual(['source.partial'])
+    expect(syncFs.readFileSync(path.join(decoy, 'source.partial'))).toEqual(decoyBytes)
+    const moved = downloadDirectory(`${rootB}-moved`, transfer.id)
+    expect(syncFs.readdirSync(moved).sort()).toEqual(['meta.json', 'source.partial'])
   })
 
   it('K3: a read whose caller directory is swapped after the check serves nothing from outside', async () => {
