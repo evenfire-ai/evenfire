@@ -1084,13 +1084,16 @@ export class GfsDownloadStore {
       if (entry.provenance === 'adopted') totals.adopted += 1
     }
     // A held directory this sweep never reached (its listing failed, or it is
-    // no longer a duplicate) keeps its charge until lstat proves it gone.
+    // no longer a duplicate) keeps its charge until lstat proves it gone:
+    // ENOENT, ENOTDIR (a parent is no longer a directory) or a path that is
+    // no longer a directory. Any other answer keeps the charge.
     for (const [directory, copy] of previousHeld) {
       if (settled.has(directory)) continue
       try {
-        await fs.lstat(directory)
+        if (!(await fs.lstat(directory)).isDirectory()) continue
       } catch (error) {
-        if (errorCode(error) === 'ENOENT') continue
+        const code = errorCode(error)
+        if (code === 'ENOENT' || code === 'ENOTDIR') continue
       }
       held.set(directory, copy)
     }

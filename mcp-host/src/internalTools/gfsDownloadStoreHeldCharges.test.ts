@@ -200,7 +200,7 @@ describe('GFS download store: held duplicate charges survive transient failures 
     await store.fail(admitted.transfer.id, PLANTER)
   })
 
-  it('a carried charge whose lstat fails with anything but ENOENT is kept', async () => {
+  it('a carried charge whose lstat fails with anything but ENOENT or ENOTDIR is kept', async () => {
     const { store, planter, ids } = await heldDuplicates()
     const listings = failWithEio('readdir', target => target.endsWith(DOWNLOADS))
     const probes = failWithEio('lstat', target =>
@@ -218,6 +218,44 @@ describe('GFS download store: held duplicate charges survive transient failures 
     await store.cleanupExpired()
     const admitted = await startTransfer(store, planter, PLANTER, 102, 5)
     await store.fail(admitted.transfer.id, PLANTER)
+  })
+
+  // R3-F2, ported from the round-3 review's SOL-R3-HELD-ENOTDIR repro. The
+  // owner's 40 bytes are adopted and evictable; an admission of 40 fits the
+  // 80-byte budget beside them only if no phantom charge remains. A phantom
+  // 40 bytes would make the admission evict every one of the owner's copies.
+  it('SOL-R3-HELD-ENOTDIR: a carried charge below a caller root that became a file is dropped', async () => {
+    const { store, owner, planter, ids } = await heldDuplicates()
+    faults.clear()
+    syncFs.rmSync(planter, { recursive: true, force: true })
+    syncFs.writeFileSync(planter, '', { mode: 0o600 })
+    // Witness: the held paths now answer ENOTDIR, not ENOENT.
+    await expect(fs.lstat(downloadDirectory(planter, ids[0]!))).rejects.toMatchObject({
+      code: 'ENOTDIR',
+    })
+    for (let sweep = 0; sweep < 3; sweep += 1) await store.cleanupExpired()
+
+    const admitted = await startTransfer(store, owner, OWNER, 101, 40)
+    for (const id of ids) expect(exists(downloadDirectory(owner, id))).toBe(true)
+    await store.fail(admitted.transfer.id, OWNER)
+  })
+
+  it('a carried path that is no longer a directory is dropped while its parent cannot be listed', async () => {
+    const { store, owner, planter, ids } = await heldDuplicates()
+    faults.clear()
+    const listings = failWithEio('readdir', target => target.endsWith(DOWNLOADS))
+    for (const id of ids) {
+      const target = downloadDirectory(planter, id)
+      syncFs.rmSync(target, { recursive: true, force: true })
+      syncFs.writeFileSync(target, '', { mode: 0o600 })
+    }
+
+    const admitted = await startTransfer(store, owner, OWNER, 101, 40)
+    // Witness: the duplicates were unreachable, so only the lstat re-check
+    // can have released their charge; no owner copy had to be evicted.
+    expect(listings.length).toBeGreaterThan(0)
+    for (const id of ids) expect(exists(downloadDirectory(owner, id))).toBe(true)
+    await store.fail(admitted.transfer.id, OWNER)
   })
 
   it('a carried directory that is now indexed is charged once, not twice', async () => {

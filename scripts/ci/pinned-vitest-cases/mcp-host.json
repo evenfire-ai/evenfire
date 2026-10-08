@@ -889,7 +889,15 @@
   },
   {
     "suite": "gfsDownloadStoreHeldCharges.test.ts",
-    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried charge whose lstat fails with anything but ENOENT is kept"
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried charge whose lstat fails with anything but ENOENT or ENOTDIR is kept"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) SOL-R3-HELD-ENOTDIR: a carried charge below a caller root that became a file is dropped"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried path that is no longer a directory is dropped while its parent cannot be listed"
   },
   {
     "suite": "gfsDownloadStoreHeldCharges.test.ts",
