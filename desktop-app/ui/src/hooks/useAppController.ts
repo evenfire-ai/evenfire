@@ -1042,11 +1042,13 @@ export function useAppController() {
       const pendingSelectionOptions: {
         selectLatest: boolean
         suppressAutoSelect: boolean
+        deferSwitch: boolean
         title?: string
         isRemote?: boolean
       } = {
         selectLatest: shouldSelectLatest,
         suppressAutoSelect: !shouldSelectLatest && !targetChatId,
+        deferSwitch: options.keepNavItem === true,
       }
       if (options.title) pendingSelectionOptions.title = options.title
       if (options.isRemote !== undefined) pendingSelectionOptions.isRemote = options.isRemote

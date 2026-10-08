@@ -448,6 +448,8 @@ export function useAgentChatController({
 
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const selectionIntentRevisionRef = useRef(0)
+  const activeChatSwitchRequestRef = useRef<symbol | null>(null)
+  const activeChatSwitchKeyRef = useRef<string | null>(null)
   // Fase 2b (§4.1): the SessionFSM is now the SINGLE writer of the per-chat
   // session projection. `sessionStateByChatKey` (the public contract) is derived
   // from the reducer's map via `useSyncExternalStore` + `projectSessionState`.
@@ -533,7 +535,11 @@ export function useAgentChatController({
   const beginSelectionIntent = useCallback(
     (startsHistoryLoad = false) => {
       selectionIntentRevisionRef.current += 1
-      if (!startsHistoryLoad) setChatMessagesLoading(false)
+      if (!startsHistoryLoad) {
+        setChatMessagesLoading(false)
+        activeChatSwitchRequestRef.current = null
+        activeChatSwitchKeyRef.current = null
+      }
       return selectionIntentRevisionRef.current
     },
     [setChatMessagesLoading]
@@ -643,8 +649,6 @@ export function useAgentChatController({
     navItem,
     selectedAgent,
   })
-  const activeChatSwitchRequestRef = useRef<symbol | null>(null)
-  const activeChatSwitchKeyRef = useRef<string | null>(null)
   // Correlate the visible local page to the switch request that loaded it.
   const activeChatLocalPageRequestRef = useRef<{
     request: symbol
@@ -1059,7 +1063,6 @@ export function useAgentChatController({
       const isStillActive = () => {
         const visible = activeChatVisibilityRef.current
         return (
-          selectionIntentRevisionRef.current === selectionIntentRevision &&
           !isHostAccessBlocked(agentRef) &&
           activeChatSwitchRequestRef.current === switchRequest &&
           visible.selectedAgent === agentRef &&
@@ -3928,6 +3931,7 @@ export function useAgentChatController({
       options: {
         selectLatest?: boolean
         suppressAutoSelect?: boolean
+        deferSwitch?: boolean
         title?: string
         isRemote?: boolean
       } = {}
@@ -3936,7 +3940,12 @@ export function useAgentChatController({
       const selectsSpecificChat = Boolean(
         chatId && !options.selectLatest && !options.suppressAutoSelect
       )
-      if (selectsSpecificChat && selectedAgent === agentName && navItem === DESKTOP_ROUTES.chat) {
+      if (
+        selectsSpecificChat &&
+        !options.deferSwitch &&
+        selectedAgent === agentName &&
+        navItem === DESKTOP_ROUTES.chat
+      ) {
         clearPendingSelection(agentName)
         if (options.title) {
           upsertProvisionalEntry(chatId!, options.title, options.isRemote === true)

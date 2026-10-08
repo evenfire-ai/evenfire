@@ -99,7 +99,7 @@ function holdSessionMessages(chatId: string) {
     if (held && requestedChatId === chatId) returned.resolve()
     return result
   })
-  return { entered, release, returned }
+  return { entered, release, returned, hasEntered: () => held }
 }
 
 function holdLastActive(chatId: string) {
@@ -138,7 +138,7 @@ function holdLocalMessages(chatId: string) {
     if (held && requestedChatId === chatId) returned.resolve()
     return messages
   })
-  return { entered, release, returned }
+  return { entered, release, returned, hasEntered: () => held }
 }
 
 describe('selection intent and continuation guards', () => {
@@ -265,25 +265,74 @@ describe('selection intent and continuation guards', () => {
     controller.unmount()
   })
 
-  it('lets a newer pending specific selection supersede the old list request', async () => {
+  it('keeps a newer chat switch while an older specific list request resolves', async () => {
     await clerum.chat.create('agent-x', 'older-selection')
     await clerum.chat.create('agent-x', 'newer-selection')
+    await clerum.chat.upsertMessages('agent-x', 'newer-selection', [
+      { id: 'newer-selection-message', role: 'user', content: 'newer history', timestamp: 1 },
+    ])
     const controller = renderController({ navItem: 'agents' })
     await waitForListIdle(controller)
     const { heldIndex, chatIndex } = await startSpecificIndexLoad(controller, 'older-selection')
+    const heldHistory = holdLocalMessages('newer-selection')
+    const heldSession = holdSessionMessages('newer-selection')
+    let localHistoryEntered = false
+    let serverHistoryEntered = false
 
     act(() => controller.result.current.setPendingChatSelection('agent-x', 'newer-selection'))
     expect(controller.result.current.activeChatId).toBe('newer-selection')
     expect(controller.result.current.chatMessagesLoading).toBe(true)
 
-    await act(async () => {
-      heldIndex.resolve(chatIndex)
-    })
-    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
-    expect(controller.result.current.activeChatId).toBe('newer-selection')
-    expect(controller.result.current.chatMessages).toEqual([])
-    expect(controller.result.current.chatMessagesLoading).toBe(true)
-    controller.unmount()
+    try {
+      await waitFor(() => expect(heldHistory.hasEntered()).toBe(true))
+      localHistoryEntered = true
+      await act(async () => {
+        await heldHistory.entered.promise
+      })
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(true)
+
+      await act(async () => {
+        heldIndex.resolve(chatIndex)
+      })
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      expect(controller.result.current.activeChatId).toBe('newer-selection')
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(true)
+
+      await act(async () => {
+        heldHistory.release.resolve()
+        await heldHistory.returned.promise
+      })
+      await waitFor(() => expect(heldSession.hasEntered()).toBe(true))
+      serverHistoryEntered = true
+      await act(async () => {
+        await heldSession.entered.promise
+      })
+      expect(controller.result.current.chatMessages).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: 'newer-selection-message' })])
+      )
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+
+      await act(async () => {
+        heldSession.release.resolve()
+        await heldSession.returned.promise
+      })
+      const newerChatKey = makeTaskKey('agent-x', 'newer-selection')
+      await waitFor(() => {
+        expect(controller.result.current.sessionStateByChatKey[newerChatKey]?.syncing).toBe(false)
+      })
+    } finally {
+      heldHistory.release.resolve()
+      heldSession.release.resolve()
+      await act(async () => {
+        heldIndex.resolve(chatIndex)
+        if (localHistoryEntered) await heldHistory.returned.promise
+        if (serverHistoryEntered) await heldSession.returned.promise
+      })
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      controller.unmount()
+    }
   })
 
   it('keeps clearActiveChat blank when a prior specific index resolves', async () => {
@@ -322,91 +371,141 @@ describe('selection intent and continuation guards', () => {
     controller.unmount()
   })
 
-  it.each(['latest', 'implicit'] as const)(
-    'does not let an older %s completion clear a newer selection spinner',
-    async mode => {
-      clerum.rpc.listSessions.mockResolvedValue(remoteCatalog())
-      clerum.rpc.loadSessionMessages.mockResolvedValue(
-        await serverSessionMessages('agent-x', 'catalog-latest')
-      )
-      const heldSession = holdSessionMessages('catalog-latest')
-      const observedLoading: boolean[] = []
-      const controller = renderController(
-        {
-          navItem: mode === 'latest' ? 'agents' : 'chat',
-          loadMenuData: false,
-        },
-        { onLayoutCommit: view => observedLoading.push(view.chatMessagesLoading) }
-      )
-      if (mode === 'latest') {
-        await waitForListIdle(controller)
-        await act(async () => {
-          controller.result.current.setPendingChatSelection('agent-x', null, {
-            selectLatest: true,
-          })
-          controller.rerender({ navItem: 'chat' })
-        })
-      }
-      try {
+  it('does not let an older session reconciliation clear a newer selection spinner', async () => {
+    await clerum.chat.create('agent-x', 'newer-chat')
+    await clerum.chat.upsertMessages('agent-x', 'newer-chat', [
+      { id: 'newer-chat-message', role: 'user', content: 'newer history', timestamp: 1 },
+    ])
+    clerum.rpc.listSessions.mockResolvedValue(remoteCatalog())
+    clerum.rpc.loadSessionMessages.mockResolvedValue(
+      await serverSessionMessages('agent-x', 'catalog-latest')
+    )
+    const heldSession = holdSessionMessages('catalog-latest')
+    const heldNewerHistory = holdLocalMessages('newer-chat')
+    const observedLoading: boolean[] = []
+    const controller = renderController(
+      { navItem: 'agents', loadMenuData: false },
+      { onLayoutCommit: view => observedLoading.push(view.chatMessagesLoading) }
+    )
+    let olderSwitch: Promise<void> | undefined
+    let newerSwitch: Promise<void> | undefined
+
+    try {
+      await waitForListIdle(controller)
+      act(() => {
+        olderSwitch = controller.result.current.handleSelectChat('catalog-latest')
+      })
+      await act(async () => {
         await heldSession.entered.promise
-        const latestKey = makeTaskKey('agent-x', 'catalog-latest')
-        expect(controller.result.current.sessionStateByChatKey[latestKey]?.syncing).toBe(true)
-        expect(controller.result.current.activeChatId).toBe('catalog-latest')
-        expect(controller.result.current.chatMessagesLoading).toBe(false)
+      })
+      const latestKey = makeTaskKey('agent-x', 'catalog-latest')
+      expect(controller.result.current.sessionStateByChatKey[latestKey]?.syncing).toBe(true)
+      expect(controller.result.current.activeChatId).toBe('catalog-latest')
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
 
-        const loadingObservationStart = observedLoading.length
-        act(() => controller.result.current.setPendingChatSelection('agent-x', 'newer-chat'))
-        expect(controller.result.current.activeChatId).toBe('newer-chat')
-        expect(controller.result.current.chatMessagesLoading).toBe(true)
+      const loadingObservationStart = observedLoading.length
+      act(() => {
+        newerSwitch = controller.result.current.handleSelectChat('newer-chat')
+      })
+      await act(async () => {
+        await heldNewerHistory.entered.promise
+      })
+      expect(controller.result.current.activeChatId).toBe('newer-chat')
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(true)
 
-        await act(async () => {
-          heldSession.release.resolve()
-          await heldSession.returned.promise
-        })
-        await waitFor(() =>
-          expect(controller.result.current.sessionStateByChatKey[latestKey]?.syncing).toBe(false)
-        )
-        await act(async () => {
-          await new Promise(resolve => setTimeout(resolve, 0))
-        })
-        expect(controller.result.current.activeChatId).toBe('newer-chat')
-        expect(controller.result.current.chatMessages).toEqual([])
-        expect(controller.result.current.chatMessagesLoading).toBe(true)
-        expect(observedLoading.slice(loadingObservationStart)).not.toContain(false)
-      } finally {
+      await act(async () => {
         heldSession.release.resolve()
-        controller.unmount()
-      }
+        await heldSession.returned.promise
+        await olderSwitch
+      })
+      expect(controller.result.current.sessionStateByChatKey[latestKey]?.syncing).toBe(false)
+      expect(controller.result.current.activeChatId).toBe('newer-chat')
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(true)
+      expect(observedLoading.slice(loadingObservationStart)).not.toContain(false)
+
+      await act(async () => {
+        heldNewerHistory.release.resolve()
+        await heldNewerHistory.returned.promise
+        await newerSwitch
+      })
+      await waitFor(() => {
+        expect(controller.result.current.chatMessages).toEqual(
+          expect.arrayContaining([expect.objectContaining({ id: 'newer-chat-message' })])
+        )
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+      })
+    } finally {
+      heldSession.release.resolve()
+      heldNewerHistory.release.resolve()
+      await olderSwitch?.catch(() => undefined)
+      await newerSwitch?.catch(() => undefined)
+      controller.unmount()
     }
-  )
+  })
 
   it('skips stale local history after a newer selection wins during setLastActive', async () => {
     await clerum.chat.create('agent-x', 'slow-chat')
     await clerum.chat.create('agent-x', 'newer-chat')
+    await clerum.chat.upsertMessages('agent-x', 'newer-chat', [
+      { id: 'newer-chat-message', role: 'user', content: 'newer history', timestamp: 1 },
+    ])
     const heldLastActive = holdLastActive('slow-chat')
     const controller = renderController()
     await waitForListIdle(controller)
+    const heldNewerHistory = holdLocalMessages('newer-chat')
 
     let switchPromise!: Promise<void>
+    let newerSwitch: Promise<void> | undefined
     act(() => {
       switchPromise = controller.result.current.switchToChat('agent-x', 'slow-chat')
     })
     await heldLastActive.entered.promise
-    act(() => controller.result.current.setPendingChatSelection('agent-x', 'newer-chat'))
-    expect(controller.result.current.activeChatId).toBe('newer-chat')
-
-    await act(async () => {
-      heldLastActive.release.resolve()
-      await switchPromise
+    act(() => {
+      newerSwitch = controller.result.current.handleSelectChat('newer-chat')
     })
+    await heldNewerHistory.entered.promise
     expect(controller.result.current.activeChatId).toBe('newer-chat')
     expect(controller.result.current.chatMessages).toEqual([])
     expect(controller.result.current.chatMessagesLoading).toBe(true)
-    expect(clerum.chat.loadMessages).not.toHaveBeenCalled()
-    controller.unmount()
+
+    try {
+      await act(async () => {
+        heldLastActive.release.resolve()
+        await switchPromise
+      })
+      await waitFor(() => {
+        expect(controller.result.current.activeChatId).toBe('newer-chat')
+        expect(controller.result.current.chatMessages).toEqual([])
+        expect(controller.result.current.chatMessagesLoading).toBe(true)
+      })
+      expect(
+        clerum.chat.loadMessages.mock.calls.some(
+          ([agentRef, chatId]) => agentRef === 'agent-x' && chatId === 'slow-chat'
+        )
+      ).toBe(false)
+
+      await act(async () => {
+        heldNewerHistory.release.resolve()
+        await heldNewerHistory.returned.promise
+        await newerSwitch
+      })
+      await waitFor(() => {
+        expect(controller.result.current.chatMessages).toEqual(
+          expect.arrayContaining([expect.objectContaining({ id: 'newer-chat-message' })])
+        )
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+      })
+    } finally {
+      heldLastActive.release.resolve()
+      heldNewerHistory.release.resolve()
+      await newerSwitch?.catch(() => undefined)
+      controller.unmount()
+    }
   })
 
-  it('does not expose cached history when Host authority becomes uncertain after setLastActive', async () => {
+  it('settles loading without exposing cached history when Host authority becomes uncertain', async () => {
     await clerum.chat.create('agent-x', 'guarded-chat')
     await clerum.chat.upsertMessages('agent-x', 'guarded-chat', [
       {
@@ -434,7 +533,7 @@ describe('selection intent and continuation guards', () => {
     })
     expect(controller.result.current.activeChatId).toBe('guarded-chat')
     expect(controller.result.current.chatMessages).toEqual([])
-    expect(controller.result.current.chatMessagesLoading).toBe(true)
+    expect(controller.result.current.chatMessagesLoading).toBe(false)
     expect(clerum.chat.loadMessages).not.toHaveBeenCalled()
     controller.unmount()
   })

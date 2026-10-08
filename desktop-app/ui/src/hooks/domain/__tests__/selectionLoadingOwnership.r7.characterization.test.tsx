@@ -36,6 +36,26 @@ function holdLastActive(chatId: string) {
   return { entered, release, returned }
 }
 
+function holdLocalMessages(chatId: string) {
+  const original = clerum.chat.loadMessages.getMockImplementation()
+  if (!original) throw new Error('Expected the ChatStore-backed loadMessages test implementation')
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  const returned = deferred<void>()
+  let held = false
+  clerum.chat.loadMessages.mockImplementation(async (agentRef, selectedChatId, ...args) => {
+    if (agentRef === 'agent-x' && selectedChatId === chatId && !held) {
+      held = true
+      entered.resolve()
+      await release.promise
+    }
+    const messages = await original(agentRef, selectedChatId, ...args)
+    if (held && selectedChatId === chatId) returned.resolve()
+    return messages
+  })
+  return { entered, release, returned }
+}
+
 describe('Round 7 selection loading ownership', () => {
   it('settles a held implicit switch when a newer no-chat intent arrives', async () => {
     await clerum.chat.create('agent-x', 'chat-a')
@@ -79,13 +99,40 @@ describe('Round 7 selection loading ownership', () => {
     await clerum.chat.create('agent-x', 'chat-a')
     clerum.chat.getIndex.mockImplementation(agentRef => clerum.readIndex(agentRef))
     const heldSwitch = holdLastActive('chat-a')
+    const heldHistory = holdLocalMessages('chat-b')
     const controller = renderController({ navItem: 'chat', loadMenuData: false })
+    let localHistoryEntered = false
+    let requestedSwitch!: Promise<void>
 
     try {
       await act(async () => {
         await heldSwitch.entered.promise
       })
-      act(() => controller.result.current.setPendingChatSelection('agent-x', 'chat-b'))
+      act(() => {
+        requestedSwitch = controller.result.current.handleSelectChat('chat-b')
+      })
+      await act(async () => {
+        await heldHistory.entered.promise
+        localHistoryEntered = true
+      })
+
+      expect(controller.result.current.activeChatId).toBe('chat-b')
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(true)
+
+      await act(async () => {
+        heldSwitch.release.resolve()
+        await heldSwitch.returned.promise
+      })
+      expect(controller.result.current.activeChatId).toBe('chat-b')
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(true)
+
+      await act(async () => {
+        heldHistory.release.resolve()
+        await heldHistory.returned.promise
+        await requestedSwitch
+      })
 
       await waitFor(() => {
         expect(controller.result.current.activeChatId).toBe('chat-b')
@@ -95,10 +142,6 @@ describe('Round 7 selection loading ownership', () => {
         expect(controller.result.current.chatMessagesLoading).toBe(false)
       })
 
-      await act(async () => {
-        heldSwitch.release.resolve()
-        await heldSwitch.returned.promise
-      })
       expect(controller.result.current.activeChatId).toBe('chat-b')
       expect(controller.result.current.chatMessages).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: 'chat-b-message' })])
@@ -106,8 +149,11 @@ describe('Round 7 selection loading ownership', () => {
       expect(controller.result.current.chatMessagesLoading).toBe(false)
     } finally {
       heldSwitch.release.resolve()
+      heldHistory.release.resolve()
       await act(async () => {
         await heldSwitch.returned.promise
+        if (localHistoryEntered) await heldHistory.returned.promise
+        await requestedSwitch?.catch(() => undefined)
       })
       controller.unmount()
     }
@@ -152,6 +198,52 @@ describe('Round 7 selection loading ownership', () => {
       expect(controller.result.current.chatMessages).toEqual([])
       expect(controller.result.current.chatMessagesLoading).toBe(false)
       expect(clerum.chat.loadMessages).not.toHaveBeenCalled()
+    } finally {
+      heldSwitch.release.resolve()
+      await act(async () => {
+        await switchPromise?.catch(() => undefined)
+      })
+      controller.unmount()
+    }
+  })
+
+  it('settles the current spinner when a newer chat switch targets a deleted chat', async () => {
+    await clerum.chat.create('agent-x', 'chat-a')
+    await clerum.chat.create('agent-x', 'chat-b')
+    const heldSwitch = holdLastActive('chat-a')
+    const controller = renderController({ loadMenuData: false })
+    let switchPromise!: Promise<void>
+
+    try {
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      act(() => {
+        switchPromise = controller.result.current.handleSelectChat('chat-a')
+      })
+      await act(async () => {
+        await heldSwitch.entered.promise
+      })
+      expect(controller.result.current.chatMessagesLoading).toBe(true)
+
+      await act(async () => {
+        const deletion = await controller.result.current.captureChatDeleteFence('agent-x')
+        await controller.result.current.handleDeleteChat('chat-b', deletion)
+        await controller.result.current.switchToChat('agent-x', 'chat-b')
+      })
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+
+      await act(async () => {
+        heldSwitch.release.resolve()
+        await switchPromise
+      })
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+      expect(
+        clerum.chat.loadMessages.mock.calls.some(
+          ([agentRef, chatId]) => agentRef === 'agent-x' && chatId === 'chat-b'
+        )
+      ).toBe(false)
     } finally {
       heldSwitch.release.resolve()
       await act(async () => {
@@ -343,9 +435,8 @@ describe('Round 7 selection loading ownership', () => {
         await createPromise
       })
       expect(observedError).toBe(createError)
-      expect(controller.result.current.chatMessages).not.toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: 'team-one-message' })])
-      )
+      expect(controller.result.current.activeChatId).toBeNull()
+      expect(controller.result.current.chatMessages).toEqual([])
       expect(controller.result.current.chatMessagesLoading).toBe(false)
     } finally {
       createGate.reject(createError)
