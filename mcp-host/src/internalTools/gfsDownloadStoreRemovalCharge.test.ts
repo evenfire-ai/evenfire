@@ -60,6 +60,17 @@ function storedBytes(directory: string): number {
   return sum
 }
 
+// Every regular file, `meta.json` included: what a chargeless measurement counts.
+function regularBytes(directory: string): number {
+  let sum = 0
+  for (const child of syncFs.readdirSync(directory, { withFileTypes: true })) {
+    const target = path.join(directory, child.name)
+    if (child.isDirectory()) sum += regularBytes(target)
+    else if (child.isFile()) sum += syncFs.statSync(target).size
+  }
+  return sum
+}
+
 function view(store: GfsDownloadStore) {
   const state = store as unknown as {
     entries: Map<string, { sizeBytes: number }>
@@ -453,7 +464,9 @@ describe('GFS download store removal charges', () => {
     const reopened = await storeWithBudget()
     expect(hits).toHaveLength(4)
     expect(storedBytes(hostRoot)).toBe(8 * MIB)
-    expect(view(reopened).held).toBeGreaterThanOrEqual(8 * MIB)
+    // Measured once on restart: both trees' regular files, meta.json included.
+    expect(regularBytes(hostRoot)).toBeGreaterThan(8 * MIB)
+    expect(view(reopened).held).toBe(regularBytes(hostRoot))
     await expectRefused(reopened)
     await recoverAndWitness(reopened)
   })

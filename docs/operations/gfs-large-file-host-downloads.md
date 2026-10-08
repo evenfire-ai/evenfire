@@ -458,6 +458,9 @@ when its turn comes, so one that is not a real directory then, such as a
 symlinked `.gfs-downloads` or a child replaced by a symlink during the walk,
 measures zero) and charged that size if its removal fails. A tree that cannot
 be measured is logged and stays uncharged until a later sweep measures it.
+A charge, once set, is not measured again: bytes written into a directory
+after its charge was set, while its removal keeps failing, are not added to
+the budget, although the free-space check still sees them.
 When a removal leaves the directory under its own name (the rename failed, the
 parent check refused before it, or a refusal after it was undone by renaming
 it back), an indexed entry keeps its own charge and is never charged a second
