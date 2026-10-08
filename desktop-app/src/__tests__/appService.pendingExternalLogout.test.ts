@@ -49,7 +49,7 @@ vi.mock('electron', () => ({
 }))
 
 beforeEach(async () => {
-  notifySessionChanged.mockClear()
+  vi.clearAllMocks()
   userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-app-pending-logout-'))
   keychain.clear()
   vi.resetModules()
@@ -298,9 +298,18 @@ describe('AppService pending external logout', () => {
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(loginResult.token)
     const keytar = await import('keytar')
-    expect(keytar.deletePassword).toHaveBeenCalledWith('Evenfire', `session-token::${activeEnvKey}`)
-    expect(keytar.deletePassword.mock.invocationCallOrder.at(-1)).toBeLessThan(
-      keytar.setPassword.mock.invocationCallOrder.at(-1)!
+    const account = `session-token::${activeEnvKey}`
+    const oldCredentialDeleteIndex = keytar.deletePassword.mock.calls.findIndex(
+      ([service, deletedAccount]) => service === 'Evenfire' && deletedAccount === account
+    )
+    const freshCredentialWriteIndex = keytar.setPassword.mock.calls.findIndex(
+      ([service, writtenAccount, token]) =>
+        service === 'Evenfire' && writtenAccount === account && token === loginResult.token
+    )
+    expect(oldCredentialDeleteIndex).toBeGreaterThanOrEqual(0)
+    expect(freshCredentialWriteIndex).toBeGreaterThanOrEqual(0)
+    expect(keytar.deletePassword.mock.invocationCallOrder[oldCredentialDeleteIndex]).toBeLessThan(
+      keytar.setPassword.mock.invocationCallOrder[freshCredentialWriteIndex]
     )
   })
 
