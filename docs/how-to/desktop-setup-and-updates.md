@@ -33,9 +33,10 @@ repair, or reassign this link.
 ## The environment model
 
 You save only the **External REST API URL** for an instance. The app then asks
-that API for the rest of the environment — the display name and the RPC proxy
-URL — and caches it locally. There is no second URL to type: the RPC proxy is
-**discovered**, not entered.
+that API for the display name and RPC proxy URL when the environment is saved
+or selected. Startup also retries discovery for a saved profile without an RPC
+URL. Discovery can happen before sign-in; there is no second URL to type or
+include in a Profile UI link.
 
 ## Setup paths
 
@@ -46,7 +47,8 @@ environment.
 
 Click the **+** beside **Environment**, give it a **name** and the **External
 REST API URL**, and save. Both fields are required. The app discovers the RPC
-proxy, and you can sign in.
+proxy before sign-in, then you can sign in with the configured REST and RPC
+endpoints.
 
 For a local minikube cluster, follow the
 [Quickstart](../get-started/quickstart.md) port-forwards and point the
@@ -56,14 +58,16 @@ environment at the forwarded External REST API.
 
 When Profile-to-Desktop handoff is enabled, a member can open the environment
 from **Profile UI → Settings → Setup desktop app**. Desktop selects a single
-saved environment with the exact External REST API URL. If the current session
-uses another REST URL, Desktop asks before switching. Cancel keeps the current
-session signed in; confirming signs out and then selects the matching saved
-environment. If no exact match is saved, Desktop asks before adding the
-environment; after confirmation, the External REST API supplies the RPC proxy
-URL. Multiple saved exact matches are rejected for manual resolution, unless the
-already-active environment itself matches the requested REST endpoint; that
-exact active environment is retained.
+saved environment with the matching REST endpoint, including its API path and
+query. URL matching ignores fragments and trailing path slashes and normalizes a
+terminal DNS root dot. A different path on an already-saved origin is rejected
+for manual resolution. If the current session uses another REST URL, Desktop
+asks before switching. Cancel keeps the current session signed in; confirming
+signs out and then selects the matching saved environment. If no exact match is
+saved, Desktop asks before adding the environment; after confirmation, the
+External REST API supplies the RPC proxy URL before sign-in. Duplicate saved
+matches are rejected unless the already-active environment itself matches the
+requested REST endpoint; that exact active environment is retained.
 
 The handoff is disabled by default. A release operator can enable it by setting
 the `PROFILE_DESKTOP_HANDOFF_ENABLED` repository variable to `true` when
