@@ -1,7 +1,10 @@
 /** An agent an operator can give a connector to, with its private Context. */
 export type AgentAccessTarget = {
   name: string
+  /** Display name, qualified with `name` when another agent shares it. */
   label: string
+  /** The immutable agent name (`metadata.name`), shown under the label and searchable. */
+  description: string
   contextRef: string
 }
 

@@ -657,6 +657,51 @@ describe('AddRemoteServerWizard', () => {
       expect(updateContextMock).not.toHaveBeenCalled()
     })
 
+    it('tells apart two agents with the same display name and installs into the chosen one', async () => {
+      getHostsMock.mockResolvedValue({
+        items: [
+          ...HOSTS.items,
+          {
+            metadata: { name: 'research-two' },
+            spec: { contextRef: 'research-2', host: 'Research' },
+          },
+        ],
+      })
+      discoverMock.mockResolvedValue(discovered(LINEAR_DISCOVER))
+      installMock.mockResolvedValue(LINEAR_INSTALLED)
+      const { onInstalled } = renderWizard()
+      fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/mcp'), {
+        target: { value: 'https://mcp.linear.app/mcp' },
+      })
+      fireEvent.change(screen.getByPlaceholderText('example-remote'), {
+        target: { value: 'linear' },
+      })
+      await screen.findByText('Select agents...')
+      fireEvent.click(screen.getByRole('button', { name: /which agents can use this connector/i }))
+
+      expect(screen.getByRole('option', { name: 'Research (research-agent)' })).toBeInTheDocument()
+      expect(screen.getByRole('option', { name: 'Research (research-two)' })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: 'Research' })).not.toBeInTheDocument()
+
+      // The slug finds the agent even though it is not the display name.
+      fireEvent.change(screen.getByRole('textbox', { name: 'Search agents...' }), {
+        target: { value: 'two' },
+      })
+      expect(screen.getAllByRole('option')).toHaveLength(1)
+      fireEvent.click(screen.getByRole('option', { name: 'Research (research-two)' }))
+
+      clickDetect()
+      await screen.findByText('https://mcp.linear.app/authorize')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+      await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
+      expect(installMock).toHaveBeenCalledWith(
+        expect.objectContaining({ contextRef: 'research-2' })
+      )
+      expect(updateContextMock).not.toHaveBeenCalled()
+    })
+
     it('reports agents it could not give access to, but keeps the installed connector', async () => {
       updateContextMock.mockRejectedValueOnce(new Error('conflict'))
       const { onInstalled } = await detectLinear(['Research', 'Ops'])

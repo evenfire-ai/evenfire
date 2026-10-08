@@ -9,16 +9,28 @@ import { buildContextUpdatePayload } from './contextMutation'
  * `host.spec.contextRef`. Hosts without a Context cannot hold a connector.
  */
 export function agentAccessTargetsFromHosts(hosts: readonly HostResource[]): AgentAccessTarget[] {
-  return hosts
+  const targets = hosts
     .map(host => {
       const name = host.metadata?.name || ''
       const contextRef = String(host.spec?.contextRef ?? '').trim()
       // The editable display name (`spec.host`), not the slug, so operators can
       // tell agents apart.
       const label = getAgentDisplayName(name, hosts) || name
-      return { name, label, contextRef }
+      return { name, label, description: name, contextRef }
     })
     .filter(target => target.name && target.contextRef)
+  // Display names are editable and need not be unique; qualify a shared one with
+  // the immutable name so two "Research" agents stay distinguishable.
+  const labelCounts = new Map<string, number>()
+  for (const target of targets) {
+    labelCounts.set(target.label, (labelCounts.get(target.label) ?? 0) + 1)
+  }
+  return targets
+    .map(target =>
+      (labelCounts.get(target.label) ?? 0) > 1 && target.label !== target.name
+        ? { ...target, label: `${target.label} (${target.name})` }
+        : target
+    )
     .sort((left, right) => left.label.localeCompare(right.label))
 }
 

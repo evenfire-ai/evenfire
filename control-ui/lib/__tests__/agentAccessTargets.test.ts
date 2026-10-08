@@ -13,9 +13,19 @@ vi.mock('../api', async importOriginal => ({
 }))
 
 const TARGETS = [
-  { name: 'agents/product', label: 'Product', contextRef: 'ctx-product' },
-  { name: 'agents/sales', label: 'Sales', contextRef: 'ctx-sales' },
-  { name: 'agents/sales-2', label: 'Sales 2', contextRef: 'ctx-sales' },
+  {
+    name: 'agents/product',
+    label: 'Product',
+    description: 'agents/product',
+    contextRef: 'ctx-product',
+  },
+  { name: 'agents/sales', label: 'Sales', description: 'agents/sales', contextRef: 'ctx-sales' },
+  {
+    name: 'agents/sales-2',
+    label: 'Sales 2',
+    description: 'agents/sales-2',
+    contextRef: 'ctx-sales',
+  },
 ]
 
 describe('agentAccessTargetsFromHosts', () => {
@@ -36,6 +46,26 @@ describe('agentAccessTargetsFromHosts', () => {
       { metadata: { name: 'jose-agent' }, spec: { contextRef: 'ctx', host: 'Jose Assistant' } },
     ])
     expect(target.label).toBe('Jose Assistant')
+  })
+
+  it('describes each agent with its immutable name', () => {
+    const [target] = agentAccessTargetsFromHosts([
+      { metadata: { name: 'jose-agent' }, spec: { contextRef: 'ctx', host: 'Jose Assistant' } },
+    ])
+    expect(target.description).toBe('jose-agent')
+  })
+
+  it('qualifies agents that share a display name with their name, and only those', () => {
+    const targets = agentAccessTargetsFromHosts([
+      { metadata: { name: 'research-two' }, spec: { contextRef: 'ctx-2', host: 'Research' } },
+      { metadata: { name: 'ops-agent' }, spec: { contextRef: 'ctx-ops', host: 'Ops' } },
+      { metadata: { name: 'research-one' }, spec: { contextRef: 'ctx-1', host: 'Research' } },
+    ])
+    expect(targets.map(target => [target.label, target.description, target.contextRef])).toEqual([
+      ['Ops', 'ops-agent', 'ctx-ops'],
+      ['Research (research-one)', 'research-one', 'ctx-1'],
+      ['Research (research-two)', 'research-two', 'ctx-2'],
+    ])
   })
 })
 

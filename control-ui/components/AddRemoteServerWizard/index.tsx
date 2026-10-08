@@ -353,6 +353,7 @@ export function AddRemoteServerWizard({
                   options={agentTargets.map(target => ({
                     value: target.name,
                     label: target.label,
+                    description: target.description,
                   }))}
                   placeholder={agentsLoading ? 'Loading agents...' : 'Select agents...'}
                   searchPlaceholder="Search agents..."
