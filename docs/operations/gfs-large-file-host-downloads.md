@@ -146,11 +146,17 @@ a new ID, after fresh GFS authorization.
 1. Expiry or eviction can remove a retained copy while a command is using it.
    A file descriptor that is already open keeps reading; a later open gets
    `ENOENT`.
-2. A command can alter or delete a retained copy. Reuse and managed reads
+2. A command can alter or delete a retained copy. Reuse and full managed reads
    re-hash the copy against the digest this process holds in memory and check
-   that the file is still the inode it published. On any mismatch the copy is
-   removed (`incomplete_removed`) and the file is downloaded again; altered
-   bytes never reach a model. A deleted copy is a cache miss.
+   that the file is still the inode it published. On a mismatch the copy is
+   removed (`incomplete_removed`): reuse downloads the file again and a full
+   managed read answers `download_missing`. The managed prefix read used for
+   file-type detection checks the inode, size and mode but not the digest, so
+   an alteration that keeps them is not detected by it; it only decides
+   `not_image`, and any image goes on to the full hashed read before bytes are
+   sent. Altered bytes therefore never reach a model, but an altered copy can
+   stay on disk until its next reuse, full managed read, expiry or eviction. A
+   deleted copy is a cache miss.
 3. Executors share the Host UID and run without a sandbox or chroot. Live
    approval, `BasicSafety` validation and credential-slot stripping remain the
    shell's controls. The store has no lease or lock that a shell holds or
@@ -190,8 +196,9 @@ Unix directory modes and random directory names do not provide cross-caller OS
 isolation when a Host shares one UID: an approved shell command can create,
 overwrite or delete any file under `users/`. The store therefore never takes
 provenance from disk. Reuse and managed reads are served only for copies this
-Host process published, and their content is re-hashed against the digest held
-in memory; a mismatch deletes the copy and the file is downloaded again.
+Host process published. Reuse and full managed reads re-hash the content against
+the digest held in memory, and a mismatch deletes the copy; the managed prefix
+read checks inode, size and mode only (see [Integrity](#integrity)).
 Directories found on disk that this process did not publish (left by a previous
 process or planted by a command) are counted against the quota of the
 `users/<key>` directory that contains them and removed when they expire or are
@@ -392,7 +399,10 @@ published, and checks its size and `0600` mode. A managed read reads exactly the
 recorded size from that descriptor, refuses a longer file and compares the
 digest with the one in memory, never with `meta.json`. A mismatch removes the
 copy (`incomplete_removed`) and answers `download_missing`. A managed prefix
-read (file-type detection) checks the inode, size and mode but does not hash.
+read (file-type detection) checks the inode, size and mode but does not hash,
+so it does not detect an alteration that keeps them. Its bytes only decide
+`not_image`; an image is always read in full, and digest-checked, before any
+byte is sent to a model.
 
 ### Errors visible to the model
 
