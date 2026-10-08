@@ -892,6 +892,7 @@ export class AppService {
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
+  private runtimeConfigResolutionInFlight = new Map<string, Promise<void>>()
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private interactiveLoginAttempts = 0
@@ -2367,12 +2368,38 @@ export class AppService {
       return {
         externalRestApiBaseUrl: canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl),
         appName: config.appName,
-        sessionGeneration: this.sessionGeneration,
         environmentBinding: this.captureAuthEnvironmentBinding(),
       }
     })
     if (!request) return
 
+    const resolutionKey = JSON.stringify([
+      request.environmentBinding.profileId,
+      request.externalRestApiBaseUrl,
+    ])
+    const inFlight = this.runtimeConfigResolutionInFlight.get(resolutionKey)
+    if (inFlight) return inFlight
+
+    const resolution = this.resolveRuntimeConfigRequest(request)
+    this.runtimeConfigResolutionInFlight.set(resolutionKey, resolution)
+    try {
+      await resolution
+    } finally {
+      if (this.runtimeConfigResolutionInFlight.get(resolutionKey) === resolution) {
+        this.runtimeConfigResolutionInFlight.delete(resolutionKey)
+      }
+    }
+  }
+
+  private async resolveRuntimeConfigRequest(request: {
+    externalRestApiBaseUrl: string
+    appName: string
+    environmentBinding: {
+      environmentKey: string
+      profileId: string | null
+      restBaseUrl: string
+    }
+  }): Promise<void> {
     const discovered = await this.authClient.getDesktopEnvironment()
     if (
       !sameDesktopRestEndpoint(discovered.externalRestApiBaseUrl, request.externalRestApiBaseUrl)
@@ -2380,7 +2407,6 @@ export class AppService {
       throw new Error('Desktop environment discovery returned a different REST endpoint')
     }
     await this.withNativeAuthEnvironmentCommit(async () => {
-      this.assertSessionGeneration(request.sessionGeneration)
       this.assertAuthEnvironmentBinding(request.environmentBinding)
       hydrateDesktopRuntimeConfig()
       if (!isDesktopRuntimeConfigured() || config.rpcProxyBaseUrl?.trim()) return

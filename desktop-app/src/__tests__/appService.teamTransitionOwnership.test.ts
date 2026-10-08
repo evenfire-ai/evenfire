@@ -201,6 +201,70 @@ describe('AppService deliberate team transition ownership', () => {
     await expect(login).resolves.toEqual({ authenticated: true, me })
   })
 
+  it('persists RPC discovery after a saved-session restore advances the generation', async () => {
+    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    const discovery = deferred<{
+      externalRestApiBaseUrl: string
+      rpcProxyBaseUrl: string
+      appName: string
+    }>()
+    const discoveryStarted = deferred<void>()
+    const me = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const app = service as unknown as {
+      authClient: unknown
+      rpcClient: unknown
+      tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
+      getDependenciesHealth(): Promise<unknown>
+      saveRuntimeConfig(config: {
+        externalRestApiBaseUrl: string
+        rpcProxyBaseUrl: string
+        appName: string
+      }): Promise<unknown>
+    }
+    app.tokenStore.getSessionToken.mockResolvedValue('saved-session-a')
+    const getMe = vi.fn().mockResolvedValue(me)
+    const getDesktopEnvironment = vi.fn(() => {
+      discoveryStarted.resolve()
+      return discovery.promise
+    })
+    app.authClient = {
+      getDesktopEnvironment,
+      getMe,
+      health: vi.fn().mockResolvedValue({ status: 'ok' }),
+    }
+    app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
+
+    const save = app.saveRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+    await discoveryStarted.promise
+    const restore = service.getSessionState()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(getMe).not.toHaveBeenCalled()
+    discovery.resolve({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+      appName: 'Environment A',
+    })
+    await save
+    await expect(restore).resolves.toEqual({ authenticated: true, me })
+    expect(getDesktopEnvironment).toHaveBeenCalledOnce()
+
+    expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe(
+      'https://rpc-discovered.example.test'
+    )
+  })
+
   it('keeps the public session generation stable through transient team hops', async () => {
     const { service } = await createNativeCommitTestHarness()
     const meA = {
@@ -268,7 +332,7 @@ describe('AppService deliberate team transition ownership', () => {
     expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(optionA.id)
   })
 
-  it('does not let REST discovery block logout or overwrite a later session revision', async () => {
+  it('keeps REST discovery for the same profile when logout advances session generation', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     await runtimeConfig.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: restA,
@@ -318,7 +382,10 @@ describe('AppService deliberate team transition ownership', () => {
     })
     await healthRequest
 
-    expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe('')
+    expect(app.sessionToken).toBeNull()
+    expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe(
+      'https://rpc-discovered.example.test'
+    )
   })
 
   it('lets logout commit while a same-team request is pending and rejects its stale result', async () => {
