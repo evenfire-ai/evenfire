@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -117,6 +118,35 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     ).rejects.toMatchObject({ message: 'Failed to clear session token storage' })
 
     expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe('saved-token')
+  })
+
+  it('allows a strict clear when keychain entries and fallback files are already absent', async () => {
+    await expect(
+      new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
+    ).resolves.toBeUndefined()
+  })
+
+  it('reports strict fallback-file deletion failures while continuing cleanup', async () => {
+    const fallbackPath = path.join(testHome, '.evenfire', `session-token-${ENV_A}.json`)
+    await fs.mkdir(path.dirname(fallbackPath), { recursive: true })
+    await fs.writeFile(fallbackPath, JSON.stringify({ token: 'fixture-token' }), { mode: 0o600 })
+    const originalUnlink = fs.unlink.bind(fs)
+    const unlink = vi.spyOn(fs, 'unlink').mockImplementation(async filePath => {
+      if (String(filePath) === fallbackPath) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      }
+      return originalUnlink(filePath)
+    })
+
+    try {
+      await expect(
+        new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
+      ).rejects.toMatchObject({ message: 'Failed to clear session token storage' })
+      expect(await fs.readFile(fallbackPath, 'utf8')).toContain('fixture-token')
+    } finally {
+      unlink.mockRestore()
+      await fs.rm(fallbackPath, { force: true })
+    }
   })
 
   it('finishes an accepted read migration after admission closes and drains its native write', async () => {
