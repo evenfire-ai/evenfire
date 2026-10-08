@@ -5,6 +5,7 @@ import path from 'node:path'
 import { AppService } from '../appService.js'
 import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
 import { _resetPluginSurfacesForTests, resolvePluginSurface } from '../pluginSurfaceRegistry.js'
+import { SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
 import { getActiveSandboxUi, unmountSandboxUiView } from '../sandboxUiDriver.js'
 import {
   SANDBOX_UI_REFRESH_INTERVAL_MS,
@@ -216,15 +217,36 @@ function mintFails(status: number, body: string): Response {
   return new Response(body, { status })
 }
 
-const mintResponders = new Map<string, () => Response>()
-const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
-  const url = String(input instanceof Request ? input.url : input)
-  const match = /\/api\/v1\/sandbox-ui\/sandbox-recipes\/([^/]+)\/session$/.exec(url)
-  if (!match) throw new Error(`unexpected fetch ${url}`)
-  const recipeName = decodeURIComponent(match[1]!)
-  const respond = mintResponders.get(recipeName)
-  return respond ? respond() : mintOk(recipeName)
-})
+// rpc-proxy accepted the mint and never answers: it settles only if the client
+// aborts it.
+function mintHangs(init?: RequestInit): Promise<Response> {
+  return new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+  })
+}
+
+// `AbortSignal.timeout` runs on the runtime's own timers, which fake timers do
+// not drive. The mint bound is shrunk to a few ms instead, keyed on its exact
+// value so the app-wide 60 s default is left untouched.
+function shrinkMintBound(toMs = 25) {
+  const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+  vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms =>
+    realTimeout(ms === SANDBOX_UI_MINT_TIMEOUT_MS ? toMs : ms)
+  )
+}
+
+const mintResponders = new Map<string, (init?: RequestInit) => Response | Promise<Response>>()
+const fetchMock = vi.fn(
+  async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input instanceof Request ? input.url : input)
+    const match = /\/api\/v1\/sandbox-ui\/sandbox-recipes\/([^/]+)\/session$/.exec(url)
+    if (!match) throw new Error(`unexpected fetch ${url}`)
+    const recipeName = decodeURIComponent(match[1]!)
+    const respond = mintResponders.get(recipeName)
+    return respond ? respond(init) : mintOk(recipeName)
+  }
+)
 
 function mintCallsFor(recipeName: string): number {
   return fetchMock.mock.calls.filter(([input]) =>
@@ -269,6 +291,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await unmountSandboxUiView()
   _resetSandboxUiRefreshForTests()
   _resetPluginSurfacesForTests()
@@ -409,6 +432,46 @@ describe('AppService sandbox-ui embed whose renderer dies', () => {
     expect(parentWindow.contentView.removeChildView).toHaveBeenCalledWith(firstView)
     expect(resolvePluginSurface(firstWebContentsId)).toBeNull()
     expect(onClosed).toHaveBeenCalledOnce()
+    const mintsBefore = mintCallsFor('first-app')
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(mintsBefore)
+  })
+})
+
+describe('AppService sandbox-ui mint against a hung rpc-proxy', () => {
+  it('a close queued behind an open whose mint hangs still runs', async () => {
+    const { service, parentWindow } = await setupWithLiveFirstApp()
+    shrinkMintBound()
+    mintResponders.set('second-app', mintHangs)
+
+    const open = service.openSandboxUi(openArgs('second-app', parentWindow))
+    const openOutcome = open.then(
+      () => 'opened',
+      (error: unknown) => error
+    )
+    let closed = false
+    void service.closeSandboxUi().then(() => {
+      closed = true
+    })
+
+    await vi.waitFor(() => expect(closed).toBe(true), { timeout: 1_000 })
+    await expect(openOutcome).resolves.toMatchObject({ name: 'TimeoutError' })
+    expect(getActiveSandboxUi()).toBeNull()
+  })
+
+  it('a refresh whose mint hangs stops and reports the error', async () => {
+    const onRefreshError = vi.fn()
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    const parentWindow = new FakeParentWindow()
+    await service.openSandboxUi({ ...openArgs('first-app', parentWindow), onRefreshError })
+    shrinkMintBound()
+    mintResponders.set('first-app', mintHangs)
+
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+
+    await vi.waitFor(() => expect(onRefreshError).toHaveBeenCalledOnce(), { timeout: 1_000 })
+    // Stopped: a further interval issues no mint.
     const mintsBefore = mintCallsFor('first-app')
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
     expect(mintCallsFor('first-app')).toBe(mintsBefore)

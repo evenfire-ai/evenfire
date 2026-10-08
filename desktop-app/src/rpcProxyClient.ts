@@ -429,6 +429,14 @@ async function parseApprovalDecisionResponse(response: Response): Promise<Approv
   }
 }
 
+// A sandbox-ui open/close runs on a single lifecycle queue, so a hung mint
+// blocks every queued close behind it; and the refresh re-mints only 30 s
+// before the cookie expires. The app-wide default (60 s) would be too loose
+// for both.
+// The embed's OAuth authorize-url call shares it: a hung one would leave the
+// embed's click without any answer for a minute.
+export const SANDBOX_UI_MINT_TIMEOUT_MS = 15_000
+
 function url(path: string): string {
   return `${config.rpcProxyBaseUrl.replace(/\/+$/, '')}${path}`
 }
@@ -675,6 +683,7 @@ export class RpcProxyClient {
       {
         method: 'POST',
         headers: { authorization: `Bearer ${rpcAccessToken}` },
+        signal: withTimeout(undefined, SANDBOX_UI_MINT_TIMEOUT_MS),
       }
     )
     if (response.status !== 204) {
@@ -715,6 +724,7 @@ export class RpcProxyClient {
           'content-type': 'application/json',
         },
         body: JSON.stringify({ oauthClientId, background }),
+        signal: withTimeout(undefined, SANDBOX_UI_MINT_TIMEOUT_MS),
       }
     )
     if (!response.ok) {
