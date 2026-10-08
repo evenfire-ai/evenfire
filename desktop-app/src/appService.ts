@@ -1325,7 +1325,6 @@ export class AppService {
           return this.withNativeAuthEnvironmentCommit(async () => {
             assertContextIsCurrent()
             const result = await operation(context.sessionToken)
-            assertContextIsCurrent()
             return result
           })
         }
