@@ -251,6 +251,7 @@ describe('AppService pending external logout', () => {
       message: 'Failed to clear session token storage',
     })
 
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('persisted-session-token')
   })
