@@ -104,7 +104,7 @@ function holdSessionMessages(chatId: string) {
 
 function holdLastActive(chatId: string) {
   const original = clerum.chat.setLastActive.getMockImplementation()
-  if (!original) throw new Error('Expected the ChatStore setLastActive producer')
+  if (!original) throw new Error('Expected the setLastActive test mock implementation')
   const entered = deferred<void>()
   const release = deferred<void>()
   const returned = deferred<void>()
@@ -121,7 +121,110 @@ function holdLastActive(chatId: string) {
   return { entered, release, returned }
 }
 
+function holdLocalMessages(chatId: string) {
+  const original = clerum.chat.loadMessages.getMockImplementation()
+  if (!original) throw new Error('Expected the ChatStore loadMessages producer')
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  const returned = deferred<void>()
+  let held = false
+  clerum.chat.loadMessages.mockImplementation(async (agentRef, requestedChatId, limit, offset) => {
+    if (agentRef === 'agent-x' && requestedChatId === chatId && !held) {
+      held = true
+      entered.resolve()
+      await release.promise
+    }
+    const messages = await original(agentRef, requestedChatId, limit, offset)
+    if (held && requestedChatId === chatId) returned.resolve()
+    return messages
+  })
+  return { entered, release, returned }
+}
+
 describe('selection intent and continuation guards', () => {
+  it.each(['latest', 'implicit'] as const)(
+    'keeps a requested chat loading when an older %s auto-select finishes late',
+    async mode => {
+      await clerum.chat.create('agent-x', 'chat-b')
+      await clerum.chat.upsertMessages('agent-x', 'chat-b', [
+        { id: 'chat-b-message', role: 'user', content: 'chat B history', timestamp: 1 },
+      ])
+      await clerum.chat.create('agent-x', 'chat-a')
+      await clerum.chat.upsertMessages('agent-x', 'chat-a', [
+        { id: 'chat-a-message', role: 'user', content: 'chat A history', timestamp: 2 },
+      ])
+      clerum.chat.getIndex.mockImplementation(agentRef => clerum.readIndex(agentRef))
+      const heldAutoSelect = holdLastActive('chat-a')
+      const heldRequestedHistory = holdLocalMessages('chat-b')
+      const controller = renderController({
+        navItem: mode === 'latest' ? 'agents' : 'chat',
+        loadMenuData: false,
+      })
+      let requestedSwitch: Promise<void> | undefined
+
+      try {
+        if (mode === 'latest') {
+          await waitForListIdle(controller)
+          await act(async () => {
+            controller.result.current.setPendingChatSelection('agent-x', null, {
+              selectLatest: true,
+            })
+            controller.rerender({ navItem: 'chat' })
+          })
+        }
+
+        await act(async () => {
+          await heldAutoSelect.entered.promise
+        })
+        await waitFor(() => {
+          expect(controller.result.current.activeChatId).toBe('chat-a')
+          expect(controller.result.current.chatMessagesLoading).toBe(true)
+        })
+
+        act(() => {
+          requestedSwitch = controller.result.current.handleSelectChat('chat-b')
+        })
+        await act(async () => {
+          await heldRequestedHistory.entered.promise
+        })
+        expect(controller.result.current.activeChatId).toBe('chat-b')
+        expect(controller.result.current.chatMessages).toEqual([])
+        expect(controller.result.current.chatMessagesLoading).toBe(true)
+
+        await act(async () => {
+          heldAutoSelect.release.resolve()
+          await heldAutoSelect.returned.promise
+          await new Promise(resolve => setTimeout(resolve, 0))
+        })
+        expect(controller.result.current.activeChatId).toBe('chat-b')
+        expect(controller.result.current.chatMessages).toEqual([])
+        expect(controller.result.current.chatMessagesLoading).toBe(true)
+
+        if (!requestedSwitch) throw new Error('Expected the requested chat switch')
+        await act(async () => {
+          heldRequestedHistory.release.resolve()
+          await heldRequestedHistory.returned.promise
+          await requestedSwitch
+        })
+        await waitFor(() => {
+          expect(controller.result.current.activeChatId).toBe('chat-b')
+          expect(controller.result.current.chatMessages).toEqual(
+            expect.arrayContaining([expect.objectContaining({ id: 'chat-b-message' })])
+          )
+          expect(controller.result.current.chatMessagesLoading).toBe(false)
+        })
+      } finally {
+        heldAutoSelect.release.resolve()
+        heldRequestedHistory.release.resolve()
+        await act(async () => {
+          await heldAutoSelect.returned.promise
+          await requestedSwitch?.catch(() => undefined)
+        })
+        controller.unmount()
+      }
+    }
+  )
+
   it('keeps a matching pending selection across a direct switch and route change', async () => {
     await clerum.chat.create('agent-x', 'requested-chat')
     await clerum.chat.upsertMessages('agent-x', 'requested-chat', [

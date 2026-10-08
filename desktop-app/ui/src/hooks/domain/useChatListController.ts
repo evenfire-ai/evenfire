@@ -823,8 +823,7 @@ export function useChatListController({
       selectionIntentRevisionAtRequest: number
     ): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
       const requestGeneration = ++requestGenerationRef.current
-      // A retry remains part of this logical load, so it must keep the selection
-      // authority captured before the first attempt rather than adopt a newer intent.
+      // Reuse the caller's request-start revision on retry; never capture a newer intent here.
       // One retry with a short backoff: during boot a concurrent team-switch /
       // access-catalog refresh can momentarily rebind the main-process chat
       // store, rejecting `getIndex` with "Not authenticated". Swallowing that
@@ -859,7 +858,7 @@ export function useChatListController({
         }
       }
     },
-    [host, loadChatListOnce]
+    [loadChatListOnce]
   )
 
   // ─── Narrow chatList mutation API (called by the parent's remaining flows) ───

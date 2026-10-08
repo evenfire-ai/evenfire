@@ -981,7 +981,6 @@ export function useAgentChatController({
   // chat, and a task in flight is rejoined via the tracker D.3 already mounts.
   const switchToChatForIntent = useCallback(
     async (agentRef: string, chatId: string, selectionIntentRevision: number) => {
-      if (selectionIntentRevisionRef.current !== selectionIntentRevision) return
       if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
       const key = makeTaskKey(agentRef, chatId)
       const visibleBeforeSwitch = activeChatVisibilityRef.current
@@ -1457,7 +1456,9 @@ export function useAgentChatController({
           autoSelectedChatIdRef.current = latest.id
           await switchToChatForIntent(selectedAgent, latest.id, selectionIntentRevision)
         }
-        setChatMessagesLoading(false)
+        if (selectionIntentRevisionRef.current === selectionIntentRevision) {
+          setChatMessagesLoading(false)
+        }
         return
       }
       if (requestedSelection?.mode === 'specific') {
@@ -1479,7 +1480,9 @@ export function useAgentChatController({
           await switchToChatForIntent(selectedAgent, latest.id, selectionIntentRevision)
         }
       }
-      setChatMessagesLoading(false)
+      if (selectionIntentRevisionRef.current === selectionIntentRevision) {
+        setChatMessagesLoading(false)
+      }
     })()
 
     return () => {
