@@ -1305,6 +1305,9 @@ export class AppService {
 
     const activeHop = this.activeTeamContextHop
     if (activeHop && targetTeamId === activeHop.homeTeamId) {
+      if (this.quitPreparationStarted) {
+        return Promise.reject(new QuitAdmissionClosedError())
+      }
       return this.enqueueHomeTeamOperation(activeHop, operation)
     }
 

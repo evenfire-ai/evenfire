@@ -327,7 +327,6 @@ describe('AppService quit producer admission', () => {
       return hopOperation.promise
     })
     await hopStarted.promise
-    const preparation = service.prepareForQuit()
     const homeRead = service.runWithTeamContext('team-home', async token => {
       homeStarted.resolve()
       await homeOperation.promise
@@ -337,6 +336,7 @@ describe('AppService quit producer admission', () => {
       token => ({ status: 'fulfilled' as const, token }),
       error => ({ status: 'rejected' as const, error })
     )
+    const preparation = service.prepareForQuit()
 
     expect(prepareForQuit).not.toHaveBeenCalled()
     hopOperation.resolve('hop-complete')
@@ -356,6 +356,73 @@ describe('AppService quit producer admission', () => {
 
     expect(homeReadStatus).toBe('started')
     expect(prepareForQuit).toHaveBeenCalledOnce()
+  })
+
+  it('rejects new home-team joins after quit closes hop admission', async () => {
+    const hopOperation = deferred<string>()
+    const hopStarted = deferred<void>()
+    const tokenStore = new TokenStoreClass()
+    const service = new AppServiceClass({ tokenStore }) as unknown as {
+      pendingCredentialProducers: Set<Promise<unknown>>
+      quitPreparationStarted: boolean
+      teamContextQueue: Promise<void>
+      sessionToken: string | null
+      me: { id: string; teamId: string }
+      tokenStore: InstanceType<typeof TokenStoreClass>
+      requireSessionToken: () => string
+      getCurrentSessionTeamId: (token: string) => Promise<string>
+      switchSessionToTeam: (teamId: string, token: string) => Promise<string>
+      enterGfsTransientTeamHop: () => () => void
+      updateEntityChangeSessionToken: (token: string | null) => void
+      restartEntityChangeStreamForSessionReplacement: () => void
+      bindCurrentChatStore: (userId: string) => Promise<void>
+      runWithTeamContext: <T>(
+        teamId: string | null | undefined,
+        operation: (sessionToken: string) => Promise<T>
+      ) => Promise<T>
+      prepareForQuit: () => Promise<void>
+    }
+    service.pendingCredentialProducers = new Set()
+    service.quitPreparationStarted = false
+    service.teamContextQueue = Promise.resolve()
+    service.sessionToken = 'home-token'
+    service.me = { id: 'user-1', teamId: 'team-home' }
+    service.tokenStore = tokenStore
+    service.requireSessionToken = vi.fn(() => service.sessionToken || 'home-token')
+    service.getCurrentSessionTeamId = vi.fn(async () => service.me.teamId)
+    service.switchSessionToTeam = vi.fn(async teamId => {
+      service.me.teamId = teamId
+      service.sessionToken = `${teamId}-token`
+      return service.sessionToken
+    })
+    service.enterGfsTransientTeamHop = vi.fn(() => () => {})
+    service.updateEntityChangeSessionToken = vi.fn()
+    service.restartEntityChangeStreamForSessionReplacement = vi.fn()
+    service.bindCurrentChatStore = vi.fn(async () => undefined)
+
+    const hop = service.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      return hopOperation.promise
+    })
+    await hopStarted.promise
+    const preparation = service.prepareForQuit()
+    const lateHomeRead = service.runWithTeamContext('team-home', async token => token)
+    const lateHomeOutcome = lateHomeRead.then(
+      () => ({ status: 'fulfilled' as const }),
+      error => ({ status: 'rejected' as const, message: error.message })
+    )
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      lateHomeOutcome,
+      new Promise<{ status: 'pending' }>(resolve => {
+        timeout = setTimeout(() => resolve({ status: 'pending' }), 100)
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+    hopOperation.resolve('hop-complete')
+    await Promise.all([hop, preparation])
+
+    expect(outcome).toEqual({ status: 'rejected', message: 'Application is shutting down' })
   })
 
   it('holds quit behind queued hops but releases a no-hop reservation early', async () => {
