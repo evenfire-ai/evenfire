@@ -33,6 +33,10 @@ image when the variable was the only change. Production promotion reuses the
 dev-built digest and does not rebuild, so create the desired digest before
 promoting it.
 
+Before enabling handoff, ensure Profile UI and Desktop use the same External
+REST API endpoint, including the API path. Desktop rejects a link when the same
+origin is already saved with a different API path.
+
 ## Local
 
 ```bash

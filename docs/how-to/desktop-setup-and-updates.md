@@ -73,6 +73,9 @@ a new image: the normal build runs only when Profile UI source paths change, or
 the **Build & Publish** workflow can be dispatched with `build_all=true` to
 rebuild every image. Production promotion reuses the digest built from dev, so
 rebuild Profile UI before promotion when the variable was the only change.
+Before enabling the handoff, verify that `EXTERNAL_REST_API_PUBLIC_BASE_URL`
+and `CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL` point to the same REST
+endpoint, including the API path. Matching only the hostname is not sufficient.
 While the handoff is disabled, copy the REST API URL from Profile UI Settings
 and add it from Desktop's sign-in screen. Fleets can also be pre-seeded with a
 `CLERUM_DESKTOP_CONFIG_PATH` config file (see
