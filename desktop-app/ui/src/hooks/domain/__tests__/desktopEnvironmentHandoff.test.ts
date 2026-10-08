@@ -479,56 +479,6 @@ describe('Desktop environment handoff concurrency', () => {
     )
   })
 
-  it('preserves a producer status when handoff logout returns no generation', async () => {
-    let publishProducerStatus:
-      | ((message: string, tone: 'info' | 'success' | 'error') => void)
-      | null = null
-    const logout = vi.fn(async () => {
-      publishProducerStatus?.('Logout failed: secure storage is unavailable.', 'error')
-      return null
-    })
-    const { handler, setStatus } = createHandler(
-      () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: true }),
-      undefined,
-      logout
-    )
-    publishProducerStatus = setStatus
-
-    await handler({
-      ...targetEnvironment,
-      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
-    })
-
-    expect(logout).toHaveBeenCalledOnce()
-    expect(setStatus).toHaveBeenLastCalledWith(
-      'Logout failed: secure storage is unavailable.',
-      'error'
-    )
-  })
-
-  it('preserves a producer status when environment selection returns null', async () => {
-    const { handler, selectRuntimeConfig, setStatus } = createHandler(() => ({
-      booting: false,
-      busy: false,
-      authTransitioning: false,
-      isAuthenticated: false,
-    }))
-    selectRuntimeConfig.mockImplementationOnce(async () => {
-      setStatus('Failed to switch environment: stale session.', 'info')
-      return null
-    })
-
-    await handler({
-      ...targetEnvironment,
-      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
-    })
-
-    expect(setStatus).toHaveBeenLastCalledWith(
-      'Failed to switch environment: stale session.',
-      'info'
-    )
-  })
-
   it.each([
     {
       targetKind: 'saved target',

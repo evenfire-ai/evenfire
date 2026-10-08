@@ -71,7 +71,7 @@ describe('useAppController desktop environment handoff', () => {
         targetExternalRestApiBaseUrl: native.restB,
       })
     )
-    return { app, handle, handoff, targetOptionId: native.optionB.id }
+    return { app, handle, handoff, native, targetOptionId: native.optionB.id }
   }
 
   it('keeps the signed-in session and skips selection when the user cancels', async () => {
@@ -125,6 +125,26 @@ describe('useAppController desktop environment handoff', () => {
     expect(app.result.current.runtimeConfigState?.activeOptionId).toBe(targetOptionId)
     expect(app.result.current.statusText).toContain(
       'Could not load the selected desktop environment'
+    )
+  })
+
+  it('keeps the signed-in session and reports the native logout failure', async () => {
+    const { app, handle, handoff, native } = await openSwitchConfirmation()
+    const tokenStore = native.service as unknown as {
+      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+    }
+    tokenStore.tokenStore.clearSessionToken.mockRejectedValueOnce(
+      new Error('secure storage unavailable')
+    )
+
+    await act(async () => app.result.current.handleConfirmDesktopEnvironmentSwitchConfirmation())
+    await act(async () => handoff)
+
+    expect(handle.logout).toHaveBeenCalledOnce()
+    expect(handle.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(app.result.current.isAuthenticated).toBe(true)
+    expect(app.result.current.statusText).toContain(
+      "Logout failed: Error invoking remote method 'auth:logout': Error: secure storage unavailable"
     )
   })
 })
