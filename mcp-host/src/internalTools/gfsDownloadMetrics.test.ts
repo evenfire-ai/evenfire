@@ -10,21 +10,18 @@ import {
   recordGfsShellOutputLimit,
 } from './gfsDownloadMetrics'
 
-async function counterValue(name: string): Promise<number> {
+/** Sum of the samples of `name` whose labels include every `labels` pair. */
+async function counterValue(name: string, labels: Record<string, string> = {}): Promise<number> {
   const metric = register.getSingleMetric(name)
   if (metric === undefined) throw new Error(`metric ${name} is not registered`)
   const { values } = await metric.get()
-  return values.reduce((sum, sample) => sum + sample.value, 0)
+  return values
+    .filter(sample => Object.entries(labels).every(([key, value]) => sample.labels[key] === value))
+    .reduce((sum, sample) => sum + sample.value, 0)
 }
 
 async function expiryValue(outcome: string): Promise<number> {
-  const metric = register.getSingleMetric('clerum_gfs_download_expiry_total')
-  if (metric === undefined)
-    throw new Error('metric clerum_gfs_download_expiry_total is not registered')
-  const { values } = await metric.get()
-  return values
-    .filter(sample => sample.labels.outcome === outcome)
-    .reduce((sum, sample) => sum + sample.value, 0)
+  return counterValue('clerum_gfs_download_expiry_total', { outcome })
 }
 
 describe('GFS download metrics', () => {
@@ -40,13 +37,29 @@ describe('GFS download metrics', () => {
   })
 
   it('records admission, transfer, active count, and shell-limit outcomes', async () => {
+    const series = [
+      ['clerum_gfs_download_admissions_total', { outcome: 'workspace_attempt' }],
+      ['clerum_gfs_download_transfers_total', { outcome: 'success' }],
+      ['clerum_gfs_shell_output_limits_total', { outcome: 'output_limit_exceeded' }],
+      ['clerum_gfs_download_quota_total', { scope: 'caller', reason: 'storage_bytes' }],
+      ['clerum_gfs_download_expiry_total', { outcome: 'remove_failed' }],
+    ] as const
+    const before = await Promise.all(series.map(([name, labels]) => counterValue(name, labels)))
+    const active = await counterValue('clerum_gfs_download_active')
+
     recordGfsDownloadAdmission('workspace_attempt')
     enterGfsDownloadTransfer()
+    expect(await counterValue('clerum_gfs_download_active')).toBe(active + 1)
     recordGfsDownloadTransfer('success', 0.25)
     exitGfsDownloadTransfer()
     recordGfsShellOutputLimit('output_limit_exceeded')
     recordGfsDownloadQuota('caller', 'storage_bytes')
     recordGfsDownloadExpiry('remove_failed')
+
+    // Each call moved its own series by exactly one.
+    for (const [index, [name, labels]] of series.entries())
+      expect(await counterValue(name, labels)).toBe(before[index]! + 1)
+    expect(await counterValue('clerum_gfs_download_active')).toBe(active)
 
     const scraped = await register.metrics()
     expect(scraped).toContain('clerum_gfs_download_admissions_total{outcome="workspace_attempt"}')

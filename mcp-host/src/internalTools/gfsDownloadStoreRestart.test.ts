@@ -361,3 +361,55 @@ describe('GFS download store restart', () => {
     expect(await second.debugInventory()).toMatchObject({ bytes: 128, files: 2 })
   })
 })
+
+describe('GFS download store restart: retirement edge cases', () => {
+  it('S14: only `.gfs-download-store.retired-<uuid>` names are removed', async () => {
+    const foreign = path.join(hostRoot, `${RETIRED_PREFIX}foo`)
+    const retired = path.join(hostRoot, `${RETIRED_PREFIX}00000000-0000-4000-8000-000000000001`)
+    for (const directory of [foreign, retired]) {
+      await fs.mkdir(directory, { mode: 0o700 })
+      await fs.writeFile(path.join(directory, 'copy'), 'bytes', { mode: 0o600 })
+    }
+
+    await open()
+
+    // Witness: a uuid-named retired tree is removed by the same sweep.
+    expect(exists(retired)).toBe(false)
+    expect(exists(path.join(foreign, 'copy'))).toBe(true)
+  })
+
+  it.each([
+    ['a file', 'file'],
+    ['a symlink', 'symlink'],
+  ] as const)(
+    'S15: a `.gfs-download-store` that is %s is retired without following it',
+    async (_label, kind) => {
+      const legacy = path.join(hostRoot, '.gfs-download-store')
+      const outside = await fs.mkdtemp(path.join(tmpdir(), 'gfs-store-legacy-target-'))
+      const target = path.join(outside, 'target')
+      try {
+        await fs.writeFile(target, 'outside bytes', { mode: 0o600 })
+        if (kind === 'file') await fs.writeFile(legacy, 'legacy bytes', { mode: 0o600 })
+        else await fs.symlink(target, legacy)
+        const warn = vi.spyOn(logger, 'warn')
+        const retiredBefore = await expiryCount('retired_legacy_store')
+
+        const store = await open()
+
+        expect(store.isAvailable()).toBe(true)
+        expect(retirementWarnings(warn)).toEqual([
+          expect.objectContaining({ files: kind === 'file' ? 1 : 0 }),
+        ])
+        expect(await expiryCount('retired_legacy_store')).toBe(retiredBefore + 1)
+        expect(exists(legacy)).toBe(false)
+        expect((await hostRootEntries()).filter(name => name.startsWith(RETIRED_PREFIX))).toEqual(
+          []
+        )
+        // The symlink's target is never followed.
+        await expect(fs.readFile(target, 'utf8')).resolves.toBe('outside bytes')
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true })
+      }
+    }
+  )
+})

@@ -606,5 +606,153 @@
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
     "fullName": "GFS download store boundaries: path swapped between check and use K2b: a caller directory swapped between the meta.json rename and the source rename publishes nothing"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S08: an infeasible eviction plan deletes nothing even when some copies are evictable"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S11: publish refuses a digest that does not match the partial bytes"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S13: publish refuses a partial file larger than the admitted size"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S24: publish refuses a transfer whose expiry passed during the download"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S22: a caller root that is an alias of another caller directory is refused"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S10: a source.partial swapped after meta.json is renamed is not published"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S12: a source.partial swapped after hashing is refused before meta.json is written"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller identity (ADV-1) two channels with the same sender never see each other’s copy"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller identity (ADV-1) refuses an identity that is not the caller root’s key"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller root shape (F9) refuses the Host root as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller root shape (F9) refuses the users directory as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller root shape (F9) refuses a directory inside a caller root as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller root shape (F9) refuses a directory outside users as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) reuse that cannot open a pinned copy keeps it for the task that holds it"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) reuse still removes a copy whose bytes no longer match its receipt"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) a sweep that cannot lstat a published copy keeps it and counts sweep_failed"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) a startup sweep that cannot open meta.json keeps the copy for the next start"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) an admission that cannot verify .gfs-downloads fails and keeps every copy"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) readManagedFile logs a non-ENOENT failure of the owner’s copy and still answers download_missing"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) readManagedFilePrefix logs a non-ENOENT failure of the owner’s copy and still answers download_missing"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a replaced .gfs-downloads stranded by a failed rm is protected and swept"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) an eviction whose removal fails keeps the copy published and charged"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a refused removal whose undo also fails reports the refusal, not the undo"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a removal of a directory that never existed is not counted as removed"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S17: createTransfer refuses an expiry at or before its creation instant"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S18: close() does not wait for pinned copies, only for active transfers"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S28: a managed read refreshes recency, so the unread copy is evicted first"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S31: a removal is proven by ENOENT, not by rm returning"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S01: a descriptor with the published inode number on another device is not served"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S09: publication syncs the download directory after the source rename"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart: retirement edge cases S14: only `.gfs-download-store.retired-<uuid>` names are removed"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart: retirement edge cases S15: a `.gfs-download-store` that is a file is retired without following it"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart: retirement edge cases S15: a `.gfs-download-store` that is a symlink is retired without following it"
+  },
+  {
+    "suite": "gfsStorePrivateFiles.test.ts",
+    "fullName": "openPrivateStoreObject S02: refuses a symlink at the open itself, with ELOOP"
+  },
+  {
+    "suite": "gfsStorePrivateFiles.test.ts",
+    "fullName": "openPrivateStoreObject S03: refuses an opened inode whose name moved to another inode"
+  },
+  {
+    "suite": "gfsExecutionCapability.test.ts",
+    "fullName": "gfsStoreCallerIdentity keys the store by the channel-namespaced caller-root key, never the raw sender"
+  },
+  {
+    "suite": "gfsExecutionCapability.test.ts",
+    "fullName": "gfsStoreCallerIdentity gives a task without a source message the system key of its caller root"
   }
 ]

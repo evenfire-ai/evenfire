@@ -985,3 +985,149 @@ describe('GFS download store: pins, lifecycle and errors', () => {
     await expect(openStore(real)).resolves.toBeInstanceOf(GfsDownloadStore)
   })
 })
+
+// Kill tests for mutations the adversarial review of PR #1028 found surviving
+// (S08, S10, S11, S12, S13, S22, S24), adapted from its verified repros.
+describe('GFS download store: adversarial review kill tests', () => {
+  it('ADV-S08: an infeasible eviction plan deletes nothing even when some copies are evictable', async () => {
+    const { limited } = await limitedStore(HOST_30_CALLER_15)
+    const loose = await completedCopy(limited, callerRoot, CALLER, 70, 5)
+    tick()
+    await completedCopy(limited, callerRoot, CALLER, 71, 8, { owner: 'task-1' })
+    const denied = await quotaCount('caller', 'storage_bytes')
+    await expect(startTransfer(limited, callerRoot, CALLER, 72, 10)).rejects.toMatchObject({
+      code: 'caller_quota_exceeded',
+    })
+    // Witness: the admission reached the quota decision.
+    expect(await quotaCount('caller', 'storage_bytes')).toBe(denied + 1)
+    // The unpinned copy could not make room on its own, so it must survive.
+    expect(await exists(downloadDirectory(callerRoot, loose.receipt.id))).toBe(true)
+    // Witness: once the pin is released the same admission evicts and succeeds.
+    await limited.releaseReceiptOwner('task-1', CALLER)
+    await expect(startTransfer(limited, callerRoot, CALLER, 72, 10)).resolves.toBeDefined()
+  })
+
+  it('ADV-S11: publish refuses a digest that does not match the partial bytes', async () => {
+    const { transfer } = await startTransfer(store, callerRoot, CALLER, 73, 8)
+    hashBoundary.mockClear()
+    await expect(
+      store.publish(transfer.id, CALLER, digest(Buffer.alloc(8, 0xee)))
+    ).rejects.toMatchObject({ code: 'storage_write_failed' })
+    // Witness: publication hashed the partial file.
+    expect(hashBoundary).toHaveBeenCalled()
+    const directory = downloadDirectory(callerRoot, transfer.id)
+    expect(await exists(path.join(directory, 'source'))).toBe(false)
+    expect(await exists(path.join(directory, 'meta.json'))).toBe(false)
+    await store.fail(transfer.id, CALLER)
+    expect(await exists(directory)).toBe(false)
+  })
+
+  it('ADV-S13: publish refuses a partial file larger than the admitted size', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: CALLER,
+      callerWorkspacePath: callerRoot,
+      source: sourceFor(74),
+      sizeBytes: 5,
+      expiresAt: future(),
+    })
+    const bigger = Buffer.alloc(9, 4)
+    await nativeFs.writeFile(path.join(callerRoot, transfer.partialPath), bigger)
+    await expect(store.publish(transfer.id, CALLER, digest(bigger))).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+    // Witness: the oversized partial is the one that was offered.
+    expect((await nativeFs.stat(path.join(callerRoot, transfer.partialPath))).size).toBe(9)
+    expect(await exists(path.join(downloadDirectory(callerRoot, transfer.id), 'source'))).toBe(
+      false
+    )
+  })
+
+  it('ADV-S24: publish refuses a transfer whose expiry passed during the download', async () => {
+    const bytes = Buffer.alloc(6, 7)
+    const transfer = await store.createTransfer({
+      callerIdentity: CALLER,
+      callerWorkspacePath: callerRoot,
+      source: sourceFor(75),
+      sizeBytes: 6,
+      expiresAt: future(1_000),
+    })
+    await nativeFs.writeFile(path.join(callerRoot, transfer.partialPath), bytes)
+    vi.setSystemTime(Date.now() + 1_000)
+    await expect(store.publish(transfer.id, CALLER, digest(bytes))).rejects.toMatchObject({
+      code: 'download_expired',
+    })
+    // Witness: the transfer is still active, so fail() is accepted and cleans it up.
+    await expect(store.fail(transfer.id, CALLER)).resolves.toBeUndefined()
+    expect(await exists(downloadDirectory(callerRoot, transfer.id))).toBe(false)
+  })
+
+  it('ADV-S22: a caller root that is an alias of another caller directory is refused', async () => {
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    const alias = path.join(hostRoot, 'users', 'alias')
+    await nativeFs.symlink(otherRoot, alias)
+    await expect(
+      store.createTransfer({
+        callerIdentity: 'alias',
+        callerWorkspacePath: alias,
+        source: sourceFor(76),
+        sizeBytes: 3,
+        expiresAt: future(),
+      })
+    ).rejects.toMatchObject({ code: 'workspace_unavailable' })
+    expect(await exists(path.join(otherRoot, '.gfs-downloads'))).toBe(false)
+    // Witness: the real directory is accepted.
+    await expect(
+      store.createTransfer({
+        callerIdentity: 'caller-b',
+        callerWorkspacePath: otherRoot,
+        source: sourceFor(76),
+        sizeBytes: 3,
+        expiresAt: future(),
+      })
+    ).resolves.toMatchObject({ sizeBytes: 3 })
+  })
+
+  it('ADV-S10: a source.partial swapped after meta.json is renamed is not published', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 77, 8)
+    const partial = path.join(callerRoot, transfer.partialPath)
+    let swapped = false
+    renameBoundary.mockImplementation(async (from: string, to: string) => {
+      await nativeFs.rename(from, to)
+      if (to.endsWith(path.sep + 'meta.json') && !swapped) {
+        swapped = true
+        await nativeFs.writeFile(partial + '.swap', Buffer.alloc(8, 0x55), { mode: 0o600 })
+        await nativeFs.rename(partial + '.swap', partial)
+      }
+    })
+    await expect(store.publish(transfer.id, CALLER, digest(bytes))).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    // Witness: the swap happened inside the publication.
+    expect(swapped).toBe(true)
+    await expect(store.readManagedFile(transfer.path, CALLER)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+  })
+
+  it('ADV-S12: a source.partial swapped after hashing is refused before meta.json is written', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 78, 8)
+    let swapped = false
+    lstatBoundary.mockImplementation(async (target: string, options?: unknown) => {
+      // The store addresses the partial through the real path of the Host root.
+      const partial = target
+      if (target.endsWith(path.sep + 'source.partial') && options === undefined && !swapped) {
+        swapped = true
+        await nativeFs.writeFile(partial + '.swap', Buffer.alloc(8, 0x66), { mode: 0o600 })
+        await nativeFs.rename(partial + '.swap', partial)
+      }
+      return nativeFs.lstat(target, options as never)
+    })
+    await expect(store.publish(transfer.id, CALLER, digest(bytes))).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+    expect(swapped).toBe(true)
+    expect(await exists(path.join(downloadDirectory(callerRoot, transfer.id), 'meta.json'))).toBe(
+      false
+    )
+  })
+})

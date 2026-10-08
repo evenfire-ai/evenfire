@@ -6,7 +6,6 @@
  * value that is refused, on a real temporary directory.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import * as crypto from 'node:crypto'
 import { randomUUID } from 'node:crypto'
 import * as syncFs from 'node:fs'
 import * as fs from 'node:fs/promises'
