@@ -497,13 +497,21 @@ export function SandboxUiPage({
   useEffect(() => {
     if (!actionRequest || actionRequest.id <= lastActionRequestIdRef.current) return
     lastActionRequestIdRef.current = actionRequest.id
+    if (actionRequest.action === 'release') {
+      // Any launch state counts: a minting open must not write its outcome, and
+      // a failed one must not leave its banner on a tab it never belonged to.
+      launchSeqRef.current += 1
+      setLaunch({ kind: 'idle' })
+      setRefreshError(null)
+      return
+    }
     if (launch.kind !== 'mounted') return
     if (actionRequest.action === 'refresh') {
       onRefresh()
     } else if (actionRequest.action === 'back-to-apps') {
       void onBackToApps()
     }
-  }, [actionRequest, launch.kind, onBackToApps, onRefresh])
+  }, [actionRequest, launch.kind, onBackToApps, onRefresh, setLaunch])
 
   const onCopyDeepLink = useCallback(async () => {
     try {

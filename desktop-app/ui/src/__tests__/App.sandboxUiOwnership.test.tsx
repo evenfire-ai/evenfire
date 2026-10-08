@@ -546,4 +546,162 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     expect(alphaAfter?.app?.appRef).toBe(ALPHA!.appRef)
     expect(alphaAfter?.title).toBe(alphaTab!.title)
   })
+  // App resolves app tabs against its own listing, refreshed on window focus and
+  // every 30 s. Firing the real focus listener drives that refresh.
+  async function refreshAppListingOnFocus() {
+    const calls = sandboxUi.listApps.mock.calls.length
+    act(() => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    await waitFor(() => expect(sandboxUi.listApps.mock.calls.length).toBeGreaterThan(calls))
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+  }
+
+  function emitTitleChanged(event: { appRef: string; title: string }) {
+    const listeners = sandboxUi.onTitleChanged.mock.calls as unknown as Array<
+      [(args: { appRef: string; title: string }) => void]
+    >
+    act(() => listeners.forEach(([listener]) => listener(event)))
+  }
+
+  function tabByAppRef(appRef: string) {
+    return currentController.workspaceTabs.tabs.find(tab => tab.app?.appRef === appRef)
+  }
+
+  function openedAppRef(openCall: number): string {
+    return closedEventFor(openCall).appRef
+  }
+
+  const BETA_RESTARTING: SandboxUiAppListing[] = APP_LISTING.map(app =>
+    app.appRef === BETA!.appRef ? { ...app, ready: false, phase: 'pending' } : app
+  )
+
+  it('closes the live embed and shows the picker when the incoming app tab cannot be resolved, then relaunches it once the app is back', async () => {
+    await renderWithLiveApp(BETA)
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    expect(openedAppRef(1)).toBe(ALPHA!.appRef)
+    const betaTab = tabByAppRef(BETA!.appRef)!
+
+    // Beta's pod restarts: App's next refresh drops it from the resolvable list.
+    sandboxUi.listApps.mockResolvedValue({ apps: BETA_RESTARTING })
+    await refreshAppListingOnFocus()
+
+    sandboxUi.getLocation.mockResolvedValue({ appRef: ALPHA!.appRef, routePath: '/inbox' })
+    fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: false }))
+
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+    expect(sandboxUi.open).toHaveBeenCalledTimes(2)
+    expect(currentController.workspaceTabs.activeTabId).toBe(betaTab.id)
+    // Tab B shows the picker instead of Alpha's chrome over an empty slot.
+    expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
+    expect(await screen.findByRole('button', { name: 'Open Alpha' })).toBeTruthy()
+    // A late title from Alpha must not relabel B.
+    emitTitleChanged({ appRef: ALPHA!.appRef, title: 'Alpha Inbox' })
+    const betaAfter = currentController.workspaceTabs.tabs.find(tab => tab.id === betaTab.id)
+    expect(betaAfter?.title).toBe('Beta')
+    expect(betaAfter?.app?.appRef).toBe(BETA!.appRef)
+    expect(betaAfter?.app?.savedRoutePath).toBeUndefined()
+    // Alpha's own route is still persisted on its tab.
+    await waitFor(() => expect(tabByAppRef(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox'))
+
+    // Beta is ready again: reactivating its (still existing) tab relaunches it.
+    sandboxUi.listApps.mockResolvedValue({ apps: APP_LISTING })
+    await refreshAppListingOnFocus()
+    clickActiveStripTab('Beta')
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
+    expect(openedAppRef(2)).toBe(BETA!.appRef)
+    expect(currentController.workspaceTabs.activeTabId).toBe(betaTab.id)
+    expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
+
+    // The relaunched Beta owns the embed again: leaving closes it.
+    await handOffMarkdownFromPlugin()
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not hand the embed to a grid-opened app tab that App has not resolved yet when the user returns to it', async () => {
+    // App's listing predates Beta becoming ready.
+    sandboxUi.listApps.mockResolvedValue({ apps: BETA_RESTARTING })
+    await renderWithLiveApp(ALPHA)
+
+    // Beta turns ready between App refreshes; the picker grid loads its own list.
+    sandboxUi.listApps.mockResolvedValue({ apps: APP_LISTING })
+    fireEvent.click(screen.getByRole('button', { name: 'New chat', pressed: false }))
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Beta' }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    expect(openedAppRef(1)).toBe(BETA!.appRef)
+    const betaTab = activeWorkspaceTab(currentController.workspaceTabs)!
+    expect(betaTab.app?.appRef).toBe(BETA!.appRef)
+    // The grid launch itself is a real app tab, not torn down on the way in.
+    expect(sandboxUi.close).toHaveBeenCalledTimes(1)
+
+    // Alpha (resolvable) takes the embed over from Beta.
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
+    expect(openedAppRef(2)).toBe(ALPHA!.appRef)
+    expect(sandboxUi.close).toHaveBeenCalledTimes(1)
+
+    // Back to Beta before App's next refresh: it cannot be relaunched yet.
+    fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: false }))
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(2))
+    expect(sandboxUi.open).toHaveBeenCalledTimes(3)
+    expect(currentController.workspaceTabs.activeTabId).toBe(betaTab.id)
+    expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
+
+    await refreshAppListingOnFocus()
+    clickActiveStripTab('Beta')
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(4))
+    expect(openedAppRef(3)).toBe(BETA!.appRef)
+  })
+  it('hands the embed to a grid pick that App has not resolved yet while the app tab it replaces still owns the embed', async () => {
+    // App's own listing predates Beta becoming ready; the page's grid sees it ready.
+    sandboxUi.listApps.mockResolvedValueOnce({ apps: BETA_RESTARTING })
+    await renderWithLiveApp(ALPHA)
+    const alphaTab = activeWorkspaceTab(currentController.workspaceTabs)!
+
+    // A failed relaunch leaves the Alpha tab owning the embed and shows the grid.
+    sandboxUi.open.mockRejectedValueOnce(OPEN_REJECTED)
+    clickActiveStripTab('Alpha')
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    await waitForLaunchFailure(ALPHA!.appRef)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Beta' }))
+
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
+    expect(openedAppRef(2)).toBe(BETA!.appRef)
+    const activeTab = activeWorkspaceTab(currentController.workspaceTabs)
+    expect(activeTab?.id).not.toBe(alphaTab.id)
+    expect(activeTab?.app?.appRef).toBe(BETA!.appRef)
+    expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
+    // app→app: the incoming open replaces the view; nothing closes it.
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+  })
+
+  it('drops a failed relaunch banner when the user moves to an app tab that cannot be resolved', async () => {
+    await renderWithLiveApp(BETA)
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    sandboxUi.listApps.mockResolvedValue({ apps: BETA_RESTARTING })
+    await refreshAppListingOnFocus()
+
+    sandboxUi.open.mockRejectedValueOnce(OPEN_REJECTED)
+    clickActiveStripTab('Alpha')
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
+    await waitForLaunchFailure(ALPHA!.appRef)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Beta', pressed: false }))
+
+    // The Alpha tab still owned the embed after its failed relaunch.
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+    const alphaPrefix = `${ALPHA!.appRef}: `
+    await waitFor(() => expect(screen.queryByText(text => text.startsWith(alphaPrefix))).toBeNull())
+    expect(await screen.findByRole('button', { name: 'Open Alpha' })).toBeTruthy()
+  })
 })

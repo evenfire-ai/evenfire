@@ -11,10 +11,14 @@ export type SandboxUiShortcutOpenResult =
   | { status: 'mounted' }
   | { status: 'failed'; message: string }
 
+// `release` returns the page to its picker without closing the embed: the
+// caller already owns (and emits) the close.
+export type SandboxUiPageAction = 'refresh' | 'back-to-apps' | 'release'
+
 export type SandboxUiPageProps = {
   actionRequest?: {
     id: number
-    action: 'refresh' | 'back-to-apps'
+    action: SandboxUiPageAction
   } | null
   boundsRefreshKey?: string | number
   currentTeamId?: string

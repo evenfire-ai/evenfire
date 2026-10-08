@@ -99,6 +99,7 @@ import { OnboardingPage } from '@pages/OnboardingPage'
 import { SandboxUiPage } from '@pages/SandboxUiPage'
 import type {
   SandboxUiConversationOrigin,
+  SandboxUiPageAction,
   SandboxUiShortcutOpenResult,
 } from '@pages/SandboxUiPage.types'
 import { SettingsPage } from '@pages/SettingsPage'
@@ -379,7 +380,7 @@ export function App() {
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
   const [sandboxActionRequest, setSandboxActionRequest] = React.useState<{
     id: number
-    action: 'refresh' | 'back-to-apps'
+    action: SandboxUiPageAction
   } | null>(null)
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
@@ -417,6 +418,11 @@ export function App() {
   // must abort — it must neither close the newer embed nor persist the newer
   // tab's route with a value read from a view that is already gone.
   const sandboxUiActivationGenRef = React.useRef(0)
+  // Tab the latest `launchSandboxUiApp` targeted. Activating an app tab hands the
+  // embed over (app→app) only when a launch is about to `open()` into it: a tab
+  // whose app App cannot resolve gets no launch, and leaving the outgoing view
+  // up would paint it inside that tab.
+  const launchTargetTabIdRef = React.useRef<string | null>(null)
   workspaceTabsRef.current = workspaceTabs
 
   const leaveSandboxForChat = React.useCallback(() => {
@@ -1413,6 +1419,7 @@ export function App() {
       // Compute the id only on the open-new branch so the sequence counter
       // advances exactly as before: relaunch of an existing tab must not burn one.
       const newAppTabId = existingTabId ? null : nextChatTabId()
+      launchTargetTabIdRef.current = existingTabId ?? newAppTabId
       setWorkspaceTabs(state =>
         existingTabId
           ? selectWorkspaceTab(state, existingTabId)
@@ -1452,15 +1459,26 @@ export function App() {
   const activeSandboxUiTabId =
     !vm.appsPickerActive && vm.activeWorkspaceTab?.kind === 'app' ? vm.activeWorkspaceTab.id : null
   React.useEffect(() => {
+    const launchTargetTabId = launchTargetTabIdRef.current
+    launchTargetTabIdRef.current = null
     const outgoingTabId = liveSandboxUiTabIdRef.current
     if (outgoingTabId === activeSandboxUiTabId) return
-    liveSandboxUiTabIdRef.current = activeSandboxUiTabId
+    const replacedByAnotherApp =
+      activeSandboxUiTabId !== null && launchTargetTabId === activeSandboxUiTabId
+    // An app tab activated without a launch hosts no embed: it stays unowned
+    // until a relaunch arms it (`handleSandboxUiOpening`).
+    liveSandboxUiTabIdRef.current = replacedByAnotherApp ? activeSandboxUiTabId : null
     // This is the single point where the active embed transitions; bump the
     // generation so any older in-flight continuation knows it no longer owns
     // the active view.
     sandboxUiActivationGenRef.current += 1
     if (outgoingTabId === null) return
-    const replacedByAnotherApp = activeSandboxUiTabId !== null
+    // The Apps route stays mounted when the incoming app tab gets no launch:
+    // drop the page's launch state too, or it keeps the outgoing app's chrome
+    // over an empty slot. The close below stays the only solicited one.
+    if (activeSandboxUiTabId !== null && !replacedByAnotherApp) {
+      setSandboxActionRequest(previous => ({ id: (previous?.id ?? 0) + 1, action: 'release' }))
+    }
     if (!replacedByAnotherApp) {
       // Deactivating to a non-app surface (chat/files/settings via strip, sidebar
       // nav, or closing the tab): drop the embed's React state now so anything
