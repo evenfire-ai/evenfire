@@ -118,13 +118,15 @@ realPg('RP-001 production credential pool ownership', () => {
     const connect = db!.pool.connect.bind(db!.pool)
     const spy = vi.spyOn(db!.pool, 'connect')
     let completing = false
+    let afterComparisonBorrows = 0
     vi.spyOn(bcrypt, 'compare').mockImplementation(async (submitted: string, stored: string) => {
       const result = await realCompare(submitted, stored)
       completing = true
       return result
     })
     spy.mockImplementation((...args: unknown[]) => {
-      if (completing) {
+      // Durable owner release now borrows first; fault the credential completion, not release.
+      if (completing && ++afterComparisonBorrows === 2) {
         completing = false
         return Promise.reject(new Error('synthetic completion failure'))
       }

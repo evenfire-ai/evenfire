@@ -1,7 +1,6 @@
 import bcrypt from 'bcryptjs'
 import { type DbTransactionClient, pool, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
-import { acquireRateLimitConcurrencyLease } from '../rateLimiterService.js'
 import {
   type PasswordIdentifierState,
   admitPasswordIdentifier,
@@ -9,6 +8,7 @@ import {
   passwordIdentifierKey,
   PASSWORD_ADMISSION_POLICY as policy,
 } from './passwordAdmissionState.js'
+import { acquirePasswordWork } from './passwordWorkOwnership.js'
 
 // Synthetic, repository-controlled cost-12 hash, precomputed once, never per request.
 export const PASSWORD_DUMMY_HASH = '$2b$12$DdpJSFUb/dYx43plh72Ia.k9RJ8krESZ/DtTRUbdQq/ngzfJuyCUu'
@@ -178,12 +178,8 @@ export async function verifyMemberPassword(
     if (busy) denied(policy.paceMs)
     busy = true
     try {
-      const lease = await acquireRateLimitConcurrencyLease(
-        [{ bucketKey: 'password-verification-global', maxConcurrent: policy.concurrency }],
-        { releaseIdleClient: true }
-      )
-      if (!lease.backendAvailable) throw new PasswordAdmissionError(503, 2)
-      if (!lease.allowed) denied(policy.paceMs)
+      const lease = await acquirePasswordWork()
+      if (!lease) denied(policy.paceMs)
       const user = capture.user
       let authenticated = false
       try {
@@ -214,7 +210,7 @@ export async function verifyMemberPassword(
       } finally {
         await lease.release()
       }
-      // Bcrypt is finished. Release its pool session before completion borrows a client.
+      // Bcrypt is finished and its durable owner is released before credential completion.
       const current = await completePasswordEvaluation(capture, authenticated)
       return current && authenticated ? user : null
     } finally {

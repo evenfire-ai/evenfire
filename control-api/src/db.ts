@@ -11,6 +11,7 @@ import {
   applyPasswordAdmissionSchema,
   applyPasswordEvaluationRetentionSchema,
 } from './services/auth/passwordAdmissionSchema.js'
+import { applyPasswordWorkOwnershipSchema } from './services/auth/passwordWorkOwnershipSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
@@ -6343,6 +6344,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0127_password_evaluation_retention',
     apply: applyPasswordEvaluationRetentionSchema,
+  },
+  {
+    version: '0128_password_work_ownership',
+    apply: applyPasswordWorkOwnershipSchema,
   },
 ]
 
