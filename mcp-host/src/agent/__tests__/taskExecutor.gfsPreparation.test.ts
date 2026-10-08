@@ -10,7 +10,11 @@ import type { GuardrailsConfig } from '../../core/guardrails'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import type { PreparedGfsFile } from '../../core/orchestration/turnContext'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
-import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import { GfsDownloadStore, GfsDownloadStoreError } from '../../internalTools/gfsDownloadStore'
+import {
+  GFS_CACHE_FULL_GUIDANCE,
+  GFS_DISK_FULL_GUIDANCE,
+} from '../../internalTools/gfsSpaceGuidance'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import type { Task } from '../../queue/types'
@@ -697,6 +701,34 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
       expect(test.observedReceipts).toMatchObject([{ status: 'unavailable', code }])
       expect(test.contentRequests).toBe(0)
       expect(JSON.stringify(test.requests)).not.toContain('untrusted transport detail')
+    }
+  )
+
+  // The store refusal travels through the real producer: gfsContentDownload,
+  // fail() in gfs.ts and the registry's `Error: ` prefix. The same refusal on
+  // the model's own clerum__gfs_download shows the exact string that path emits.
+  it.each([
+    ['disk_full', 'disk_full', `\n${GFS_DISK_FULL_GUIDANCE}`],
+    ['host_quota_exceeded', 'quota_exceeded', `\n${GFS_CACHE_FULL_GUIDANCE}`],
+    ['volume_unmeasurable', 'volume_unmeasurable', ''],
+  ] as const)(
+    'maps the real tool output for a %s store refusal to its preparation code',
+    async (storeCode, code, guidance) => {
+      const test = await scenario({ mode: 'download-again' })
+      test.createTransfer.mockRejectedValue(new GfsDownloadStoreError(storeCode))
+      await test.executor.run()
+
+      expect(test.onFail).not.toHaveBeenCalled()
+      // Witness: preparation and the model's call both reached store admission.
+      expect(test.createTransfer).toHaveBeenCalledTimes(2)
+      expect(test.contentRequests).toBe(0)
+      expect(test.observedReceipts).toEqual([
+        { referenceId: expect.any(String), status: 'unavailable', code },
+      ])
+      const toolResult = test.requests[1]?.find(
+        message => message.role === 'tool' && message.tool_call_id === 'unit-download-again'
+      )
+      expect(toolResult?.content).toBe(`Error: GFS download store failed (${storeCode})${guidance}`)
     }
   )
 

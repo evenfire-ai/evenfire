@@ -32,6 +32,7 @@ import {
   isGfsDownloadPath,
   isProtectedWorkspacePath,
 } from '../workspace/protectedPaths'
+import { GfsDownloadPathError, WorkspaceService } from '../workspace/service'
 import { deriveUserKey } from '../workspace/userKey'
 import { GfsDownloadStore } from './gfsDownloadStore'
 
@@ -383,6 +384,30 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
     expect(stranded[0]).toMatch(new RegExp(`^${GFS_DOWNLOADS_TRASH_PREFIX.replaceAll('.', '\\.')}`))
     expect(isProtectedWorkspacePath(`${stranded[0]}/input-${receipt.id}/source`)).toBe(true)
     expect(isGfsDownloadPath(stranded[0]!)).toBe(true)
+
+    // The prefix is enforced by WorkspaceService, not only by the predicate:
+    // read, list and search all hide the stranded tree, while an ordinary
+    // file in the same caller root stays visible.
+    syncFs.writeFileSync(path.join(root, stranded[0]!, 'notes.md'), 'quokka marmalade', 'utf-8')
+    syncFs.writeFileSync(path.join(root, 'visible.md'), 'gazebo lantern', 'utf-8')
+    const workspace = new WorkspaceService(root)
+    await expect(workspace.read('visible.md')).resolves.toBe('gazebo lantern')
+    await expect(workspace.list()).resolves.toContainEqual(
+      expect.objectContaining({ name: 'visible.md' })
+    )
+    await expect(workspace.search('gazebo lantern')).resolves.toEqual([
+      expect.objectContaining({ path: 'visible.md' }),
+    ])
+    await expect(workspace.read(`${stranded[0]}/notes.md`)).rejects.toBeInstanceOf(
+      GfsDownloadPathError
+    )
+    await expect(
+      workspace.read(`${stranded[0]}/input-${receipt.id}/source`)
+    ).rejects.toBeInstanceOf(GfsDownloadPathError)
+    await expect(workspace.list()).resolves.not.toContainEqual(
+      expect.objectContaining({ name: stranded[0] })
+    )
+    await expect(workspace.search('quokka marmalade')).resolves.toEqual([])
 
     const removed = await expiryCount('incomplete_removed')
     await store.cleanupExpired()

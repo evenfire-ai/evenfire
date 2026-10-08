@@ -190,11 +190,17 @@ a new ID, after fresh GFS authorization.
    if the parent moved). The windows that remain can be won only by a process
    running with the Host UID, which can already alter or delete those files
    directly (risk 3); winning one gives no capability beyond that.
-8. A turn-wide or "always" approval of `shell_exec` also authorizes shell
-   commands the model issues after it has read untrusted GFS content in the
-   same turn (or, with "always", in later turns). The shell runs with the Host
-   UID. Operators who need per-call approval add a guardrail rule with
-   `action: 'ask'` for `shell_exec`.
+8. A turn-wide approval of `shell_exec`, like any turn-wide approval,
+   auto-approves every approval-gated tool for the rest of the turn, not only
+   shell commands: `http_request`, `cron_manage`, `file_write` and MCP tools run
+   without a new approval card, including calls the model issues after it has
+   read untrusted GFS content in that turn. This is the behaviour of an
+   `http_request` approval, and of a `shell_exec` approval before #979. An
+   "always" approval also keeps `shell_exec` approved in later turns. The shell
+   runs with the Host UID. A configured `clerum__gfs_download` approval is still
+   asked for each call. Operators who need per-call approval add a guardrail
+   rule with `action: 'ask'` for `shell_exec` and for any other tool that must
+   be asked each time.
 
 Partial reads are not possible, because publication is an atomic `rename` of
 `source.partial`.
@@ -214,7 +220,7 @@ download per file; accounting and cleanup survive the restart. Approved
 arbitrary shell access remains a documented Stage 1 residual; stronger executor
 isolation is separate Stage 2 work.
 
-Shell cleanup signals and waits for the detached process group before the tool result is returned, or reports `process_group_termination_failed` when its termination cannot be confirmed. A process that moved outside that group (for example through `setsid` or a detached spawn) can keep stdout/stderr open after the group is gone, so the Host bounds settlement without waiting for those pipes to close. After a timeout, cancellation or output overflow, termination has 5000 ms of SIGTERM grace and the call settles at the 6000 ms cleanup budget at the latest. When the command exits on its own, the Host checks every 1000 ms whether the process group is gone and settles once it is. If the group never disappears, the execution timeout still applies, followed by the same 6000 ms cleanup budget. In both cases the Host stops output capture, the result starts with `[stdio_held_by_detached_process: <reason>; ...]` and is an error, and a `shell_stdio_held_by_detached_process` warning is logged. The escaped process is not signalled and may keep running; this bounds the call, it does not contain the process. Redirect background output to a file or `/dev/null`. Operating systems may reuse a process-group identifier after the original leader has been reaped; Stage 1 narrows that window by signaling immediately on leader close, but stronger executor identity is required to eliminate it.
+Shell cleanup signals and waits for the detached process group before the tool result is returned, or reports `process_group_termination_failed` when its termination cannot be confirmed. A process that moved outside that group (for example through `setsid` or a detached spawn) can keep stdout/stderr open after the group is gone, so the Host bounds settlement without waiting for those pipes to close. After a timeout, cancellation or output overflow, termination has 5000 ms of SIGTERM grace and the call settles at the 6000 ms cleanup budget at the latest. When the command exits on its own, the Host checks every 1000 ms whether the process group is gone and settles once it is. If the group never disappears, the execution timeout still applies, followed by the same 6000 ms cleanup budget. In both cases the Host stops output capture, the result starts with `[stdio_held_by_detached_process: <reason>; ...]` and is an error, and a `shell_stdio_held_by_detached_process` warning is logged. This holds even when the command itself exits 0: the result is still an error (`is_error: true`), so the model may treat a successful command as failed and retry it, for example starting a second background daemon. The escaped process is not signalled and may keep running; this bounds the call, it does not contain the process. Redirect background output to a file or `/dev/null`. Operating systems may reuse a process-group identifier after the original leader has been reaped; Stage 1 narrows that window by signaling immediately on leader close, but stronger executor identity is required to eliminate it.
 
 Generic workspace tools reject direct and symlink-resolved access to
 `.gfs-downloads`, the pre-#1028 `.gfs-download-store` directory, every
@@ -269,8 +275,10 @@ rename and its delete leaves behind and the next sweep removes.
 
 ### What counts as a complete download
 
-A directory is complete when `meta.json` is a regular file of at most the
-metadata size limit, opens without following a symlink, and parses as a schema-1
+A directory is complete when `meta.json` is a regular file (checked with
+`lstat` before it is opened, so a socket, FIFO, device, directory or symlink
+makes the directory incomplete) of at most the metadata size limit, opens
+without following a symlink, and parses as a schema-1
 receipt for the directory's own ID; its source fields, size, digest and dates
 are well formed; the size is within the GFS admission limit; `expiresAt` is not
 before `createdAt` and not later than `createdAt` plus the retention period; and
@@ -362,17 +370,26 @@ the admission is refused. Eviction candidates are not hashed.
 
 Shell writes do not trigger eviction. Files a command writes elsewhere in a
 workspace share the volume with the cache but are not charged to the budget, so
-a full cache can make a shell write fail with `ENOSPC` until the next admission
-evicts copies or the next sweep removes expired ones.
+a full disk can make a shell write fail with `ENOSPC` until the next download
+admission evicts unpinned copies to free space or the next sweep removes
+expired ones. Nothing evicts copies between admissions.
 
-Free space is checked before the plan and again after it. Free space must cover
-the block-rounded size of the new download, every active reservation and a
-16 MiB margin; otherwise the admission is refused with `disk_full`
-(reason `free_space`). The admission sweep runs before the first check, so
+Free space must cover the block-rounded size of the new download, every
+active reservation and a 16 MiB margin. The admission sweep runs first, so
 expired copies (pinned ones included) and incomplete directories are removed
-first and never cause a `disk_full`. The first check still runs before any
-eviction of live copies, so a volume that cannot hold the download costs no
-cached copy. A `statfs` that reports a block size or block count that is not
+before the volume is measured and never cause a `disk_full`. One eviction plan
+then covers both deficits: the bytes over the budget and the free-space
+deficit (`required − available bytes`, each candidate credited with its
+block-rounded size), with the same candidates and order as above. Files that
+are not cache copies (other workspace files, other services on the volume)
+therefore make the store evict unpinned copies instead of refusing. The checks
+run in this order, all before anything is deleted: if the evictable copies
+cannot cover the free-space deficit, the admission is refused with `disk_full`
+(reason `free_space`); then the per-caller protected cap; then, if no plan fits
+the budget, `host_quota_exceeded`. After the eviction the budget and the free
+space are checked again, and a volume still short is refused with
+`disk_full`. A volume that cannot hold the download therefore costs no cached
+copy. A `statfs` that reports a block size or block count that is not
 positive, or a negative available-block count, cannot size a budget. The store
 then measures the volume once more; if the second reading is valid the
 admission proceeds with it, and if it is still invalid the admission is
@@ -420,7 +437,16 @@ it` and counts `sweep_failed`. All three log the error code only.
 
 A directory that cannot be listed is skipped and retried by the next sweep
 (`sweep_failed`). A removal that fails is logged with its error code
-(`remove_failed`) and retried by the next sweep. A removal that fails before
+(`remove_failed`) and retried by the next sweep. When the removal of a renamed
+copy fails with `EACCES` or `EPERM` (for example after a command ran
+`chmod 0500` on it), the store adds owner `rwx` to every real directory in
+that tree (symlinks are not followed) and retries once; a directory made
+read-only from a shell therefore does not hold its charge forever. The change
+is path-based, so a name swapped for a symlink between the `lstat` and the
+`chmod` can gain owner bits on another inode the Host UID owns, which a
+command running as that UID can already change. A `.gfs-downloads` parent
+made unwritable is not repaired: its copies stay in place and charged. A
+removal that fails before
 its rename leaves the copy where it is, indexed and charged, and a published
 copy stays published. A removal that renamed the copy and then failed leaves it
 under its trash name (below): it stays charged there until its removal succeeds
@@ -591,8 +617,13 @@ Managed shell execution keeps the verified caller root and continues; it cannot
 fall back to the Host's shared workspace. A failed sweep never makes the store
 unavailable.
 
-`close()` stops admission, waits up to 5 seconds for active transfers and then
-closes; directories of transfers still active are removed by the next start.
+`close()` stops admission and, within one 5-second deadline, waits for an
+`initialize()` still in progress (which then fails with `download_busy`), for
+active transfers, and then for the mutation queue to stay unchanged, so a
+sweep accepted while `close()` was waiting also finishes. Every call returns
+the same promise. A managed read that finishes after `close()` does not remove
+its copy. Directories of transfers still active at the deadline are removed by
+the next start.
 
 Execution safety binding is independent of delivery eligibility and of store
 availability. Cron, internal and approval-disabled tasks associated with this
@@ -648,7 +679,9 @@ directory; the next sweep retries it`, each with an errno `code`.
 are removed at the next start` with the `active` count.
 - `warn` `GFS download store ignores a removed retained-storage variable; the
 budget is MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT of the workspace volume`, once
-  per removed variable that is set at startup, with the `variable` name only.
+  per removed variable that is set, with the `variable` name only. It is
+  emitted once per store instance (once per Host process), not on every
+  `initialize()` retry.
 
 ## Rollout and rollback
 

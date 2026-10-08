@@ -61,6 +61,8 @@ describe('prepared GFS receipts', () => {
     })
     expect(block).toContain('prepared_gfs_file:')
     expect(block).toContain(PREPARED_GFS_FILES_INSTRUCTION)
+    // The approval gate decides shell_exec consent; the prompt states no shell rule.
+    expect(PREPARED_GFS_FILES_INSTRUCTION).not.toMatch(/approval for shell_exec/)
     expect(block).not.toContain(REFERENCED_FILES_INSTRUCTION)
     expect(block.split('\n').filter(line => line === '</turn-context>')).toHaveLength(1)
     const line = block.split('\n').find(line => line.startsWith('prepared_gfs_file:'))!

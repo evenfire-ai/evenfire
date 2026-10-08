@@ -529,30 +529,6 @@
   },
   {
     "suite": "gfsDownloadStoreRestart.test.ts",
-    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: v2 fence with a matching device"
-  },
-  {
-    "suite": "gfsDownloadStoreRestart.test.ts",
-    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: v2 fence with another device"
-  },
-  {
-    "suite": "gfsDownloadStoreRestart.test.ts",
-    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: v2 fence without a device"
-  },
-  {
-    "suite": "gfsDownloadStoreRestart.test.ts",
-    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: v3 fence"
-  },
-  {
-    "suite": "gfsDownloadStoreRestart.test.ts",
-    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: ledger without a fence"
-  },
-  {
-    "suite": "gfsDownloadStoreRestart.test.ts",
-    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: live processing lease of a crashed Host"
-  },
-  {
-    "suite": "gfsDownloadStoreRestart.test.ts",
     "fullName": "GFS download store restart R2: dev user directories of every state are removed at startup and do not count against quota"
   },
   {
@@ -1025,10 +1001,6 @@
   },
   {
     "suite": "gfsFilePreparation.test.ts",
-    "fullName": "GFS file preparation maps the bare disk_full envelope to its fixed category"
-  },
-  {
-    "suite": "gfsFilePreparation.test.ts",
     "fullName": "GFS file preparation maps the host_quota_exceeded envelope with its guidance to its fixed category"
   },
   {
@@ -1278,5 +1250,125 @@
   {
     "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
     "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) DS-R6-FAIL-PARTIAL: a failed transfer whose trash cannot be removed stays charged with the bytes it wrote"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety U7: rejects a shell_exec command containing a NUL character (#1020)"
+  },
+  {
+    "suite": "shell.test.ts",
+    "fullName": "ShellTool start failures (#1020) U3: rejects a NUL env value before spawn and names only the variable key"
+  },
+  {
+    "suite": "shell.test.ts",
+    "fullName": "ShellTool start failures (#1020) U3b: reports only the error code of a synchronous spawn throw"
+  },
+  {
+    "suite": "shell.test.ts",
+    "fullName": "ShellTool start failures (#1020) U3c: reports a fixed message for a synchronous spawn throw without a well-formed code"
+  },
+  {
+    "suite": "toolUseLoop.shellNul.test.ts",
+    "fullName": "shell_exec NUL commands through the tool loop (#1020) X5: BasicSafety rejects a NUL command before approval, the same command without NUL reaches approval"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) reserves the 6s cleanup the shell declares"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) U11: accepts CLERUM_TOOL_TIMEOUT at 2^31-1 minus the shell cleanup and rejects one more"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) U11: accepts CLERUM_SHELL_TIMEOUT at 2^31-1 minus the shell cleanup and rejects one more"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) accepts 'CLERUM_AGENT_MAX_TASK_DURATION' at the full timer range 2^31-1 and rejects one more"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) accepts 'CLERUM_AGENT_MAX_TOOL_CALLS' at the full timer range 2^31-1 and rejects one more"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) U11: the accepted maximum runs a shell call and one more is refused by the timer guard"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "one turn-wide shell approval auto-approves cron_manage and http_request for the rest of the turn"
+  },
+  {
+    "suite": "taskExecutor.gfsPreparation.test.ts",
+    "fullName": "TaskExecutor prepares admitted GFS files before its first model call maps the real tool output for a disk_full store refusal to its preparation code"
+  },
+  {
+    "suite": "taskExecutor.gfsPreparation.test.ts",
+    "fullName": "TaskExecutor prepares admitted GFS files before its first model call maps the real tool output for a host_quota_exceeded store refusal to its preparation code"
+  },
+  {
+    "suite": "taskExecutor.gfsPreparation.test.ts",
+    "fullName": "TaskExecutor prepares admitted GFS files before its first model call maps the real tool output for a volume_unmeasurable store refusal to its preparation code"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X3-TE-channel: an approved channel shell dispatch with GFS delivery on makes zero GFS download store calls (#1019)"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts projects only metadata inside the original fence and tells the model to use the prepared copy"
+  },
+  {
+    "suite": "gfsDownloadStoreDiskPressure.test.ts",
+    "fullName": "GFS download store: disk pressure evicts unpinned copies DP-1: a full disk under budget evicts the least recently used unpinned copies of another caller instead of refusing as disk_full"
+  },
+  {
+    "suite": "gfsDownloadStoreDiskPressure.test.ts",
+    "fullName": "GFS download store: disk pressure evicts unpinned copies DP-2: pinned copies are never evicted for a physical deficit, and the admission refuses as disk_full without deleting anything"
+  },
+  {
+    "suite": "gfsDownloadStoreDiskPressure.test.ts",
+    "fullName": "GFS download store: disk pressure evicts unpinned copies DP-3: a deficit larger than every unpinned copy refuses as disk_full and evicts nothing"
+  },
+  {
+    "suite": "gfsDownloadStoreDiskPressure.test.ts",
+    "fullName": "GFS download store: eviction metric EVM-1: a budget eviction increments expired_removed and removes the evicted directory"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a store directory made unwritable is still removed RCV-1: expired copies in input directories chmod 0500 are removed by the sweep, release their charge, and another caller is admitted"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a non-regular meta.json RCV-2: a Unix socket planted as meta.json makes the directory incomplete, and the sweep removes it"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a non-regular meta.json RCV-2b: at initialize, a socket meta.json is removed as incomplete"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: close() and initialize() RCV-3: close() requested while initialize() is sweeping waits for that sweep"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: close() and initialize() RCV-4: a second close() while the first is draining resolves only when the first does"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: close() and initialize() RCV-5: a managed read whose digest check finishes after close() does not remove the copy"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: removed variables across initialize() retries RCV-6: a removed variable is warned about once although initialize() runs twice"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: killed with an expired and a live processing lease"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: restarted by the dev Host, every record quarantined (#1019)"
   }
 ]

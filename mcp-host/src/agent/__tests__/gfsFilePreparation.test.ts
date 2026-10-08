@@ -289,7 +289,6 @@ describe('GFS file preparation', () => {
     ['Error: GFS read failed (gfsc 403: forbidden)', 'denied'],
     ['Error: GFS read failed (gfsc 404: not_found)', 'missing'],
     ['Error: GFS download failed (version_conflict)', 'stale'],
-    ['Error: GFS download store failed (host_quota_exceeded)', 'quota_exceeded'],
     ['Error: untrusted transport detail', 'download_failed'],
   ] as const)('publishes a fixed category for %s', async (content, code) => {
     const test = subject(vi.fn(async () => ({ content, duration_ms: 1, is_error: true })))
@@ -303,13 +302,16 @@ describe('GFS file preparation', () => {
   const diskFull = 'Error: GFS download store failed (disk_full)'
   const cacheFull = 'Error: GFS download store failed (host_quota_exceeded)'
   const volumeUnmeasurable = 'Error: GFS download store failed (volume_unmeasurable)'
+  // Only shapes the real producer emits (or near misses of them): disk_full and
+  // host_quota_exceeded always carry their guidance line, volume_unmeasurable
+  // never does. taskExecutor.gfsPreparation.test.ts derives all three from the
+  // real tool output.
   it.each([
     [
       'the disk_full envelope with its guidance',
       `${diskFull}\n${GFS_DISK_FULL_GUIDANCE}`,
       'disk_full',
     ],
-    ['the bare disk_full envelope', diskFull, 'disk_full'],
     [
       'the host_quota_exceeded envelope with its guidance',
       `${cacheFull}\n${GFS_CACHE_FULL_GUIDANCE}`,

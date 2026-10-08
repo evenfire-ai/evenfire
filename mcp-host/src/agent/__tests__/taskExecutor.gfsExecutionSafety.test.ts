@@ -3,7 +3,7 @@ import { spawn } from 'child_process'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildDevStore } from '../../__tests__/fixtures/devGfsStoreFixture'
+import { loadDevStore } from '../../__tests__/fixtures/devGfsStoreFixture'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
@@ -125,29 +125,21 @@ async function unavailableStore() {
 }
 
 /**
- * A store whose Host root still holds what the pre-#1028 image left on disk: a
- * ledger with an empty processing lease written by a crashed Host, the v2
- * writer fence and its database. By default the lease is expired; `live`
- * seeds one whose expiry is still in the future.
+ * A store whose Host root holds what the pre-#1028 image left on disk, as its
+ * real store wrote it (devGfsStoreFixture, `restarted`): a ledger with every
+ * record quarantined, an expired and a live processing lease of a killed
+ * writer, the v2 writer fence and its database. The dev store itself was
+ * unavailable on this state (#1019). `live` picks which of the two leases the
+ * caller checks.
  */
 async function preRedesignStore({ live = false }: { live?: boolean } = {}) {
   const root = await fs.mkdtemp(join(tmpdir(), 'gfs-shell-safety-legacy-'))
   roots.push(root)
-  const devStore = await buildDevStore(root, {
-    ledger: 'processingLeasesEmpty',
-    fence: 'v2-matching',
-    sqlite: true,
-    userDirs: [],
-    lease: live ? 'live' : 'expired',
-  })
-  if (devStore.ledgerText === undefined)
-    throw new Error('preRedesignStore fixture: no ledger was written')
-  const ledger = JSON.parse(devStore.ledgerText) as {
-    processingLeases: Record<string, { expiresAt: string }>
-  }
-  const [seededLease] = Object.values(ledger.processingLeases)
-  if (seededLease === undefined)
-    throw new Error('preRedesignStore fixture: no processing lease was written')
+  const devStore = loadDevStore(root, 'restarted')
+  expect(devStore.oldStoreAvailable).toBe(false)
+  expect(Date.parse(devStore.leases.expired.expiresAt)).toBeLessThan(Date.now())
+  expect(Date.parse(devStore.leases.live.expiresAt)).toBeGreaterThan(Date.now())
+  const seededLease = live ? devStore.leases.live : devStore.leases.expired
   // Witness for every X1 case: the old store is on disk before the start and
   // the start retires it, so availability cannot come from a missing fixture.
   await expect(fs.lstat(devStore.storeRoot)).resolves.toBeDefined()
@@ -791,6 +783,59 @@ it('X3-TE: a shell dispatch inside TaskExecutor makes zero GFS download store ca
   expect(JSON.stringify(scenario.providerCalls.at(-1))).toContain(scenario.callerWorkspace)
   // Claim: no store method ran from the moment the executor received the shell
   // call until it returned the shell result to the model.
+  expect(dispatch.windows[0]!.storeCalls).toEqual([])
+  expect(executeWindows[0]!.storeCalls).toEqual([])
+})
+
+it('X3-TE-channel: an approved channel shell dispatch with GFS delivery on makes zero GFS download store calls (#1019)', async () => {
+  const timeline: string[] = []
+  const dispatch = shellDispatchWindows(timeline)
+  const { call, marker } = markerCall('shell-safety-channel', 'X3_CHANNEL')
+  const scenario = await shellScenario({
+    source: 'channel',
+    channelCaller: true,
+    healthy: true,
+    calls: [call],
+    turnObserver: dispatch.observer,
+  })
+  const net = storeSpyNet(scenario.store)
+  dispatch.attach(net)
+  const executeWindows = shellExecuteWindows(net, timeline)
+
+  await scenario.executor.run()
+  // Witnesses: the shell reached the live approval gate, and delivery is on:
+  // every store read the executor made while building the registry reported
+  // the store live, and clerum__gfs_download was advertised. The test reads the
+  // spy's results rather than calling the store, so the open window stays clean.
+  expect(scenario.onApprovalNeeded).toHaveBeenCalledTimes(1)
+  expect(spawn).not.toHaveBeenCalled()
+  const availability = net.spies.get('isAvailable')!.mock.results
+  expect(availability.length).toBeGreaterThan(0)
+  expect(availability.every(result => result.value === true)).toBe(true)
+  expect(scenario.advertisedTools[0]).toContain('clerum__gfs_download')
+
+  await scenario.executor.resumeAfterApproval(false)
+
+  // Witnesses: one dispatch window opened at the model's shell call and closed
+  // at the next turn, with ShellTool.execute nested inside it, and the
+  // command's stdout reached the model.
+  expect(dispatch.unclosed()).toBeUndefined()
+  expect(dispatch.windows).toEqual([{ toolCallId: call.id, storeCalls: expect.any(Array) }])
+  expect(executeWindows).toHaveLength(1)
+  expect(timeline).toEqual([
+    'turn 0 started',
+    'turn 0 returned shell_exec',
+    'shell execute entered',
+    'shell execute returned',
+    'turn 1 started',
+    'turn 1 returned final answer',
+  ])
+  expect(spawn).toHaveBeenCalledOnce()
+  expect(vi.mocked(spawn).mock.calls[0]![2]).toMatchObject({ cwd: scenario.callerWorkspace })
+  expect(shellToolResult(scenario.providerCalls, call.id)).toContain(marker)
+  expect(scenario.onFail).not.toHaveBeenCalled()
+  // Claim: no store method ran from the moment the executor received the shell
+  // call, through the approval and its resume, until the shell result returned.
   expect(dispatch.windows[0]!.storeCalls).toEqual([])
   expect(executeWindows[0]!.storeCalls).toEqual([])
 })

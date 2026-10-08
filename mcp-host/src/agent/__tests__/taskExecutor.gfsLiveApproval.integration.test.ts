@@ -314,6 +314,44 @@ it.each(['http_request', 'shell_exec'] as const)(
   }
 )
 
+// Accepted risk: a turn-wide shell_exec approval, like any turn-wide approval,
+// adds '*' and so auto-approves every approval-gated tool for the rest of the turn.
+it('one turn-wide shell approval auto-approves cron_manage and http_request for the rest of the turn', async () => {
+  // http_request resolves and pins its own socket; the tool boundary is the witness.
+  const httpExecute = vi
+    .spyOn(HttpRequestTool.prototype, 'execute')
+    .mockResolvedValue({ content: 'follow-up body', duration_ms: 1, is_error: false })
+  const shell = shellCall('wildcard-shell', firstCommand)
+  const s = await scenario(
+    [shell, riskyFollowUp('cron_manage'), riskyFollowUp('http_request')],
+    false,
+    new ConversationManager(),
+    'available',
+    false
+  )
+  const listJobs = vi.spyOn(s.deps.cronScheduler!, 'getAllJobs')
+  await s.executor.run()
+
+  expect(s.executor.pendingApproval).toMatchObject({
+    tool_name: 'shell_exec',
+    tool_call_id: shell.id,
+    authorization_scope: 'turn_tools',
+  })
+  expect(spawn).not.toHaveBeenCalled()
+  await s.executor.resumeAfterApproval(false)
+
+  expect(s.onFail).not.toHaveBeenCalled()
+  // Witness: each of the three tools ran once, after a single approval card.
+  expect(vi.mocked(spawn).mock.calls.map(call => call.slice(0, 2))).toEqual([
+    ['/bin/sh', ['-c', firstCommand]],
+  ])
+  expect(listJobs).toHaveBeenCalledOnce()
+  expect(httpExecute).toHaveBeenCalledOnce()
+  expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
+  expect(s.executor.executorState).toBe('completed')
+  expect(s.conversation.auto_approved_tools.has('*')).toBe(true)
+})
+
 it.each(['http_request', 'cron_manage'] as const)(
   'cold-resumes SQLite NULL shell scope without granting the next %s from an old wildcard',
   async followUp => {

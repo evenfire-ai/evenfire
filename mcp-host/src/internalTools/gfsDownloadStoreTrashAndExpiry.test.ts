@@ -197,10 +197,13 @@ describe('GFS download store: expired copies never make the disk full (M1)', () 
 
   it('a disk truly full after the sweep refuses as disk_full and leaves live cached copies intact', async () => {
     const store = await openStore()
-    // A live unpinned 6-byte copy for a day, and a pinned 6-byte copy for an
-    // hour: margin + 8 available.
+    // A live pinned 6-byte copy for a day, and a pinned 6-byte copy for an
+    // hour: margin + 8 available. A live unpinned copy would be evicted to
+    // cover the deficit (gfsDownloadStoreDiskPressure.test.ts); a pinned one
+    // never is, so nothing on this volume can make room.
     const live = await completedCopy(store, rootA, A, 0, 6, {
       expiresAt: new Date(Date.now() + 24 * HOUR_MS).toISOString(),
+      owner: 'task-live',
     })
     const expiring = await completedCopy(store, rootA, A, 1, 6, { owner: 'task-a' })
     vi.setSystemTime(Date.now() + 2 * HOUR_MS)
@@ -208,8 +211,7 @@ describe('GFS download store: expired copies never make the disk full (M1)', () 
     const removedBefore = await expiryCount('expired_removed')
 
     // The sweep frees the expired 6 bytes (margin + 14), still short of
-    // margin + 16; evicting the live copy would make it fit, but no live copy
-    // is evicted before the free-space check.
+    // margin + 16; evicting the live copy would make it fit, but it is pinned.
     await expect(startTransfer(store, rootB, B, 2, 16)).rejects.toMatchObject({ code: 'disk_full' })
     expect(await quotaCount('host', 'free_space')).toBe(diskDenied + 1)
     // Witness: the sweep ran before the refusal.

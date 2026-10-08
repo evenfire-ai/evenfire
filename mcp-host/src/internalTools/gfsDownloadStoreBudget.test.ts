@@ -470,15 +470,38 @@ describe('GFS download store budget: removed variables', () => {
     return warn.mock.calls.filter(call => call[1] === REMOVED_VARIABLE_WARNING)
   }
 
-  it.each(REMOVED_GFS_STORAGE_VARIABLES)(
+  // Spelled out rather than read from REMOVED_GFS_STORAGE_VARIABLES: a name
+  // dropped from that constant would be silently ignored, and these cases
+  // must then go red.
+  const REMOVED_VARIABLE_NAMES = [
+    'MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES',
+    'MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES',
+    'MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES',
+  ] as const
+
+  /**
+   * The store and its logger re-imported together, so any module-level state
+   * (such as a once-per-process warning) starts fresh in every case.
+   */
+  async function freshStoreWithWarnSpy() {
+    vi.resetModules()
+    const { logger: freshLogger } = await import('../logger')
+    const warn = vi.spyOn(freshLogger, 'warn')
+    const { GfsDownloadStore: Store } = await import('./gfsDownloadStore')
+    const opened = new Store(hostRoot) as unknown as GfsDownloadStore
+    stores.push(opened)
+    await opened.initialize()
+    return { store: opened, warn }
+  }
+
+  it.each(REMOVED_VARIABLE_NAMES)(
     'BUD-9: %s still set is warned about once, by name and never by value',
     async variable => {
-      for (const name of REMOVED_GFS_STORAGE_VARIABLES) vi.stubEnv(name, undefined)
+      for (const name of REMOVED_VARIABLE_NAMES) vi.stubEnv(name, undefined)
       const value = 'secret-value-1073741824'
       vi.stubEnv(variable, value)
-      const warn = vi.spyOn(logger, 'warn')
 
-      const store = await openStore()
+      const { store, warn } = await freshStoreWithWarnSpy()
 
       expect(store.isAvailable()).toBe(true)
       const logged = removedWarnings(warn)
@@ -489,17 +512,16 @@ describe('GFS download store budget: removed variables', () => {
   )
 
   it('BUD-9b: every removed variable set at once gives one warning each', async () => {
-    for (const name of REMOVED_GFS_STORAGE_VARIABLES) vi.stubEnv(name, '1')
-    const warn = vi.spyOn(logger, 'warn')
+    for (const name of REMOVED_VARIABLE_NAMES) vi.stubEnv(name, '1')
 
-    const store = await openStore()
+    const { store, warn } = await freshStoreWithWarnSpy()
 
     expect(store.isAvailable()).toBe(true)
     expect(
       removedWarnings(warn)
         .map(call => (call[0] as { variable: string }).variable)
         .sort()
-    ).toEqual([...REMOVED_GFS_STORAGE_VARIABLES].sort())
+    ).toEqual([...REMOVED_VARIABLE_NAMES].sort())
   })
 
   it('BUD-9c: removed variables set to 1 byte and 1 file do not limit retained storage', async () => {

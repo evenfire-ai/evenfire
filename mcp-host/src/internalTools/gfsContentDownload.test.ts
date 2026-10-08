@@ -28,7 +28,8 @@ vi.mock('node:fs/promises', async original => {
       ) {
         rmFailure.target = undefined
         rmFailure.injected += 1
-        throw Object.assign(new Error('simulated rm failure'), { code: 'EACCES' })
+        // EBUSY, not EACCES: a permission error is retried after restoring owner access.
+        throw Object.assign(new Error('simulated rm failure'), { code: 'EBUSY' })
       }
       return actual.rm(...values)
     },
