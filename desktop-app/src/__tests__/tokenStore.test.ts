@@ -160,7 +160,7 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     const legacyPlainFile = path.join(storageDirectory, 'session-token.json')
     await fs.mkdir(storageDirectory, { recursive: true })
     await fs.writeFile(legacyEncryptedFile, Buffer.from('legacy-encrypted-token'), { mode: 0o600 })
-    await fs.writeFile(legacyPlainFile, JSON.stringify({ token: 'legacy-plain-token' }), {
+    await fs.writeFile(legacyPlainFile, JSON.stringify({ token: 'legacy-fixture-token' }), {
       mode: 0o600,
     })
 

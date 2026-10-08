@@ -35,8 +35,12 @@ describe('TokenStore without the Keytar module', () => {
     await fs.mkdir(storageDirectory, { recursive: true })
     const activeToken = path.join(storageDirectory, `session-token-${ENV_A}.json`)
     const legacyToken = path.join(storageDirectory, 'session-token.json')
-    await fs.writeFile(activeToken, JSON.stringify({ token: 'active-token' }), { mode: 0o600 })
-    await fs.writeFile(legacyToken, JSON.stringify({ token: 'legacy-token' }), { mode: 0o600 })
+    await fs.writeFile(activeToken, JSON.stringify({ token: 'active-fixture-token' }), {
+      mode: 0o600,
+    })
+    await fs.writeFile(legacyToken, JSON.stringify({ token: 'legacy-fixture-token' }), {
+      mode: 0o600,
+    })
 
     await expect(
       new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })

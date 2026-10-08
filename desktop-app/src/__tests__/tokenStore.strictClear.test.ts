@@ -34,8 +34,12 @@ describe('TokenStore strict session clearing', () => {
     const activeToken = path.join(storageDirectory, 'session-token-env_a-000000000000.json')
     const legacyToken = path.join(storageDirectory, 'session-token.json')
     await mkdir(storageDirectory, { recursive: true })
-    await writeFile(activeToken, JSON.stringify({ token: 'active-token' }), { mode: 0o600 })
-    await writeFile(legacyToken, JSON.stringify({ token: 'legacy-token' }), { mode: 0o600 })
+    await writeFile(activeToken, JSON.stringify({ token: 'active-fixture-token' }), {
+      mode: 0o600,
+    })
+    await writeFile(legacyToken, JSON.stringify({ token: 'legacy-fixture-token' }), {
+      mode: 0o600,
+    })
 
     await expect(
       new TokenStore().clearSessionToken('env_a-000000000000', { throwOnStorageError: true })
