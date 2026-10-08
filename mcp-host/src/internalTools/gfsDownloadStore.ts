@@ -53,10 +53,18 @@ const SHA256_RE = /^[0-9a-f]{64}$/
 
 export type GfsDownloadStoreErrorCode =
   | 'caller_mismatch'
+  /** The Host volume's free space cannot hold the reservation plus its margin. */
+  | 'disk_full'
   | 'download_busy'
   | 'download_expired'
   | 'download_missing'
+  /**
+   * The retained-download budget or one caller's protected share of it is
+   * full, or the volume cannot be measured.
+   */
   | 'host_quota_exceeded'
+  /** The declared size is not a safe non-negative integer up to the file limit. */
+  | 'limit_exceeded'
   | 'publication_cancelled'
   | 'storage_write_failed'
   | 'workspace_unavailable'
@@ -490,7 +498,7 @@ export class GfsDownloadStore {
       input.sizeBytes < 0 ||
       input.sizeBytes > GFS_FILE_LIMITS.maxFileBytes
     )
-      throw new GfsDownloadStoreError('host_quota_exceeded')
+      throw new GfsDownloadStoreError('limit_exceeded')
     if (typeof input.callerIdentity !== 'string' || input.callerIdentity.length === 0)
       throw new GfsDownloadStoreError('caller_mismatch')
     if (!isValidSource(input.source)) throw new RangeError('GFS download source is malformed')
@@ -770,8 +778,12 @@ export class GfsDownloadStore {
       if (!entry) return undefined
       // Pinning a copy this caller does not protect yet adds it to the
       // caller's protected bytes; checked before hashing, so a refusal costs
-      // no read.
-      if (bounds?.retentionOwnerId !== undefined)
+      // no read. A copy the caller already protects adds nothing, so that is
+      // decided first and re-pinning it never depends on statfs.
+      if (
+        bounds?.retentionOwnerId !== undefined &&
+        !this.protectedIds(callerIdentity).has(entry.id)
+      )
         this.assertProtectedRoom(callerIdentity, retainedBudget(await this.measureVolume()), {
           id: entry.id,
           sizeBytes: entry.sizeBytes,
@@ -985,8 +997,11 @@ export class GfsDownloadStore {
 
   /**
    * Walks `users/*\/.gfs-downloads/*` plus every indexed directory. Incomplete
-   * directories and expired, unpinned complete ones are removed; complete ones
-   * are (re)indexed, new ones as adopted. Active transfers of this process are
+   * directories and expired complete ones are removed; complete ones are
+   * (re)indexed, new ones as adopted. Expiry is absolute: a retention pin
+   * protects a copy from eviction, never past its `expiresAt`, so a pinned
+   * copy is removed at expiry like any other and a task that still needs the
+   * file downloads it again. Active transfers of this process are
    * never touched, and a published entry is never replaced: another directory
    * carrying the id of a reservation or of a published copy is removed, and an
    * id found in several directories with neither is removed everywhere (a
@@ -1021,9 +1036,11 @@ export class GfsDownloadStore {
     }
     // A duplicate this sweep could not remove is still on disk, so it stays
     // charged: a failed cleanup never turns into free capacity. Its charge is
-    // released only by a removal that succeeds or an lstat that answers
-    // ENOENT; an inspection or listing that fails carries the previous
-    // sweep's charge over instead of reading as zero.
+    // released only by a removal that succeeds or an lstat that proves the
+    // directory gone: ENOENT, ENOTDIR (a parent is no longer a directory) or
+    // a path that is no longer a directory. An inspection or listing that
+    // fails, or any other lstat answer, carries the previous sweep's charge
+    // over instead of reading as zero.
     const previousHeld = this.held
     const held = new Map<string, HeldCopy>()
     const settled = new Set<string>()
@@ -1081,7 +1098,7 @@ export class GfsDownloadStore {
         continue
       }
       const entry = state.entry
-      if (Date.parse(entry.expiresAt) <= now && !this.isPinned(id)) {
+      if (Date.parse(entry.expiresAt) <= now) {
         const result = await this.removeDirectory(directory, 'expired_removed')
         if (result === 'removed') totals.removedExpired += 1
         if (result === 'failed') totals.removeFailed += 1
@@ -1439,7 +1456,9 @@ export class GfsDownloadStore {
 
   /**
    * A statfs whose block size or block count is not positive cannot size
-   * anything; it refuses the admission as `free_space`, like a full volume.
+   * anything; it records `free_space` but keeps `host_quota_exceeded`, because
+   * an unmeasurable volume is not proof that the disk is full, and `disk_full`
+   * tells the model to offer the user a workspace cleanup.
    */
   private async measureVolume(): Promise<VolumeSpace> {
     const space = await fs.statfs(this.hostRoot, { bigint: true })
@@ -1462,31 +1481,41 @@ export class GfsDownloadStore {
     for (const transfer of this.active.values()) required += reserve(transfer.sizeBytes)
     if (space.bavail * space.bsize < required) {
       recordGfsDownloadQuota('host', 'free_space')
-      throw new GfsDownloadStoreError('host_quota_exceeded')
+      throw new GfsDownloadStoreError('disk_full')
     }
     return space
   }
 
   /**
    * Ids one caller holds out of eviction: its active reservations and the
-   * copies its retention owners pin, each id once.
+   * unexpired copies its retention owners pin, each id once. An expired
+   * pinned copy protects nothing: the sweep and eviction both remove it.
    */
   private protectedIds(callerIdentity: string): Set<string> {
     const ids = new Set<string>()
+    const now = Date.now()
     for (const transfer of this.active.values())
       if (transfer.callerIdentity === callerIdentity) ids.add(transfer.id)
     for (const [key, pinned] of this.pins)
       if ((JSON.parse(key) as [string, string])[0] === callerIdentity)
-        for (const id of pinned) ids.add(id)
+        for (const id of pinned) {
+          const entry = this.entries.get(id)
+          if (entry !== undefined && Date.parse(entry.expiresAt) <= now) continue
+          ids.add(id)
+        }
     return ids
   }
 
   /**
-   * Eviction never reclaims a pinned copy or a reservation, so without a bound
-   * one caller's open tasks could hold the whole budget and refuse every other
-   * caller. A caller's protected bytes may therefore reach at most half the
-   * budget, which always leaves the other half reclaimable for anyone else.
-   * Only this caller's own usage decides; the refusal is the fixed code.
+   * Eviction never reclaims an unexpired pinned copy or a reservation, so
+   * without a bound one caller's open tasks could hold the whole budget and
+   * refuse every other caller. One caller's protected bytes may therefore
+   * reach at most half the budget. That bounds each caller, not their sum:
+   * several callers together can protect the whole budget, and then every
+   * positive-size admission is refused until protection is released or the
+   * pinned copies expire (expiry is absolute, so the retention window bounds
+   * that state). Only this caller's own usage decides; the refusal is the
+   * fixed code.
    */
   private assertProtectedRoom(
     callerIdentity: string,
@@ -1522,7 +1551,9 @@ export class GfsDownloadStore {
   /**
    * Completed, unpinned copies are a cache, whoever downloaded them: one
    * caller's admission may evict another caller's copy, which costs that
-   * caller a re-download and reveals nothing. The whole eviction plan is
+   * caller a re-download and reveals nothing. A pinned copy past its expiry
+   * is evictable too; the admission sweep normally removes it first, so this
+   * matters when that sweep could not inspect it. The whole eviction plan is
    * computed before anything is deleted: adopted copies first, so files
    * planted in one directory can never cost another caller a copy this
    * process published, then published copies least recently used first.
@@ -1533,8 +1564,9 @@ export class GfsDownloadStore {
    */
   private async reclaimForAdmission(sizeBytes: number, budget: bigint): Promise<void> {
     if (!this.overBudget(sizeBytes, budget)) return
+    const now = Date.now()
     const candidates = [...this.entries.values()]
-      .filter(entry => !this.isPinned(entry.id))
+      .filter(entry => !this.isPinned(entry.id) || Date.parse(entry.expiresAt) <= now)
       .sort(evictionOrder)
     const plan = new Set<string>()
     for (const candidate of candidates) {

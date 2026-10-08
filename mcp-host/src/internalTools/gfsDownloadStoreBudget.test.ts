@@ -200,6 +200,95 @@ describe('GFS download store budget: share of the workspace volume', () => {
   })
 })
 
+describe('GFS download store budget: a full disk and a full cache are distinct refusals', () => {
+  it('DSK-1: a full disk refuses as disk_full while a full budget still refuses as host_quota_exceeded', async () => {
+    // Budget floor(20 * 85 / 100) = 17; A and B pin 8 each, so 2 more bytes
+    // exceed the budget while 1 more fits.
+    volumeOf(20n)
+    const store = await openStore()
+    const C = 'caller-c'
+    const rootC = callerDirectory(hostRoot, C)
+    await completedCopy(store, rootA, A, 40, 8, { owner: 'task-a' })
+    await completedCopy(store, rootB, B, 41, 8, { owner: 'task-b' })
+    const budgetDenied = await quotaCount('host', 'storage_bytes')
+    const diskDenied = await quotaCount('host', 'free_space')
+
+    await expect(startTransfer(store, rootC, C, 42, 2)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(await quotaCount('host', 'storage_bytes')).toBe(budgetDenied + 1)
+    expect(await quotaCount('host', 'free_space')).toBe(diskDenied)
+
+    // The same volume with one byte less than the 16 MiB margin plus the request.
+    statfsBoundary.mockImplementation(async (target: string) => ({
+      ...(await nativeFs.statfs(target, { bigint: true })),
+      bsize: 1n,
+      blocks: 20n,
+      bavail: 16n * BigInt(MIB),
+    }))
+    await expect(startTransfer(store, rootC, C, 43, 1)).rejects.toMatchObject({
+      code: 'disk_full',
+      message: 'GFS download store failed (disk_full)',
+    })
+    expect(await quotaCount('host', 'free_space')).toBe(diskDenied + 1)
+    expect(await quotaCount('host', 'storage_bytes')).toBe(budgetDenied + 1)
+
+    // Witness: with the real free space the same request fits the budget.
+    volumeOf(20n)
+    await expect(startTransfer(store, rootC, C, 43, 1)).resolves.toBeDefined()
+  })
+
+  it('DSK-2: statfs reporting a negative available-block count keeps host_quota_exceeded, not disk_full', async () => {
+    const store = await openStore()
+    const observed = await nativeFs.statfs(hostRoot, { bigint: true })
+    statfsBoundary.mockResolvedValue({ ...observed, bavail: -1n })
+    const denied = await quotaCount('host', 'free_space')
+
+    const refusal = await startTransfer(store, rootA, A, 44, 4).catch((error: unknown) => error)
+    expect(refusal).toBeInstanceOf(GfsDownloadStoreError)
+    expect((refusal as GfsDownloadStoreError).code).toBe('host_quota_exceeded')
+    expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
+
+    // Witness: the real statfs admits the same request.
+    statfsBoundary.mockImplementation(nativeFs.statfs)
+    await expect(startTransfer(store, rootA, A, 44, 4)).resolves.toBeDefined()
+  })
+
+  it.each([
+    { name: 'one byte above the file limit', size: 11 },
+    { name: 'a negative size', size: -1 },
+    { name: 'a fractional size', size: 1.5 },
+  ])('DSK-3: $name is refused as limit_exceeded without a space metric', async ({ size }) => {
+    // Budget 850 bytes, so only the 10-byte file limit can refuse.
+    volumeOf(1000n)
+    const store = await limitedStore({ MCP_HOST_GFS_MAX_FILE_BYTES: '10' })
+    const budgetDenied = await quotaCount('host', 'storage_bytes')
+    const diskDenied = await quotaCount('host', 'free_space')
+    statfsBoundary.mockClear()
+
+    // Called directly: the kit's helper allocates the bytes before admission.
+    const refused = store.createTransfer({
+      callerIdentity: A,
+      callerWorkspacePath: rootA,
+      source: sourceFor(45),
+      sizeBytes: size,
+      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+    })
+    await expect(refused).rejects.toMatchObject({
+      code: 'limit_exceeded',
+      message: 'GFS download store failed (limit_exceeded)',
+    })
+    expect(await quotaCount('host', 'storage_bytes')).toBe(budgetDenied)
+    expect(await quotaCount('host', 'free_space')).toBe(diskDenied)
+    expect(statfsBoundary).not.toHaveBeenCalled()
+
+    // Witness: a size exactly at the file limit is admitted and measured.
+    const admitted = await startTransfer(store, rootA, A, 45, 10)
+    expect(admitted.transfer.sizeBytes).toBe(10)
+    expect(statfsBoundary).toHaveBeenCalled()
+  })
+})
+
 describe('GFS download store budget: no per-caller storage or file-count limit', () => {
   it('BUD-6: one caller fills the whole budget with 18 files of 16 MiB and another caller evicts its least recently used copy', async () => {
     const size = 16 * MIB

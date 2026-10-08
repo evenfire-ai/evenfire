@@ -175,7 +175,7 @@ a new ID, after fresh GFS authorization.
 6. The retained-storage budget, free space and the Host-wide active-transfer
    limit are shared by every caller on a Host; there is no per-caller byte or
    file limit. A caller can therefore observe aggregate pressure from others
-   (`host_quota_exceeded`, Host-scope `download_busy`, or an eviction that
+   (`host_quota_exceeded`, `disk_full`, Host-scope `download_busy`, or an eviction that
    removes one of its own unpinned copies), and one caller's admission can
    evict another caller's unpinned copies, which costs that caller a
    re-download. These signals carry no identity, count, name or path of
@@ -321,21 +321,30 @@ no per-caller limit on unpinned copies: those per-user limits were removed by
 user decision, and one caller can hold any number of unpinned copies while the
 budget has room.
 
-Eviction cannot reclaim what a caller protects: the copies its tasks pin and
-its active reservations. A caller's protected bytes (each copy once, whichever
-of its tasks pins it) may therefore reach at most `floor(budget / 2)`, so one
-caller's open tasks always leave half the budget reclaimable for everyone else.
+Eviction cannot reclaim what a caller protects: the unexpired copies its tasks
+pin and its active reservations. A caller's protected bytes (each copy once,
+whichever of its tasks pins it) may therefore reach at most `floor(budget / 2)`.
 An admission that would take a caller over that half, or a reuse that would pin
 a copy the caller does not protect yet, is refused with `host_quota_exceeded`
 (scope `caller`, reason `protected_bytes`) before any eviction. The decision and
 the error use only that caller's own usage; the error is the same as a full
 Host budget. A single download larger than half the budget is always refused
 (about 4.25 GiB on a 10 Gi volume at 85%, far above the per-file limit).
+Re-pinning a copy the caller already protects adds nothing and is decided
+before the volume is measured.
 
-Before refusing, the store plans an eviction of complete, unpinned copies that
-are not being transferred, in any caller's directory: adopted copies first
-(oldest `createdAt` first), then published copies least recently used first
-(publication, reuse or managed read). Pinned copies are never evicted. One
+The cap bounds each caller, not their sum. Two callers at their caps together
+protect the whole budget, and then every admission of a positive size is
+refused until a task releases its pins or the pinned copies expire. This is an
+accepted risk: a pin never outlives the copy's `expiresAt` (see
+[Retention pins](#retention-pins-and-cold-resume)), so the state lasts at most
+the retention period, `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS` (168 hours by default).
+
+Before refusing, the store plans an eviction of complete copies that are
+unpinned or pinned but already expired and are not being transferred, in any
+caller's directory: adopted copies first (oldest `createdAt` first), then
+published copies least recently used first (publication, reuse or managed
+read). Unexpired pinned copies are never evicted. One
 caller's admission can thus evict another caller's unpinned copies; that caller
 pays a re-download on its next use and learns nothing about who caused it, and
 the denial is the same code whoever's copies fill the budget. The whole plan is
@@ -349,12 +358,13 @@ evicts copies or the next sweep removes expired ones.
 
 Free space is checked before the plan and again after it. Free space must cover
 the block-rounded size of the new download, every active reservation and a
-16 MiB margin; otherwise the admission is refused with `host_quota_exceeded`
+16 MiB margin; otherwise the admission is refused with `disk_full`
 (reason `free_space`). The first check runs before any eviction, so a volume
 that cannot hold the download costs no cached copy. A `statfs` that reports a
-block size or block count that is not positive cannot size a budget; the
-admission is refused the same way, as `host_quota_exceeded` with reason
-`free_space`. A Host runs at most 2
+block size or block count that is not positive, or a negative available-block
+count, cannot size a budget; the admission is refused as `host_quota_exceeded`
+with reason `free_space`, not as `disk_full`, because an unmeasurable volume is
+not evidence that the disk is full. A Host runs at most 2
 transfers at once, and a caller at most its configured concurrency; beyond that
 admission returns `download_busy`.
 
@@ -371,8 +381,8 @@ lost by this, because a restart already makes every copy adopted.
 
 A sweep runs when the store initializes, before every admission, and hourly
 after that. It walks `users/*/.gfs-downloads/input-*` without following
-symlinks. It removes incomplete directories and expired copies that no task
-pins. It never touches a directory that is an active transfer of this process,
+symlinks. It removes incomplete directories and expired copies, pinned ones
+included. It never touches a directory that is an active transfer of this process,
 and it never replaces a published copy: another directory carrying the same ID
 is removed. A `.gfs-downloads` that is a symlink or not a directory is removed
 by the sweep without following it and recreated on the next admission.
@@ -426,14 +436,18 @@ after refusing to remove it` with its error code.
 ### Retention pins and cold resume
 
 A task that prepares or downloads a copy pins it while its model, pending
-approval or execution can still use it. A pin protects the copy from expiry and
-eviction and is released when the task reaches a terminal state. Pins are per
-caller: another caller using the same owner ID holds a different pin. Pins are
-held in memory, so after a restart a resumed task finds its copy unpinned and
-not reusable, and downloads it again. A shell command never pins a copy. A pin
-is not bounded by the TTL or by the task's active-time budget (a task waiting
-for approval keeps its pins), which is why a caller's pinned and reserved bytes
-are capped at half the budget (see Quotas and eviction).
+approval or execution can still use it. A pin protects the copy from eviction
+until its `expiresAt`, never beyond, and is released when the task reaches a
+terminal state. Expiry is absolute: once a pinned copy expires, it no longer
+counts toward its caller's protected bytes, eviction may reclaim it, and the
+next sweep removes it even though the task still holds its pin. A task that
+still needs the file downloads it again. Pins are per caller: another caller
+using the same owner ID holds a different pin. Pins are held in memory, so after
+a restart a resumed task finds its copy unpinned and not reusable, and downloads
+it again. A shell command never pins a copy. A pin is not bounded by the task's
+active-time budget (a task waiting for approval keeps its pins), which is why a
+caller's pinned and reserved bytes are capped at half the budget (see Quotas and
+eviction).
 
 ### Integrity
 
@@ -449,20 +463,62 @@ byte is sent to a model.
 
 ### Errors visible to the model
 
-| Code                    | Meaning                                                                                                                  |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `host_quota_exceeded`   | The Host's retained bytes would exceed the volume budget and eviction cannot make room, or free space would be exceeded. |
-| `download_busy`         | Too many active transfers, the store is closed or closing, or no such transfer exists.                                   |
-| `download_missing`      | No copy this process published for this caller has that path, or the copy failed verification.                           |
-| `download_expired`      | The copy or the transfer is past its expiry.                                                                             |
-| `publication_cancelled` | The task was cancelled or ran out of time while the copy was being verified or published.                                |
-| `storage_write_failed`  | A filesystem operation failed during admission, publication or removal.                                                  |
-| `workspace_unavailable` | The store is not initialized, or the Host root or caller directory is not a real directory inside the Host root.         |
-| `caller_mismatch`       | The request carries no caller identity, one that is not its caller directory's key, or a malformed retention owner ID.   |
+| Code                    | Meaning                                                                                                                |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `host_quota_exceeded`   | The Host's retained bytes would exceed the volume budget and eviction cannot make room, or the volume is unmeasurable. |
+| `disk_full`             | Free space on the Host volume cannot hold the download, every active reservation and the 16 MiB margin.                |
+| `limit_exceeded`        | The declared size is not a non-negative integer up to `MCP_HOST_GFS_MAX_FILE_BYTES`.                                   |
+| `download_busy`         | Too many active transfers, the store is closed or closing, or no such transfer exists.                                 |
+| `download_missing`      | No copy this process published for this caller has that path, or the copy failed verification.                         |
+| `download_expired`      | The copy or the transfer is past its expiry.                                                                           |
+| `publication_cancelled` | The task was cancelled or ran out of time while the copy was being verified or published.                              |
+| `storage_write_failed`  | A filesystem operation failed during admission, publication or removal.                                                |
+| `workspace_unavailable` | The store is not initialized, or the Host root or caller directory is not a real directory inside the Host root.       |
+| `caller_mismatch`       | The request carries no caller identity, one that is not its caller directory's key, or a malformed retention owner ID. |
 
 Another caller's download is answered with the same code and message as an ID
 that does not exist (`download_missing` for reads and publication,
 `download_busy` for a transfer being abandoned).
+
+### Space refusals and the guidance the model receives
+
+The two space refusals carry a fixed guidance text so the model can tell the
+user what happened and offer a cleanup through an approved `shell_exec`:
+
+- `disk_full`: the Host workspace disk is full. The model tells the user and
+  offers to list the files in the user's own workspace (the shell working
+  directory, e.g. `du -sh -- * .[!.]* 2>/dev/null | sort -h`) and to delete
+  what the user no longer needs with a command the user approves. It never
+  lists, reads or deletes another user's directory or anything outside the
+  workspace.
+- `host_quota_exceeded`: the Host's cache of downloaded files is full. Space
+  frees as other tasks finish and cached copies expire. The model tells the
+  user, who may delete their own downloaded copies under `.gfs-downloads` in
+  their workspace that no running task is using, with an approved command,
+  never another user's. A task that still needs a deleted copy downloads it
+  again.
+
+An unmeasurable volume (invalid `statfs`) is refused as `host_quota_exceeded`
+and therefore carries the cache guidance; the condition is not expected on a
+real volume. `limit_exceeded` and every other store code carry no guidance.
+
+Neither text names, counts or hints at whose files use the space, and neither
+interpolates any value. The texts live in
+`mcp-host/src/internalTools/gfsSpaceGuidance.ts` and reach the model on two
+paths:
+
+- A direct `clerum__gfs_download` (or managed `clerum__gfs_read`) call returns
+  the fixed envelope `GFS download store failed (<code>)` as the first line of
+  the tool error and the guidance as the second line.
+- A large file reference prepared before the turn is rendered as
+  `prepared_gfs_file: ... status=unavailable code=disk_full` (or
+  `code=quota_exceeded`), followed once per code by a
+  `For code=<code>: <guidance>` line in the turn context. Preparation accepts
+  the envelope alone or the envelope followed by exactly its own guidance line;
+  any other second line maps to `download_failed`.
+
+The `free_space` metric counts `disk_full` refusals and the unmeasurable-volume
+refusals described in [Quotas and eviction](#quotas-and-eviction).
 
 ### Initialization and availability
 

@@ -485,10 +485,6 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: caller isolation U4: an owner id another caller pins is neither refused nor released across callers"
-  },
-  {
-    "suite": "gfsDownloadStoreBoundaries.test.ts",
     "fullName": "GFS download store boundaries: path swapped between check and use K1: a removal whose parent is swapped after the check renames back and touches nothing outside"
   },
   {
@@ -930,5 +926,141 @@
   {
     "suite": "gfsDownloadStoreProtected.test.ts",
     "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a file larger than the cap is refused before any eviction"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: sweep F17: the sweep removes expired complete downloads, pinned or not"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: pins, lifecycle and errors F24: releaseReceiptOwner accepts an unknown owner and another caller owner id without removing any copy"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U4: an owner id another caller pins is not refused, and releasing it twice is a no-op"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-1: a full disk refuses as disk_full while a full budget still refuses as host_quota_exceeded"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-2: statfs reporting a negative available-block count keeps host_quota_exceeded, not disk_full"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-3: 'one byte above the file limit' is refused as limit_exceeded without a space metric"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-3: 'a negative size' is refused as limit_exceeded without a space metric"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-3: 'a fractional size' is refused as limit_exceeded without a space metric"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) SOL-R4-ORDER: a caller at its cap is refused before eviction, so a full budget keeps the other caller copies"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: retention pins never outlive expiresAt (Addendum 10) the sweep removes a pinned copy once it is past its expiry"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: retention pins never outlive expiresAt (Addendum 10) an expired pinned copy stops counting toward its caller cap without releasing the owner"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: retention pins never outlive expiresAt (Addendum 10) eviction reclaims an expired pinned copy the admission sweep could not inspect, and keeps unexpired pins"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: re-pinning an already protected copy (R4-F1) reuses a copy the caller already protects without measuring the volume"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: pins are per caller and per process (F24/U4 ported) releasing an owner id unpins only the releasing caller; the same id under another caller keeps counting"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: pins are per caller and per process (F24/U4 ported) a second store on the same root holds no pins"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code disk_full to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code limit_exceeded to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code disk_full to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code limit_exceeded to the model"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the disk_full envelope with its guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the bare disk_full envelope to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the host_quota_exceeded envelope with its guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the disk_full envelope with the cache guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the host_quota_exceeded envelope with the disk guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the disk_full envelope with an untrusted second line to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the host_quota_exceeded envelope with its guidance and a third line to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the store limit_exceeded envelope to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the store limit_exceeded envelope with the cache guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation keeps every guided space envelope within the fixed error bound"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts tells the model the workspace disk is full and to offer a cleanup of the caller workspace only"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts tells the model the download cache is full and that only the caller may delete its own copies"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts keeps the two space guidances distinct from each other"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts names no caller, foreign path or count in either space guidance"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts adds each space guidance once for several refusals and none for other codes"
   }
 ]

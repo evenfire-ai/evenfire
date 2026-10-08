@@ -543,7 +543,7 @@ describe('GFS download store: quotas and eviction', () => {
     const denied = await quotaCount('host', 'free_space')
 
     await expect(startTransfer(store, callerRoot, CALLER, 51, 4096)).rejects.toMatchObject({
-      code: 'host_quota_exceeded',
+      code: 'disk_full',
     })
     expect(statfsBoundary).toHaveBeenCalled()
     expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
@@ -580,7 +580,7 @@ describe('GFS download store: quotas and eviction', () => {
     statfsBoundary.mockClear()
     lstatBoundary.mockClear()
     await expect(startTransfer(limited, callerRoot, CALLER, 70, 11)).rejects.toMatchObject({
-      code: 'host_quota_exceeded',
+      code: 'limit_exceeded',
     })
     expect(statfsBoundary).not.toHaveBeenCalled()
     expect(lstatBoundary).not.toHaveBeenCalled()
@@ -656,21 +656,23 @@ describe('GFS download store: sweep', () => {
     await expect(store.readManagedFile(kept.receipt.path, CALLER)).resolves.toEqual(kept.bytes)
   })
 
-  it('F17: the sweep removes expired complete downloads unless pinned', async () => {
+  it('F17: the sweep removes expired complete downloads, pinned or not', async () => {
     const pinned = await completedCopy(store, callerRoot, CALLER, 100, 8, { owner: 'task-100' })
     const loose = await completedCopy(store, callerRoot, CALLER, 101, 8)
     const later = Date.now() + 2 * 60 * 60_000
 
+    // Witness: before expiry the same sweep keeps both.
+    await expect(store.cleanupExpired()).resolves.toMatchObject({ removedExpired: 0 })
+    expect(await exists(downloadDirectory(callerRoot, loose.receipt.id))).toBe(true)
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
+
+    // Expiry is absolute (Addendum 10): the open pin does not keep its copy.
     await expect(store.cleanupExpired(later)).resolves.toEqual({
-      removedExpired: 1,
+      removedExpired: 2,
       removedIncomplete: 0,
       removeFailed: 0,
     })
     expect(await exists(downloadDirectory(callerRoot, loose.receipt.id))).toBe(false)
-    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
-
-    await store.releaseReceiptOwner('task-100', CALLER)
-    await expect(store.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
     expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(false)
   })
 
@@ -875,23 +877,21 @@ describe('GFS download store: managed reads', () => {
 })
 
 describe('GFS download store: pins, lifecycle and errors', () => {
-  it('F24: releaseReceiptOwner unpins only its own caller and a second store on the same root sees no pins', async () => {
+  // Expiry no longer observes pins (Addendum 10): which caller a release
+  // unpins, and that a second store holds no pins, are proven against the
+  // protected-bytes cap in gfsDownloadStoreProtected.test.ts.
+  it('F24: releaseReceiptOwner accepts an unknown owner and another caller owner id without removing any copy', async () => {
     const pinned = await completedCopy(store, callerRoot, CALLER, 130, 8, { owner: 'task-130' })
     const rootB = await callerDirectory(hostRoot, 'caller-b')
     // The same owner id under another caller is another pin, not a refusal.
     const other = await completedCopy(store, rootB, 'caller-b', 131, 8, { owner: 'task-130' })
-    const later = Date.now() + 2 * 60 * 60_000
     await expect(store.releaseReceiptOwner('unknown-owner', CALLER)).resolves.toBeUndefined()
     await expect(store.releaseReceiptOwner('task-130', 'caller-b')).resolves.toBeUndefined()
-    // Witness: caller-b's release freed only caller-b's copy; CALLER's pin holds.
-    await expect(store.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
-    expect(await exists(downloadDirectory(rootB, other.receipt.id))).toBe(false)
-    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
-
-    await store.close()
-    const second = await openStore(hostRoot)
-    await expect(second.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
-    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(false)
+    // A release only unpins: both copies stay readable by their callers.
+    await expect(store.readManagedFile(pinned.receipt.path, CALLER)).resolves.toEqual(pinned.bytes)
+    await expect(store.readManagedFile(other.receipt.path, 'caller-b')).resolves.toEqual(
+      other.bytes
+    )
   })
 
   it('F25: close drains active transfers and refuses new admissions', async () => {

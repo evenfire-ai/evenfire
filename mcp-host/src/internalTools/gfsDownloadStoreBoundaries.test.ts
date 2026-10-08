@@ -379,7 +379,7 @@ describe('GFS download store boundaries: quota and capacity', () => {
     const denied = await quotaCount('host', 'free_space')
 
     await expect(startTransfer(store, rootA, A, 320, size)).rejects.toMatchObject({
-      code: 'host_quota_exceeded',
+      code: 'disk_full',
     })
     expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
 
@@ -803,7 +803,10 @@ describe('GFS download store boundaries: caller isolation', () => {
     )
   })
 
-  it('U4: an owner id another caller pins is neither refused nor released across callers', async () => {
+  // Expiry no longer observes pins (Addendum 10): that B's release leaves A's
+  // pin under the same owner id in place is proven against the
+  // protected-bytes cap in gfsDownloadStoreProtected.test.ts.
+  it('U4: an owner id another caller pins is not refused, and releasing it twice is a no-op', async () => {
     const pinnedA = await completedCopy(store, rootA, A, 73, 8, { owner: 'task-73' })
     const pinnedB = await completedCopy(store, rootB, B, 74, 8, { owner: 'task-73' })
     const reused = await store.reusableReceipt(B, sourceFor(74), 8, { retentionOwnerId: 'task-73' })
@@ -811,12 +814,9 @@ describe('GFS download store boundaries: caller isolation', () => {
 
     await expect(store.releaseReceiptOwner('task-73', B)).resolves.toBeUndefined()
     await expect(store.releaseReceiptOwner('task-73', B)).resolves.toBeUndefined()
-    const later = Date.parse(pinnedA.receipt.expiresAt) + HOUR
-
-    // Witness: B's release freed B's copy only; A's pin still holds A's.
-    await expect(store.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
-    expect(exists(downloadDirectory(rootB, pinnedB.receipt.id))).toBe(false)
-    expect(exists(downloadDirectory(rootA, pinnedA.receipt.id))).toBe(true)
+    // A release only unpins: both copies stay readable by their callers.
+    await expect(store.readManagedFile(pinnedA.receipt.path, A)).resolves.toEqual(pinnedA.bytes)
+    await expect(store.readManagedFile(pinnedB.receipt.path, B)).resolves.toEqual(pinnedB.bytes)
   })
 })
 

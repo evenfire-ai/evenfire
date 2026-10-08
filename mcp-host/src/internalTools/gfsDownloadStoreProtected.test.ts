@@ -5,6 +5,10 @@
  * budget. Unpinned copies still use the whole budget. Ported from the final
  * review's SOL-R3-PINS repro. A 100-byte volume at the default 85% gives a
  * budget of 85 and a per-caller protected cap of floor(85 / 2) = 42.
+ *
+ * Addendum 10: expiry is absolute. A pin protects a copy from eviction, never
+ * past its `expiresAt`: the sweep removes an expired pinned copy, it stops
+ * counting toward its caller's cap, and eviction may reclaim it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as syncFs from 'node:fs'
@@ -22,11 +26,21 @@ import {
 } from '../__tests__/fixtures/gfsStoreTestKit'
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
 
-const { statfsBoundary } = vi.hoisted(() => ({ statfsBoundary: vi.fn() }))
+const { statfsBoundary, lstatBoundary } = vi.hoisted(() => ({
+  statfsBoundary: vi.fn(),
+  lstatBoundary: vi.fn(),
+}))
 vi.mock('node:fs/promises', async original => ({
   ...(await original<typeof fs>()),
   statfs: statfsBoundary,
+  lstat: lstatBoundary,
 }))
+
+const HOUR_MS = 60 * 60 * 1000
+
+function ioError(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${code}: injected by the test`), { code })
+}
 
 const A = 'caller-a'
 const B = 'caller-b'
@@ -75,6 +89,10 @@ beforeEach(async () => {
     const real = await nativeFs.statfs(target, { bigint: true })
     return { ...real, bsize: 1n, blocks: 100n, bavail: real.bavail * real.bsize }
   })
+  lstatBoundary.mockReset()
+  lstatBoundary.mockImplementation((...args: unknown[]) =>
+    (nativeFs.lstat as (...forwarded: unknown[]) => Promise<unknown>)(...args)
+  )
   hostRoot = syncFs.mkdtempSync(path.join(tmpdir(), 'gfs-store-protected-'))
   rootA = callerDirectory(hostRoot, A)
   rootB = callerDirectory(hostRoot, B)
@@ -103,11 +121,10 @@ describe('GFS download store: a caller protects at most half the budget (R3-F1)'
     expect(await protectedRefusals()).toBe(protectedBefore + 1)
     expect(await hostRefusals()).toBe(hostBefore)
 
-    // The repro's denial: B and C are admitted, before and after expiry.
+    // The repro's denial: B and C are admitted while A holds its cap. Expiry
+    // of pinned copies is covered by the absolute-retention tests below.
     const b = await startTransfer(store, rootB, B, 10, 1)
     await store.fail(b.transfer.id, B)
-    vi.setSystemTime(Date.now() + 8 * 24 * 60 * 60 * 1000)
-    expect((await store.cleanupExpired()).removedExpired).toBe(0)
     const c = await startTransfer(store, rootC, C, 11, 1)
     await store.fail(c.transfer.id, C)
     for (const receipt of pinned) expect(exists(downloadDirectory(rootA, receipt.id))).toBe(true)
@@ -217,15 +234,198 @@ describe('GFS download store: a caller protects at most half the budget (R3-F1)'
 
   it('a file larger than the cap is refused before any eviction', async () => {
     const store = await openStore()
-    const other = await completedCopy(store, rootB, B, 0, 5)
+    // B holds 80 unpinned bytes, so A's 43 bytes would need eviction: a cap
+    // check placed after reclaimForAdmission would delete B's copies first.
+    const others = await copies(store, rootB, B, 0, 16)
     const before = await protectedRefusals()
 
-    await expect(startTransfer(store, rootA, A, 1, 43)).rejects.toMatchObject({
+    await expect(startTransfer(store, rootA, A, 100, 43)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
     })
     expect(await protectedRefusals()).toBe(before + 1)
-    expect(exists(downloadDirectory(rootB, other.receipt.id))).toBe(true)
-    const admitted = await startTransfer(store, rootA, A, 2, 42)
+    for (const receipt of others) expect(exists(downloadDirectory(rootB, receipt.id))).toBe(true)
+    const admitted = await startTransfer(store, rootA, A, 101, 42)
     await store.fail(admitted.transfer.id, A)
+    expect(await protectedRefusals()).toBe(before + 1)
+  })
+
+  it('SOL-R4-ORDER: a caller at its cap is refused before eviction, so a full budget keeps the other caller copies', async () => {
+    const store = await openStore()
+    // B first: 43 unpinned bytes. Then A pins 42, the cap: 85 of 85.
+    const others = [
+      ...(await copies(store, rootB, B, 0, 8)),
+      (await completedCopy(store, rootB, B, 8, 3)).receipt,
+    ]
+    await copies(store, rootA, A, 20, 8, 'task-a')
+    await completedCopy(store, rootA, A, 28, 2, { owner: 'task-a' })
+    const before = await protectedRefusals()
+
+    await expect(startTransfer(store, rootA, A, 30, 1)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(await protectedRefusals()).toBe(before + 1)
+    for (const receipt of others) expect(exists(downloadDirectory(rootB, receipt.id))).toBe(true)
+
+    // Releasing A's owner unpins its 42 bytes: the same byte is admitted.
+    await store.releaseReceiptOwner('task-a', A)
+    const admitted = await startTransfer(store, rootA, A, 31, 1)
+    await store.fail(admitted.transfer.id, A)
+    expect(await protectedRefusals()).toBe(before + 1)
+  })
+})
+
+describe('GFS download store: retention pins never outlive expiresAt (Addendum 10)', () => {
+  it('the sweep removes a pinned copy once it is past its expiry', async () => {
+    const store = await openStore()
+    const pinned = await completedCopy(store, rootA, A, 0, 10, { owner: 'task-a' })
+    const directory = downloadDirectory(rootA, pinned.receipt.id)
+
+    // Witness: before expiry the same sweep keeps the pinned copy readable.
+    expect((await store.cleanupExpired()).removedExpired).toBe(0)
+    expect(exists(directory)).toBe(true)
+    await expect(store.readManagedFile(pinned.receipt.path, A)).resolves.toEqual(pinned.bytes)
+
+    // Past expiresAt, the owner still open: removed anyway.
+    vi.setSystemTime(Date.now() + 2 * HOUR_MS)
+    expect((await store.cleanupExpired()).removedExpired).toBe(1)
+    expect(exists(directory)).toBe(false)
+    await expect(store.readManagedFile(pinned.receipt.path, A)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+  })
+
+  it('an expired pinned copy stops counting toward its caller cap without releasing the owner', async () => {
+    const store = await openStore()
+    // A 20-byte unpinned copy that lives a day (first: its open reservation
+    // beside 30 pinned bytes would itself exceed the cap), then 30 pinned
+    // bytes expiring in one hour. Pinning the first one would make 50.
+    const lasting = await completedCopy(store, rootA, A, 1, 20, {
+      expiresAt: new Date(Date.now() + 24 * HOUR_MS).toISOString(),
+    })
+    await completedCopy(store, rootA, A, 0, 30, { owner: 'task-a' })
+    const before = await protectedRefusals()
+    await expect(
+      store.reusableReceipt(A, sourceFor(1), 20, { retentionOwnerId: 'task-b' })
+    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
+    expect(await protectedRefusals()).toBe(before + 1)
+
+    // Two hours later, with no sweep between and task-a never released, the
+    // expired 30 bytes protect nothing: the same pin is admitted.
+    vi.setSystemTime(Date.now() + 2 * HOUR_MS)
+    await expect(
+      store.reusableReceipt(A, sourceFor(1), 20, { retentionOwnerId: 'task-b' })
+    ).resolves.toMatchObject({ id: lasting.receipt.id })
+    expect(await protectedRefusals()).toBe(before + 1)
+
+    // A new reservation is admitted under the cap as well: 20 + 22 = 42.
+    const admitted = await startTransfer(store, rootA, A, 2, 22)
+    await store.fail(admitted.transfer.id, A)
+    expect(await protectedRefusals()).toBe(before + 1)
+  })
+
+  it('eviction reclaims an expired pinned copy the admission sweep could not inspect, and keeps unexpired pins', async () => {
+    const store = await openStore()
+    // A pins 42 bytes for one hour; B pins 42 bytes for a day. 84 of 85.
+    const expiring = await completedCopy(store, rootA, A, 0, 42, { owner: 'task-a' })
+    const lasting = await completedCopy(store, rootB, B, 1, 42, {
+      owner: 'task-b',
+      expiresAt: new Date(Date.now() + 24 * HOUR_MS).toISOString(),
+    })
+    vi.setSystemTime(Date.now() + 2 * HOUR_MS)
+
+    // The admission sweep removes expired copies before eviction plans, so
+    // the eviction path is isolated by making the sweep's one inspection of
+    // A's copy fail transiently: the sweep keeps it indexed, unexamined.
+    const sourceSuffix = path.join(`input-${expiring.receipt.id}`, 'source')
+    let injected = 0
+    const passThrough = lstatBoundary.getMockImplementation()!
+    lstatBoundary.mockImplementation((...args: unknown[]) => {
+      if (injected === 0 && String(args[0]).endsWith(sourceSuffix)) {
+        injected += 1
+        return Promise.reject(ioError('EIO'))
+      }
+      return passThrough(...args)
+    })
+
+    // C's 5 bytes need 4 bytes evicted: only A's expired copy can give them.
+    const admitted = await startTransfer(store, rootC, C, 2, 5)
+    expect(injected).toBe(1)
+    expect(exists(downloadDirectory(rootA, expiring.receipt.id))).toBe(false)
+    expect(exists(downloadDirectory(rootB, lasting.receipt.id))).toBe(true)
+    await expect(store.readManagedFile(lasting.receipt.path, B)).resolves.toEqual(lasting.bytes)
+    await store.fail(admitted.transfer.id, C)
+  })
+})
+
+describe('GFS download store: re-pinning an already protected copy (R4-F1)', () => {
+  it('reuses a copy the caller already protects without measuring the volume', async () => {
+    const store = await openStore()
+    const held = await completedCopy(store, rootA, A, 0, 30, { owner: 'task-a' })
+    await completedCopy(store, rootA, A, 1, 5)
+    statfsBoundary.mockRejectedValueOnce(ioError('EIO'))
+    const callsBefore = statfsBoundary.mock.calls.length
+
+    // Already pinned by task-a: task-b's pin adds nothing and needs no statfs,
+    // so the armed EIO is not consumed.
+    await expect(
+      store.reusableReceipt(A, sourceFor(0), 30, { retentionOwnerId: 'task-b' })
+    ).resolves.toMatchObject({ id: held.receipt.id })
+    expect(statfsBoundary.mock.calls.length).toBe(callsBefore)
+
+    // Control: a copy A does not protect yet must size the budget, and the
+    // same armed EIO refuses it.
+    await expect(
+      store.reusableReceipt(A, sourceFor(1), 5, { retentionOwnerId: 'task-b' })
+    ).rejects.toBeInstanceOf(Error)
+    expect(statfsBoundary.mock.calls.length).toBe(callsBefore + 1)
+  })
+})
+
+describe('GFS download store: pins are per caller and per process (F24/U4 ported)', () => {
+  it('releasing an owner id unpins only the releasing caller; the same id under another caller keeps counting', async () => {
+    const store = await openStore()
+    // A pins 42 (its cap) and B pins 40, both under the same owner id.
+    await copies(store, rootA, A, 0, 8, 'task-shared')
+    await completedCopy(store, rootA, A, 8, 2, { owner: 'task-shared' })
+    await copies(store, rootB, B, 20, 8, 'task-shared')
+    const before = await protectedRefusals()
+
+    // Before any release B is refused too: 40 + 3 > 42.
+    await expect(startTransfer(store, rootB, B, 30, 3)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(await protectedRefusals()).toBe(before + 1)
+
+    await expect(store.releaseReceiptOwner('task-shared', B)).resolves.toBeUndefined()
+    await expect(store.releaseReceiptOwner('unknown-owner', A)).resolves.toBeUndefined()
+
+    // B's release freed B: its 3 bytes are admitted (82 + 3 = 85 fits the
+    // budget, so only the cap could refuse them).
+    const admittedB = await startTransfer(store, rootB, B, 31, 3)
+    await store.fail(admittedB.transfer.id, B)
+    expect(await protectedRefusals()).toBe(before + 1)
+    // A's pin under the same id still holds A at its cap.
+    await expect(startTransfer(store, rootA, A, 32, 1)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(await protectedRefusals()).toBe(before + 2)
+  })
+
+  it('a second store on the same root holds no pins', async () => {
+    const first = await openStore()
+    await copies(first, rootA, A, 0, 8, 'task-a')
+    await completedCopy(first, rootA, A, 8, 2, { owner: 'task-a' })
+    const before = await protectedRefusals()
+    // Witness: in the first store A's pins hold it at the cap.
+    await expect(startTransfer(first, rootA, A, 9, 1)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(await protectedRefusals()).toBe(before + 1)
+
+    await first.close(0)
+    const second = await openStore()
+    const admitted = await startTransfer(second, rootA, A, 10, 1)
+    await second.fail(admitted.transfer.id, A)
+    expect(await protectedRefusals()).toBe(before + 1)
   })
 })

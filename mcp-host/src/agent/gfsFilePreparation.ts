@@ -12,6 +12,7 @@ import type { ToolOutput } from '../core/types'
 import { normalizeRid } from '../internalTools/gfsContentRead'
 import { GFS_FILE_LIMITS } from '../internalTools/gfsFilePolicy'
 import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../internalTools/gfsReadTypes'
+import { gfsStoreSpaceGuidance } from '../internalTools/gfsSpaceGuidance'
 import type { FileReferenceResolution } from './fileReferenceResolver'
 import type { TaskExecutionBudget } from './taskExecutionBudget'
 
@@ -47,9 +48,20 @@ function failureCode(content: string): GfsPreparationFailure {
     if (status === 413) return 'limit_exceeded'
     return 'download_failed'
   }
+  // A store space refusal carries its fixed guidance as an exact second line;
+  // any other second line is not a recognised envelope.
+  const space = /^Error: GFS download store failed \((disk_full|host_quota_exceeded)\)\n/.exec(
+    content
+  )
+  if (space) {
+    const code = space[1] as 'disk_full' | 'host_quota_exceeded'
+    if (content.slice(space[0].length) !== gfsStoreSpaceGuidance(code)) return 'download_failed'
+    return code === 'disk_full' ? 'disk_full' : 'quota_exceeded'
+  }
   const fixed = /^Error: GFS (?:download(?: store)?|read) failed \(([a-z_]+)\)$/.exec(content)?.[1]
   if (fixed === 'version_conflict') return 'stale'
   if (fixed === 'download_missing' || fixed === 'download_expired') return 'missing'
+  if (fixed === 'disk_full') return 'disk_full'
   if (fixed === 'host_quota_exceeded') return 'quota_exceeded'
   if (fixed === 'workspace_unavailable') return 'workspace_unavailable'
   if (fixed === 'limit_exceeded') return 'limit_exceeded'

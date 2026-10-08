@@ -22,6 +22,10 @@
  */
 import { quotePromptValue } from '@clerum/gfs-interaction-policy'
 import type { GfsDownloadReceipt } from '../../internalTools/gfsDownloadStore'
+import {
+  GFS_CACHE_FULL_GUIDANCE,
+  GFS_DISK_FULL_GUIDANCE,
+} from '../../internalTools/gfsSpaceGuidance'
 import type { Attachment } from '../types'
 
 export interface TurnContextChannel {
@@ -98,6 +102,9 @@ export type GfsPreparationFailure =
   | 'unauthenticated'
   | 'stale'
   | 'missing'
+  /** The Host workspace disk has no room for the download. */
+  | 'disk_full'
+  /** The Host's cache of downloaded files has no room for the download. */
   | 'quota_exceeded'
   | 'limit_exceeded'
   | 'timeout'
@@ -198,6 +205,13 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
       )
     }
     lines.push(PREPARED_GFS_FILES_INSTRUCTION)
+    // Fixed text, once per code: it names no file, size or owner.
+    const codes = new Set(
+      input.preparedGfsFiles.map(file => (file.status === 'unavailable' ? file.code : undefined))
+    )
+    if (codes.has('disk_full')) lines.push(`For code=disk_full: ${GFS_DISK_FULL_GUIDANCE}`)
+    if (codes.has('quota_exceeded'))
+      lines.push(`For code=quota_exceeded: ${GFS_CACHE_FULL_GUIDANCE}`)
   }
   return `<turn-context>\n${lines.join('\n')}\n</turn-context>\n\n`
 }

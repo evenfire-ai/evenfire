@@ -12,6 +12,7 @@ import {
   GfsDownloadStoreError,
   type GfsDownloadStoreErrorCode,
 } from './gfsDownloadStore'
+import { GFS_CACHE_FULL_GUIDANCE, GFS_DISK_FULL_GUIDANCE } from './gfsSpaceGuidance'
 
 const MIB = 1024 * 1024
 const target = { drive: 'main', resourceId: 'a'.repeat(32) }
@@ -344,14 +345,23 @@ describe('GFS managed image projection', () => {
 describe('GFS download store errors at the tool boundary', () => {
   const codes: GfsDownloadStoreErrorCode[] = [
     'caller_mismatch',
+    'disk_full',
     'download_busy',
     'download_expired',
     'download_missing',
     'host_quota_exceeded',
+    'limit_exceeded',
     'publication_cancelled',
     'storage_write_failed',
     'workspace_unavailable',
   ]
+  // Only the two space refusals carry guidance, as an exact second line.
+  const toolError = (code: GfsDownloadStoreErrorCode): string =>
+    code === 'disk_full'
+      ? `GFS download store failed (disk_full)\n${GFS_DISK_FULL_GUIDANCE}`
+      : code === 'host_quota_exceeded'
+        ? `GFS download store failed (host_quota_exceeded)\n${GFS_CACHE_FULL_GUIDANCE}`
+        : `GFS download store failed (${code})`
 
   it.each(codes)('surfaces store code %s to the model', async code => {
     const subject = scenario(largePng, {
@@ -363,7 +373,7 @@ describe('GFS download store errors at the tool boundary', () => {
 
     expect(subject.store.readManagedFile).toHaveBeenCalledTimes(1)
     expect(result.success).toBe(false)
-    expect(result.error).toBe(`GFS download store failed (${code})`)
+    expect(result.error).toBe(toolError(code))
     expect(subject.budget.residentBytes).toBe(0)
   })
 
@@ -377,6 +387,6 @@ describe('GFS download store errors at the tool boundary', () => {
     expect(subject.client.download).toHaveBeenCalledTimes(1)
     expect(subject.store.readManagedFile).not.toHaveBeenCalled()
     expect(result.success).toBe(false)
-    expect(result.error).toBe(`GFS download store failed (${code})`)
+    expect(result.error).toBe(toolError(code))
   })
 })

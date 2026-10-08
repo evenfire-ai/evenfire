@@ -27,6 +27,7 @@ import {
   type GfsFileContent,
   type GfsReadOptions,
 } from './gfsReadTypes'
+import { gfsStoreSpaceGuidance } from './gfsSpaceGuidance'
 import { decodeTextContent } from './textContent'
 
 /**
@@ -89,10 +90,19 @@ function ok(content: unknown): InternalToolResult {
 // Read failures get the same redaction floor as mutations (see mutationFail):
 // only gfsc's HTTP status and a coarse public category may reach the model —
 // never the response body, which could carry paths or server internals.
+// A store space refusal keeps its fixed envelope as the first line and adds the
+// fixed guidance for its code as a second line; gfsFilePreparation accepts that
+// exact second line and nothing else.
 function fail(error: unknown): InternalToolResult {
   if (error instanceof VisualInputError) return { success: false, error: error.message }
-  if (error instanceof GfsDownloadError || error instanceof GfsDownloadStoreError)
-    return { success: false, error: error.message }
+  if (error instanceof GfsDownloadStoreError) {
+    const guidance = gfsStoreSpaceGuidance(error.code)
+    return {
+      success: false,
+      error: guidance === undefined ? error.message : `${error.message}\n${guidance}`,
+    }
+  }
+  if (error instanceof GfsDownloadError) return { success: false, error: error.message }
   return redactedFail('GFS read failed', error)
 }
 
