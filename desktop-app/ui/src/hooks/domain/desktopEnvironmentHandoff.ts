@@ -275,10 +275,14 @@ export function createDesktopEnvironmentSetupHandler({
               `Could not reload the current desktop session: ${error instanceof Error ? error.message : String(error)}`,
               'error'
             )
+            return
           }
+          authState = getAuthState()
         }
-        if (authState.isAuthenticated || isAuthenticationOperationInProgress(authState)) {
+        if (isAuthenticationOperationInProgress(authState)) {
           reportAuthenticationStateChanged(authState, setStatus)
+        } else if (authState.isAuthenticated) {
+          setStatus('Could not sign out before switching desktop environments.', 'error')
         } else {
           setStatus('Could not confirm sign out before switching desktop environments.', 'error')
         }

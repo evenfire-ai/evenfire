@@ -339,6 +339,34 @@ describe('Desktop environment handoff concurrency', () => {
     expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
   })
 
+  it('keeps a session reload error visible when handoff logout did not commit', async () => {
+    const onSessionNeedsLoad = vi.fn(async () => {
+      throw new Error('session read unavailable')
+    })
+    const { handler, setStatus } = createHandler(
+      () => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: true,
+      }),
+      undefined,
+      vi.fn(async () => null),
+      onSessionNeedsLoad
+    )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(onSessionNeedsLoad).toHaveBeenCalledWith({ preserveNav: true })
+    expect(setStatus).toHaveBeenLastCalledWith(
+      'Could not reload the current desktop session: session read unavailable',
+      'error'
+    )
+  })
+
   it.each([
     {
       targetKind: 'saved target',
