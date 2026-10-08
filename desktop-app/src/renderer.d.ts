@@ -30,6 +30,7 @@ import {
   HostStatusStreamEvent,
   LoginBackendHint,
   MessageToolStep,
+  ModelStepContinueResult,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
@@ -627,6 +628,18 @@ declare global {
           chatId: string,
           title: string
         ) => Promise<{ title: string }>
+        /**
+         * Issue #1044 — continue a `resumable` model-step checkpoint. Resolves to
+         * the contract row (claimed / completed / not_found / version_mismatch /
+         * blocked); any other answer (503 `host_draining`, 5xx) rejects.
+         */
+        continueModelStep: (
+          hostRef: string,
+          agent: string,
+          chatId: string,
+          checkpointId: string,
+          version: number
+        ) => Promise<ModelStepContinueResult>
         getTokenMetadata: () => Promise<TokenMetadata>
         // U5 (mcp-oauth reactive consent): "Connect <server>" for a task
         // suspended with `connect_required`. Host-bound to that conversation.

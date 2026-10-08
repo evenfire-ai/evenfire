@@ -114,6 +114,7 @@ describe('ipc host status stream handlers', () => {
     getChatDeletionFenceAuthority: vi.fn(),
     loadSessionMessages: vi.fn(),
     renameSession: vi.fn(),
+    continueModelStep: vi.fn(),
     listWorkflowRuns: vi.fn(),
     listWorkflowRunArtifacts: vi.fn(),
     downloadWorkflowRunArtifact: vi.fn(),
@@ -293,6 +294,82 @@ describe('ipc host status stream handlers', () => {
     } as never)
     // The handler passes only the four positional args; no hostRefs fleet leaks.
     expect(service.renameSession).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'x')
+  })
+
+  // ─── rpc:continueModelStep (#1044 Retry model step) ───
+
+  const continuePayload = {
+    hostRef: 'chatllm',
+    agent: 'chatllm',
+    chatId: 'c1',
+    checkpointId: 'msc_01J9Z7Q4R2M3N5P6Q7R8S9T0V1',
+    version: 1,
+  }
+
+  it('rejects an untrusted sender for rpc:continueModelStep', async () => {
+    const handler = testState.handlers.get('rpc:continueModelStep')
+    expect(handler).toBeDefined()
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          continuePayload
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(service.continueModelStep).not.toHaveBeenCalled()
+  })
+
+  it('forwards a valid rpc:continueModelStep to the service with the version', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:continueModelStep')
+    const answer = {
+      outcome: 'claimed',
+      httpStatus: 202,
+      body: {
+        taskId: '3c1e9b7a-0f2d-4a6b-8c5e-1d7f9a3b2c40',
+        checkpointId: 'msc_01J9Z7Q4R2M3N5P6Q7R8S9T0V1',
+        status: 'claimed',
+        replayed: false,
+      },
+    }
+    service.continueModelStep.mockResolvedValue(answer)
+    await expect(
+      handler?.(event, { ...continuePayload, hostRefs: ['other'] } as never)
+    ).resolves.toBe(answer)
+    expect(service.continueModelStep).toHaveBeenCalledWith(
+      'chatllm',
+      'chatllm',
+      'c1',
+      'msc_01J9Z7Q4R2M3N5P6Q7R8S9T0V1',
+      1
+    )
+  })
+
+  it('rejects an unsafe checkpointId segment for rpc:continueModelStep', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:continueModelStep')
+    await expect(
+      Promise.resolve(handler?.(event, { ...continuePayload, checkpointId: '../evil' }))
+    ).rejects.toThrow(/unsafe path segment/)
+    expect(service.continueModelStep).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a missing version', undefined],
+    ['a negative version', -1],
+    ['a fractional version', 1.5],
+    ['a string version', '1'],
+  ])('rejects %s for rpc:continueModelStep', async (_label, version) => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:continueModelStep')
+    await expect(
+      Promise.resolve(handler?.(event, { ...continuePayload, version } as never))
+    ).rejects.toThrow('version must be a non-negative integer')
+    expect(service.continueModelStep).not.toHaveBeenCalled()
   })
 
   it('forwards sandbox UI visibility changes from the trusted renderer', async () => {

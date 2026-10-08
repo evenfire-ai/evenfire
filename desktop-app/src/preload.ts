@@ -518,6 +518,21 @@ const clerum = Object.freeze({
     // process scopes the write token to this single host.
     renameSession: (hostRef: string, agent: string, chatId: string, title: string) =>
       ipcRenderer.invoke('rpc:renameSession', { hostRef, agent, chatId, title }),
+    // Issue #1044 — "Retry model step" (single host, like rename).
+    continueModelStep: (
+      hostRef: string,
+      agent: string,
+      chatId: string,
+      checkpointId: string,
+      version: number
+    ) =>
+      ipcRenderer.invoke('rpc:continueModelStep', {
+        hostRef,
+        agent,
+        chatId,
+        checkpointId,
+        version,
+      }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
     // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
     // authorize-URL for a task that suspended with `connect_required`. Host-bound

@@ -187,6 +187,16 @@ export type FailedAgentSend = {
   undeliveredFileIds?: string[]
 }
 
+/**
+ * Renderer-local state of one **Retry model step** request (#1044): whether the
+ * continuation POST is in flight, and the message of the last request that
+ * failed without a contract answer (transport error, 5xx, host draining).
+ */
+export interface ModelStepRetryState {
+  pending: boolean
+  error: string | null
+}
+
 export type HostConnectionTone = 'healthy' | 'degraded' | 'offline'
 
 export interface ApprovalInputPreview {
