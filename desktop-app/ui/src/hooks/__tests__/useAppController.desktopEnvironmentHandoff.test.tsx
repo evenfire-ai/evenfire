@@ -94,6 +94,9 @@ describe('useAppController desktop environment handoff', () => {
     expect(handle.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
     expect(app.result.current.isAuthenticated).toBe(true)
     expect(app.result.current.pendingDesktopEnvironmentSwitchConfirmation).toBeNull()
+    expect(app.result.current.toasts.map(toast => toast.text)).toContain(
+      'Environment switch cancelled. Your current session remains active.'
+    )
   })
 
   it('signs out before selecting the saved environment with the logout generation', async () => {
@@ -108,9 +111,7 @@ describe('useAppController desktop environment handoff', () => {
       handle.selectRuntimeConfigForHandoff.mock.invocationCallOrder[0]!
     )
     expect(app.result.current.isAuthenticated).toBe(false)
-    await expect(handle.getRuntimeConfigState()).resolves.toMatchObject({
-      activeOptionId: 'target-profile',
-    })
+    expect(app.result.current.runtimeConfigState?.activeOptionId).toBe('target-profile')
   })
 
   it('keeps the committed logout when renderer session reload fails', async () => {

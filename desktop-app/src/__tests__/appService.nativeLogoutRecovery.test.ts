@@ -24,8 +24,6 @@ describe('AppService logout recovery ownership', () => {
       }),
     } as never
     await service.googleLogin('initial-login')
-    const app = service as unknown as { activateGfsAuthScope: () => void }
-    const restoreAuthScope = vi.spyOn(app, 'activateGfsAuthScope')
     service.tokenStore.clearSessionToken = vi
       .fn()
       .mockRejectedValue(new Error('keychain unavailable'))
@@ -34,6 +32,6 @@ describe('AppService logout recovery ownership', () => {
 
     expect(service.getCachedUserId()).toBe('user-a')
     expect(service.sessionToken).toBe('synthetic-session-a')
-    expect(restoreAuthScope).toHaveBeenCalledOnce()
+    await expect(service.listGfsUploadSessions()).resolves.toEqual([])
   })
 })
