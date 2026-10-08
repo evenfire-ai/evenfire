@@ -100,6 +100,19 @@ verify_runtime_access_contract`,
   return queries
 }
 
+const deniedRuntimeColumnPrivileges = [
+  { privilege: 'SELECT', relation: 'gfs_blob_manifests', column: 'blob_key' },
+  { privilege: 'INSERT', relation: 'gfs_blob_manifests', column: 'blob_key' },
+  { privilege: 'UPDATE', relation: 'password_verification_work', column: 'owner_instance' },
+  { privilege: 'REFERENCES', relation: 'gfs_blob_manifests', column: 'blob_key' },
+] as const
+
+const columnPrivilegeFixtures = deniedRuntimeColumnPrivileges.flatMap(grant => [
+  { ...grant, principal: 'direct' as const },
+  { ...grant, principal: 'public' as const },
+  { ...grant, principal: 'inherited' as const },
+])
+
 async function relationPrivileges(pool: Pool, roleName: string): Promise<PrivilegeExpectation> {
   const result = await pool.query<{
     relation_name: string
@@ -235,6 +248,59 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
     expect(await violations(relationQuery)).toBe(0)
   }, 60_000)
+
+  it.each(columnPrivilegeFixtures)(
+    'rejects $principal column-level $privilege on $relation',
+    async ({ privilege, relation, column, principal }) => {
+      const { initDb } = await import('../src/db.js')
+      await initDb({ connect: () => dbPool.connect() })
+      const [relationQuery] = deploymentRuntimeAccessQueries()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `runtime_column_acl_probe_${randomBytes(6).toString('hex')}`
+      const grantee = principal === 'public' ? 'PUBLIC' : quoteIdent('control_api_runtime')
+      const inherited = principal === 'inherited'
+      const assertClean = async () => {
+        const result = await dbPool.query<{ table_access: boolean; column_access: boolean }>(
+          `SELECT has_table_privilege('control_api_runtime', $1, $2) AS table_access,
+                  has_any_column_privilege('control_api_runtime', $1, $2) AS column_access`,
+          [relation, privilege]
+        )
+        expect(result.rows[0]).toEqual({ table_access: false, column_access: true })
+        const violationCount = Number(
+          (await dbPool.query({ text: relationQuery, rowMode: 'array' })).rows[0][0]
+        )
+        expect(violationCount).toBe(1)
+      }
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT ${privilege} (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO control_api_runtime`)
+        }
+
+        await assertClean()
+      } finally {
+        if (inherited) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM control_api_runtime`)
+          await dbPool.query(
+            `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${quoteIdent(inheritedRole)}`
+          )
+          await dbPool.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`)
+        } else {
+          await dbPool.query(
+            `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${grantee}`
+          )
+        }
+      }
+    }
+  )
 
   it('applies initDb twice and leaves the exact runtime privilege envelopes', async () => {
     const { initDb } = await import('../src/db.js')
