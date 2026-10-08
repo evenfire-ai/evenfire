@@ -64,7 +64,7 @@ describe('0101 oauth_grants owner generalization migration', () => {
       versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')
     )
     expect(versions.indexOf('0124_entity_change_definer_search_path')).toBeLessThan(
-      versions.indexOf('0126_user_access_foundation')
+      versions.indexOf('0129_user_access_foundation')
     )
     expect(versions).toContain('0099_gfs_upload_finalizing_recovery')
   })

@@ -3,15 +3,15 @@ import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
-  '0126_user_access_foundation',
-  '0127_invitation_delivery_commands',
-  '0128_catalog_utf8_ordering',
-  '0129_composable_catalog_revisions',
-  '012a_gfs_catalog_revision_components',
-  '012b_user_access_foundation_definer_temp_shadow_hardening',
-  '0130_legacy_password_security_epoch_backfill',
-  // Executed immediately after 0126 by the runner, before the remaining PR1 migrations.
-  '0138_authorization_revision_delete_compatibility',
+  '0129_user_access_foundation',
+  '0130_invitation_delivery_commands',
+  '0131_catalog_utf8_ordering',
+  '0132_composable_catalog_revisions',
+  '0133_gfs_catalog_revision_components',
+  '0134_user_access_foundation_definer_temp_shadow_hardening',
+  '0135_legacy_password_security_epoch_backfill',
+  // Executed immediately after 0129 by the runner, before the remaining PR1 migrations.
+  '0143_authorization_revision_delete_compatibility',
 ] as const)
 
 export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
@@ -34,6 +34,9 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   '0123_entity_change_checkpoint_cursor_convergence',
   '0124_entity_change_definer_search_path',
   '0125_admin_subscription_rate_limit_namespace',
+  '0126_bug192_password_admission',
+  '0127_password_evaluation_retention',
+  '0128_password_work_ownership',
 ] as const)
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)
@@ -49,9 +52,9 @@ export type MigrationDescriptor = {
   apply: (db: DbClient) => Promise<void>
 }
 
-const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0126_user_access_foundation'
+const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0129_user_access_foundation'
 const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
-  '0138_authorization_revision_delete_compatibility'
+  '0143_authorization_revision_delete_compatibility'
 
 type ApplyPendingPr1MigrationsInput = {
   db: DbClient
@@ -120,24 +123,35 @@ export async function applyPendingPr1Migrations({
     const currentMigrationApplied = appliedVersions.has(version) || Boolean(acceptedLegacyVersion)
     if (currentMigrationApplied) {
       const currentReceiptPending = !appliedVersions.has(version)
+      const acceptedCompatibilityLegacyVersion = compatibilityMigration?.legacyVersions?.find(
+        alias => appliedVersions.has(alias)
+      )
       const compatibilityReceiptPending =
         compatibilityMigration && !appliedVersions.has(compatibilityMigration.version)
       if (currentReceiptPending || compatibilityReceiptPending) {
         await runBoundedTransaction(db, async () => {
           if (currentReceiptPending) await recordMigration(db, version)
           if (compatibilityReceiptPending) {
-            await compatibilityMigration.apply(db)
+            if (!acceptedCompatibilityLegacyVersion) {
+              await compatibilityMigration.apply(db)
+            }
             await recordMigration(db, compatibilityMigration.version)
           }
         })
         if (currentReceiptPending) appliedVersions.add(version)
-        if (compatibilityReceiptPending) appliedVersions.add(compatibilityMigration.version)
+        if (compatibilityReceiptPending) {
+          appliedVersions.add(compatibilityMigration.version)
+        }
       }
       continue
     }
 
     const isPr1Migration = expected.has(version)
-    if (compatibilityMigration && appliedVersions.has(compatibilityMigration.version)) {
+    const compatibilityReceiptAlreadyApplied = compatibilityMigration
+      ? appliedVersions.has(compatibilityMigration.version) ||
+        compatibilityMigration.legacyVersions?.some(alias => appliedVersions.has(alias))
+      : false
+    if (compatibilityMigration && compatibilityReceiptAlreadyApplied) {
       throw new Error(
         `Team revision compatibility is recorded before its prerequisite: ${compatibilityMigration.version}`
       )

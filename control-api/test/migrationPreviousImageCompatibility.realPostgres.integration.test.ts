@@ -142,7 +142,7 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
     expect(
       await databasePool.query(
         `SELECT 1 FROM schema_migrations
-          WHERE version = '0138_authorization_revision_delete_compatibility'`
+          WHERE version = '0143_authorization_revision_delete_compatibility'`
       )
     ).toMatchObject({ rowCount: 1 })
   })
@@ -234,7 +234,7 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
 
     await databasePool.query(
       `DELETE FROM schema_migrations
-        WHERE version = '0138_authorization_revision_delete_compatibility'`
+        WHERE version = '0143_authorization_revision_delete_compatibility'`
     )
     await initDb({ connect: () => databasePool.connect() })
 
@@ -283,7 +283,7 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
     expect(
       await databasePool.query(
         `SELECT 1 FROM schema_migrations
-          WHERE version = '0138_authorization_revision_delete_compatibility'`
+          WHERE version = '0143_authorization_revision_delete_compatibility'`
       )
     ).toMatchObject({ rowCount: 1 })
   })

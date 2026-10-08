@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { spawn } from 'node:child_process'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { execFileSync, spawn } from 'node:child_process'
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
+import { existsSync, readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { Pool, type PoolClient } from 'pg'
-import { type DbClient, initDb } from '../src/db.js'
+import { CONTROL_API_MIGRATIONS, type DbClient, assertDbReady, initDb } from '../src/db.js'
 import {
   DEV_POST_0106_MIGRATION_VERSIONS,
   PR1_MIGRATION_VERSIONS,
@@ -18,6 +20,96 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
+const HISTORICAL_TASK106_SOURCE_COMMIT = '2370a399d4221350946462d41427fad8aee0087f'
+const HISTORICAL_TASK106_DB_SOURCE_SHA256 =
+  'f2e06aba1cfa84a920eedefdb1ec56748efccbacf5baecad7caede4938364379'
+const HISTORICAL_TASK106_MIGRATION_RUNNER_SOURCE_SHA256 =
+  '65023efa1630261ce8d180fc2fa8789e517eb6a13ace2a6458ba95236046748f'
+const OBSERVED_DEV_SOURCE_COMMIT = '0b26101eb247adcc44f70d39451f3e82c3225d47'
+const OBSERVED_DEV_DB_SOURCE_SHA256 =
+  '1948ad306fe56b368f120edbc70ddbac6cb9b981d9fd218e7ded2575ed3b2beb'
+const OBSERVED_DEV_RECEIPT_COUNT = 133
+const OBSERVED_DEV_RECEIPT_SET_SHA256 =
+  'acb72ad12e1d342310832cf7628ab8351a80cee7311111039b4c2b9720077307'
+
+const DISPLACED_TASK106_RECEIPTS = Object.freeze([
+  ['0126_user_access_foundation', '0129_user_access_foundation'],
+  ['0127_invitation_delivery_commands', '0130_invitation_delivery_commands'],
+  ['0128_catalog_utf8_ordering', '0131_catalog_utf8_ordering'],
+  ['0129_composable_catalog_revisions', '0132_composable_catalog_revisions'],
+  ['012a_gfs_catalog_revision_components', '0133_gfs_catalog_revision_components'],
+  [
+    '012b_user_access_foundation_definer_temp_shadow_hardening',
+    '0134_user_access_foundation_definer_temp_shadow_hardening',
+  ],
+  ['0130_legacy_password_security_epoch_backfill', '0135_legacy_password_security_epoch_backfill'],
+  [
+    '0138_authorization_revision_delete_compatibility',
+    '0143_authorization_revision_delete_compatibility',
+  ],
+] as const)
+
+const TASK106_HISTORICAL_SOURCE_DIR = process.env.TASK106_R61_B1_HISTORICAL_SOURCE_DIR
+const OBSERVED_DEV_SOURCE_DIR = process.env.TASK106_R61_B1_DEV_SOURCE_DIR
+if (
+  process.env.CONTROL_API_REAL_PG_REQUIRED === '1' &&
+  (!TASK106_HISTORICAL_SOURCE_DIR || !OBSERVED_DEV_SOURCE_DIR)
+) {
+  throw new Error(
+    'R61-B1 real PostgreSQL lane requires both pinned historical producer source directories'
+  )
+}
+
+type HistoricalRunnerPin = {
+  label: string
+  sourceDir: string | undefined
+  commit: string
+  sourceFiles: ReadonlyArray<readonly [string, string]>
+}
+
+const HISTORICAL_TASK106_RUNNER: HistoricalRunnerPin = {
+  label: 'historical Task 106',
+  sourceDir: TASK106_HISTORICAL_SOURCE_DIR,
+  commit: HISTORICAL_TASK106_SOURCE_COMMIT,
+  sourceFiles: [
+    ['control-api/src/db.ts', HISTORICAL_TASK106_DB_SOURCE_SHA256],
+    [
+      'control-api/src/migrations/migrationRunner.ts',
+      HISTORICAL_TASK106_MIGRATION_RUNNER_SOURCE_SHA256,
+    ],
+  ],
+}
+
+const OBSERVED_DEV_RUNNER: HistoricalRunnerPin = {
+  label: 'observed DEV',
+  sourceDir: OBSERVED_DEV_SOURCE_DIR,
+  commit: OBSERVED_DEV_SOURCE_COMMIT,
+  sourceFiles: [['control-api/src/db.ts', OBSERVED_DEV_DB_SOURCE_SHA256]],
+}
+
+let ephemeralMigrationSigningKeys:
+  | {
+      rpc: string
+      session: string
+      admin: string
+    }
+  | undefined
+
+function migrationRunnerSigningKeys(): NonNullable<typeof ephemeralMigrationSigningKeys> {
+  if (!ephemeralMigrationSigningKeys) {
+    const privateKey = () =>
+      generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({
+        type: 'pkcs8',
+        format: 'pem',
+      }) as string
+    ephemeralMigrationSigningKeys = {
+      rpc: privateKey(),
+      session: privateKey(),
+      admin: privateKey(),
+    }
+  }
+  return ephemeralMigrationSigningKeys
+}
 
 const FRESH_TABLE_INDEXES = Object.freeze([
   'external_user_sessions_user_live_idx',
@@ -46,6 +138,179 @@ function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
+function sha256File(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+function verifyPinnedRunnerSource(pin: HistoricalRunnerPin): string {
+  if (!pin.sourceDir) {
+    throw new Error(`R61-B1 test did not receive ${pin.label} source directory`)
+  }
+  const sourceDir = resolve(pin.sourceDir)
+  const revision = execFileSync('git', ['-C', sourceDir, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  }).trim()
+  expect(revision, `${pin.label} source revision`).toBe(pin.commit)
+  const status = execFileSync('git', ['-C', sourceDir, 'status', '--porcelain'], {
+    encoding: 'utf8',
+  }).trim()
+  expect(status, `${pin.label} source checkout is clean`).toBe('')
+
+  for (const [relativePath, expectedHash] of pin.sourceFiles) {
+    expect(sha256File(join(sourceDir, relativePath)), `${pin.label} ${relativePath} SHA-256`).toBe(
+      expectedHash
+    )
+  }
+
+  const runnerPath = join(sourceDir, 'control-api/dist/migrate.js')
+  expect(existsSync(runnerPath), `${pin.label} migration runner build`).toBe(true)
+  return runnerPath
+}
+
+async function runPinnedMigrationProducer(
+  pin: HistoricalRunnerPin,
+  targetDatabaseUrl: string
+): Promise<void> {
+  const runnerPath = verifyPinnedRunnerSource(pin)
+  const keys = migrationRunnerSigningKeys()
+  const child = spawn(process.execPath, [runnerPath], {
+    cwd: join(resolve(pin.sourceDir!), 'control-api'),
+    env: {
+      NODE_ENV: 'test',
+      CONTROL_API_PG_CONNECTION_STRING: targetDatabaseUrl,
+      CONTROL_API_RPC_JWT_PRIVATE_KEY: keys.rpc,
+      CONTROL_API_SESSION_JWT_PRIVATE_KEY: keys.session,
+      CONTROL_API_ADMIN_JWT_PRIVATE_KEY: keys.admin,
+      TZ: 'UTC',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  const output: string[] = []
+  const appendOutput = (chunk: Buffer) => {
+    output.push(chunk.toString('utf8'))
+    while (output.join('').length > 32_000) output.shift()
+  }
+  child.stdout?.on('data', appendOutput)
+  child.stderr?.on('data', appendOutput)
+
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGTERM')
+      setTimeout(() => child.kill('SIGKILL'), 5_000).unref()
+    }, 240_000)
+    timeout.unref()
+
+    child.once('error', error => {
+      clearTimeout(timeout)
+      rejectPromise(error)
+    })
+    child.once('close', (code, signal) => {
+      clearTimeout(timeout)
+      if (code === 0 && !timedOut) {
+        resolvePromise()
+        return
+      }
+      const detail = output
+        .join('')
+        .replaceAll(targetDatabaseUrl, '<isolated test database URL>')
+        .slice(-8_000)
+      rejectPromise(
+        new Error(
+          `${pin.label} migration runner ${timedOut ? 'timed out' : `exited ${code ?? signal}`}\n${detail}`
+        )
+      )
+    })
+  })
+}
+
+function receiptSetSha256(receipts: readonly string[]): string {
+  return createHash('sha256')
+    .update(`${[...receipts].sort().join('\n')}\n`)
+    .digest('hex')
+}
+
+async function withMigrationApplyObserver<T>(
+  observe: ReadonlySet<string>,
+  work: () => Promise<T>
+): Promise<{ result: T; applyCounts: Map<string, number>; applyOrder: string[] }> {
+  const originals = new Map<string, (db: DbClient) => Promise<void>>()
+  const applyCounts = new Map<string, number>()
+  const applyOrder: string[] = []
+  for (const migration of CONTROL_API_MIGRATIONS) {
+    if (!observe.has(migration.version)) continue
+    const original = migration.apply
+    originals.set(migration.version, original)
+    migration.apply = async db => {
+      applyCounts.set(migration.version, (applyCounts.get(migration.version) ?? 0) + 1)
+      applyOrder.push(migration.version)
+      await original(db)
+    }
+  }
+
+  try {
+    return { result: await work(), applyCounts, applyOrder }
+  } finally {
+    for (const migration of CONTROL_API_MIGRATIONS) {
+      const original = originals.get(migration.version)
+      if (original) migration.apply = original
+    }
+  }
+}
+
+async function currentMigrationSchemaAndPrivileges(pool: Pool): Promise<{
+  objects: Record<string, string | null>
+  privileges: string[]
+}> {
+  const objectNames = [
+    'external_user_sessions',
+    'external_v1_session_revocations',
+    'authorization_resource_revisions',
+    'invitation_delivery_commands',
+  ]
+  const objectRows = await pool.query<{ name: string; relation: string | null }>(
+    `SELECT name, to_regclass(format('public.%I', name))::text AS relation
+       FROM unnest($1::text[]) AS names(name)`,
+    [objectNames]
+  )
+  const privilegeRows = await pool.query<{ privilege: string; allowed: boolean }>(
+    `SELECT relation || ':' || privilege AS privilege,
+            has_table_privilege('control_api_runtime', relation, privilege) AS allowed
+       FROM (VALUES
+         ('schema_migrations'::text, 'SELECT'::text),
+         ('schema_migrations', 'INSERT'),
+         ('schema_migrations', 'UPDATE'),
+         ('schema_migrations', 'DELETE')
+       ) AS required(relation, privilege)`,
+    []
+  )
+  return {
+    objects: Object.fromEntries(objectRows.rows.map(row => [row.name, row.relation])),
+    privileges: privilegeRows.rows.map(row => `${row.privilege}:${row.allowed}`).sort(),
+  }
+}
+
+async function passwordMigrationPrivileges(pool: Pool): Promise<string[]> {
+  const result = await pool.query<{ privilege: string; allowed: boolean }>(
+    `SELECT relation || ':' || privilege AS privilege,
+            has_table_privilege('control_api_runtime', relation, privilege) AS allowed
+       FROM (VALUES
+         ('password_identifier_state'::text, 'SELECT'::text),
+         ('password_identifier_state', 'INSERT'),
+         ('password_identifier_state', 'UPDATE'),
+         ('password_identifier_state', 'DELETE'),
+         ('password_verification_work', 'SELECT'),
+         ('password_verification_work', 'INSERT'),
+         ('password_verification_work', 'UPDATE'),
+         ('password_verification_work', 'DELETE')
+       ) AS required(relation, privilege)`,
+    []
+  )
+  return result.rows.map(row => `${row.privilege}:${row.allowed}`).sort()
+}
+
 async function versions(pool: Pool): Promise<string[]> {
   const result = await pool.query<{ version: string }>(
     'SELECT version FROM schema_migrations ORDER BY version'
@@ -55,8 +320,8 @@ async function versions(pool: Pool): Promise<string[]> {
 
 async function removeMigrationReceiptForReplay(pool: Pool, version: string): Promise<void> {
   const versionsToRemove =
-    version === '0126_user_access_foundation'
-      ? [version, '0138_authorization_revision_delete_compatibility']
+    version === '0129_user_access_foundation'
+      ? [version, '0143_authorization_revision_delete_compatibility']
       : [version]
   await pool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
     versionsToRemove,
@@ -71,6 +336,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   )
   let adminPool: Pool
   let databasePool: Pool
+  const isolatedDatabases: string[] = []
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
@@ -83,6 +349,16 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     try {
       await endPoolAndWaitForClients(databasePool)
       if (adminPool) {
+        for (const isolatedDatabase of isolatedDatabases) {
+          await adminPool.query(
+            `SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND pid <> pg_backend_pid()`,
+            [isolatedDatabase]
+          )
+          await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(isolatedDatabase)}`)
+        }
         await adminPool.query(
           `SELECT pg_terminate_backend(pid)
            FROM pg_stat_activity
@@ -202,7 +478,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     for (const candidate of cases) {
       await databasePool.query(`CREATE INDEX ${candidate.name} ON ${table} ${candidate.actual}`)
       const entry: OnlineIndexDefinition = {
-        migrationVersion: '0126_user_access_foundation',
+        migrationVersion: '0129_user_access_foundation',
         name: candidate.name,
         table,
         createSql: `CREATE INDEX CONCURRENTLY ${candidate.name} ON ${table} ${candidate.expected}`,
@@ -216,7 +492,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     await databasePool.query(`CREATE INDEX ${uniqueName} ON ${table} (userid)`)
     await expect(
       ensureOnlineIndex(databasePool, {
-        migrationVersion: '0126_user_access_foundation',
+        migrationVersion: '0129_user_access_foundation',
         name: uniqueName,
         table,
         unique: true,
@@ -228,7 +504,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   it('repairs an equivalent interrupted index and enforces the online bound', async () => {
     const name = `d34_interrupted_${randomBytes(4).toString('hex')}`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0126_user_access_foundation',
+      migrationVersion: '0129_user_access_foundation',
       name,
       table: 'd34_interrupted_index',
       unique: true,
@@ -277,7 +553,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const functionName = `d34_slow_index_value_${suffix}`
     const name = `d34_slow_index_${suffix}_idx`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0126_user_access_foundation',
+      migrationVersion: '0129_user_access_foundation',
       name,
       table,
       createSql: `CREATE INDEX CONCURRENTLY ${name} ON ${table} (${functionName}(value))`,
@@ -391,7 +667,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const locker = await databasePool.connect()
     await databasePool.query(
       `DELETE FROM schema_migrations
-        WHERE version IN ('0129_composable_catalog_revisions', '012a_gfs_catalog_revision_components')`
+        WHERE version IN ('0132_composable_catalog_revisions', '0133_gfs_catalog_revision_components')`
     )
     await locker.query('BEGIN')
     await locker.query('LOCK TABLE team_members IN ACCESS EXCLUSIVE MODE')
@@ -407,8 +683,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
     expect(Date.now() - started).toBeLessThan(15_000)
     const failedVersions = await versions(databasePool)
-    expect(failedVersions).not.toContain('0129_composable_catalog_revisions')
-    expect(failedVersions).not.toContain('012a_gfs_catalog_revision_components')
+    expect(failedVersions).not.toContain('0132_composable_catalog_revisions')
+    expect(failedVersions).not.toContain('0133_gfs_catalog_revision_components')
     await initDb({ connect: () => databasePool.connect() })
   }, 20_000)
 
@@ -417,7 +693,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const appliedVersions = new Set([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS.slice(0, 3),
-      '0138_authorization_revision_delete_compatibility',
+      '0143_authorization_revision_delete_compatibility',
     ])
     const recordTable = `d34_record_${randomBytes(4).toString('hex')}`
     await client.query(`CREATE TEMP TABLE ${recordTable}(version text PRIMARY KEY)`)
@@ -429,7 +705,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ...PR1_MIGRATION_VERSIONS.map(version => ({
         version,
         apply: async (db: DbClient) => {
-          if (version === '0129_composable_catalog_revisions') {
+          if (version === '0132_composable_catalog_revisions') {
             await db.query('SELECT pg_sleep(20)')
           }
         },
@@ -453,7 +729,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         `SELECT version FROM ${recordTable} ORDER BY version`
       )
       expect(recorded.rows).toEqual([])
-      expect(appliedVersions).not.toContain('012a_gfs_catalog_revision_components')
+      expect(appliedVersions).not.toContain('0133_gfs_catalog_revision_components')
     } finally {
       client.release(true)
     }
@@ -480,6 +756,170 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     )
     expect(after.rows[0]?.oid).toBe(before.rows[0]?.oid)
     expect(await versions(databasePool)).toContain(entry.migrationVersion)
+  })
+
+  it('reconciles real historical Task 106 receipts without replaying migration bodies', async () => {
+    const databaseName = `r61_historical_task106_${randomBytes(6).toString('hex')}`
+    const isolatedUrl = databaseUrl(adminUrl!, databaseName)
+    await adminPool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`)
+    isolatedDatabases.push(databaseName)
+    const isolatedPool = new Pool({ connectionString: isolatedUrl })
+    try {
+      await runPinnedMigrationProducer(HISTORICAL_TASK106_RUNNER, isolatedUrl)
+
+      const historicalReceipts = await versions(isolatedPool)
+      const historicalReceiptSet = new Set(historicalReceipts)
+      for (const [historicalReceipt] of DISPLACED_TASK106_RECEIPTS) {
+        expect(
+          historicalReceiptSet.has(historicalReceipt),
+          `${historicalReceipt} producer receipt`
+        ).toBe(true)
+      }
+      for (const [, currentVersion] of DISPLACED_TASK106_RECEIPTS) {
+        expect(
+          historicalReceiptSet.has(currentVersion),
+          `${currentVersion} not in old producer`
+        ).toBe(false)
+      }
+
+      const schemaAndPrivilegesBefore = await currentMigrationSchemaAndPrivileges(isolatedPool)
+      const observedVersions = new Set<string>([
+        ...PR1_MIGRATION_VERSIONS,
+        '0126_bug192_password_admission',
+        '0127_password_evaluation_retention',
+        '0128_password_work_ownership',
+      ])
+      const currentRun = await withMigrationApplyObserver(observedVersions, async () =>
+        initDb({ connect: () => isolatedPool.connect() })
+      )
+
+      const receiptsAfterReconciliation = await versions(isolatedPool)
+      const reconciledSet = new Set(receiptsAfterReconciliation)
+      for (const [historicalReceipt, currentVersion] of DISPLACED_TASK106_RECEIPTS) {
+        const migration = CONTROL_API_MIGRATIONS.find(
+          candidate => candidate.version === currentVersion
+        )
+        expect(migration?.legacyVersions, `${historicalReceipt} alias owner`).toContain(
+          historicalReceipt
+        )
+        expect(reconciledSet.has(historicalReceipt), `${historicalReceipt} preserved`).toBe(true)
+        expect(reconciledSet.has(currentVersion), `${currentVersion} canonical receipt`).toBe(true)
+        expect(
+          currentRun.applyCounts.get(currentVersion) ?? 0,
+          `${currentVersion} body replay`
+        ).toBe(0)
+      }
+      for (const version of [
+        '0126_bug192_password_admission',
+        '0127_password_evaluation_retention',
+        '0128_password_work_ownership',
+      ]) {
+        expect(currentRun.applyCounts.get(version), `${version} applies to old Task 106 DB`).toBe(1)
+        expect(reconciledSet.has(version), `${version} receipt`).toBe(true)
+      }
+
+      await assertDbReady(isolatedPool)
+      const schemaAndPrivilegesAfter = await currentMigrationSchemaAndPrivileges(isolatedPool)
+      expect(schemaAndPrivilegesAfter.objects).toEqual(schemaAndPrivilegesBefore.objects)
+      expect(schemaAndPrivilegesAfter.privileges).toEqual(schemaAndPrivilegesBefore.privileges)
+      expect(Object.values(schemaAndPrivilegesAfter.objects).every(Boolean)).toBe(true)
+      expect(await passwordMigrationPrivileges(isolatedPool)).toEqual([
+        'password_identifier_state:DELETE:true',
+        'password_identifier_state:INSERT:true',
+        'password_identifier_state:SELECT:true',
+        'password_identifier_state:UPDATE:true',
+        'password_verification_work:DELETE:true',
+        'password_verification_work:INSERT:true',
+        'password_verification_work:SELECT:true',
+        'password_verification_work:UPDATE:false',
+      ])
+
+      const afterFirstRerun = await versions(isolatedPool)
+      const secondRun = await withMigrationApplyObserver(observedVersions, async () =>
+        initDb({ connect: () => isolatedPool.connect() })
+      )
+      expect(await versions(isolatedPool)).toEqual(afterFirstRerun)
+      expect([...secondRun.applyCounts.values()]).toEqual([])
+      await assertDbReady(isolatedPool)
+    } finally {
+      await endPoolAndWaitForClients(isolatedPool)
+    }
+  })
+
+  it('upgrades the exact observed DEV migration identity set with real migration producers', async () => {
+    const databaseName = `r61_observed_dev_${randomBytes(6).toString('hex')}`
+    const isolatedUrl = databaseUrl(adminUrl!, databaseName)
+    await adminPool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`)
+    isolatedDatabases.push(databaseName)
+    const isolatedPool = new Pool({ connectionString: isolatedUrl })
+    try {
+      await runPinnedMigrationProducer(OBSERVED_DEV_RUNNER, isolatedUrl)
+
+      const observedDevReceipts = await versions(isolatedPool)
+      expect(observedDevReceipts).toHaveLength(OBSERVED_DEV_RECEIPT_COUNT)
+      expect(receiptSetSha256(observedDevReceipts)).toBe(OBSERVED_DEV_RECEIPT_SET_SHA256)
+      for (const version of [
+        '0126_bug192_password_admission',
+        '0127_password_evaluation_retention',
+        '0128_password_work_ownership',
+      ]) {
+        expect(observedDevReceipts).toContain(version)
+      }
+      expect(
+        DISPLACED_TASK106_RECEIPTS.some(([historicalReceipt]) =>
+          observedDevReceipts.includes(historicalReceipt)
+        )
+      ).toBe(false)
+
+      const observedDevSet = new Set(observedDevReceipts)
+      const firstRun = await withMigrationApplyObserver(
+        new Set<string>([
+          ...PR1_MIGRATION_VERSIONS,
+          '0126_bug192_password_admission',
+          '0127_password_evaluation_retention',
+          '0128_password_work_ownership',
+        ]),
+        async () => initDb({ connect: () => isolatedPool.connect() })
+      )
+      const upgradedReceipts = await versions(isolatedPool)
+      const upgradedSet = new Set(upgradedReceipts)
+      expect(upgradedReceipts).toHaveLength(
+        OBSERVED_DEV_RECEIPT_COUNT + PR1_MIGRATION_VERSIONS.length
+      )
+      expect(upgradedReceipts.filter(version => !observedDevSet.has(version))).toEqual(
+        [...PR1_MIGRATION_VERSIONS].sort()
+      )
+      expect(upgradedReceipts.filter(version => observedDevSet.has(version))).toEqual(
+        observedDevReceipts
+      )
+      for (const version of PR1_MIGRATION_VERSIONS) {
+        expect(firstRun.applyCounts.get(version), `${version} applies from DEV`).toBe(1)
+        expect(upgradedSet.has(version), `${version} current receipt`).toBe(true)
+      }
+      for (const version of [
+        '0126_bug192_password_admission',
+        '0127_password_evaluation_retention',
+        '0128_password_work_ownership',
+      ]) {
+        expect(firstRun.applyCounts.get(version) ?? 0, `${version} DEV body replay`).toBe(0)
+      }
+      const foundationIndex = firstRun.applyOrder.indexOf('0129_user_access_foundation')
+      expect(firstRun.applyOrder[foundationIndex + 1]).toBe(
+        '0143_authorization_revision_delete_compatibility'
+      )
+      await assertDbReady(isolatedPool)
+
+      const afterUpgrade = await versions(isolatedPool)
+      const secondRun = await withMigrationApplyObserver(
+        new Set<string>(PR1_MIGRATION_VERSIONS),
+        async () => initDb({ connect: () => isolatedPool.connect() })
+      )
+      expect(await versions(isolatedPool)).toEqual(afterUpgrade)
+      expect([...secondRun.applyCounts.values()]).toEqual([])
+      await assertDbReady(isolatedPool)
+    } finally {
+      await endPoolAndWaitForClients(isolatedPool)
+    }
   })
 
   it('keeps legacy team-member payloads compatible with revision triggers', async () => {
