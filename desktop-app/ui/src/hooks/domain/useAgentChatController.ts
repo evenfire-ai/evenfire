@@ -3947,6 +3947,7 @@ export function useAgentChatController({
 
   return {
     activeChatId,
+    isChatDeleted,
     chatList,
     chatListLoading,
     chatListMoreLoading,

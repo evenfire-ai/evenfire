@@ -78,6 +78,7 @@ import {
   cycleWorkspaceTab,
   newChatTab,
   openAppTab,
+  openChatTab,
   reconcileWorkspaceChatTab,
   refreshPreviewTab,
   reorderWorkspaceTab,
@@ -313,6 +314,16 @@ export function App() {
   const [notificationTrayLeft, setNotificationTrayLeft] = React.useState<number | null>(null)
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
+  const [pendingWorkspaceTabId, setPendingWorkspaceTabId] = React.useState<string | null>(null)
+  const [unavailableWorkspaceTabId, setUnavailableWorkspaceTabId] = React.useState<string | null>(
+    null
+  )
+  const [unavailableWorkspaceTabReason, setUnavailableWorkspaceTabReason] = React.useState<
+    'access' | 'conversation' | 'team-context'
+  >('access')
+  const [requestedDrawerChatTabId, setRequestedDrawerChatTabId] = React.useState<string | null>(
+    null
+  )
   // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
   // drawer follows the app content down when the sandbox-ui header wraps (narrow
   // window). 0 means "not measured yet" -> the CSS fallback (64px) applies.
@@ -345,6 +356,73 @@ export function App() {
   const setWorkspaceTabs = vm.setWorkspaceTabs
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
+  const workspaceTabSelectionIntentRef = React.useRef(0)
+  const closedWorkspaceChatIdentitiesRef = React.useRef(new Set<string>())
+  const staleTeamContextChatIdentitiesRef = React.useRef(new Set<string>())
+  const observedTeamContextRevisionRef = React.useRef(vm.teamContextRevision)
+  React.useLayoutEffect(() => {
+    if (observedTeamContextRevisionRef.current === vm.teamContextRevision) return
+    observedTeamContextRevisionRef.current = vm.teamContextRevision
+    for (const tab of workspaceTabsRef.current.tabs) {
+      if (tab.kind !== 'chat' || !tab.chat?.agentRef || !tab.chat.chatId) continue
+      staleTeamContextChatIdentitiesRef.current.add(
+        JSON.stringify([tab.chat.agentRef, tab.chat.chatId])
+      )
+    }
+  }, [vm.teamContextRevision])
+  const pendingWorkspaceTabSelectionRef = React.useRef<{
+    tabId: string
+    selectionIntent: number
+    navigationIntent: number
+    phase: 'checking' | 'switching' | 'unavailable'
+    inDrawer: boolean
+  } | null>(null)
+  const workspaceChatSelectionAuthorityRef = React.useRef<{
+    tabId: string
+    tabSnapshot: WorkspaceTab
+    selectionIntent: number
+    navigationIntent: number
+    inDrawer: boolean
+    teamContextRevision: number
+    hasBeenDisplayed: boolean
+    loadRequested: boolean
+    lastReplayKey: string | null
+    requiresExplicitRetry: boolean
+    retryReason: 'conversation' | 'team-context' | null
+    teamContextVerificationPending: boolean
+  } | null>(null)
+  const rememberWorkspaceChatSelection = React.useCallback(
+    (tab: WorkspaceTab, selectionIntent: number, navigationIntent: number, inDrawer: boolean) => {
+      if (tab.kind !== 'chat') {
+        workspaceChatSelectionAuthorityRef.current = null
+        return
+      }
+      workspaceChatSelectionAuthorityRef.current = {
+        tabId: tab.id,
+        tabSnapshot: { ...tab, chat: tab.chat ? { ...tab.chat } : tab.chat },
+        selectionIntent,
+        navigationIntent,
+        inDrawer,
+        teamContextRevision: vm.teamContextRevision,
+        hasBeenDisplayed: false,
+        loadRequested: false,
+        lastReplayKey: null,
+        requiresExplicitRetry: false,
+        retryReason: null,
+        teamContextVerificationPending: false,
+      }
+    },
+    [vm.teamContextRevision]
+  )
+  const clearPendingWorkspaceTabSelection = React.useCallback((selectionIntent?: number) => {
+    const pending = pendingWorkspaceTabSelectionRef.current
+    if (selectionIntent !== undefined && pending?.selectionIntent !== selectionIntent) return
+    pendingWorkspaceTabSelectionRef.current = null
+    setPendingWorkspaceTabId(null)
+    setUnavailableWorkspaceTabId(null)
+    setUnavailableWorkspaceTabReason('access')
+    setRequestedDrawerChatTabId(null)
+  }, [])
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
   // Mirrors `chatDrawerVisible` so the chat-tab handlers (which run from stable
   // callbacks) can tell whether a reveal should target the in-app drawer or the
@@ -459,6 +537,22 @@ export function App() {
       }
       const agentRef = tab.chat?.agentRef ?? null
       const chatId = tab.chat?.chatId ?? null
+      if (agentRef && chatId) {
+        const identity = JSON.stringify([agentRef, chatId])
+        if (
+          staleTeamContextChatIdentitiesRef.current.has(identity) &&
+          !vm.isConversationAccessVerifiedForCurrentTeam(agentRef, chatId)
+        ) {
+          // A team switch invalidates the previous team's local transcript. Keep
+          // the selected tab in an unavailable state until exact access succeeds;
+          // replaying it here would read user-scoped cached messages.
+          setPendingWorkspaceTabId(null)
+          setUnavailableWorkspaceTabId(tab.id)
+          setUnavailableWorkspaceTabReason('team-context')
+          setRequestedDrawerChatTabId(null)
+          return
+        }
+      }
       if (inDrawer) {
         // Swap the shared <ChatPage>'s conversation in place, keeping the live
         // app mounted and the `apps` route active. A blank tab with no agent
@@ -490,47 +584,349 @@ export function App() {
         vm.handleNavSelect(DESKTOP_ROUTES.chat)
       }
     },
-    [availableSandboxUiApps, leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
+    [
+      availableSandboxUiApps,
+      leaveSandboxForChat,
+      vm.handleNavSelect,
+      vm.handleSelectChatAgent,
+      vm.isConversationAccessVerifiedForCurrentTeam,
+    ]
   )
 
-  // Global strip selection: activate the tab (so `navItem` derives this commit),
-  // then reveal its content.
-  const handleSelectWorkspaceTab = React.useCallback(
-    (id: string) => {
-      const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
+  // Focus the requested tab immediately. When access is held, keep its surface
+  // on an explicit checking state until verification allows the conversation to
+  // load; the previous transcript must never appear under the new tab.
+  const requestWorkspaceTabSelection = React.useCallback(
+    (id: string, inDrawer: boolean, tabOverride?: WorkspaceTab) => {
+      const tab =
+        tabOverride ??
+        workspaceTabsRef.current.tabs.find(
+          candidate => candidate.id === id && (!inDrawer || candidate.kind === 'chat')
+        )
       if (!tab) return
-      vm.clearAppsPicker()
-      setWorkspaceTabs(state => selectWorkspaceTab(state, id))
-      revealWorkspaceTab(tab, false)
-    },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
-  )
-
-  // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
-  // stealing focus from the active app tab.
-  const handleSelectDrawerChatTab = React.useCallback(
-    (id: string) => {
-      const tab = workspaceTabsRef.current.tabs.find(
-        candidate => candidate.id === id && candidate.kind === 'chat'
+      const previousAuthority = workspaceChatSelectionAuthorityRef.current
+      const chatId = tab.kind === 'chat' ? tab.chat?.chatId : undefined
+      const agentRef = tab.kind === 'chat' ? tab.chat?.agentRef : undefined
+      const chatIdentity = agentRef && chatId ? JSON.stringify([agentRef, chatId]) : null
+      if (
+        chatIdentity &&
+        agentRef &&
+        chatId &&
+        vm.isConversationAccessVerifiedForCurrentTeam(agentRef, chatId)
+      ) {
+        staleTeamContextChatIdentitiesRef.current.delete(chatIdentity)
+      }
+      const requiresTeamContextVerification = Boolean(
+        chatIdentity &&
+        (staleTeamContextChatIdentitiesRef.current.has(chatIdentity) ||
+          (previousAuthority?.tabId === id &&
+            previousAuthority.requiresExplicitRetry &&
+            previousAuthority.retryReason === 'team-context'))
       )
-      if (tab) revealWorkspaceTab(tab, true)
+      const selectionIntent = ++workspaceTabSelectionIntentRef.current
+      const navigationIntent = vm.beginNavigationIntent()
+      clearPendingWorkspaceTabSelection()
+      if (tab.kind === 'chat' && tab.chat?.agentRef) {
+        closedWorkspaceChatIdentitiesRef.current.delete(
+          JSON.stringify([tab.chat.agentRef, tab.chat.chatId ?? null])
+        )
+      }
+      rememberWorkspaceChatSelection(tab, selectionIntent, navigationIntent, inDrawer)
+      if (inDrawer) {
+        setRequestedDrawerChatTabId(id)
+      } else {
+        vm.clearAppsPicker()
+        setWorkspaceTabs(state => selectWorkspaceTab(state, id))
+      }
+      const hostAccessBlocked = Boolean(agentRef && vm.isHostAccessBlocked(agentRef))
+      if (agentRef && chatId && !hostAccessBlocked && vm.isChatDeleted(agentRef, chatId)) {
+        pendingWorkspaceTabSelectionRef.current = {
+          tabId: id,
+          selectionIntent,
+          navigationIntent,
+          phase: 'unavailable',
+          inDrawer,
+        }
+        setUnavailableWorkspaceTabId(id)
+        setUnavailableWorkspaceTabReason('conversation')
+        return
+      }
+      if (!agentRef || (!hostAccessBlocked && !requiresTeamContextVerification)) {
+        revealWorkspaceTab(tab, inDrawer)
+        const switchNavigationIntent = vm.beginNavigationIntent()
+        rememberWorkspaceChatSelection(tab, selectionIntent, switchNavigationIntent, inDrawer)
+        const authority = workspaceChatSelectionAuthorityRef.current
+        if (authority?.selectionIntent === selectionIntent) authority.loadRequested = true
+        return
+      }
+
+      pendingWorkspaceTabSelectionRef.current = {
+        tabId: id,
+        selectionIntent,
+        navigationIntent,
+        phase: 'checking',
+        inDrawer,
+      }
+      if (requiresTeamContextVerification) {
+        const authority = workspaceChatSelectionAuthorityRef.current
+        if (authority?.selectionIntent === selectionIntent) {
+          authority.requiresExplicitRetry = true
+          authority.retryReason = 'team-context'
+          authority.teamContextVerificationPending = true
+        }
+      }
+      setPendingWorkspaceTabId(id)
+      const verification =
+        requiresTeamContextVerification && chatId
+          ? vm.verifyConversationAccess(agentRef, chatId)
+          : vm.verifyHostAccess(agentRef)
+      void verification.then(result => {
+        if (selectionIntent !== workspaceTabSelectionIntentRef.current) return
+        if (!vm.isNavigationIntentCurrent(navigationIntent)) {
+          clearPendingWorkspaceTabSelection(selectionIntent)
+          return
+        }
+        const exactChatProof =
+          requiresTeamContextVerification && result && typeof result === 'object' ? result : null
+        const verified = requiresTeamContextVerification
+          ? Boolean(
+              agentRef &&
+              chatId &&
+              exactChatProof &&
+              vm.isConversationAccessProofCurrent(agentRef, chatId, exactChatProof)
+            )
+          : Boolean(result)
+        if (verified) {
+          if (chatIdentity) staleTeamContextChatIdentitiesRef.current.delete(chatIdentity)
+          const pending = pendingWorkspaceTabSelectionRef.current
+          if (pending?.selectionIntent === selectionIntent) {
+            pendingWorkspaceTabSelectionRef.current = { ...pending, phase: 'switching' }
+          }
+          setPendingWorkspaceTabId(null)
+          setUnavailableWorkspaceTabId(null)
+          if (!inDrawer) setRequestedDrawerChatTabId(null)
+          const authority = workspaceChatSelectionAuthorityRef.current
+          if (authority?.selectionIntent === selectionIntent) authority.loadRequested = true
+          revealWorkspaceTab(tab, inDrawer)
+          // The controller begins its own navigation intent while dispatching
+          // the conversation switch. Start the transition guard afterward so
+          // its own action does not invalidate the guard, while later navigation
+          // can still supersede it.
+          const switchNavigationIntent = vm.beginNavigationIntent()
+          const currentPending = pendingWorkspaceTabSelectionRef.current
+          if (currentPending?.selectionIntent === selectionIntent) {
+            pendingWorkspaceTabSelectionRef.current = {
+              ...currentPending,
+              navigationIntent: switchNavigationIntent,
+            }
+          }
+          rememberWorkspaceChatSelection(tab, selectionIntent, switchNavigationIntent, inDrawer)
+          const nextAuthority = workspaceChatSelectionAuthorityRef.current
+          if (nextAuthority?.selectionIntent === selectionIntent) nextAuthority.loadRequested = true
+          return
+        }
+        const failedPending = pendingWorkspaceTabSelectionRef.current
+        if (failedPending?.selectionIntent === selectionIntent) {
+          pendingWorkspaceTabSelectionRef.current = { ...failedPending, phase: 'unavailable' }
+        }
+        setPendingWorkspaceTabId(null)
+        setUnavailableWorkspaceTabId(id)
+        if (requiresTeamContextVerification) {
+          const authority = workspaceChatSelectionAuthorityRef.current
+          if (authority?.selectionIntent === selectionIntent) {
+            authority.requiresExplicitRetry = true
+            authority.retryReason = 'team-context'
+            authority.teamContextVerificationPending = false
+          }
+          setUnavailableWorkspaceTabReason('team-context')
+        } else {
+          setUnavailableWorkspaceTabReason('access')
+        }
+      })
     },
-    [revealWorkspaceTab]
+    [
+      clearPendingWorkspaceTabSelection,
+      rememberWorkspaceChatSelection,
+      revealWorkspaceTab,
+      setWorkspaceTabs,
+      vm.beginNavigationIntent,
+      vm.clearAppsPicker,
+      vm.isChatDeleted,
+      vm.isHostAccessBlocked,
+      vm.isConversationAccessProofCurrent,
+      vm.isConversationAccessVerifiedForCurrentTeam,
+      vm.isNavigationIntentCurrent,
+      vm.verifyHostAccess,
+      vm.verifyConversationAccess,
+    ]
+  )
+  const handleSelectWorkspaceTab = React.useCallback(
+    (id: string) => requestWorkspaceTabSelection(id, false),
+    [requestWorkspaceTabSelection]
+  )
+  const handleSelectDrawerChatTab = React.useCallback(
+    (id: string) => requestWorkspaceTabSelection(id, true),
+    [requestWorkspaceTabSelection]
+  )
+  const restoreWorkspaceChatSelection = React.useCallback(
+    (
+      agentRef: string,
+      chatId: string,
+      title: string | undefined,
+      inDrawer: boolean,
+      requireExactAccess: boolean
+    ) => {
+      if (!requireExactAccess) {
+        vm.handleSelectChatAgent(agentRef, {
+          chatId,
+          ...(title ? { title } : {}),
+          selectLatest: false,
+          ...(inDrawer ? { keepNavItem: true } : {}),
+        })
+        return
+      }
+      const current = workspaceTabsRef.current
+      let tab = current.tabs.find(
+        candidate =>
+          candidate.kind === 'chat' &&
+          candidate.chat?.agentRef === agentRef &&
+          candidate.chat.chatId === chatId
+      )
+      if (!tab) {
+        const id = nextChatTabId()
+        const opened = openChatTab(current, {
+          id,
+          agentRef,
+          chatId,
+          title: title ?? 'Conversation',
+        })
+        tab = opened.tabs.find(
+          candidate =>
+            candidate.kind === 'chat' &&
+            candidate.chat?.agentRef === agentRef &&
+            candidate.chat.chatId === chatId
+        )
+        if (tab) {
+          setWorkspaceTabs(state => {
+            const next = openChatTab(state, {
+              id,
+              agentRef,
+              chatId,
+              title: title ?? 'Conversation',
+            })
+            return inDrawer ? { ...next, activeTabId: state.activeTabId } : next
+          })
+        }
+      }
+      if (!tab) return
+      if (requireExactAccess) {
+        staleTeamContextChatIdentitiesRef.current.add(JSON.stringify([agentRef, chatId]))
+      }
+      requestWorkspaceTabSelection(tab.id, inDrawer, tab)
+    },
+    [nextChatTabId, requestWorkspaceTabSelection, setWorkspaceTabs, vm.handleSelectChatAgent]
   )
 
   const handleCloseWorkspaceTab = React.useCallback(
     (id: string) => {
       const current = workspaceTabsRef.current
       const wasActive = current.activeTabId === id
+      const pending = pendingWorkspaceTabSelectionRef.current
+      const authority = workspaceChatSelectionAuthorityRef.current
+      const tabToClose = current.tabs.find(tab => tab.id === id)
+      const displayedDrawerTab = chatDrawerVisibleRef.current
+        ? current.tabs.find(
+            tab =>
+              tab.kind === 'chat' &&
+              tab.chat?.agentRef === vm.selectedAgent &&
+              (tab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
+          )
+        : undefined
+      const explicitDrawerSelectionId =
+        requestedDrawerChatTabId ??
+        (pending?.inDrawer ? pending.tabId : null) ??
+        (authority?.inDrawer ? authority.tabId : null)
+      const closesSelectedDrawerChat = Boolean(
+        chatDrawerVisibleRef.current &&
+        (explicitDrawerSelectionId === id ||
+          (!explicitDrawerSelectionId && displayedDrawerTab?.id === id))
+      )
+      const closesCurrentSelection =
+        wasActive || closesSelectedDrawerChat || pending?.tabId === id || authority?.tabId === id
+      if (
+        tabToClose?.kind === 'chat' &&
+        tabToClose.chat?.agentRef &&
+        tabToClose.chat.chatId &&
+        (wasActive ||
+          closesSelectedDrawerChat ||
+          pending?.tabId === id ||
+          authority?.tabId === id ||
+          displayedDrawerTab?.id === id)
+      ) {
+        closedWorkspaceChatIdentitiesRef.current.add(
+          JSON.stringify([tabToClose.chat.agentRef, tabToClose.chat.chatId ?? null])
+        )
+      }
+      if (closesCurrentSelection) {
+        // Closing an inactive neighbor must not invalidate the active tab's
+        // verification or selection authority.
+        workspaceTabSelectionIntentRef.current += 1
+        vm.beginNavigationIntent()
+        clearPendingWorkspaceTabSelection()
+        workspaceChatSelectionAuthorityRef.current = null
+      }
       const next = closeWorkspaceTab(current, id)
       if (next === current) return
-      vm.clearAppsPicker()
       setWorkspaceTabs(next)
       // Closing the active tab activates a neighbor (or empties the workspace,
       // §5). Reveal it so its content follows the strip.
-      if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
+      if (wasActive) {
+        vm.clearAppsPicker()
+        const nextTab = activeWorkspaceTab(next)
+        if (nextTab) {
+          handleSelectWorkspaceTab(nextTab.id)
+          if (tabToClose?.kind === 'chat' && nextTab.kind !== 'chat') {
+            vm.setSelectedAgent(null)
+            vm.clearActiveChat()
+          }
+        } else {
+          revealWorkspaceTab(undefined, false)
+          vm.setSelectedAgent(null)
+          vm.clearActiveChat()
+        }
+      } else if (closesSelectedDrawerChat) {
+        const closedIndex = current.tabs.findIndex(tab => tab.id === id)
+        const drawerNeighbor =
+          current.tabs
+            .slice(0, closedIndex)
+            .reverse()
+            .find(tab => tab.id !== id && tab.kind === 'chat') ??
+          current.tabs.slice(closedIndex + 1).find(tab => tab.kind === 'chat')
+        if (drawerNeighbor) {
+          handleSelectDrawerChatTab(drawerNeighbor.id)
+        } else if (vm.selectedAgent) {
+          vm.handleSelectChatAgent(vm.selectedAgent, {
+            selectLatest: false,
+            keepNavItem: true,
+          })
+        }
+      }
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [
+      clearPendingWorkspaceTabSelection,
+      handleSelectWorkspaceTab,
+      handleSelectDrawerChatTab,
+      revealWorkspaceTab,
+      requestedDrawerChatTabId,
+      setWorkspaceTabs,
+      vm.activeChatId,
+      vm.beginNavigationIntent,
+      vm.clearAppsPicker,
+      vm.clearActiveChat,
+      vm.handleSelectChatAgent,
+      vm.setSelectedAgent,
+      vm.selectedAgent,
+    ]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -544,12 +940,36 @@ export function App() {
 
   const handleNewWorkspaceChatTab = React.useCallback(() => {
     vm.clearAppsPicker()
+    workspaceTabSelectionIntentRef.current += 1
+    vm.beginNavigationIntent()
+    clearPendingWorkspaceTabSelection()
+    workspaceChatSelectionAuthorityRef.current = null
+    setPendingWorkspaceTabId(null)
+    setUnavailableWorkspaceTabId(null)
+    setUnavailableWorkspaceTabReason('access')
+    setRequestedDrawerChatTabId(null)
     const agentRef = vm.selectedAgent
+    if (agentRef) {
+      closedWorkspaceChatIdentitiesRef.current.delete(JSON.stringify([agentRef, null]))
+    }
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
       // chat in the drawer without tearing the live embed down.
       setChatDrawerOpen(true)
       if (agentRef) {
+        const existingBlank = workspaceTabsRef.current.tabs.find(
+          tab => tab.kind === 'chat' && (tab.chat?.chatId ?? null) === null
+        )
+        const blankTabId = existingBlank?.id ?? nextChatTabId()
+        setWorkspaceTabs(state => {
+          const reconciled = reconcileWorkspaceChatTab(
+            state,
+            { agentRef, chatId: null },
+            blankTabId
+          )
+          return reconciled === state ? state : { ...reconciled, activeTabId: state.activeTabId }
+        })
+        setRequestedDrawerChatTabId(blankTabId)
         vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
       }
       // With no agent yet there is nothing to seed, so this INTENTIONALLY writes
@@ -567,10 +987,12 @@ export function App() {
     }
     setComposerFocusRequestId(value => value + 1)
   }, [
+    clearPendingWorkspaceTabSelection,
     leaveSandboxForChat,
     nextChatTabId,
     setWorkspaceTabs,
     vm.clearAppsPicker,
+    vm.beginNavigationIntent,
     vm.handleSelectChatAgent,
     vm.selectedAgent,
   ])
@@ -598,29 +1020,57 @@ export function App() {
           )
         : undefined
     if (origin && !hasActiveChat) {
-      vm.handleSelectChatAgent(origin.agentName, {
-        chatId: origin.chatId,
-        title: origin.title,
-        selectLatest: false,
-        keepNavItem: true,
-      })
+      closedWorkspaceChatIdentitiesRef.current.delete(
+        JSON.stringify([origin.agentName, origin.chatId])
+      )
+      const identity = JSON.stringify([origin.agentName, origin.chatId])
+      restoreWorkspaceChatSelection(
+        origin.agentName,
+        origin.chatId,
+        origin.title,
+        true,
+        staleTeamContextChatIdentitiesRef.current.has(identity) ||
+          Boolean(origin.teamId && origin.teamId !== vm.getCurrentTeamId())
+      )
     } else if (lastChatTab?.chat?.agentRef && lastChatTab.chat.chatId) {
-      vm.handleSelectChatAgent(lastChatTab.chat.agentRef, {
-        chatId: lastChatTab.chat.chatId,
-        title: lastChatTab.title,
-        selectLatest: false,
-        keepNavItem: true,
-      })
+      closedWorkspaceChatIdentitiesRef.current.delete(
+        JSON.stringify([lastChatTab.chat.agentRef, lastChatTab.chat.chatId])
+      )
+      const identity = JSON.stringify([lastChatTab.chat.agentRef, lastChatTab.chat.chatId])
+      restoreWorkspaceChatSelection(
+        lastChatTab.chat.agentRef,
+        lastChatTab.chat.chatId,
+        lastChatTab.title,
+        true,
+        staleTeamContextChatIdentitiesRef.current.has(identity)
+      )
     } else if (vm.selectedAgent) {
       // Re-reveal the current drawer chat in place.
-      vm.handleSelectChatAgent(vm.selectedAgent, {
-        ...(vm.activeChatId ? { chatId: vm.activeChatId } : {}),
-        selectLatest: false,
-        keepNavItem: true,
-      })
+      if (vm.activeChatId) {
+        const identity = JSON.stringify([vm.selectedAgent, vm.activeChatId])
+        restoreWorkspaceChatSelection(
+          vm.selectedAgent,
+          vm.activeChatId,
+          'Conversation',
+          true,
+          staleTeamContextChatIdentitiesRef.current.has(identity)
+        )
+      } else {
+        vm.handleSelectChatAgent(vm.selectedAgent, {
+          selectLatest: false,
+          keepNavItem: true,
+        })
+      }
     }
     setComposerFocusRequestId(value => value + 1)
-  }, [vm.activeChatId, vm.handleSelectChatAgent, vm.lastActiveChatTabId, vm.selectedAgent])
+  }, [
+    restoreWorkspaceChatSelection,
+    vm.activeChatId,
+    vm.getCurrentTeamId,
+    vm.handleSelectChatAgent,
+    vm.lastActiveChatTabId,
+    vm.selectedAgent,
+  ])
 
   const closeChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(false)
@@ -642,10 +1092,24 @@ export function App() {
     // app launch from a chat re-sets it explicitly).
     leaveSandboxForChat()
     if (vm.selectedAgent) {
-      vm.handleSelectChatAgent(vm.selectedAgent, {
-        ...(vm.activeChatId ? { chatId: vm.activeChatId } : {}),
-        selectLatest: false,
-      })
+      if (vm.activeChatId) {
+        const identity = JSON.stringify([vm.selectedAgent, vm.activeChatId])
+        const displayedTab = workspaceTabsRef.current.tabs.find(
+          tab =>
+            tab.kind === 'chat' &&
+            tab.chat?.agentRef === vm.selectedAgent &&
+            tab.chat.chatId === vm.activeChatId
+        )
+        restoreWorkspaceChatSelection(
+          vm.selectedAgent,
+          vm.activeChatId,
+          displayedTab?.title,
+          false,
+          staleTeamContextChatIdentitiesRef.current.has(identity)
+        )
+      } else {
+        vm.handleSelectChatAgent(vm.selectedAgent, { selectLatest: false })
+      }
     } else {
       vm.handleNavSelect(DESKTOP_ROUTES.chat)
     }
@@ -657,6 +1121,7 @@ export function App() {
     vm.handleNavSelect,
     vm.handleSelectChatAgent,
     vm.selectedAgent,
+    restoreWorkspaceChatSelection,
   ])
 
   // minispec 04 approach C: while the app embed is live, an "open conversation"
@@ -671,6 +1136,17 @@ export function App() {
   const handleOpenNotificationInDrawer = React.useCallback(
     (...args: Parameters<typeof vm.handleOpenNotification>) => {
       const [notification, options] = args
+      const notificationAgent = String(notification.agentName || '').trim()
+      const notificationChatId = String(notification.chatId || '').trim()
+      if (notificationAgent && notificationChatId) {
+        workspaceTabSelectionIntentRef.current += 1
+        vm.beginNavigationIntent()
+        workspaceChatSelectionAuthorityRef.current = null
+        clearPendingWorkspaceTabSelection()
+        closedWorkspaceChatIdentitiesRef.current.delete(
+          JSON.stringify([notificationAgent, notificationChatId])
+        )
+      }
       const surfacesInDrawer =
         chatDrawerDivertableRef.current &&
         notification.kind !== 'workflow_completed' &&
@@ -680,13 +1156,42 @@ export function App() {
         // opening the drawer for it would leave it up with a blank composer.
         String(notification.agentName || '').trim() !== '' &&
         (!notification.teamId || notification.teamId === vm.getCurrentTeamId())
+      const sameTeamStaleNotification =
+        notification.kind !== 'workflow_completed' &&
+        notification.kind !== 'sdk_notification' &&
+        notificationAgent !== '' &&
+        notificationChatId !== '' &&
+        (!notification.teamId || notification.teamId === vm.getCurrentTeamId()) &&
+        staleTeamContextChatIdentitiesRef.current.has(
+          JSON.stringify([notificationAgent, notificationChatId])
+        )
+      if (sameTeamStaleNotification) {
+        const inDrawer = Boolean(surfacesInDrawer)
+        vm.markNotificationRead(notification.id)
+        if (inDrawer) setChatDrawerOpen(true)
+        restoreWorkspaceChatSelection(
+          notificationAgent,
+          notificationChatId,
+          'Conversation',
+          inDrawer,
+          true
+        )
+        return Promise.resolve()
+      }
       if (surfacesInDrawer) {
         setChatDrawerOpen(true)
         return vm.handleOpenNotification(notification, { keepNavItem: true })
       }
       return vm.handleOpenNotification(notification, options)
     },
-    [vm.getCurrentTeamId, vm.handleOpenNotification]
+    [
+      clearPendingWorkspaceTabSelection,
+      vm.beginNavigationIntent,
+      vm.getCurrentTeamId,
+      vm.handleOpenNotification,
+      vm.markNotificationRead,
+      restoreWorkspaceChatSelection,
+    ]
   )
 
   const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {
@@ -717,18 +1222,45 @@ export function App() {
       agentName: string,
       options: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string } = {}
     ) => {
+      workspaceTabSelectionIntentRef.current += 1
+      workspaceChatSelectionAuthorityRef.current = null
+      clearPendingWorkspaceTabSelection()
       // The controller's handleSelectChatAgent owns the tab store now (it
       // activates the matching chat tab so `navItem` derives to `chat` in the
       // same commit). This wrapper only adds drawer-awareness: while the drawer
       // is visible, selection swaps the drawer's chat in place (`keepNavItem`)
       // instead of navigating to full-screen and tearing the live app down.
       vm.clearAppsPicker()
+      if (options.chatId) {
+        closedWorkspaceChatIdentitiesRef.current.delete(JSON.stringify([agentName, options.chatId]))
+        const identity = JSON.stringify([agentName, options.chatId])
+        if (staleTeamContextChatIdentitiesRef.current.has(identity)) {
+          restoreWorkspaceChatSelection(
+            agentName,
+            options.chatId,
+            options.title ?? 'Conversation',
+            chatDrawerVisibleRef.current,
+            true
+          )
+          return
+        }
+      } else if (options.selectLatest !== false) {
+        for (const identity of closedWorkspaceChatIdentitiesRef.current) {
+          const [closedAgent] = JSON.parse(identity) as [string, string | null]
+          if (closedAgent === agentName) closedWorkspaceChatIdentitiesRef.current.delete(identity)
+        }
+      }
       vm.handleSelectChatAgent(
         agentName,
         chatDrawerVisibleRef.current ? { ...options, keepNavItem: true } : options
       )
     },
-    [vm.clearAppsPicker, vm.handleSelectChatAgent]
+    [
+      clearPendingWorkspaceTabSelection,
+      restoreWorkspaceChatSelection,
+      vm.clearAppsPicker,
+      vm.handleSelectChatAgent,
+    ]
   )
   const bootSplashLoading = vm.booting || vm.initialExperienceLoading
   const isAgentChatView =
@@ -1420,16 +1952,30 @@ export function App() {
         // `apps` route change and loads the chat. The reconcile effect adds the
         // chat tab to the switcher.
         setChatDrawerOpen(true)
-        vm.handleSelectChatAgent(conversationOrigin.agentName, {
-          chatId: conversationOrigin.chatId,
-          title: conversationOrigin.title,
-          selectLatest: false,
-          keepNavItem: true,
-        })
+        closedWorkspaceChatIdentitiesRef.current.delete(
+          JSON.stringify([conversationOrigin.agentName, conversationOrigin.chatId])
+        )
+        const identity = JSON.stringify([conversationOrigin.agentName, conversationOrigin.chatId])
+        restoreWorkspaceChatSelection(
+          conversationOrigin.agentName,
+          conversationOrigin.chatId,
+          conversationOrigin.title,
+          true,
+          staleTeamContextChatIdentitiesRef.current.has(identity) ||
+            Boolean(
+              conversationOrigin.teamId && conversationOrigin.teamId !== vm.getCurrentTeamId()
+            )
+        )
       }
       return requestId
     },
-    [nextChatTabId, setWorkspaceTabs, vm.clearAppsPicker, vm.handleSelectChatAgent]
+    [
+      nextChatTabId,
+      restoreWorkspaceChatSelection,
+      setWorkspaceTabs,
+      vm.clearAppsPicker,
+      vm.getCurrentTeamId,
+    ]
   )
   relaunchSandboxUiAppRef.current = (app, tabId) => {
     launchSandboxUiApp(app, null, tabId)
@@ -1523,9 +2069,29 @@ export function App() {
           sandboxUiConversationOrigin
         )
       )
-      vm.handleNavSelect(item)
+      const onFocusedChat =
+        item === DESKTOP_ROUTES.chat
+          ? ({ agentRef, chatId }: { agentRef: string; chatId: string }) => {
+              const tab = workspaceTabsRef.current.tabs.find(
+                candidate =>
+                  candidate.kind === 'chat' &&
+                  candidate.chat?.agentRef === agentRef &&
+                  candidate.chat.chatId === chatId
+              )
+              if (!tab) return false
+              requestWorkspaceTabSelection(tab.id, false, tab)
+              return true
+            }
+          : undefined
+      if (onFocusedChat) vm.handleNavSelect(item, { onFocusedChat })
+      else vm.handleNavSelect(item)
     },
-    [activeConversationOrigin, sandboxUiConversationOrigin, vm.handleNavSelect]
+    [
+      activeConversationOrigin,
+      requestWorkspaceTabSelection,
+      sandboxUiConversationOrigin,
+      vm.handleNavSelect,
+    ]
   )
 
   const handleOpenSandboxUiApp = React.useCallback(
@@ -1613,11 +2179,10 @@ export function App() {
         await vm.handleEnsureTeamContext({ teamId: context.originalTeamId, announce: true })
         const origin = context.conversationOrigin
         if (origin && (!origin.teamId || origin.teamId === context.originalTeamId)) {
-          vm.handleSelectChatAgent(origin.agentName, {
-            selectLatest: false,
-            chatId: origin.chatId,
-            title: origin.title,
-          })
+          closedWorkspaceChatIdentitiesRef.current.delete(
+            JSON.stringify([origin.agentName, origin.chatId])
+          )
+          restoreWorkspaceChatSelection(origin.agentName, origin.chatId, origin.title, false, true)
         }
       } catch (rollbackError) {
         const message =
@@ -1625,7 +2190,7 @@ export function App() {
         vm.pushToast(`Could not restore the previous team: ${message}`, 'error')
       }
     },
-    [vm.getCurrentTeamId, vm.handleEnsureTeamContext, vm.handleSelectChatAgent, vm.pushToast]
+    [restoreWorkspaceChatSelection, vm.getCurrentTeamId, vm.handleEnsureTeamContext, vm.pushToast]
   )
 
   const deferSandboxUiDeepLinkUntilTerminal = React.useCallback(
@@ -1963,9 +2528,215 @@ export function App() {
   // so any path that moves `vm.activeChatId` — the ChatThread session list, an
   // opened notification, auto-select, resume — keeps the strip / drawer switcher
   // in sync. `reconcileWorkspaceChatTab` is idempotent (returns the same
-  // reference when already aligned), so this never ping-pongs with the reveal
-  // paths and never drives a chat switch itself.
+  // reference when already aligned); an explicit tab selection remains the
+  // authority across controller resets and is replayed if its conversation drifts.
   React.useEffect(() => {
+    const pendingSelection = pendingWorkspaceTabSelectionRef.current
+    const pendingTab = pendingSelection
+      ? workspaceTabsRef.current.tabs.find(tab => tab.id === pendingSelection.tabId)
+      : undefined
+    const pendingSelectionIsCurrent = Boolean(
+      pendingSelection &&
+      pendingSelection.selectionIntent === workspaceTabSelectionIntentRef.current &&
+      vm.isNavigationIntentCurrent(pendingSelection.navigationIntent)
+    )
+    const pendingConversationIsDisplayed = Boolean(
+      pendingSelection?.phase === 'switching' &&
+      pendingTab?.kind === 'chat' &&
+      (pendingTab.chat?.agentRef ?? null) === (vm.selectedAgent ?? null) &&
+      (pendingTab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
+    )
+    const pendingConversationIsUnavailable = Boolean(
+      pendingSelection?.phase === 'switching' &&
+      pendingTab?.kind === 'chat' &&
+      pendingTab.chat?.agentRef &&
+      pendingTab.chat?.chatId &&
+      (vm.isChatDeleted(pendingTab.chat.agentRef, pendingTab.chat.chatId) ||
+        vm.isHostAccessBlocked(pendingTab.chat.agentRef))
+    )
+    if (pendingConversationIsUnavailable && pendingSelection) {
+      pendingWorkspaceTabSelectionRef.current = { ...pendingSelection, phase: 'unavailable' }
+      setPendingWorkspaceTabId(null)
+      setUnavailableWorkspaceTabId(pendingSelection.tabId)
+      setUnavailableWorkspaceTabReason(
+        pendingTab?.kind === 'chat' &&
+          pendingTab.chat?.agentRef &&
+          pendingTab.chat?.chatId &&
+          vm.isChatDeleted(pendingTab.chat.agentRef, pendingTab.chat.chatId)
+          ? 'conversation'
+          : 'access'
+      )
+    }
+    if (
+      pendingSelection &&
+      (!pendingSelectionIsCurrent ||
+        (pendingConversationIsDisplayed && !pendingConversationIsUnavailable) ||
+        !pendingTab)
+    ) {
+      clearPendingWorkspaceTabSelection(pendingSelection.selectionIntent)
+    }
+
+    const authority = workspaceChatSelectionAuthorityRef.current
+    const authorityTeamContextChanged = Boolean(
+      authority && authority.teamContextRevision !== vm.teamContextRevision
+    )
+    const authorityTab = authorityTeamContextChanged
+      ? authority?.tabSnapshot
+      : authority
+        ? workspaceTabsRef.current.tabs.find(tab => tab.id === authority.tabId)
+        : undefined
+    if (authority && authorityTab?.kind === 'chat' && authorityTeamContextChanged) {
+      // A team switch can finish after a newer tab click supersedes the
+      // notification that started it. Keep the user's tab focused, but require
+      // an explicit retry in the new team context before loading its transcript.
+      authority.teamContextRevision = vm.teamContextRevision
+      authority.navigationIntent = vm.beginNavigationIntent()
+      authority.requiresExplicitRetry = true
+      authority.retryReason = 'team-context'
+      setWorkspaceTabs(state => {
+        const currentTab = state.tabs.find(tab => tab.id === authority.tabId)
+        const snapshotChat =
+          authority.tabSnapshot.kind === 'chat' ? authority.tabSnapshot.chat : null
+        const currentChat = currentTab?.kind === 'chat' ? currentTab.chat : null
+        const currentMatchesSnapshot = Boolean(
+          currentTab?.kind === 'chat' &&
+          currentChat?.agentRef === snapshotChat?.agentRef &&
+          (currentChat?.chatId ?? null) === (snapshotChat?.chatId ?? null)
+        )
+        const tabs = !currentTab
+          ? [...state.tabs, authority.tabSnapshot]
+          : currentMatchesSnapshot
+            ? state.tabs
+            : state.tabs.map(tab => (tab.id === authority.tabId ? authority.tabSnapshot : tab))
+        const activeTabId = authority.inDrawer ? state.activeTabId : authority.tabId
+        if (tabs === state.tabs && activeTabId === state.activeTabId) return state
+        return { tabs, activeTabId }
+      })
+      if (pendingSelection?.selectionIntent === authority.selectionIntent) {
+        pendingWorkspaceTabSelectionRef.current = null
+        setPendingWorkspaceTabId(null)
+      }
+      setUnavailableWorkspaceTabId(authority.tabId)
+      setUnavailableWorkspaceTabReason('team-context')
+    }
+    const authorityIsCurrent = Boolean(
+      authority &&
+      authorityTab?.kind === 'chat' &&
+      authority.teamContextRevision === vm.teamContextRevision &&
+      vm.isNavigationIntentCurrent(authority.navigationIntent)
+    )
+    if (authority && !authorityIsCurrent) {
+      workspaceChatSelectionAuthorityRef.current = null
+    } else if (authority && authorityTab?.kind === 'chat' && authorityIsCurrent) {
+      const agentRef = authorityTab.chat?.agentRef ?? null
+      const chatId = authorityTab.chat?.chatId ?? null
+      const conversationIsDisplayed = Boolean(
+        agentRef && vm.selectedAgent === agentRef && (vm.activeChatId ?? null) === chatId
+      )
+      const conversationIsDeleted = Boolean(
+        (authority.hasBeenDisplayed || authority.loadRequested) &&
+        agentRef &&
+        chatId &&
+        vm.isChatDeleted(agentRef, chatId)
+      )
+      if (conversationIsDeleted) {
+        authority.requiresExplicitRetry = true
+        authority.retryReason = 'conversation'
+        setPendingWorkspaceTabId(null)
+        setUnavailableWorkspaceTabId(authority.tabId)
+        setUnavailableWorkspaceTabReason('conversation')
+      } else if (authority.teamContextVerificationPending) {
+        const verificationPending =
+          pendingSelection?.selectionIntent === authority.selectionIntent &&
+          pendingSelection.phase === 'checking'
+        if (verificationPending) {
+          setPendingWorkspaceTabId(authority.tabId)
+          setUnavailableWorkspaceTabId(null)
+        } else {
+          authority.teamContextVerificationPending = false
+          setPendingWorkspaceTabId(null)
+          setUnavailableWorkspaceTabId(authority.tabId)
+          setUnavailableWorkspaceTabReason('team-context')
+        }
+      } else if (authority.requiresExplicitRetry) {
+        setPendingWorkspaceTabId(null)
+        setUnavailableWorkspaceTabId(authority.tabId)
+        setUnavailableWorkspaceTabReason(authority.retryReason ?? 'conversation')
+      } else if (conversationIsDisplayed) {
+        authority.hasBeenDisplayed = true
+        authority.lastReplayKey = null
+      } else if (agentRef) {
+        const accessCheckPending =
+          pendingSelection?.tabId === authority.tabId && pendingSelection.phase === 'checking'
+        const accessUnavailable = vm.isHostAccessBlocked(agentRef)
+        if (accessUnavailable && !accessCheckPending) {
+          setPendingWorkspaceTabId(null)
+          setUnavailableWorkspaceTabId(authority.tabId)
+          setUnavailableWorkspaceTabReason('access')
+        } else if (
+          authority.hasBeenDisplayed &&
+          !accessUnavailable &&
+          (authority.inDrawer ? chatDrawerVisible : vm.navItem === DESKTOP_ROUTES.chat)
+        ) {
+          const replayKey = [
+            authority.selectionIntent,
+            vm.getCurrentTeamId(),
+            vm.selectedAgent ?? '',
+            vm.activeChatId ?? '',
+          ].join('\u0000')
+          if (authority.lastReplayKey !== replayKey) {
+            authority.lastReplayKey = replayKey
+            revealWorkspaceTab(authorityTab, authority.inDrawer)
+            authority.navigationIntent = vm.beginNavigationIntent()
+          }
+        }
+      }
+    }
+
+    const activeTeamStaleTab = activeWorkspaceTab(workspaceTabsRef.current)
+    const activeTeamStaleChat =
+      activeTeamStaleTab?.kind === 'chat' &&
+      activeTeamStaleTab.chat?.agentRef &&
+      activeTeamStaleTab.chat.chatId
+        ? {
+            tab: activeTeamStaleTab,
+            agentRef: activeTeamStaleTab.chat.agentRef,
+            chatId: activeTeamStaleTab.chat.chatId,
+          }
+        : null
+    const activeTeamStaleIdentity = activeTeamStaleChat
+      ? JSON.stringify([activeTeamStaleChat.agentRef, activeTeamStaleChat.chatId])
+      : null
+    const activeTeamRetryPending = Boolean(
+      activeTeamStaleChat &&
+      pendingSelectionIsCurrent &&
+      pendingSelection?.tabId === activeTeamStaleChat.tab.id
+    )
+    const displayedConversationAuthorized = Boolean(
+      vm.selectedAgent &&
+      vm.activeChatId &&
+      vm.isConversationAccessVerifiedForCurrentTeam(vm.selectedAgent, vm.activeChatId)
+    )
+    if (
+      activeTeamStaleChat &&
+      activeTeamStaleIdentity &&
+      staleTeamContextChatIdentitiesRef.current.has(activeTeamStaleIdentity) &&
+      !vm.isConversationAccessVerifiedForCurrentTeam(
+        activeTeamStaleChat.agentRef,
+        activeTeamStaleChat.chatId
+      ) &&
+      !displayedConversationAuthorized &&
+      !activeTeamRetryPending
+    ) {
+      // resetChat is teardown, not a signal to reconcile the still-selected
+      // conversation from the controller's now-empty identity. Keep its tab
+      // selected and wait for an explicit exact-access retry.
+      setPendingWorkspaceTabId(null)
+      setUnavailableWorkspaceTabId(activeTeamStaleChat.tab.id)
+      setUnavailableWorkspaceTabReason('team-context')
+      return
+    }
+
     if ((vm.navItem !== DESKTOP_ROUTES.chat && !chatDrawerVisible) || !vm.selectedAgent) return
     const conversation = vm.activeChatId
       ? (vm.chatList.find(chat => chat.id === vm.activeChatId) ??
@@ -1978,10 +2749,68 @@ export function App() {
       chatId: vm.activeChatId ?? null,
       title: conversation?.title,
     }
+    for (const tab of workspaceTabsRef.current.tabs) {
+      if (tab.kind !== 'chat' || !tab.chat?.agentRef || !tab.chat.chatId) continue
+      const identity = JSON.stringify([tab.chat.agentRef, tab.chat.chatId])
+      if (
+        staleTeamContextChatIdentitiesRef.current.has(identity) &&
+        vm.isConversationAccessVerifiedForCurrentTeam(tab.chat.agentRef, tab.chat.chatId)
+      ) {
+        staleTeamContextChatIdentitiesRef.current.delete(identity)
+      }
+    }
     const id = nextChatTabId()
     setWorkspaceTabs(state => {
       const reconciled = reconcileWorkspaceChatTab(state, active, id)
-      if (reconciled === state) return state
+      const filteredTabs = reconciled.tabs.filter(tab => {
+        if (tab.kind !== 'chat' || !tab.chat?.agentRef) return true
+        return !closedWorkspaceChatIdentitiesRef.current.has(
+          JSON.stringify([tab.chat.agentRef, tab.chat.chatId ?? null])
+        )
+      })
+      const safeReconciled =
+        filteredTabs.length === reconciled.tabs.length
+          ? reconciled
+          : {
+              tabs: filteredTabs,
+              activeTabId: filteredTabs.some(tab => tab.id === reconciled.activeTabId)
+                ? reconciled.activeTabId
+                : filteredTabs.some(tab => tab.id === state.activeTabId)
+                  ? state.activeTabId
+                  : (filteredTabs[0]?.id ?? null),
+            }
+      if (safeReconciled === state) return state
+      // Keep reconciling chat metadata while a requested tab is authoritative,
+      // but don't let the old displayed conversation reactivate it mid-switch.
+      const pendingSelectionStillCurrent = Boolean(
+        pendingSelectionIsCurrent &&
+        pendingSelection &&
+        pendingWorkspaceTabSelectionRef.current?.selectionIntent ===
+          pendingSelection.selectionIntent &&
+        vm.isNavigationIntentCurrent(pendingSelection.navigationIntent)
+      )
+      if (pendingSelectionStillCurrent && safeReconciled.activeTabId !== state.activeTabId) {
+        return safeReconciled.tabs === state.tabs
+          ? state
+          : { tabs: safeReconciled.tabs, activeTabId: state.activeTabId }
+      }
+      const authority = workspaceChatSelectionAuthorityRef.current
+      const authorityTab = authority
+        ? state.tabs.find(tab => tab.id === authority.tabId)
+        : undefined
+      const authorityStillOwnsChatTab = Boolean(
+        authority &&
+        authorityTab?.kind === 'chat' &&
+        !authority.inDrawer &&
+        authority.teamContextRevision === vm.teamContextRevision &&
+        vm.navItem === DESKTOP_ROUTES.chat &&
+        vm.isNavigationIntentCurrent(authority.navigationIntent)
+      )
+      if (authorityStillOwnsChatTab && authorityTab) {
+        return safeReconciled.tabs === state.tabs && state.activeTabId === authorityTab.id
+          ? state
+          : { tabs: safeReconciled.tabs, activeTabId: authorityTab.id }
+      }
       // Drawer mode: the active tab is the app tab. Keep the chat tab reconcile
       // created/aligned (so the switcher lists it) but DON'T let it steal the
       // active slot — activating a chat tab would flip navItem to chat and tear
@@ -1992,32 +2821,54 @@ export function App() {
         // `activeTabId` (the tab list is unchanged), return `state` unchanged so
         // the idempotent same-reference bail this effect relies on still holds —
         // rebuilding an equal object would force one extra render per change.
-        return reconciled.tabs === state.tabs
+        return safeReconciled.tabs === state.tabs
           ? state
-          : { tabs: reconciled.tabs, activeTabId: state.activeTabId }
+          : { tabs: safeReconciled.tabs, activeTabId: state.activeTabId }
       }
-      return reconciled
+      return safeReconciled
     })
   }, [
     chatDrawerVisible,
+    clearPendingWorkspaceTabSelection,
     nextChatTabId,
+    pendingWorkspaceTabId,
+    revealWorkspaceTab,
     setWorkspaceTabs,
     vm.activeChatId,
+    vm.beginNavigationIntent,
     vm.chatList,
+    vm.hostAuthorityRevision,
+    vm.isChatDeleted,
+    vm.isHostAccessBlocked,
+    vm.isNavigationIntentCurrent,
+    vm.getCurrentTeamId,
+    vm.isConversationAccessVerifiedForCurrentTeam,
+    vm.me?.teamId,
     vm.latestChatSessions,
     vm.navItem,
     vm.selectedAgent,
+    vm.teamContextRevision,
   ])
 
   // Reset ephemeral UI + the workspace store when the authenticated principal
-  // CHANGES (team switch / re-login), not on the initial mount — the controller
+  // CHANGES (logout / re-login or user switch), not on the initial mount — the controller
   // already seeds a fresh store there, and resetting on mount would clobber the
   // derived route before the first paint.
   const previousPrincipalIdentityRef = React.useRef<string | null | undefined>(undefined)
   React.useEffect(() => {
     const previousIdentity = previousPrincipalIdentityRef.current
+    if (previousIdentity === undefined) {
+      previousPrincipalIdentityRef.current = vm.authenticatedPrincipalIdentity
+      return
+    }
+    if (previousIdentity === vm.authenticatedPrincipalIdentity) return
     previousPrincipalIdentityRef.current = vm.authenticatedPrincipalIdentity
-    if (previousIdentity === undefined) return
+    workspaceTabSelectionIntentRef.current += 1
+    workspaceChatSelectionAuthorityRef.current = null
+    vm.beginNavigationIntent()
+    clearPendingWorkspaceTabSelection()
+    closedWorkspaceChatIdentitiesRef.current.clear()
+    staleTeamContextChatIdentitiesRef.current.clear()
     setWorkspaceTabs(createWorkspaceTabsState('chat-tab-1'))
     vm.clearAppsPicker()
     setComposerFocusRequestId(0)
@@ -2033,7 +2884,11 @@ export function App() {
     setSettingsShortcutsRequestId(0)
     setChatDrawerOpen(false)
     setChatSwitcherFocusRequestId(0)
-  }, [vm.authenticatedPrincipalIdentity])
+  }, [
+    clearPendingWorkspaceTabSelection,
+    vm.authenticatedPrincipalIdentity,
+    vm.beginNavigationIntent,
+  ])
 
   const desktopCommandContext = React.useMemo(
     () => ({
@@ -2107,9 +2962,17 @@ export function App() {
       // chat-specific.
       const selectAndReveal = (next: typeof state) => {
         if (next === state) return
+        const nextTab = activeWorkspaceTab(next)
+        if (nextTab) {
+          handleSelectWorkspaceTab(nextTab.id)
+          return
+        }
+        workspaceTabSelectionIntentRef.current += 1
+        workspaceChatSelectionAuthorityRef.current = null
+        vm.beginNavigationIntent()
         vm.clearAppsPicker()
         setWorkspaceTabs(next)
-        revealWorkspaceTab(activeWorkspaceTab(next), false)
+        revealWorkspaceTab(undefined, false)
       }
       if (commandId === 'commands.open') {
         closeChatLocalSearch(false)
@@ -2224,14 +3087,40 @@ export function App() {
           // belongs to the drawer's chat (selectedAgent, activeChatId). Reveal it
           // in place so focus lands on the drawer's live composer.
           if (vm.selectedAgent) {
-            vm.handleSelectChatAgent(vm.selectedAgent, {
-              ...(vm.activeChatId ? { chatId: vm.activeChatId } : {}),
-              selectLatest: false,
-              keepNavItem: true,
-            })
+            const identity = vm.activeChatId
+              ? JSON.stringify([vm.selectedAgent, vm.activeChatId])
+              : null
+            if (vm.activeChatId && staleTeamContextChatIdentitiesRef.current.has(identity!)) {
+              restoreWorkspaceChatSelection(
+                vm.selectedAgent,
+                vm.activeChatId,
+                'Conversation',
+                true,
+                true
+              )
+            } else {
+              vm.handleSelectChatAgent(vm.selectedAgent, {
+                ...(vm.activeChatId ? { chatId: vm.activeChatId } : {}),
+                selectLatest: false,
+                keepNavItem: true,
+              })
+            }
           }
         } else {
-          revealWorkspaceTab(activeWorkspaceTab(state), false)
+          const activeTab = activeWorkspaceTab(state)
+          const identity =
+            activeTab?.kind === 'chat' && activeTab.chat?.agentRef && activeTab.chat.chatId
+              ? JSON.stringify([activeTab.chat.agentRef, activeTab.chat.chatId])
+              : null
+          if (
+            activeTab?.kind === 'chat' &&
+            identity &&
+            staleTeamContextChatIdentitiesRef.current.has(identity)
+          ) {
+            requestWorkspaceTabSelection(activeTab.id, false, activeTab)
+          } else {
+            revealWorkspaceTab(activeTab, false)
+          }
         }
         setComposerFocusRequestId(value => value + 1)
         return
@@ -2260,16 +3149,21 @@ export function App() {
       handleCloseWorkspaceTab,
       handleNewWorkspaceChatTab,
       handleSidebarNavSelect,
+      handleSelectWorkspaceTab,
       openChatDrawer,
       revealWorkspaceTab,
+      requestWorkspaceTabSelection,
+      restoreWorkspaceChatSelection,
       sandboxUiMounted,
       setWorkspaceTabs,
       vm.activeChatId,
+      vm.beginNavigationIntent,
       vm.clearAppsPicker,
       vm.handleNavSelect,
       vm.handleLogout,
       vm.handleSelectChatAgent,
       vm.isAuthenticated,
+      vm.isHostAccessBlocked,
       vm.navItem,
       vm.selectedAgent,
     ]
@@ -2740,18 +3634,118 @@ export function App() {
     />
   ) : null
   // The drawer switcher is chat-only: the chat sub-slice of the universal store.
-  // Its "current" chat is the controller's (selectedAgent, activeChatId) — NOT
-  // the store's active tab, which is the app tab while the drawer is open.
+  // Its current chat follows selectedAgent/activeChatId, temporarily overridden
+  // by a requested chat selection while the drawer is open.
   const chatWorkspaceTabs = React.useMemo(
     () => visibleWorkspaceTabs.filter((tab): tab is WorkspaceTab => tab.kind === 'chat'),
     [visibleWorkspaceTabs]
   )
-  const drawerActiveChatTabId =
+  const controllerActiveDrawerTabId =
     chatWorkspaceTabs.find(
       tab =>
         (tab.chat?.agentRef ?? null) === vm.selectedAgent &&
         (tab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
     )?.id ?? null
+  const drawerActiveChatTabId =
+    requestedDrawerChatTabId ??
+    pendingWorkspaceTabId ??
+    unavailableWorkspaceTabId ??
+    controllerActiveDrawerTabId
+  const activeWorkspaceTabForChat = activeWorkspaceTab(workspaceTabs)
+  const fullScreenChatTabNeedsLoad = Boolean(
+    activeWorkspaceTabForChat?.kind === 'chat' &&
+    activeWorkspaceTabForChat.chat?.agentRef &&
+    ((activeWorkspaceTabForChat.chat.agentRef ?? null) !== (vm.selectedAgent ?? null) ||
+      (activeWorkspaceTabForChat.chat.chatId ?? null) !== (vm.activeChatId ?? null))
+  )
+  const fullScreenChatAccessPhase =
+    activeWorkspaceTabForChat?.kind === 'chat' &&
+    pendingWorkspaceTabId === activeWorkspaceTabForChat.id
+      ? 'checking'
+      : activeWorkspaceTabForChat?.kind === 'chat' &&
+          unavailableWorkspaceTabId === activeWorkspaceTabForChat.id
+        ? 'unavailable'
+        : fullScreenChatTabNeedsLoad
+          ? 'loading'
+          : null
+  const fullScreenLoadingTabId =
+    activeWorkspaceTabForChat?.kind === 'chat' &&
+    (fullScreenChatAccessPhase === 'loading' ||
+      (!fullScreenChatAccessPhase && vm.chatMessagesLoading))
+      ? activeWorkspaceTabForChat.id
+      : null
+  const drawerActiveChatTab = chatWorkspaceTabs.find(tab => tab.id === drawerActiveChatTabId)
+  const drawerChatTabNeedsLoad = Boolean(
+    requestedDrawerChatTabId &&
+    drawerActiveChatTab?.chat?.agentRef &&
+    ((drawerActiveChatTab.chat.agentRef ?? null) !== (vm.selectedAgent ?? null) ||
+      (drawerActiveChatTab.chat.chatId ?? null) !== (vm.activeChatId ?? null))
+  )
+  const drawerChatAccessPhase =
+    drawerActiveChatTab && pendingWorkspaceTabId === drawerActiveChatTab.id
+      ? 'checking'
+      : drawerActiveChatTab && unavailableWorkspaceTabId === drawerActiveChatTab.id
+        ? 'unavailable'
+        : drawerChatTabNeedsLoad
+          ? 'loading'
+          : null
+  const drawerLoadingTabId =
+    drawerActiveChatTab?.kind === 'chat' &&
+    (drawerChatAccessPhase === 'loading' || (!drawerChatAccessPhase && vm.chatMessagesLoading))
+      ? drawerActiveChatTab.id
+      : null
+  const renderChatTabAccessState = (
+    phase: 'checking' | 'loading' | 'unavailable',
+    unavailableReason: 'access' | 'conversation' | 'team-context' = 'access'
+  ) => {
+    const unavailable = phase === 'unavailable'
+    const message = unavailable
+      ? unavailableReason === 'conversation'
+        ? 'This conversation is no longer available. Close this tab or select it to retry.'
+        : unavailableReason === 'team-context'
+          ? 'The team changed while this conversation was opening. Select this tab to retry.'
+          : 'Could not verify access. Select this tab to retry.'
+      : phase === 'checking'
+        ? 'Checking access to conversation…'
+        : 'Loading conversation…'
+    return (
+      <section
+        aria-busy={unavailable ? undefined : 'true'}
+        aria-live={unavailable ? 'assertive' : 'polite'}
+        className="chat-tab-access-state"
+        role={unavailable ? 'alert' : 'status'}
+      >
+        {unavailable ? (
+          <span aria-hidden="true" className="chat-view-tab__access-error" />
+        ) : (
+          <span aria-hidden="true" className="notification-inline-spinner" />
+        )}
+        <span>{message}</span>
+      </section>
+    )
+  }
+
+  React.useEffect(() => {
+    if (!requestedDrawerChatTabId || pendingWorkspaceTabId || unavailableWorkspaceTabId) return
+    const requestedTab = chatWorkspaceTabs.find(tab => tab.id === requestedDrawerChatTabId)
+    if (!requestedTab) {
+      setRequestedDrawerChatTabId(null)
+      return
+    }
+    if (
+      (requestedTab.chat?.agentRef ?? null) === (vm.selectedAgent ?? null) &&
+      (requestedTab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
+    ) {
+      setRequestedDrawerChatTabId(null)
+    }
+  }, [
+    chatWorkspaceTabs,
+    pendingWorkspaceTabId,
+    requestedDrawerChatTabId,
+    unavailableWorkspaceTabId,
+    vm.activeChatId,
+    vm.selectedAgent,
+  ])
 
   const desktopUpdateRequiredDialog =
     vm.isAuthenticated && vm.desktopReleaseStatus?.updateRequired ? (
@@ -2847,6 +3841,10 @@ export function App() {
                                 {workspaceTabs.tabs.length > 0 && (
                                   <WorkspaceTabStrip
                                     tabs={visibleWorkspaceTabs}
+                                    pendingTabId={pendingWorkspaceTabId}
+                                    loadingTabId={fullScreenLoadingTabId}
+                                    unavailableTabId={unavailableWorkspaceTabId}
+                                    unavailableReason={unavailableWorkspaceTabReason}
                                     activeTabId={
                                       vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                     }
@@ -2888,7 +3886,14 @@ export function App() {
                                       }
                                       surfaceId="chat-view-panel"
                                     >
-                                      <ChatPage scrollContainerRef={contentPanelRef} />
+                                      {fullScreenChatAccessPhase ? (
+                                        renderChatTabAccessState(
+                                          fullScreenChatAccessPhase,
+                                          unavailableWorkspaceTabReason
+                                        )
+                                      ) : (
+                                        <ChatPage scrollContainerRef={contentPanelRef} />
+                                      )}
                                     </ChatViewWorkspace>
                                   ))}
                                 {vm.navItem === DESKTOP_ROUTES.agents && (
@@ -2990,6 +3995,10 @@ export function App() {
                                       <ChatSwitcher
                                         tabs={chatWorkspaceTabs}
                                         activeTabId={drawerActiveChatTabId}
+                                        pendingTabId={pendingWorkspaceTabId}
+                                        loadingTabId={drawerLoadingTabId}
+                                        unavailableTabId={unavailableWorkspaceTabId}
+                                        unavailableReason={unavailableWorkspaceTabReason}
                                         onSelect={handleSelectDrawerChatTab}
                                         onNewChat={handleNewWorkspaceChatTab}
                                         focusRequestId={chatSwitcherFocusRequestId}
@@ -3007,7 +4016,14 @@ export function App() {
                                     width={chatDrawerResize.width}
                                     resizing={chatDrawerResize.isResizing}
                                   >
-                                    <ChatPage scrollContainerRef={chatDrawerRef} />
+                                    {drawerChatAccessPhase ? (
+                                      renderChatTabAccessState(
+                                        drawerChatAccessPhase,
+                                        unavailableWorkspaceTabReason
+                                      )
+                                    ) : (
+                                      <ChatPage scrollContainerRef={chatDrawerRef} />
+                                    )}
                                   </ChatDrawer>
                                 </RightRailShell>
                               )}
