@@ -378,6 +378,24 @@ function stateFor(error: unknown): DirectoryState {
     : { state: 'unknown', code: errorCode(error) }
 }
 
+/**
+ * Only a regular file can be a receipt. Opening a socket fails with an errno
+ * that is not definitive by itself (ENXIO on Linux; on macOS an EOPNOTSUPP that
+ * Node reports as an unknown system error), which would keep the directory as
+ * unknown forever; after such a failure the type of the name is the answer.
+ * The type is read only after the open failed, so nothing is opened on the
+ * strength of a check that may be stale.
+ */
+async function metaOpenFailureState(metaPath: string, error: unknown): Promise<DirectoryState> {
+  if (isDefinitiveMismatch(error)) return { state: 'incomplete' }
+  try {
+    if (!(await fs.lstat(metaPath)).isFile()) return { state: 'incomplete' }
+  } catch (lstatError) {
+    return stateFor(lstatError)
+  }
+  return stateFor(error)
+}
+
 /** A removal is proven by ENOENT, not by `fs.rm` returning. */
 async function assertAbsent(target: string): Promise<void> {
   try {
@@ -1512,14 +1530,6 @@ export class GfsDownloadStore {
     }
     if (!info.isDirectory()) return { state: 'incomplete' }
     const metaPath = path.join(directory, META_FILE)
-    try {
-      // Only a regular file can be a receipt. Opening a socket fails with an
-      // errno that is not definitive (ENXIO, EOPNOTSUPP), which would keep the
-      // directory as unknown forever; its type is the answer.
-      if (!(await fs.lstat(metaPath)).isFile()) return { state: 'incomplete' }
-    } catch (error) {
-      return stateFor(error)
-    }
     let raw: string
     try {
       // Anything in the tree may have been replaced from a shell. A FIFO with
@@ -1538,7 +1548,7 @@ export class GfsDownloadStore {
         await handle.close()
       }
     } catch (error) {
-      return stateFor(error)
+      return metaOpenFailureState(metaPath, error)
     }
     const meta = parseMeta(raw, id, now)
     if (!meta) return { state: 'incomplete' }

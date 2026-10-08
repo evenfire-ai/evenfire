@@ -275,10 +275,11 @@ rename and its delete leaves behind and the next sweep removes.
 
 ### What counts as a complete download
 
-A directory is complete when `meta.json` is a regular file (checked with
-`lstat` before it is opened, so a socket, FIFO, device, directory or symlink
-makes the directory incomplete) of at most the metadata size limit, opens
-without following a symlink, and parses as a schema-1
+A directory is complete when `meta.json` opens without following a symlink
+and without blocking, the opened descriptor is a regular file of at most the
+metadata size limit (a FIFO, device or directory makes the directory
+incomplete; a socket, which cannot be opened, is classified by `lstat` only
+after the open failed), and it parses as a schema-1
 receipt for the directory's own ID; its source fields, size, digest and dates
 are well formed; the size is within the GFS admission limit; `expiresAt` is not
 before `createdAt` and not later than `createdAt` plus the retention period; and
