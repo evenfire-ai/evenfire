@@ -158,3 +158,47 @@ export async function setupInvitationPassword(
     return { error: 'invalid_password' }
   }
 }
+
+export async function setupInvitationPasswordWithToken(
+  token: string,
+  email: string,
+  invitationId: string,
+  password: string
+): Promise<{
+  error?:
+    | 'not_found'
+    | 'forbidden'
+    | 'not_accepted'
+    | 'not_pending'
+    | 'expired'
+    | 'invalid_invitation'
+    | 'invalid_password'
+  data?: InvitationPreview & { passwordUpdated: boolean; token: string }
+}> {
+  try {
+    const data = await controlApiRequest<
+      InvitationPreview & { passwordUpdated: boolean; token: string }
+    >('POST', '/external/invitations/password-token', {
+      body: { email, token, invitationId, password },
+    })
+    return { data }
+  } catch (error) {
+    if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
+    if (
+      error instanceof ControlApiError &&
+      error.status === 400 &&
+      error.body &&
+      typeof error.body === 'object' &&
+      'error' in error.body &&
+      error.body.error === 'invalid_invitation'
+    ) {
+      return { error: 'invalid_invitation' }
+    }
+    const message = error instanceof Error ? error.message : ''
+    if (message.includes('(404)')) return { error: 'not_found' }
+    if (message.includes('(403)')) return { error: 'forbidden' }
+    if (message.includes('(409)')) return { error: 'not_pending' }
+    if (message.includes('(410)')) return { error: 'expired' }
+    return { error: 'invalid_password' }
+  }
+}
