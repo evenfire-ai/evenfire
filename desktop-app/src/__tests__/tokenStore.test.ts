@@ -60,6 +60,41 @@ beforeEach(async () => {
 })
 
 describe('TokenStore per-environment slots (spec §5.2)', () => {
+  it('only permits Keytar replacement for the active account when no files failed', async () => {
+    const { SessionTokenStorageClearError } = await import('../tokenStore.js')
+    const activeAccount = `${LEGACY_ACCOUNT}::${ENV_A}`
+    const activeFailure = new SessionTokenStorageClearError(
+      [new Error('keychain locked')],
+      [activeAccount],
+      0
+    )
+    const otherAccountFailure = new SessionTokenStorageClearError(
+      [new Error('keychain locked')],
+      [`${LEGACY_ACCOUNT}::${ENV_B}`],
+      0
+    )
+    const additionalAccountFailure = new SessionTokenStorageClearError(
+      [new Error('keychain locked')],
+      [activeAccount, `${LEGACY_ACCOUNT}::${ENV_B}`],
+      0
+    )
+    const fileFailure = new SessionTokenStorageClearError(
+      [new Error('keychain locked'), new Error('file locked')],
+      [activeAccount],
+      1
+    )
+    const noKeytarFailure = new SessionTokenStorageClearError([], [], 0)
+
+    expect(activeFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(true)
+    expect(activeFailure.canUseFileFallbackWhileMarkerRemains()).toBe(true)
+    expect(otherAccountFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
+    expect(additionalAccountFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
+    expect(fileFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
+    expect(fileFailure.canUseFileFallbackWhileMarkerRemains()).toBe(false)
+    expect(noKeytarFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
+    expect(noKeytarFailure.canUseFileFallbackWhileMarkerRemains()).toBe(false)
+  })
+
   it('rejects new operations after the TokenStore drain begins', async () => {
     const keytar = await import('keytar')
     let finishWrite!: () => void

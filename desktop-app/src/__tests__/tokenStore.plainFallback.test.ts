@@ -34,6 +34,16 @@ afterEach(async () => {
 })
 
 describe('TokenStore plain-text fallback (no keytar, no safeStorage)', () => {
+  it('does not use file fallback when Keytar replacement is required but Keytar is absent', async () => {
+    const store = new TokenStore()
+
+    await expect(
+      store.setSessionToken('fresh-token', ENV_A, { requireKeytar: true })
+    ).rejects.toThrow('Keytar is unavailable during session-token replacement')
+
+    expect(await fs.readdir(userDataDir)).toEqual([])
+  })
+
   it('reads back a token it wrote to the per-env plain-text file (restart survival)', async () => {
     const store = new TokenStore()
     await store.setSessionToken('tok-a', ENV_A)

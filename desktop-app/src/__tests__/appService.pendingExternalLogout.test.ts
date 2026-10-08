@@ -331,6 +331,29 @@ describe('AppService pending external logout', () => {
     expect(internals(service).sessionToken).toBe(loginResult.token)
   })
 
+  it('falls back to a verified file when required Keytar replacement also fails', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const keytar = await import('keytar')
+    const account = `session-token::${activeEnvKey}`
+    vi.mocked(keytar.getPassword).mockRejectedValue(new Error('keychain unavailable'))
+    vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain unavailable'))
+    vi.mocked(keytar.deletePassword).mockImplementation(async (_service, deletedAccount) => {
+      if (deletedAccount === account) throw new Error('keychain unavailable')
+      return false
+    })
+
+    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+    expect(keytar.setPassword).toHaveBeenCalledWith('Evenfire', account, loginResult.token)
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(loginResult.token)
+  })
+
   it('allows file-backed login when the whole Keytar store fails and retains the marker', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
