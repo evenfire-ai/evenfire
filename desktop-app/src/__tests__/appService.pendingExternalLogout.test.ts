@@ -423,15 +423,24 @@ describe('AppService pending external logout', () => {
     expect(clearToken).not.toHaveBeenCalled()
   })
 
-  it('does not record a marker for an unrelated shutdown-shaped error', async () => {
+  it('does not record a marker for an unrelated shutdown-shaped producer error', async () => {
     const { service } = createService()
-    vi.spyOn(internals(service), 'runCredentialProducer').mockRejectedValue(
+    const state = service as unknown as {
+      sessionToken: string | null
+      me: unknown
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    state.sessionToken = 'active-session-token'
+    state.me = loginResult.me
+    vi.spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary').mockRejectedValue(
       new Error('Application is shutting down')
     )
 
     await expect(service.logout()).rejects.toThrow('Application is shutting down')
 
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(state.sessionToken).toBe('active-session-token')
+    expect(state.me).toEqual(loginResult.me)
   })
 
   it('does not let environment B consume environment A logout intent', async () => {

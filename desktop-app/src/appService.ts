@@ -2409,10 +2409,8 @@ export class AppService {
     const envKey = getActiveEnvKey()
     return this.runCredentialProducer(
       () => this.logoutOnce(),
-      error => {
-        if (error instanceof QuitAdmissionClosedError) {
-          recordPendingExternalLogout(this.getUserDataDirectory(), envKey)
-        }
+      () => {
+        recordPendingExternalLogout(this.getUserDataDirectory(), envKey)
       }
     )
   }
