@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { createPrivateKey, generateKeyPairSync } from 'node:crypto'
 import { BasicSafety, createPrivateKeyBlockTracker } from '../safety'
 
 describe('BasicSafety', () => {
@@ -1239,6 +1240,70 @@ describe('BasicSafety', () => {
       const text = `${pem(lines, { end: false })}\n\nThanks everyone\n${footer()}`
       const result = expectRedacted(text, lines)
       expect(result.content).toBe('[REDACTED]\n\nThanks everyone\n[REDACTED]')
+    })
+
+    describe('irregular line widths between a header and a footer', () => {
+      // A real key from node:crypto, so a parser shows the rewrapped text is
+      // still a key. Nothing here prints it.
+      const exported = generateKeyPairSync('rsa', { modulusLength: 2048 })
+        .privateKey.export({ type: 'pkcs8', format: 'pem' })
+        .toString()
+        .trim()
+        .split('\n')
+      const body = exported.slice(1, -1).join('')
+
+      /** The body rewrapped so its lines take `widths` in turn. */
+      function rewrap(widths: number[]): string[] {
+        const lines: string[] = []
+        for (let at = 0, n = 0; at < body.length; n++) {
+          const width = widths[n % widths.length]
+          lines.push(body.slice(at, at + width))
+          at += width
+        }
+        return lines
+      }
+
+      function key(lines: string[]): string {
+        const text = [exported[0], ...lines, exported[exported.length - 1]].join('\n')
+        expect(createPrivateKey(text).asymmetricKeyType).toBe('rsa')
+        return text
+      }
+
+      it.each([
+        ['64/20', [64, 20]],
+        ['70/70/70/69', [70, 70, 70, 69]],
+        ['76/40', [76, 40]],
+      ])('redacts a parseable key wrapped %s', (_name, widths) => {
+        const lines = rewrap(widths)
+        expect(expectRedacted(`before\n${key(lines)}\nafter`, lines).content).toBe(
+          'before\n[REDACTED]\nafter'
+        )
+      })
+
+      it('redacts a key wrapped 64/20 inside JSON', () => {
+        const lines = rewrap([64, 20])
+        const text = JSON.stringify({ a: key(lines), b: 'KEEP THIS PROSE' })
+        const result = expectRedacted(text, lines)
+        expect(JSON.parse(result.content)).toEqual({ a: '[REDACTED]', b: 'KEEP THIS PROSE' })
+      })
+
+      it('reads back from the footer past prose inside the block', () => {
+        const lines = rewrap([64, 20])
+        const text = [
+          exported[0],
+          ...lines.slice(0, 6),
+          'Thanks everyone',
+          ...lines.slice(6),
+          exported[exported.length - 1],
+        ].join('\n')
+        expect(expectRedacted(text, lines).content).toBe('[REDACTED]\nThanks everyone\n[REDACTED]')
+      })
+
+      it('redacts a flattened key with words of irregular length', () => {
+        const words = [bodyLine(1, 64), bodyLine(2, 20), bodyLine(3, 64), bodyLine(4, 9)]
+        const text = `before ${header()} ${words.join(' ')} ${footer()} after`
+        expect(expectRedacted(text, words).content).toBe('before [REDACTED] after')
+      })
     })
 
     it('redacts interleaved keys of different labels', () => {

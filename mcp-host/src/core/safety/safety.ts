@@ -686,11 +686,14 @@ function metadataLineAt(
 /**
  * Where the key that starts with `header` ends.
  *
- * The body runs while its lines keep the length `L` of the first one; the
+ * When the next marker is a footer (`bracketed`), the body is every armor line
+ * up to it, at any length, because a parser accepts any wrapping. Otherwise
+ * the body runs while its lines keep the length `L` of the first one; the
  * first shorter line is the last line and is included. So a truncated key
  * without a footer takes at most one more line after a full-length one: a
  * line of base64 alone whose length is `L` cannot be told apart from the body.
- * A checksum line and a footer of any label may follow. When the header's line
+ * In both cases prose ends the body. A checksum line and a footer of any label
+ * may follow. When the header's line
  * has a prefix (`linePrefixShape`) and the next line starts with the same
  * shape, every line of the block must carry it, and a line without it ends
  * the block.
@@ -699,13 +702,14 @@ function privateKeyEndAfter(
   text: string,
   header: PrivateKeyMarker,
   footerEnds: Map<number, number>,
-  markerStarts: Set<number>
+  markerStarts: Set<number>,
+  bracketed: boolean
 ): number {
   let end = header.end
   let i = skipBlanks(text, header.end)
   const footerEnd = footerEnds.get(i)
   if (footerEnd !== undefined) return footerEnd
-  if (base64At(text, i) > 0) return flattenedKeyEnd(text, i, footerEnds)
+  if (base64At(text, i) > 0) return flattenedKeyEnd(text, i, footerEnds, bracketed)
   const separator = separatorAt(text, i)
   if (separator === 0) return end
   i += separator
@@ -735,12 +739,14 @@ function privateKeyEndAfter(
     const line = armorLineAt(text, i, footerEnds)
     if (!line || line.kind === 'prose') break
     if (line.kind === 'glued') return footerEnds.get(line.end) ?? line.end
-    if (bodyLength < 0) bodyLength = line.length
-    else if (line.length > bodyLength) break
+    if (!bracketed) {
+      if (bodyLength < 0) bodyLength = line.length
+      else if (line.length > bodyLength) break
+    }
     end = line.end
     if (line.footerEnd !== undefined) return line.footerEnd
     lastAfter = line.after
-    if (line.length < bodyLength) break
+    if (!bracketed && line.length < bodyLength) break
     const separators = separatorsFrom(text, line.after, shape)
     if (separators.count === 0) return end
     if (unit < 0) unit = separators.count
@@ -764,11 +770,16 @@ function privateKeyEndAfter(
 /**
  * A key flattened onto the header's own line (`echo $KEY`, or no separator
  * at all): base64 words separated by blanks, with the same length rule as
- * lines, never crossing a line separator.
+ * lines (none when `bracketed`), never crossing a line separator.
  */
-function flattenedKeyEnd(text: string, i: number, footerEnds: Map<number, number>): number {
+function flattenedKeyEnd(
+  text: string,
+  i: number,
+  footerEnds: Map<number, number>,
+  bracketed: boolean
+): number {
   let end = i
-  let wordLength = -1
+  let wordLength = bracketed ? Infinity : -1
   for (;;) {
     const { end: wordEnd, length } = base64RunFrom(text, i)
     if (wordLength < 0) wordLength = length
@@ -779,7 +790,8 @@ function flattenedKeyEnd(text: string, i: number, footerEnds: Map<number, number
     const next = skipBlanks(text, wordEnd)
     const footerEnd = footerEnds.get(next)
     if (next > wordEnd && footerEnd !== undefined) return footerEnd
-    if (length < wordLength || next === wordEnd || base64At(text, next) === 0) return end
+    if ((!bracketed && length < wordLength) || next === wordEnd || base64At(text, next) === 0)
+      return end
     i = next
   }
 }
@@ -790,11 +802,12 @@ function flattenedKeyEnd(text: string, i: number, footerEnds: Map<number, number
  * mid-key). Read backwards: an optional checksum line, the last body line at
  * any length, then lines of the length `L` of the line before the last one.
  * A line that breaks the rule adds only its base64 suffix glued to another
- * character; a shorter line is taken only where the text starts. A prefix on
- * the footer's line is followed upwards as `privateKeyEndAfter` follows it
- * downwards.
+ * character; a shorter line is taken only where the text starts. When the
+ * previous marker is a header (`bracketed`), lines of any length are taken. A
+ * prefix on the footer's line is followed upwards as `privateKeyEndAfter`
+ * follows it downwards.
  */
-function privateKeyStartBefore(text: string, footerStart: number): number {
+function privateKeyStartBefore(text: string, footerStart: number, bracketed: boolean): number {
   let start = footerStart
   let line: ReturnType<typeof armorLineBefore> = null
   let shape = linePrefixShape(text, footerStart)
@@ -836,7 +849,7 @@ function privateKeyStartBefore(text: string, footerStart: number): number {
     if (!line || line.kind === 'prose') return start
     if (line.kind === 'glued') return line.start
     if (bodyLength < 0) bodyLength = line.length
-    else if (line.length !== bodyLength) {
+    else if (!bracketed && line.length !== bodyLength) {
       return line.length < bodyLength && line.lineStart === 0 ? line.start : start
     }
     start = line.start
@@ -846,29 +859,44 @@ function privateKeyStartBefore(text: string, footerStart: number): number {
 /**
  * Each private key block: from every header forward (`privateKeyEndAfter`),
  * then from every footer no such block covers backward
- * (`privateKeyStartBefore`); blocks that overlap or touch are joined. Every
- * scan stops at the first character outside the armor, so scans in one
- * direction never overlap and the cost is linear in the text.
+ * (`privateKeyStartBefore`); blocks that overlap or touch are joined. A
+ * header whose next marker is a footer brackets a block, and both scans drop
+ * the line length rule inside it. Every scan stops at the first character
+ * outside the armor, so scans in one direction never overlap: the scans are
+ * linear in the text, plus sorting the markers and blocks.
  */
 function privateKeyMatches(text: string): Array<[number, number]> {
   const headers = privateKeyMarkers(text, PRIVATE_KEY_HEADER_SOURCE)
   const footers = privateKeyMarkers(text, PRIVATE_KEY_FOOTER_SOURCE)
   if (headers.length === 0 && footers.length === 0) return []
   const footerEnds = new Map(footers.map(footer => [footer.start, footer.end]))
-  const markerStarts = new Set([...headers, ...footers].map(marker => marker.start))
+  const markers = [...headers, ...footers].sort((a, b) => a.start - b.start)
+  const markerStarts = new Set(markers.map(marker => marker.start))
+  const bracketed = new Set<number>()
+  for (let n = 1; n < markers.length; n++) {
+    if (footerEnds.has(markers[n].start) && !footerEnds.has(markers[n - 1].start)) {
+      bracketed.add(markers[n - 1].start).add(markers[n].start)
+    }
+  }
 
   const blocks: Array<[number, number]> = []
   for (const header of headers) {
     const last = blocks[blocks.length - 1]
     if (last && header.start < last[1]) continue
-    blocks.push([header.start, privateKeyEndAfter(text, header, footerEnds, markerStarts)])
+    blocks.push([
+      header.start,
+      privateKeyEndAfter(text, header, footerEnds, markerStarts, bracketed.has(header.start)),
+    ])
   }
   let covering = 0
   const forward = blocks.length
   for (const footer of footers) {
     while (covering < forward && blocks[covering][1] <= footer.start) covering++
     if (covering < forward && blocks[covering][0] <= footer.start) continue
-    blocks.push([privateKeyStartBefore(text, footer.start), footer.end])
+    blocks.push([
+      privateKeyStartBefore(text, footer.start, bracketed.has(footer.start)),
+      footer.end,
+    ])
   }
 
   blocks.sort((a, b) => a[0] - b[0])

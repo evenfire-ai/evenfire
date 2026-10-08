@@ -188,6 +188,30 @@
     "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker finds the longest header fed one character per chunk"
   },
   {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) irregular line widths between a header and a footer redacts a parseable key wrapped 64/20"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) irregular line widths between a header and a footer redacts a parseable key wrapped 70/70/70/69"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) irregular line widths between a header and a footer redacts a parseable key wrapped 76/40"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) irregular line widths between a header and a footer redacts a key wrapped 64/20 inside JSON"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) irregular line widths between a header and a footer reads back from the footer past prose inside the block"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) irregular line widths between a header and a footer redacts a flattened key with words of irregular length"
+  },
+  {
     "suite": "attachmentRead.redaction.test.ts",
     "fullName": "a private key split across attachment pages (#1034) a middle page holding only body leaks nothing (footer: false)"
   },
