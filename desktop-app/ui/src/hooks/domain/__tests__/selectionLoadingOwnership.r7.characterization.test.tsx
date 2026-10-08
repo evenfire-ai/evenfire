@@ -352,4 +352,121 @@ describe('Round 7 selection loading ownership', () => {
       controller.unmount()
     }
   })
+
+  it.each(['latest', 'implicit'] as const)(
+    'restores the newest existing chat after a failed create during an unconsumed %s load',
+    async mode => {
+      await clerum.chat.create('agent-x', 'chat-older')
+      await new Promise(resolve => setTimeout(resolve, 5))
+      await clerum.chat.create('agent-x', 'chat-newest')
+      await clerum.chat.upsertMessages('agent-x', 'chat-newest', [
+        { id: 'newest-message', role: 'user', content: 'newest history', timestamp: 3 },
+      ])
+      clerum.chat.getIndex.mockImplementation(agentRef => clerum.readIndex(agentRef))
+      const controller = renderController({ navItem: 'agents', loadMenuData: false })
+      const createError = new Error('local chat creation failed')
+      let observedError: unknown
+      let createPromise!: Promise<void>
+      const heldIndex = deferred<Awaited<ReturnType<typeof clerum.chat.getIndex>>>()
+      let routeIndexReads = 0
+
+      try {
+        await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+        clerum.chat.getIndex.mockImplementation(agentRef => {
+          routeIndexReads += 1
+          if (routeIndexReads === 1) return heldIndex.promise
+          return clerum.readIndex(agentRef)
+        })
+        if (mode === 'latest') {
+          act(() =>
+            controller.result.current.setPendingChatSelection('agent-x', null, {
+              selectLatest: true,
+            })
+          )
+        }
+        await act(async () => {
+          controller.rerender({ navItem: 'chat' })
+        })
+        await waitFor(() => expect(routeIndexReads).toBe(1))
+
+        clerum.chat.create.mockRejectedValueOnce(createError)
+        act(() => {
+          createPromise = controller.result.current.handleCreateChat().catch(error => {
+            observedError = error
+          })
+        })
+        await act(async () => {
+          await createPromise
+        })
+        expect(observedError).toBe(createError)
+
+        await waitFor(() => {
+          expect(controller.result.current.activeChatId).toBe('chat-newest')
+          expect(controller.result.current.chatMessages).toEqual(
+            expect.arrayContaining([expect.objectContaining({ id: 'newest-message' })])
+          )
+          expect(controller.result.current.chatMessagesLoading).toBe(false)
+        })
+
+        await act(async () => {
+          heldIndex.resolve(await clerum.readIndex('agent-x'))
+        })
+        expect(controller.result.current.activeChatId).toBe('chat-newest')
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+      } finally {
+        heldIndex.resolve(await clerum.readIndex('agent-x'))
+        controller.unmount()
+      }
+    }
+  )
+
+  it('keeps the chat blank after a failed create when no latest chat exists', async () => {
+    clerum.chat.getIndex.mockImplementation(agentRef => clerum.readIndex(agentRef))
+    const controller = renderController({ navItem: 'agents', loadMenuData: false })
+    const createError = new Error('local chat creation failed')
+    const heldIndex = deferred<Awaited<ReturnType<typeof clerum.chat.getIndex>>>()
+    let routeIndexReads = 0
+    let observedError: unknown
+    let createPromise!: Promise<void>
+
+    try {
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      clerum.chat.getIndex.mockImplementation(agentRef => {
+        routeIndexReads += 1
+        if (routeIndexReads === 1) return heldIndex.promise
+        return clerum.readIndex(agentRef)
+      })
+      await act(async () => {
+        controller.rerender({ navItem: 'chat' })
+      })
+      await waitFor(() => expect(routeIndexReads).toBe(1))
+
+      clerum.chat.create.mockRejectedValueOnce(createError)
+      act(() => {
+        createPromise = controller.result.current.handleCreateChat().catch(error => {
+          observedError = error
+        })
+      })
+      await act(async () => {
+        await createPromise
+      })
+      expect(observedError).toBe(createError)
+
+      await waitFor(() => {
+        expect(controller.result.current.activeChatId).toBeNull()
+        expect(controller.result.current.chatMessages).toEqual([])
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+        expect(controller.result.current.chatListLoading).toBe(false)
+      })
+
+      await act(async () => {
+        heldIndex.resolve(await clerum.readIndex('agent-x'))
+      })
+      expect(controller.result.current.activeChatId).toBeNull()
+      expect(controller.result.current.chatMessages).toEqual([])
+    } finally {
+      heldIndex.resolve(await clerum.readIndex('agent-x'))
+      controller.unmount()
+    }
+  })
 })
