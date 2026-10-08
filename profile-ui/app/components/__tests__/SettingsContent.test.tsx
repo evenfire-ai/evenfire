@@ -15,7 +15,6 @@ const mocks = vi.hoisted(() => ({
   getConfiguredExternalRestApiBaseUrl: vi.fn(),
   getDesktopEnvironment: vi.fn(),
   getMe: vi.fn(),
-  isDesktopEnvironmentHandoffEnabled: vi.fn(),
   isSilentApiError: vi.fn(),
   listWorkflowApprovalMediums: vi.fn(),
   logout: vi.fn(),
@@ -108,11 +107,14 @@ vi.mock('@lib/approvalChannels', () => ({
   listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
 }))
 
-vi.mock('@lib/desktopAppLinks', () => ({
-  buildDesktopEnvironmentLink: mocks.buildDesktopEnvironmentLink,
-  isDesktopEnvironmentHandoffEnabled: mocks.isDesktopEnvironmentHandoffEnabled,
-  navigateToDesktopApp: mocks.navigateToDesktopApp,
-}))
+vi.mock('@lib/desktopAppLinks', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/desktopAppLinks')>()
+  return {
+    ...actual,
+    buildDesktopEnvironmentLink: mocks.buildDesktopEnvironmentLink,
+    navigateToDesktopApp: mocks.navigateToDesktopApp,
+  }
+})
 
 vi.mock('@lib/releaseIdentity', () => ({
   refreshReleaseIdentity: mocks.refreshReleaseIdentity,
@@ -120,17 +122,20 @@ vi.mock('@lib/releaseIdentity', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'true')
   mocks.buildDesktopEnvironmentLink.mockReturnValue(null)
   mocks.getConfiguredExternalRestApiBaseUrl.mockReturnValue('https://api.example.com')
   mocks.getDesktopEnvironment.mockResolvedValue(desktopEnvironment)
   mocks.getMe.mockResolvedValue(currentUser)
-  mocks.isDesktopEnvironmentHandoffEnabled.mockReturnValue(true)
   mocks.isSilentApiError.mockReturnValue(false)
   mocks.listWorkflowApprovalMediums.mockResolvedValue([])
   mocks.refreshApprovalTargets.mockResolvedValue([])
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllEnvs()
+})
 
 describe('Settings desktop setup handoff', () => {
   it('uses the shared desktop environment link builder', async () => {
@@ -156,7 +161,7 @@ describe('Settings desktop setup handoff', () => {
   })
 
   it('keeps manual REST setup available while automatic handoff is disabled', async () => {
-    mocks.isDesktopEnvironmentHandoffEnabled.mockReturnValue(false)
+    vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'false')
 
     render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
 
