@@ -146,8 +146,12 @@ export interface ModelStepContinuationRef {
 export type ModelStepContinuationVerdict =
   | { kind: 'started' }
   | { kind: 'blocked'; blockedReason: ModelStepBlockedReason }
-  /** Revalidation could not run (transient GFS or credentials); still resumable. */
-  | { kind: 'check_unavailable' }
+  /**
+   * The file-reference check failed exactly as it fails at message admission;
+   * the claim was released (checkpoint resumable again) and the task fails
+   * with the admission's file-reference error.
+   */
+  | { kind: 'reference_check_failed' }
   /** The fence was lost or preparation failed; the checkpoint is no longer offered. */
   | { kind: 'lost' }
 

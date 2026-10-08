@@ -61,7 +61,6 @@ describe('model-step checkpoint wire vectors', () => {
   it('ships one session view per visible status and one continue response per POST row', () => {
     expect(files.sort()).toEqual([
       'continue-response.blocked.json',
-      'continue-response.check-unavailable.json',
       'continue-response.claimed.json',
       'continue-response.completed.json',
       'continue-response.not-found.json',
@@ -93,9 +92,6 @@ describe('model-step checkpoint wire vectors', () => {
     const completed = readVector('continue-response.completed.json') as typeof claimed
     const mismatch = readVector('continue-response.version-mismatch.json') as typeof claimed
     const blocked = readVector('continue-response.blocked.json') as typeof claimed
-    const checkUnavailable = readVector(
-      'continue-response.check-unavailable.json'
-    ) as typeof claimed
     const notFound = readVector('continue-response.not-found.json') as typeof claimed
 
     expect([claimed.httpStatus, claimed.body.status, claimed.body.replayed]).toEqual([
@@ -129,12 +125,6 @@ describe('model-step checkpoint wire vectors', () => {
     expect(blocked.httpStatus).toBe(409)
     expect(blocked.body.code).toBe(MODEL_STEP_CONTINUE_ERROR_CODES.blocked)
     expect(MODEL_STEP_BLOCKED_REASONS).toContain(blocked.body.blockedReason)
-    // Row 6b: the claim is released, which bumps the version, so the body
-    // carries the resumable view the client retries against.
-    expect(checkUnavailable.httpStatus).toBe(503)
-    expect(checkUnavailable.body.code).toBe(MODEL_STEP_CONTINUE_ERROR_CODES.checkUnavailable)
-    assertView(checkUnavailable.body.current)
-    expect(checkUnavailable.body.current.status).toBe('resumable')
     expect(notFound.httpStatus).toBe(404)
     expect(notFound.body).toEqual({ code: MODEL_STEP_CONTINUE_ERROR_CODES.notFound })
   })

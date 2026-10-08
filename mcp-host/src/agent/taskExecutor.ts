@@ -146,7 +146,11 @@ import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
 import type { FileReferenceGfsAccess } from './fileReferenceGfsGate'
-import { referencedFilesForTurnContext, resolveFileReferences } from './fileReferenceResolver'
+import {
+  type FileReferenceCheckFailure,
+  referencedFilesForTurnContext,
+  resolveFileReferences,
+} from './fileReferenceResolver'
 import {
   GFS_SYSTEM_CALLER_IDENTITY,
   gfsManagedWorkspaceExecution,
@@ -154,6 +158,7 @@ import {
 } from './gfsExecutionCapability'
 import { hasLargeAvailableGfsReferences, prepareGfsFiles } from './gfsFilePreparation'
 import type { GfsSurfaceRuntimeCapability } from './gfsReferenceSurfaces'
+import { fileReferenceCheckError } from './incomingAdmission'
 import { inlineFileAttachmentBytes } from './modelStepCheckpointAttachments'
 import {
   type ProviderWorkflowAccessDenialReason,
@@ -692,28 +697,27 @@ export class TaskExecutor {
   }
 
   private failContinuationPreparation(
-    verdict: Exclude<ModelStepContinuationVerdict, { kind: 'started' }>
+    verdict: Exclude<ModelStepContinuationVerdict, { kind: 'started' | 'reference_check_failed' }>
   ): void {
     const continuation = this.task.modelStepContinuation!
     this.emitContinuationVerdict(verdict)
     this.state = 'failed'
-    const code =
+    this.deps.onFail(
+      this.task,
       verdict.kind === 'blocked'
-        ? MODEL_STEP_CONTINUE_ERROR_CODES.blocked
-        : verdict.kind === 'check_unavailable'
-          ? MODEL_STEP_CONTINUE_ERROR_CODES.checkUnavailable
-          : MODEL_STEP_CONTINUE_ERROR_CODES.notFound
-    this.deps.onFail(this.task, {
-      code,
-      message:
-        verdict.kind === 'blocked'
-          ? `Model-step continuation is blocked: ${verdict.blockedReason}.`
-          : verdict.kind === 'check_unavailable'
-            ? 'Referenced files could not be checked. Retry the model step later.'
-            : 'The model-step checkpoint is no longer available.',
-      retryable: verdict.kind === 'check_unavailable',
-      provider: continuation.provider,
-    })
+        ? {
+            code: MODEL_STEP_CONTINUE_ERROR_CODES.blocked,
+            message: `Model-step continuation is blocked: ${verdict.blockedReason}.`,
+            retryable: false,
+            provider: continuation.provider,
+          }
+        : {
+            code: MODEL_STEP_CONTINUE_ERROR_CODES.notFound,
+            message: 'The model-step checkpoint is no longer available.',
+            retryable: false,
+            provider: continuation.provider,
+          }
+    )
   }
 
   private async blockModelStepContinuation(blockedReason: ModelStepBlockedReason): Promise<void> {
@@ -800,10 +804,16 @@ export class TaskExecutor {
               support.gfsSurfaceRuntimeCapability(message)
             )
       if (!resolved.ok) {
-        if (resolved.failure !== 'transient' && resolved.failure !== 'credentials') {
-          throw new Error(`Model-step file-reference check failed: ${resolved.failure}`)
-        }
-        await this.releaseUnavailableContinuationCheck(sessionKey, attachments)
+        logger.warn(
+          {
+            taskId: this.taskId,
+            checkpointId: continuation.checkpointId,
+            failure: resolved.failure,
+            errorClass: resolved.errorClass,
+          },
+          'Model-step continuation file-reference check failed'
+        )
+        await this.releaseClaimAfterReferenceCheckFailure(sessionKey, attachments, resolved.failure)
         return undefined
       }
       const wasAvailable = new Set(
@@ -976,9 +986,15 @@ export class TaskExecutor {
     return true
   }
 
-  private async releaseUnavailableContinuationCheck(
+  /**
+   * A file-reference check that cannot complete is handled as message
+   * admission handles it: the turn is refused with the same error. The claim
+   * goes back to `resumable` so Retry model step stays offered.
+   */
+  private async releaseClaimAfterReferenceCheckFailure(
     sessionKey: string,
-    attachments: ModelStepCheckpointAttachmentRow[]
+    attachments: ModelStepCheckpointAttachmentRow[],
+    failure: FileReferenceCheckFailure
   ): Promise<void> {
     const continuation = this.task.modelStepContinuation!
     const support = this.deps.modelStepCheckpoints!
@@ -1017,9 +1033,13 @@ export class TaskExecutor {
           }
         : {}),
     })
-    this.failContinuationPreparation(
-      version === null ? { kind: 'lost' } : { kind: 'check_unavailable' }
-    )
+    if (version === null) {
+      this.failContinuationPreparation({ kind: 'lost' })
+      return
+    }
+    this.emitContinuationVerdict({ kind: 'reference_check_failed' })
+    this.state = 'failed'
+    this.deps.onFail(this.task, fileReferenceCheckError(failure, continuation.provider))
   }
 
   private rebuildCheckpointMessages(

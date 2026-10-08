@@ -134,10 +134,6 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
       response: readVector('continue-response.version-mismatch.json'),
     },
     {
-      name: 'check-unavailable (503)',
-      response: readVector('continue-response.check-unavailable.json'),
-    },
-    {
       name: 'host_draining (503)',
       response: { httpStatus: 503, body: { code: 'host_draining', retryAfterMs: 1000 } },
     },

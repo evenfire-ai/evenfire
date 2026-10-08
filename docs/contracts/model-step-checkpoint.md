@@ -63,7 +63,6 @@ The status is checked first. The version is compared only when the status is `re
 | 4 | `blocked` | `409 { code: "model_step_checkpoint_blocked", blockedReason }` | `continue-response.blocked.json` |
 | 5 | `resumable`, other version | `409 { code: "model_step_checkpoint_version_mismatch", current: <view> }` | `continue-response.version-mismatch.json` |
 | 6 | `resumable`, same version, revalidation fails | `409 { code: "model_step_checkpoint_blocked", blockedReason }`; the checkpoint becomes `blocked` | `continue-response.blocked.json` |
-| 6b | `resumable`, same version, revalidation could not run (transient GFS or credential failure) | `503 { code: "model_step_checkpoint_check_unavailable", current: <view> }`; the claim is released and the checkpoint is `resumable` again under a new version (every transition bumps it), so the client retries with `current.version` | `continue-response.check-unavailable.json` |
 | 7 | `resumable`, same version, claim won | `202 { taskId, checkpointId, status: "claimed", replayed: false }` | `continue-response.claimed.json` |
 
 Every claim creates a new task id: the task lifecycle refuses a terminal id. "The same

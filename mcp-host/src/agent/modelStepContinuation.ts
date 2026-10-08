@@ -22,7 +22,7 @@ export interface ModelStepContinuationRequest {
 }
 
 export interface ModelStepContinuationResult {
-  status: 200 | 202 | 404 | 409 | 503
+  status: 200 | 202 | 404 | 409
   body: ModelStepContinueResponse
 }
 
@@ -202,16 +202,10 @@ export class ModelStepContinuationService {
         },
       }
     }
-    if (verdict?.kind === 'check_unavailable') {
-      const snapshot = await checkpoints.store.loadLive(sessionKey)
-      const current =
-        snapshot?.header.checkpoint_id === request.checkpointId
-          ? toModelStepCheckpointView(snapshot)
-          : undefined
-      return current
-        ? { status: 503, body: { code: MODEL_STEP_CONTINUE_ERROR_CODES.checkUnavailable, current } }
-        : notFound()
-    }
+    // `started`, `reference_check_failed` and no verdict yet all answer 202:
+    // the task exists and its outcome (including a file-reference error,
+    // reported exactly as message admission reports it) arrives through the
+    // ordinary async task result.
     return {
       status: 202,
       body: {
