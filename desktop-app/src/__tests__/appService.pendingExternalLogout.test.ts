@@ -580,7 +580,7 @@ describe('AppService pending external logout', () => {
 
   it('fails closed without Keytar or safeStorage instead of writing a plaintext fallback', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
-    const { service, tokenStore } = createService()
+    const { service } = createService()
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
     const keytar = await import('keytar')
