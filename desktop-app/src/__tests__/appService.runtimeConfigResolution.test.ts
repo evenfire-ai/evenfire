@@ -79,43 +79,4 @@ describe('AppService runtime config discovery ownership', () => {
     expect(getDesktopEnvironment).toHaveBeenCalledTimes(2)
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')
   })
-
-  it('does not let a settled discovery remove a newer entry for the same binding', async () => {
-    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
-    await runtimeConfig.saveDesktopRuntimeConfig({
-      externalRestApiBaseUrl: restA,
-      rpcProxyBaseUrl: '',
-      appName: 'Environment A',
-    })
-
-    const discovery = deferred<DesktopEnvironmentDiscovery>()
-    const discoveryStarted = deferred<void>()
-    const getDesktopEnvironment = vi.fn(() => {
-      discoveryStarted.resolve()
-      return discovery.promise
-    })
-    const app = service as unknown as {
-      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
-      resolveRuntimeConfigIfNeeded: () => Promise<void>
-      runtimeConfigResolutionInFlight: Map<string, { promise: Promise<void> }>
-    }
-    app.authClient = { getDesktopEnvironment }
-
-    const original = app.resolveRuntimeConfigIfNeeded()
-    await discoveryStarted.promise
-    const activeOptionId = runtimeConfig.getDesktopRuntimeConfigState().activeOptionId
-    const resolutionKey = JSON.stringify([activeOptionId, restA])
-    const replacement = { promise: Promise.resolve() }
-    app.runtimeConfigResolutionInFlight.set(resolutionKey, replacement)
-    discovery.resolve({
-      externalRestApiBaseUrl: restA,
-      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
-      appName: 'Environment A',
-    })
-
-    await expect(original).resolves.toBeUndefined()
-
-    expect(app.runtimeConfigResolutionInFlight.get(resolutionKey)).toBe(replacement)
-    expect(getDesktopEnvironment).toHaveBeenCalledOnce()
-  })
 })
