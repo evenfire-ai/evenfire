@@ -172,6 +172,55 @@ describe('AppService quit producer admission', () => {
     expect(outcome).toEqual({ status: 'fulfilled', value: 'ok:team-b-token' })
   })
 
+  it('queues home-team work behind an admitted hop while quit is preparing', async () => {
+    const firstRead = deferred<string>()
+    const firstReadStarted = deferred<void>()
+    const service = createService()
+    service.quitPreparationStarted = false
+    service.teamContextQueue = Promise.resolve()
+    service.sessionToken = 'team-home-token'
+    service.me = { id: 'user-1', teamId: 'team-home' }
+    service.requireSessionToken = vi.fn(() => service.sessionToken || 'team-home-token')
+    service.getCurrentSessionTeamId = vi.fn(async () => service.me?.teamId || '')
+    service.switchSessionToTeam = vi.fn(async teamId => {
+      service.me!.teamId = teamId
+      service.sessionToken = `${teamId}-token`
+      return service.sessionToken
+    })
+
+    const firstHomeRead = service.runWithTeamContext('team-home', async () => {
+      firstReadStarted.resolve()
+      return firstRead.promise
+    })
+    await firstReadStarted.promise
+    const queuedHop = service.runWithTeamContext('team-a', async token => token)
+    const preparation = service.prepareForQuit()
+    const queuedHomeRead = service.runWithTeamContext('team-home', async token => {
+      return token
+    })
+    const queuedHomeOutcome = queuedHomeRead.then(
+      value => ({ status: 'fulfilled' as const, value }),
+      error => ({ status: 'rejected' as const, error })
+    )
+
+    firstRead.resolve('first-read-complete')
+    await expect(firstHomeRead).resolves.toBe('first-read-complete')
+    await expect(queuedHop).resolves.toBe('team-a-token')
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      queuedHomeOutcome,
+      new Promise<{ status: 'pending' }>(resolve => {
+        timeout = setTimeout(() => resolve({ status: 'pending' }), 100)
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+    expect(outcome).toEqual({ status: 'fulfilled', value: 'team-home-token' })
+    await expect(preparation).resolves.toBeUndefined()
+    service.cancelQuitPreparation()
+
+    expect(service.pendingCredentialProducers.size).toBe(0)
+  })
+
   it('waits for an admitted temporary team hop before draining TokenStore', async () => {
     const operation = deferred<string>()
     const operationStarted = deferred<void>()

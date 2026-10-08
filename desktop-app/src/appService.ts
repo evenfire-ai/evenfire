@@ -1308,11 +1308,11 @@ export class AppService {
       return this.enqueueHomeTeamOperation(activeHop, operation)
     }
 
-    // A queued cross-team hop is admitted at call time, before it can wait
-    // behind another team operation. A request queued behind a possible hop
-    // also reserves admission until its actual team is known.
+    // A request that already targets another team reserves admission at call
+    // time. Queued same-team work remains a nonproducer until it proves it
+    // needs a credential switch after reaching the head of the queue.
     const activeTeamId = String(this.me?.teamId || '').trim()
-    let hasHopReservation = targetTeamId !== activeTeamId || this.pendingTeamContextHops > 0
+    let hasHopReservation = targetTeamId !== activeTeamId
     const earlyProducer = hasHopReservation ? this.admitCredentialProducer() : null
     if (hasHopReservation && !earlyProducer) {
       return Promise.reject(new QuitAdmissionClosedError())
