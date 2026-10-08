@@ -3,8 +3,12 @@ import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook } from '@testing-library/react'
-import type { DesktopRuntimeConfigState } from '../../../../../../src/types'
+import type {
+  DesktopRuntimeConfigHandoffSelection,
+  DesktopRuntimeConfigState,
+} from '../../../../../../src/types'
 import { useAppController } from '../../../useAppController'
+import { wrapLikeElectronIpc } from './ipcErrors'
 import { type MockClerum, installMockClerum } from './mockClerum'
 
 /**
@@ -115,7 +119,22 @@ export interface AppControllerClerumOptions {
   me?: Partial<typeof HARNESS_ME>
   /** Runtime profiles exposed to the desktop-environment handoff flow. */
   runtimeConfigState?: DesktopRuntimeConfigState
+  /** Real main-process producer for auth and runtime-config IPC contract tests. */
+  desktopEnvironmentHandoffProducer?: {
+    getSessionState: () => Promise<{ authenticated: boolean; me: unknown | null }>
+    getSessionGeneration: () => number
+    getRuntimeConfigState: () => DesktopRuntimeConfigState
+    selectRuntimeConfigForHandoff: (
+      optionId: string,
+      expectedGeneration: number
+    ) => Promise<DesktopRuntimeConfigHandoffSelection>
+    logout: () => Promise<number>
+  }
 }
+
+export type AppControllerDesktopEnvironmentHandoffProducer = NonNullable<
+  AppControllerClerumOptions['desktopEnvironmentHandoffProducer']
+>
 
 export interface AppControllerClerumHandle {
   getDependenciesHealth: Fn
@@ -176,6 +195,7 @@ export function extendMockClerumForAppController(
     options: [],
   }
   let sessionMe = { ...HARNESS_ME, ...options.me }
+  const handoffProducer = options.desktopEnvironmentHandoffProducer
   const teamDirectoryPayload = options.teamDirectory ?? {
     items: [],
     currentTeamId: HARNESS_ME.teamId,
@@ -192,6 +212,7 @@ export function extendMockClerumForAppController(
   })
   const getSessionState = vi.fn(async () => {
     if (sessionStateError) throw sessionStateError
+    if (handoffProducer) return handoffProducer.getSessionState()
     return createSessionState(authenticated, sessionMe)
   })
   const passwordLogin = vi.fn(async () => {
@@ -199,11 +220,30 @@ export function extendMockClerumForAppController(
     authenticated = true
     return createSessionState(true, sessionMe)
   })
-  const getSessionGeneration = vi.fn(async () => sessionGeneration)
-  const getRuntimeConfigState = vi.fn(async () => runtimeConfigState)
+  const getSessionGeneration = vi.fn(async () =>
+    handoffProducer ? handoffProducer.getSessionGeneration() : sessionGeneration
+  )
+  const getRuntimeConfigState = vi.fn(async () =>
+    handoffProducer ? handoffProducer.getRuntimeConfigState() : runtimeConfigState
+  )
   const selectRuntimeConfigForHandoff = vi.fn(
     async (optionId: string, expectedGeneration: number) => {
-      if (expectedGeneration !== sessionGeneration) throw new Error('stale_session_generation')
+      if (handoffProducer) {
+        try {
+          return await handoffProducer.selectRuntimeConfigForHandoff(optionId, expectedGeneration)
+        } catch (error) {
+          throw wrapLikeElectronIpc(
+            'auth:selectRuntimeConfigForHandoff',
+            error instanceof Error ? error : new Error(String(error))
+          )
+        }
+      }
+      if (expectedGeneration !== sessionGeneration) {
+        throw wrapLikeElectronIpc(
+          'auth:selectRuntimeConfigForHandoff',
+          new Error('stale_session_generation')
+        )
+      }
       const selected = runtimeConfigState.options.find(option => option.id === optionId)
       if (!selected) throw new Error('runtime configuration not found')
       runtimeConfigState = {
@@ -221,6 +261,18 @@ export function extendMockClerumForAppController(
     }
   )
   const logout = vi.fn(async () => {
+    if (handoffProducer) {
+      try {
+        const generation = await handoffProducer.logout()
+        authenticated = false
+        return { ok: true as const, sessionGeneration: generation }
+      } catch (error) {
+        throw wrapLikeElectronIpc(
+          'auth:logout',
+          error instanceof Error ? error : new Error(String(error))
+        )
+      }
+    }
     authenticated = false
     sessionGeneration += 1
     return { ok: true as const, sessionGeneration }

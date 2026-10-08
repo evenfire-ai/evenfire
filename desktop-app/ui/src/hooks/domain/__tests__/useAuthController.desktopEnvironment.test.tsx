@@ -698,8 +698,9 @@ describe('Desktop environment handoff', () => {
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
     mocks.loadSession.mockClear()
     mocks.selectRuntimeConfigForHandoff.mockRejectedValueOnce(
-      new Error(
-        "Error invoking remote method 'auth:selectRuntimeConfigForHandoff': Error: stale_session_generation"
+      wrapLikeElectronIpc(
+        'auth:selectRuntimeConfigForHandoff',
+        new Error('stale_session_generation')
       )
     )
 

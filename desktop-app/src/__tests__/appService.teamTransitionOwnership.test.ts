@@ -334,17 +334,16 @@ describe('AppService deliberate team transition ownership', () => {
 
   it('keeps REST discovery for the same profile when logout advances session generation', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
-    await runtimeConfig.saveDesktopRuntimeConfig({
-      externalRestApiBaseUrl: restA,
-      rpcProxyBaseUrl: '',
-      appName: 'Environment A',
-    })
     const discovery = deferred<{
       externalRestApiBaseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
     const discoveryStarted = deferred<void>()
+    const getDesktopEnvironment = vi.fn(() => {
+      discoveryStarted.resolve()
+      return discovery.promise
+    })
     const app = service as unknown as {
       sessionToken: string | null
       me: { id: string; email: string; name: string; picture: null; teamId: string; role: string }
@@ -353,23 +352,29 @@ describe('AppService deliberate team transition ownership', () => {
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
       getDependenciesHealth(): Promise<unknown>
     }
-    app.sessionToken = 'session-a'
-    app.me = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      role: 'member',
-    }
     app.authClient = {
-      getDesktopEnvironment: vi.fn(() => {
-        discoveryStarted.resolve()
-        return discovery.promise
+      googleLogin: vi.fn().mockResolvedValue({
+        token: 'session-a',
+        me: {
+          id: 'user-a',
+          email: 'user-a@example.test',
+          name: 'User A',
+          picture: null,
+          teamId: 'team-a',
+          teamName: 'Team A',
+          role: 'member',
+        },
       }),
+      getDesktopEnvironment,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
     app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
+    await service.googleLogin('synthetic-google-token')
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
     app.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
 
     const healthRequest = app.getDependenciesHealth()
@@ -406,16 +411,21 @@ describe('AppService deliberate team transition ownership', () => {
       runWithTeamContext<T>(teamId: string, operation: (token: string) => Promise<T>): Promise<T>
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
-    app.sessionToken = 'session-a'
-    app.me = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
+    app.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({
+        token: 'session-a',
+        me: {
+          id: 'user-a',
+          email: 'user-a@example.test',
+          name: 'User A',
+          picture: null,
+          teamId: 'team-a',
+          teamName: 'Team A',
+          role: 'member',
+        },
+      }),
     }
+    await service.googleLogin('synthetic-google-token')
     app.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
     const operation = app.runWithTeamContext('team-a', async () => {
       requestStarted.resolve()
@@ -458,22 +468,25 @@ describe('AppService deliberate team transition ownership', () => {
       runWithTeamContext<T>(teamId: string, operation: (token: string) => Promise<T>): Promise<T>
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
-    app.sessionToken = 'session-a'
-    app.me = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: null,
-      teamName: null,
-      role: 'member',
-    }
     app.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({
+        token: 'session-a',
+        me: {
+          id: 'user-a',
+          email: 'user-a@example.test',
+          name: 'User A',
+          picture: null,
+          teamId: null,
+          teamName: null,
+          role: 'member',
+        },
+      }),
       getMe: vi.fn(() => {
         discoveryStarted.resolve()
         return meResponse.promise
       }),
     }
+    await service.googleLogin('synthetic-google-token')
     app.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => logoutStarted.resolve())
     const operation = vi.fn(async () => 'team result')
     const contextRequest = app.runWithTeamContext('team-a', operation)
