@@ -34,7 +34,11 @@ import {
 import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
-import { clearPendingExternalLogout, hasPendingExternalLogout } from './pendingExternalLogout.js'
+import {
+  clearPendingExternalLogout,
+  hasPendingExternalLogout,
+  recordPendingExternalLogout,
+} from './pendingExternalLogout.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
 import { RpcTokenManager } from './rpcTokenManager.js'
@@ -1615,24 +1619,58 @@ export class AppService {
 
   private async clearPendingExternalLogoutBeforeRestore(): Promise<boolean> {
     const userDataDirectory = this.getUserDataDirectory()
-    if (!hasPendingExternalLogout(userDataDirectory)) return false
-    this.clearAuthenticatedSessionState()
+    const envKey = getActiveEnvKey()
+    try {
+      if (!hasPendingExternalLogout(userDataDirectory, envKey)) return false
+    } catch (error) {
+      await this.failClosedForPendingLogout(error)
+      return true
+    }
     try {
       await this.runCredentialProducer(() =>
-        this.tokenStore.clearSessionToken(getActiveEnvKey(), {
-          legacyEnvKeys: getActiveLegacyEnvKeys(),
-          throwOnStorageError: true,
-        })
+        this.logoutOnce({ strictTokenClear: true, includeRuntimeSideEffects: false })
       )
-      clearPendingExternalLogout(userDataDirectory)
+      clearPendingExternalLogout(userDataDirectory, envKey)
     } catch (error) {
-      try {
-        this.reportDeferredLogoutFailure(error)
-      } catch {
-        // A diagnostic callback must not permit restoring a deferred logout.
-      }
+      this.reportDeferredLogoutFailureSafely(error)
     }
     return true
+  }
+
+  private reportDeferredLogoutFailureSafely(error: unknown): void {
+    try {
+      this.reportDeferredLogoutFailure(error)
+    } catch {
+      // Failure reporting must not permit a pending logout to restore a session.
+    }
+  }
+
+  private async failClosedForPendingLogout(error: unknown): Promise<void> {
+    if (this.sessionToken || this.me) {
+      try {
+        await this.suspendDesktopGfsUploadsForAuthBoundary()
+      } catch (suspendError) {
+        this.reportDeferredLogoutFailureSafely(suspendError)
+      }
+    }
+    this.clearAuthenticatedSessionState()
+    this.reportDeferredLogoutFailureSafely(error)
+  }
+
+  private async applyPendingExternalLogoutBeforeLogin(
+    userDataDirectory: string,
+    envKey: string
+  ): Promise<void> {
+    try {
+      if (!hasPendingExternalLogout(userDataDirectory, envKey)) return
+      // A fresh login supersedes the pending intent only after the old
+      // environment credentials and runtime auth effects have been cleared.
+      await this.logoutOnce({ strictTokenClear: true })
+      clearPendingExternalLogout(userDataDirectory, envKey)
+    } catch (error) {
+      await this.failClosedForPendingLogout(error)
+      throw error
+    }
   }
 
   private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
@@ -1720,9 +1758,15 @@ export class AppService {
 
   async applyPendingExternalLogoutIntent(): Promise<boolean> {
     const userDataDirectory = this.getUserDataDirectory()
-    if (!hasPendingExternalLogout(userDataDirectory)) return false
+    const envKey = getActiveEnvKey()
+    try {
+      if (!hasPendingExternalLogout(userDataDirectory, envKey)) return false
+    } catch (error) {
+      await this.failClosedForPendingLogout(error)
+      throw error
+    }
     await this.runCredentialProducer(() => this.logoutOnce({ strictTokenClear: true }))
-    clearPendingExternalLogout(userDataDirectory)
+    clearPendingExternalLogout(userDataDirectory, envKey)
     return true
   }
 
@@ -1772,6 +1816,8 @@ export class AppService {
   }): Promise<SessionState> {
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
+      const envKey = getActiveEnvKey()
+      await this.applyPendingExternalLogoutBeforeLogin(this.getUserDataDirectory(), envKey)
       const previousToken = this.sessionToken
       const previousMe = this.me
       const previousGeneration = this.sessionGeneration
@@ -1809,8 +1855,7 @@ export class AppService {
       this.workflowApprovalTeamById.clear()
       this.workflowTeamByKey.clear()
       this.rpcTokenManager.clear()
-      await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
-      clearPendingExternalLogout(this.getUserDataDirectory())
+      await this.tokenStore.setSessionToken(result.token, envKey)
       this.activateGfsAuthScope()
       return { authenticated: true, me: result.me }
     } finally {
@@ -2248,24 +2293,37 @@ export class AppService {
   }
 
   logout(): Promise<void> {
-    return this.runCredentialProducer(() => this.logoutOnce())
+    const envKey = getActiveEnvKey()
+    return this.runCredentialProducer(
+      () => this.logoutOnce(),
+      error => {
+        if (error instanceof QuitAdmissionClosedError) {
+          recordPendingExternalLogout(this.getUserDataDirectory(), envKey)
+        }
+      }
+    )
   }
 
-  private async logoutOnce(options: { strictTokenClear?: boolean } = {}): Promise<void> {
+  private async logoutOnce(
+    options: { strictTokenClear?: boolean; includeRuntimeSideEffects?: boolean } = {}
+  ): Promise<void> {
     this.logoutInProgress = true
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const envKey = getActiveEnvKey()
       const legacyEnvKeys = getActiveLegacyEnvKeys()
-      await this.suspendDesktopGfsUploadsForAuthBoundary()
+      const includeRuntimeSideEffects = options.includeRuntimeSideEffects !== false
+      if (includeRuntimeSideEffects) await this.suspendDesktopGfsUploadsForAuthBoundary()
       this.clearAuthenticatedSessionState()
       await this.tokenStore.clearSessionToken(envKey, {
         legacyEnvKeys,
         ...(options.strictTokenClear ? { throwOnStorageError: true } : {}),
       })
-      // Grants survive logout (they are keyed by userId), but every cached SDK
-      // result must not: the next user of this machine gets nothing of this one's.
-      tryGetPluginSdkRuntime()?.notifySessionChanged(false)
+      if (includeRuntimeSideEffects) {
+        // Grants survive logout (they are keyed by userId), but every cached SDK
+        // result must not: the next user of this machine gets nothing of this one's.
+        tryGetPluginSdkRuntime()?.notifySessionChanged(false)
+      }
     } finally {
       releasePrewarm()
       this.logoutInProgress = false

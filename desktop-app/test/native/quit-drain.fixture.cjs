@@ -217,9 +217,8 @@ registerQuitDrain(
           appService.me?.id === 'synthetic-user' &&
           savedCredential
 
-        // The old deadline resumes quit first, so the real beforeunload veto
-        // below releases this fence. The corrected path stays pending while
-        // this 20-second observation window elapses.
+        // A producer deadline would settle preparation during this window.
+        // The current contract stays pending until the held producer is released.
         if (!preparationSettled) {
           firstAuthFence.resolve()
           if (process.env.EVENFIRE_TEST_QUIT_DRAIN_REJECT_PREPARATION === 'first') {

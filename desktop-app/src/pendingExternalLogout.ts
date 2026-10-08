@@ -1,13 +1,19 @@
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const PENDING_EXTERNAL_LOGOUT_FILE = 'pending-external-logout'
+const PENDING_EXTERNAL_LOGOUT_PREFIX = 'pending-external-logout-'
+const LEGACY_PENDING_EXTERNAL_LOGOUT_FILE = 'pending-external-logout'
 
-function markerPath(userDataDirectory: string): string {
+function markerPath(userDataDirectory: string, envKey: string): string {
   if (!path.isAbsolute(userDataDirectory)) {
     throw new Error('Pending logout intent requires an absolute userData path')
   }
-  return path.join(userDataDirectory, PENDING_EXTERNAL_LOGOUT_FILE)
+  if (!/^[a-z0-9_]+-[0-9a-f]{12}$/.test(envKey)) {
+    throw new Error('Pending logout intent requires a valid environment key')
+  }
+  const environmentId = createHash('sha256').update(envKey).digest('hex')
+  return path.join(userDataDirectory, `${PENDING_EXTERNAL_LOGOUT_PREFIX}${environmentId}`)
 }
 
 function syncDirectory(directory: string): void {
@@ -28,19 +34,24 @@ function syncDirectory(directory: string): void {
   }
 }
 
-export function hasPendingExternalLogout(userDataDirectory: string): boolean {
-  try {
-    const stat = fs.lstatSync(markerPath(userDataDirectory))
-    if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
-    return true
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return false
-    throw error
+export function hasPendingExternalLogout(userDataDirectory: string, envKey: string): boolean {
+  for (const filePath of [
+    markerPath(userDataDirectory, envKey),
+    path.join(userDataDirectory, LEGACY_PENDING_EXTERNAL_LOGOUT_FILE),
+  ]) {
+    try {
+      const stat = fs.lstatSync(filePath)
+      if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') throw error
+    }
   }
+  return false
 }
 
-export function recordPendingExternalLogout(userDataDirectory: string): void {
-  const filePath = markerPath(userDataDirectory)
+export function recordPendingExternalLogout(userDataDirectory: string, envKey: string): void {
+  const filePath = markerPath(userDataDirectory, envKey)
   fs.mkdirSync(userDataDirectory, { recursive: true })
   let descriptor: number | undefined
   try {
@@ -48,7 +59,7 @@ export function recordPendingExternalLogout(userDataDirectory: string): void {
     fs.fsyncSync(descriptor)
   } catch (error) {
     if ((error as NodeJS.ErrnoException | undefined)?.code !== 'EEXIST') throw error
-    if (!hasPendingExternalLogout(userDataDirectory)) throw error
+    if (!hasPendingExternalLogout(userDataDirectory, envKey)) throw error
     return
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor)
@@ -56,15 +67,20 @@ export function recordPendingExternalLogout(userDataDirectory: string): void {
   syncDirectory(userDataDirectory)
 }
 
-export function clearPendingExternalLogout(userDataDirectory: string): void {
-  const filePath = markerPath(userDataDirectory)
-  try {
-    const stat = fs.lstatSync(filePath)
-    if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
-    fs.unlinkSync(filePath)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return
-    throw error
+export function clearPendingExternalLogout(userDataDirectory: string, envKey: string): void {
+  let removed = false
+  for (const filePath of [
+    markerPath(userDataDirectory, envKey),
+    path.join(userDataDirectory, LEGACY_PENDING_EXTERNAL_LOGOUT_FILE),
+  ]) {
+    try {
+      const stat = fs.lstatSync(filePath)
+      if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
+      fs.unlinkSync(filePath)
+      removed = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') throw error
+    }
   }
-  syncDirectory(userDataDirectory)
+  if (removed) syncDirectory(userDataDirectory)
 }

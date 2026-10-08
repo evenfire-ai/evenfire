@@ -27,7 +27,6 @@ import {
 } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
-import { recordPendingExternalLogout } from './pendingExternalLogout.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { collectInitialProtocolUrls, shouldRegisterOsProtocols } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
@@ -91,6 +90,10 @@ registerQuitDrain(
         }
       })
       .catch(error => {
+        if (error instanceof QuitAdmissionClosedError) {
+          console.info('[Desktop] Deferred external logout remains pending while quit resumes.')
+          return
+        }
         const errorName = error instanceof Error && error.name ? error.name : typeof error
         console.error(`[Desktop] Deferred external logout failed (${errorName}).`)
         if (!appService.getCachedUserId() && mainWindow && !mainWindow.isDestroyed()) {
@@ -335,11 +338,9 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   handleSandboxUiDeepLink,
   isRendererReady: () => mainWindowRendererReady,
   logout: () => appService.logout(),
-  deferLogout: error => {
-    if (error instanceof QuitAdmissionClosedError) {
-      recordPendingExternalLogout(app.getPath('userData'))
-    }
-  },
+  // AppService records the environment-scoped marker before rejecting this
+  // shutdown-time logout. The router treats that rejection as deferred work.
+  deferLogout: error => error instanceof QuitAdmissionClosedError,
   reportLogoutFailure: error => {
     // The main-process bootstrap has no service logger; log only the safe error
     // name because native storage errors must not leak credential or URL data.

@@ -48,10 +48,12 @@ function deferred<T>() {
 }
 
 function createService(tokenStore = new TokenStoreClass()) {
-  const service = Object.create(AppServiceClass.prototype) as {
+  const service = new AppServiceClass({
+    tokenStore,
+    getUserDataDirectory: () => path.dirname(isolatedConfigPath),
+  }) as unknown as {
     pendingCredentialProducers: Set<Promise<unknown>>
     quitPreparationStarted: boolean
-    tokenStore: InstanceType<typeof TokenStoreClass>
     logoutOnce: ReturnType<typeof vi.fn>
     prepareForQuit: () => Promise<void>
     cancelQuitPreparation: () => void
@@ -99,25 +101,23 @@ describe('AppService quit preparation', () => {
       .mockImplementation(async () => {
         persistedSession = false
       })
-    const service = Object.create(AppServiceClass.prototype) as {
+    const service = new AppServiceClass({
+      tokenStore,
+      getUserDataDirectory: () => path.dirname(isolatedConfigPath),
+    }) as unknown as {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
       logoutInProgress: boolean
       sessionToken: string | null
       me: object | null
-      tokenStore: typeof tokenStore
       logout: () => Promise<void>
       prepareForQuit: () => Promise<void>
       beginPrewarmAuthTransition: () => () => void
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
       clearAuthenticatedSessionState: () => void
     }
-    service.pendingCredentialProducers = new Set()
-    service.quitPreparationStarted = false
-    service.logoutInProgress = false
     service.sessionToken = 'active-session-token'
     service.me = { id: 'synthetic-user' }
-    service.tokenStore = tokenStore
     service.beginPrewarmAuthTransition = vi.fn(() => () => {})
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(() => pendingAuthFence.promise)
     service.clearAuthenticatedSessionState = vi.fn(() => {
@@ -133,6 +133,7 @@ describe('AppService quit preparation', () => {
 
     try {
       expect(service.quitPreparationStarted).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
       await expect(service.logout()).rejects.toThrow('Application is shutting down')
       await vi.advanceTimersByTimeAsync(120_001)
       expect(preparationSettled).toBe(false)
@@ -199,19 +200,16 @@ describe('AppService quit preparation', () => {
   })
 
   it('does not gate a runWithTeamContext call that has no team credential hop', async () => {
-    const service = Object.create(AppServiceClass.prototype) as {
+    const service = new AppServiceClass() as unknown as {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
-      teamContextQueue: Promise<void>
       requireSessionToken: () => string
       runWithTeamContext: <T>(
         teamId: string | null | undefined,
         operation: (sessionToken: string) => Promise<T>
       ) => Promise<T>
     }
-    service.pendingCredentialProducers = new Set()
     service.quitPreparationStarted = true
-    service.teamContextQueue = Promise.resolve()
     service.requireSessionToken = vi.fn(() => 'session-token')
     const read = vi.fn(async (token: string) => token)
 
@@ -225,7 +223,7 @@ describe('AppService quit preparation', () => {
     const requestStarted = deferred<void>()
     const tokenStore = new TokenStoreClass()
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
-    const service = Object.create(AppServiceClass.prototype) as {
+    const service = new AppServiceClass({ tokenStore }) as unknown as {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
       teamContextQueue: Promise<void>
@@ -240,12 +238,10 @@ describe('AppService quit preparation', () => {
       ) => Promise<T>
       prepareForQuit: () => Promise<void>
     }
-    service.pendingCredentialProducers = new Set()
     service.quitPreparationStarted = false
     service.teamContextQueue = Promise.resolve()
     service.sessionToken = 'session-token'
     service.me = { id: 'user-1', teamId: 'team-a' }
-    service.tokenStore = tokenStore
     service.requireSessionToken = vi.fn(() => 'session-token')
     service.getCurrentSessionTeamId = vi.fn(async () => 'team-a')
 
@@ -264,4 +260,3 @@ describe('AppService quit preparation', () => {
     expect(service.pendingCredentialProducers.size).toBe(0)
   })
 })
-      expect(vi.getTimerCount()).toBe(0)

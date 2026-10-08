@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { QuitAdmissionClosedError } from '../appService.js'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
 
 type SentMessage = {
@@ -38,7 +39,7 @@ function createHarness() {
   const focusWindow = vi.fn()
   const requestMainWindow = vi.fn()
   const logout = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
-  const deferLogout = vi.fn<(error: unknown) => void>()
+  const deferLogout = vi.fn<(error: unknown) => boolean | void>()
   const getSessionState = vi.fn(async () => ({ authenticated }))
   const reportLogoutFailure = vi.fn()
   const handleSandboxUiDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
@@ -264,7 +265,7 @@ describe('evenfire deep-link router', () => {
     }
   })
 
-  it('records quit-rejected logout intent without reporting success while still authenticated', async () => {
+  it('reports a generic shutdown-shaped error unless the caller confirms durable deferral', async () => {
     const harness = createHarness()
     const failure = new Error('Application is shutting down')
     harness.logout.mockRejectedValue(failure)
@@ -275,6 +276,20 @@ describe('evenfire deep-link router', () => {
 
     expect(harness.deferLogout).toHaveBeenCalledWith(failure)
     expect(harness.reportLogoutFailure).toHaveBeenCalledWith(failure)
+    expect(harness.sent).toEqual([])
+  })
+
+  it('treats a durably recorded quit rejection as deferred work', async () => {
+    const harness = createHarness()
+    const failure = new QuitAdmissionClosedError()
+    harness.logout.mockRejectedValue(failure)
+    harness.deferLogout.mockReturnValue(true)
+
+    harness.router.handle('evenfire://logout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(harness.deferLogout).toHaveBeenCalledWith(failure)
+    expect(harness.reportLogoutFailure).not.toHaveBeenCalled()
     expect(harness.sent).toEqual([])
   })
 
