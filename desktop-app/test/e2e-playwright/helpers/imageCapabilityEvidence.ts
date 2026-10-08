@@ -57,14 +57,6 @@ export const FIXTURE_RESPONSE_KIND = {
   // delivered.
   documentReadRequested: 'document-read-requested',
   documentAnswer: 'document-answer',
-  // Issue #1022: the legacy processing-lease restart journey. shell_exec first,
-  // then clerum__gfs_download, then an answer built from the download receipt;
-  // a failed step is answered with the store code it reported.
-  legacyLeaseShellRequested: 'legacy-lease-shell-requested',
-  legacyLeaseDownloadRequested: 'legacy-lease-download-requested',
-  legacyLeaseAnswer: 'legacy-lease-answer',
-  legacyLeaseShellFailed: 'legacy-lease-shell-failed',
-  legacyLeaseDownloadFailed: 'legacy-lease-download-failed',
 } as const
 
 /**
@@ -93,33 +85,6 @@ export const FIXTURE_REJECTION_REASONS: readonly string[] = Object.freeze([
   'document-tool-output-unreadable',
   'document-page-range-malformed',
   'document-stream-unsupported',
-  'legacy-lease-shell-not-offered',
-  'legacy-lease-download-not-offered',
-  'legacy-lease-tool-result-unexpected',
-  'legacy-lease-tool-result-count',
-  'legacy-lease-download-result-malformed',
-  'legacy-lease-stream-unsupported',
-])
-
-/**
- * Store failure codes a legacy-lease failure row may carry (the
- * `GfsDownloadStoreError` codes plus `unrecognized`). Declared independently of
- * the fixture; `test/imageCapabilityEvidence.test.ts` checks the lists agree.
- */
-export const FIXTURE_LEGACY_LEASE_FAILURE_CODES: readonly string[] = Object.freeze([
-  'caller_mismatch',
-  'caller_quota_exceeded',
-  'corrupt_store_ledger',
-  'download_expired',
-  'download_missing',
-  'download_busy',
-  'host_quota_exceeded',
-  'publication_cancelled',
-  'storage_write_failed',
-  'unsupported_store_schema',
-  'workspace_unavailable',
-  'writer_locked',
-  'unrecognized',
 ])
 
 /** The fixture's text-only answer. It names no image and no color. */
@@ -347,12 +312,6 @@ export interface FixtureProviderAttempt {
   truncated?: boolean
   /** One of {@link FIXTURE_REJECTION_REASONS}. Present only on rejected rows. */
   reason?: string
-  /** One of {@link FIXTURE_LEGACY_LEASE_FAILURE_CODES}. Legacy-lease failure rows only. */
-  failureCode?: string
-  /** sha256 the download receipt reported. Legacy-lease answer row only. */
-  downloadSha256?: string
-  /** Byte count the download receipt reported. Legacy-lease answer row only. */
-  downloadBytes?: number
 }
 
 export interface FixtureEvidenceCounters {
@@ -367,10 +326,6 @@ export interface FixtureEvidenceCounters {
   documentReadRequests: number
   documentAnswers: number
   documentFailures: number
-  legacyLeaseShellRequests: number
-  legacyLeaseDownloadRequests: number
-  legacyLeaseAnswers: number
-  legacyLeaseFailures: number
 }
 
 export interface ImageCapabilityEvidenceSnapshot {
@@ -397,10 +352,6 @@ const COUNTER_KEYS: readonly (keyof FixtureEvidenceCounters)[] = [
   'documentReadRequests',
   'documentAnswers',
   'documentFailures',
-  'legacyLeaseShellRequests',
-  'legacyLeaseDownloadRequests',
-  'legacyLeaseAnswers',
-  'legacyLeaseFailures',
 ]
 
 function requireCounters(value: unknown, source: string): FixtureEvidenceCounters {
@@ -480,53 +431,6 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
     throw new Error(
       `${source}: attempts[${index}].byteRange and truncated are only valid on a ` +
         `${FIXTURE_RESPONSE_KIND.documentAnswer} row`
-    )
-  }
-
-  // failureCode is present on every legacy-lease failure row and on no other row.
-  const legacyFailure =
-    responseKind === FIXTURE_RESPONSE_KIND.legacyLeaseShellFailed ||
-    responseKind === FIXTURE_RESPONSE_KIND.legacyLeaseDownloadFailed
-  if (legacyFailure) {
-    const failureCode = value.failureCode
-    if (
-      typeof failureCode !== 'string' ||
-      !FIXTURE_LEGACY_LEASE_FAILURE_CODES.includes(failureCode)
-    ) {
-      throw new Error(
-        `${source}: attempts[${index}].failureCode must be one of ` +
-          `${FIXTURE_LEGACY_LEASE_FAILURE_CODES.join(', ')} on a ${responseKind} row`
-      )
-    }
-    row.failureCode = failureCode
-  } else if ('failureCode' in value) {
-    throw new Error(
-      `${source}: attempts[${index}].failureCode is only valid on a legacy-lease failure row`
-    )
-  }
-
-  // downloadSha256 and downloadBytes are present on every legacy-lease answer row only.
-  if (responseKind === FIXTURE_RESPONSE_KIND.legacyLeaseAnswer) {
-    const downloadSha256 = value.downloadSha256
-    const downloadBytes = value.downloadBytes
-    if (typeof downloadSha256 !== 'string' || !SHA256_HEX.test(downloadSha256)) {
-      throw new Error(
-        `${source}: attempts[${index}].downloadSha256 must be a sha256 hex digest on a ` +
-          `${FIXTURE_RESPONSE_KIND.legacyLeaseAnswer} row`
-      )
-    }
-    if (!isByteCount(downloadBytes)) {
-      throw new Error(
-        `${source}: attempts[${index}].downloadBytes must be a non-negative integer on a ` +
-          `${FIXTURE_RESPONSE_KIND.legacyLeaseAnswer} row`
-      )
-    }
-    row.downloadSha256 = downloadSha256
-    row.downloadBytes = downloadBytes
-  } else if ('downloadSha256' in value || 'downloadBytes' in value) {
-    throw new Error(
-      `${source}: attempts[${index}].downloadSha256 and downloadBytes are only valid on a ` +
-        `${FIXTURE_RESPONSE_KIND.legacyLeaseAnswer} row`
     )
   }
 
@@ -719,10 +623,7 @@ export function appendedAttempts(
       current.reason !== row.reason ||
       current.byteRange?.offset !== row.byteRange?.offset ||
       current.byteRange?.length !== row.byteRange?.length ||
-      current.truncated !== row.truncated ||
-      current.failureCode !== row.failureCode ||
-      current.downloadSha256 !== row.downloadSha256 ||
-      current.downloadBytes !== row.downloadBytes
+      current.truncated !== row.truncated
     ) {
       throw new Error(
         `[image-capabilities] ledger row ${index} changed between reads; the ledger must be append-only.`
