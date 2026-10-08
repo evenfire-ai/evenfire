@@ -2495,17 +2495,39 @@ describe('executeSingleTool — progress watcher', () => {
       expect(published[published.length - 1]).toBeUndefined()
     })
 
-    it('publishes the preview again after the footer', async () => {
+    it('publishes the preview again once the footer leaves the buffer', async () => {
       const lines = bodyLines(5, 1280)
+      const log = 'ordinary log line\n'.repeat(4_000)
+      expect(log.length).toBeGreaterThan(64 * 1024)
       const published = await previews([
         [`${HEADER}\n`],
         ...bodyChunks(lines).map(chunk => [chunk]),
         [`${FOOTER}\nall done\n`],
+        [log],
       ])
       expect(leakedPiece(published, lines)).toBeNull()
-      // Precondition: the preview was skipped while the block was open.
+      // Precondition: the preview stays skipped while the body is still in the
+      // buffer, footer included.
       expect(published[published.length - 2]).toBeUndefined()
-      expect(shown(published[published.length - 1])).toContain('all done')
+      expect(shown(published[published.length - 1])).toContain('ordinary log line')
+    })
+
+    it('hides an earlier open key whose header was evicted behind a later header', async () => {
+      const earlier = bodyLines(6, 8)
+      const later = bodyLines(7, 3)
+      // 80-byte lines up to just under the 64 KiB buffer with the earlier key,
+      // so only the later key's arrival evicts the earlier header.
+      const filler = Array.from({ length: 812 }, () => `${'x'.repeat(79)}\n`)
+      const published = await previews([
+        [`${HEADER}\n`, ...earlier.map(line => `${line}\n`)],
+        filler,
+        [`${HEADER}\n${later.join('\n')}\n`],
+      ])
+      expect(leakedPiece(published, [...earlier, ...later])).toBeNull()
+      // Witnesses: before the eviction the whole buffer was previewed with the
+      // earlier key masked; after it, the preview was skipped.
+      expect(shown(published[1])).toContain('[REDACTED]')
+      expect(published[2]).toBeUndefined()
     })
   })
 })

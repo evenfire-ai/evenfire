@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { generateKeyPairSync } from 'node:crypto'
 import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config as appConfig } from '../../config'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
@@ -8,7 +9,11 @@ import { LlmError, LlmErrorCode } from '../../core/errors'
 import { PressureContextManager } from '../../core/extensions/contextManager'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
-import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
+import {
+  buildOutputPreview,
+  executeSingleTool,
+  runToolUseLoop,
+} from '../../core/orchestration/toolUseLoop'
 import { TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
 import { registerDesktopTools } from '../../core/tools/desktopTools'
 import {
@@ -1399,6 +1404,71 @@ describe('TaskExecutor', () => {
       expect.stringMatching(/:llm:1784041199000-0$/),
       expect.stringMatching(/:llm:1784041201000-0$/),
     ])
+  })
+
+  it('sanitizes the whole output before building the approval resume preview (#1034)', async () => {
+    // A real key, so its 25 body lines exceed the preview's 3 head and 10 tail
+    // lines and each previewed line arrives without its header. Nothing here
+    // prints it.
+    const key = generateKeyPairSync('rsa', { modulusLength: 2048 })
+      .privateKey.export({ type: 'pkcs8', format: 'pem' })
+      .toString()
+    const bodyLines = key.split('\n').filter(line => line.length > 0 && !line.startsWith('-----'))
+    expect(bodyLines.length).toBeGreaterThan(13)
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: '00000000-0000-4000-8000-000000000789',
+          tool_name: 'shell_exec',
+          tool_kind: 'internal_tool',
+          tool_source_ref: 'mcp-host',
+          parameters: { command: 'cat key.pem' },
+          description: 'Shell command',
+          tool_call_id: 'tc_key',
+          context_snapshot: [
+            { role: 'user', content: 'Show the key' },
+            {
+              role: 'assistant',
+              content: '',
+              tool_calls: [
+                { id: 'tc_key', name: 'shell_exec', arguments: { command: 'cat key.pem' } },
+              ],
+            },
+          ],
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    vi.mocked(executeSingleTool).mockResolvedValueOnce({
+      tool_call_id: 'tc_key',
+      name: 'shell_exec',
+      content: 'redacted elsewhere',
+      rawContent: `stdout:\n${key}`,
+      is_error: false,
+    })
+    // The file-wide mock keeps the output as one line; the real builder splits it.
+    const previews = await vi.importActual<
+      typeof import('../../core/orchestration/toolUseLoopPreviews')
+    >('../../core/orchestration/toolUseLoopPreviews')
+    vi.mocked(buildOutputPreview).mockImplementationOnce(previews.buildOutputPreview)
+
+    const executor = new TaskExecutor(createTask('Show the key'), createDeps())
+    await executor.run()
+    expect(executor.executorState).toBe('waiting_approval')
+    const { progressReporterRegistry } = await import('../../progress/sseProgressReporter.js')
+    const events: Array<{ type: string; data: any }> = []
+    progressReporterRegistry.get(executor.taskId)!.subscribe(e => events.push(e))
+
+    await executor.resumeAfterApproval(false)
+
+    const completes = events.filter(e => e.type === 'tool_complete')
+    expect(completes).toHaveLength(1)
+    const preview = JSON.stringify(completes[0].data.outputPreview)
+    // Witness: the preview was published, from the key's output.
+    expect(preview).toContain('stdout:')
+    expect(preview).toContain('[REDACTED]')
+    // A count, so a failure does not print key material.
+    expect(bodyLines.filter(line => preview.includes(line.slice(0, 16))).length).toBe(0)
   })
 })
 

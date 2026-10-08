@@ -818,7 +818,15 @@ export class TaskExecutor {
           iteration: 0,
           stepIndex: 0,
           totalSteps: 1,
-          outputPreview: buildOutputPreview(toolResult.rawContent ?? toolResult.content),
+          // Sanitized whole, as `reportToolComplete` in the loop does: the
+          // reporter redacts each preview line alone, and a key's body line
+          // without its header is not recognizable.
+          outputPreview: buildOutputPreview(
+            loopConfig.safety.sanitizeOutput(
+              toolResult.name,
+              toolResult.rawContent ?? toolResult.content
+            ).content
+          ),
           metadata: toolResult.metadata,
         })
       }

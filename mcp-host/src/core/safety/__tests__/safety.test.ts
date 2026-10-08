@@ -1306,6 +1306,51 @@ describe('BasicSafety', () => {
       })
     })
 
+    describe('flattened keys with metadata on the header line', () => {
+      // A real encrypted traditional key from node:crypto (`Proc-Type` and
+      // `DEK-Info` after the header). Nothing here prints it.
+      const passphrase = 'flattened-metadata-test'
+      const encrypted = generateKeyPairSync('rsa', { modulusLength: 2048 })
+        .privateKey.export({ type: 'pkcs1', format: 'pem', cipher: 'aes-128-cbc', passphrase })
+        .toString()
+        .trim()
+      const lines = encrypted.split('\n')
+      const body = lines.filter(line => /^[A-Za-z0-9+/=]+$/.test(line))
+      // `echo $KEY`: every separator becomes one space.
+      const flat = encrypted.replace(/\n+/g, ' ')
+
+      it('is a parseable key with metadata', () => {
+        expect(createPrivateKey({ key: encrypted, passphrase }).asymmetricKeyType).toBe('rsa')
+        expect(lines[1]).toMatch(/^Proc-Type: /)
+        expect(lines[2]).toMatch(/^DEK-Info: /)
+        expect(body.length).toBeGreaterThan(20)
+      })
+
+      it('redacts it with its footer and keeps the text around it', () => {
+        expect(expectRedacted(`out: ${flat} end`, body).content).toBe('out: [REDACTED] end')
+      })
+
+      it('redacts it truncated before the footer, inside JSON', () => {
+        const truncated = flat.slice(0, flat.indexOf(body[12]) + body[12].length)
+        const text = JSON.stringify({ a: truncated, b: 'KEEP THIS PROSE' })
+        const result = expectRedacted(text, body)
+        expect(JSON.parse(result.content)).toEqual({ a: '[REDACTED]', b: 'KEEP THIS PROSE' })
+      })
+
+      it('follows the lines after metadata that shares the header line', () => {
+        const text = `${lines[0]} ${lines.slice(1, 16).join('\n')}\nok`
+        expect(expectRedacted(text, body.slice(0, 13)).content).not.toContain(lines[1])
+      })
+
+      it('redacts a flattened PGP key with armor headers', () => {
+        const words = [...body.slice(0, 10), '=Q1w2']
+        const text = `${PGP_HEADER} Version: GnuPG v2 Comment: test key ${words.join(' ')} ${PGP_FOOTER}`
+        expect(expectRedacted(`out: ${text} end`, body.slice(0, 10)).content).toBe(
+          'out: [REDACTED] end'
+        )
+      })
+    })
+
     it('redacts interleaved keys of different labels', () => {
       const rsa = bodyLines(16).slice(0, 2)
       const ec = bodyLines(17)
@@ -1536,41 +1581,72 @@ describe('BasicSafety', () => {
     })
 
     describe('createPrivateKeyBlockTracker', () => {
-      const body = bodyLines(33).join('\n')
+      const body = `${bodyLines(33).join('\n')}\n`
 
-      it('takes the state of the last marker in a chunk', () => {
-        const opened = createPrivateKeyBlockTracker()
-        opened.observe(`${footer()}\nlog line\n${header()}\n`)
-        expect(opened.hidesPreview(body)).toBe(true)
-        // Witness: a snapshot that still shows the header is previewed.
-        expect(opened.hidesPreview(`${header()}\n${body}`)).toBe(false)
+      /** A tracker that has observed `chunks`, and the output they make. */
+      function observed(chunks: string[]) {
+        const tracker = createPrivateKeyBlockTracker()
+        for (const chunk of chunks) tracker.observe(chunk)
+        return { tracker, output: chunks.join('') }
+      }
 
-        const closed = createPrivateKeyBlockTracker()
-        closed.observe(`${header()}\n${body}\n${footer()}\n`)
-        expect(closed.hidesPreview(body)).toBe(false)
+      /** The snapshot a buffer holds once everything before `from` is evicted. */
+      const from = (output: string, from: string) => output.slice(output.lastIndexOf(from))
+
+      it('hides a snapshot that starts inside an open block', () => {
+        const { tracker, output } = observed([`${footer()}\nlog line\n${header()}\n`, body])
+        // Witness: a snapshot that still starts at the header is previewed.
+        expect(tracker.hidesPreview(from(output, header()))).toBe(false)
+        expect(tracker.hidesPreview(body)).toBe(true)
+      })
+
+      it('previews a snapshot that starts after the footer', () => {
+        const { tracker } = observed([`${header()}\n`, body, `${footer()}\n`, 'log line\n'])
+        // Witness: inside the block, the preview is hidden.
+        expect(tracker.hidesPreview(`${body}${footer()}\nlog line\n`)).toBe(true)
+        expect(tracker.hidesPreview('log line\n')).toBe(false)
       })
 
       it('keeps hiding the preview of a block that never closes', () => {
         // Intended: without a footer, nothing after the header can be told
-        // apart from the body, so the preview stays off until the tool ends.
-        const tracker = createPrivateKeyBlockTracker()
-        tracker.observe(`${header()}\n${body}\n`)
+        // apart from the body, so the preview stays off until a footer leaves
+        // the buffer or the tool ends.
         const log = 'ordinary log line\n'.repeat(4_000)
-        tracker.observe(log)
+        const { tracker } = observed([`${header()}\n`, body, log])
         expect(log.length).toBeGreaterThan(64 * 1024)
         expect(tracker.hidesPreview(log)).toBe(true)
       })
 
+      it('hides an evicted open block behind a later header in the snapshot', () => {
+        const later = bodyLines(34)
+        const earlier = [`${header()}\n`, body, 'log line\n'.repeat(100)]
+        for (const rest of [
+          [`${header('EC ')}\n${later.slice(0, 3).join('\n')}\n`],
+          [`${pem(later, { label: 'EC ' })}\n`],
+        ]) {
+          const { tracker, output } = observed([...earlier, ...rest])
+          expect(tracker.hidesPreview(output.slice(output.indexOf(body) + 70))).toBe(true)
+        }
+        // Witness: once the later footer is before the snapshot, it is previewed.
+        const { tracker } = observed([...earlier, `${pem(later, { label: 'EC ' })}\n`, 'done\n'])
+        expect(tracker.hidesPreview('done\n')).toBe(false)
+      })
+
       it('finds the longest header fed one character per chunk', () => {
         const longest = header('ABCDEFGHIJKLMNOP '.repeat(4))
-        const tracker = createPrivateKeyBlockTracker()
-        for (const char of `log\n${longest}\n`) tracker.observe(char)
+        const { tracker } = observed([...`log\n${longest}\n`, body])
         expect(tracker.hidesPreview(body)).toBe(true)
 
         // Witness: one character over the label bound, nothing opens.
-        const tooLong = createPrivateKeyBlockTracker()
-        for (const char of `log\n${header('ABCDEFGHIJKLMNOPQ '.repeat(4))}\n`) tooLong.observe(char)
-        expect(tooLong.hidesPreview(body)).toBe(false)
+        const tooLong = observed([...`log\n${header('ABCDEFGHIJKLMNOPQ '.repeat(4))}\n`, body])
+        expect(tooLong.tracker.hidesPreview(body)).toBe(false)
+      })
+
+      it('fails on a snapshot that is not a suffix moving forward', () => {
+        const { tracker, output } = observed([`${header()}\n`, body])
+        expect(() => tracker.hidesPreview(`${output}x`)).toThrow(/suffix/)
+        expect(tracker.hidesPreview(body)).toBe(true)
+        expect(() => tracker.hidesPreview(output)).toThrow(/suffix/)
       })
     })
 

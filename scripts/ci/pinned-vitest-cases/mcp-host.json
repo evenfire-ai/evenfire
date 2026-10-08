@@ -85,7 +85,11 @@
   },
   {
     "suite": "toolUseLoop.test.ts",
-    "fullName": "executeSingleTool — progress watcher private key blocks in the preview (#1034) publishes the preview again after the footer"
+    "fullName": "executeSingleTool — progress watcher private key blocks in the preview (#1034) publishes the preview again once the footer leaves the buffer"
+  },
+  {
+    "suite": "toolUseLoop.test.ts",
+    "fullName": "executeSingleTool — progress watcher private key blocks in the preview (#1034) hides an earlier open key whose header was evicted behind a later header"
   },
   {
     "suite": "safety.test.ts",
@@ -177,7 +181,7 @@
   },
   {
     "suite": "safety.test.ts",
-    "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker takes the state of the last marker in a chunk"
+    "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker hides a snapshot that starts inside an open block"
   },
   {
     "suite": "safety.test.ts",
@@ -186,6 +190,18 @@
   {
     "suite": "safety.test.ts",
     "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker finds the longest header fed one character per chunk"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker previews a snapshot that starts after the footer"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker hides an evicted open block behind a later header in the snapshot"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) createPrivateKeyBlockTracker fails on a snapshot that is not a suffix moving forward"
   },
   {
     "suite": "safety.test.ts",
@@ -212,6 +228,22 @@
     "fullName": "BasicSafety private key blocks (#1034) irregular line widths between a header and a footer redacts a flattened key with words of irregular length"
   },
   {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) flattened keys with metadata on the header line redacts it with its footer and keeps the text around it"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) flattened keys with metadata on the header line redacts it truncated before the footer, inside JSON"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) flattened keys with metadata on the header line follows the lines after metadata that shares the header line"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety private key blocks (#1034) flattened keys with metadata on the header line redacts a flattened PGP key with armor headers"
+  },
+  {
     "suite": "attachmentRead.redaction.test.ts",
     "fullName": "a private key split across attachment pages (#1034) a middle page holding only body leaks nothing (footer: false)"
   },
@@ -222,5 +254,9 @@
   {
     "suite": "ringBuffer.test.ts",
     "fullName": "RingBuffer keeps the first line of the first chunk when nothing was evicted (#1034)"
+  },
+  {
+    "suite": "taskExecutor.test.ts",
+    "fullName": "TaskExecutor sanitizes the whole output before building the approval resume preview (#1034)"
   }
 ]

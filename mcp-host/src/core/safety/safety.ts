@@ -709,14 +709,26 @@ function privateKeyEndAfter(
   let i = skipBlanks(text, header.end)
   const footerEnd = footerEnds.get(i)
   if (footerEnd !== undefined) return footerEnd
-  if (base64At(text, i) > 0) return flattenedKeyEnd(text, i, footerEnds, bracketed)
-  const separator = separatorAt(text, i)
-  if (separator === 0) return end
-  i += separator
-  let shape = linePrefixShape(text, header.start)
-  const prefixEnd = shape ? linePrefixEnd(text, i, shape) : -1
-  if (prefixEnd < 0) shape = null
-  else i = prefixEnd
+  let shape: string | null = null
+  // Metadata on the header's own line (`echo $KEY` of an encrypted or PGP
+  // key): the block runs to the end of its value, which on a flattened key is
+  // the rest of the line, up to a footer, a JSON string's closing quote or the
+  // end of the text.
+  const inline = metadataLineAt(text, i, header.pgp, markerStarts)
+  if (inline) {
+    end = inline.end
+    if (inline.next === undefined) return footerEnds.get(end) ?? end
+    i = inline.next
+  } else {
+    if (base64At(text, i) > 0) return flattenedKeyEnd(text, i, footerEnds, bracketed)
+    const separator = separatorAt(text, i)
+    if (separator === 0) return end
+    i += separator
+    shape = linePrefixShape(text, header.start)
+    const prefixEnd = shape ? linePrefixEnd(text, i, shape) : -1
+    if (prefixEnd < 0) shape = null
+    else i = prefixEnd
+  }
   for (;;) {
     const metadata = metadataLineAt(text, skipBlanks(text, i), header.pgp, markerStarts)
     if (!metadata) break
@@ -911,41 +923,65 @@ function privateKeyMatches(text: string): Array<[number, number]> {
 }
 
 /**
- * Whether a stream holds an open private key block, for previews of output
- * that arrives in chunks of any size. It keeps the last
+ * Whether a preview of streamed output starts inside a private key block,
+ * for output that arrives in chunks of any size. It keeps the last
  * `PRIVATE_KEY_MARKER_MAX` code units of everything seen, so a header or
- * footer split across any number of chunks is still found whole.
+ * footer split across any number of chunks is still found whole, and the
+ * offset in the stream of every marker.
  */
 export type PrivateKeyBlockTracker = {
   observe(chunk: string): void
-  /** True while a block is open and `snapshot` no longer shows its header. */
+  /**
+   * True when the last marker that starts before `snapshot` is a header: the
+   * snapshot then starts inside a block whose header it no longer shows, so
+   * no sanitizer can recognize that body, whatever later markers it holds.
+   * `snapshot` must be a suffix of the observed output, and each snapshot
+   * must start at or after the previous one, as a ring buffer's do.
+   */
   hidesPreview(snapshot: string): boolean
 }
 
 export function createPrivateKeyBlockTracker(): PrivateKeyBlockTracker {
   let tail = ''
-  let open = false
+  let seen = 0
+  let previousStart = 0
+  // Offsets where the state changes, ascending: a marker of the other kind
+  // than the one before it. A repeated kind leaves the state unchanged.
+  const changes: Array<{ start: number; opens: boolean }> = []
   return {
     observe(chunk) {
       if (chunk.length === 0) return
       const window = tail + chunk
-      let lastStart = -1
+      const windowStart = seen - tail.length
+      const found: Array<{ start: number; opens: boolean }> = []
       for (const [source, opens] of [
         [PRIVATE_KEY_HEADER_SOURCE, true],
         [PRIVATE_KEY_FOOTER_SOURCE, false],
       ] as const) {
         for (const marker of privateKeyMarkers(window, source)) {
           // A marker that ends inside the tail was seen with an earlier chunk.
-          if (marker.end > tail.length && marker.start > lastStart) {
-            lastStart = marker.start
-            open = opens
-          }
+          if (marker.end > tail.length) found.push({ start: windowStart + marker.start, opens })
         }
       }
+      found.sort((a, b) => a.start - b.start)
+      for (const marker of found) {
+        if (changes[changes.length - 1]?.opens !== marker.opens) changes.push(marker)
+      }
+      seen += chunk.length
       tail = window.slice(-PRIVATE_KEY_MARKER_MAX)
     },
     hidesPreview(snapshot) {
-      return open && privateKeyMarkers(snapshot, PRIVATE_KEY_HEADER_SOURCE).length === 0
+      const start = seen - snapshot.length
+      if (start < previousStart) {
+        throw new Error('a preview snapshot must be a suffix of the output that only moves forward')
+      }
+      previousStart = start
+      // Only the last change before `start` decides; earlier ones are dropped.
+      let last = -1
+      while (last + 1 < changes.length && changes[last + 1].start < start) last++
+      if (last < 0) return false
+      changes.splice(0, last)
+      return changes[0].opens
     },
   }
 }

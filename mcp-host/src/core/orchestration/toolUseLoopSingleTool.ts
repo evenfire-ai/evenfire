@@ -99,8 +99,9 @@ export async function executeSingleTool(
 
   let ringBuffer: RingBuffer | null = null
   // Once the buffer evicts a private key's header, the body left in the
-  // snapshot no longer looks like a key, so the preview is skipped until the
-  // footer arrives.
+  // snapshot no longer looks like a key, so the preview is skipped while the
+  // snapshot starts inside that block. The tracker sees the same chunks as
+  // the buffer, so each snapshot is a suffix of what it observed.
   let keyBlocks: PrivateKeyBlockTracker | null = null
   const executionContext: ExecutionContext = {
     onOutput: chunk => {
