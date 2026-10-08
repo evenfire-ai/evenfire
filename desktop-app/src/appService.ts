@@ -907,6 +907,7 @@ export class AppService {
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
+  private pendingTeamContextHops = 0
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
@@ -1033,9 +1034,37 @@ export class AppService {
     )
   }
 
-  private runCredentialProducer<T>(operation: () => Promise<T>): Promise<T> {
+  private admitCredentialProducer(): (() => void) | null {
     if (this.quitPreparationStarted) {
-      return Promise.reject(new QuitAdmissionClosedError())
+      return null
+    }
+
+    let settleProducer!: () => void
+    const producer = new Promise<void>(resolve => {
+      settleProducer = resolve
+    })
+    this.pendingCredentialProducers.add(producer)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.pendingCredentialProducers.delete(producer)
+      settleProducer()
+    }
+  }
+
+  private runCredentialProducer<T>(
+    operation: () => Promise<T>,
+    onAdmissionRejected?: (error: QuitAdmissionClosedError) => void
+  ): Promise<T> {
+    if (this.quitPreparationStarted) {
+      const error = new QuitAdmissionClosedError()
+      try {
+        onAdmissionRejected?.(error)
+      } catch (recordError) {
+        return Promise.reject(recordError)
+      }
+      return Promise.reject(error)
     }
 
     let resolveProducer!: (value: T | PromiseLike<T>) => void
@@ -1262,6 +1291,17 @@ export class AppService {
       return operation(this.requireSessionToken())
     }
 
+    // A queued cross-team hop is admitted at call time, before it can wait
+    // behind another team operation. A request queued behind a possible hop
+    // also reserves admission until its actual team is known.
+    const activeTeamId = String(this.me?.teamId || '').trim()
+    let hasHopReservation = targetTeamId !== activeTeamId || this.pendingTeamContextHops > 0
+    const earlyProducer = hasHopReservation ? this.admitCredentialProducer() : null
+    if (hasHopReservation && !earlyProducer) {
+      return Promise.reject(new QuitAdmissionClosedError())
+    }
+    if (hasHopReservation) this.pendingTeamContextHops += 1
+
     const previousQueue = this.teamContextQueue
     let releaseQueue!: () => void
     this.teamContextQueue = previousQueue
@@ -1282,6 +1322,10 @@ export class AppService {
       let activeToken = originalToken
       const shouldSwitch = originalTeamId !== targetTeamId
       const shouldRestore = Boolean(originalTeamId && shouldSwitch)
+      if (shouldSwitch && !hasHopReservation) {
+        this.pendingTeamContextHops += 1
+        hasHopReservation = true
+      }
       const runOperation = async (): Promise<T> => {
         let restoredOriginalTeam = false
         const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
@@ -1352,8 +1396,18 @@ export class AppService {
 
       // Only a real session hop can write credentials. Same-team operations
       // reuse the active token and must not hold Cmd+Q while doing request work.
-      return shouldSwitch ? await this.runCredentialProducer(runOperation) : await runOperation()
+      if (!shouldSwitch) {
+        earlyProducer?.()
+        if (hasHopReservation) {
+          this.pendingTeamContextHops -= 1
+          hasHopReservation = false
+        }
+      }
+      if (shouldSwitch && !earlyProducer) return await this.runCredentialProducer(runOperation)
+      return await runOperation()
     } finally {
+      earlyProducer?.()
+      if (hasHopReservation) this.pendingTeamContextHops -= 1
       releaseQueue()
     }
   }
