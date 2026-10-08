@@ -1204,7 +1204,6 @@ export function useAgentChatController({
       clearComposerDraft,
       getActiveChatId: () => activeChatVisibilityRef.current.activeChatId,
       getChatMessagesLoading: () => chatMessagesLoadingRef.current,
-      clearChatMessagesLoading: () => setChatMessagesLoading(false),
       getAutoSelectedChatId: () => autoSelectedChatIdRef.current,
       markAutoSelectedChat: chatId => {
         autoSelectedChatIdRef.current = chatId

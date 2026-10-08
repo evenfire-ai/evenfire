@@ -109,7 +109,6 @@ export interface ChatListControllerHost {
   clearComposerDraft: (chatId: string) => void
   getActiveChatId: () => string | null
   getChatMessagesLoading: () => boolean
-  clearChatMessagesLoading: () => void
   getAutoSelectedChatId: () => string | null
   markAutoSelectedChat: (chatId: string | null) => void
   shouldAutoSelectLatest: () => boolean
@@ -1063,8 +1062,6 @@ export function useChatListController({
         if (restoreChatId) {
           const restore = host.current?.switchToChat(agentRef, restoreChatId)
           void restore?.catch(() => undefined)
-        } else if (chatMessagesLoadingAtCreate) {
-          host.current?.clearChatMessagesLoading()
         }
       }
       throw error
