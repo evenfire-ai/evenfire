@@ -874,5 +874,25 @@
   {
     "suite": "gfsFilePolicy.test.ts",
     "fullName": "GFS file policy removed retained-storage variables no longer shape the policy"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) SOL-R2-HELD-meta-open: a duplicate whose meta.json cannot be opened keeps its charge"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) SOL-R2-HELD-caller-list: a duplicate whose .gfs-downloads cannot be listed keeps its charge"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried charge is dropped once lstat reports the directory gone"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried charge whose lstat fails with anything but ENOENT is kept"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried directory that is now indexed is charged once, not twice"
   }
 ]

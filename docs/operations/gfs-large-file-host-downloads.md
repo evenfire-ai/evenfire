@@ -385,7 +385,13 @@ it` and counts `sweep_failed`. All three log the error code only.
 A directory that cannot be listed is skipped and retried by the next sweep
 (`sweep_failed`). A removal that fails is logged with its error code
 (`remove_failed`) and retried by the next sweep; the copy stays where it is,
-indexed and charged, and a published copy stays published. Only a
+indexed and charged, and a published copy stays published. A duplicate
+directory whose removal failed stays charged against the Host budget until a
+removal succeeds or `lstat` answers `ENOENT` for it. When a later sweep cannot
+inspect it (an error other than a size, type or content mismatch) or cannot
+list its `.gfs-downloads`, the charge of the previous sweep carries over;
+a directory that is now indexed or being transferred is charged once, through
+its entry or reservation. Only a
 removal that moved a directory counts as `incomplete_removed` or
 `expired_removed`; one whose directory never existed counts nothing. Expiry is the boundary itself: a
 copy whose `expiresAt` equals the current time is expired for reuse, managed

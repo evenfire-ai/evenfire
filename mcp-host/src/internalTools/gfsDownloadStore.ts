@@ -1010,12 +1010,22 @@ export class GfsDownloadStore {
       return result !== 'failed'
     }
     // A duplicate this sweep could not remove is still on disk, so it stays
-    // charged: a failed cleanup never turns into free capacity.
+    // charged: a failed cleanup never turns into free capacity. Its charge is
+    // released only by a removal that succeeds or an lstat that answers
+    // ENOENT; an inspection or listing that fails carries the previous
+    // sweep's charge over instead of reading as zero.
+    const previousHeld = this.held
     const held = new Map<string, HeldCopy>()
+    const settled = new Set<string>()
     const removeDuplicate = async (id: string, directory: string): Promise<void> => {
+      settled.add(directory)
       if (await removeIncomplete(directory)) return
       const state = await this.inspectDirectory(directory, id, now)
       if (state.state === 'complete') held.set(directory, { sizeBytes: state.entry.sizeBytes })
+      else if (state.state === 'unknown' || state.state === 'incomplete') {
+        const previous = previousHeld.get(directory)
+        if (previous) held.set(directory, previous)
+      }
     }
 
     for (const [id, directories] of candidates) {
@@ -1073,6 +1083,23 @@ export class GfsDownloadStore {
       totals.retainedBytes += entry.sizeBytes
       if (entry.provenance === 'adopted') totals.adopted += 1
     }
+    // A held directory this sweep never reached (its listing failed, or it is
+    // no longer a duplicate) keeps its charge until lstat proves it gone.
+    for (const [directory, copy] of previousHeld) {
+      if (settled.has(directory)) continue
+      try {
+        await fs.lstat(directory)
+      } catch (error) {
+        if (errorCode(error) === 'ENOENT') continue
+      }
+      held.set(directory, copy)
+    }
+    // Never charged twice: a directory now indexed or being transferred is
+    // already counted through its entry or its reservation.
+    const counted = new Set<string>()
+    for (const entry of this.entries.values()) counted.add(entry.directory)
+    for (const transfer of this.active.values()) counted.add(transfer.directory)
+    for (const directory of held.keys()) if (counted.has(directory)) held.delete(directory)
     this.held = held
     return totals
   }
