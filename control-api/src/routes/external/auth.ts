@@ -91,7 +91,7 @@ function requireLegacySessionTokenPayload(req: Request, res: Response, next: Nex
   next()
 }
 
-function sendExternalLoginError(res: Response, error: string | undefined): Response {
+function sendExternalLoginError(res: Response, error: unknown): Response {
   if (error === 'password_not_set') {
     return res.status(409).json({ error: 'password_not_set' })
   }
