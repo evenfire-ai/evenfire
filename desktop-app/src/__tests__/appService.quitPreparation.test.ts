@@ -264,3 +264,4 @@ describe('AppService quit preparation', () => {
     expect(service.pendingCredentialProducers.size).toBe(0)
   })
 })
+      expect(vi.getTimerCount()).toBe(0)
