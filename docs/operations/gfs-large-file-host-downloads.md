@@ -448,10 +448,20 @@ removal keeps failing stays charged until it is removed. An indexed entry left
 under a trash name is dropped from the index, because its name is gone, and is
 charged only on the trash name, never twice. An unindexed expired copy whose
 removal fails after the rename is charged on its trash name with the size read
-from its `meta.json`. When the parent
-check refuses and the rename back also fails, the refusal is reported and the
-undo failure is logged as `GFS download store could not restore a directory
-after refusing to remove it` with its error code.
+from its `meta.json`. A directory the store holds no charge for when it
+removes it (an unpublished transfer's partial, an unindexed incomplete
+directory, or a trash directory left before this process started, since
+charges are held in memory) is measured on its trash name (the bytes of its
+regular files, symlinks not followed) and charged that size if its removal
+fails. A tree that cannot be measured is logged and stays uncharged until a
+later sweep measures it. When the rename itself fails, the directory keeps its
+name: an indexed entry keeps its charge, and a directory with no charge is
+measured the same way and charged under its own name. When the parent check
+refuses after the rename and the rename back also fails, the refusal is
+reported, the undo failure is logged as `GFS download store could not restore a
+directory after refusing to remove it` with its error code, and a charge in
+hand moves to the trash name; a trash directory in a refused parent is not
+read to measure it.
 
 ### Retention pins and cold resume
 
@@ -520,10 +530,11 @@ user what happened and what they can do:
   frees as tasks finish and downloaded copies expire. The model tells the user,
   who can finish or cancel their own running tasks to free space sooner and
   then try again. It never acts on another user's tasks or files. The text
-  offers no deletion of downloaded copies: the store has already evicted every
-  copy no running task protects before refusing, and the per-caller cap counts
-  only the caller's protected copies, so deleting copies by hand cannot admit
-  the download.
+  offers no deletion of downloaded copies, because that cannot admit the
+  download: the budget refusal comes only when evicting every copy no running
+  task protects would still not make room (the store then evicts nothing), and
+  the per-caller cap is checked before any eviction and counts only the copies
+  the caller's running tasks protect.
 
 `volume_unmeasurable` carries no guidance: the volume could not be measured,
 and no cleanup by the user would change that. `limit_exceeded` and every other

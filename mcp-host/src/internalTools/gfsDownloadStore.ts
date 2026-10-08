@@ -209,17 +209,35 @@ type RemovalResult = 'removed' | 'absent' | 'failed' | 'trashed'
 /**
  * A removal that renamed `directory` to `trash` and then could not remove
  * `trash` (or could not prove it gone). `code` is the underlying errno or
- * store code, so logs and errorCode() see the real cause.
+ * store code, so logs and errorCode() see the real cause. `refusal` is set
+ * when the parent check refused `trash` and the rename back failed: the
+ * bytes are under `trash`, the refusal is what callers report, and `trash`
+ * is not measured because its parent did not pass the check.
  */
 class TrashLeftError extends Error {
   readonly code: string
 
   constructor(
     readonly trash: string,
-    cause: unknown
+    cause: unknown,
+    readonly refusal?: unknown
   ) {
     super('GFS download store left a renamed directory on disk')
     this.name = 'TrashLeftError'
+    this.code = errorCode(cause)
+  }
+}
+
+/**
+ * A removal whose rename failed after the parent check passed: the directory
+ * and its bytes are still under their own name.
+ */
+class KeptInPlaceError extends Error {
+  readonly code: string
+
+  constructor(cause: unknown) {
+    super('GFS download store could not rename a directory it is removing')
+    this.name = 'KeptInPlaceError'
     this.code = errorCode(cause)
   }
 }
@@ -1284,7 +1302,9 @@ export class GfsDownloadStore {
       return found
     }
     // A trash directory a held charge names keeps that charge through the
-    // removal: removeDirectory moves it to the next trash name or releases it.
+    // removal: removeDirectory keeps it, moves it to the next trash name, or
+    // releases it, and measures one with no held charge (left before this
+    // process started) when its removal fails.
     const removeStray = async (directory: string, sweep: SweepTotals) => {
       const result = await this.removeDirectory(directory, 'incomplete_removed')
       if (result === 'removed') sweep.removedIncomplete += 1
@@ -1318,6 +1338,23 @@ export class GfsDownloadStore {
       }
     }
     return found
+  }
+
+  /**
+   * Bytes of regular files under a directory the store is removing and holds
+   * no charge for, without following symlinks. A tree that cannot be
+   * measured is logged with its code and left uncharged.
+   */
+  private async sizeStray(directory: string): Promise<number | undefined> {
+    try {
+      return (await treeUsage(directory)).bytes
+    } catch (error) {
+      logger.warn(
+        { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error) },
+        'GFS download store could not measure a directory it is removing; it is not charged until a sweep measures it'
+      )
+      return undefined
+    }
   }
 
   /**
@@ -1504,8 +1541,10 @@ export class GfsDownloadStore {
     } catch (error) {
       // Renamed but not removed: every copy charged under the old name is
       // now on disk under the trash name, so the charge moves there.
-      if (error instanceof TrashLeftError)
+      if (error instanceof TrashLeftError) {
         this.moveChargesToTrash(downloadsRoot, replaced, error.trash)
+        if (error.refusal !== undefined) throw error.refusal
+      }
       throw error
     }
     for (const id of replaced) this.forget(id)
@@ -1703,7 +1742,8 @@ export class GfsDownloadStore {
    * Retained bytes stay charged while they are on disk. The charge is
    * `charge` when the caller gives one (an indexed entry's size), otherwise a
    * held charge already on `directory` (a held duplicate or a trash directory
-   * an earlier removal left). When the rename to the trash name succeeds but
+   * an earlier removal left), otherwise the measured size of the trash. When
+   * the rename to the trash name succeeds but
    * the trash is not removed, the charge moves to the trash name as a held
    * charge, so the old name's absence never releases it; it is released only
    * when a later removal of that trash succeeds or lstat proves it gone
@@ -1724,9 +1764,24 @@ export class GfsDownloadStore {
         { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error) },
         'GFS download store could not remove a download directory; the next sweep retries it'
       )
+      if (error instanceof KeptInPlaceError) {
+        // Still under its own name. With no charge in hand (a stray trash, an
+        // unindexed partial, a failed transfer) it is measured and held here;
+        // a caller's charge stays with its indexed entry.
+        if (carried === undefined) {
+          const kept = await this.sizeStray(directory)
+          if (kept !== undefined) this.held.set(directory, { sizeBytes: kept })
+        }
+        return 'failed'
+      }
       if (!(error instanceof TrashLeftError)) return 'failed'
       this.held.delete(directory)
-      if (carried !== undefined) this.held.set(error.trash, { sizeBytes: carried })
+      // No charge in hand: the bytes the rename moved are measured on the
+      // trash name when it passed the parent check. One the check refused is
+      // not read; only a charge in hand follows it there.
+      const moved =
+        carried ?? (error.refusal === undefined ? await this.sizeStray(error.trash) : undefined)
+      if (moved !== undefined) this.held.set(error.trash, { sizeBytes: moved })
       return 'trashed'
     }
     this.held.delete(directory)
@@ -1754,7 +1809,7 @@ export class GfsDownloadStore {
     try {
       await fs.rename(directory, trash)
     } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw error
+      if (errorCode(error) !== 'ENOENT') throw new KeptInPlaceError(error)
       await assertAbsent(directory)
       return 'absent'
     }
@@ -1764,12 +1819,13 @@ export class GfsDownloadStore {
       try {
         await fs.rename(trash, directory)
       } catch (undoError) {
-        // The refusal is what the caller must see; the trash name it is left
-        // under is one the sweep collects.
+        // The refusal is what the caller must see; the bytes are left under
+        // the trash name, which the sweep collects, so the charge moves there.
         logger.warn(
           { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(undoError) },
           'GFS download store could not restore a directory after refusing to remove it'
         )
+        throw new TrashLeftError(trash, error, error)
       }
       throw error
     }

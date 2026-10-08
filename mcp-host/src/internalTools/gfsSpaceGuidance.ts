@@ -13,9 +13,11 @@ export const GFS_DISK_FULL_GUIDANCE =
   'no longer need with a shell_exec command they approve. Never list, read or delete ' +
   "another user's directory or anything outside the workspace."
 
-// The store evicts every copy no running task protects before it refuses, so
-// deleting downloaded copies by hand cannot admit the download; only tasks
-// finishing (or being cancelled) and copies expiring free that space.
+// Deleting downloaded copies by hand cannot admit the download. The budget
+// refusal comes only when evicting every copy no running task protects would
+// still not make room, and the per-caller cap, checked before any eviction,
+// counts only copies the caller's running tasks protect. Only tasks finishing
+// (or being cancelled) and copies expiring free that space.
 export const GFS_CACHE_FULL_GUIDANCE =
   "The Host's cache of downloaded files is full, so the file was not downloaded. " +
   'Space frees as tasks finish and downloaded copies expire. Tell the user. ' +

@@ -1126,5 +1126,89 @@
   {
     "suite": "turnContext.test.ts",
     "fullName": "prepared GFS receipts renders an unmeasurable volume without any guidance line"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-UNDO-FAIL: post-rename verification and undo failures retain the renamed bytes"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-FAILED-TRANSFER-partial: failed transfer trash keeps its former reservation charged"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-FAILED-TRANSFER-post-source-rename: failed transfer trash keeps its former reservation charged"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-NO-DOUBLE-CHARGE: repeated trash failures charge exactly once and admission at the remainder works"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-TRASH-ABSENCE-file: definitive absence releases a held trash charge despite a failed listing"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-TRASH-ABSENCE-missing: definitive absence releases a held trash charge despite a failed listing"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-TRASH-ABSENCE-parent-file: definitive absence releases a held trash charge despite a failed listing"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-TRASH-UNKNOWN: failed listing and EIO probing retain trash charges until cleanup recovers"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-SERIAL-SWEEPS: concurrent admission and cleanup queue behind the pre-check sweep and preserve live pins and active transfers"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-REUSE-UNPINNED-false: post-hash expiry is a miss with and without a new retention owner"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-REUSE-UNPINNED-true: post-hash expiry is a miss with and without a new retention owner"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-RESTART-TRASH: trash that survives startup cleanup remains charged after reopening the store"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-FAIL-BEFORE-RENAME: a failed transfer still in its original incomplete directory retains its charge"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-SECOND-CHECK-false: the post-reclaim measurement retries invalid readings and retains the correct error"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-SECOND-CHECK-true: the post-reclaim measurement retries invalid readings and retains the correct error"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-REUSE-false: a new retention owner shares the invalid-statfs retry and category"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-REUSE-true: a new retention owner shares the invalid-statfs retry and category"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-EIO-false: a rejected statfs propagates without treating it as an invalid reading"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-EIO-true: a rejected statfs propagates without treating it as an invalid reading"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) OPUS-R6-RESTART: after a Host restart a trash directory whose removal keeps failing is sized and charged again"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) DS-R6-FAIL-PARTIAL: a failed transfer whose trash cannot be removed stays charged with the bytes it wrote"
   }
 ]

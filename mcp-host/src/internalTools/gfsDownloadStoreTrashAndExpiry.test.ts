@@ -285,6 +285,92 @@ describe('GFS download store: a copy left under a trash name stays charged (R5-F
     expect(admitted.transfer.sizeBytes).toBe(4 * MIB)
     await store.fail(admitted.transfer.id, C)
   })
+
+  it('OPUS-R6-RESTART: after a Host restart a trash directory whose removal keeps failing is sized and charged again', async () => {
+    coherentVolume(1000n * BigInt(MIB), 1000n * BigInt(MIB))
+    const store = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '1' })
+    await completedCopy(store, rootA, A, 0, 4 * MIB, { owner: 'task-a' })
+    await completedCopy(store, rootB, B, 1, 4 * MIB, { owner: 'task-b' })
+    vi.setSystemTime(Date.now() + 2 * HOUR_MS)
+    const trashRemovals: string[] = []
+    rmBoundary.mockImplementation((...args: unknown[]) => {
+      if (path.basename(String(args[0])).startsWith('.trash-')) {
+        trashRemovals.push(String(args[0]))
+        return Promise.reject(Object.assign(new Error('EIO: injected'), { code: 'EIO' }))
+      }
+      return Reflect.apply(nativeFs.rm, nativeFs, args)
+    })
+    expect((await store.cleanupExpired()).removeFailed).toBe(2)
+    await store.close(0)
+
+    // A new process on the same root, the fault still present: it holds no
+    // charge from the old one.
+    const before = trashRemovals.length
+    const restarted = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '1' })
+    // Witness: the startup sweep reached both trash directories and failed.
+    expect(trashRemovals.length).toBe(before + 2)
+    expect(trashIn(rootA)).toHaveLength(1)
+    expect(trashIn(rootB)).toHaveLength(1)
+    expect(storedSourceBytes(hostRoot)).toBe(8 * MIB)
+    // 8 MiB of trash + 4 MiB requested > 10 MiB.
+    await expect(startTransfer(restarted, rootC, C, 2, 4 * MIB)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(storedSourceBytes(hostRoot)).toBe(8 * MIB)
+
+    // Fault cleared: the trash is removed and the same admission succeeds.
+    rmBoundary.mockImplementation((...args: unknown[]) =>
+      Reflect.apply(nativeFs.rm, nativeFs, args)
+    )
+    expect((await restarted.cleanupExpired()).removedIncomplete).toBe(2)
+    expect(storedSourceBytes(hostRoot)).toBe(0)
+    const admitted = await startTransfer(restarted, rootC, C, 2, 4 * MIB)
+    expect(admitted.transfer.sizeBytes).toBe(4 * MIB)
+    await restarted.fail(admitted.transfer.id, C)
+  })
+
+  it('DS-R6-FAIL-PARTIAL: a failed transfer whose trash cannot be removed stays charged with the bytes it wrote', async () => {
+    coherentVolume(1000n * BigInt(MIB), 1000n * BigInt(MIB))
+    const store = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '1' })
+    const first = await startTransfer(store, rootA, A, 0, 4 * MIB)
+    const second = await startTransfer(store, rootB, B, 1, 4 * MIB)
+    const trashRemovals: string[] = []
+    rmBoundary.mockImplementation((...args: unknown[]) => {
+      if (path.basename(String(args[0])).startsWith('.trash-')) {
+        trashRemovals.push(String(args[0]))
+        return Promise.reject(Object.assign(new Error('EIO: injected'), { code: 'EIO' }))
+      }
+      return Reflect.apply(nativeFs.rm, nativeFs, args)
+    })
+
+    // Neither transfer was published, so the store holds no indexed size for
+    // either; both partials are left on disk under trash names.
+    await expect(store.fail(first.transfer.id, A)).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    await expect(store.fail(second.transfer.id, B)).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    expect(trashRemovals).toHaveLength(2)
+    expect(trashIn(rootA)).toHaveLength(1)
+    expect(trashIn(rootB)).toHaveLength(1)
+    expect(storedSourceBytes(hostRoot)).toBe(8 * MIB)
+
+    // 8 MiB of partials + 4 MiB requested > 10 MiB.
+    await expect(startTransfer(store, rootC, C, 2, 4 * MIB)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+
+    // Fault cleared: the trash is removed and the same admission succeeds.
+    rmBoundary.mockImplementation((...args: unknown[]) =>
+      Reflect.apply(nativeFs.rm, nativeFs, args)
+    )
+    expect((await store.cleanupExpired()).removedIncomplete).toBe(2)
+    expect(storedSourceBytes(hostRoot)).toBe(0)
+    const admitted = await startTransfer(store, rootC, C, 2, 4 * MIB)
+    expect(admitted.transfer.sizeBytes).toBe(4 * MIB)
+    await store.fail(admitted.transfer.id, C)
+  })
 })
 
 describe('GFS download store: reuse that crosses expiry while hashing (R5-F2)', () => {
