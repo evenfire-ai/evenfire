@@ -8,10 +8,15 @@ import {
   fixtureImage,
   fixturePassLine,
   installSignalRestore,
+  laneRuntime,
+  legacyLeaseReplicaPlan,
+  legacyLeaseVacuity,
+  legacyLeaseVacuityManifestPath,
   modelInputs,
   playwrightLaneConfig,
   playwrightVerdict,
   proveImages,
+  proveVacuityImages,
   requireOwnedResource,
   runAnnotation,
   sanitizeFixtureReport,
@@ -351,4 +356,191 @@ test('the playwright log redacts the admin password, the session cookie and bear
   assert.ok(!report.includes(jwt))
   assert.ok(!report.includes('opaque-bearer-value'))
   assert.match(report, /3 passed \(41\.2s\)/)
+})
+
+// ---------------------------------------------------------------------------
+// Issue #1022: legacy processing-lease restart lanes.
+// ---------------------------------------------------------------------------
+
+test('the legacy-lease lanes share one config and select disjoint journeys', () => {
+  const fixed = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'legacy-lease-restart' })
+  const vacuity = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'legacy-lease-restart-vacuity' })
+  assert.equal(
+    fixed.config,
+    'desktop-app/test/e2e-playwright/playwright.legacy-lease-restart.config.ts'
+  )
+  assert.equal(vacuity.config, fixed.config)
+  assert.equal(fixed.grep, 'legacy-lease-restart fixture: ')
+  assert.equal(vacuity.grep, 'legacy-lease-restart vacuity: ')
+  assert.equal(vacuity.grep.startsWith(fixed.grep), false)
+  assert.equal(fixed.grep.startsWith(vacuity.grep), false)
+  const options = {
+    lane: 'legacy-lease-restart',
+    configFile: laneConfigFile('legacy-lease-restart'),
+  }
+  const scenarioTitles = ['S-crash', 'S-graceful', 'S-hcc', 'S-gfs', 'S-update'].map(
+    scenario => `legacy-lease-restart fixture: ${scenario}`
+  )
+  // Witness: the lane's own five scenario titles are PASS.
+  assert.equal(
+    playwrightVerdict(
+      playwrightReport({ lane: 'legacy-lease-restart', titles: scenarioTitles }),
+      options
+    ),
+    'PASS'
+  )
+  // A clean report that lost scenarios is not the lane.
+  assert.throws(
+    () =>
+      playwrightVerdict(
+        playwrightReport({ lane: 'legacy-lease-restart', titles: scenarioTitles.slice(0, 2) }),
+        options
+      ),
+    /lists 2 legacy-lease-restart specs, expected 5/
+  )
+  // The vacuity lane is exactly its one S-crash journey.
+  assert.equal(
+    playwrightVerdict(
+      playwrightReport({
+        lane: 'legacy-lease-restart-vacuity',
+        titles: ['legacy-lease-restart vacuity: S-crash'],
+      }),
+      {
+        lane: 'legacy-lease-restart-vacuity',
+        configFile: laneConfigFile('legacy-lease-restart-vacuity'),
+      }
+    ),
+    'PASS'
+  )
+  // A vacuity title in the fixed lane's report is outside that lane.
+  assert.throws(
+    () =>
+      playwrightVerdict(
+        playwrightReport({
+          lane: 'legacy-lease-restart',
+          titles: ['legacy-lease-restart vacuity: S-crash'],
+        }),
+        options
+      ),
+    /outside the legacy-lease-restart lane/
+  )
+})
+
+test('each lane runtime names its Host image and deadline; existing lanes are unchanged', () => {
+  for (const lane of ['image', 'document-upload']) {
+    assert.deepEqual(laneRuntime(lane), { fixtureImage, timeoutSeconds: 900, legacyLease: null })
+  }
+  assert.deepEqual(laneRuntime('legacy-lease-restart'), {
+    fixtureImage,
+    timeoutSeconds: 3600,
+    legacyLease: 'fixed',
+  })
+  assert.deepEqual(laneRuntime('legacy-lease-restart-vacuity'), {
+    fixtureImage: 'clerum/image-capabilities-mcp-host:legacy-lease-vacuity',
+    timeoutSeconds: 900,
+    legacyLease: 'vacuity',
+  })
+  // The vacuity images never reuse a HEAD tag.
+  assert.notEqual(legacyLeaseVacuity.fixtureImage, fixtureImage)
+  assert.notEqual(legacyLeaseVacuity.baseImage, baseImage)
+  for (const lane of ['typo', '__proto__', '']) {
+    assert.throws(() => laneRuntime(lane), /Unknown lane/, lane)
+  }
+})
+
+test('the vacuity manifest lives under the canonical run root, per profile', () => {
+  assert.equal(
+    legacyLeaseVacuityManifestPath('/repo/evenfire', profile),
+    `/repo/evenfire/.local-notes/infra/runs/legacy-lease-vacuity/${profile}/manifest.json`
+  )
+})
+
+const vacuityIds = {
+  [legacyLeaseVacuity.baseImage]: `sha256:${'e'.repeat(64)}`,
+  [legacyLeaseVacuity.fixtureImage]: `sha256:${'f'.repeat(64)}`,
+}
+function vacuityManifest() {
+  return {
+    kind: 'legacy-lease-vacuity',
+    profile,
+    baseRevision: '74e0d81d9b70bbc0e123ed2bad89f08d3e13e99e',
+    fixtureLayerRevision: head,
+    images: { ...vacuityIds },
+    derivedFrom: {
+      [legacyLeaseVacuity.fixtureImage]: {
+        ref: legacyLeaseVacuity.baseImage,
+        id: vacuityIds[legacyLeaseVacuity.baseImage],
+      },
+    },
+  }
+}
+
+test('vacuity images must come from the pre-fix base and this HEAD, for this profile', () => {
+  // Witness: the well-formed manifest is proven.
+  assert.deepEqual(proveVacuityImages(vacuityManifest(), vacuityIds, head, profile), {
+    head,
+    profile,
+    baseRevision: '74e0d81d9b70bbc0e123ed2bad89f08d3e13e99e',
+    images: vacuityIds,
+  })
+  for (const [label, mutate, pattern] of [
+    ['other kind', value => (value.kind = 'image-manifest'), /ownership/],
+    ['other profile', value => (value.profile = 'clerum-other-12345678'), /ownership/],
+    ['built from HEAD', value => (value.baseRevision = head), /pre-fix base/],
+    ['stale fixture layer', value => (value.fixtureLayerRevision = 'd'.repeat(40)), /this HEAD/],
+    [
+      'other base id',
+      value => (value.images[legacyLeaseVacuity.baseImage] = `sha256:${'1'.repeat(64)}`),
+      /identity/,
+    ],
+    [
+      'fixture from another base',
+      value => (value.derivedFrom[legacyLeaseVacuity.fixtureImage].id = `sha256:${'2'.repeat(64)}`),
+      /derived-base/,
+    ],
+    [
+      'fixture from the HEAD Host',
+      value => (value.derivedFrom[legacyLeaseVacuity.fixtureImage].ref = baseImage),
+      /derived-base/,
+    ],
+  ]) {
+    const changed = vacuityManifest()
+    mutate(changed)
+    assert.throws(() => proveVacuityImages(changed, vacuityIds, head, profile), pattern, label)
+  }
+  // The node holds a different image than the manifest recorded.
+  assert.throws(
+    () =>
+      proveVacuityImages(
+        vacuityManifest(),
+        { ...vacuityIds, [legacyLeaseVacuity.fixtureImage]: `sha256:${'3'.repeat(64)}` },
+        head,
+        profile
+      ),
+    /identity/
+  )
+  // A HEAD image manifest is never accepted as a vacuity proof.
+  assert.throws(() => proveVacuityImages(manifest(), ids, head, profile), /ownership/)
+})
+
+test('restoration scales the Host before HCC and never accepts zero as restored', () => {
+  const recorded = { host: 1, hcc: 1 }
+  // Witness: both at zero yields a plan, Host first.
+  assert.deepEqual(legacyLeaseReplicaPlan(recorded, { host: 0, hcc: 0 }), [
+    { key: 'host', replicas: 1 },
+    { key: 'hcc', replicas: 1 },
+  ])
+  assert.deepEqual(legacyLeaseReplicaPlan(recorded, { host: 1, hcc: 0 }), [
+    { key: 'hcc', replicas: 1 },
+  ])
+  assert.deepEqual(legacyLeaseReplicaPlan(recorded, { host: 1, hcc: 1 }), [])
+  for (const [label, bad] of [
+    ['zero host', { host: 0, hcc: 1 }],
+    ['zero hcc', { host: 1, hcc: 0 }],
+    ['missing', {}],
+    ['fractional', { host: 1.5, hcc: 1 }],
+  ]) {
+    assert.throws(() => legacyLeaseReplicaPlan(bad, { host: 1, hcc: 1 }), /Recorded/, label)
+  }
+  assert.throws(() => legacyLeaseReplicaPlan(recorded, { host: undefined, hcc: 1 }), /unreadable/)
 })

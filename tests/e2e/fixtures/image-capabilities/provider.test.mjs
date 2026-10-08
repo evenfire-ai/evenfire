@@ -1091,6 +1091,12 @@ const EXPECTED_REJECTION_REASONS = [
   'image-png-malformed',
   'image-png-unsupported-form',
   'image-tile-grid-mismatch',
+  'legacy-lease-download-not-offered',
+  'legacy-lease-download-result-malformed',
+  'legacy-lease-shell-not-offered',
+  'legacy-lease-stream-unsupported',
+  'legacy-lease-tool-result-count',
+  'legacy-lease-tool-result-unexpected',
   'provider-auth-mismatch',
   'provider-body-invalid',
   'provider-body-unsupported',
@@ -1226,4 +1232,309 @@ test('every rejected row records its closed-set reason and no request content', 
   assert.equal(accepted.getEvidence().attempts.length, 1)
   assert.equal(accepted.getEvidence().attempts[0].responseKind, 'text-only')
   assert.equal(Object.hasOwn(accepted.getEvidence().attempts[0], 'reason'), false)
+})
+
+// ---------------------------------------------------------------------------
+// Legacy processing-lease restart journey (issue #1022): the fixture scripts
+// shell_exec, then clerum__gfs_download, then answers from the receipt.
+// ---------------------------------------------------------------------------
+
+const LEGACY_MARKER = 'legacy-lease-0123456789abcdef'
+const LEGACY_RESOURCE = 'a'.repeat(32)
+const LEGACY_SHA = 'b'.repeat(64)
+const LEGACY_TOKEN = `${LEGACY_MARKER}-shell-ok`
+
+const toolDefinition = name => ({
+  type: 'function',
+  function: { name, description: name, parameters: { type: 'object' } },
+})
+const LEGACY_TOOLS = [toolDefinition('shell_exec'), toolDefinition('clerum__gfs_download')]
+
+function legacyUserMessage(marker = LEGACY_MARKER) {
+  return {
+    role: 'user',
+    content:
+      '<turn-context>\ndate: 2026-10-08\n</turn-context>\n\n' +
+      `Run the journey. LEGACY_LEASE_JOURNEY marker=${marker} drive=main resourceId=${LEGACY_RESOURCE}`,
+  }
+}
+
+function legacyMessages(results) {
+  const messages = [legacyUserMessage()]
+  for (const [index, [name, content]] of results.entries()) {
+    messages.push({
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: `call-${index}`, type: 'function', function: { name, arguments: '{}' } }],
+    })
+    messages.push({ role: 'tool', tool_call_id: `call-${index}`, content })
+  }
+  return messages
+}
+
+const wrapped = (name, content) =>
+  `<tool_output name="${name}" sanitized="false">\n${content}\n</tool_output>`
+const shellResult = content => ['shell_exec', wrapped('shell_exec', content)]
+const downloadResult = content => ['clerum__gfs_download', wrapped('clerum__gfs_download', content)]
+const receipt = (overrides = {}) =>
+  JSON.stringify({
+    delivery: 'workspace_file',
+    id: '11111111-2222-4333-8444-555555555555',
+    path: '.gfs-downloads/input-1/report.pdf',
+    sizeBytes: 42,
+    sha256: LEGACY_SHA,
+    ...overrides,
+  })
+
+test('legacy-lease step 1: asks for a shell command whose output token is not in the command', async () => {
+  const h = harness()
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, [legacyUserMessage()], { tools: LEGACY_TOOLS })
+  )
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  assert.equal(body.choices[0].finish_reason, 'tool_calls')
+  const [toolCall] = body.choices[0].message.tool_calls
+  assert.equal(toolCall.function.name, 'shell_exec')
+  const { command } = JSON.parse(toolCall.function.arguments)
+  // The approval preview shows the marker, but only an executed command can
+  // produce the joined token.
+  assert.ok(command.includes(LEGACY_MARKER))
+  assert.equal(command.includes(LEGACY_TOKEN), false)
+  assert.equal(command, `printf '%s-shell-ok\\n' ${LEGACY_MARKER}`)
+  const evidence = h.getEvidence()
+  assert.equal(evidence.counters.legacyLeaseShellRequests, 1)
+  assert.deepEqual(evidence.attempts, [
+    { model: VISUAL_MODEL, imageSha256: null, responseKind: 'legacy-lease-shell-requested' },
+  ])
+})
+
+test('legacy-lease step 2: a shell result with the token asks for the GFS download', async () => {
+  const h = harness()
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, legacyMessages([shellResult(`${LEGACY_TOKEN}\n`)]), {
+      tools: LEGACY_TOOLS,
+    })
+  )
+  const body = await response.json()
+  const [toolCall] = body.choices[0].message.tool_calls
+  assert.equal(toolCall.function.name, 'clerum__gfs_download')
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), {
+    drive: 'main',
+    resourceId: LEGACY_RESOURCE,
+  })
+  assert.equal(h.getEvidence().counters.legacyLeaseDownloadRequests, 1)
+  assert.equal(h.getEvidence().attempts[0].responseKind, 'legacy-lease-download-requested')
+})
+
+test('legacy-lease step 2: a lease failure before command start is answered with its store code', async () => {
+  const h = harness()
+  const response = await call(
+    h,
+    chatBody(
+      VISUAL_MODEL,
+      legacyMessages([
+        shellResult(
+          'Processing lease failed before command start: GFS download store failed (download_busy)'
+        ),
+      ]),
+      { tools: LEGACY_TOOLS }
+    )
+  )
+  const body = await response.json()
+  assert.equal(body.choices[0].finish_reason, 'stop')
+  assert.equal(
+    body.choices[0].message.content,
+    'LEGACY-LEASE-FIXTURE-SHELL-FAILED code=download_busy'
+  )
+  const evidence = h.getEvidence()
+  assert.equal(evidence.counters.legacyLeaseFailures, 1)
+  assert.equal(evidence.counters.legacyLeaseDownloadRequests, 0)
+  assert.deepEqual(evidence.attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'legacy-lease-shell-failed',
+      failureCode: 'download_busy',
+    },
+  ])
+})
+
+test('legacy-lease step 2: output without the token or a known code is unrecognized, never a download', async () => {
+  for (const content of [
+    // The command echoed back is not the token.
+    `printf '%s-shell-ok\\n' ${LEGACY_MARKER}`,
+    'GFS download store failed (not_a_store_code)',
+    `${LEGACY_TOKEN}-extra`,
+  ]) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, legacyMessages([shellResult(content)]), { tools: LEGACY_TOOLS })
+    )
+    const body = await response.json()
+    assert.equal(
+      body.choices[0].message.content,
+      'LEGACY-LEASE-FIXTURE-SHELL-FAILED code=unrecognized',
+      content
+    )
+    assert.equal(h.getEvidence().counters.legacyLeaseDownloadRequests, 0, content)
+  }
+})
+
+test('legacy-lease step 3: the answer carries the receipt sha256 and byte count', async () => {
+  const h = harness()
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, legacyMessages([shellResult(LEGACY_TOKEN), downloadResult(receipt())]), {
+      tools: LEGACY_TOOLS,
+    })
+  )
+  const body = await response.json()
+  assert.equal(
+    body.choices[0].message.content,
+    `LEGACY-LEASE-FIXTURE-OK marker=${LEGACY_MARKER} sha256=${LEGACY_SHA} bytes=42`
+  )
+  const evidence = h.getEvidence()
+  assert.equal(evidence.counters.legacyLeaseAnswers, 1)
+  assert.deepEqual(evidence.attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'legacy-lease-answer',
+      downloadSha256: LEGACY_SHA,
+      downloadBytes: 42,
+    },
+  ])
+})
+
+test('legacy-lease step 3: a different receipt gives a different answer (not a constant)', async () => {
+  const other = 'c'.repeat(64)
+  const h = harness()
+  const response = await call(
+    h,
+    chatBody(
+      VISUAL_MODEL,
+      legacyMessages([
+        shellResult(LEGACY_TOKEN),
+        downloadResult(receipt({ sha256: other, sizeBytes: 7 })),
+      ]),
+      { tools: LEGACY_TOOLS }
+    )
+  )
+  const body = await response.json()
+  assert.equal(
+    body.choices[0].message.content,
+    `LEGACY-LEASE-FIXTURE-OK marker=${LEGACY_MARKER} sha256=${other} bytes=7`
+  )
+})
+
+test('legacy-lease step 3: a download error is answered with its store code', async () => {
+  const h = harness()
+  const response = await call(
+    h,
+    chatBody(
+      VISUAL_MODEL,
+      legacyMessages([
+        shellResult(LEGACY_TOKEN),
+        downloadResult('Error: GFS download store failed (workspace_unavailable)'),
+      ]),
+      { tools: LEGACY_TOOLS }
+    )
+  )
+  const body = await response.json()
+  assert.equal(
+    body.choices[0].message.content,
+    'LEGACY-LEASE-FIXTURE-DOWNLOAD-FAILED code=workspace_unavailable'
+  )
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'legacy-lease-download-failed',
+      failureCode: 'workspace_unavailable',
+    },
+  ])
+})
+
+test('legacy-lease turns the fixture cannot use are refused with a closed-set reason', async () => {
+  const cases = [
+    [
+      'shell not offered',
+      chatBody(VISUAL_MODEL, [legacyUserMessage()], {
+        tools: [toolDefinition('clerum__gfs_download')],
+      }),
+      'legacy-lease-shell-not-offered',
+    ],
+    [
+      'download not offered',
+      chatBody(VISUAL_MODEL, legacyMessages([shellResult(LEGACY_TOKEN)]), {
+        tools: [toolDefinition('shell_exec')],
+      }),
+      'legacy-lease-download-not-offered',
+    ],
+    [
+      'first result from another tool',
+      chatBody(VISUAL_MODEL, legacyMessages([downloadResult(receipt())]), { tools: LEGACY_TOOLS }),
+      'legacy-lease-tool-result-unexpected',
+    ],
+    [
+      'three results',
+      chatBody(
+        VISUAL_MODEL,
+        legacyMessages([
+          shellResult(LEGACY_TOKEN),
+          downloadResult(receipt()),
+          downloadResult(receipt()),
+        ]),
+        { tools: LEGACY_TOOLS }
+      ),
+      'legacy-lease-tool-result-count',
+    ],
+    [
+      'receipt without sha256',
+      chatBody(
+        VISUAL_MODEL,
+        legacyMessages([shellResult(LEGACY_TOKEN), downloadResult(receipt({ sha256: 'x' }))]),
+        { tools: LEGACY_TOOLS }
+      ),
+      'legacy-lease-download-result-malformed',
+    ],
+    [
+      'streamed turn',
+      chatBody(VISUAL_MODEL, [legacyUserMessage()], { tools: LEGACY_TOOLS, stream: true }),
+      'legacy-lease-stream-unsupported',
+    ],
+  ]
+  for (const [label, body, reason] of cases) {
+    const h = harness()
+    const response = await call(h, body)
+    assert.ok(response.status >= 400, label)
+    const evidence = h.getEvidence()
+    assert.equal(evidence.counters.legacyLeaseFailures, 1, label)
+    assert.deepEqual(
+      evidence.attempts,
+      [{ model: VISUAL_MODEL, imageSha256: null, responseKind: 'rejected', reason }],
+      label
+    )
+  }
+})
+
+test('legacy-lease: a journey line without offered tools is an ordinary text-only request', async () => {
+  const h = harness()
+  const response = await call(h, chatBody(VISUAL_MODEL, [legacyUserMessage()]))
+  const body = await response.json()
+  assert.equal(body.choices[0].message.content, TEXT_ONLY_CONTENT)
+  // Witness: the request reached the fixture and was answered as text.
+  assert.equal(h.getEvidence().counters.textOnlyResponses, 1)
+  assert.equal(h.getEvidence().counters.legacyLeaseShellRequests, 0)
+})
+
+test('legacy-lease failure codes are a frozen closed set that includes download_busy', () => {
+  const codes = providerModule.LEGACY_LEASE_FAILURE_CODES
+  assert.equal(Object.isFrozen(codes), true)
+  assert.ok(codes.includes('download_busy'))
+  assert.ok(codes.includes('unrecognized'))
 })

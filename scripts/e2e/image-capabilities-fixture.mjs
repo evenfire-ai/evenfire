@@ -42,6 +42,69 @@ export const playwrightLanes = {
     label: 'document-upload-playwright',
     grep: 'document-upload fixture: ',
   },
+  // Issue #1022: legacy processing-lease restart scenarios on the fixed Host.
+  'legacy-lease-restart': {
+    config: 'desktop-app/test/e2e-playwright/playwright.legacy-lease-restart.config.ts',
+    label: 'legacy-lease-restart-playwright',
+    grep: 'legacy-lease-restart fixture: ',
+    // S-crash, S-graceful, S-hcc, S-gfs and S-update: a shorter list is a lost scenario.
+    expectedSpecs: 5,
+  },
+  // The same journey on a Host built from the pre-fix base revision: it must
+  // fail at the shell step with download_busy, or the lane proves nothing.
+  'legacy-lease-restart-vacuity': {
+    config: 'desktop-app/test/e2e-playwright/playwright.legacy-lease-restart.config.ts',
+    label: 'legacy-lease-restart-vacuity-playwright',
+    grep: 'legacy-lease-restart vacuity: ',
+    expectedSpecs: 1,
+  },
+}
+
+/**
+ * The pre-fix revision the vacuity lane runs (#1022 base, before #1019), and
+ * the two images `scripts/e2e/build-legacy-lease-vacuity-image.sh` builds from
+ * it. They never share a tag with the HEAD images.
+ */
+export const legacyLeaseVacuity = Object.freeze({
+  baseRevision: '74e0d81d9b70bbc0e123ed2bad89f08d3e13e99e',
+  baseImage: 'clerum/mcp-host:legacy-lease-vacuity',
+  fixtureImage: 'clerum/image-capabilities-mcp-host:legacy-lease-vacuity',
+  manifestKind: 'legacy-lease-vacuity',
+})
+
+export function legacyLeaseVacuityManifestPath(canonical, profile) {
+  return path.join(
+    canonical,
+    '.local-notes/infra/runs/legacy-lease-vacuity',
+    profile,
+    'manifest.json'
+  )
+}
+
+/** Label of the seed pods the legacy-lease spec creates; restoration deletes them. */
+export const legacyLeaseSeedLabel = 'evenfire.ai/legacy-lease-seed'
+
+/**
+ * Runtime of each lane: the Host image HCC is pointed at, the Playwright
+ * deadline, and whether the lane restarts workloads (legacy-lease lanes scale
+ * HCC and the Host to zero and restart GFS and WRC, so restoration must bring
+ * them back).
+ */
+const laneRuntimes = {
+  image: { fixtureImage, timeoutSeconds: 900, legacyLease: null },
+  'document-upload': { fixtureImage, timeoutSeconds: 900, legacyLease: null },
+  // Five scenarios, each with workload stop/start cycles and one Desktop launch.
+  'legacy-lease-restart': { fixtureImage, timeoutSeconds: 3600, legacyLease: 'fixed' },
+  'legacy-lease-restart-vacuity': {
+    fixtureImage: legacyLeaseVacuity.fixtureImage,
+    timeoutSeconds: 900,
+    legacyLease: 'vacuity',
+  },
+}
+
+export function laneRuntime(lane) {
+  if (!Object.hasOwn(laneRuntimes, lane)) throw new Error(`Unknown lane ${JSON.stringify(lane)}`)
+  return laneRuntimes[lane]
 }
 
 export function playwrightLaneConfig(env) {
@@ -73,7 +136,7 @@ const isCount = value => Number.isSafeInteger(value) && value >= 0
  * test and no unexpected, skipped or flaky outcome.
  */
 export function playwrightVerdict(report, { lane, configFile }) {
-  const { grep } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
+  const { grep, expectedSpecs } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
   const reported = report?.config?.configFile
   if (typeof reported !== 'string' || fs.realpathSync(reported) !== fs.realpathSync(configFile))
     throw new Error('Playwright report config mismatch')
@@ -102,6 +165,10 @@ export function playwrightVerdict(report, { lane, configFile }) {
     )
   if (titles.some(title => !title.startsWith(grep)))
     throw new Error(`Playwright report has specs outside the ${lane} lane`)
+  if (expectedSpecs !== undefined && titles.length !== expectedSpecs)
+    throw new Error(
+      `Playwright report lists ${titles.length} ${lane} specs, expected ${expectedSpecs}`
+    )
   return 'PASS'
 }
 
@@ -135,6 +202,53 @@ export function proveImages(manifest, observed, head, profile) {
   if (binding?.ref !== baseImage || binding.id !== observed[baseImage])
     throw new Error('Fixture derived-base mismatch')
   return { head, profile, images: observed }
+}
+
+/**
+ * Proves the vacuity images: the Host layer was built from the pre-fix base
+ * revision, the fixture layer from this HEAD, both for this profile, and the
+ * fixture layer derives from the exact base image present in the node.
+ */
+export function proveVacuityImages(manifest, observed, head, profile) {
+  const { baseRevision, baseImage: vacuityBase, fixtureImage: vacuityFixture } = legacyLeaseVacuity
+  if (
+    !/^[a-f0-9]{40}$/.test(head) ||
+    manifest?.kind !== legacyLeaseVacuity.manifestKind ||
+    manifest.profile !== profile
+  )
+    throw new Error('Vacuity image ownership mismatch')
+  if (manifest.baseRevision !== baseRevision)
+    throw new Error('Vacuity Host image was not built from the pre-fix base revision')
+  if (manifest.fixtureLayerRevision !== head)
+    throw new Error('Vacuity fixture layer was not built from this HEAD')
+  for (const ref of [vacuityBase, vacuityFixture]) {
+    const id = manifest.images?.[ref]
+    if (!/^sha256:[a-f0-9]{64}$/.test(id ?? '') || id !== observed[ref])
+      throw new Error('Vacuity image identity mismatch')
+  }
+  const binding = manifest.derivedFrom?.[vacuityFixture]
+  if (binding?.ref !== vacuityBase || binding.id !== observed[vacuityBase])
+    throw new Error('Vacuity fixture derived-base mismatch')
+  return { head, profile, baseRevision, images: observed }
+}
+
+/**
+ * The legacy-lease lanes scale HCC and the Host. Each must be back at its
+ * recorded replica count; zero is never a restored state.
+ */
+export function legacyLeaseReplicaPlan(recorded, live) {
+  const plan = []
+  // The Host first: HCC sets the Host replicas itself, and a Host already at
+  // its count makes HCC's first reconcile a no-op.
+  for (const key of ['host', 'hcc']) {
+    const want = recorded?.[key]
+    if (!Number.isSafeInteger(want) || want < 1)
+      throw new Error(`Recorded ${key} replicas must be a positive integer`)
+    if (!Number.isSafeInteger(live?.[key]) || live[key] < 0)
+      throw new Error(`Live ${key} replicas are unreadable`)
+    if (live[key] !== want) plan.push({ key, replicas: want })
+  }
+  return plan
 }
 
 export function modelInputs(runId) {
@@ -256,6 +370,7 @@ async function main() {
     label: laneLabel,
     grep: laneGrep,
   } = selectFixtureAction(process.argv[2], process.env)
+  const runtime = action === 'run' ? laneRuntime(lane) : null
   const head = command('git', ['rev-parse', 'HEAD']).trim()
   const branch = command('git', ['branch', '--show-current']).trim()
   if (command('git', ['status', '--porcelain']).trim()) throw new Error('Clean checkout required')
@@ -339,6 +454,8 @@ async function main() {
           profile,
           head,
           root,
+          fixtureImage: runtime.fixtureImage,
+          legacyLease: runtime.legacyLease,
           rows: [],
           changes: {},
           restored: false,
@@ -350,6 +467,10 @@ async function main() {
     (action === 'run' && state.head !== head)
   )
     throw new Error('Run state identity mismatch')
+  // Restore reads the lane's Host image from the persisted state, never from the
+  // environment, so a stale lane variable cannot point restoration elsewhere.
+  if (typeof state.fixtureImage !== 'string' || !state.fixtureImage)
+    throw new Error('Run state has no fixture image; restore it with the runner that created it')
   const save = () => {
     const destination = path.join(evidence, 'state.json')
     if (fs.existsSync(destination)) {
@@ -424,8 +545,86 @@ async function main() {
     if (!response.ok) throw new Error(`Fixture admin operation failed (${response.status})`)
     return response.status === 204 ? null : response.json()
   }
+  const deploymentReplicas = (namespace, name) => get(namespace, 'deployment', name).spec.replicas
+  const restoreLegacyLeaseWorkloads = () => {
+    // Seed pods mount the Host PVC; none may outlive the run.
+    kc([
+      '-n',
+      'mcp-host',
+      'delete',
+      'pod',
+      '-l',
+      `${legacyLeaseSeedLabel}=${state.runId}`,
+      '--ignore-not-found',
+      '--wait=true',
+      '--timeout=90s',
+    ])
+    const remaining = kc([
+      '-n',
+      'mcp-host',
+      'get',
+      'pod',
+      '-l',
+      legacyLeaseSeedLabel,
+      '-o',
+      'jsonpath={.items[*].metadata.name}',
+    ]).trim()
+    if (remaining) throw new Error('Legacy-lease seed pods remain in mcp-host')
+    const liveReplicas = () => ({
+      host: deploymentReplicas('mcp-host', 'chatllm'),
+      hcc: deploymentReplicas('control-plane', 'host-context-controller'),
+    })
+    for (const { key, replicas } of legacyLeaseReplicaPlan(
+      state.legacyLeaseReplicas,
+      liveReplicas()
+    )) {
+      const [namespace, name] =
+        key === 'host' ? ['mcp-host', 'chatllm'] : ['control-plane', 'host-context-controller']
+      kc(['-n', namespace, 'scale', `deployment/${name}`, `--replicas=${replicas}`])
+    }
+    for (const [namespace, name] of [
+      ['gfs', 'gfsc-writer'],
+      ['gfs', 'gfsc-reader'],
+      ['control-plane', 'workflow-recipes'],
+      ['control-plane', 'host-context-controller'],
+      ['mcp-host', 'chatllm'],
+    ])
+      kc(['-n', namespace, 'rollout', 'status', `deployment/${name}`, '--timeout=150s'])
+    if (legacyLeaseReplicaPlan(state.legacyLeaseReplicas, liveReplicas()).length)
+      throw new Error('HCC or the Host is not back at its recorded replicas')
+  }
+  // The Host discards a legacy lease at initialize, which runs at boot and can
+  // wait out writer contention, so the ledger is polled with a bound.
+  const waitLedgerWithoutLegacyLeases = async () => {
+    const until = Date.now() + 240_000
+    let last = 'unread'
+    while (Date.now() < until) {
+      try {
+        const ledger = JSON.parse(
+          kc([
+            '-n',
+            'mcp-host',
+            'exec',
+            'deployment/chatllm',
+            '-c',
+            'mcp-host',
+            '--',
+            'cat',
+            '/workspace/.gfs-download-store/ledger-v1.json',
+          ])
+        )
+        if (!Object.hasOwn(ledger, 'processingLeases')) return
+        last = 'processingLeases present'
+      } catch (error) {
+        last = error.message
+      }
+      await new Promise(resolve => setTimeout(resolve, 2_000))
+    }
+    throw new Error(`Restored Host ledger still carries legacy processing leases (${last})`)
+  }
   const restoreRuntime = async () => {
     if (state.restored) return
+    if (state.legacyLease && state.legacyLeaseReplicas) restoreLegacyLeaseWorkloads()
     // Restore the model before removing its fixture-only catalog rows.
     if (state.changes.host) {
       const current = get('mcp-host', 'host', 'chatllm')
@@ -500,7 +699,7 @@ async function main() {
             path: state.hcc.path.replace(/value$/, 'name'),
             value: 'CONTEXT_MAPPER_HOST_IMAGE',
           },
-          { op: 'test', path: state.hcc.path, value: fixtureImage },
+          { op: 'test', path: state.hcc.path, value: state.fixtureImage },
           { op: 'replace', path: state.hcc.path, value: state.hcc.image },
           unmark,
         ])
@@ -582,6 +781,9 @@ async function main() {
       'process.stdout.write(String(!process.env.EVENFIRE_IMAGE_CAPABILITIES_FIXTURE && !require("node:fs").existsSync("/tmp/image-capabilities-evidence.json")))',
     ]).trim()
     if (predicate !== 'true') throw new Error('Fixture state remains in Host')
+    // The vacuity lane leaves its seeded lease on the PVC (the pre-fix Host
+    // cannot discard it); the restored fixed Host must discard it at boot.
+    if (state.legacyLease) await waitLedgerWithoutLegacyLeases()
     state.restored = true
     save()
   }
@@ -596,11 +798,20 @@ async function main() {
   }
   let failure
   try {
+    const vacuity = runtime.legacyLease === 'vacuity'
     const manifest = JSON.parse(
-      fs.readFileSync(path.join(root, 'deploy/minikube/.image-manifest.json'), 'utf8')
+      fs.readFileSync(
+        vacuity
+          ? legacyLeaseVacuityManifestPath(canonical, profile)
+          : path.join(root, 'deploy/minikube/.image-manifest.json'),
+        'utf8'
+      )
     )
+    const proofRefs = vacuity
+      ? [legacyLeaseVacuity.baseImage, legacyLeaseVacuity.fixtureImage]
+      : [baseImage, fixtureImage]
     const observed = Object.fromEntries(
-      [baseImage, fixtureImage].map(ref => [
+      proofRefs.map(ref => [
         ref,
         command('minikube', [
           '-p',
@@ -616,7 +827,9 @@ async function main() {
         ]).trim(),
       ])
     )
-    state.imageProof = proveImages(manifest, observed, head, profile)
+    state.imageProof = vacuity
+      ? proveVacuityImages(manifest, observed, head, profile)
+      : proveImages(manifest, observed, head, profile)
     save()
     const host = get('mcp-host', 'host', 'chatllm')
     const hosts = JSON.parse(kc(['-n', 'mcp-host', 'get', 'hosts', '-o', 'json']))
@@ -772,7 +985,7 @@ async function main() {
         value: 'CONTEXT_MAPPER_HOST_IMAGE',
       },
       { op: 'test', path: state.hcc.path, value: state.hcc.image },
-      { op: 'replace', path: state.hcc.path, value: fixtureImage },
+      { op: 'replace', path: state.hcc.path, value: state.fixtureImage },
     ])
     kc([
       '-n',
@@ -782,7 +995,7 @@ async function main() {
       'deployment/host-context-controller',
       '--timeout=120s',
     ])
-    await waitHostImage(fixtureImage)
+    await waitHostImage(state.fixtureImage)
     const wire = JSON.parse(
       kc([
         '-n',
@@ -811,6 +1024,26 @@ async function main() {
       QA_RECORDER_IMAGE_MODEL_UNSUPPORTED: 'glm-5.3',
       QA_RECORDER_IMAGE_MODEL_UNKNOWN: models[2].model,
       QA_RECORDER_ROOT: evidence,
+      ...(runtime.legacyLease
+        ? {
+            // The GFS fixture helpers name the cluster through this variable.
+            E2E_K8S_CONTEXT: profile,
+            LEGACY_LEASE_LANE_MODE: runtime.legacyLease,
+            LEGACY_LEASE_SEED_LABEL_VALUE: state.runId,
+          }
+        : {}),
+    }
+    if (runtime.legacyLease) {
+      // The spec scales these to zero; restoration needs the values it found.
+      const replicas = {
+        host: deploymentReplicas('mcp-host', 'chatllm'),
+        hcc: deploymentReplicas('control-plane', 'host-context-controller'),
+      }
+      // Validates the recorded counts: a workload already at zero is refused
+      // here, before the spec runs, instead of becoming the restore target.
+      legacyLeaseReplicaPlan(replicas, replicas)
+      state.legacyLeaseReplicas = replicas
+      save()
     }
     command('npm', ['run', 'verify:electron', '--prefix', 'desktop-app'])
     process.stdout.write(`Image capability fixture ready: ${state.runId} (lane ${lane})\n`)
@@ -826,7 +1059,7 @@ async function main() {
         [
           'scripts/minikube/run-with-deadline.mjs',
           '--timeout-seconds',
-          '900',
+          String(runtime.timeoutSeconds),
           '--heartbeat-seconds',
           '20',
           '--kill-grace-seconds',
@@ -847,7 +1080,7 @@ async function main() {
             ...environment,
             PLAYWRIGHT_JSON_OUTPUT_FILE: path.join(evidence, 'playwright-report.json'),
           },
-          timeout: 930_000,
+          timeout: (runtime.timeoutSeconds + 30) * 1000,
         }
       )
       report(output)
@@ -875,7 +1108,9 @@ async function main() {
       try {
         const current = get('mcp-host', 'deployment', 'chatllm')
         if (
-          current.spec.template.spec.containers.some(container => container.image === fixtureImage)
+          current.spec.template.spec.containers.some(
+            container => container.image === state.fixtureImage
+          )
         ) {
           const logs = kc(['-n', 'mcp-host', 'logs', 'deployment/chatllm', '--tail=60'])
           state.startupDiagnostic = [
@@ -902,6 +1137,32 @@ async function main() {
     )
   }
   uninstallSignalRestore()
+  if (!failure && state.legacyLease) {
+    // The spec removes its GFS fixtures; a live row left behind fails the run.
+    try {
+      const live = kc([
+        '-n',
+        'control-plane',
+        'exec',
+        'deployment/control-postgres',
+        '--',
+        'psql',
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-U',
+        'postgres',
+        '-d',
+        'profiles',
+        '-t',
+        '-A',
+        '-c',
+        "SELECT count(*) FROM gfs_resources WHERE drive = 'main' AND deleted_at IS NULL AND path_cache LIKE '/e2e-gfs-legacy-lease-%';",
+      ]).trim()
+      if (live !== '0') failure = new Error(`Legacy-lease GFS fixture rows remain (${live})`)
+    } catch (error) {
+      failure = new Error(`Legacy-lease GFS fixture check failed: ${error.message}`)
+    }
+  }
   if (failure) throw failure
   process.stdout.write(
     fixturePassLine(JSON.parse(readOwnedFile(evidence, 'state.json')), { lane, evidence })

@@ -321,6 +321,25 @@ minikube-run-document-upload: ## Run the visible Desktop document-upload journey
 		IMAGE_CAPABILITIES_LANE=document-upload \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
 
+.PHONY: minikube-run-legacy-lease-restart minikube-run-legacy-lease-restart-vacuity
+minikube-run-legacy-lease-restart: ## Run the legacy processing-lease restart scenarios (issue #1022) with the Desktop shell+GFS download journey and restore the Host
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		IMAGE_CAPABILITIES_LANE=legacy-lease-restart \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
+
+minikube-run-legacy-lease-restart-vacuity: ## Prove the legacy-lease lane fails on the pre-fix Host (base 74e0d81d9): S-crash must stop at the shell with download_busy
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		IMAGE_CAPABILITIES_LANE=legacy-lease-restart-vacuity \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
+
+.PHONY: minikube-build-legacy-lease-vacuity-fixture
+minikube-build-legacy-lease-vacuity-fixture: ## Build the pre-fix Host (base 74e0d81d9) and its provider-fixture layer for the legacy-lease vacuity lane under the owned profile lease
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-legacy-lease-vacuity-image.sh
+
 minikube-restore-image-capabilities: ## Resume restoration of a recorded image fixture run (IMAGE_CAPABILITIES_RUN_DIR=<dir printed by minikube-run-image-capabilities>)
 	@test -n "$(IMAGE_CAPABILITIES_RUN_DIR)" || { echo "IMAGE_CAPABILITIES_RUN_DIR is required: the run directory printed by 'make minikube-run-image-capabilities'"; exit 1; }
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \

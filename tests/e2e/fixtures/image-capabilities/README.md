@@ -55,6 +55,39 @@ file chip, sends, and requires the digest of the attached bytes in the answer,
 one `document-read-requested` row, one `document-answer` row carrying that
 digest, no image row and no `documentFailures`.
 
+## Legacy processing-lease restart journey (issue #1022)
+
+`make minikube-run-legacy-lease-restart` is the same runner with
+`IMAGE_CAPABILITIES_LANE=legacy-lease-restart`; the config is
+`desktop-app/test/e2e-playwright/playwright.legacy-lease-restart.config.ts` and
+the cluster side lives in `helpers/legacyLeaseRestart.ts`. The user message
+carries one line:
+
+```
+LEGACY_LEASE_JOURNEY marker=legacy-lease-<16 hex> drive=<drive> resourceId=<32 hex>
+```
+
+The fixture then scripts the turns from the message list alone: it asks for
+`shell_exec` with a command whose output is `<marker>-shell-ok` (a token absent
+from the command), then for `clerum__gfs_download` of the named resource once
+the shell result echoes the token, and answers
+`LEGACY-LEASE-FIXTURE-OK marker=… sha256=… bytes=…` from the download receipt.
+A shell or download result without what the next step needs is answered with
+`LEGACY-LEASE-FIXTURE-SHELL-FAILED code=<code>` or
+`LEGACY-LEASE-FIXTURE-DOWNLOAD-FAILED code=<code>`, where the code is a GFS
+download store error code (for example `download_busy`) or `unrecognized`.
+`download_busy` is what the pre-fix Host returns for a legacy lease. The ledger
+rows are `legacy-lease-shell-requested`, `legacy-lease-download-requested`,
+`legacy-lease-answer` (with `downloadSha256` and `downloadBytes`),
+`legacy-lease-shell-failed` and `legacy-lease-download-failed` (with
+`failureCode`). It never records command output.
+
+The vacuity lane, `make minikube-run-legacy-lease-restart-vacuity`, runs the same
+fixture layer on a Host built from the pre-fix base by
+`make minikube-build-legacy-lease-vacuity-fixture`. The procedure and the
+signals checked after each scenario are in
+`docs/testing/minikube-t2-runbook.md` (Legacy processing-lease restart lane).
+
 ## Local execution
 
 Use Node 24 and Bash 5, a clean development branch based on current `origin/dev`,

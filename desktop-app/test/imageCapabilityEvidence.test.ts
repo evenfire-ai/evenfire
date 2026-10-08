@@ -44,6 +44,24 @@ const rows = {
     truncated: true,
   }),
   textOnly: (): Row => ({ model: 'glm-5.3-flash', imageSha256: null, responseKind: 'text-only' }),
+  shellRequested: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'legacy-lease-shell-requested',
+  }),
+  legacyAnswer: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'legacy-lease-answer',
+    downloadSha256: DIGEST,
+    downloadBytes: 42,
+  }),
+  shellFailed: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'legacy-lease-shell-failed',
+    failureCode: 'download_busy',
+  }),
 }
 
 function ledger(attempts: Row[]): string {
@@ -63,6 +81,10 @@ function ledger(attempts: Row[]): string {
       documentReadRequests: 0,
       documentAnswers: 0,
       documentFailures: 0,
+      legacyLeaseShellRequests: 0,
+      legacyLeaseDownloadRequests: 0,
+      legacyLeaseAnswers: 0,
+      legacyLeaseFailures: 0,
     },
     attempts,
   })
@@ -120,6 +142,47 @@ describe('imageCapabilityEvidence ledger rows', () => {
   })
 })
 
+describe('legacy-lease ledger rows', () => {
+  it('keeps the failure code and the download receipt on the rows that carry them', () => {
+    const snapshot = parse([rows.shellRequested(), rows.legacyAnswer(), rows.shellFailed()])
+    expect(snapshot.attempts).toEqual([
+      rows.shellRequested(),
+      rows.legacyAnswer(),
+      rows.shellFailed(),
+    ])
+  })
+
+  it('requires a closed-set failure code on failure rows and nowhere else', () => {
+    // Witness: the well-formed failure row parses with its code.
+    expect(parse([rows.shellFailed()]).attempts[0]?.failureCode).toBe('download_busy')
+    const { failureCode: _code, ...withoutCode } = rows.shellFailed()
+    for (const [label, row] of [
+      ['missing failureCode', withoutCode],
+      ['free-text failureCode', { ...rows.shellFailed(), failureCode: 'disk on fire' }],
+      ['failureCode on an answer row', { ...rows.legacyAnswer(), failureCode: 'download_busy' }],
+      ['failureCode on a text row', { ...rows.textOnly(), failureCode: 'download_busy' }],
+    ] as const) {
+      expect(() => parse([row]), label).toThrow(/failureCode/)
+    }
+  })
+
+  it('requires the download receipt on every answer row and nowhere else', () => {
+    // Witness: the well-formed answer row parses with its receipt.
+    expect(parse([rows.legacyAnswer()]).attempts[0]?.downloadBytes).toBe(42)
+    const { downloadSha256: _sha, ...withoutSha } = rows.legacyAnswer()
+    const { downloadBytes: _bytes, ...withoutBytes } = rows.legacyAnswer()
+    for (const [label, row] of [
+      ['missing downloadSha256', withoutSha],
+      ['short downloadSha256', { ...rows.legacyAnswer(), downloadSha256: 'abc' }],
+      ['missing downloadBytes', withoutBytes],
+      ['negative downloadBytes', { ...rows.legacyAnswer(), downloadBytes: -1 }],
+      ['receipt on a shell row', { ...rows.shellRequested(), downloadSha256: DIGEST }],
+    ] as const) {
+      expect(() => parse([row]), label).toThrow(/downloadSha256|downloadBytes/)
+    }
+  })
+})
+
 describe('appendedAttempts', () => {
   it('refuses a row whose reason or delivered page changed between reads', () => {
     const before = parse([rows.rejected(), rows.answer()])
@@ -132,6 +195,21 @@ describe('appendedAttempts', () => {
       ['offset', [rows.rejected(), { ...rows.answer(), byteRange: { offset: 1, length: 65_536 } }]],
       ['length', [rows.rejected(), { ...rows.answer(), byteRange: { offset: 0, length: 65_535 } }]],
       ['truncated', [rows.rejected(), { ...rows.answer(), truncated: false }]],
+    ] as const) {
+      expect(() => appendedAttempts(before, parse([...changed])), label).toThrow(/append-only/)
+    }
+  })
+
+  it('refuses a legacy-lease row whose receipt or failure code changed between reads', () => {
+    const before = parse([rows.legacyAnswer(), rows.shellFailed()])
+    // Witness: an unchanged prefix yields the appended row.
+    expect(
+      appendedAttempts(before, parse([rows.legacyAnswer(), rows.shellFailed(), rows.textOnly()]))
+    ).toEqual([rows.textOnly()])
+    for (const [label, changed] of [
+      ['sha', [{ ...rows.legacyAnswer(), downloadSha256: 'c'.repeat(64) }, rows.shellFailed()]],
+      ['bytes', [{ ...rows.legacyAnswer(), downloadBytes: 43 }, rows.shellFailed()]],
+      ['code', [rows.legacyAnswer(), { ...rows.shellFailed(), failureCode: 'writer_locked' }]],
     ] as const) {
       expect(() => appendedAttempts(before, parse([...changed])), label).toThrow(/append-only/)
     }
@@ -152,5 +230,18 @@ describe('rejection reason parity', () => {
     // Witness: the set is not empty, so equality is not two empty lists.
     expect((declared as readonly string[]).length).toBeGreaterThan(0)
     expect(FIXTURE_RESPONSE_KIND.rejected).toBe('rejected')
+  })
+
+  it('declares the same legacy-lease failure codes as the fixture, independently', async () => {
+    const providerModule = (await import(PROVIDER_MODULE_URL)) as {
+      LEGACY_LEASE_FAILURE_CODES: readonly string[]
+    }
+    const declared = (evidenceModule as Record<string, unknown>).FIXTURE_LEGACY_LEASE_FAILURE_CODES
+    expect(Array.isArray(declared)).toBe(true)
+    expect(declared).not.toBe(providerModule.LEGACY_LEASE_FAILURE_CODES)
+    expect([...(declared as readonly string[])].sort()).toEqual(
+      [...providerModule.LEGACY_LEASE_FAILURE_CODES].sort()
+    )
+    expect(declared as readonly string[]).toContain('download_busy')
   })
 })
