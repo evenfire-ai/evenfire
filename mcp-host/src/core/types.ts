@@ -706,7 +706,12 @@ export interface PendingApproval {
 export type LoopResult =
   | { type: 'response'; content: string; usage: TokenUsage; attachments?: Attachment[] }
   | { type: 'need_approval'; approval: PendingApproval }
-  | { type: 'error'; error: Error }
+  | {
+      type: 'error'
+      error: Error
+      /** #1043 — set when the failed turn left a resumable model-step checkpoint. */
+      checkpointId?: string
+    }
   | {
       type: 'exhaustion'
       reason?: 'iteration_limit' | 'task_budget' | 'turn_stop'

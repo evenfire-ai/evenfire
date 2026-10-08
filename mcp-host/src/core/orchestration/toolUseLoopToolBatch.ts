@@ -276,7 +276,11 @@ export async function executeToolCalls(
 
     const progressStart = reportToolStart(config, call, iteration, i, calls.length, llmTextContent)
     if (admission.kind !== 'execute') throw new Error('Admitted tool call has no execution phase')
+    // #1043 — the dispatch is durable before the tool's effect, and the
+    // result right after it: a dispatch without a result reads `unknown`.
+    await config.modelStepCheckpointRecorder?.recordDispatch(call)
     const toolResult = await executeAdmittedTool(admission, config, iteration)
+    await config.modelStepCheckpointRecorder?.recordResult(call, toolResult)
 
     // Retain policy-processed output before a subsequent tool can throw.
     if (config.onAttachments && toolResult.attachments?.length) {

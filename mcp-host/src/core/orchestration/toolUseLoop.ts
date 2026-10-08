@@ -62,6 +62,52 @@ export async function runToolUseLoop(
   initialMessages: ChatMessage[],
   jobDescription?: string
 ): Promise<LoopResult> {
+  const recorder = config.modelStepCheckpointRecorder
+  if (!recorder) return runLoopIterations(config, initialMessages, jobDescription)
+
+  // #1043 — the recorder settles exactly once, whatever way the loop exits.
+  await recorder.begin(initialMessages)
+  let result: LoopResult | undefined
+  try {
+    result = await runLoopIterations(config, initialMessages, jobDescription)
+  } finally {
+    const checkpointId = await recorder.settle(result)
+    if (checkpointId !== undefined && result?.type === 'error') {
+      result = { ...result, checkpointId }
+    }
+  }
+  return result
+}
+
+/**
+ * Context management with the checkpoint kept in step: everything pushed
+ * since the last pass is recorded before the array can be replaced.
+ */
+async function manageRecordedMessages(
+  config: LoopConfig,
+  messages: ChatMessage[],
+  iteration: number,
+  tools: ToolDefinition[],
+  logCompaction = false
+): Promise<ChatMessage[]> {
+  const recorder = config.modelStepCheckpointRecorder
+  await recorder?.syncMessages(messages)
+  const managed = await manageMessagesForIteration(
+    config,
+    messages,
+    iteration,
+    tools,
+    logCompaction
+  )
+  recorder?.rebase(managed.length)
+  return managed
+}
+
+async function runLoopIterations(
+  config: LoopConfig,
+  initialMessages: ChatMessage[],
+  jobDescription?: string
+): Promise<LoopResult> {
   const { toolRegistry, loopController, maxIterations } = config
   let messages = [...initialMessages]
   const totalUsage: TokenUsage = {
@@ -127,7 +173,7 @@ export async function runToolUseLoop(
         }
       }
 
-      messages = await manageMessagesForIteration(config, messages, iteration, tools, true)
+      messages = await manageRecordedMessages(config, messages, iteration, tools, true)
 
       const context: ReasoningContext = {
         messages,
@@ -341,6 +387,8 @@ export async function runToolUseLoop(
             tool_calls: result.calls,
             reasoning_content: result.reasoning_content,
           })
+          // #1043 — the tool-call message is durable before any tool runs.
+          await config.modelStepCheckpointRecorder?.syncMessages(messages)
 
           for (const message of messages) {
             for (const part of message.contentParts ?? []) {
@@ -425,7 +473,8 @@ export async function runToolUseLoop(
             config.imageSourceIdentity === true
           )
           lastToolResults = toolResults
-          messages = await manageMessagesForIteration(config, messages, iteration, tools)
+          messages = await manageRecordedMessages(config, messages, iteration, tools)
+          await config.modelStepCheckpointRecorder?.updateState(iteration + 1)
           validateToolLinkages(messages)
           continue
         }
