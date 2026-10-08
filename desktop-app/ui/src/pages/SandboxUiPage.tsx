@@ -507,11 +507,6 @@ export function SandboxUiPage({
     }
   }, [currentTeamId, onNotify])
 
-  const onRemoveApp = useCallback(async () => {
-    await closeEmbed()
-    onEmbeddedAppRemoved?.()
-  }, [closeEmbed, onEmbeddedAppRemoved])
-
   useEffect(() => {
     if (shortcutOpenRequestId === lastShortcutOpenRequestIdRef.current) return
     lastShortcutOpenRequestIdRef.current = shortcutOpenRequestId

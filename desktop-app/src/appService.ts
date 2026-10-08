@@ -5241,9 +5241,10 @@ export class AppService {
    * view at the bounds the renderer reserved.
    *
    * Only one sandbox-ui view exists at a time across the desktop app —
-   * re-opening recipe B while A is up tears down A first (the driver enforces
-   * this). This keeps memory + GPU usage bounded and avoids accidental
-   * cross-recipe focus / cookie-jar mixups.
+   * re-opening recipe B while A is up tears down A first, before B's session
+   * is minted, so a failed open leaves no view at all. This keeps memory + GPU
+   * usage bounded and avoids accidental cross-recipe focus / cookie-jar
+   * mixups.
    */
   openSandboxUi(args: {
     recipeNs: string
@@ -5278,6 +5279,27 @@ export class AppService {
     const recipeName = String(args.recipeName || '').trim()
     if (!recipeNs || !recipeName) throw new Error('recipeNs and recipeName are required')
     this.sandboxUiGeneration += 1
+    // An open replaces the current view whatever its outcome, so the outgoing
+    // view goes BEFORE the network mint: a failed mint must not leave it
+    // painted (with its refresh loop still minting) after the renderer has been
+    // told the open failed. Deliberately silent — no `onClosed`: the renderer
+    // drops its owner of the embed on `sandboxUi:closed`, which here would
+    // orphan the view this open is about to mount. Failure is reported only by
+    // the rejection.
+    await this.teardownSandboxUiView()
+    try {
+      await this.mintAndMountSandboxUiView(args, recipeNs, recipeName)
+    } catch (error) {
+      await this.teardownSandboxUiView()
+      throw error
+    }
+  }
+
+  private async mintAndMountSandboxUiView(
+    args: Parameters<AppService['openSandboxUi']>[0],
+    recipeNs: string,
+    recipeName: string
+  ): Promise<void> {
     const { setCookie } = await this.mintSandboxUiSession(recipeNs, recipeName)
     const driver = await import('./sandboxUiDriver.js')
     const refreshModule = await import('./sandboxUiSessionRefresh.js')
@@ -5349,13 +5371,15 @@ export class AppService {
   }
 
   closeSandboxUi(): Promise<void> {
-    return this.enqueueSandboxUiLifecycle(async () => {
-      const driver = await import('./sandboxUiDriver.js')
-      const refreshModule = await import('./sandboxUiSessionRefresh.js')
-      refreshModule.cancelSandboxUiRefresh()
-      tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
-      await driver.unmountSandboxUiView()
-    })
+    return this.enqueueSandboxUiLifecycle(() => this.teardownSandboxUiView())
+  }
+
+  private async teardownSandboxUiView(): Promise<void> {
+    const driver = await import('./sandboxUiDriver.js')
+    const refreshModule = await import('./sandboxUiSessionRefresh.js')
+    refreshModule.cancelSandboxUiRefresh()
+    tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
+    await driver.unmountSandboxUiView()
   }
 
   // Read the active embed's current in-app route for the renderer's tab store

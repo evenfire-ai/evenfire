@@ -405,7 +405,9 @@ export function App() {
   // app tab changes, this ref tells the deactivation effect which OUTGOING tab
   // to persist the route onto. `null` = no embed is live (also the reconciled
   // state after an UNsolicited close — crash/quit/GC — so a later tab switch
-  // does not persist or re-close a dead embed).
+  // does not persist or re-close a dead embed). A FAILED open does not reset it:
+  // the tab keeps owning whatever main may still hold (see
+  // `handleSandboxUiRemoved`).
   const liveSandboxUiTabIdRef = React.useRef<string | null>(null)
   // Monotonic generation bumped on EVERY transition of the active embed (the
   // deactivation effect and the deep-link handoff are the only emitters). Each
@@ -1327,8 +1329,12 @@ export function App() {
     setSidebarSettingsMenuOpen(false)
   }, [])
 
+  // A failed open (rejected by main, or failed before reaching it) clears only
+  // the React state. The active tab stays the embed's owner: a failure before
+  // the open IPC leaves the previous view live in main, and only an owner makes
+  // the deactivation effect `close()` it when the user leaves the tab. When main
+  // already tore the view down, that `close()` is a harmless no-op.
   const handleSandboxUiRemoved = React.useCallback(() => {
-    liveSandboxUiTabIdRef.current = null
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
