@@ -4,7 +4,10 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
-import { RETIRED_GFS_DOWNLOAD_STORE_PREFIX } from '../workspace/protectedPaths'
+import {
+  GFS_DOWNLOADS_TRASH_PREFIX,
+  RETIRED_GFS_DOWNLOAD_STORE_PREFIX,
+} from '../workspace/protectedPaths'
 import { recordGfsDownloadExpiry, recordGfsDownloadQuota } from './gfsDownloadMetrics'
 import {
   GFS_FILE_LIMITS,
@@ -36,6 +39,10 @@ export const GFS_INPUT_DIRECTORY_RE = new RegExp(`^input-(${UUID_PATTERN})$`)
 /** A directory renamed out of the way before removal; swept if a removal stops. */
 const TRASH_PREFIX = '.trash-'
 const TRASH_DIRECTORY_RE = new RegExp(`^\\.trash-${UUID_PATTERN}$`)
+/** A replaced `.gfs-downloads`, renamed inside its caller root before removal. */
+const DOWNLOADS_TRASH_DIRECTORY_RE = new RegExp(
+  `^${GFS_DOWNLOADS_TRASH_PREFIX.replaceAll('.', '\\.')}${UUID_PATTERN}$`
+)
 /** Host-root names the retirement of the pre-#1028 store gives the old tree. */
 const RETIRED_DIRECTORY_RE = new RegExp(
   `^${RETIRED_GFS_DOWNLOAD_STORE_PREFIX.replaceAll('.', '\\.')}${UUID_PATTERN}$`
@@ -165,6 +172,8 @@ export interface GfsDownloadInventory {
  * `unknown`: the disk did not answer (EMFILE, EIO, ...). Nothing is decided
  * about the directory; it is kept as it is and inspected again later.
  */
+type RemovalResult = 'removed' | 'absent' | 'failed'
+
 type DirectoryState =
   | { state: 'absent' }
   | { state: 'incomplete' }
@@ -774,7 +783,7 @@ export class GfsDownloadStore {
       if (this.active.get(id) !== transfer) throw new GfsDownloadStoreError('download_busy')
       this.releaseActive(id)
       this.unpinId(id)
-      if (!(await this.removeDirectory(transfer.directory, 'incomplete_removed')))
+      if ((await this.removeDirectory(transfer.directory, 'incomplete_removed')) === 'failed')
         throw new GfsDownloadStoreError('storage_write_failed')
     })
   }
@@ -953,9 +962,11 @@ export class GfsDownloadStore {
     for (const { id, directory } of await this.listInputDirectories(totals))
       addCandidate(id, directory)
     for (const entry of this.entries.values()) addCandidate(entry.id, entry.directory)
-    const removeIncomplete = async (directory: string) => {
-      if (await this.removeDirectory(directory, 'incomplete_removed')) totals.removedIncomplete += 1
-      else totals.removeFailed += 1
+    const removeIncomplete = async (directory: string): Promise<boolean> => {
+      const result = await this.removeDirectory(directory, 'incomplete_removed')
+      if (result === 'removed') totals.removedIncomplete += 1
+      else if (result === 'failed') totals.removeFailed += 1
+      return result !== 'failed'
     }
 
     for (const [id, directories] of candidates) {
@@ -990,16 +1001,18 @@ export class GfsDownloadStore {
         )
         continue
       }
+      // An entry is forgotten only once its directory is gone: a failed
+      // removal leaves it indexed, charged and with its provenance.
       if (state.state === 'incomplete') {
-        this.forget(id)
-        await removeIncomplete(directory)
+        if (await removeIncomplete(directory)) this.forget(id)
         continue
       }
       const entry = state.entry
       if (Date.parse(entry.expiresAt) <= now && !this.isPinned(id)) {
-        this.forget(id)
-        if (await this.removeDirectory(directory, 'expired_removed')) totals.removedExpired += 1
-        else totals.removeFailed += 1
+        const result = await this.removeDirectory(directory, 'expired_removed')
+        if (result === 'removed') totals.removedExpired += 1
+        if (result === 'failed') totals.removeFailed += 1
+        else this.forget(id)
         continue
       }
       this.entries.set(id, entry)
@@ -1077,7 +1090,7 @@ export class GfsDownloadStore {
     for (const name of names) {
       if (!RETIRED_DIRECTORY_RE.test(name)) continue
       try {
-        await this.removeVerified(path.join(this.hostRoot, name), RETIRED_GFS_DOWNLOAD_STORE_PREFIX)
+        await this.removeVerified(path.join(this.hostRoot, name))
       } catch (error) {
         failed('remove', error)
       }
@@ -1104,18 +1117,22 @@ export class GfsDownloadStore {
       this.reportSweepFailure(error)
       return found
     }
+    const removeStray = async (directory: string, sweep: SweepTotals) => {
+      const result = await this.removeDirectory(directory, 'incomplete_removed')
+      if (result === 'removed') sweep.removedIncomplete += 1
+      else if (result === 'failed') sweep.removeFailed += 1
+    }
     for (const user of users) {
       if (!user.isDirectory()) continue
-      const downloadsRoot = path.join(usersRoot, user.name, DOWNLOADS_DIRECTORY)
+      const callerRoot = path.join(usersRoot, user.name)
+      if (totals)
+        await this.sweepDownloadsTrash(callerRoot, directory => removeStray(directory, totals))
+      const downloadsRoot = path.join(callerRoot, DOWNLOADS_DIRECTORY)
       let children: import('node:fs').Dirent[]
       try {
         const info = await fs.lstat(downloadsRoot)
         if (!info.isDirectory()) {
-          if (totals) {
-            if (await this.removeDirectory(downloadsRoot, 'incomplete_removed'))
-              totals.removedIncomplete += 1
-            else totals.removeFailed += 1
-          }
+          if (totals) await removeStray(downloadsRoot, totals)
           continue
         }
         children = await fs.readdir(downloadsRoot, { withFileTypes: true })
@@ -1127,17 +1144,32 @@ export class GfsDownloadStore {
       for (const child of children) {
         const match = GFS_INPUT_DIRECTORY_RE.exec(child.name)
         if (match) found.push({ id: match[1]!, directory: path.join(downloadsRoot, child.name) })
-        else if (totals && TRASH_DIRECTORY_RE.test(child.name)) {
+        else if (totals && TRASH_DIRECTORY_RE.test(child.name))
           // Left by a removal that stopped between its rename and its rm.
-          if (
-            await this.removeDirectory(path.join(downloadsRoot, child.name), 'incomplete_removed')
-          )
-            totals.removedIncomplete += 1
-          else totals.removeFailed += 1
-        }
+          await removeStray(path.join(downloadsRoot, child.name), totals)
       }
     }
     return found
+  }
+
+  /**
+   * A replaced `.gfs-downloads` is renamed to `.gfs-downloads.trash-<uuid>`
+   * in its caller root; one a stopped removal left there still holds copies
+   * of user files, so the sweep removes it like any other trash.
+   */
+  private async sweepDownloadsTrash(
+    callerRoot: string,
+    remove: (directory: string) => Promise<void>
+  ): Promise<void> {
+    let names: string[]
+    try {
+      names = await fs.readdir(callerRoot)
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') this.reportSweepFailure(error)
+      return
+    }
+    for (const name of names)
+      if (DOWNLOADS_TRASH_DIRECTORY_RE.test(name)) await remove(path.join(callerRoot, name))
   }
 
   /** Reads one directory from disk; a complete result is always `adopted`. */
@@ -1294,8 +1326,9 @@ export class GfsDownloadStore {
     } catch (error) {
       if (!isDefinitiveMismatch(error)) throw error
     }
-    for (const id of this.idsUnder(downloadsRoot)) this.forget(id)
+    const replaced = this.idsUnder(downloadsRoot)
     await this.removeVerified(downloadsRoot)
+    for (const id of replaced) this.forget(id)
     await fs.mkdir(downloadsRoot, { mode: 0o700 })
     await verifyPrivateStoreDirectory(downloadsRoot)
   }
@@ -1394,14 +1427,18 @@ export class GfsDownloadStore {
     }
   }
 
-  /** Removes an indexed entry's directory and forgets it. */
+  /**
+   * Removes an indexed entry's directory, then forgets it. A failed removal
+   * keeps the entry indexed: still charged to its caller, and a published
+   * copy stays published instead of coming back as adopted.
+   */
   private async removeEntry(
     entry: Entry,
     outcome: 'incomplete_removed' | 'expired_removed',
     count = true
   ): Promise<void> {
-    this.forget(entry.id)
-    await this.removeDirectory(entry.directory, count ? outcome : undefined)
+    if ((await this.removeDirectory(entry.directory, count ? outcome : undefined)) !== 'failed')
+      this.forget(entry.id)
   }
 
   /**
@@ -1415,19 +1452,21 @@ export class GfsDownloadStore {
   private async removeDirectory(
     directory: string,
     outcome: 'incomplete_removed' | 'expired_removed' | undefined
-  ): Promise<boolean> {
+  ): Promise<RemovalResult> {
+    let result: RemovalResult
     try {
-      await this.removeVerified(directory)
+      result = await this.removeVerified(directory)
     } catch (error) {
       recordGfsDownloadExpiry('remove_failed')
       logger.warn(
         { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error) },
         'GFS download store could not remove a download directory; the next sweep retries it'
       )
-      return false
+      return 'failed'
     }
-    if (outcome) recordGfsDownloadExpiry(outcome)
-    return true
+    // A directory that never existed is not a removal.
+    if (result === 'removed' && outcome) recordGfsDownloadExpiry(outcome)
+    return result
   }
 
   /**
@@ -1438,24 +1477,49 @@ export class GfsDownloadStore {
    * parent moved in between, the rename is undone and the removal refused,
    * so whatever the swapped path led to keeps its name and content.
    */
-  private async removeVerified(directory: string, trashPrefix = TRASH_PREFIX): Promise<void> {
+  private async removeVerified(directory: string): Promise<'removed' | 'absent'> {
     await this.assertRemovable(directory)
-    const trash = path.join(path.dirname(directory), `${trashPrefix}${randomUUID()}`)
+    const trash = path.join(
+      path.dirname(directory),
+      `${this.trashPrefixFor(directory)}${randomUUID()}`
+    )
     try {
       await fs.rename(directory, trash)
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') throw error
       await assertAbsent(directory)
-      return
+      return 'absent'
     }
     try {
       await this.assertRemovable(trash)
     } catch (error) {
-      await fs.rename(trash, directory)
+      try {
+        await fs.rename(trash, directory)
+      } catch (undoError) {
+        // The refusal is what the caller must see; the trash name it is left
+        // under is one the sweep collects.
+        logger.warn(
+          { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(undoError) },
+          'GFS download store could not restore a directory after refusing to remove it'
+        )
+      }
       throw error
     }
     await fs.rm(trash, { recursive: true, force: true })
     await assertAbsent(trash)
+    return 'removed'
+  }
+
+  /**
+   * The trash name is one the sweep lists in that parent: `.trash-<uuid>`
+   * inside `.gfs-downloads`, `.gfs-downloads.trash-<uuid>` in a caller root,
+   * `.gfs-download-store.retired-<uuid>` in the Host root.
+   */
+  private trashPrefixFor(directory: string): string {
+    const parent = path.dirname(directory)
+    if (parent === this.hostRoot) return RETIRED_GFS_DOWNLOAD_STORE_PREFIX
+    if (path.basename(parent) === DOWNLOADS_DIRECTORY) return TRASH_PREFIX
+    return GFS_DOWNLOADS_TRASH_PREFIX
   }
 
   /**

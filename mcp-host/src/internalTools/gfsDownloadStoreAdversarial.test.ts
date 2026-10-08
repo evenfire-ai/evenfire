@@ -19,12 +19,18 @@ import {
   plantDownload,
   sourceFor,
   startTransfer,
+  withEnvironment,
 } from '../__tests__/fixtures/gfsStoreTestKit'
 import { logger } from '../logger'
+import {
+  GFS_DOWNLOADS_TRASH_PREFIX,
+  isGfsDownloadPath,
+  isProtectedWorkspacePath,
+} from '../workspace/protectedPaths'
 import { deriveUserKey } from '../workspace/userKey'
 import { GfsDownloadStore } from './gfsDownloadStore'
 
-type FsOperation = 'open' | 'lstat' | 'rename' | 'rm' | 'readdir'
+type FsOperation = 'open' | 'lstat' | 'rename' | 'rm' | 'readdir' | 'realpath'
 /** A fault returns the errno to throw for this call, or undefined to pass through. */
 type Fault = (target: string) => string | undefined
 
@@ -54,6 +60,7 @@ vi.mock('node:fs/promises', async original => {
     rename: wrap('rename', actual.rename),
     rm: wrap('rm', actual.rm),
     readdir: wrap('readdir', actual.readdir),
+    realpath: wrap('realpath', actual.realpath),
   }
 })
 
@@ -330,4 +337,128 @@ describe('GFS download store adversarial round: transient I/O is not corruption 
       expect(warnings(warn).map(entry => entry.message)).not.toContain(READ_FAILED)
     }
   )
+})
+
+const REMOVE_FAILED =
+  'GFS download store could not remove a download directory; the next sweep retries it'
+const UNDO_FAILED = 'GFS download store could not restore a directory after refusing to remove it'
+
+describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8)', () => {
+  const KEY = 'bob-key'
+
+  it('a replaced .gfs-downloads stranded by a failed rm is protected and swept', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { receipt } = await completedCopy(store, root, KEY, 1, 48)
+    syncFs.chmodSync(path.join(root, '.gfs-downloads'), 0o755)
+    const removals = watch('rm', '', 'EIO')
+
+    await expect(startTransfer(store, root, KEY, 2, 16)).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    faults.clear()
+
+    expect(removals).toHaveLength(1)
+    const stranded = syncFs.readdirSync(root).filter(name => name.startsWith('.gfs-downloads.'))
+    expect(stranded).toHaveLength(1)
+    expect(stranded[0]).toMatch(new RegExp(`^${GFS_DOWNLOADS_TRASH_PREFIX.replaceAll('.', '\\.')}`))
+    expect(isProtectedWorkspacePath(`${stranded[0]}/input-${receipt.id}/source`)).toBe(true)
+    expect(isGfsDownloadPath(stranded[0]!)).toBe(true)
+
+    const removed = await expiryCount('incomplete_removed')
+    await store.cleanupExpired()
+    expect(exists(path.join(root, stranded[0]!))).toBe(false)
+    expect(await expiryCount('incomplete_removed')).toBeGreaterThan(removed)
+  })
+
+  it('an eviction whose removal fails keeps the copy published and charged', async () => {
+    const limited = await withEnvironment(
+      {
+        MCP_HOST_GFS_MAX_FILE_BYTES: '10',
+        MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '30',
+        MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '15',
+      },
+      async () => {
+        vi.resetModules()
+        const { GfsDownloadStore: Store } = await import('./gfsDownloadStore')
+        const opened = new Store(hostRoot) as unknown as GfsDownloadStore
+        stores.push(opened)
+        await opened.initialize()
+        return opened
+      }
+    )
+    const root = callerDirectory(hostRoot, KEY)
+    const { receipt, bytes } = await completedCopy(limited, root, KEY, 3, 10)
+    const failedRemovals = await expiryCount('remove_failed')
+    const renames = watch('rename', `input-${receipt.id}`, 'EIO')
+
+    await expect(startTransfer(limited, root, KEY, 4, 10)).rejects.toMatchObject({
+      code: 'caller_quota_exceeded',
+    })
+    faults.clear()
+
+    // Witness: the eviction was attempted and failed.
+    expect(renames).toHaveLength(1)
+    expect(await expiryCount('remove_failed')).toBe(failedRemovals + 1)
+    await expect(limited.readManagedFile(receipt.path, KEY)).resolves.toEqual(bytes)
+    await expect(limited.reusableReceipt(KEY, sourceFor(3), 10)).resolves.toMatchObject({
+      id: receipt.id,
+    })
+    // A sweep does not turn it into an adopted copy either.
+    await limited.cleanupExpired()
+    await expect(limited.readManagedFile(receipt.path, KEY)).resolves.toEqual(bytes)
+  })
+
+  it('a refused removal whose undo also fails reports the refusal, not the undo', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { transfer } = await startTransfer(store, root, KEY, 5, 16)
+    const warn = vi.spyOn(logger, 'warn')
+    let renamedToTrash = false
+    injectFault('rename', target => {
+      if (target.endsWith(`input-${transfer.id}`)) {
+        renamedToTrash = true
+        return undefined
+      }
+      return path.basename(target).startsWith('.trash-') ? 'EXDEV' : undefined
+    })
+    injectFault('realpath', target =>
+      renamedToTrash && target.endsWith('.gfs-downloads') ? 'EIO' : undefined
+    )
+
+    await expect(store.fail(transfer.id, KEY)).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    faults.clear()
+
+    expect(renamedToTrash).toBe(true)
+    expect(warnings(warn)).toContainEqual({ code: 'EXDEV', message: UNDO_FAILED })
+    expect(warnings(warn)).toContainEqual({ code: 'EIO', message: REMOVE_FAILED })
+    expect(warnings(warn)).not.toContainEqual({ code: 'EXDEV', message: REMOVE_FAILED })
+  })
+
+  it('a removal of a directory that never existed is not counted as removed', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    await completedCopy(store, root, KEY, 6, 16)
+    const removed = await expiryCount('incomplete_removed')
+    const opens = watch('open', `${KEY}/.gfs-downloads`, 'EMFILE')
+    const renames: string[] = []
+    injectFault('rename', target => {
+      if (path.basename(target).startsWith('input-')) renames.push(target)
+      return undefined
+    })
+
+    await expect(startTransfer(store, root, KEY, 7, 16)).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    faults.clear()
+
+    // Witness: the admission failed after reserving its directory name and
+    // tried to remove it.
+    expect(opens.length).toBeGreaterThan(0)
+    expect(renames).toHaveLength(1)
+    expect(exists(renames[0]!)).toBe(false)
+    expect(await expiryCount('incomplete_removed')).toBe(removed)
+  })
 })

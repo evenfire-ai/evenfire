@@ -13,8 +13,18 @@ export const PROTECTED_WORKSPACE_DIRS: ReadonlySet<string> = new Set([
  */
 export const RETIRED_GFS_DOWNLOAD_STORE_PREFIX = '.gfs-download-store.retired-'
 
+/**
+ * Name prefix of a caller's `.gfs-downloads` the store renamed inside the
+ * caller root before replacing it. It holds the same copies, so it is
+ * protected the same way until the sweep removes it.
+ */
+export const GFS_DOWNLOADS_TRASH_PREFIX = '.gfs-downloads.trash-'
+
 function isRetiredGfsStoreSegment(segment: string): boolean {
-  return segment.startsWith(RETIRED_GFS_DOWNLOAD_STORE_PREFIX)
+  return (
+    segment.startsWith(RETIRED_GFS_DOWNLOAD_STORE_PREFIX) ||
+    segment.startsWith(GFS_DOWNLOADS_TRASH_PREFIX)
+  )
 }
 
 function isProtectedSegment(segment: string): boolean {
