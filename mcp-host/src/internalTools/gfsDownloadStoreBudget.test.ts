@@ -502,6 +502,24 @@ describe('GFS download store budget: removed variables', () => {
     ).toEqual([...REMOVED_GFS_STORAGE_VARIABLES].sort())
   })
 
+  it('BUD-9c: removed variables set to 1 byte and 1 file do not limit retained storage', async () => {
+    // Set for the whole test and the store re-imported with them, so a limit
+    // read at module load or at admission would apply. Two 40-byte copies for
+    // one caller exceed both old limits; the 85-byte budget of a 101-byte
+    // volume admits them.
+    const removed = Object.fromEntries(REMOVED_GFS_STORAGE_VARIABLES.map(name => [name, '1']))
+    for (const [name, value] of Object.entries(removed)) vi.stubEnv(name, value)
+    volumeOf(101n)
+    const store = await limitedStore(removed)
+    const first = await completedCopy(store, rootA, A, 1, 40)
+    tick()
+    const second = await completedCopy(store, rootA, A, 2, 40)
+
+    await expect(store.readManagedFile(first.receipt.path, A)).resolves.toEqual(first.bytes)
+    await expect(store.readManagedFile(second.receipt.path, A)).resolves.toEqual(second.bytes)
+    expect(statfsBoundary).toHaveBeenCalled()
+  })
+
   it('BUD-10: with no removed variable set nothing is warned and the store initializes', async () => {
     for (const name of REMOVED_GFS_STORAGE_VARIABLES) vi.stubEnv(name, undefined)
     const warn = vi.spyOn(logger, 'warn')

@@ -817,6 +817,10 @@
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9c: removed variables set to 1 byte and 1 file do not limit retained storage"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
     "fullName": "GFS download store budget: removed variables BUD-10: with no removed variable set nothing is warned and the store initializes"
   },
   {
