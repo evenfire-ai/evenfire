@@ -128,8 +128,8 @@ export async function loadConnectorAccessState(
   const bindingsByConnectorName = connectorAgentBindingsFromContexts(contexts, agentTargets)
   const managedAgentNames = [
     ...new Set(
-      Object.values(bindingsByConnectorName)
-        .flat()
+      connectors
+        .flatMap(connector => bindingsByConnectorName[resourceName(connector)] ?? [])
         .flatMap(binding => binding.agents.map(agent => agent.id))
     ),
   ]

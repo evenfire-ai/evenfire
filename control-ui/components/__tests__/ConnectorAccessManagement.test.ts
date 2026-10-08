@@ -135,6 +135,34 @@ describe('connector access management', () => {
     expect(state.warning).toMatch(/may be incomplete/)
   })
 
+  it('does not let access failures from unrelated connectors warn the selected connector', async () => {
+    vi.mocked(api.getAgentUsers).mockImplementation(async agentName => {
+      if (agentName === 'agent-unrelated') throw new Error('directory unavailable')
+      return { items: [{ id: 'user-1', name: 'Ada' }] }
+    })
+    vi.mocked(api.getAgentTeams).mockResolvedValue({ items: [{ id: 'team-1', name: 'Growth' }] })
+    const state = await loadConnectorAccessState(
+      [makeConnector('search')],
+      [
+        makeContext('selected-context', 'selected-context', ['search']),
+        makeContext('unrelated-context', 'unrelated-context', ['other-connector']),
+      ],
+      [
+        makeHost('agent-selected', 'Selected', 'selected-context'),
+        makeHost('agent-unrelated', 'Unrelated', 'unrelated-context'),
+      ]
+    )
+
+    expect(api.getAgentUsers).toHaveBeenCalledTimes(1)
+    expect(api.getAgentUsers).toHaveBeenCalledWith('agent-selected')
+    expect(api.getAgentTeams).toHaveBeenCalledTimes(1)
+    expect(api.getAgentTeams).toHaveBeenCalledWith('agent-selected')
+    expect(state.accessByConnectorKey['mcp-server/search'].users).toEqual([
+      { id: 'user-1', label: 'Ada' },
+    ])
+    expect(state.warning).toBe('')
+  })
+
   it('adds through the resolved context using its resource version and keeps unrelated fields', async () => {
     const context = makeContext('context-resource', 'context-alias', ['other-connector'])
     await addConnectorToAgentContexts(
