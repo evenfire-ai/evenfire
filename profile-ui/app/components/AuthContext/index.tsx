@@ -49,6 +49,7 @@ function meFromPasswordLoginResponse(me: PasswordLoginResponse['me']): Me {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const sessionExpiredHandledRef = useRef(false)
+  const authCheckSequenceRef = useRef(0)
   const [authState, setAuthState] = useState<AuthState>({
     isLoggedIn: false,
     isLoading: true,
@@ -56,11 +57,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   })
 
   const checkAuth = useCallback(async () => {
+    const sequence = ++authCheckSequenceRef.current
     try {
       const me = await getMe({ silentUnauthorized: true })
+      if (sequence !== authCheckSequenceRef.current) return
       sessionExpiredHandledRef.current = false
       setAuthState({ isLoggedIn: true, isLoading: false, me })
     } catch (error) {
+      if (sequence !== authCheckSequenceRef.current) return
       if (isSilentApiError(error)) {
         setAuthState({ isLoggedIn: false, isLoading: false, me: null })
         return
@@ -84,6 +88,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [checkAuth])
 
   const login = useCallback(async (email: string, password: string) => {
+    authCheckSequenceRef.current += 1
     try {
       const result = await loginWithPassword(email, password)
       resetProfileAccessCache()
@@ -105,6 +110,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const logout = useCallback(() => {
+    authCheckSequenceRef.current += 1
     sessionExpiredHandledRef.current = false
     resetProfileAccessCache(authState.me?.id)
     void logoutProfileUI()

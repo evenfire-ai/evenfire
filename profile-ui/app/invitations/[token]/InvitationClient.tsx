@@ -9,6 +9,8 @@ import {
   useRef,
   useState,
 } from 'react'
+import { useRouter } from 'next/navigation'
+import { useAuth } from '@components/AuthContext'
 import { Button } from '@components/Button'
 import { FormField } from '@components/FormField'
 import { TextInput } from '@components/TextInput'
@@ -73,6 +75,8 @@ export function InvitationClient({
   initialInvitation,
   initialError,
 }: InvitationClientProps) {
+  const router = useRouter()
+  const { checkAuth } = useAuth()
   const [invitation, setInvitation] = useState<InvitationPreview | null>(initialInvitation)
   const [error, setError] = useState(initialError)
   const [status, setStatus] = useState(() =>
@@ -129,6 +133,7 @@ export function InvitationClient({
     if (!(value instanceof Error)) return 'Failed to update invitation.'
     const message = value.message.replace(/^\d{3}\s+[A-Za-z ]+\s+-\s+/, '')
     if (message === 'invalid_password') return 'Password must be between 8 and 256 characters.'
+    if (message === 'invalid_invitation') return 'This recovery link is invalid or expired.'
     if (message === 'invitation_not_accepted')
       return 'Accept the invitation before setting a password.'
     if (message === 'invitation_not_pending') return 'This invitation has already been used.'
@@ -137,6 +142,10 @@ export function InvitationClient({
     if (message === 'expired') return 'This invitation has expired.'
     if (message === 'forbidden') return 'Invitation email does not match.'
     if (message === 'not_found') return 'Invitation not found.'
+    if (message === 'rate_limited')
+      return 'Account recovery is temporarily busy. Please wait a moment and try again.'
+    if (message === 'authority_unavailable')
+      return 'Account recovery is temporarily unavailable. Please try again shortly.'
     return message
   }
 
@@ -204,6 +213,11 @@ export function InvitationClient({
         invitation.id,
         password
       )
+      if (isPasswordReset) {
+        await checkAuth()
+        router.replace(PROFILE_ROUTES.home)
+        return
+      }
       applyInvitationUpdate({
         ...invitation,
         ...response,
