@@ -61,6 +61,9 @@ function safeForwardableResponseHeaders(headers: Headers, status: number): Recor
       }
     }
   }
+  if (status === 503 && headers.get('cache-control')?.trim().toLowerCase() === 'no-store') {
+    result['cache-control'] = 'no-store'
+  }
   return result
 }
 

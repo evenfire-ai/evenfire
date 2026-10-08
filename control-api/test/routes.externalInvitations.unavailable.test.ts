@@ -135,6 +135,7 @@ describe('external invitation routes when the hub is unavailable', () => {
       if (text.includes('clock_timestamp()')) {
         return { rows: [{ db_now: new Date('2026-10-07T12:00:00.000Z') }], rowCount: 1 }
       }
+      if (text.includes('SELECT valid_after')) return { rows: [], rowCount: 0 }
       throw new Error(`unexpected invitation session issuance query: ${text}`)
     })
 
@@ -155,10 +156,11 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(passwordReset.status).toBe(400)
     expect(passwordReset.body).toEqual({ error: 'not_pending' })
     expect(tokenSigner.sign).toHaveBeenCalledTimes(1)
-    expect(database.query).toHaveBeenCalledTimes(3)
+    expect(database.query).toHaveBeenCalledTimes(4)
     expect(String(database.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
     expect(String(database.query.mock.calls[1]?.[0])).toContain('lifecycle_version')
     expect(String(database.query.mock.calls[2]?.[0])).toContain('clock_timestamp()')
+    expect(String(database.query.mock.calls[3]?.[0])).toContain('SELECT valid_after')
   })
 
   it('binds the secret capability to the public id and never issues on password setup', async () => {

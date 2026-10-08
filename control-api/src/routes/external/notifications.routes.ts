@@ -1,9 +1,11 @@
 import { Request, Response, Router } from 'express'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import { sendPublicApiError } from '../../http/publicApiError.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
+  handleExternalSessionBackendFailure,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
@@ -18,6 +20,7 @@ import {
   notificationStreamSnapshotSize,
 } from '../../observability/metrics.js'
 import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
+import { observeExternalSessionCurrentness } from '../../services/auth/externalSessionCurrentnessObserver.js'
 import { acknowledgeDesktopNotificationDelivery } from '../../services/notificationAckService.js'
 import {
   listActiveApprovalNotificationsForUser,
@@ -115,12 +118,23 @@ export function createExternalNotificationsRouter(): Router {
       },
       onBackendUnavailable: 'process-memory',
     }),
-    (req: Request, res: Response) => {
+    (req: Request, res: Response, next) => {
       void (async () => {
         const extReq = req as ExternalAuthedRequest
         const claims = extReq.externalAuth
-        if (!claims) {
+        const authentication = extReq.externalSessionAuthentication
+        if (!claims || !authentication) {
           res.status(401).json({ error: 'Unauthorized' })
+          return
+        }
+
+        const initialAuthority = await observeExternalSessionCurrentness(authentication)
+        if (initialAuthority.status === 'denied') {
+          sendPublicApiError(req, res, 401, 'invalid_session', 'The session is not valid.')
+          return
+        }
+        if (initialAuthority.status === 'unavailable') {
+          handleExternalSessionBackendFailure(initialAuthority.error, req, res, next)
           return
         }
 
@@ -161,6 +175,46 @@ export function createExternalNotificationsRouter(): Router {
           )
         }
 
+        const closeForAuthority = async (): Promise<boolean> => {
+          if (closed) return false
+          let authority
+          try {
+            authority = await observeExternalSessionCurrentness(authentication)
+          } catch {
+            // Unexpected observer failures are fail-closed after the stream
+            // starts, and must release its listener and connection accounting.
+            disconnectReason = 'stream_error'
+            logger.error(
+              {
+                event: 'notification_stream_currentness_failed',
+                userId: claims.userId,
+                correlationId: req.correlationId ?? null,
+              },
+              'notification stream currentness check failed'
+            )
+            res.end()
+            cleanup()
+            return false
+          }
+          if (closed) return false
+          if (authority.status === 'current') return true
+          if (authority.status === 'denied') {
+            disconnectReason = 'session_expired'
+            writeStreamMessage(res, {
+              type: 'stream.closing',
+              reason: 'session_expired',
+              observedAt: new Date().toISOString(),
+            })
+          } else {
+            // The client already has bounded reconnect/backoff behavior for an
+            // ended notification transport. Emit no data or cursor on outage.
+            disconnectReason = 'stream_error'
+          }
+          res.end()
+          cleanup()
+          return false
+        }
+
         req.on('close', cleanup)
         req.on('aborted', () => {
           disconnectReason = 'client_aborted'
@@ -185,11 +239,13 @@ export function createExternalNotificationsRouter(): Router {
           if (closed || flushInFlight) return
           flushInFlight = true
           try {
+            if (!(await closeForAuthority())) return
             const initialSnapshot = lastCursor === null
             const events = await listNotificationStreamEventsForUser(claims.userId, {
               limit: config.notificationStreamSnapshotLimit,
               after: lastCursor ? parseNotificationCursor(lastCursor) : null,
             })
+            if (!(await closeForAuthority())) return
             const legacyComplete =
               initialSnapshot && events.length < config.notificationStreamSnapshotLimit
             scheduleAccessCatalogShadow({
@@ -212,6 +268,7 @@ export function createExternalNotificationsRouter(): Router {
             }
             for (const event of events) {
               if (closed) break
+              if (!(await closeForAuthority())) break
               if (event.eventType === 'approval.requested') {
                 writeStreamMessage(res, {
                   type: 'approval.requested',
@@ -297,10 +354,12 @@ export function createExternalNotificationsRouter(): Router {
           )
         }
 
+        if (!(await closeForAuthority())) return
         const snapshot = await listActiveApprovalNotificationsForUser(claims.userId, {
           limit: config.notificationStreamSnapshotLimit,
           after: parsedCursor,
         })
+        if (!(await closeForAuthority())) return
         const snapshotCursor = newestNotificationCursor(snapshot, lastCursor)
         notificationStreamSnapshotSize.observe(snapshot.length)
         writeStreamMessage(res, {
@@ -313,13 +372,15 @@ export function createExternalNotificationsRouter(): Router {
         void flushNewEvents()
 
         heartbeatTimer = setInterval(() => {
-          void flushNewEvents()
-          if (closed) return
-          writeStreamMessage(res, {
-            type: 'heartbeat',
-            observedAt: new Date().toISOString(),
-          })
-          notificationStreamEventsSentTotal.inc({ event_type: 'heartbeat' }, 1)
+          void (async () => {
+            void flushNewEvents()
+            if (closed || !(await closeForAuthority())) return
+            writeStreamMessage(res, {
+              type: 'heartbeat',
+              observedAt: new Date().toISOString(),
+            })
+            notificationStreamEventsSentTotal.inc({ event_type: 'heartbeat' }, 1)
+          })()
         }, config.notificationStreamHeartbeatMs)
 
         lifetimeTimer = setTimeout(() => {

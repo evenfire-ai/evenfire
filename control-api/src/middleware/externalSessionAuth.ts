@@ -205,6 +205,7 @@ async function validateExternalSessionToken(
     }
     req.externalAuth = authentication.claims
     req.externalSessionAuthority = authentication.authorityContext
+    req.externalSessionAuthentication = authentication
     next()
   } catch (error) {
     handleExternalSessionBackendFailure(error, req, res, next)

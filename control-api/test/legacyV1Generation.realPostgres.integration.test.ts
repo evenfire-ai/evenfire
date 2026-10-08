@@ -2,7 +2,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { Pool } from 'pg'
-import { initDb } from '../src/db.js'
+import { initDb, withTransaction } from '../src/db.js'
+import type { DbClient } from '../src/db.js'
+import { backfillLegacyPasswordSecurityEpochs } from '../src/services/access/userAccessFoundationSchema.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { issueExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
 import {
@@ -74,6 +76,19 @@ async function alignToFreshDatabaseSecond(pool: Pool): Promise<void> {
     EXTRACT(EPOCH FROM date_trunc('second', clock_timestamp()) + interval '1 second' - clock_timestamp())
     + 0.05
   )`)
+}
+
+async function alignToDatabaseSecondFraction(pool: Pool, fractionSeconds: number): Promise<void> {
+  await pool.query(
+    `SELECT pg_sleep(
+       GREATEST(
+         0,
+         EXTRACT(EPOCH FROM date_trunc('second', clock_timestamp())
+           + interval '1 second' - clock_timestamp()) + $1::double precision
+       )
+     )`,
+    [fractionSeconds]
+  )
 }
 
 describeRealPostgres('legacy V1 generation ordering on real PostgreSQL', () => {
@@ -168,7 +183,7 @@ describeRealPostgres('legacy V1 generation ordering on real PostgreSQL', () => {
     const successor = await issueLegacy(source)
     const successorClaims = verified(successor)
     const authority = await databasePool.query<{
-      lifecycle_version: number
+      lifecycle_version: number | string
       valid_after: Date
     }>(
       `SELECT u.lifecycle_version, epoch.valid_after
@@ -230,6 +245,131 @@ describeRealPostgres('legacy V1 generation ordering on real PostgreSQL', () => {
     ).resolves.toEqual({ status: 'revoked', reason: 'logout' })
     await expect(
       validateLegacyUserSession(successor, successorClaims, { db: databasePool })
+    ).resolves.toMatchObject({ status: 'valid' })
+  })
+
+  it('does not publish V1 issuance behind a retained historical password cutoff', async () => {
+    const source = await principal('historical-cutoff-issuance')
+    await alignToDatabaseSecondFraction(databasePool, 0.65)
+
+    const predecessor = await withTransaction(async db => {
+      const issued = await issueExternalUserSession(
+        {
+          contract: 'v1',
+          userId: source.userId,
+          email: source.email,
+          teamId: source.teamId,
+          role: 'member',
+          authenticationMethods: ['password'],
+        },
+        { db, policy: legacyPolicy }
+      )
+      return issued.token
+    }, databasePool)
+    const predecessorClaims = verified(predecessor)
+    const historical = await databasePool.query<{ password_set_at: Date }>(
+      `UPDATE users
+          SET password_set_at = date_trunc('second', clock_timestamp()) + interval '200 milliseconds'
+        WHERE id = $1
+      RETURNING password_set_at`,
+      [source.userId]
+    )
+    const cutoff = historical.rows[0]?.password_set_at
+    expect(cutoff).toBeInstanceOf(Date)
+    expect(predecessorClaims.iat! * 1000).toBeLessThan(cutoff!.getTime())
+
+    // Use the production historical backfill writer, then the canonical
+    // security-event writer and the same transactional V1 issuer.
+    await backfillLegacyPasswordSecurityEpochs(databasePool as unknown as DbClient)
+    await withTransaction(
+      db => revokeAllUserSessions(source.userId, 'password_changed', db),
+      databasePool
+    )
+    const authority = await databasePool.query<{
+      lifecycle_version: number
+      valid_after: Date
+    }>(
+      `SELECT u.lifecycle_version, epoch.valid_after
+         FROM users u
+         JOIN external_user_session_security_epochs epoch ON epoch.user_id = u.id
+        WHERE u.id = $1`,
+      [source.userId]
+    )
+    expect(authority.rows[0]?.valid_after).toEqual(cutoff)
+    expect(Number(authority.rows[0]?.lifecycle_version)).toBe(predecessorClaims.authGeneration! + 1)
+    expect(Math.floor(authority.rows[0]!.valid_after.getTime() / 1000)).toBe(predecessorClaims.iat)
+    await expect(
+      validateLegacyUserSession(predecessor, predecessorClaims, { db: databasePool })
+    ).resolves.toMatchObject({ status: 'revoked' })
+    await expect(
+      isCurrentBaseExternalSession(verifyBaseExternalSessionToken(predecessor)!)
+    ).resolves.toBe(false)
+
+    let issuedToken: string | null = null
+    let issuanceError: unknown
+    try {
+      issuedToken = await withTransaction(async db => {
+        const issued = await issueExternalUserSession(
+          {
+            contract: 'v1',
+            userId: source.userId,
+            email: source.email,
+            teamId: source.teamId,
+            role: 'member',
+            authenticationMethods: ['password'],
+          },
+          { db, policy: legacyPolicy }
+        )
+        return issued.token
+      }, databasePool)
+    } catch (error) {
+      issuanceError = error
+    }
+
+    if (issuedToken) {
+      const claims = verified(issuedToken)
+      const validation = await validateLegacyUserSession(issuedToken, claims, {
+        db: databasePool,
+      })
+      expect(
+        validation,
+        'successful issuance must be accepted by the canonical validator'
+      ).toMatchObject({ status: 'valid' })
+    } else {
+      expect(issuanceError).toMatchObject({
+        name: 'ExternalSessionIssuanceUnavailableError',
+        code: 'session_issuance_temporarily_unavailable',
+        status: 503,
+      })
+    }
+
+    await databasePool.query(`SELECT pg_sleep(
+      GREATEST(
+        0,
+        EXTRACT(EPOCH FROM date_trunc('second', clock_timestamp())
+          + interval '1 second' - clock_timestamp()) + 0.2
+      )
+    )`)
+    const nextSecond = await withTransaction(async db => {
+      const issued = await issueExternalUserSession(
+        {
+          contract: 'v1',
+          userId: source.userId,
+          email: source.email,
+          teamId: source.teamId,
+          role: 'member',
+          authenticationMethods: ['password'],
+        },
+        { db, policy: legacyPolicy }
+      )
+      return issued.token
+    }, databasePool)
+    const nextClaims = verified(nextSecond)
+    expect(nextClaims.iat! * 1000).toBeGreaterThan(cutoff!.getTime())
+    expect(nextClaims.iat! * 1000).toBeLessThanOrEqual(Date.now())
+    expect(Number(nextClaims.authGeneration)).toBe(Number(authority.rows[0]?.lifecycle_version))
+    await expect(
+      validateLegacyUserSession(nextSecond, nextClaims, { db: databasePool })
     ).resolves.toMatchObject({ status: 'valid' })
   })
 
