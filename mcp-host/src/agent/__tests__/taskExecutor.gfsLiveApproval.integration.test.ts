@@ -73,16 +73,20 @@ function riskyFollowUp(name: 'http_request' | 'cron_manage'): ToolCall {
   return { id: `${name}-follow-up`, name, arguments: { action: 'list' } }
 }
 
+type StoreState = 'available' | 'closed' | 'uninitialized'
+
 async function scenario(
   calls: ToolCall[],
   guardrailAsk = false,
-  conversationManager = new ConversationManager()
+  conversationManager = new ConversationManager(),
+  storeState: StoreState = 'available'
 ) {
   const root = await mkdtemp(join(tmpdir(), 'gfs-live-approval-'))
   roots.push(root)
   const store = new GfsDownloadStore(root)
   stores.push(store)
-  await store.initialize()
+  if (storeState !== 'uninitialized') await store.initialize()
+  if (storeState === 'closed') await store.close()
   const task: Task = {
     id: randomUUID(),
     source: 'channel',
@@ -186,6 +190,7 @@ async function scenario(
   return {
     task,
     deps,
+    store,
     sessionKey,
     conversation,
     executor: new TaskExecutor(task, deps),
@@ -214,6 +219,38 @@ it('requires live shell approval despite persistent shell auto-approval', async 
   expect(s.providerCalls).toHaveLength(1)
   expect(spawn).not.toHaveBeenCalled()
 })
+
+// X6 covers an unavailable store with source 'cron', where the forced live
+// approval set never applies. These cases pin the channel path: delivery is
+// withdrawn, yet persistent shell auto-approval still does not run a command.
+it.each([
+  ['store closed', 'closed'] as const,
+  ['store never initialized', 'uninitialized'] as const,
+])(
+  'requires live shell approval while the GFS download store is unavailable: %s',
+  async (_label, storeState) => {
+    const call = shellCall('unavailable-store-shell-call', firstCommand)
+    const s = await scenario([call], false, new ConversationManager(), storeState)
+    // Witness: the store wired into the executor reports itself unavailable.
+    expect(s.store.isAvailable()).toBe(false)
+    const isAvailable = vi.spyOn(s.store, 'isAvailable')
+
+    await s.executor.run()
+
+    // Witness: the executor consulted the unavailable store for this task.
+    expect(isAvailable.mock.calls.length).toBeGreaterThan(0)
+    expect(s.onFail).not.toHaveBeenCalled()
+    expect(s.executor.executorState).toBe('waiting_approval')
+    expect(s.executor.pendingApproval).toMatchObject({
+      tool_name: 'shell_exec',
+      tool_call_id: call.id,
+      parameters: call.arguments,
+    })
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
+    expect(s.providerCalls).toHaveLength(1)
+    expect(spawn).not.toHaveBeenCalled()
+  }
+)
 
 it.each(['http_request', 'cron_manage'] as const)(
   'does not turn an exact GFS shell approval into turn-wide consent for %s',

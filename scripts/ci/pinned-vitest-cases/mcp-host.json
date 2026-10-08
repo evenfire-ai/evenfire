@@ -206,5 +206,13 @@
   {
     "suite": "gfsStoreWriterFence.test.ts",
     "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T9: assertInitialized and assertWriterOwnership propagate ownership_lost"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "requires live shell approval while the GFS download store is unavailable: store closed"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "requires live shell approval while the GFS download store is unavailable: store never initialized"
   }
 ]
