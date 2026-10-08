@@ -1966,11 +1966,11 @@ export class AppService {
           try {
             await this.tokenStore.setSessionToken(result.token, envKey, { requireKeytar: true })
           } catch (keytarError) {
-            this.reportDeferredLogoutFailureSafely(keytarError)
             // Keep the logout marker until a later Keytar cleanup succeeds.
             // The read-back below still rejects a stale credential left in Keytar.
             retirePendingLogoutMarker = false
             await this.tokenStore.setSessionToken(result.token, envKey)
+            this.reportDeferredLogoutFailureSafely(keytarError)
           }
         } else {
           await this.tokenStore.setSessionToken(result.token, envKey)

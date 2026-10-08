@@ -54,6 +54,20 @@ beforeEach(async () => {
   userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-app-pending-logout-'))
   keychain.clear()
   vi.resetModules()
+  const keytar = await import('keytar')
+  vi.mocked(keytar.getPassword)
+    .mockReset()
+    .mockImplementation(async (service, account) =>
+      keychain.has(keyOf(service, account)) ? keychain.get(keyOf(service, account))! : null
+    )
+  vi.mocked(keytar.setPassword)
+    .mockReset()
+    .mockImplementation(async (service, account, password) => {
+      keychain.set(keyOf(service, account), password)
+    })
+  vi.mocked(keytar.deletePassword)
+    .mockReset()
+    .mockImplementation(async (service, account) => keychain.delete(keyOf(service, account)))
   const [{ AppService, QuitAdmissionClosedError }, tokenStore, pendingLogout, config, lifecycle] =
     await Promise.all([
       import('../appService.js'),
@@ -281,8 +295,7 @@ describe('AppService pending external logout', () => {
     const { service, tokenStore } = createService()
     await tokenStore.setSessionToken('persisted-session-token', activeEnvKey)
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
-    internals(service).quitPreparationStarted = true
-    await tokenStore.prepareForQuit()
+    await service.prepareForQuit()
     const callbackOrder: string[] = []
     const applied = vi.fn(() => callbackOrder.push('notified'))
     const failed = vi.fn()
@@ -356,7 +369,8 @@ describe('AppService pending external logout', () => {
 
   it('falls back to a verified file when required Keytar replacement also fails', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
-    const { service, tokenStore } = createService()
+    const reportFailure = vi.fn()
+    const { service, tokenStore } = createService(undefined, reportFailure)
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
     const keytar = await import('keytar')
     const account = `session-token::${activeEnvKey}`
@@ -379,6 +393,7 @@ describe('AppService pending external logout', () => {
       expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
       expect(keytar.setPassword).toHaveBeenCalledWith('Evenfire', account, loginResult.token)
       await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(loginResult.token)
+      expect(reportFailure).toHaveBeenCalledOnce()
     } finally {
       vi.mocked(keytar.getPassword).mockReset().mockImplementation(originalGet)
       vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
@@ -449,6 +464,37 @@ describe('AppService pending external logout', () => {
       await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('previous-session-token')
     } finally {
       unlink.mockRestore()
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
+  })
+
+  it('reports the fallback write failure once when required Keytar replacement also fails', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const reportFailure = vi.fn()
+    const { service, tokenStore } = createService(undefined, reportFailure)
+    const keytar = await import('keytar')
+    const activeAccount = `session-token::${activeEnvKey}`
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    vi.mocked(keytar.deletePassword).mockImplementation(async (service, account) => {
+      if (account === activeAccount) throw new Error('keychain temporarily locked')
+      return originalDelete(service, account)
+    })
+    vi.spyOn(tokenStore, 'setSessionToken').mockImplementation(async (_token, _envKey, options) => {
+      throw new Error(options?.requireKeytar ? 'Keytar replacement failed' : 'file fallback failed')
+    })
+
+    try {
+      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
+        'file fallback failed'
+      )
+
+      expect(reportFailure).toHaveBeenCalledOnce()
+      expect(reportFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'file fallback failed' })
+      )
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+      expect(internals(service).sessionToken).toBeNull()
+    } finally {
       vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
     }
   })
