@@ -83,8 +83,7 @@ jobs:
             pinned_suites: gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/mcp-host.json
           - service: control-api
-            pinned_suites:
-              helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
+            pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
           - service: codex-llm-proxy
             pinned_suites: originPolicy.test.ts server.security.test.ts
@@ -128,6 +127,11 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
+        run: npm ci
+
+      - name: Install External REST contract-test dependencies
+        if: matrix.service == 'control-api'
+        working-directory: external-rest-api
         run: npm ci
 
       # Desktop strict-pixel fixture checks consume the Host's locked native
@@ -364,6 +368,10 @@ jobs:
       - name: Build workflow-runtime-core
         working-directory: packages/workflow-runtime-core
         run: npm run build
+
+      - name: Install External REST contract-test dependencies
+        working-directory: external-rest-api
+        run: npm ci
 
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
