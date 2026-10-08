@@ -59,15 +59,12 @@ describe('AppService TokenStore quit drain ordering', () => {
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
     await tokenStoreOperationStarted.promise
 
-    const service = Object.create(AppServiceClass.prototype) as {
+    const service = new AppServiceClass({ tokenStore }) as unknown as {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
       tokenStore: InstanceType<typeof TokenStoreClass>
       prepareForQuit: () => Promise<void>
     }
-    service.pendingCredentialProducers = new Set()
-    service.quitPreparationStarted = false
-    service.tokenStore = tokenStore
 
     let preparationSettled = false
     const preparation = service.prepareForQuit().then(() => {
