@@ -174,7 +174,7 @@ describe('Desktop environment handoff concurrency', () => {
       originalActiveOptionId
     )
     expect(setStatus).toHaveBeenCalledWith(
-      'Finish the current authentication action before continuing this desktop link.',
+      'Finish the current authentication action, then reopen this desktop link.',
       'info'
     )
   })
@@ -898,7 +898,7 @@ describe('Desktop environment REST endpoint matching', () => {
     expect(selectRuntimeConfig).not.toHaveBeenCalled()
     expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
     expect(setStatus).toHaveBeenCalledWith(
-      'Finish the current authentication action before continuing this desktop link.',
+      'Finish the current authentication action, then reopen this desktop link.',
       'info'
     )
   })

@@ -105,10 +105,7 @@ function reportAuthenticationStateChanged(
   setStatus: SetStatusFn
 ): void {
   if (isAuthenticationOperationInProgress(state)) {
-    setStatus(
-      'Finish the current authentication action before continuing this desktop link.',
-      'info'
-    )
+    setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
     return
   }
   setStatus('The desktop session changed while processing this link. Open it again.', 'info')
@@ -190,10 +187,7 @@ export function createDesktopEnvironmentSetupHandler({
     }
 
     if (isAuthenticationOperationInProgress(getAuthState())) {
-      setStatus(
-        'Finish the current authentication action before opening another desktop environment.',
-        'info'
-      )
+      setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
       return
     }
 
@@ -412,10 +406,7 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
     if (isAuthenticationOperationInProgress(getAuthState())) {
-      setStatus(
-        'Finish the current authentication action before opening another desktop environment.',
-        'info'
-      )
+      setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
       return
     }
 

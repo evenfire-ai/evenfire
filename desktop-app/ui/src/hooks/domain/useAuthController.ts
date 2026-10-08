@@ -355,7 +355,7 @@ export function useAuthController({
         message.includes('auth_transition_in_progress')
       ) {
         setStatus(
-          'Finish the current authentication action before continuing this desktop link.',
+          'Finish the current authentication action, then reopen this desktop link.',
           'info'
         )
       } else if (
@@ -461,7 +461,7 @@ export function useAuthController({
         }
         if (message.includes('auth_transition_in_progress')) {
           setStatus(
-            'Finish the current authentication action before continuing this desktop link.',
+            'Finish the current authentication action, then reopen this desktop link.',
             'info'
           )
           return null
@@ -569,10 +569,7 @@ export function useAuthController({
       setStatus('The desktop session changed while processing this link. Open it again.', 'info')
     }
     const reportAuthenticationInProgress = () => {
-      setStatus(
-        'Finish the current authentication action before continuing this desktop link.',
-        'info'
-      )
+      setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
     }
 
     if (bootingRef.current || busyRef.current || authTransitioningRef.current) {
