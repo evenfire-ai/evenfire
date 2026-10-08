@@ -51,17 +51,17 @@ describe('pending external logout intent', () => {
     expect((await fs.readdir(userDataDirectory)).join('')).not.toContain(ENV_A)
   })
 
-  it('recognizes and retires the global marker written by earlier PR builds', async () => {
+  it('ignores the unscoped marker and leaves it untouched by environment cleanup', async () => {
     userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-pending-logout-'))
     await fs.writeFile(path.join(userDataDirectory, LEGACY_MARKER), '', { mode: 0o600 })
 
-    expect(hasPendingExternalLogout(userDataDirectory, ENV_A)).toBe(true)
-    expect(hasPendingExternalLogout(userDataDirectory, ENV_B)).toBe(true)
+    expect(hasPendingExternalLogout(userDataDirectory, ENV_A)).toBe(false)
+    expect(hasPendingExternalLogout(userDataDirectory, ENV_B)).toBe(false)
 
     clearPendingExternalLogout(userDataDirectory, ENV_A)
 
     expect(hasPendingExternalLogout(userDataDirectory, ENV_A)).toBe(false)
-    expect(await fs.readdir(userDataDirectory)).toEqual([])
+    expect(await fs.readdir(userDataDirectory)).toEqual([LEGACY_MARKER])
   })
 
   it('rejects markers outside the app userData directory contract', async () => {

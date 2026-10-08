@@ -3,7 +3,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const PENDING_EXTERNAL_LOGOUT_PREFIX = 'pending-external-logout-'
-const LEGACY_PENDING_EXTERNAL_LOGOUT_FILE = 'pending-external-logout'
 
 function markerPath(userDataDirectory: string, envKey: string): string {
   if (!path.isAbsolute(userDataDirectory)) {
@@ -35,17 +34,13 @@ function syncDirectory(directory: string): void {
 }
 
 export function hasPendingExternalLogout(userDataDirectory: string, envKey: string): boolean {
-  for (const filePath of [
-    markerPath(userDataDirectory, envKey),
-    path.join(userDataDirectory, LEGACY_PENDING_EXTERNAL_LOGOUT_FILE),
-  ]) {
-    try {
-      const stat = fs.lstatSync(filePath)
-      if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
-      return true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') throw error
-    }
+  const filePath = markerPath(userDataDirectory, envKey)
+  try {
+    const stat = fs.lstatSync(filePath)
+    if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') throw error
   }
   return false
 }
@@ -69,18 +64,14 @@ export function recordPendingExternalLogout(userDataDirectory: string, envKey: s
 
 export function clearPendingExternalLogout(userDataDirectory: string, envKey: string): void {
   let removed = false
-  for (const filePath of [
-    markerPath(userDataDirectory, envKey),
-    path.join(userDataDirectory, LEGACY_PENDING_EXTERNAL_LOGOUT_FILE),
-  ]) {
-    try {
-      const stat = fs.lstatSync(filePath)
-      if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
-      fs.unlinkSync(filePath)
-      removed = true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') throw error
-    }
+  const filePath = markerPath(userDataDirectory, envKey)
+  try {
+    const stat = fs.lstatSync(filePath)
+    if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
+    fs.unlinkSync(filePath)
+    removed = true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') throw error
   }
   if (removed) syncDirectory(userDataDirectory)
 }

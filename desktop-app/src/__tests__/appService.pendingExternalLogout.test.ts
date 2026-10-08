@@ -17,7 +17,6 @@ const { notifySessionChanged } = vi.hoisted(() => ({ notifySessionChanged: vi.fn
 
 const keychain = new Map<string, string>()
 const keyOf = (service: string, account: string) => `${service}::${account}`
-const LEGACY_MARKER = 'pending-external-logout'
 
 vi.mock('keytar', () => ({
   getPassword: vi.fn(async (service: string, account: string) =>
@@ -144,19 +143,6 @@ describe('AppService pending external logout', () => {
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
     expect(restore).not.toHaveBeenCalled()
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
-  })
-
-  it('migrates the legacy global marker before restoring the active environment', async () => {
-    await fs.writeFile(path.join(userDataDirectory, LEGACY_MARKER), '', { mode: 0o600 })
-    const { service, tokenStore } = createService()
-    await tokenStore.setSessionToken('persisted-session-token', activeEnvKey)
-    const restore = vi.spyOn(internals(service), 'restoreSavedSessionOnce')
-
-    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
-
-    expect(restore).not.toHaveBeenCalled()
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
-    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
   })
 
   it('keeps startup recoverable and skips restore when the marker cannot be inspected', async () => {
