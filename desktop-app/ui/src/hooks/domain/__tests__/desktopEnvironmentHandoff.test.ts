@@ -674,4 +674,59 @@ describe('Desktop environment REST endpoint matching', () => {
       'error'
     )
   })
+
+  it('reports an auth transition that starts during the post-logout config read', async () => {
+    let authState = {
+      booting: false,
+      busy: false,
+      authTransitioning: false,
+      isAuthenticated: true,
+    }
+    let sessionGeneration = 0
+    let refreshCount = 0
+    let finishSecondRefresh!: () => void
+    let reportSecondRefreshStarted!: () => void
+    const secondRefreshStarted = new Promise<void>(resolve => {
+      reportSecondRefreshStarted = resolve
+    })
+    const runtimeConfigState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const refreshRuntimeConfigState = () => {
+      refreshCount += 1
+      if (refreshCount === 1) return Promise.resolve(runtimeConfigState)
+      return new Promise<typeof runtimeConfigState>(resolve => {
+        finishSecondRefresh = () => resolve(runtimeConfigState)
+        reportSecondRefreshStarted()
+      })
+    }
+    const logout = vi.fn(async () => {
+      authState = { ...authState, isAuthenticated: false }
+      sessionGeneration += 1
+      return sessionGeneration
+    })
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(
+        () => authState,
+        refreshRuntimeConfigState,
+        logout,
+        vi.fn(async () => {}),
+        async () => sessionGeneration
+      )
+
+    const handling = handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+    await secondRefreshStarted
+    authState = { ...authState, busy: true, authTransitioning: true }
+    finishSecondRefresh()
+    await handling
+
+    expect(logout).toHaveBeenCalledOnce()
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      'Finish the current authentication action before continuing this desktop link.',
+      'info'
+    )
+  })
 })

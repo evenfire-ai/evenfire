@@ -99,6 +99,20 @@ function isAuthenticationOperationInProgress(state: DesktopEnvironmentHandoffSta
   return state.booting || state.busy || state.authTransitioning
 }
 
+function reportAuthenticationStateChanged(
+  state: DesktopEnvironmentHandoffState,
+  setStatus: SetStatusFn
+): void {
+  if (isAuthenticationOperationInProgress(state)) {
+    setStatus(
+      'Finish the current authentication action before continuing this desktop link.',
+      'info'
+    )
+    return
+  }
+  setStatus('The desktop session changed while processing this link. Open it again.', 'info')
+}
+
 function isActiveRestEndpointMatch(
   configState: DesktopRuntimeConfigState,
   externalRestApiBaseUrl: string
@@ -204,7 +218,6 @@ export function createDesktopEnvironmentSetupHandler({
       )
       return
     }
-
     if (restMatches.sameOriginDifferentEndpoint.length > 0) {
       setPendingDesktopEnvironmentSetup(null)
       rejectSameOriginPathConflict(setStatus)
@@ -236,7 +249,10 @@ export function createDesktopEnvironmentSetupHandler({
       if (!(await ownsSessionGeneration(sessionGeneration))) return
 
       authState = getAuthState()
-      if (isAuthenticationOperationInProgress(authState) || !authState.isAuthenticated) return
+      if (isAuthenticationOperationInProgress(authState) || !authState.isAuthenticated) {
+        reportAuthenticationStateChanged(authState, setStatus)
+        return
+      }
 
       setPendingDesktopEnvironmentSetup(null)
       let logoutGeneration: number | null
@@ -254,9 +270,17 @@ export function createDesktopEnvironmentSetupHandler({
         if (authState.isAuthenticated && !isAuthenticationOperationInProgress(authState)) {
           try {
             await onSessionNeedsLoad({ preserveNav: true })
-          } catch {
-            // A failed logout must leave the current environment in place.
+          } catch (error) {
+            setStatus(
+              `Could not reload the current desktop session: ${error instanceof Error ? error.message : String(error)}`,
+              'error'
+            )
           }
+        }
+        if (authState.isAuthenticated || isAuthenticationOperationInProgress(authState)) {
+          reportAuthenticationStateChanged(authState, setStatus)
+        } else {
+          setStatus('Could not confirm sign out before switching desktop environments.', 'error')
         }
         return
       }
@@ -264,7 +288,10 @@ export function createDesktopEnvironmentSetupHandler({
       if (!(await ownsSessionGeneration(sessionGeneration))) return
 
       authState = getAuthState()
-      if (isAuthenticationOperationInProgress(authState)) return
+      if (isAuthenticationOperationInProgress(authState)) {
+        reportAuthenticationStateChanged(authState, setStatus)
+        return
+      }
       if (authState.isAuthenticated) {
         try {
           await onSessionNeedsLoad({ preserveNav: true })
@@ -278,7 +305,10 @@ export function createDesktopEnvironmentSetupHandler({
         }
         if (!(await ownsSessionGeneration(sessionGeneration))) return
         authState = getAuthState()
-        if (authState.isAuthenticated) return
+        if (authState.isAuthenticated) {
+          reportAuthenticationStateChanged(authState, setStatus)
+          return
+        }
       }
       try {
         configState = await refreshRuntimeConfigState()
@@ -288,7 +318,10 @@ export function createDesktopEnvironmentSetupHandler({
       }
       if (!(await ownsSessionGeneration(sessionGeneration))) return
       authState = getAuthState()
-      if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) return
+      if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
+        reportAuthenticationStateChanged(authState, setStatus)
+        return
+      }
       restMatches = getDesktopEnvironmentRestMatches(
         configState,
         linkedConfig.externalRestApiBaseUrl
@@ -341,10 +374,19 @@ export function createDesktopEnvironmentSetupHandler({
       }
       setPendingDesktopEnvironmentSetup(null)
       const selection = await handleSelectRuntimeConfig(savedOption.id, sessionGeneration)
-      if (!selection) return
+      if (!selection) {
+        setStatus(
+          'Could not select the linked desktop environment. Try opening the link again.',
+          'error'
+        )
+        return
+      }
       if (!(await ownsSessionGeneration(selection.sessionGeneration))) return
       authState = getAuthState()
-      if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) return
+      if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
+        reportAuthenticationStateChanged(authState, setStatus)
+        return
+      }
       try {
         await onSessionNeedsLoad({ preserveNav: true })
       } catch (error) {
@@ -359,7 +401,10 @@ export function createDesktopEnvironmentSetupHandler({
     // The backend supplies the RPC endpoint after the user confirms this REST API.
     if (!(await ownsSessionGeneration(sessionGeneration))) return
     authState = getAuthState()
-    if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) return
+    if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
+      reportAuthenticationStateChanged(authState, setStatus)
+      return
+    }
     setPendingDesktopEnvironmentSetup({ ...linkedConfig, rpcProxyBaseUrl: '' })
   }
 
