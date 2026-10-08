@@ -434,6 +434,14 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url — remote redirect URI'
       },
       NS
     )
+    // Written outside the install, so nothing attached it to the Context allowlist;
+    // per-user consent is admitted by that exposure (PR #1004).
+    await gateway.mutateResource(
+      'contexts',
+      CONTEXT,
+      current => ({ spec: { ...current.spec, mcpServers: ['atlassian.v2'] } }),
+      NS
+    )
 
     const res = await mint('atlassian.v2')
 

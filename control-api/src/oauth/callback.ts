@@ -282,16 +282,19 @@ export interface CallbackDeps {
    */
   mcpServerReader?: McpServerOAuthReader
   /**
-   * Resolve the Contexts a user is a member of (agent access via
-   * `user_agents`/`team_agents`, plus legacy `user_contexts`). Required
-   * ONLY for the shared-identity mcp bootstrap (`grantScope='context'`): a
-   * shared grant plants a team credential for everyone in the Context, so the
-   * consenting user MUST be a member first. Injected so the pure callback stays
-   * testable; the route wires the real `getUserMemberContexts`. When absent on a
-   * shared-context path, that path fails closed (`context_membership_denied`).
-   * The per-user path never touches it (its key IS the user).
+   * Whether the signed user may complete consent for this MCP server — the
+   * SAME rule as the authorize-URL mint and disconnect (PR #1004): a per-user
+   * server is admitted by agent exposure (a Context the user reaches through
+   * an agent, or legacy `user_contexts`, lists it), a shared server by
+   * membership of its own `contextRef`. Applied to BOTH grant scopes before
+   * the token exchange. Injected so the pure callback stays testable; the
+   * route wires the real `authorizeMcpOAuthConsent`. When absent, every mcp
+   * consent fails closed (`context_membership_denied`).
    */
-  userContextsReader?: (userId: string) => Promise<{ contextIds: string[] }>
+  consentAdmission?: (
+    userId: string,
+    server: { name: string; grantScope: 'user' | 'context'; contextRef?: string }
+  ) => Promise<boolean>
   /**
    * Injectable for tests; defaults to globalThis.fetch in production wiring.
    * BAKED lane ONLY — the remote lane (`source:'remote'`) never uses it (DEC-17):
@@ -608,36 +611,38 @@ async function handleMcpOAuthCallback(
     redirectUri = perServer.redirectUri
   }
 
-  // ─── Membership guards run BEFORE the token exchange (R3-L1) ──────────────
+  // ─── Admission guards run BEFORE the token exchange (R3-L1) ───────────────
   // These guards depend only on the signed claims + the resolved subject
-  // (`subject.contextRef`, `deps.userContextsReader`, `claims.userId`) — never
-  // on the token. Running them first means a user removed from the Context
-  // during the ~600s mint→callback window fails here instead of first driving
+  // (`subject.contextRef`, `deps.consentAdmission`, `claims.userId`) — never
+  // on the token. Running them first means a user who lost access during the
+  // ~600s mint→callback window fails here instead of first driving
   // `exchangeAuthCode`, which burns the single-use auth-code against the
   // provider and yields a real token only to discard it at a 403. The mint is
   // still the primary gate, so this is not exploitable head-on; it just avoids
   // the pointless exchange + code burn. Persistence (below) stays after the
   // exchange, unchanged.
   //
-  // `contextRef` is set iff this is a context-scoped grant that passed the
-  // membership guard; the persistence dispatch below keys off it (non-undefined
-  // ⇒ shared bootstrap), which also re-narrows it to `string` without a `!`.
-  let contextRef: string | undefined
-  if (subject.grantScope === 'context') {
-    // Shared identity — the coordinate is the server's authoritative contextRef.
-    // Without it there is nothing safe to key the grant on: fail closed.
-    if (!subject.contextRef) return { kind: 'server_missing_context' }
-    // Defence in depth: a shared grant lends a team-wide credential to every
-    // member of the Context, so the consenting (signed) user must be a member
-    // of that Context before we let them bootstrap it. Fail closed when the
-    // membership reader is unwired or the user is not a member — NEVER persist.
-    if (!deps.userContextsReader) return { kind: 'context_membership_denied' }
-    const { contextIds } = await deps.userContextsReader(claims.userId)
-    if (!contextIds.includes(subject.contextRef)) {
-      return { kind: 'context_membership_denied' }
-    }
-    contextRef = subject.contextRef
+  // Shared identity — the coordinate is the server's authoritative contextRef.
+  // Without it there is nothing safe to key the grant on: fail closed.
+  if (subject.grantScope === 'context' && !subject.contextRef) {
+    return { kind: 'server_missing_context' }
   }
+  // Defence in depth for BOTH scopes, the mint's own rule (PR #1004): a shared
+  // grant lends a team-wide credential to everyone in the server's Context, so
+  // the signed user must be a member of it; a per-user grant must be exposed
+  // to the user by one of their agents. Fail closed when the admission is
+  // unwired or denies — NEVER exchange or persist.
+  if (!deps.consentAdmission) return { kind: 'context_membership_denied' }
+  const admitted = await deps.consentAdmission(claims.userId, {
+    name: claims.mcpServerName,
+    grantScope: subject.grantScope,
+    contextRef: subject.contextRef,
+  })
+  if (!admitted) return { kind: 'context_membership_denied' }
+  // `contextRef` is set iff this is a context-scoped grant that passed the
+  // admission guard; the persistence dispatch below keys off it (non-undefined
+  // ⇒ shared bootstrap), which also re-narrows it to `string` without a `!`.
+  const contextRef = subject.grantScope === 'context' ? subject.contextRef : undefined
 
   const exchanged = await exchangeAuthCode(
     subject.decl,

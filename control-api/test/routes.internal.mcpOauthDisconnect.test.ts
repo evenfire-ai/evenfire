@@ -16,8 +16,11 @@ import { MockGateway } from './mockGateway.js'
  * Authorization BY FLAVOR (the security invariant, §2.3):
  *   - `user`    → the key is built on the forwarded userId, so a cross-user
  *     delete is structurally impossible.
- *   - `context` → membership in the server's Context is required (getUserContexts),
- *     and a non-member is rejected 403 with NO delete.
+ *   - `context` → membership in the server's Context is required, and a
+ *     non-member is rejected 403 with NO delete.
+ *   - both flavors share the mint's admission (`authorizeMcpOAuthConsent`):
+ *     a `user` server is admitted by agent exposure — a Context the caller
+ *     reaches lists it (PR #1004) — never by owner-Context membership alone.
  *
  * These tests mock `pool.query` (SQL-shape assertions). The end-to-end delete
  * against real grant rows built by the real producers is the sibling
@@ -80,6 +83,23 @@ function seedOauthServer(
   )
 }
 
+/** A Context CR whose `spec.mcpServers` allowlist exposes `servers` (PR #1004). */
+function seedContext(gateway: MockGateway, contextId: string, servers: string[]): void {
+  void gateway.createResource(
+    'contexts',
+    { metadata: { name: contextId }, spec: { contextId, mcpServers: servers } },
+    MCP_NS
+  )
+}
+
+function seedHost(gateway: MockGateway, name: string, contextRef: string): void {
+  void gateway.createResource(
+    'hosts',
+    { metadata: { name }, spec: { contextRef } },
+    config.hostsNamespace
+  )
+}
+
 /**
  * Route pool.query by SQL: membership lookups (getUserContexts) return the
  * supplied contexts; the grant DELETE returns `rowCount`. Anything else is an
@@ -88,10 +108,26 @@ function seedOauthServer(
 function mockDb(opts: {
   memberContexts: string[]
   userAgents?: string[]
+  teams?: string[]
+  teamAgents?: string[]
   deleteRowCount?: number
 }): void {
   mockPoolQuery.mockImplementation((sql: unknown) => {
     const text = typeof sql === 'string' ? sql : ''
+    if (text.includes('FROM team_members')) {
+      const teams = opts.teams ?? []
+      return Promise.resolve({
+        rows: teams.map(id => ({ id, name: id, role: 'member' })),
+        rowCount: teams.length,
+      })
+    }
+    if (text.includes('FROM team_agents')) {
+      const agents = opts.teamAgents ?? []
+      return Promise.resolve({
+        rows: agents.map(agent_name => ({ agent_name })),
+        rowCount: agents.length,
+      })
+    }
     if (text.includes('FROM user_agents')) {
       const agents = opts.userAgents ?? []
       return Promise.resolve({
@@ -188,8 +224,9 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
 
   // ── user flavor ──────────────────────────────────────────────────────────
 
-  it('user flavor: a MEMBER revokes → 204 and deletes the (user, own-userId) grant', async () => {
+  it('user flavor: an admitted user revokes → 204 and deletes the (user, own-userId) grant', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
+    seedContext(gateway, 'ctx-9', ['gdrive'])
     mockDb({ memberContexts: ['ctx-9'] })
     const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-7' })
     expect(res.status).toBe(204)
@@ -206,6 +243,7 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
 
   it('user flavor: a NON-member is rejected 403 and NOTHING is deleted', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
+    seedContext(gateway, 'ctx-9', ['gdrive'])
     // user-8 belongs to other contexts, but NOT ctx-9.
     mockDb({ memberContexts: ['ctx-other'] })
     const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-8' })
@@ -218,19 +256,74 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
   // whose Context holds the server can revoke without a user_contexts row.
   it('user flavor: a user granted the agent that owns the Context revokes → 204', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
-    void gateway.createResource(
-      'hosts',
-      { metadata: { name: 'agent-9' }, spec: { contextRef: 'ctx-9' } },
-      config.hostsNamespace
-    )
+    seedContext(gateway, 'ctx-9', ['gdrive'])
+    seedHost(gateway, 'agent-9', 'ctx-9')
     mockDb({ memberContexts: [], userAgents: ['agent-9'] })
     const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-7' })
     expect(res.status).toBe(204)
     expect(deleteCalls()).toHaveLength(1)
   })
 
+  // PR #1004: whoever may connect may disconnect — per-user admission follows
+  // agent exposure, not the server's owner Context. The delete key is still
+  // the caller's own userId.
+  describe('user flavor: admission follows agent exposure (PR #1004)', () => {
+    beforeEach(() => {
+      seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
+      seedContext(gateway, 'ctx-owner', ['gdrive'])
+    })
+
+    it('a user granted only agent B, whose Context lists the server, revokes their own grant', async () => {
+      seedHost(gateway, 'agent-b', 'ctx-b')
+      seedContext(gateway, 'ctx-b', ['gdrive'])
+      mockDb({ memberContexts: [], userAgents: ['agent-b'] })
+      const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-b' })
+      expect(res.status).toBe(204)
+      const calls = deleteCalls()
+      expect(calls).toHaveLength(1)
+      expect(calls[0][1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'user-b', 'google-drive'])
+    })
+
+    it('a user whose active team is granted agent B revokes → 204', async () => {
+      seedHost(gateway, 'agent-b', 'ctx-b')
+      seedContext(gateway, 'ctx-b', ['gdrive'])
+      mockDb({ memberContexts: [], teams: ['team-1'], teamAgents: ['agent-b'] })
+      const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-t' })
+      expect(res.status).toBe(204)
+      expect(deleteCalls()).toHaveLength(1)
+    })
+
+    it('an outsider whose agents do not expose the server is rejected 403, nothing deleted', async () => {
+      seedHost(gateway, 'agent-c', 'ctx-c')
+      seedContext(gateway, 'ctx-c', ['notion'])
+      mockDb({ memberContexts: [], userAgents: ['agent-c'] })
+      const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-c' })
+      expect(res.status).toBe(403)
+      expect(res.body.error).toBe('context_membership_denied')
+      expect(deleteCalls()).toHaveLength(0)
+    })
+
+    it('a private install is rejected until agent B is assigned the connector, then revokes', async () => {
+      seedHost(gateway, 'agent-b', 'ctx-b')
+      seedContext(gateway, 'ctx-b', [])
+      mockDb({ memberContexts: [], userAgents: ['agent-b'] })
+      expect((await del(app).send({ mcpServerName: 'gdrive', userId: 'user-b' })).status).toBe(403)
+      expect(deleteCalls()).toHaveLength(0)
+
+      await gateway.mutateResource(
+        'contexts',
+        'ctx-b',
+        current => ({ spec: { ...(current.spec as object), mcpServers: ['gdrive'] } }),
+        MCP_NS
+      )
+      expect((await del(app).send({ mcpServerName: 'gdrive', userId: 'user-b' })).status).toBe(204)
+      expect(deleteCalls()).toHaveLength(1)
+    })
+  })
+
   it('user flavor: idempotent — revoking an absent grant still returns 204', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
+    seedContext(gateway, 'ctx-9', ['gdrive'])
     mockDb({ memberContexts: ['ctx-9'], deleteRowCount: 0 })
     const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-7' })
     expect(res.status).toBe(204)

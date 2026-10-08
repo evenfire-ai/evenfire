@@ -16,6 +16,7 @@ import {
   resolveServerOAuthSubject,
 } from '../src/oauth/mcpServerOAuthSpec.js'
 import { signOAuthState } from '../src/oauth/state.js'
+import { admitContexts } from './fixtures/mcpConsentAdmission.js'
 import {
   discoverPilot,
   installRemoteServer,
@@ -204,7 +205,7 @@ function harness() {
       },
     },
     mcpServerReader: { read },
-    userContextsReader: async () => ({ contextIds: [CONTEXT] }),
+    consentAdmission: admitContexts([CONTEXT]),
     fetchFn: (async () => {
       throw new Error('the remote lane must not use fetchFn')
     }) as unknown as typeof fetch,

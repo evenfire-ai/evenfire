@@ -153,7 +153,7 @@ function asArray<T>(value: unknown): T[] {
  * When omitted, every context in the namespace is indexed — appropriate when
  * the caller authorizes by agent rather than by context.
  */
-async function loadAllowedNamesByContext(
+export async function loadAllowedNamesByContext(
   gateway: K8sGateway,
   mcpServersNamespace: string,
   scopedContextIds?: ReadonlySet<string>

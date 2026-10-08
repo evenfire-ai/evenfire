@@ -10,6 +10,7 @@ import {
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import { signOAuthState } from '../src/oauth/state.js'
+import { admitContexts } from './fixtures/mcpConsentAdmission.js'
 
 /**
  * C4/DEC-17 — the REMOTE auth-code exchange goes through the IP-pinned
@@ -145,7 +146,7 @@ describe('handleOAuthCallback — remote exchange is IP-pinned (DEC-17, T3)', ()
       db: db as unknown as CallbackDeps['db'],
       recipeReader: { read: vi.fn(async () => null) },
       mcpServerReader: remoteReader(),
-      userContextsReader: vi.fn(async () => ({ contextIds: ['ctx-A'] })),
+      consentAdmission: admitContexts(['ctx-A']),
       secretReader: { read: vi.fn(async () => ({})) } as unknown as CallbackDeps['secretReader'],
       fetchFn: fetchFn as unknown as typeof fetch,
       stateSecret: STATE_SECRET,
@@ -214,7 +215,7 @@ describe('baked mcp exchange stays on fetchFn (byte-identical, T5c)', () => {
       db: db as unknown as CallbackDeps['db'],
       recipeReader: { read: vi.fn(async () => null) },
       mcpServerReader: { read: vi.fn(async () => subject) },
-      userContextsReader: vi.fn(async () => ({ contextIds: ['ctx-A'] })),
+      consentAdmission: admitContexts(['ctx-A']),
       secretReader: {
         read: vi.fn(async () => ({ 'client-id': 'CID', 'client-secret': 'CSEC' })),
       } as unknown as CallbackDeps['secretReader'],

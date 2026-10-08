@@ -1,5 +1,6 @@
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
+import { buildAgentDirectoryEntry } from '../directory/accessReconciliation.js'
 import { getTeamAgents, getUserAgents, getUserContexts, listTeams } from '../directory/index.js'
 
 export type ContextMembershipDirectory = {
@@ -28,9 +29,10 @@ const defaultDirectory: ContextMembershipDirectory = {
  * nor the signed OAuth state carries one, and an active team member can
  * already switch to that team and use its agents.
  *
- * Disabled or missing Hosts contribute nothing, matching chat access
- * (`authorizeRpcHostAccess`). Directory/Kubernetes errors propagate so an
- * outage is not reported as a membership denial.
+ * Missing Hosts, and Hosts the connectors panel would not list (disabled,
+ * terminating, or reported from another namespace — `buildAgentDirectoryEntry`,
+ * the producer's own filter), contribute nothing. Directory/Kubernetes errors
+ * propagate so an outage is not reported as a membership denial.
  */
 export async function getUserMemberContexts(
   gateway: K8sGateway,
@@ -57,11 +59,11 @@ export async function getUserMemberContexts(
   if (agentNames.size > 0) {
     const hosts = (await gateway.listResource('hosts', config.hostsNamespace)) as Array<{
       metadata?: { name?: string }
-      spec?: { contextRef?: unknown; enabled?: boolean }
+      spec?: { contextRef?: unknown }
     }>
     for (const host of hosts) {
-      const name = host.metadata?.name
-      if (!name || !agentNames.has(name) || host.spec?.enabled === false) continue
+      const entry = buildAgentDirectoryEntry(host, config.hostsNamespace)
+      if (!entry || !agentNames.has(entry.name)) continue
       const contextRef =
         typeof host.spec?.contextRef === 'string' ? host.spec.contextRef.trim() : ''
       if (contextRef) contextIds.add(contextRef)

@@ -351,6 +351,13 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
       return Promise.resolve({ rows: [], rowCount: 0 })
     })
     config.mcpOauthBrokerEnabled = true
+    // The member Context lists the server: per-user consent is admitted by that
+    // exposure (PR #1004), so the coherence check is what the mint reaches.
+    void gateway.createResource(
+      'contexts',
+      { metadata: { name: CONTEXT }, spec: { contextId: CONTEXT, mcpServers: ['srv'] } },
+      MCP_NS
+    )
   })
 
   afterEach(() => {

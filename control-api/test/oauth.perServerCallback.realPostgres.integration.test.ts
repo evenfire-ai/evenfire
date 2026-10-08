@@ -16,7 +16,8 @@
  * uid, row and nonce by the real install route; the state by the real authorize-url
  * mint; teardown by the uninstall's own store call. The AS registration response and
  * the token endpoint are the only external edges. Context membership is answered on the
- * app pool as the sibling route suites do (it is not what this suite certifies).
+ * app pool as the sibling route suites do, and the seeded Context lists the servers so
+ * consent admission passes (it is not what this suite certifies).
  *
  *   CONTROL_API_REAL_PG_ADMIN_URL=postgres://<user>:<pass>@<host>:5432 npm test -- \
  *     test/oauth.perServerCallback.realPostgres.integration.test.ts
@@ -182,7 +183,10 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     savedBaseUrl = config.oauthCallbackBaseUrl
     config.oauthCallbackBaseUrl = ORIGIN
     gateway = new MockGateway(NS)
-    await seedContext(gateway, NS, CONTEXT)
+    // Per-user consent is admitted by Context allowlist exposure (PR #1004). The
+    // install attaches its server itself; the CRs written directly by a test are
+    // listed here.
+    await seedContext(gateway, NS, CONTEXT, ['legacy', 'gitops'])
     app = createApp(gateway as never)
     tokenEndpoint.posts.length = 0
   })

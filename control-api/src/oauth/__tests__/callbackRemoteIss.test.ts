@@ -127,6 +127,9 @@ function buildDeps(
       read: vi.fn(async () => ({}) as Record<string, string>),
     } as unknown as CallbackDeps['secretReader'],
     mcpServerReader: { read: vi.fn(async () => opts.subject ?? remoteSubject()) },
+    // Consent admission (PR #1004) is certified by its own suite; admit here so the
+    // iss validation is what these cases exercise.
+    consentAdmission: vi.fn(async () => true),
     // Remote lane never touches globalThis fetch (DEC-17); a call is a regression.
     fetchFn: vi.fn() as unknown as typeof fetch,
     stateSecret: STATE_SECRET,

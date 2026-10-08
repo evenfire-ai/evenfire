@@ -11,6 +11,13 @@ import {
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import { signOAuthState } from '../src/oauth/state.js'
+import type { ContextMembershipDirectory } from '../src/services/access/contextMembership.js'
+import {
+  type ConsentAdmission,
+  admitContexts,
+  realConsentAdmission,
+} from './fixtures/mcpConsentAdmission.js'
+import { MockGateway } from './mockGateway.js'
 
 /**
  * U5 — the mcp-subject OAuth callback. Fixtures are derived from the REAL
@@ -81,9 +88,11 @@ interface StubDb {
 function buildDeps(opts: {
   subject?: McpServerOAuthSubject | null
   subjectError?: unknown
-  /** Contexts the signed user belongs to (shared-bootstrap membership gate). Default: member of ctx-A. */
+  /** Contexts whose servers the stand-in admission admits. Default: ctx-A. */
   memberContexts?: string[]
-}): { deps: CallbackDeps; db: StubDb } {
+  /** Overrides the stand-in admission (e.g. the real rule over a MockGateway). */
+  consentAdmission?: ConsentAdmission
+}): { deps: CallbackDeps; db: StubDb; fetchFn: ReturnType<typeof vi.fn> } {
   const db: StubDb = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }) }
 
   // A recipeReader that would explode if the mcp path ever hit it — proves the
@@ -117,27 +126,29 @@ function buildDeps(opts: {
     text: async () => '',
   }))
 
-  const memberContexts = opts.memberContexts ?? ['ctx-A']
-  const userContextsReader = vi.fn(async () => ({ contextIds: memberContexts }))
+  const consentAdmission = opts.consentAdmission ?? admitContexts(opts.memberContexts ?? ['ctx-A'])
 
   return {
     deps: {
       db: db as unknown as CallbackDeps['db'],
       recipeReader,
       mcpServerReader,
-      userContextsReader,
+      consentAdmission,
       secretReader: secretReader as unknown as CallbackDeps['secretReader'],
       fetchFn: fetchFn as unknown as typeof fetch,
       stateSecret: STATE_SECRET,
       encryptionKey: ENCRYPTION_KEY,
     },
     db,
+    fetchFn,
   }
 }
 
 describe('handleOAuthCallback — mcp subject (U5)', () => {
   it('persists a per-user grant keyed by (mcpserver owner, userId) and returns source:mcp', async () => {
-    const { deps, db } = buildDeps({ subject: gdriveSubject({ grantScope: 'user' }) })
+    const { deps, db } = buildDeps({
+      subject: gdriveSubject({ grantScope: 'user', contextRef: 'ctx-A' }),
+    })
     const result = await handleOAuthCallback(buildInput(), deps)
 
     expect(result).toEqual({
@@ -204,16 +215,141 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
     expect(db.query).not.toHaveBeenCalled()
   })
 
-  it('context server: fails closed when no userContextsReader is wired', async () => {
-    const { deps, db } = buildDeps({
-      subject: gdriveSubject({ grantScope: 'context', contextRef: 'ctx-A' }),
+  it.each(['user', 'context'] as const)(
+    '%s server: fails closed when no consentAdmission is wired',
+    async grantScope => {
+      const { deps, db, fetchFn } = buildDeps({
+        subject: gdriveSubject({ grantScope, contextRef: 'ctx-A' }),
+      })
+      const result = await handleOAuthCallback(buildInput(), {
+        ...deps,
+        consentAdmission: undefined,
+      })
+      expect(result.kind).toBe('context_membership_denied')
+      expect(fetchFn).not.toHaveBeenCalled()
+      expect(db.query).not.toHaveBeenCalled()
+    }
+  )
+
+  it('passes the server name, grant scope and authoritative contextRef to admission', async () => {
+    const consentAdmission = admitContexts(['ctx-A'])
+    const { deps } = buildDeps({
+      subject: gdriveSubject({ grantScope: 'user', contextRef: 'ctx-A' }),
+      consentAdmission,
     })
-    const result = await handleOAuthCallback(buildInput(), {
-      ...deps,
-      userContextsReader: undefined,
+    await handleOAuthCallback(buildInput(), deps)
+    expect(consentAdmission).toHaveBeenCalledWith(USER_ID, {
+      name: 'gdrive',
+      grantScope: 'user',
+      contextRef: 'ctx-A',
     })
-    expect(result.kind).toBe('context_membership_denied')
-    expect(db.query).not.toHaveBeenCalled()
+  })
+
+  // PR #1004: the per-user callback re-checks the mint's admission (agent
+  // exposure) BEFORE the token exchange, so a consent minted for a user who
+  // has since lost the exposing agent never burns the code or persists a grant.
+  describe('per-user admission follows agent exposure (PR #1004)', () => {
+    const HOSTS_NS = 'mcp-host'
+    const SERVERS_NS = 'mcp-server'
+
+    function world(opts: {
+      userAgents?: string[]
+      teams?: string[]
+      teamAgents?: string[]
+      contexts: Record<string, string[]>
+      hosts: Record<string, string>
+    }) {
+      const gateway = new MockGateway()
+      for (const [name, contextRef] of Object.entries(opts.hosts)) {
+        void gateway.createResource('hosts', { metadata: { name }, spec: { contextRef } }, HOSTS_NS)
+      }
+      for (const [contextId, mcpServers] of Object.entries(opts.contexts)) {
+        void gateway.createResource(
+          'contexts',
+          { metadata: { name: contextId }, spec: { contextId, mcpServers } },
+          SERVERS_NS
+        )
+      }
+      const directory: ContextMembershipDirectory = {
+        getUserContexts: vi.fn(async (userId: string) => ({ userId, contextIds: [] })),
+        getUserAgents: vi.fn(async (userId: string) => ({
+          userId,
+          agentNames: opts.userAgents ?? [],
+        })),
+        listTeams: vi.fn(async (_userId: string, currentTeamId: string) => ({
+          currentTeamId,
+          items: (opts.teams ?? []).map(id => ({ id, name: id, role: 'member' })),
+        })),
+        getTeamAgents: vi.fn(async (teamId: string) => ({
+          teamId,
+          agentNames: opts.teamAgents ?? [],
+        })),
+      }
+      return { gateway, admission: realConsentAdmission(gateway as never, directory) }
+    }
+
+    const ownerSubject = () => gdriveSubject({ grantScope: 'user', contextRef: 'ctx-owner' })
+
+    it('admits a user granted only agent B, whose Context lists the server', async () => {
+      const { admission } = world({
+        userAgents: ['agent-b'],
+        hosts: { 'agent-b': 'ctx-b' },
+        contexts: { 'ctx-owner': ['gdrive'], 'ctx-b': ['gdrive'] },
+      })
+      const { deps, db } = buildDeps({ subject: ownerSubject(), consentAdmission: admission })
+      const result = await handleOAuthCallback(buildInput(), deps)
+      expect(result.kind).toBe('ok')
+      expect(String(db.query.mock.calls[0][0])).toContain('INSERT INTO oauth_grants')
+    })
+
+    it('admits a user whose active team is granted agent B', async () => {
+      const { admission } = world({
+        teams: ['team-1'],
+        teamAgents: ['agent-b'],
+        hosts: { 'agent-b': 'ctx-b' },
+        contexts: { 'ctx-b': ['gdrive'] },
+      })
+      const { deps } = buildDeps({ subject: ownerSubject(), consentAdmission: admission })
+      expect((await handleOAuthCallback(buildInput(), deps)).kind).toBe('ok')
+    })
+
+    it('denies an outsider WITHOUT exchanging the code or persisting', async () => {
+      const { admission } = world({
+        userAgents: ['agent-c'],
+        hosts: { 'agent-c': 'ctx-c' },
+        contexts: { 'ctx-owner': ['gdrive'], 'ctx-c': ['notion'] },
+      })
+      const { deps, db, fetchFn } = buildDeps({
+        subject: ownerSubject(),
+        consentAdmission: admission,
+      })
+      const result = await handleOAuthCallback(buildInput(), deps)
+      expect(result.kind).toBe('context_membership_denied')
+      expect(fetchFn).not.toHaveBeenCalled()
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it('denies a private install until agent B is assigned the connector, then admits', async () => {
+      const { gateway, admission } = world({
+        userAgents: ['agent-b'],
+        hosts: { 'agent-b': 'ctx-b' },
+        contexts: { 'ctx-owner': ['gdrive'], 'ctx-b': [] },
+      })
+      const denied = buildDeps({ subject: ownerSubject(), consentAdmission: admission })
+      expect((await handleOAuthCallback(buildInput(), denied.deps)).kind).toBe(
+        'context_membership_denied'
+      )
+      expect(denied.db.query).not.toHaveBeenCalled()
+
+      await gateway.mutateResource(
+        'contexts',
+        'ctx-b',
+        current => ({ spec: { ...(current.spec as object), mcpServers: ['gdrive'] } }),
+        SERVERS_NS
+      )
+      const admitted = buildDeps({ subject: ownerSubject(), consentAdmission: admission })
+      expect((await handleOAuthCallback(buildInput(), admitted.deps)).kind).toBe('ok')
+    })
   })
 
   it('context server WITHOUT contextRef fails closed (server_missing_context), no persist', async () => {

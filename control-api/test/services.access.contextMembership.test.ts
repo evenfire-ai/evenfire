@@ -101,6 +101,30 @@ describe('getUserMemberContexts (#989)', () => {
     expect(result.contextIds).toEqual([])
   })
 
+  // Mirrors the connectors producer (buildAgentDirectoryEntry): a Host it would
+  // not list must not grant membership either.
+  it.each([
+    [
+      'being deleted',
+      {
+        name: 'gone-agent',
+        namespace: config.hostsNamespace,
+        deletionTimestamp: '2026-10-01T00:00:00Z',
+      },
+    ],
+    ['reported from another namespace', { name: 'gone-agent', namespace: 'elsewhere' }],
+  ])('ignores a granted agent whose Host is %s', async (_label, metadata) => {
+    const gateway = {
+      listResource: vi.fn(async () => [{ metadata, spec: { contextRef: 'gone-ctx' } }]),
+    }
+    const result = await getUserMemberContexts(
+      gateway as never,
+      'user-1',
+      directory({ userAgents: ['gone-agent'] })
+    )
+    expect(result.contextIds).toEqual([])
+  })
+
   it('ignores a granted agent whose Host no longer exists', async () => {
     const gateway = new MockGateway()
     const result = await getUserMemberContexts(

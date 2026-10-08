@@ -20,6 +20,7 @@ vi.mock('../src/oauth/store.js', async importActual => {
 })
 
 const { resolveConnectorsForAgents } = await import('../src/services/access/mcpInvocable.js')
+const { authorizeMcpOAuthConsent } = await import('../src/services/access/mcpOauthAdmission.js')
 
 const NS = 'mcp-server'
 const HOSTS_NS = 'mcp-host'
@@ -173,6 +174,94 @@ describe('resolveConnectorsForAgents — property: classify, never filter', () =
               expect(c!.authKind).toBe(s.kind)
               // Invariant 1 (needs-connect) + 2 (authorized) driven ONLY by grant.
               expect(c!.status).toBe(s.granted ? 'authorized' : 'requires_setup')
+            }
+          }
+        }
+      ),
+      { numRuns: 200 }
+    )
+  })
+})
+
+// PR #1004 — producer/consumer agreement. Whatever the panel offers as
+// `requires_setup` (the "Connect" button) must be admitted by the consent gate
+// for that same user, or Connect dead-ends in a 403. Shared servers are bound to
+// their owner Context by design, so the promise for them is limited to the
+// agent whose Context owns the server; per-user servers carry it everywhere.
+describe('resolveConnectorsForAgents ⇄ authorizeMcpOAuthConsent — agreement property', () => {
+  const CONTEXTS = ['ctx-0', 'ctx-1', 'ctx-2']
+  const AGENTS = ['agent-0', 'agent-1', 'agent-2', 'agent-3']
+  const SERVERS = ['srv-0', 'srv-1', 'srv-2', 'srv-3']
+
+  it('every requires_setup connector the panel shows a user is admitted for that user', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record({
+          hosts: fc.tuple(
+            ...AGENTS.map(() =>
+              fc.record({
+                contextRef: fc.constantFrom(...CONTEXTS),
+                state: fc.constantFrom('active', 'active', 'disabled', 'deleting'),
+              })
+            )
+          ),
+          allowlists: fc.tuple(...CONTEXTS.map(() => fc.subarray(SERVERS))),
+          servers: fc.tuple(
+            ...SERVERS.map(() =>
+              fc.record({
+                grantScope: fc.constantFrom('user' as const, 'context' as const),
+                owner: fc.constantFrom(...CONTEXTS, 'ctx-private'),
+              })
+            )
+          ),
+          directAgents: fc.subarray(AGENTS),
+          teamAgents: fc.subarray(AGENTS),
+        }),
+        async world => {
+          grantExists.mockResolvedValue(false)
+          const hosts = world.hosts.map((h, i) => ({
+            metadata: {
+              name: AGENTS[i],
+              namespace: HOSTS_NS,
+              ...(h.state === 'deleting' ? { deletionTimestamp: '2026-10-01T00:00:00Z' } : {}),
+            },
+            spec: {
+              contextRef: h.contextRef,
+              ...(h.state === 'disabled' ? { enabled: false } : {}),
+            },
+          }))
+          const contexts = CONTEXTS.map((id, i) => ctx(id, world.allowlists[i]))
+          const mcpservers = world.servers.map((s, i) =>
+            oauthServer(SERVERS[i], s.grantScope, s.owner)
+          )
+          const g = gateway({ hosts, contexts, mcpservers })
+
+          // The user reaches agents directly and through one active team.
+          const directory = {
+            getUserContexts: async (userId: string) => ({ userId, contextIds: [] }),
+            getUserAgents: async (userId: string) => ({ userId, agentNames: world.directAgents }),
+            listTeams: async (_userId: string, currentTeamId: string) => ({
+              currentTeamId,
+              items: [{ id: 'team-1', name: 'team-1', role: 'member' }],
+            }),
+            getTeamAgents: async (teamId: string) => ({ teamId, agentNames: world.teamAgents }),
+          }
+          const reachable = [...new Set([...world.directAgents, ...world.teamAgents])]
+          const agents = await connectorsFor(g, reachable)
+
+          for (const agent of agents) {
+            for (const connector of agent.connectors) {
+              if (connector.status !== 'requires_setup') continue
+              const index = SERVERS.indexOf(connector.name)
+              const server = world.servers[index]
+              if (server.grantScope === 'context' && server.owner !== agent.contextRef) continue
+              const admitted = await authorizeMcpOAuthConsent(
+                g,
+                USER,
+                { name: connector.name, grantScope: server.grantScope, contextRef: server.owner },
+                directory as never
+              )
+              expect(admitted, `${agent.name} offers ${connector.name}`).toBe(true)
             }
           }
         }

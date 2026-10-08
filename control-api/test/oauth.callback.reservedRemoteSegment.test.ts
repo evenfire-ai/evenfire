@@ -21,6 +21,7 @@ import {
   getEntryVersion,
   reportInstall,
 } from '../src/services/registryClient.js'
+import { admitContexts } from './fixtures/mcpConsentAdmission.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -248,7 +249,7 @@ async function deliverState(lane: Lane, serverName: string, segment: string) {
     recipeReader: { read: vi.fn(async () => null) },
     secretReader,
     mcpServerReader,
-    userContextsReader: vi.fn(async () => ({ contextIds: [CONTEXT] })),
+    consentAdmission: admitContexts([CONTEXT]),
     fetchFn: fetchFn as unknown as typeof fetch,
     stateSecret: STATE_SECRET,
     encryptionKey: ENCRYPTION_KEY,
