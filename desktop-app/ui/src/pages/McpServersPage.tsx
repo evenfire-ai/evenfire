@@ -19,6 +19,7 @@ import {
   isActionableConnector,
   useConnectorsController,
 } from '../hooks/domain/useConnectorsController'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { clickableRowProps } from '../lib/clickableRowProps'
 
 function ConnectorRowView({
@@ -131,11 +132,22 @@ function ConnectorRowView({
 }
 
 export function McpServersPage() {
-  // `autoRefresh` (#991): opening this screen, regaining focus, and a bounded
-  // poll keep the catalog current, so connectors added or removed by an admin
-  // mid-session appear without a restart.
-  const { loading, error, actionError, agents, pendingKey, refresh, authorize, disconnect } =
-    useConnectorsController({ autoRefresh: true })
+  const {
+    loading,
+    error,
+    actionError,
+    agents,
+    pendingKey,
+    refresh,
+    isStale,
+    authorize,
+    disconnect,
+  } = useConnectorsController()
+  // #991: opening this screen, regaining focus, and a start-anchored poll keep
+  // the catalog current, so connectors added or removed by an admin mid-session
+  // appear without a restart. The Refresh button goes through the same
+  // scheduler so it joins a run already in flight instead of stacking one.
+  const { refreshNow } = useAutoRefresh({ enabled: true, refresh, isStale })
   const { agentDisplayByName } = useAgentsDataController()
   const { handleOpenAgentWorkspace } = useNavigationContext()
 
@@ -153,7 +165,7 @@ export function McpServersPage() {
             label="Refresh connectors"
             loading={loading}
             onClick={() => {
-              void refresh()
+              void refreshNow()
             }}
             size="sm"
             title="Refresh connectors"

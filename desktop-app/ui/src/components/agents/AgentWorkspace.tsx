@@ -19,6 +19,7 @@ import {
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
+import { useAutoRefresh } from '@hooks/useAutoRefresh'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { deriveConnectorRows } from '@lib/connectorRows'
 import { deriveScopedMembers } from '@lib/scopedMembers'
@@ -110,6 +111,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     agentDisplayByName,
     selectedAgentMcpServers,
     refresh: refreshMcpServerMapping,
+    isStale: mcpServerMappingStale,
   } = useMcpServersDataController({
     selectedAgent,
   })
@@ -121,34 +123,38 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   // app-coordinated `connectors` query cache — same pattern McpServersPage uses.
   // `pendingKey`/`authorize`/`disconnect` MUST come from this same instance so
   // the busy spinner and the action stay paired.
-  //
-  // `autoRefresh` only while the Connectors panel is visible (#991): chat mode
-  // mounts this workspace too and must not poll. Opening the panel also reloads
-  // the agent→server mapping, because the panel's rows come from that catalog —
-  // a connector attached mid-session needs both to show its Authorize button.
   const {
     agents: connectorAgents,
     pendingKey: connectorPendingKey,
     actionError: connectorActionError,
     refresh: refreshConnectors,
+    isStale: connectorsStale,
     authorize: authorizeConnector,
     disconnect: disconnectConnector,
-  } = useConnectorsController({ autoRefresh: connectorsPanelOpen })
+  } = useConnectorsController()
   const [connectorsRefreshing, setConnectorsRefreshing] = useState(false)
 
-  useEffect(() => {
-    if (!connectorsPanelOpen) return
-    void refreshMcpServerMapping()
-  }, [connectorsPanelOpen, refreshMcpServerMapping, selectedAgent])
+  // One scheduler for the panel (#991), enabled only while it is visible: chat
+  // mode mounts this workspace too and must not poll. The panel's rows come from
+  // the agent→server mapping (access catalog) and its buttons from the grants
+  // (connectors), so every run reloads BOTH — a connector attached or detached
+  // mid-session must show or drop its row and its Authorize button together.
+  const { refreshNow: refreshConnectorsPanel } = useAutoRefresh({
+    enabled: connectorsPanelOpen,
+    refresh: () => Promise.all([refreshConnectors(), refreshMcpServerMapping()]),
+    isStale: maxAgeMs => connectorsStale(maxAgeMs) || mcpServerMappingStale(maxAgeMs),
+  })
 
+  // The manual Refresh joins a run already in flight (poll or focus) instead
+  // of stacking a second request.
   const handleRefreshConnectors = useCallback(async () => {
     setConnectorsRefreshing(true)
     try {
-      await Promise.all([refreshConnectors(), refreshMcpServerMapping()])
+      await refreshConnectorsPanel()
     } finally {
       setConnectorsRefreshing(false)
     }
-  }, [refreshConnectors, refreshMcpServerMapping])
+  }, [refreshConnectorsPanel])
 
   const [chatScrollNavVisible, setChatScrollNavVisible] = useState(true)
   const [scrollToBottomChatId, setScrollToBottomChatId] = useState<string | null>(null)
