@@ -2437,6 +2437,14 @@ export class AppService {
       this.assertAuthEnvironmentBinding(request.environmentBinding)
       hydrateDesktopRuntimeConfig()
       if (!isDesktopRuntimeConfigured() || config.rpcProxyBaseUrl?.trim()) return
+      const previousConfig = {
+        externalRestApiBaseUrl: config.externalRestApiBaseUrl,
+        rpcProxyBaseUrl: config.rpcProxyBaseUrl,
+        appName: config.appName,
+      }
+      const previousEnvKey = getActiveEnvKey()
+      const sessionToken = this.sessionToken
+      const sessionUser = this.me
       await saveDesktopRuntimeConfig({
         // Discovery is scoped to the configured REST endpoint; it may provide
         // RPC details but must never switch or overwrite another REST profile.
@@ -2444,6 +2452,44 @@ export class AppService {
         rpcProxyBaseUrl: discovered.rpcProxyBaseUrl,
         appName: discovered.appName || request.appName,
       })
+      const nextEnvKey = getActiveEnvKey()
+      if (
+        nextEnvKey !== previousEnvKey &&
+        sessionToken &&
+        sessionUser &&
+        this.sessionToken === sessionToken &&
+        this.me === sessionUser
+      ) {
+        try {
+          await this.tokenStore.setSessionToken(sessionToken, nextEnvKey)
+          await bindChatStoreForUser(sessionUser.id, nextEnvKey, {
+            legacyEnvKeys: [previousEnvKey],
+            teamId: this.chatStoreTeamId(),
+          })
+          await this.tokenStore.clearSessionToken(previousEnvKey, {
+            clearLegacyGlobalSlot: false,
+          })
+        } catch (migrationError) {
+          try {
+            await saveDesktopRuntimeConfig(previousConfig)
+            await this.tokenStore.setSessionToken(sessionToken, previousEnvKey)
+            await this.tokenStore.clearSessionToken(nextEnvKey, {
+              clearLegacyGlobalSlot: false,
+            })
+            await bindChatStoreForUser(sessionUser.id, previousEnvKey, {
+              legacyEnvKeys: [nextEnvKey],
+              teamId: this.chatStoreTeamId(),
+            })
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [migrationError, rollbackError],
+              'RPC discovery session migration and rollback failed'
+            )
+          }
+          throw migrationError
+        }
+      }
+      if (nextEnvKey !== previousEnvKey) this.rpcTokenManager.clear()
     })
   }
 
