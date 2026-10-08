@@ -8,7 +8,7 @@
  * held before the terminal outcome and is gone after it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
 import { readHostModelSelection, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { RetainedSendSnapshot } from '@lib/retainedSendStore'
 import type { ComposerImageAttachment } from '../../../uiTypes'
@@ -22,6 +22,8 @@ type RetainedSendStore = ReturnType<
 const captured = vi.hoisted(() => ({
   stores: [] as RetainedSendStore[],
   retained: [] as RetainedSendSnapshot[],
+  /** Task ids the controller asked the store to release as ended. */
+  releasedTasks: [] as string[],
 }))
 
 vi.mock('@lib/retainedSendStore', async importOriginal => {
@@ -34,7 +36,11 @@ vi.mock('@lib/retainedSendStore', async importOriginal => {
         captured.retained.push(snapshot)
         store.retainSendSnapshot(snapshot)
       }
-      const wrapped = { ...store, retainSendSnapshot }
+      const releaseRetainedSendsForTask = (taskId: string) => {
+        captured.releasedTasks.push(taskId)
+        store.releaseRetainedSendsForTask(taskId)
+      }
+      const wrapped = { ...store, retainSendSnapshot, releaseRetainedSendsForTask }
       captured.stores.push(wrapped)
       return wrapped
     },
@@ -43,6 +49,8 @@ vi.mock('@lib/retainedSendStore', async importOriginal => {
 
 let clerum: MockClerum
 let uuidCounter = 0
+const ASYNC_WAIT_TIMEOUT_MS = 5_000
+const WIRING_TIMEOUT_MS = 10_000
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -50,6 +58,7 @@ beforeEach(() => {
   uuidCounter = 0
   captured.stores.length = 0
   captured.retained.length = 0
+  captured.releasedTasks.length = 0
   vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(
     () => `uuid-${++uuidCounter}` as `${string}-${string}-${string}-${string}-${string}`
   )
@@ -57,11 +66,19 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
+  expect(document.body.childElementCount).toBe(0)
   vi.restoreAllMocks()
   vi.useRealTimers()
   resetHostModelSelectionStore()
   uninstallMockClerum()
 })
+
+// Real ChatStore-backed effects can exceed Testing Library's 1-second default
+// on loaded local/T0 runners. This follows the #958 wiring-timeout contract.
+function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof rtlWaitFor>[1]) {
+  return rtlWaitFor(callback, { timeout: ASYNC_WAIT_TIMEOUT_MS, ...options })
+}
 
 const image: ComposerImageAttachment = {
   id: 'input-image',
@@ -91,11 +108,12 @@ function heldSnapshot(): RetainedSendSnapshot | undefined {
 
 async function sendAsync(result: ReturnType<typeof renderController>['result'], taskId: string) {
   clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId })
-  const send = act(async () => {
+  await act(async () => {
     await result.current.handleSendAgentMessage('keep this payload')
   })
-  await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true))
-  await send
+  await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true), {
+    timeout: WIRING_TIMEOUT_MS,
+  })
   // Liveness: the send retained its payload and the task id is attached to it.
   expect(heldSnapshot()).toMatchObject({ content: 'keep this payload', taskId })
 }
@@ -200,27 +218,27 @@ describe('retained send release on terminal outcomes (#654 M6)', () => {
   })
 })
 
+/** Sends one message whose POST throws, leaving a retained failure. */
+async function sendFailing(result: ReturnType<typeof renderController>['result'], text: string) {
+  clerum.rpc.invokeHostMessage.mockRejectedValueOnce(new Error('network down'))
+  await act(async () => {
+    await result.current.handleSendAgentMessage(text)
+  })
+  expect(result.current.failedAgentSend?.content).toBe(text)
+}
+
+/** Failed snapshots still held by the controller's store. */
+function heldFailures(): RetainedSendSnapshot[] {
+  expect(captured.stores).toHaveLength(1)
+  const [store] = captured.stores
+  return captured.retained
+    .map(retained =>
+      store!.getRetainedSendSnapshot(retained.agentRef, retained.chatId, retained.userMessageId)
+    )
+    .filter((snapshot): snapshot is RetainedSendSnapshot => Boolean(snapshot?.failure))
+}
+
 describe('older failures of a chat (#654 M2)', () => {
-  /** Sends one message whose POST throws, leaving a retained failure. */
-  async function sendFailing(result: ReturnType<typeof renderController>['result'], text: string) {
-    clerum.rpc.invokeHostMessage.mockRejectedValueOnce(new Error('network down'))
-    await act(async () => {
-      await result.current.handleSendAgentMessage(text)
-    })
-    expect(result.current.failedAgentSend?.content).toBe(text)
-  }
-
-  /** Failed snapshots still held by the controller's store. */
-  function heldFailures(): RetainedSendSnapshot[] {
-    expect(captured.stores).toHaveLength(1)
-    const [store] = captured.stores
-    return captured.retained
-      .map(retained =>
-        store!.getRetainedSendSnapshot(retained.agentRef, retained.chatId, retained.userMessageId)
-      )
-      .filter((snapshot): snapshot is RetainedSendSnapshot => Boolean(snapshot?.failure))
-  }
-
   it('hides an older failure once a later synchronous send succeeds', async () => {
     const { result, spies } = renderController()
     await settleMount()
@@ -245,11 +263,12 @@ describe('older failures of a chat (#654 M2)', () => {
     await sendFailing(result, 'first try')
 
     clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-later' })
-    const send = act(async () => {
+    await act(async () => {
       await result.current.handleSendAgentMessage('second try')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-later')).toBe(true))
-    await send
+    await waitFor(() => expect(clerum.hasProgressHandler('task-later')).toBe(true), {
+      timeout: WIRING_TIMEOUT_MS,
+    })
     // The later send has not reached a terminal yet, so it supersedes nothing.
     expect(result.current.failedAgentSend?.content).toBe('first try')
 
@@ -316,5 +335,191 @@ describe('older failures of a chat (#654 M2)', () => {
     expect(result.current.failedAgentSend?.content).toBe('first try')
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     expect(result.current.agentError).toBe(blocker)
+  })
+})
+
+/**
+ * jozer-rami review 5445124702 (A15 items 2 and 3) — documents the Host never
+ * received exist nowhere else, so ending a task or dismissing a newer failure
+ * must not drop them. The snapshot stays visible, offers Recover files, and
+ * nothing is sent again.
+ */
+describe('documents the Host never received (#678 A15)', () => {
+  type Result = ReturnType<typeof renderController>['result']
+
+  /** Adds one document through the public action and waits until it is read. */
+  async function addReadyFile(result: Result, name: string) {
+    act(() => {
+      result.current.handleAddComposerFiles(
+        [new File([new TextEncoder().encode(`${name} body`)], name, { type: 'text/plain' })],
+        ''
+      )
+    })
+    await waitFor(() =>
+      expect(result.current.composerFileAttachments.map(item => item.status)).toEqual(['ready'])
+    )
+    return result.current.composerFileAttachments[0]!
+  }
+
+  /** A synchronous send the Host answered without admitting its document. */
+  async function sendDropped(result: Result, text: string, name: string) {
+    const file = await addReadyFile(result, name)
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({
+      response: 'done',
+      acceptedAttachmentIds: [],
+    })
+    await act(async () => {
+      await result.current.handleSendAgentMessage(text)
+    })
+    expect(result.current.failedAgentSend).toMatchObject({
+      content: text,
+      answeredWithoutFiles: true,
+    })
+    return file
+  }
+
+  /** An async task the Host accepted without admitting its document. */
+  async function sendAsyncDropped(result: Result, taskId: string) {
+    const file = await addReadyFile(result, 'notes.txt')
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId, acceptedAttachmentIds: [] })
+    const send = act(async () => {
+      await result.current.handleSendAgentMessage('keep this payload')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true), {
+      timeout: WIRING_TIMEOUT_MS,
+    })
+    await send
+    // Liveness: the drop was recorded on the task's snapshot.
+    expect(heldSnapshot()).toMatchObject({ taskId, reason: 'host_files_dropped' })
+    expect(result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
+    return file
+  }
+
+  /** The kept snapshot offers its files back and never sends the text again. */
+  async function expectFilesRecoverableAndNotResent(result: Result, fileId: string) {
+    expect(result.current.failedAgentSend).toMatchObject({
+      content: 'keep this payload',
+      answeredWithoutFiles: true,
+    })
+    await act(async () => {
+      await result.current.handleRetryFailedAgentSend()
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+
+    act(() => result.current.handleRecoverFailedAgentSend())
+
+    // Recover brings the document back and releases what it recovered.
+    expect(result.current.composerFileAttachments.map(item => item.id)).toEqual([fileId])
+    expect(heldSnapshot()).toBeUndefined()
+    expect(result.current.failedAgentSend).toBeNull()
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+  }
+
+  it('a discard keeps an older snapshot whose documents never reached the Host', async () => {
+    const { result } = renderController()
+    await settleMount()
+    const firstFile = await sendDropped(result, 'first drop', 'first.txt')
+    await sendFailing(result, 'plain failure')
+    await sendDropped(result, 'second drop', 'second.txt')
+    expect(heldFailures().map(snapshot => snapshot.content)).toEqual([
+      'first drop',
+      'plain failure',
+      'second drop',
+    ])
+
+    act(() => {
+      result.current.handleDiscardFailedAgentSend()
+    })
+
+    // Witness: the visible drop and the plain failure behind it are released.
+    expect(heldFailures().map(snapshot => snapshot.content)).toEqual(['first drop'])
+    // The older drop is now the visible failure and still offers its file back.
+    expect(result.current.failedAgentSend).toMatchObject({
+      content: 'first drop',
+      answeredWithoutFiles: true,
+    })
+    expect(result.current.failedAgentSend?.files.map(item => item.id)).toEqual([firstFile.id])
+  })
+
+  it('recovering the files of the newest drop keeps an older drop recoverable', async () => {
+    const { result } = renderController()
+    await settleMount()
+    await sendDropped(result, 'first drop', 'first.txt')
+    const secondFile = await sendDropped(result, 'second drop', 'second.txt')
+
+    act(() => result.current.handleRecoverFailedAgentSend())
+
+    // Witness: the recovered drop is released and its document is back.
+    expect(result.current.composerFileAttachments.map(item => item.id)).toEqual([secondFile.id])
+    expect(heldFailures().map(snapshot => snapshot.content)).toEqual(['first drop'])
+    expect(result.current.failedAgentSend).toMatchObject({
+      content: 'first drop',
+      answeredWithoutFiles: true,
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+  })
+
+  it('a cancel keeps the snapshot of a task whose documents never reached the Host', async () => {
+    const { result } = renderController()
+    await settleMount()
+    const file = await sendAsyncDropped(result, 'task-cancel-doc')
+
+    await act(async () => {
+      await result.current.cancelTask('task-cancel-doc')
+    })
+
+    // Witness: the cancel succeeded and released the task in the store.
+    expect(clerum.rpc.cancelTask).toHaveBeenCalledWith('agent-x', 'task-cancel-doc')
+    expect(captured.releasedTasks).toEqual(['task-cancel-doc'])
+    expect(heldSnapshot()).toMatchObject({ reason: 'host_files_dropped' })
+    await expectFilesRecoverableAndNotResent(result, file.id)
+  })
+
+  it('a cancel of a task already gone keeps the snapshot whose documents never reached the Host', async () => {
+    clerum.rpc.cancelTask.mockRejectedValue(new Error('404 Not Found'))
+    const { result, spies } = renderController()
+    await settleMount()
+    const file = await sendAsyncDropped(result, 'task-gone-doc')
+
+    await act(async () => {
+      await result.current.cancelTask('task-gone-doc')
+    })
+
+    // Witness: the 404 branch ran and released the task in the store.
+    expect(spies.pushToast).toHaveBeenCalledWith('That task is no longer active.', 'info')
+    expect(captured.releasedTasks).toEqual(['task-gone-doc'])
+    expect(heldSnapshot()).toMatchObject({ reason: 'host_files_dropped' })
+    await expectFilesRecoverableAndNotResent(result, file.id)
+  })
+
+  it('a lost stream the turn already covered keeps the snapshot whose documents never reached the Host', async () => {
+    const { result } = renderController()
+    await settleMount()
+    const file = await sendAsyncDropped(result, 'task-noop-doc')
+    // The local transcript already holds the task's answer, so the reconcile
+    // after the stream loss settles as `noop`.
+    const chatId = result.current.activeChatId
+    expect(chatId).toEqual(expect.any(String))
+    await act(async () => {
+      await clerum.chat.appendMessages('agent-x', chatId, [
+        {
+          id: 'covered-answer',
+          role: 'assistant',
+          content: 'already answered',
+          timestamp: Date.now(),
+          task_id: 'task-noop-doc',
+        },
+      ])
+    })
+
+    await act(async () => {
+      clerum.emitTaskProgress('task-noop-doc', { type: 'closed' })
+    })
+
+    // Witness: the noop branch ran and released the task in the store.
+    await waitFor(() => expect(captured.releasedTasks).toEqual(['task-noop-doc']))
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalled()
+    expect(heldSnapshot()).toMatchObject({ reason: 'host_files_dropped' })
+    await expectFilesRecoverableAndNotResent(result, file.id)
   })
 })

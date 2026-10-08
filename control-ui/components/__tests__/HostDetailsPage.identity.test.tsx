@@ -19,7 +19,19 @@ import {
   listGrokConnectionModels,
   listGrokSubscriptionConnections,
 } from '../../lib/grokSubscription'
+import {
+  __resetReadRequestCacheForTests,
+  setReadRequestPrincipal,
+} from '../../lib/readRequestCache'
 import { ToastProvider } from '../Toast'
+
+// Capability consumers load only for a principal confirmed by /me (AuthContext).
+beforeEach(() => {
+  setReadRequestPrincipal('admin-one', 'admin')
+})
+afterEach(() => {
+  __resetReadRequestCacheForTests()
+})
 
 const replaceMock = vi.fn()
 const pushMock = vi.fn()
@@ -223,6 +235,12 @@ afterEach(() => {
 describe('HostDetailsPage identity integration', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(api.apiGet).mockResolvedValue({
+      providers: {
+        'codex-subscription': { enabled: true },
+        'grok-subscription': { enabled: true },
+      },
+    })
     mockParams = { name: 'foo' }
     setupApiMocks()
   })
@@ -445,8 +463,9 @@ describe('HostDetailsPage identity integration', () => {
     const summary = await screen.findByRole('region', { name: 'LLM configuration summary' })
     expect(summary).toHaveTextContent('Current model')
     expect(summary).toHaveTextContent('gpt-5.1')
-    expect(screen.getByText('Team A')).toBeInTheDocument()
-    expect(screen.queryByText('codex-aaa')).not.toBeInTheDocument()
+    expect(screen.getByText('codex-aaa')).toBeInTheDocument()
+    expect(screen.queryByText('Team A')).not.toBeInTheDocument()
+    expect(listCodexSubscriptionConnections).not.toHaveBeenCalled()
     expect(screen.getByText('Credential')).toBeInTheDocument()
     expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
     expect(screen.queryByText('Broker-backed — no LLM secret required')).not.toBeInTheDocument()
@@ -644,6 +663,7 @@ describe('HostDetailsPage identity integration', () => {
     ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(grokHost)
     render(<HostDetailsPage />)
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => {
       expect(api.apiSend).toHaveBeenCalledWith(
@@ -757,7 +777,10 @@ describe('HostDetailsPage identity integration', () => {
     render(<HostDetailsPage />)
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
     await waitFor(() => {
-      expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
+      expect(listCodexConnectionModels).toHaveBeenCalledWith(
+        'codex-aaa',
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
     })
     fireEvent.click(await findGrokProviderOption())
     await waitFor(() => {
@@ -793,18 +816,31 @@ describe('HostDetailsPage identity integration', () => {
     render(<HostDetailsPage />)
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
     await waitFor(() => {
-      expect(listGrokConnectionModels).toHaveBeenCalledWith('team-grok')
+      expect(listGrokConnectionModels).toHaveBeenCalledWith(
+        'team-grok',
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
     })
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })
 
   it('hides the Grok provider option when the Grok capability probe reports disabled', async () => {
     mockParams = { name: 'foo', tab: 'model' }
+    vi.mocked(api.apiGet).mockResolvedValue({
+      providers: {
+        'codex-subscription': { enabled: true },
+        'grok-subscription': { enabled: false },
+      },
+    })
     vi.mocked(listGrokSubscriptionConnections).mockRejectedValue({ status: 404 })
     render(<HostDetailsPage />)
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
     await waitFor(() => {
-      expect(listGrokSubscriptionConnections).toHaveBeenCalled()
+      expect(api.apiGet).toHaveBeenCalledWith(
+        '/api/v1/admin/llm/providers/capabilities',
+        {},
+        expect.objectContaining({ metadataRead: 'subscription-capabilities' })
+      )
     })
     fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
     expect(screen.getByRole('option', { name: /^OpenAI$/ })).toBeInTheDocument()

@@ -69,7 +69,7 @@ require_command() {
 }
 
 start_wrc_port_forward() {
-  WRC_PF_LOG="$(mktemp "${TMPDIR:-/tmp}/wrc-port-forward.XXXXXX.log")"
+  WRC_PF_LOG="$(mktemp "${TMPDIR:-/tmp}/wrc-port-forward.XXXXXX")"
   # Start kubectl itself, not the kctl function: a backgrounded function runs in
   # a subshell, so $! would be that subshell and stop_wrc_port_forward would leave
   # kubectl running as an orphan with no ownership record.
@@ -292,7 +292,7 @@ ok "synthetic WorkflowRecipe applied"
 start_wrc_port_forward
 token="$(sign_wrc_status_token)"
 
-running_response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-running-response.XXXXXX.json")"
+running_response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-running-response.XXXXXX")"
 running_http_status="$(curl -sS -o "$running_response_file" -w '%{http_code}' \
   -X POST "http://127.0.0.1:${WRC_PORT}/api/v1/workflow/${WRC_RECIPE_NAME}/status" \
   -H "Authorization: Bearer ${token}" \
@@ -315,7 +315,7 @@ else
   exit 1
 fi
 
-step_running_response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-step-running-response.XXXXXX.json")"
+step_running_response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-step-running-response.XXXXXX")"
 step_running_payload='{"stepId":"tool-step","phase":"running","executor":"agentic"}'
 step_running_http_status="$(curl -sS -o "$step_running_response_file" -w '%{http_code}' \
   -X POST "http://127.0.0.1:${WRC_PORT}/api/v1/workflow/${WRC_RECIPE_NAME}/status" \
@@ -331,7 +331,7 @@ else
 fi
 rm -f "$step_running_response_file"
 
-premature_completed_response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-premature-completed-response.XXXXXX.json")"
+premature_completed_response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-premature-completed-response.XXXXXX")"
 premature_completed_http_status="$(curl -sS -o "$premature_completed_response_file" -w '%{http_code}' \
   -X POST "http://127.0.0.1:${WRC_PORT}/api/v1/workflow/${WRC_RECIPE_NAME}/status" \
   -H "Authorization: Bearer ${token}" \
@@ -400,7 +400,7 @@ console.log(JSON.stringify({
 }))
 NODE
 )"
-response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-status-response.XXXXXX.json")"
+response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-status-response.XXXXXX")"
 http_status="$(curl -sS -o "$response_file" -w '%{http_code}' \
   -X POST "http://127.0.0.1:${WRC_PORT}/api/v1/workflow/${WRC_RECIPE_NAME}/status" \
   -H "Authorization: Bearer ${token}" \
@@ -423,7 +423,7 @@ else
   exit 1
 fi
 
-pending_response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-pending-response.XXXXXX.json")"
+pending_response_file="$(mktemp "${TMPDIR:-/tmp}/wrc-pending-response.XXXXXX")"
 pending_http_status="$(curl -sS -o "$pending_response_file" -w '%{http_code}' \
   -X POST "http://127.0.0.1:${WRC_PORT}/api/v1/workflow/${WRC_RECIPE_NAME}/status" \
   -H "Authorization: Bearer ${token}" \

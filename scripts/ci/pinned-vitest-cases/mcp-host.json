@@ -1,0 +1,74 @@
+[
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local visual_host_share keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local visual_gate keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local stream_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local stream_queue_wait keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local body_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local demotion_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local visual_host_share keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local visual_gate keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local stream_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local stream_queue_wait keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local body_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local demotion_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "grokLlmProxyClient.test.ts",
+    "fullName": "GrokLlmProxyClient keeps wire unknown_machine_code separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "grokLlmProxyClient.test.ts",
+    "fullName": "GrokLlmProxyClient keeps wire reason_only separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "grokLlmProxyClient.test.ts",
+    "fullName": "GrokLlmProxyClient keeps wire malformed_json separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "codexLlmProxyClient.test.ts",
+    "fullName": "CodexLlmProxyClient keeps wire unknown_machine_code separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "codexLlmProxyClient.test.ts",
+    "fullName": "CodexLlmProxyClient keeps wire reason_only separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "codexLlmProxyClient.test.ts",
+    "fullName": "CodexLlmProxyClient keeps wire malformed_json separate from trusted local refusal provenance"
+  }
+]

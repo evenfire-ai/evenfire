@@ -76,6 +76,22 @@ jobs:
           - packages/codex-catalog-projection
           - codex-llm-proxy
           - grok-llm-proxy
+        include:
+          - service: gfs-controller
+            pinned_suites: serve.agentRateLimit.test.ts
+          - service: mcp-host
+            pinned_suites: gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts
+            pinned_cases: ../scripts/ci/pinned-vitest-cases/mcp-host.json
+          - service: control-api
+            pinned_suites:
+              helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
+            pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
+          - service: codex-llm-proxy
+            pinned_suites: originPolicy.test.ts server.security.test.ts
+            pinned_cases: ../scripts/ci/pinned-vitest-cases/codex-llm-proxy.json
+          - service: grok-llm-proxy
+            pinned_suites: originPolicy.test.ts server.security.test.ts
+            pinned_cases: ../scripts/ci/pinned-vitest-cases/grok-llm-proxy.json
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -114,6 +130,25 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      # Desktop strict-pixel fixture checks consume the Host's locked native
+      # canvas dependency through mcp-host/package.json.
+      - name: Install Host dependencies for Desktop fixture checks
+        if: matrix.service == 'desktop-app'
+        working-directory: mcp-host
+        run: npm ci
+
+      # Host's native HTTP admission test imports each proxy server. Install the
+      # existing locked proxy dependencies on this otherwise isolated matrix job.
+      - name: Install Codex proxy dependencies for Host integration
+        if: matrix.service == 'mcp-host'
+        working-directory: codex-llm-proxy
+        run: npm ci
+
+      - name: Install Grok proxy dependencies for Host integration
+        if: matrix.service == 'mcp-host'
+        working-directory: grok-llm-proxy
+        run: npm ci
+
       - name: Verify Electron runtime
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app
@@ -137,17 +172,40 @@ jobs:
         working-directory: desktop-app
         run: npx playwright install --with-deps chromium
 
+      - name: Test subscription login privacy
+        if: matrix.service == 'desktop-app'
+        run: node --test scripts/tests/subscription-private-ui-input.test.mjs
+
+      # Hermetic subscription-image and Control API memory-calibration node:test
+      # suites. Their only installed dependency is mcp-host's @napi-rs/canvas,
+      # which this leg installs for the Desktop fixture checks above.
+      - name: Test subscription image fixtures and memory calibration
+        if: matrix.service == 'desktop-app'
+        run: |
+          node scripts/tests/run-node-test-files.mjs \
+            scripts/tests/subscription-image-coordinator.test.mjs \
+            scripts/tests/subscription-image-coordinator-regressions.test.mjs \
+            scripts/tests/subscription-image-runner.test.mjs \
+            scripts/tests/subscription-image-input-frames.test.mjs \
+            scripts/tests/subscription-t0-discovery.test.mjs \
+            scripts/tests/control-api-qa-runtime.test.mjs \
+            scripts/tests/measure-control-api-authorize-memory.test.mjs \
+            scripts/e2e/prepare-subscription-remaining-fixtures.test.mjs \
+            scripts/e2e/fixtures/subscription-image-provider.test.mjs
+
       - name: Test the pinned-suite checker
         if: matrix.service == 'gfs-controller'
         run: node scripts/tests/run-node-test-files.mjs scripts/ci/assert-pinned-vitest-suites.test.mjs
 
-      # PINNED_SUITES lists test files that must run and pass. The check reads
-      # Vitest's JSON report, not the console output: a file whose tests are all
-      # skipped is still printed by name, so a grep would accept it.
+      # PINNED_SUITES lists test files that must run and pass. PINNED_CASES
+      # optionally lists exact fullName witnesses that must survive merges. Both
+      # checks read Vitest's JSON report, not console output: a file whose tests
+      # are all skipped is still printed by name, so a grep would accept it.
       - name: Test
         working-directory: ${{ matrix.service }}
         env:
-          PINNED_SUITES: ${{ matrix.service == 'gfs-controller' && 'serve.agentRateLimit.test.ts' || matrix.service == 'mcp-host' && 'gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts' || '' }}
+          PINNED_SUITES: ${{ matrix.pinned_suites || '' }}
+          PINNED_CASES: ${{ matrix.pinned_cases || '' }}
         run: |
           set -euo pipefail
           if [ -z "$PINNED_SUITES" ]; then
@@ -159,6 +217,9 @@ jobs:
           npm test -- --reporter=default --reporter=json --outputFile="$report"
           # PINNED_SUITES is unquoted on purpose: one argument per file name.
           node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report" $PINNED_SUITES
+          if [ -n "$PINNED_CASES" ]; then
+            node ../scripts/ci/assert-pinned-vitest-suites.mjs --cases "$report" "$PINNED_CASES"
+          fi
 
       - name: Test web-search image with isolated DNS TLS and MCP
         if: matrix.service == 'mcp-servers/web-search'
@@ -321,6 +382,7 @@ jobs:
             services.codexSubscriptionOAuth.realPostgres.integration.test.ts \
             services.codexSubscriptionCatalog.realPostgres.integration.test.ts \
             services.llmProviderAttemptAuthorization.realPostgres.integration.test.ts \
+            llmProviderAttemptAuthorizer.cancellation.realPostgres.integration.test.ts \
             services.llmProviderAttemptStore.realPostgres.integration.test.ts \
             services.llmProviderAttemptRedemption.realPostgres.integration.test.ts \
             services.llmProviderAttemptFinalization.realPostgres.integration.test.ts \
@@ -338,7 +400,10 @@ jobs:
             routes.externalGfsRateLimitStress.realPostgres.integration.test.ts \
             routes.externalGfsRateLimitFailClosed.realPostgres.integration.test.ts \
             routes.rateLimitProcessMemory.realPostgres.integration.test.ts \
+            services.rateLimiter.realPostgres.integration.test.ts \
             services.rateLimiterPoolSaturation.realPostgres.integration.test.ts \
+            services.adminSubscriptionRateLimitMigration.realPostgres.integration.test.ts \
+            pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts \
             entityChangeFeed.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts
 

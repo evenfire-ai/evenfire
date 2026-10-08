@@ -39,9 +39,12 @@ import {
 } from '../services/mcpProxyService.js'
 import { readMutatingResponseBody } from '../services/upstreamBody.js'
 import {
+  describeErrorForLog,
+  isHostPayloadTooLargeError,
   isUpstreamTimeoutError,
   isWakeEligibleHostError,
   respondWithWakeAndHold,
+  sanitizeHostRefForLog,
 } from '../services/wakeAndHold.js'
 import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
@@ -85,9 +88,9 @@ function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
 export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown): void {
   if (res.headersSent) {
     console.warn(
-      `[RPC_PROXY] suppressing duplicate terminal response (upstream-unavailable): ${
-        error instanceof Error ? error.message : String(error)
-      }`
+      `[RPC_PROXY] suppressing duplicate terminal response (upstream-unavailable): ${describeErrorForLog(
+        error
+      )}`
     )
     return
   }
@@ -99,6 +102,21 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
 }
 
 /**
+ * Terminal mapping for a failed Host message forward, on the first attempt and
+ * on the post-wake retry alike. A Host 413 is the client's body to fix, not an
+ * unavailable Host: it gets the same body as chatJsonBody's own 413, so the
+ * Desktop maps a Host refusal and a proxy refusal identically. Everything else
+ * keeps the respondUpstreamUnavailable mapping, including its headersSent guard.
+ */
+function respondHostMessageForwardFailure(res: ExpressResponse, error: unknown): void {
+  if (isHostPayloadTooLargeError(error) && !res.headersSent) {
+    res.status(413).json({ error: 'Payload Too Large' })
+    return
+  }
+  respondUpstreamUnavailable(res, error)
+}
+
+/**
  * Guards a `next(error)` handoff against a committed response (§11.5). Express
  * routes an error to the default handler which, when headers are already sent,
  * aborts the socket; suppress it loudly instead so a held request that already
@@ -106,11 +124,7 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
  */
 function guardedNext(res: ExpressResponse, next: NextFunction, error: unknown): void {
   if (res.headersSent) {
-    console.warn(
-      `[RPC_PROXY] suppressing post-response route error: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    )
+    console.warn(`[RPC_PROXY] suppressing post-response route error: ${describeErrorForLog(error)}`)
     return
   }
   next(error)
@@ -510,9 +524,9 @@ export function createRpcRouter(): Router {
           })
         } catch (error) {
           console.warn(
-            `[RPC_PROXY] host message forward failed host=${hostRef} error=${
-              error instanceof Error ? error.message : String(error)
-            }`
+            `[RPC_PROXY] host message forward failed host=${sanitizeHostRefForLog(hostRef)} error=${describeErrorForLog(
+              error
+            )}`
           )
           if (isWakeEligibleHostError(error)) {
             // Stateless wake-and-hold: a down or draining host triggers a
@@ -535,11 +549,11 @@ export function createRpcRouter(): Router {
                 })
                 res.status(200).json(retried)
               },
-              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+              respondLegacy: legacyError => respondHostMessageForwardFailure(res, legacyError),
             })
             return
           }
-          respondUpstreamUnavailable(res, error)
+          respondHostMessageForwardFailure(res, error)
           return
         }
         // The upstream accepted the message: the request is resolved. Writing
@@ -554,9 +568,9 @@ export function createRpcRouter(): Router {
           return
         }
         console.warn(
-          `[RPC_PROXY] host message forward failed host=${String(req.params.hostRef || '').trim()} error=${
-            error instanceof Error ? error.message : String(error)
-          }`
+          `[RPC_PROXY] host message forward failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
+            error
+          )}`
         )
         respondUpstreamUnavailable(res, error)
       }
@@ -1338,9 +1352,7 @@ export function createRpcRouter(): Router {
         try {
           await attemptTaskResult()
         } catch (error) {
-          console.warn(
-            `[RPC_PROXY] task result forward failed error=${error instanceof Error ? error.message : String(error)}`
-          )
+          console.warn(`[RPC_PROXY] task result forward failed error=${describeErrorForLog(error)}`)
           if (isWakeEligibleHostError(error)) {
             await respondWithWakeAndHold({
               res,
@@ -1359,9 +1371,7 @@ export function createRpcRouter(): Router {
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
-        console.warn(
-          `[RPC_PROXY] task result forward failed error=${error instanceof Error ? error.message : String(error)}`
-        )
+        console.warn(`[RPC_PROXY] task result forward failed error=${describeErrorForLog(error)}`)
         respondUpstreamUnavailable(res, error)
       }
     }
@@ -1420,9 +1430,7 @@ export function createRpcRouter(): Router {
         try {
           await attemptCancel()
         } catch (error) {
-          console.warn(
-            `[RPC_PROXY] cancel forward failed error=${error instanceof Error ? error.message : String(error)}`
-          )
+          console.warn(`[RPC_PROXY] cancel forward failed error=${describeErrorForLog(error)}`)
           if (isWakeEligibleHostError(error)) {
             await respondWithWakeAndHold({
               res,
@@ -1439,9 +1447,7 @@ export function createRpcRouter(): Router {
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
-        console.warn(
-          `[RPC_PROXY] cancel forward failed error=${error instanceof Error ? error.message : String(error)}`
-        )
+        console.warn(`[RPC_PROXY] cancel forward failed error=${describeErrorForLog(error)}`)
         respondUpstreamUnavailable(res, error)
       }
     }
@@ -1662,9 +1668,9 @@ export function createRpcRouter(): Router {
         res.status(200).json(activity)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host activity failed host=${String(req.params.hostRef || '').trim()} error=${
-            error instanceof Error ? error.message : String(error)
-          }`
+          `[RPC_PROXY] host activity failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
+            error
+          )}`
         )
         next(error)
       }
@@ -1696,16 +1702,18 @@ export function createRpcRouter(): Router {
 
         const status = await forwardHostStatus(host)
         if (!status) {
-          console.warn(`[RPC_PROXY] host status malformed host=${hostRef} user=${auth.sub}`)
+          console.warn(
+            `[RPC_PROXY] host status malformed host=${sanitizeHostRefForLog(hostRef)} user=${auth.sub}`
+          )
           res.status(502).json({ error: 'Invalid upstream host status response' })
           return
         }
         res.status(200).json(status)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host status failed host=${String(req.params.hostRef || '').trim()} error=${
-            error instanceof Error ? error.message : String(error)
-          }`
+          `[RPC_PROXY] host status failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
+            error
+          )}`
         )
         next(error)
       }
@@ -1739,9 +1747,9 @@ export function createRpcRouter(): Router {
         res.status(200).json(health)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host health failed host=${String(req.params.hostRef || '').trim()} error=${
-            error instanceof Error ? error.message : String(error)
-          }`
+          `[RPC_PROXY] host health failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
+            error
+          )}`
         )
         next(error)
       }

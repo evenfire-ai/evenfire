@@ -3,22 +3,24 @@
  *
  * At an 8 MiB request cap, the stream gate alone would let 24 bodies in (8
  * running plus 16 queued). Eleven bodies in flight (eight streams, three
- * queued; #739 D5) already peaked at 510 MiB of RSS with the heap capped, so
- * 24 would not fit the proxy's 768Mi limit by that ratio (not
- * measured at 24). These tests drive the real runtime app over HTTP and use
- * the control-api `redeem` call as the witness: it runs only after the whole
+ * queued; #739 D5) already peaked at 511 MiB of RSS with the heap capped. That
+ * ratio puts 24 bodies at about 1.1 GiB (not measured at 24), and it does not
+ * hold for structure-dense bodies, whose parsed trees cost far more than
+ * their bytes (#806 Q1).
+ * These tests drive the real runtime app over HTTP and use the control-api
+ * `redeem` call as the witness: it runs only after the whole
  * body was read, JSON-parsed, contract-parsed and hash-checked, so the number
  * of attempts held there is the number of bodies in memory.
  */
 import { describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
-import { generateKeyPairSync, randomUUID } from 'node:crypto'
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { gzipSync } from 'node:zlib'
 import {
   LIMITS,
-  hashGrokCompletionRequestV1,
+  hashGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import type { GrokLlmProxyConfig } from '../src/config.js'
@@ -66,6 +68,7 @@ function config(maxBodyBytes: number): GrokLlmProxyConfig {
     adminPort: 0,
     probePort: 0,
     maxBodyBytes,
+    maxVisualBodyBytes: LIMITS.maxVisualRequestBodyBytes,
     maxStreamDurationMs: 60_000,
     maxDeadlineMs: 60_000,
     upstreamIdleTimeoutMs: 600_000,
@@ -104,7 +107,7 @@ function completionBody(contentChars: number, attempt: string, ticketLifetimeSec
   }
   const parsed = parseGrokCompletionRequestV1(raw)
   if (!parsed.ok) throw new Error(parsed.message)
-  const requestHash = hashGrokCompletionRequestV1(parsed.value)
+  const requestHash = hashGrokCompletionRequest(parsed.value)
   return JSON.stringify({
     executionTicket: sign(
       {
@@ -351,7 +354,7 @@ describe('grok-llm-proxy body admission (#731 R3-2)', () => {
     }
   }, 30_000)
 
-  it('T-R3-2c-grok answers provider_unavailable once the admission queue is full', async () => {
+  it('T-R3-2c-grok answers proxy_capacity_exceeded once the admission queue is full', async () => {
     // A small body limit keeps this cheap; the budget scales with it.
     const maxBodyBytes = 16 * 1024
     const proxy = await heldProxy(maxBodyBytes)
@@ -366,9 +369,28 @@ describe('grok-llm-proxy body admission (#731 R3-2)', () => {
       )
       expect(await settle(proxy.redeemed)).toBe(BUDGET_BODIES)
 
-      const overflow = await post(proxy.port, payload('overflow'))
-      expect(overflow.status).toBe(503)
-      expect(JSON.parse(overflow.body)).toEqual({ error: 'provider_unavailable' })
+      const warn = vi.spyOn(logger, 'warn')
+      try {
+        const overflow = await post(proxy.port, payload('overflow'))
+        // Witnesses: the refusal was answered, and the admission logged why.
+        expect(overflow.status).toBe(503)
+        expect(JSON.parse(overflow.body)).toEqual({ error: 'proxy_capacity_exceeded' })
+        const logged = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+        expect(logged.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+          { event: 'grok_proxy_denied', code: 'proxy_capacity_exceeded' },
+        ])
+        expect(logged.filter(entry => entry?.event === 'grok_proxy_admission_refused')).toEqual([
+          {
+            event: 'grok_proxy_admission_refused',
+            reason: 'body_budget',
+            code: 'proxy_capacity_exceeded',
+            kind: 'queue_full',
+            detail: expect.any(String),
+          },
+        ])
+      } finally {
+        warn.mockRestore()
+      }
 
       // Liveness: every queued request is still served once the budget frees.
       proxy.releaseAll()
@@ -797,6 +819,28 @@ describe('grok-llm-proxy encoded bodies (R9-1)', () => {
       const served = await post(proxy.port, completionBody(12_000, 'plain'))
       expect(served.status).toBe(200)
       expect(proxy.redeemed()).toBe(1)
+    } finally {
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-R9-1b-grok refuses a gzip body on the visual parser with 415', async () => {
+    const proxy = await heldProxy(maxBodyBytes)
+    proxy.releaseAll()
+    try {
+      // Random base64 barely compresses, so the wire length stays above the
+      // ordinary cap and selects the visual parser.
+      const gzipped = gzipSync(JSON.stringify({ pad: randomBytes(32 * 1024).toString('base64') }))
+      expect(gzipped.length).toBeGreaterThan(maxBodyBytes)
+      const refused = await postEncoded(proxy.port, {
+        path: COMPLETIONS_PATH,
+        token: platformToken,
+        body: gzipped,
+        encoding: 'gzip',
+      })
+      expect(refused.status).toBe(415)
+      expect(JSON.parse(refused.body)).toEqual({ error: 'unsupported_media_type' })
+      expect(proxy.redeemed()).toBe(0)
     } finally {
       await proxy.close()
     }
