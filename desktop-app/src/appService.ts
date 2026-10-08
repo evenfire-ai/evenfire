@@ -918,7 +918,6 @@ export class AppService {
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
-  private pendingTeamContextHops = 0
   private activeTeamContextHop: ActiveTeamContextHop | null = null
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
@@ -1315,12 +1314,10 @@ export class AppService {
     // time. Queued same-team work remains a nonproducer until it proves it
     // needs a credential switch after reaching the head of the queue.
     const activeTeamId = String(this.me?.teamId || '').trim()
-    let hasHopReservation = targetTeamId !== activeTeamId
-    const earlyProducer = hasHopReservation ? this.admitCredentialProducer() : null
-    if (hasHopReservation && !earlyProducer) {
+    const earlyProducer = targetTeamId !== activeTeamId ? this.admitCredentialProducer() : null
+    if (targetTeamId !== activeTeamId && !earlyProducer) {
       return Promise.reject(new QuitAdmissionClosedError())
     }
-    if (hasHopReservation) this.pendingTeamContextHops += 1
 
     const previousQueue = this.teamContextQueue
     let releaseQueue!: () => void
@@ -1350,10 +1347,6 @@ export class AppService {
             homeTeamOperations: [],
           }
         : null
-      if (shouldSwitch && !hasHopReservation) {
-        this.pendingTeamContextHops += 1
-        hasHopReservation = true
-      }
       const runOperation = async (): Promise<T> => {
         if (activeHop) this.activeTeamContextHop = activeHop
         let restoredOriginalTeam = false
@@ -1435,16 +1428,11 @@ export class AppService {
       // reuse the active token and must not hold Cmd+Q while doing request work.
       if (!shouldSwitch) {
         earlyProducer?.()
-        if (hasHopReservation) {
-          this.pendingTeamContextHops -= 1
-          hasHopReservation = false
-        }
       }
       if (shouldSwitch && !earlyProducer) return await this.runCredentialProducer(runOperation)
       return await runOperation()
     } finally {
       earlyProducer?.()
-      if (hasHopReservation) this.pendingTeamContextHops -= 1
       releaseQueue()
     }
   }
