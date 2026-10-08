@@ -51,6 +51,24 @@ function savedEnvironmentsForRestEndpoint(
   })
 }
 
+function savedEnvironmentsWithDifferentEndpointOnSameOrigin(
+  options: DesktopRuntimeConfigState['options'],
+  externalRestApiBaseUrl: string
+) {
+  const restOrigin = desktopRestEndpointOrigin(externalRestApiBaseUrl)
+  return options.filter(option => {
+    if (option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID) return false
+    try {
+      return (
+        desktopRestEndpointOrigin(option.externalRestApiBaseUrl) === restOrigin &&
+        !sameDesktopRestEndpoint(option.externalRestApiBaseUrl, externalRestApiBaseUrl)
+      )
+    } catch {
+      return false
+    }
+  })
+}
+
 function isLocalhostOption(option: DesktopRuntimeConfigState['options'][number]): boolean {
   return option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID
 }
@@ -70,11 +88,36 @@ export function getDesktopEnvironmentRestMatches(
       }
     }),
     saved: savedEnvironmentsForRestEndpoint(configState.options, externalRestApiBaseUrl),
+    sameOriginDifferentEndpoint: savedEnvironmentsWithDifferentEndpointOnSameOrigin(
+      configState.options,
+      externalRestApiBaseUrl
+    ),
   }
 }
 
 function isAuthenticationOperationInProgress(state: DesktopEnvironmentHandoffState): boolean {
   return state.booting || state.busy || state.authTransitioning
+}
+
+function isActiveRestEndpointMatch(
+  configState: DesktopRuntimeConfigState,
+  externalRestApiBaseUrl: string
+): boolean {
+  return Boolean(
+    configState.configured &&
+    configState.currentConfig &&
+    sameDesktopRestEndpoint(
+      configState.currentConfig.externalRestApiBaseUrl,
+      externalRestApiBaseUrl
+    )
+  )
+}
+
+function rejectSameOriginPathConflict(setStatus: SetStatusFn): void {
+  setStatus(
+    'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
+    'error'
+  )
 }
 
 export function createDesktopEnvironmentSetupHandler({
@@ -162,14 +205,16 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
+    if (restMatches.sameOriginDifferentEndpoint.length > 0) {
+      setPendingDesktopEnvironmentSetup(null)
+      rejectSameOriginPathConflict(setStatus)
+      return
+    }
+
     let authState = getAuthState()
-    const activeRestEndpointMatches = Boolean(
-      configState.configured &&
-      configState.currentConfig &&
-      sameDesktopRestEndpoint(
-        configState.currentConfig.externalRestApiBaseUrl,
-        linkedConfig.externalRestApiBaseUrl
-      )
+    let activeRestEndpointMatches = isActiveRestEndpointMatch(
+      configState,
+      linkedConfig.externalRestApiBaseUrl
     )
     if (restMatches.saved.length > 1 && !activeRestEndpointMatches) {
       setPendingDesktopEnvironmentSetup(null)
@@ -254,6 +299,11 @@ export function createDesktopEnvironmentSetupHandler({
           'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
           'error'
         )
+        return
+      }
+      if (restMatches.sameOriginDifferentEndpoint.length > 0) {
+        setPendingDesktopEnvironmentSetup(null)
+        rejectSameOriginPathConflict(setStatus)
         return
       }
     }

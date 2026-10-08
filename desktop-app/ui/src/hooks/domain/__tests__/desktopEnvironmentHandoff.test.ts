@@ -162,7 +162,7 @@ describe('Desktop environment handoff concurrency', () => {
     },
     {
       outcome: 'prompts to add the linked environment',
-      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
+      externalRestApiBaseUrl: 'https://unconfigured-api.example.test/api/v1',
       action: 'prompt',
     },
   ])('waits for logout to finish, then $outcome', async ({ externalRestApiBaseUrl, action }) => {
@@ -563,7 +563,7 @@ describe('Desktop environment REST endpoint matching', () => {
   })
 
   it.each(['one saved profile', 'multiple saved profiles'])(
-    'offers to add an unmatched REST path with %s on the same origin',
+    'rejects a different REST API path when %s already uses the same origin',
     async profileCount => {
       if (profileCount === 'multiple saved profiles') {
         await runtimeConfigModule!.saveDesktopRuntimeConfig({

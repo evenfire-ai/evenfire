@@ -555,6 +555,15 @@ export function useAuthController({
         return
       }
 
+      if (restMatches.sameOriginDifferentEndpoint.length > 0) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
+          'error'
+        )
+        return
+      }
+
       if (restMatches.saved.length > 0) {
         if (restMatches.saved.length > 1) {
           setPendingDesktopEnvironmentSetup(null)

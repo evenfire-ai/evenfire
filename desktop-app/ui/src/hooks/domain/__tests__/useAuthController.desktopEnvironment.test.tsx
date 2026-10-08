@@ -213,6 +213,35 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
+  it('rejects a same-origin REST path conflict added before setup confirmation', async () => {
+    const linkedEnvironment = {
+      appName: 'New tenant',
+      externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
+    }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linkedEnvironment)
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      linkedEnvironment.externalRestApiBaseUrl
+    )
+
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      appName: 'Other API path',
+      externalRestApiBaseUrl: 'https://new-api.example.test/api/v2',
+      rpcProxyBaseUrl: 'https://rpc.new-api.example.test',
+    })
+    mocks.setStatus.mockClear()
+
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+
+    expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
+      'error'
+    )
+  })
+
   it('asks the user to sign out when native desktop setup rejects an active session', async () => {
     mocks.completeDesktopSetup.mockRejectedValue(
       wrapLikeElectronIpc('auth:completeDesktopSetup', new Error('desktop_setup_requires_signout'))
