@@ -2,11 +2,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import McpServerDetailPage from '../../app/mcp-servers/[name]/page'
 import * as api from '../../lib/api'
+import { ConnectorDetailProvider } from '../ConnectorDetailProvider'
 
 const navigation = vi.hoisted(() => ({
   push: vi.fn(),
   params: { name: 'search' } as { name: string; tab?: string },
 }))
+
+function renderDetailPage() {
+  return render(
+    <ConnectorDetailProvider>
+      <McpServerDetailPage />
+    </ConnectorDetailProvider>
+  )
+}
 
 vi.mock('next/navigation', () => ({
   useParams: () => navigation.params,
@@ -30,6 +39,22 @@ afterEach(() => {
 })
 
 describe('McpServerDetailPage', () => {
+  it('keeps the route-derived connector name visible while its resource is loading', async () => {
+    let resolveResource: ((resource: Awaited<ReturnType<typeof api.getMcpServer>>) => void) | null =
+      null
+    vi.mocked(api.getMcpServer).mockReturnValue(
+      new Promise(resolve => {
+        resolveResource = resolve
+      })
+    )
+    renderDetailPage()
+
+    expect(screen.getByRole('heading', { name: 'Connector: search' })).toBeVisible()
+
+    resolveResource?.({ metadata: { name: 'search' }, spec: {} })
+    expect(await screen.findByRole('heading', { name: 'Connector: search' })).toBeVisible()
+  })
+
   it('renders non-secret configuration in route-backed, read-only fields and links to edit', async () => {
     vi.mocked(api.getMcpServer).mockResolvedValue({
       metadata: { name: 'search', namespace: 'mcp-server' },
@@ -53,7 +78,7 @@ describe('McpServerDetailPage', () => {
         ],
       },
     })
-    render(<McpServerDetailPage />)
+    renderDetailPage()
 
     expect(await screen.findByRole('heading', { name: 'Connector: search' })).toBeVisible()
     expect(screen.getByRole('tab', { name: 'Configuration' })).toHaveAttribute(
@@ -90,10 +115,14 @@ describe('McpServerDetailPage', () => {
         ],
       },
     })
-    const { rerender } = render(<McpServerDetailPage />)
+    const { rerender } = renderDetailPage()
     expect(await screen.findByRole('heading', { name: 'Configuration' })).toBeVisible()
     navigation.params = { name: 'search', tab: 'runtime' }
-    rerender(<McpServerDetailPage />)
+    rerender(
+      <ConnectorDetailProvider>
+        <McpServerDetailPage />
+      </ConnectorDetailProvider>
+    )
 
     expect(await screen.findByRole('heading', { name: 'Runtime status' })).toBeVisible()
     expect(screen.getByRole('tab', { name: 'Runtime status' })).toHaveAttribute(
@@ -123,7 +152,7 @@ describe('McpServerDetailPage', () => {
         ],
       },
     })
-    render(<McpServerDetailPage />)
+    renderDetailPage()
 
     expect(await screen.findByText('Search the public web')).toBeVisible()
     fireEvent.click(screen.getByRole('tab', { name: 'Runtime status' }))
@@ -141,7 +170,7 @@ describe('McpServerDetailPage', () => {
     vi.mocked(api.getMcpServer)
       .mockResolvedValueOnce({ metadata: { name: 'search' }, spec: {} })
       .mockRejectedValueOnce(new Error('Connector search was not found.'))
-    render(<McpServerDetailPage />)
+    renderDetailPage()
     await screen.findByRole('heading', { name: 'Connector: search' })
     fireEvent.click(screen.getByRole('button', { name: 'Refresh connector' }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('was not found'))

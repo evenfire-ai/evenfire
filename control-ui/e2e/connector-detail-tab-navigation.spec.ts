@@ -3,6 +3,8 @@ import { expect, test } from '@playwright/test'
 test('connector detail tabs navigate once and browser back restores configuration', async ({
   page,
 }) => {
+  let connectorDetailRequests = 0
+
   await page.addInitScript(() => {
     window.localStorage.setItem('controlUiAdminToken', 'connector-detail-tab-test-token')
   })
@@ -19,6 +21,7 @@ test('connector detail tabs navigate once and browser back restores configuratio
     }
 
     if (pathname.endsWith('/api/v1/admin/mcp-servers/search')) {
+      connectorDetailRequests += 1
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -39,14 +42,19 @@ test('connector detail tabs navigate once and browser back restores configuratio
   await page.goto('/connectors/search')
   await expect(page.getByRole('heading', { name: 'Connector: search' })).toBeVisible()
   await expect(page.getByText('Search the public web')).toBeVisible()
+  expect(connectorDetailRequests).toBe(1)
 
   await page.getByRole('tab', { name: 'Runtime status' }).click()
   await expect(page).toHaveURL(/\/connectors\/search\/runtime$/)
   await expect(page.getByRole('heading', { name: 'Runtime status' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Connector: search' })).toBeVisible()
   await expect(page.getByText('Connector is ready.')).toBeVisible()
+  expect(connectorDetailRequests).toBe(1)
 
   await page.goBack()
   await expect(page).toHaveURL(/\/connectors\/search\/?$/)
   await expect(page.getByRole('heading', { name: 'Configuration' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Connector: search' })).toBeVisible()
   await expect(page.getByText('Search the public web')).toBeVisible()
+  expect(connectorDetailRequests).toBe(1)
 })

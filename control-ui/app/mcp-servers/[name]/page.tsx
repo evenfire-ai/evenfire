@@ -1,8 +1,9 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
+import { useConnectorDetail } from '@components/ConnectorDetailProvider'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { IconCable } from '@components/Sidebar/icons'
 import { IconRefresh } from '@components/icons'
@@ -14,12 +15,7 @@ import {
   type ConnectorDetailTab,
 } from '@constants/connectorDetail'
 import { CONTROL_ROUTES } from '@constants/routes'
-import {
-  type McpServerCondition,
-  type McpServerResource,
-  getMcpServer,
-  isSilentApiError,
-} from '@lib/api'
+import type { McpServerCondition } from '@lib/api'
 
 function text(value: unknown, fallback = '—'): string {
   return typeof value === 'string' && value.trim() ? value : fallback
@@ -88,34 +84,14 @@ export default function McpServerDetailPage() {
   const router = useRouter()
   const params = useParams<{ name: string; tab?: string | string[] }>()
   const name = decodeURIComponent(params?.name ?? '')
+  const { server, loading, error, load } = useConnectorDetail()
   const [activeTab, setActiveTab] = useState<ConnectorDetailTab>(() =>
     parseConnectorDetailTab(params?.tab)
   )
-  const [server, setServer] = useState<McpServerResource | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError('')
-    try {
-      setServer(await getMcpServer(name))
-    } catch (caught) {
-      if (isSilentApiError(caught)) return
-      setServer(null)
-      setError(caught instanceof Error ? caught.message : `Connector ${name} was not found.`)
-    } finally {
-      setLoading(false)
-    }
-  }, [name])
 
   function selectTab(next: ConnectorDetailTab) {
     setActiveTab(next)
   }
-
-  useEffect(() => {
-    if (name) void load()
-  }, [load, name])
 
   useEffect(() => {
     setActiveTab(parseConnectorDetailTab(params?.tab))
@@ -132,7 +108,7 @@ export default function McpServerDetailPage() {
     <AuthGate>
       <DetailPageShell
         icon={<IconCable />}
-        title={loading ? 'Connector details' : `Connector: ${name}`}
+        title={`Connector: ${name}`}
         subtitle="Review connector configuration and runtime status. Edit this connector to make changes."
         backLabel="Back to connectors"
         onBack={() => router.push(CONTROL_ROUTES.connectors.root)}
