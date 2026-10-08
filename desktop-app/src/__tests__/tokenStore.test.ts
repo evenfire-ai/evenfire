@@ -149,6 +149,24 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     }
   })
 
+  it('strictly clears the legacy global token files', async () => {
+    const storageDirectory = path.join(testHome, '.evenfire')
+    const legacyEncryptedFile = path.join(storageDirectory, 'session-token.enc')
+    const legacyPlainFile = path.join(storageDirectory, 'session-token.json')
+    await fs.mkdir(storageDirectory, { recursive: true })
+    await fs.writeFile(legacyEncryptedFile, Buffer.from('legacy-encrypted-token'), { mode: 0o600 })
+    await fs.writeFile(legacyPlainFile, JSON.stringify({ token: 'legacy-plain-token' }), {
+      mode: 0o600,
+    })
+
+    await expect(
+      new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
+    ).resolves.toBeUndefined()
+
+    await expect(fs.access(legacyEncryptedFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.access(legacyPlainFile)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('finishes an accepted read migration after admission closes and drains its native write', async () => {
     const keytar = await import('keytar')
     const store = new TokenStore()
