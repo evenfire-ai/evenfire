@@ -1,0 +1,17 @@
+{
+  "checkpointId": "msc_01J9Z7Q4R2M3N5P6Q7R8S9T0V1",
+  "version": 2,
+  "status": "blocked",
+  "retryAvailable": false,
+  "originTaskId": "8d6f3a2e-4b1c-4e7a-9f0d-2c5b6a7e8f90",
+  "provider": "codex-subscription",
+  "model": "gpt-6.1-sol",
+  "blockedReason": "model_unavailable",
+  "tools": {
+    "confirmed": 21,
+    "unknown": 0,
+    "notDispatched": 0
+  },
+  "failedAt": "2026-10-07T23:58:23.000Z",
+  "expiresAt": "2026-10-14T23:58:23.000Z"
+}
