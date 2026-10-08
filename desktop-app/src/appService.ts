@@ -3857,7 +3857,7 @@ export class AppService {
           this.requireSessionToken()
         )
         const switchedMe = this.me
-        if (this.sessionToken !== switchedToken || !switchedMe || this.me !== switchedMe) {
+        if (this.sessionToken !== switchedToken || !switchedMe) {
           throw new Error('stale_auth_epoch: authenticated team scope changed before activation')
         }
         // A deliberate user switch is the only team-context boundary that fences

@@ -384,7 +384,6 @@ describe('AppService invitation configuration lookup', () => {
       }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       updateDesktopGfsUploadState: ReturnType<typeof vi.fn>
-      logoutInProgress: boolean
       passwordLogin: (email: string, password: string) => Promise<unknown>
       logout: () => Promise<void>
       getSessionState: () => Promise<unknown>
