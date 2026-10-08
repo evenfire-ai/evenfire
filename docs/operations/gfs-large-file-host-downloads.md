@@ -127,8 +127,8 @@ a new ID, after fresh GFS authorization.
   proven scope. Persisted approvals without a scope are treated as individual
   invocations.
 - Combined retained command output is bounded to 1 MiB. Live progress is bounded to 64 KiB. Exceeding the output bound terminates the process group and returns a truthful `output_limit_exceeded` result.
-- `shell_exec` never calls the GFS download store (#1019). It does not acquire
-  a processing lease, does not depend on `store.isAvailable()`, and keeps
+- `shell_exec` never calls the GFS download store (#1019). It takes nothing
+  from the store, does not depend on `store.isAvailable()`, and keeps
   running while the store is unavailable. When a Host-owned store exists,
   the shell stays bound to the verified caller root; before every command it
   re-verifies that the caller root is still canonical. That check is per-user
@@ -204,8 +204,9 @@ isolation is separate Stage 2 work.
 Shell cleanup signals and waits for the detached process group before the tool result is returned, or reports `process_group_termination_failed` when its termination cannot be confirmed. A process that moved outside that group (for example through `setsid` or a detached spawn) can keep stdout/stderr open after the group is gone, so the Host bounds settlement without waiting for those pipes to close. After a timeout, cancellation or output overflow, termination has 5000 ms of SIGTERM grace and the call settles at the 6000 ms cleanup budget at the latest. When the command exits on its own, the Host checks every 1000 ms whether the process group is gone and settles once it is. If the group never disappears, the execution timeout still applies, followed by the same 6000 ms cleanup budget. In both cases the Host stops output capture, the result starts with `[stdio_held_by_detached_process: <reason>; ...]` and is an error, and a `shell_stdio_held_by_detached_process` warning is logged. The escaped process is not signalled and may keep running; this bounds the call, it does not contain the process. Redirect background output to a file or `/dev/null`. Operating systems may reuse a process-group identifier after the original leader has been reaped; Stage 1 narrows that window by signaling immediately on leader close, but stronger executor identity is required to eliminate it.
 
 Generic workspace tools reject direct and symlink-resolved access to
-`.gfs-downloads`, the pre-#1028 `.gfs-download-store` directory and every
-`.gfs-download-store.retired-*` tree through `file_read`, `file_write`, memory
+`.gfs-downloads`, the pre-#1028 `.gfs-download-store` directory, every
+`.gfs-download-store.retired-*` tree and every `.gfs-downloads.trash-*` tree
+through `file_read`, `file_write`, memory
 read/write, list/tree, and search. A name that only resembles them (for example
 `.gfs-download-storex`) is an ordinary workspace path.
 The protected absolute target is checked before relativizing it against a
@@ -240,7 +241,13 @@ make a Host refuse downloads.
     source                 0600  the published copy
 ```
 
-`<hostRoot>/users/<key>` is the verified caller workspace. The receipt path
+`<hostRoot>/users/<key>` is the verified caller workspace. `<key>` is the
+channel-namespaced caller key (`_system` for tasks without a source message),
+and it is also the store's caller identity: an admission whose identity is not
+the key of its caller directory, or whose caller directory is not exactly
+`<hostRoot>/users/<key>`, is refused. Two people with the same sender name on
+different channels therefore never share reuse, managed reads or pins. The
+receipt path
 given to the model is `.gfs-downloads/input-<uuid>/source`, relative to that
 workspace. `<uuid>` is random. Names in `.gfs-downloads` that do not match
 `input-<uuid>` belong to the user and are never listed, charged or removed,
@@ -312,8 +319,14 @@ that cannot hold the download costs no cached copy. A Host runs at most 2
 transfers at once, and a caller at most its configured concurrency; beyond that
 admission returns `download_busy`.
 
-If limits are lowered, existing copies remain charged and new admissions evict
-or are refused until usage falls below the new policy.
+If the quota limits (`MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`, the caller limits
+or the file counts) are lowered, existing copies remain charged and new
+admissions evict or are refused until usage falls below the new policy.
+Lowering `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS` or `MCP_HOST_GFS_MAX_FILE_BYTES` is
+different: a `meta.json` is validated against the limits in force, so after the
+restart every copy whose size or retention exceeds the new value is incomplete
+and the first sweep removes it (counted as `incomplete_removed`). No reuse is
+lost by this, because a restart already makes every copy adopted.
 
 ### Expiry and sweeps
 
@@ -323,16 +336,45 @@ symlinks. It removes incomplete directories and expired copies that no task
 pins. It never touches a directory that is an active transfer of this process,
 and it never replaces a published copy: another directory carrying the same ID
 is removed. A `.gfs-downloads` that is a symlink or not a directory is removed
-without following it and recreated on the next admission. A directory that
-cannot be listed is skipped and retried by the next sweep (`sweep_failed`). A
-removal that fails is logged with its error code (`remove_failed`) and retried
-by the next sweep; the copy stays where it is. Expiry is the boundary itself: a
+by the sweep without following it and recreated on the next admission.
+
+An admission replaces a caller's `.gfs-downloads`, deleting every copy in it
+(pinned ones included), only when the check answers about the directory itself:
+it is a symlink or not a directory, it is gone (`ENOENT`), the check fails with
+`ELOOP`, `ENOTDIR` or `EACCES`, or its owner or mode (for example after a
+`chmod 755` from a shell) is not the store's private one. Any
+other error (`EMFILE`, `EIO`, ...) proves nothing about the directory: the
+admission fails with `storage_write_failed` and the directory and its copies
+stay. The same distinction applies to every check of a copy: reuse, managed
+reads and the sweep remove a copy only on a size, inode or digest mismatch, an
+untrusted owner, mode or type, or one of those errnos. On any other error the
+copy is kept and checked again later; reuse logs `GFS download store could not
+verify a published copy for reuse; it is kept and checked again later`, a
+managed read answers `download_missing` and logs `GFS download store could not
+read a published copy for its caller`, and the sweep logs `GFS download store
+could not inspect a download directory; it is kept and the next sweep retries
+it` and counts `sweep_failed`. All three log the error code only.
+
+A directory that cannot be listed is skipped and retried by the next sweep
+(`sweep_failed`). A removal that fails is logged with its error code
+(`remove_failed`) and retried by the next sweep; the copy stays where it is,
+indexed and charged to its caller, and a published copy stays published. Only a
+removal that moved a directory counts as `incomplete_removed` or
+`expired_removed`; one whose directory never existed counts nothing. Expiry is the boundary itself: a
 copy whose `expiresAt` equals the current time is expired for reuse, managed
 reads and the sweep.
 
-Every removal renames the directory to a private `.trash-<uuid>` name inside its
-verified parent, checks the parent again and removes only the private name; the
-removal is proven by `ENOENT` afterwards.
+Every removal renames the directory to a private name inside its verified
+parent, checks the parent again and removes only the private name; the removal
+is proven by `ENOENT` afterwards. The private name is one the sweep lists in
+that parent: `.trash-<uuid>` inside `.gfs-downloads`,
+`.gfs-downloads.trash-<uuid>` in a caller root (a replaced `.gfs-downloads`)
+and `.gfs-download-store.retired-<uuid>` in the Host root. A removal that stops
+between its rename and its `rm` leaves that name behind; the next sweep removes
+it, and workspace tools treat it as protected until then. When the parent
+check refuses and the rename back also fails, the refusal is reported and the
+undo failure is logged as `GFS download store could not restore a directory
+after refusing to remove it` with its error code.
 
 ### Retention pins and cold resume
 
@@ -354,17 +396,17 @@ read (file-type detection) checks the inode, size and mode but does not hash.
 
 ### Errors visible to the model
 
-| Code                    | Meaning                                                                                                          |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `caller_quota_exceeded` | The caller's retained bytes or files would exceed its limits and eviction cannot make room.                      |
-| `host_quota_exceeded`   | The Host's bytes or files, the admission size limit or free space would be exceeded.                             |
-| `download_busy`         | Too many active transfers, the store is closed or closing, or no such transfer exists.                           |
-| `download_missing`      | No copy this process published for this caller has that path, or the copy failed verification.                   |
-| `download_expired`      | The copy or the transfer is past its expiry.                                                                     |
-| `publication_cancelled` | The task was cancelled or ran out of time while the copy was being verified or published.                        |
-| `storage_write_failed`  | A filesystem operation failed during admission, publication or removal.                                          |
-| `workspace_unavailable` | The store is not initialized, or the Host root or caller directory is not a real directory inside the Host root. |
-| `caller_mismatch`       | The request carries no caller identity or a malformed retention owner ID.                                        |
+| Code                    | Meaning                                                                                                                |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `caller_quota_exceeded` | The caller's retained bytes or files would exceed its limits and eviction cannot make room.                            |
+| `host_quota_exceeded`   | The Host's bytes or files, the admission size limit or free space would be exceeded.                                   |
+| `download_busy`         | Too many active transfers, the store is closed or closing, or no such transfer exists.                                 |
+| `download_missing`      | No copy this process published for this caller has that path, or the copy failed verification.                         |
+| `download_expired`      | The copy or the transfer is past its expiry.                                                                           |
+| `publication_cancelled` | The task was cancelled or ran out of time while the copy was being verified or published.                              |
+| `storage_write_failed`  | A filesystem operation failed during admission, publication or removal.                                                |
+| `workspace_unavailable` | The store is not initialized, or the Host root or caller directory is not a real directory inside the Host root.       |
+| `caller_mismatch`       | The request carries no caller identity, one that is not its caller directory's key, or a malformed retention owner ID. |
 
 Another caller's download is answered with the same code and message as an ID
 that does not exist (`download_missing` for reads and publication,
@@ -396,6 +438,15 @@ processes. During the overlap each Host enforces the quota on its own
 reservations, so their combined usage can exceed it, and the starting Host's sweep can remove a transfer the terminating
 Host is still draining; that transfer fails with `storage_write_failed` in a
 task that is being interrupted anyway.
+
+The first rollout from the dev image (`74e0d81d9`) to this one extends that
+risk. The starting Host's first sweep retires the dev Host's live
+`.gfs-download-store` (its ledger and writer fence), so the dev Host's ledger
+writes fail with `ENOENT`, and it removes the dev Host's completed `input-*`
+directories, which have no `meta.json`. For the rest of the overlap the
+terminating dev Host's managed reads of finished downloads fail as well, not
+only its transfers. The window is the termination grace period; the affected
+files are downloaded again by the new Host on their next use.
 
 ## Metrics
 
@@ -455,8 +506,12 @@ removes it. A retired tree is protected from workspace tools until then.
 
 Rolling back to the dev image (`74e0d81d9`) is safe. That image creates a new
 `.gfs-download-store` with an empty ledger and a fresh writer fence, and ignores
-the `meta.json` directories this image left; they occupy space within the quota
-until a later image sweeps them. A retired tree left by a failed removal is not
+the `meta.json` directories this image left. The dev image charges only its
+ledger records, so those directories are outside its accounting: they are not
+charged against its quota, only its free-space check sees them, and their size
+is bounded by the quota in force when this image wrote them (1024 MiB by
+default) plus any partial files. They stay until a later image sweeps them. A
+retired tree or a `.gfs-downloads.trash-*` tree left by a failed removal is not
 protected from workspace tools under that image. Rolling forward again retires
 the store the dev image created and keeps every copy that is still complete and
 unexpired, as adopted. This was checked once outside CI by starting the dev
