@@ -114,6 +114,52 @@ describe('AppService native auth and environment commit ordering', () => {
     expect(service.gfsScopeIdentity).toEqual(gfsScopeBeforeSetup)
   })
 
+  it('rejects desktop setup while an explicit login is in flight', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const loginStarted = deferred<void>()
+    const loginResponse = deferred<{
+      token: string
+      me: { id: string; email: string; teamId: string }
+    }>()
+    const me = { id: 'user-a', email: 'user-a@example.test', teamId: 'team-a' }
+    service.authClient = {
+      googleLogin: vi.fn(() => {
+        loginStarted.resolve()
+        return loginResponse.promise
+      }),
+    } as never
+    const setupRequest = vi.fn().mockRejectedValue(new Error('unexpected setup dispatch'))
+    const serviceInternals = service as unknown as {
+      memberRegistrationServiceClient: { completeDesktopSetup: typeof setupRequest }
+      completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
+    }
+    serviceInternals.memberRegistrationServiceClient = { completeDesktopSetup: setupRequest }
+
+    const login = service.googleLogin('synthetic-google-token')
+    await loginStarted.promise
+    const generationDuringLogin = service.getSessionGeneration()
+    const setupOutcome = await serviceInternals
+      .completeDesktopSetup('user-a@example.test', 'synthetic-setup-token')
+      .then(
+        () => ({ error: null as unknown }),
+        error => ({ error })
+      )
+    const generationAfterSetup = service.getSessionGeneration()
+    loginResponse.resolve({ token: 'synthetic-session-a', me })
+    const loginOutcome = await login.then(
+      result => ({ result, error: null as unknown }),
+      error => ({ result: null, error })
+    )
+
+    expect(setupOutcome.error).toBeInstanceOf(Error)
+    expect((setupOutcome.error as Error).message).toBe('auth_transition_in_progress')
+    expect(setupRequest).not.toHaveBeenCalled()
+    expect(generationAfterSetup).toBe(generationDuringLogin)
+    expect(loginOutcome.error).toBeNull()
+    expect(loginOutcome.result).toMatchObject({ authenticated: true, me })
+    expect(service.getSessionGeneration()).toBe(generationDuringLogin + 1)
+  })
+
   it('rejects handoff environment saves after auth changes or while auth is active', async () => {
     const { service, runtimeConfig, optionB, restA, restB } = await createNativeCommitTestHarness()
     const loginStarted = deferred<void>()
