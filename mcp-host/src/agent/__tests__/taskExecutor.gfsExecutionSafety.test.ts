@@ -148,9 +148,21 @@ async function preRedesignStore({ live = false }: { live?: boolean } = {}) {
   const [seededLease] = Object.values(ledger.processingLeases)
   if (seededLease === undefined)
     throw new Error('preRedesignStore fixture: no processing lease was written')
+  // Witness for every X1 case: the old store is on disk before the start and
+  // the start retires it, so availability cannot come from a missing fixture.
+  await expect(fs.lstat(devStore.storeRoot)).resolves.toBeDefined()
+  const warn = vi.spyOn(logger, 'warn')
   const store = new GfsDownloadStore(root)
   stores.push(store)
   await store.initialize()
+  expect(warn).toHaveBeenCalledWith(
+    expect.objectContaining({ component: 'GfsDownloadStore' }),
+    'Retired the pre-#1028 GFS download store'
+  )
+  warn.mockRestore()
+  await expect(fs.lstat(join(root, '.gfs-download-store'))).rejects.toMatchObject({
+    code: 'ENOENT',
+  })
   return { root, store, seededLease }
 }
 

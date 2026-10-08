@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
+import { RETIRED_GFS_DOWNLOAD_STORE_PREFIX } from '../workspace/protectedPaths'
 import { recordGfsDownloadExpiry, recordGfsDownloadQuota } from './gfsDownloadMetrics'
 import {
   GFS_FILE_LIMITS,
@@ -21,6 +22,8 @@ const SOURCE_FILE = 'source'
 const PARTIAL_FILE = 'source.partial'
 const META_MAX_BYTES = 64 * 1024
 const FREE_SPACE_RESERVE_BYTES = 16n * 1024n * 1024n
+/** Host-root directory of the ledger store written before #1028; never read. */
+const LEGACY_STORE_DIRECTORY = '.gfs-download-store'
 
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 /** The only directory names under `.gfs-downloads` that belong to the store. */
@@ -28,6 +31,10 @@ export const GFS_INPUT_DIRECTORY_RE = new RegExp(`^input-(${UUID_PATTERN})$`)
 /** A directory renamed out of the way before removal; swept if a removal stops. */
 const TRASH_PREFIX = '.trash-'
 const TRASH_DIRECTORY_RE = new RegExp(`^\\.trash-${UUID_PATTERN}$`)
+/** Host-root names the retirement of the pre-#1028 store gives the old tree. */
+const RETIRED_DIRECTORY_RE = new RegExp(
+  `^${RETIRED_GFS_DOWNLOAD_STORE_PREFIX.replaceAll('.', '\\.')}${UUID_PATTERN}$`
+)
 /** Caller-relative receipt path; the same contract gfsFilePreparation enforces. */
 const RECEIPT_PATH_RE = new RegExp(`^\\.gfs-downloads/input-(${UUID_PATTERN})/source$`)
 const SHA256_RE = /^[0-9a-f]{64}$/
@@ -138,6 +145,8 @@ interface SweepTotals extends GfsDownloadSweepResult {
   retainedBytes: number
   /** Retained entries this process did not publish. */
   adopted: number
+  /** This sweep renamed the pre-#1028 store out of the way. */
+  retiredLegacyStore: boolean
 }
 
 export interface GfsDownloadInventory {
@@ -264,6 +273,28 @@ async function sha256FileHandle(handle: fs.FileHandle, assertActive?: () => void
   return digest.digest('hex')
 }
 
+/**
+ * Regular files and their bytes under a directory, for the retirement log
+ * only. Nothing is opened and no symlink is followed: entries are classified
+ * by their own lstat type.
+ */
+async function treeUsage(root: string): Promise<{ files: number; bytes: number }> {
+  const usage = { files: 0, bytes: 0 }
+  const pending = [root]
+  while (pending.length > 0) {
+    const directory = pending.pop()!
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const child = path.join(directory, entry.name)
+      if (entry.isDirectory()) pending.push(child)
+      else if (entry.isFile()) {
+        usage.files += 1
+        usage.bytes += (await fs.lstat(child)).size
+      }
+    }
+  }
+  return usage
+}
+
 function receiptPath(id: string): string {
   return path.join(DOWNLOADS_DIRECTORY, `input-${id}`, SOURCE_FILE)
 }
@@ -355,7 +386,7 @@ export class GfsDownloadStore {
         retainedCompleted: totals.retainedCompleted,
         retainedBytes: totals.retainedBytes,
         adopted: totals.adopted,
-        retiredLegacyStore: false,
+        retiredLegacyStore: totals.retiredLegacyStore,
       },
       'GFS download store initialized'
     )
@@ -830,7 +861,8 @@ export class GfsDownloadStore {
    * never touched, and a published entry is never replaced: another directory
    * carrying the id of a reservation or of a published copy is removed, and an
    * id found in several directories with neither is removed everywhere (a
-   * random uuid does not repeat by chance).
+   * random uuid does not repeat by chance). Every sweep first retires the
+   * pre-#1028 store if one is present.
    */
   private async sweep(now: number): Promise<SweepTotals> {
     const totals: SweepTotals = {
@@ -840,7 +872,9 @@ export class GfsDownloadStore {
       retainedCompleted: 0,
       retainedBytes: 0,
       adopted: 0,
+      retiredLegacyStore: false,
     }
+    await this.retireLegacyStore(totals)
     const candidates = new Map<string, string[]>()
     const addCandidate = (id: string, directory: string) => {
       const directories = candidates.get(id) ?? []
@@ -896,6 +930,80 @@ export class GfsDownloadStore {
       if (entry.provenance === 'adopted') totals.adopted += 1
     }
     return totals
+  }
+
+  /**
+   * Retires the ledger store of the pre-#1028 image, at startup and in every
+   * sweep: `.gfs-download-store` is renamed to
+   * `.gfs-download-store.retired-<uuid>` inside the Host root, then every
+   * retired tree is removed the way any store directory is (renamed to a new
+   * private name, the parent checked again, removed). Nothing inside is read;
+   * the warning carries only file and byte counts. A failed step is logged
+   * with its code and step and counted, and never fails the sweep: leftover
+   * state can cost disk space, never availability. A retired tree a failed
+   * removal left is protected from workspace tools and retried by the next
+   * sweep.
+   */
+  private async retireLegacyStore(totals: SweepTotals): Promise<void> {
+    const failed = (step: 'inspect' | 'rename' | 'list' | 'remove', error: unknown) => {
+      totals.removeFailed += 1
+      recordGfsDownloadExpiry('remove_failed')
+      logger.warn(
+        { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error), step },
+        'GFS download store could not retire the pre-#1028 store; the next sweep retries it'
+      )
+    }
+    const legacy = path.join(this.hostRoot, LEGACY_STORE_DIRECTORY)
+    let info: import('node:fs').Stats | undefined
+    try {
+      info = await fs.lstat(legacy)
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') failed('inspect', error)
+    }
+    if (info) {
+      let usage: { files: number; bytes: number } | undefined
+      try {
+        usage = info.isDirectory()
+          ? await treeUsage(legacy)
+          : { files: info.isFile() ? 1 : 0, bytes: info.isFile() ? info.size : 0 }
+      } catch (error) {
+        // The counts only feed the log line; the retirement goes ahead without them.
+        logger.warn(
+          { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error), step: 'measure' },
+          'GFS download store could not measure the pre-#1028 store before retiring it'
+        )
+      }
+      try {
+        await this.assertRemovable(legacy)
+        await fs.rename(
+          legacy,
+          path.join(this.hostRoot, `${RETIRED_GFS_DOWNLOAD_STORE_PREFIX}${randomUUID()}`)
+        )
+        totals.retiredLegacyStore = true
+        recordGfsDownloadExpiry('retired_legacy_store')
+        logger.warn(
+          { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, ...usage },
+          'Retired the pre-#1028 GFS download store'
+        )
+      } catch (error) {
+        failed('rename', error)
+      }
+    }
+    let names: string[]
+    try {
+      names = await fs.readdir(this.hostRoot)
+    } catch (error) {
+      failed('list', error)
+      return
+    }
+    for (const name of names) {
+      if (!RETIRED_DIRECTORY_RE.test(name)) continue
+      try {
+        await this.removeVerified(path.join(this.hostRoot, name), RETIRED_GFS_DOWNLOAD_STORE_PREFIX)
+      } catch (error) {
+        failed('remove', error)
+      }
+    }
   }
 
   /**
@@ -1244,9 +1352,9 @@ export class GfsDownloadStore {
    * parent moved in between, the rename is undone and the removal refused,
    * so whatever the swapped path led to keeps its name and content.
    */
-  private async removeVerified(directory: string): Promise<void> {
+  private async removeVerified(directory: string, trashPrefix = TRASH_PREFIX): Promise<void> {
     await this.assertRemovable(directory)
-    const trash = path.join(path.dirname(directory), `${TRASH_PREFIX}${randomUUID()}`)
+    const trash = path.join(path.dirname(directory), `${trashPrefix}${randomUUID()}`)
     try {
       await fs.rename(directory, trash)
     } catch (error) {
@@ -1264,10 +1372,13 @@ export class GfsDownloadStore {
     await assertAbsent(trash)
   }
 
-  /** The parent of a directory about to be removed is real and inside the Host root. */
+  /**
+   * The parent of a directory about to be removed is real and is the Host
+   * root (only for the retired pre-#1028 store) or inside it.
+   */
   private async assertRemovable(directory: string): Promise<void> {
     const parent = path.dirname(directory)
-    if (!isWithinDirectory(parent, this.hostRoot))
+    if (parent !== this.hostRoot && !isWithinDirectory(parent, this.hostRoot))
       throw new GfsDownloadStoreError('workspace_unavailable')
     let real: string
     try {

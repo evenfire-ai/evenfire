@@ -514,5 +514,61 @@
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
     "fullName": "GFS download store boundaries: path swapped between check and use K3: a read whose caller directory is swapped after the check serves nothing from outside"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: v2 fence with a matching device"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: v2 fence with another device"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: v2 fence without a device"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: v3 fence"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: ledger without a fence"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: live processing lease of a crashed Host"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R2: dev user directories of every state are removed at startup and do not count against quota"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R3: a failed retirement is logged, the store is available and the next sweep retires it"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R4: after startup the volume has no store directory and only valid input directories"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R5: a retired directory left by a failed removal is removed by the next sweep and is protected meanwhile"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R6: a retired directory left by an earlier start is removed at startup and is protected meanwhile"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R7: restarting with copies left by this design keeps them for accounting and does not reuse them"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R8: after a restart the same file downloads again under a new id that is reused and served"
+  },
+  {
+    "suite": "protectedWorkspacePaths.test.ts",
+    "fullName": "protected workspace paths blocks a retired pre-#1028 store tree and leaves a lookalike name readable"
   }
 ]

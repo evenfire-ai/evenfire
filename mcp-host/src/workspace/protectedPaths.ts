@@ -6,6 +6,21 @@ export const PROTECTED_WORKSPACE_DIRS: ReadonlySet<string> = new Set([
   '.gfs-downloads',
 ])
 
+/**
+ * Name prefix of a pre-#1028 store directory the GFS download store renamed
+ * before removing it. A tree left by a failed removal still holds copies of
+ * user files, so it is protected like the directory it replaced.
+ */
+export const RETIRED_GFS_DOWNLOAD_STORE_PREFIX = '.gfs-download-store.retired-'
+
+function isRetiredGfsStoreSegment(segment: string): boolean {
+  return segment.startsWith(RETIRED_GFS_DOWNLOAD_STORE_PREFIX)
+}
+
+function isProtectedSegment(segment: string): boolean {
+  return PROTECTED_WORKSPACE_DIRS.has(segment) || isRetiredGfsStoreSegment(segment)
+}
+
 export const PROTECTED_STATE_DB_FILES: ReadonlySet<string> = new Set([
   'state.db',
   'state.db-wal',
@@ -30,7 +45,7 @@ export function isProtectedWorkspacePath(relativePath: string): boolean {
   const segments = normalizeWorkspacePath(relativePath)
     .split('/')
     .filter(segment => segment.length > 0 && segment !== '.')
-  if (segments.some(segment => PROTECTED_WORKSPACE_DIRS.has(segment))) return true
+  if (segments.some(isProtectedSegment)) return true
   const base = segments[segments.length - 1]
   return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
 }
@@ -51,7 +66,12 @@ export function isGfsDownloadPath(relativePath: string): boolean {
   const segments = normalizeWorkspacePath(relativePath)
     .split('/')
     .filter(segment => segment.length > 0 && segment !== '.')
-  return segments.some(segment => segment === '.gfs-downloads' || segment === '.gfs-download-store')
+  return segments.some(
+    segment =>
+      segment === '.gfs-downloads' ||
+      segment === '.gfs-download-store' ||
+      isRetiredGfsStoreSegment(segment)
+  )
 }
 
 export function stateDbProtectedMessage(filename: string): string {
@@ -99,7 +119,7 @@ export function protectedWorkspacePathMessage(relativePath: string): string {
 function isProtectedAbsoluteRealPath(realPath: string): boolean {
   if (!path.isAbsolute(realPath)) return false
   const segments = realPath.split(path.sep).filter(segment => segment.length > 0)
-  if (segments.some(segment => PROTECTED_WORKSPACE_DIRS.has(segment))) return true
+  if (segments.some(isProtectedSegment)) return true
   const base = segments[segments.length - 1]
   return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
 }
@@ -107,7 +127,12 @@ function isProtectedAbsoluteRealPath(realPath: string): boolean {
 export function isProtectedGfsRealPath(realPath: string): boolean {
   if (!path.isAbsolute(realPath)) return false
   const segments = realPath.split(path.sep).filter(segment => segment.length > 0)
-  return segments.some(segment => segment === '.gfs-download-store' || segment === '.gfs-downloads')
+  return segments.some(
+    segment =>
+      segment === '.gfs-download-store' ||
+      segment === '.gfs-downloads' ||
+      isRetiredGfsStoreSegment(segment)
+  )
 }
 
 /**
@@ -120,7 +145,7 @@ export function isProtectedRealPath(realPath: string, realWorkspaceRoot: string)
   const relative = path.relative(realWorkspaceRoot, realPath)
   if (relative.startsWith('..') || path.isAbsolute(relative) || relative === '') return false
   const segments = relative.split(path.sep).filter(segment => segment.length > 0)
-  if (segments.some(segment => PROTECTED_WORKSPACE_DIRS.has(segment))) return true
+  if (segments.some(isProtectedSegment)) return true
   const base = segments[segments.length - 1]
   return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
 }
