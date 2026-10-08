@@ -603,7 +603,16 @@ export class GfsDownloadStore {
       await fs.rename(temporary, metaPath)
       temporaryExists = false
     } finally {
-      if (temporaryExists) await fs.rm(temporary, { force: true }).catch(() => undefined)
+      // Runs only while a publication error is propagating; that error is the
+      // one the caller sees. A leftover temporary file goes with the directory
+      // when the caller's fail() or the sweep removes it.
+      if (temporaryExists)
+        await fs.rm(temporary, { force: true }).catch((error: unknown) => {
+          logger.warn(
+            { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error) },
+            'GFS download store could not remove a temporary meta.json after a failed publish; the directory removal clears it'
+          )
+        })
     }
     // The last cancellation point: once source exists the download is complete.
     this.assertPublicationOpen(publication)
