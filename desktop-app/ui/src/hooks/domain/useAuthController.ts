@@ -555,7 +555,13 @@ export function useAuthController({
         return
       }
 
-      if (restMatches.sameOriginDifferentEndpoint.length > 0) {
+      if (restMatches.active) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(`Opening ${nextConfig.appName} in Evenfire Desktop.`, 'success')
+        return
+      }
+
+      if (restMatches.saved.length === 0 && restMatches.sameOriginDifferentEndpoint.length > 0) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',

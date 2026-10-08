@@ -431,10 +431,56 @@ describe('Desktop environment handoff', () => {
     })
 
     expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
-    expect(mocks.selectRuntimeConfig).toHaveBeenCalledWith(savedOption.id)
+    expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
     expect((await runtimeConfigModule!.getDesktopRuntimeConfigState()).activeOptionId).toBe(
       savedOption.id
+    )
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      `Opening ${linkedEnvironment.appName} in Evenfire Desktop.`,
+      'success'
+    )
+  })
+
+  it('keeps the exact active REST profile when a same-origin sibling appears before confirmation', async () => {
+    const linkedEnvironment = {
+      appName: 'Linked target',
+      externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
+    }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linkedEnvironment)
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      linkedEnvironment.externalRestApiBaseUrl
+    )
+
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      appName: 'Active target',
+      externalRestApiBaseUrl: linkedEnvironment.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: 'https://rpc.new-api.example.test/v1',
+    })
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      appName: 'Sibling target',
+      externalRestApiBaseUrl: 'https://new-api.example.test/api/v2',
+      rpcProxyBaseUrl: 'https://rpc.new-api.example.test/v2',
+    })
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const exactTarget = state.options.find(
+      option => option.externalRestApiBaseUrl === linkedEnvironment.externalRestApiBaseUrl
+    )
+    if (!exactTarget) throw new Error('The config producer did not return the exact REST profile')
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(exactTarget.id)
+
+    await act(async () => {
+      await confirmDesktopEnvironmentSetupForTest?.()
+    })
+
+    expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
+    expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      `Opening ${linkedEnvironment.appName} in Evenfire Desktop.`,
+      'success'
     )
   })
 

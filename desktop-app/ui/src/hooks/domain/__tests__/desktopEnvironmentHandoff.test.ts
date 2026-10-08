@@ -226,6 +226,93 @@ describe('Desktop environment handoff concurrency', () => {
     }
   })
 
+  it('selects an exact saved REST endpoint when a same-origin sibling is also saved', async () => {
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      appName: 'Sibling API profile',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v2`,
+      rpcProxyBaseUrl: 'https://sibling-rpc.example.test',
+    })
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const exactTarget = state.options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!exactTarget) throw new Error('The config producer did not return the exact REST profile')
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(() => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: false,
+      }))
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    expect(selectRuntimeConfig).toHaveBeenCalledWith(exactTarget.id, 0)
+    expect(finalState.activeOptionId).toBe(exactTarget.id)
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
+    expect(setStatus).not.toHaveBeenCalledWith(
+      'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
+      'error'
+    )
+  })
+
+  it('selects an exact REST profile added during logout despite a same-origin sibling', async () => {
+    let authenticated = true
+    let sessionGeneration = 0
+    let targetId = ''
+    const logout = vi.fn(async () => {
+      await runtimeConfigModule!.saveDesktopRuntimeConfig({
+        appName: 'New exact target',
+        externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
+        rpcProxyBaseUrl: 'https://rpc.new-api.example.test/v1',
+      })
+      await runtimeConfigModule!.saveDesktopRuntimeConfig({
+        appName: 'New sibling target',
+        externalRestApiBaseUrl: 'https://new-api.example.test/api/v2',
+        rpcProxyBaseUrl: 'https://rpc.new-api.example.test/v2',
+      })
+      const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+      targetId =
+        state.options.find(
+          option => option.externalRestApiBaseUrl === 'https://new-api.example.test/api/v1'
+        )?.id ?? ''
+      authenticated = false
+      sessionGeneration += 1
+      return sessionGeneration
+    })
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(
+        () => ({
+          booting: false,
+          busy: false,
+          authTransitioning: false,
+          isAuthenticated: authenticated,
+        }),
+        undefined,
+        logout,
+        undefined,
+        async () => sessionGeneration
+      )
+
+    await handler({
+      appName: 'New target',
+      externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
+    })
+
+    expect(logout).toHaveBeenCalledOnce()
+    expect(selectRuntimeConfig).toHaveBeenCalledWith(targetId, 1)
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
+    expect(setStatus).not.toHaveBeenCalledWith(
+      'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
+      'error'
+    )
+  })
+
   it('asks before logging out to switch from an authenticated environment', async () => {
     const requestEnvironmentSwitchConfirmation = vi.fn(async () => false)
     const {
@@ -487,6 +574,42 @@ describe('Desktop environment handoff concurrency', () => {
 })
 
 describe('Desktop environment REST endpoint matching', () => {
+  it('keeps an exact active REST endpoint when a same-origin sibling is saved', async () => {
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      appName: 'Sibling API profile',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v2`,
+      rpcProxyBaseUrl: 'https://sibling-rpc.example.test',
+    })
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const exactTarget = state.options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!exactTarget) throw new Error('The config producer did not return the exact REST profile')
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(exactTarget.id)
+
+    const { handler, logout, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(() => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: false,
+      }))
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(logout).not.toHaveBeenCalled()
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
+    expect(setStatus).toHaveBeenLastCalledWith(
+      `Opening ${targetEnvironment.appName} in Evenfire Desktop.`,
+      'success'
+    )
+  })
+
   it.each([
     [
       'a REST host suffix',

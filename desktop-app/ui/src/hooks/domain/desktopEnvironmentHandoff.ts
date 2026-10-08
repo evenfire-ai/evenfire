@@ -79,6 +79,7 @@ export function getDesktopEnvironmentRestMatches(
 ) {
   const restOrigin = desktopRestEndpointOrigin(externalRestApiBaseUrl)
   return {
+    active: isActiveRestEndpointMatch(configState, externalRestApiBaseUrl),
     localhost: configState.options.find(option => {
       if (!isLocalhostOption(option)) return false
       try {
@@ -218,17 +219,18 @@ export function createDesktopEnvironmentSetupHandler({
       )
       return
     }
-    if (restMatches.sameOriginDifferentEndpoint.length > 0) {
+    let authState = getAuthState()
+    let activeRestEndpointMatches = restMatches.active
+    if (
+      !activeRestEndpointMatches &&
+      restMatches.saved.length === 0 &&
+      restMatches.sameOriginDifferentEndpoint.length > 0
+    ) {
       setPendingDesktopEnvironmentSetup(null)
       rejectSameOriginPathConflict(setStatus)
       return
     }
 
-    let authState = getAuthState()
-    let activeRestEndpointMatches = isActiveRestEndpointMatch(
-      configState,
-      linkedConfig.externalRestApiBaseUrl
-    )
     if (restMatches.saved.length > 1 && !activeRestEndpointMatches) {
       setPendingDesktopEnvironmentSetup(null)
       setStatus(
@@ -338,15 +340,16 @@ export function createDesktopEnvironmentSetupHandler({
         )
         return
       }
-      if (restMatches.sameOriginDifferentEndpoint.length > 0) {
+      activeRestEndpointMatches = restMatches.active
+      if (
+        !activeRestEndpointMatches &&
+        restMatches.saved.length === 0 &&
+        restMatches.sameOriginDifferentEndpoint.length > 0
+      ) {
         setPendingDesktopEnvironmentSetup(null)
         rejectSameOriginPathConflict(setStatus)
         return
       }
-      activeRestEndpointMatches = isActiveRestEndpointMatch(
-        configState,
-        linkedConfig.externalRestApiBaseUrl
-      )
       if (restMatches.saved.length > 1 && !activeRestEndpointMatches) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
