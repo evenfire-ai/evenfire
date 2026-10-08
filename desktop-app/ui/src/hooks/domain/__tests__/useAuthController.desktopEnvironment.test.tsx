@@ -228,7 +228,7 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
-  it('preserves a session that starts while setup confirmation rereads configuration', async () => {
+  it('preserves a native login that starts while setup confirmation rereads configuration', async () => {
     const linkedEnvironment = {
       appName: 'New tenant',
       externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
@@ -263,9 +263,70 @@ describe('Desktop environment handoff', () => {
       await Promise.resolve()
     })
     await waitFor(() => expect(finishRefresh).toBeTypeOf('function'))
-    await act(async () => setAuthenticatedForTest?.(true))
+
+    let finishLogin!: (result: {
+      token: string
+      me: {
+        id: string
+        email: string
+        name: string
+        picture: null
+        teamId: string
+        teamName: string
+        role: string
+      }
+    }) => void
+    let reportLoginStarted!: () => void
+    const loginStarted = new Promise<void>(resolve => {
+      reportLoginStarted = resolve
+    })
+    const loginResult = new Promise<{
+      token: string
+      me: {
+        id: string
+        email: string
+        name: string
+        picture: null
+        teamId: string
+        teamName: string
+        role: string
+      }
+    }>(resolve => {
+      finishLogin = resolve
+    })
+    const native = nativeAppService as unknown as {
+      authClient: { googleLogin: ReturnType<typeof vi.fn> }
+      tokenStore: { setSessionToken: ReturnType<typeof vi.fn> }
+    }
+    native.authClient = {
+      googleLogin: vi.fn(() => {
+        reportLoginStarted()
+        return loginResult
+      }),
+    }
+    native.tokenStore.setSessionToken = vi.fn().mockResolvedValue(undefined)
+    let login!: Promise<unknown>
+    await act(async () => {
+      login = nativeAppService!.googleLogin('synthetic-google-login-during-refresh')
+      await loginStarted
+    })
     finishRefresh?.(await runtimeConfigModule!.getDesktopRuntimeConfigState())
     await act(async () => confirmation)
+
+    finishLogin({
+      token: 'synthetic-session-during-refresh',
+      me: {
+        id: 'refresh-race-user',
+        email: 'refresh-race@example.test',
+        name: 'Refresh Race User',
+        picture: null,
+        teamId: 'team-b',
+        teamName: 'Team B',
+        role: 'member',
+      },
+    })
+    await act(async () => login)
+    await act(async () => setAuthenticatedForTest?.(true))
 
     const saveRuntimeConfigCallCount = mocks.saveRuntimeConfig.mock.calls.length
     mocks.saveRuntimeConfig.mockReset()
