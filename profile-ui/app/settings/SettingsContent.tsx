@@ -677,8 +677,6 @@ function DesktopSetupModal({
   onCopy: () => void
   onOpenDesktop: () => void
 }) {
-  const canOpenDesktop = handoffEnabled && Boolean(environment?.externalRestApiBaseUrl)
-
   return (
     <div
       className="cu-modal-backdrop"
@@ -721,19 +719,21 @@ function DesktopSetupModal({
               </Button>
             </div>
           </div>
-          {!handoffEnabled ? (
+          {handoffEnabled ? (
+            <div className="settings-desktop-setup-actions">
+              <Button
+                onClick={onOpenDesktop}
+                disabled={busy || !environment?.externalRestApiBaseUrl}
+              >
+                Open desktop app and setup
+              </Button>
+            </div>
+          ) : (
             <p className="settings-help">
               Automatic Desktop handoff is temporarily unavailable. You can copy this API URL and
               add it in Desktop.
             </p>
-          ) : null}
-          {handoffEnabled ? (
-            <div className="settings-desktop-setup-actions">
-              <Button onClick={onOpenDesktop} disabled={busy || !canOpenDesktop}>
-                Open desktop app and setup
-              </Button>
-            </div>
-          ) : null}
+          )}
         </div>
       </section>
     </div>
