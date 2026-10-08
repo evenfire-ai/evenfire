@@ -92,11 +92,11 @@ describe('external invitation routes when the hub is unavailable', () => {
   it('issues a normal session only after trusted password-reset validation and completion', async () => {
     flow.validateInvitationFlowToken.mockResolvedValue({
       email: 'member@example.invalid',
-      invitationUuid: 'producer-token-1',
+      invitationUuid: 'Synthetic-producer-token-1',
     })
     directory.getInvitationByToken.mockResolvedValue({
       id: 'database-row-1',
-      token: 'producer-token-1',
+      token: 'Synthetic-producer-token-1',
       email: 'member@example.invalid',
       purpose: 'password_reset',
       status: 'pending',
@@ -126,7 +126,7 @@ describe('external invitation routes when the hub is unavailable', () => {
     const res = await request(app())
       .post('/external/invitations/password-token')
       .send({
-        token: 'trusted-reset-proof',
+        token: 'Synthetic-trusted-reset-proof',
         email: 'member@example.invalid',
         invitationId: 'database-row-1',
         password: 'Synthetic-new-password',
@@ -134,7 +134,7 @@ describe('external invitation routes when the hub is unavailable', () => {
       .expect(200)
 
     expect(flow.validateInvitationFlowToken).toHaveBeenCalledWith(
-      'trusted-reset-proof',
+      'Synthetic-trusted-reset-proof',
       'member@example.invalid'
     )
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
@@ -160,7 +160,7 @@ describe('external invitation routes when the hub is unavailable', () => {
     const invalidProof = await request(app())
       .post('/external/invitations/password-token')
       .send({
-        token: 'invalid-reset-proof',
+        token: 'Synthetic-invalid-reset-proof',
         email: 'member@example.invalid',
         invitationId: 'reset-1',
         password: 'Synthetic-new-password',
@@ -170,11 +170,11 @@ describe('external invitation routes when the hub is unavailable', () => {
 
     flow.validateInvitationFlowToken.mockResolvedValue({
       email: 'member@example.invalid',
-      invitationUuid: 'producer-token-1',
+      invitationUuid: 'Synthetic-producer-token-1',
     })
     directory.getInvitationByToken.mockResolvedValue({
       id: 'database-row-1',
-      token: 'producer-token-1',
+      token: 'Synthetic-producer-token-1',
       email: 'member@example.invalid',
       purpose: 'password_reset',
       status: 'accepted',
@@ -182,7 +182,7 @@ describe('external invitation routes when the hub is unavailable', () => {
     await request(app())
       .post('/external/invitations/password-token')
       .send({
-        token: 'redeemed-reset-proof',
+        token: 'Synthetic-redeemed-reset-proof',
         email: 'member@example.invalid',
         invitationId: 'database-row-1',
         password: 'Synthetic-new-password',
@@ -194,7 +194,7 @@ describe('external invitation routes when the hub is unavailable', () => {
 
     directory.getInvitationByToken.mockReset().mockResolvedValue({
       id: 'database-row-1',
-      token: 'producer-token-1',
+      token: 'Synthetic-producer-token-1',
       email: 'member@example.invalid',
       purpose: 'password_reset',
       status: 'pending',
@@ -203,7 +203,7 @@ describe('external invitation routes when the hub is unavailable', () => {
     await request(app())
       .post('/external/invitations/password-token')
       .send({
-        token: 'raced-reset-proof',
+        token: 'Synthetic-raced-reset-proof',
         email: 'member@example.invalid',
         invitationId: 'database-row-1',
         password: 'Synthetic-new-password',
@@ -215,11 +215,11 @@ describe('external invitation routes when the hub is unavailable', () => {
   it('rejects a database row ID that does not match the trusted flow token', async () => {
     flow.validateInvitationFlowToken.mockResolvedValue({
       email: 'member@example.invalid',
-      invitationUuid: 'producer-token-1',
+      invitationUuid: 'Synthetic-producer-token-1',
     })
     directory.getInvitationByToken.mockResolvedValue({
       id: 'database-row-1',
-      token: 'producer-token-1',
+      token: 'Synthetic-producer-token-1',
       email: 'member@example.invalid',
       purpose: 'password_reset',
       status: 'pending',
@@ -228,7 +228,7 @@ describe('external invitation routes when the hub is unavailable', () => {
     const res = await request(app())
       .post('/external/invitations/password-token')
       .send({
-        token: 'trusted-reset-proof',
+        token: 'Synthetic-trusted-reset-proof',
         email: 'member@example.invalid',
         invitationId: 'another-row',
         password: 'Synthetic-new-password',

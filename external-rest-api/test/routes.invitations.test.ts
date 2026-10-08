@@ -88,7 +88,7 @@ describe('routes/invitations', () => {
         teamId: null,
         teamName: null,
         role: 'member',
-        token: 'pre-reset-session-token',
+        token: 'Synthetic-pre-reset-session-token',
       },
     })
     invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
@@ -107,17 +107,17 @@ describe('routes/invitations', () => {
         purpose: 'password_reset',
         status: 'accepted',
         passwordUpdated: true,
-        token: 'post-reset-session-token',
+        token: 'Synthetic-post-reset-session-token',
       },
     })
 
     const res = await request(makeApp())
       .post('/invitations/password')
       .send({
-        token: 'verified-password-reset-link',
+        token: 'Synthetic-verified-password-reset-link',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'new-password-123',
+        password: 'Synthetic-new-password-123',
       })
       .expect(200)
 
@@ -128,16 +128,18 @@ describe('routes/invitations', () => {
       status: 'accepted',
       passwordUpdated: true,
     })
-    expect(JSON.stringify(res.body)).not.toContain('post-reset-session-token')
-    expect(String(res.headers['set-cookie'])).toContain('profile_session=post-reset-session-token')
-    expect(String(res.headers['set-cookie'])).not.toContain('pre-reset-session-token')
+    expect(JSON.stringify(res.body)).not.toContain('Synthetic-post-reset-session-token')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=Synthetic-post-reset-session-token'
+    )
+    expect(String(res.headers['set-cookie'])).not.toContain('Synthetic-pre-reset-session-token')
     expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
     expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
     expect(invitationsServiceMock.setupInvitationPasswordWithToken).toHaveBeenCalledWith(
-      'verified-password-reset-link',
+      'Synthetic-verified-password-reset-link',
       'invitee@example.com',
       'inv-1',
-      'new-password-123'
+      'Synthetic-new-password-123'
     )
   })
 
@@ -160,10 +162,10 @@ describe('routes/invitations', () => {
     const res = await request(makeApp())
       .post('/invitations/password')
       .send({
-        token: 'verified-password-reset-link',
+        token: 'Synthetic-verified-password-reset-link',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'new-password-123',
+        password: 'Synthetic-new-password-123',
       })
       .expect(429)
 
@@ -188,10 +190,10 @@ describe('routes/invitations', () => {
     const res = await request(makeApp())
       .post('/invitations/password')
       .send({
-        token: 'invalid-recovery-proof',
+        token: 'Synthetic-invalid-recovery-proof',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'new-password-123',
+        password: 'Synthetic-new-password-123',
       })
       .expect(400)
 
@@ -202,7 +204,7 @@ describe('routes/invitations', () => {
   it('does not expose preview lookup paths or recovery proofs when the signed link is invalid', async () => {
     invitationsServiceMock.getInvitationByToken.mockRejectedValue(
       new ControlApiError(
-        'Control API GET /external/invitations/token/raw-proof failed (400)',
+        'Control API GET /external/invitations/token/Synthetic-raw-proof failed (400)',
         400,
         { error: 'invalid_invitation' }
       )
@@ -211,15 +213,15 @@ describe('routes/invitations', () => {
     const res = await request(makeApp())
       .post('/invitations/password')
       .send({
-        token: 'raw-proof',
+        token: 'Synthetic-raw-proof',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'new-password-123',
+        password: 'Synthetic-new-password-123',
       })
       .expect(400)
 
     expect(res.body).toEqual({ error: 'invalid_invitation' })
-    expect(JSON.stringify(res.body)).not.toContain('raw-proof')
+    expect(JSON.stringify(res.body)).not.toContain('Synthetic-raw-proof')
     expect(JSON.stringify(res.body)).not.toContain('/external/invitations/token')
     expect(res.headers['set-cookie']).toBeUndefined()
     expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
@@ -228,16 +230,16 @@ describe('routes/invitations', () => {
   it('sanitizes rejected recovery proofs on the public invitation preview route', async () => {
     invitationsServiceMock.getInvitationByToken.mockRejectedValue(
       new ControlApiError(
-        'Control API GET /external/invitations/token/raw-proof failed (400)',
+        'Control API GET /external/invitations/token/Synthetic-raw-proof failed (400)',
         400,
         { error: 'invalid_invitation' }
       )
     )
 
-    const res = await request(makeApp()).get('/invitations/token/raw-proof').expect(400)
+    const res = await request(makeApp()).get('/invitations/token/Synthetic-raw-proof').expect(400)
 
     expect(res.body).toEqual({ error: 'invalid_invitation' })
-    expect(JSON.stringify(res.body)).not.toContain('raw-proof')
+    expect(JSON.stringify(res.body)).not.toContain('Synthetic-raw-proof')
     expect(JSON.stringify(res.body)).not.toContain('/external/invitations/token')
   })
 
