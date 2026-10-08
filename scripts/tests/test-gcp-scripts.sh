@@ -1461,12 +1461,12 @@ assert_control_api_runtime_access_contract_is_exact() {
 
   relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$profile_file")"
   duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$profile_file")"
-  invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/) { count++ } END { print count + 0 }' "$profile_file")"
+  invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/) { count++ } END { print count + 0 }' "$profile_file")"
   sequence_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_rw|consume|none)$/) { count++ } END { print count + 0 }' "$sequence_profile_file")"
 
-  if [[ "$relation_count" == "97" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+  if [[ "$relation_count" == "100" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
      grep -qx $'dynamic_clients\tlegacy_dml' "$profile_file" && \
      grep -qx $'entity_change_feed\tnone' "$profile_file" && \
      grep -qx $'entity_change_outbox\tnone' "$profile_file" && \
@@ -1481,6 +1481,9 @@ assert_control_api_runtime_access_contract_is_exact() {
      grep -qx $'plugin_workload_sdk_spend_outcomes\tappend' "$profile_file" && \
      grep -qx $'gfs_desktop_operator_links\tlink_lifecycle' "$profile_file" && \
      grep -qx $'desktop_user_retirement_operations\tlink_lifecycle' "$profile_file" && \
+     grep -qx $'password_identifier_state\tlegacy_dml' "$profile_file" && \
+     grep -qx $'password_verification_pace\tlegacy_dml' "$profile_file" && \
+     grep -qx $'password_verification_work\tinsert_delete' "$profile_file" && \
      [[ "$sequence_count" == "9" && "$sequence_duplicate_count" == "0" && "$sequence_invalid_count" == "0" ]] && \
      grep -qx $'dynamic_clients_id_seq\tlegacy_rw' "$sequence_profile_file" && \
      grep -qx $'entity_change_outbox_id_seq\tnone' "$sequence_profile_file" && \
@@ -1491,9 +1494,9 @@ assert_control_api_runtime_access_contract_is_exact() {
      [[ "$migration_script" == *'IS DISTINCT FROM required.allowed'* ]] && \
      [[ "$migration_script" == *'has_sequence_privilege('* ]] && \
      [[ "$migration_script" == *"('SELECT', expected.access_profile != 'none')"* ]] && \
-     [[ "$migration_script" == *"expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle')"* ]] && \
+     [[ "$migration_script" == *"expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle', 'insert_delete')"* ]] && \
      [[ "$migration_script" == *"('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert', 'link_lifecycle'))"* ]] && \
-     [[ "$migration_script" == *"('DELETE', expected.access_profile IN ('legacy_dml'))"* ]] && \
+     [[ "$migration_script" == *"('DELETE', expected.access_profile IN ('legacy_dml', 'insert_delete'))"* ]] && \
      [[ "$migration_script" == *"('TRUNCATE', false)"* ]] && \
      [[ "$migration_script" == *"('REFERENCES', false)"* ]] && \
      [[ "$migration_script" == *"('TRIGGER', false)"* ]]; then
