@@ -128,8 +128,11 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
 
   it('reports strict fallback-file deletion failures while continuing cleanup', async () => {
     const fallbackPath = path.join(testHome, '.evenfire', `session-token-${ENV_A}.json`)
+    const otherFilePath = path.join(testHome, '.evenfire', 'session-token.enc')
     await fs.mkdir(path.dirname(fallbackPath), { recursive: true })
     await fs.writeFile(fallbackPath, JSON.stringify({ token: 'fixture-token' }), { mode: 0o600 })
+    await fs.writeFile(otherFilePath, Buffer.from('legacy-encrypted-token'), { mode: 0o600 })
+    keychain.set(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`), 'fixture-token')
     const originalUnlink = fs.unlink.bind(fs)
     const unlink = vi.spyOn(fs, 'unlink').mockImplementation(async filePath => {
       if (String(filePath) === fallbackPath) {
@@ -143,6 +146,8 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
         new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
       ).rejects.toMatchObject({ message: 'Failed to clear session token storage' })
       expect(await fs.readFile(fallbackPath, 'utf8')).toContain('fixture-token')
+      expect(keychain.has(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe(false)
+      await expect(fs.access(otherFilePath)).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
       unlink.mockRestore()
       await fs.rm(fallbackPath, { force: true })
