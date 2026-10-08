@@ -700,6 +700,15 @@ verify_trace_maintenance_access_contract() {
                 actual.oid,
                 required.privilege_name
               ) IS DISTINCT FROM required.allowed
+           OR (
+             NOT required.allowed
+             AND required.privilege_name IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+             AND has_any_column_privilege(
+                   'trace_maintenance_runtime',
+                   actual.oid,
+                   required.privilege_name
+                 )
+           )
      )
      SELECT
        (SELECT COUNT(*) FROM relation_coverage_violations)

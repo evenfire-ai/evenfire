@@ -100,6 +100,55 @@ verify_runtime_access_contract`,
   return queries
 }
 
+function traceMaintenanceRuntimeAccessQueries(): string[] {
+  const script = readFileSync(
+    new URL('../../deploy/scripts/run-control-api-db-migration.sh', import.meta.url),
+    'utf8'
+  )
+  const start = script.indexOf('\nmaintenance_access_contract_values() {')
+  const end = script.indexOf('\nverify_workflow_recipes_runtime_boundary() {', start)
+  if (start < 0 || end < 0) throw new Error('Trace maintenance access verifier is missing')
+
+  // Capture SQL from the production profile parser and verifier without entering Kubernetes.
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+MAINTENANCE_ACCESS_PROFILES_FILE="$1"
+MAINTENANCE_SEQUENCE_ACCESS_PROFILES_FILE="$2"
+MAINTENANCE_FUNCTION_ACCESS_PROFILES_FILE="$3"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+assert_db_query_equals() { printf '%s\\0' "$3"; }
+${script.slice(start, end)}
+verify_trace_maintenance_access_contract`,
+      'trace-maintenance-runtime-access',
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-sequence-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-function-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+    ],
+    { encoding: 'utf8', timeout: 10_000 }
+  )
+  const queries = output.split('\0').filter(Boolean)
+  expect(queries).toHaveLength(3)
+  return queries
+}
+
 const deniedRuntimeColumnPrivileges = [
   { privilege: 'SELECT', relation: 'gfs_blob_manifests', column: 'blob_key' },
   { privilege: 'INSERT', relation: 'gfs_blob_manifests', column: 'blob_key' },
@@ -296,6 +345,66 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         } else {
           await dbPool.query(
             `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${grantee}`
+          )
+        }
+      }
+    }
+  )
+
+  it.each(['direct', 'public', 'inherited'] as const)(
+    'rejects %s column-level UPDATE on governed_event_stream for trace maintenance',
+    async principal => {
+      const { initDb } = await import('../src/db.js')
+      await initDb({ connect: () => dbPool.connect() })
+      const [relationQuery, sequenceQuery, functionQuery] = traceMaintenanceRuntimeAccessQueries()
+      const relation = 'governed_event_stream'
+      const column = 'event_id'
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `trace_maintenance_acl_probe_${randomBytes(6).toString('hex')}`
+      const grantee = principal === 'public' ? 'PUBLIC' : quoteIdent('trace_maintenance_runtime')
+      const inherited = principal === 'inherited'
+      const violationCount = async (query: string) =>
+        Number((await dbPool.query({ text: query, rowMode: 'array' })).rows[0][0])
+
+      expect(await violationCount(relationQuery)).toBe(0)
+      expect(await violationCount(sequenceQuery)).toBe(0)
+      expect(await violationCount(functionQuery)).toBe(0)
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT UPDATE (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO trace_maintenance_runtime`)
+        }
+
+        const privileges = await dbPool.query<{
+          table_access: boolean
+          column_access: boolean
+        }>(
+          `SELECT has_table_privilege('trace_maintenance_runtime', $1, 'UPDATE') AS table_access,
+                  has_any_column_privilege('trace_maintenance_runtime', $1, 'UPDATE') AS column_access`,
+          [relation]
+        )
+        expect(privileges.rows[0]).toEqual({ table_access: false, column_access: true })
+        expect(await violationCount(relationQuery)).toBe(1)
+        expect(await violationCount(sequenceQuery)).toBe(0)
+        expect(await violationCount(functionQuery)).toBe(0)
+      } finally {
+        if (inherited) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM trace_maintenance_runtime`)
+          await dbPool.query(
+            `REVOKE UPDATE (${columnName}) ON TABLE ${relationName} FROM ${quoteIdent(inheritedRole)}`
+          )
+          await dbPool.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`)
+        } else {
+          await dbPool.query(
+            `REVOKE UPDATE (${columnName}) ON TABLE ${relationName} FROM ${grantee}`
           )
         }
       }

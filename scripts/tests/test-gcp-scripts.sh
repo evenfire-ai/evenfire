@@ -1454,12 +1454,16 @@ assert_db_migration_context_fails_closed() {
 }
 
 assert_trace_maintenance_runtime_access_contract_is_exact() {
-  local relation_file sequence_file function_file migration_script
+  local relation_file sequence_file function_file migration_script maintenance_contract
   local relation_count sequence_count function_count
   relation_file="deploy/scripts/trace-maintenance-runtime-access-profiles.tsv"
   sequence_file="deploy/scripts/trace-maintenance-runtime-sequence-access-profiles.tsv"
   function_file="deploy/scripts/trace-maintenance-runtime-function-access-profiles.tsv"
   migration_script="$(cat deploy/scripts/run-control-api-db-migration.sh)"
+  maintenance_contract="$(
+    printf '%s\n' "$migration_script" |
+      sed -n '/^verify_trace_maintenance_access_contract() {/,/^verify_workflow_recipes_runtime_boundary() {/p'
+  )"
 
   relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$relation_file")"
   sequence_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$sequence_file")"
@@ -1468,6 +1472,8 @@ assert_trace_maintenance_runtime_access_contract_is_exact() {
   if [[ "$relation_count" == "8" && "$sequence_count" == "2" && "$function_count" == "11" ]] && \
      [[ "$migration_script" == *'verify_trace_maintenance_access_contract'* ]] && \
      [[ "$migration_script" == *'has_table_privilege('* ]] && \
+     [[ "$maintenance_contract" == *'has_any_column_privilege('* ]] && \
+     [[ "$maintenance_contract" == *'NOT required.allowed'* ]] && \
      [[ "$migration_script" == *'has_sequence_privilege('* ]] && \
      [[ "$migration_script" == *'has_function_privilege('* ]] && \
      [[ "$migration_script" == *"'trace_maintenance_runtime'"* ]] && \
