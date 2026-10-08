@@ -339,6 +339,41 @@ Labels contain bounded enums only. Caller, resource, download, command, path, co
 
 If limits are lowered, existing retained copies remain charged and new admissions are rejected until usage falls below the new policy.
 
+### Writer fence versions and persistent-disk reattach (#1028)
+
+`writer.lock` names the writer database by ownership and inode. The v2 fence
+(`{schemaVersion:2, ownership, databaseDevice, databaseInode}`) also recorded
+the device number, and a persistent disk reattached under another device node
+changes that number while the inode stays the same. A v2 Host whose disk came
+back on another `/dev/sdX` was refused with a permanent `writer_locked`.
+
+The current image accepts a v2 or v3 fence when its ownership matches and its
+`databaseInode` equals the inode of the open writer database; the device is
+ignored. An accepted fence is never rewritten. A v3 fence
+(`{schemaVersion:3, ownership, databaseInode}`) is written only when a store is
+bootstrapped with no fence. Live writers are still excluded by the SQLite
+`BEGIN EXCLUSIVE` lock and by the descriptor/name device and inode checks.
+When a v2 fence with a stale device is accepted, the Host logs one info line,
+`GFS writer fence v2 accepted with stale device`, with `storedDevice` and
+`currentDevice`. A writer refusal is logged with `writerDetail`, a closed value
+naming the refusal branch (for example `database_identity_changed`,
+`legacy_fence`, `sqlite_busy_verified`, `ownership_lost`).
+
+Operator note: v2 remains on disk on pre-existing Hosts. Do not delete
+`writer.lock`. Inspect the store (ledger, writer-fence and source-inventory
+hashes) before any transition; the inspected fence hash stays valid because an
+accepted v2 fence is not rewritten.
+
+| Image after the fix has run               | Store with a v2 fence (pre-existing Host)                                                  | Store with a v3 fence (bootstrapped by the fix)  |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| Production main image (no GFS store code) | Ignores the store directory; works                                                         | Ignores the store directory; works               |
+| Image with the v2 fence (before #1028)    | Works while the device number is unchanged; a reattach under another device locks it again | Refuses the v3 fence as legacy (`writer_locked`) |
+| Current image                             | Accepted by inode                                                                          | Accepted by inode                                |
+
+Deleting `writer.lock` to force a rollback does not work: with a ledger present
+the store refuses with `unsupported_store_schema`, and the fence is what keeps
+older binaries excluded.
+
 ### Records quarantined by builds before the #1022 fix
 
 A build before this fix quarantined every record on any boot whose ledger held

@@ -21,6 +21,12 @@ function transientWriterContention(error: unknown): boolean {
   )
 }
 
+// The logger keeps only name/code/status of an Error, so the writer refusal
+// branch is logged as its own field.
+function writerDetail(error: unknown): string | undefined {
+  return error instanceof GfsDownloadStoreError ? error.detail : undefined
+}
+
 /**
  * Contain GFS store failure without removing the caller workspace or falling
  * back to an unprotected shared-root shell. Ordinary RPC startup continues;
@@ -70,7 +76,12 @@ export async function bootstrapGfsRuntime(
         if (stopped) return
         if (!transientWriterContention(error)) {
           logger.error(
-            { component: 'gfs-runtime', err: error, attempt: attempts },
+            {
+              component: 'gfs-runtime',
+              err: error,
+              writerDetail: writerDetail(error),
+              attempt: attempts,
+            },
             'GFS writer retry ended in recovery-required state'
           )
           return
@@ -140,7 +151,12 @@ export async function bootstrapGfsRuntime(
       schedule({ kind: 'retry', delayMs: retryDelayMs })
     } else {
       logger.error(
-        { component: 'gfs-runtime', err: error, available: store.isAvailable() },
+        {
+          component: 'gfs-runtime',
+          err: error,
+          writerDetail: writerDetail(error),
+          available: store.isAvailable(),
+        },
         'GFS download store entered recovery-required state; managed GFS operations are disabled'
       )
     }

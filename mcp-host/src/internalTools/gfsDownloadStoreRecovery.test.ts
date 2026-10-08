@@ -613,6 +613,108 @@ describe('legacy processing leases after #1019', () => {
   })
 })
 
+describe('first boot of a Host locked by a persistent-disk reattach (#1028)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('T7: recovers the store behind a stale-device v2 fence and keeps every record it must keep', async () => {
+    const owner = '55555555-5555-4555-8555-555555555555'
+    const thirdSource: GfsImageSource = {
+      ...source,
+      resourceId: 'c'.repeat(32),
+      gfsUri: `gfs://main/${'c'.repeat(32)}`,
+      name: 'third.csv',
+    }
+    const crashed = freshStore()
+    await crashed.initialize()
+    const reusable = await fixture(crashed)
+    const pinned = await fixture(crashed, owner, otherSource)
+    const callerRoot = path.join(root, 'users', 'caller-a')
+    const transfer = await crashed.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source: thirdSource,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    // The Host dies holding the writer; releasing the kernel connection models it.
+    await (
+      crashed as unknown as { writerLease: { release(): Promise<void> } }
+    ).writerLease.release()
+
+    // An older build left a processing lease, and the pinned copy expired
+    // while the Host was locked.
+    const seededLedger = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+    seededLedger.records[pinned.id].expiresAt = new Date(Date.now() - 60_000).toISOString()
+    seededLedger.processingLeases = {
+      [LEGACY_LEASE_ID]: legacyLease({ recordIds: [transfer.id] }),
+    }
+    await fs.writeFile(ledgerFile(), JSON.stringify(seededLedger), { mode: 0o600 })
+    // The disk came back under another device node: the v2 fence keeps the
+    // inode and carries a stale device.
+    const storeRoot = path.join(await fs.realpath(root), '.gfs-download-store')
+    const database = await fs.stat(path.join(storeRoot, 'writer-v2.sqlite'), { bigint: true })
+    const staleDevice = String(database.dev + 1n)
+    const v2 = JSON.stringify({
+      schemaVersion: 2,
+      ownership: 'sqlite-exclusive-v1',
+      databaseDevice: staleDevice,
+      databaseInode: String(database.ino),
+    })
+    await fs.writeFile(path.join(storeRoot, 'writer.lock'), v2, { mode: 0o600 })
+    // Witness: the seeded store holds every state this boot has to handle.
+    expect(seededLedger.records[reusable.id].state).toBe('completed')
+    expect(seededLedger.records[pinned.id].state).toBe('completed')
+    expect(seededLedger.records[transfer.id].state).toBe('transferring')
+    expect(seededLedger.retentionOwners[owner].recordIds).toEqual([pinned.id])
+    const pinnedPath = path.join(callerRoot, pinned.path)
+    expect(await fs.readFile(pinnedPath, 'utf8')).toBe('fixture')
+
+    const warn = vi.spyOn(logger, 'warn')
+    const info = vi.spyOn(logger, 'info')
+    const recovering = freshStore()
+    await recovering.initialize()
+
+    expect(recovering.isAvailable()).toBe(true)
+    expect(
+      info.mock.calls.filter(call => call[1] === 'GFS writer fence v2 accepted with stale device')
+    ).toEqual([
+      [
+        {
+          component: 'GfsDownloadStore',
+          storedDevice: staleDevice,
+          currentDevice: String(database.dev),
+        },
+        'GFS writer fence v2 accepted with stale device',
+      ],
+    ])
+    expect(await fs.readFile(path.join(storeRoot, 'writer.lock'), 'utf8')).toBe(v2)
+    expect(discardWarnings(warn.mock.calls)).toEqual([
+      [
+        { component: 'GfsDownloadStore', discarded: 1 },
+        'GFS download store discarded 1 legacy processing lease(s) at initialize',
+      ],
+    ])
+    expect(recovering.debugRecord(transfer.id)?.state).toBe('quarantined')
+    expect(recovering.debugRecord(pinned.id)?.state).toBe('completed')
+    // Three copies of 7 bytes stay charged, including the quarantined transfer.
+    expect(recovering.debugUsage().bytes).toBe(21)
+
+    const persisted = JSON.parse(await fs.readFile(ledgerFile(), 'utf8'))
+    expect(persisted).not.toHaveProperty('processingLeases')
+    expect(persisted.records[transfer.id].state).toBe('quarantined')
+    expect(persisted.records[pinned.id].state).toBe('completed')
+    expect(persisted.retentionOwners[owner]).toEqual(seededLedger.retentionOwners[owner])
+    // The first-boot expiry sweep kept the expired copy its owner still pins.
+    expect(await fs.readFile(pinnedPath, 'utf8')).toBe('fixture')
+    expect(await recovering.reusableReceipt('caller-a', source, 7)).toMatchObject({
+      id: reusable.id,
+      sha256: reusable.sha256,
+    })
+  })
+})
+
 describe('GFS writer recovery and filesystem invariants', () => {
   it.each(['SIGKILL', 'SIGTERM'] as const)(
     'excludes another process and recovers after %s on the same inode',
@@ -839,7 +941,13 @@ describe('GFS writer recovery and filesystem invariants', () => {
     await store.close()
     const databasePath = path.join(root, '.gfs-download-store', 'writer-v2.sqlite')
     await fs.rename(databasePath, `${databasePath}.old`)
-    await expect(freshStore().initialize()).rejects.toMatchObject({ code: 'workspace_unavailable' })
+    // #1028: a fence naming a database that is gone is a writer refusal with
+    // its own detail, never a generic workspace failure.
+    await expect(freshStore().initialize()).rejects.toMatchObject({
+      code: 'writer_locked',
+      transientWriterContention: false,
+      detail: 'database_missing',
+    })
     // Exclusive creation proves initialization left the target absent in the
     // same atomic operation. An unexpected second inode fails with EEXIST.
     let replacementDatabase: FileHandle | undefined
@@ -848,7 +956,10 @@ describe('GFS writer recovery and filesystem invariants', () => {
     } finally {
       await replacementDatabase?.close()
     }
-    await expect(freshStore().initialize()).rejects.toMatchObject({ code: 'writer_locked' })
+    await expect(freshStore().initialize()).rejects.toMatchObject({
+      code: 'writer_locked',
+      detail: 'database_identity_changed',
+    })
   })
 
   it('restores only verified owned fsGroup transformations without relaxing privacy', async () => {

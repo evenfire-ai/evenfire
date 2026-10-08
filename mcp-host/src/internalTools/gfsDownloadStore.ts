@@ -20,7 +20,11 @@ import {
   openPrivateStoreObject,
   verifyPrivateStoreDirectory,
 } from './gfsStorePrivateFiles'
-import { GfsStoreWriterLease, GfsStoreWriterOwnershipError } from './gfsStoreWriterLease'
+import {
+  GfsStoreWriterLease,
+  GfsStoreWriterOwnershipError,
+  type WriterFenceDetail,
+} from './gfsStoreWriterLease'
 
 const GFS_DOWNLOAD_STORE_LOG_COMPONENT = 'GfsDownloadStore'
 
@@ -41,7 +45,9 @@ export type GfsDownloadStoreErrorCode =
 export class GfsDownloadStoreError extends Error {
   constructor(
     readonly code: GfsDownloadStoreErrorCode,
-    readonly transientWriterContention = false
+    readonly transientWriterContention = false,
+    /** Writer-ownership refusal branch; set only when the writer lease named it. */
+    readonly detail?: WriterFenceDetail
   ) {
     super(`GFS download store failed (${code})`)
     this.name = 'GfsDownloadStoreError'
@@ -1300,6 +1306,19 @@ export class GfsDownloadStore {
     try {
       await lease.acquire()
       this.writerLease = lease
+      // A v2 fence is accepted by inode only and stays on disk unchanged. Its
+      // stale device is the persistent-disk reattach case; device numbers are
+      // not secrets.
+      const accepted = lease.lastAcquire
+      if (accepted?.fenceSchema === 2 && accepted.storedDevice !== accepted.currentDevice)
+        logger.info(
+          {
+            component: GFS_DOWNLOAD_STORE_LOG_COMPONENT,
+            storedDevice: accepted.storedDevice,
+            currentDevice: accepted.currentDevice,
+          },
+          'GFS writer fence v2 accepted with stale device'
+        )
     } catch (error) {
       if (error instanceof GfsStoreWriterOwnershipError) {
         if (error.transientWriterContention) {
@@ -1324,7 +1343,7 @@ export class GfsDownloadStore {
             await handle?.close()
           }
         }
-        throw new GfsDownloadStoreError(error.reason, error.transientWriterContention)
+        throw new GfsDownloadStoreError(error.reason, error.transientWriterContention, error.detail)
       }
       throw new GfsDownloadStoreError('workspace_unavailable')
     }
@@ -1337,11 +1356,16 @@ export class GfsDownloadStore {
 
   private async assertWriterOwnership(): Promise<void> {
     try {
-      if (!this.writerLease) throw new GfsStoreWriterOwnershipError('Writer ownership lost')
+      if (!this.writerLease)
+        throw new GfsStoreWriterOwnershipError('Writer ownership lost', 'ownership_lost')
       await this.writerLease.verifyHeld()
-    } catch {
+    } catch (error) {
       this.unsafe = true
-      throw new GfsDownloadStoreError('writer_locked')
+      throw new GfsDownloadStoreError(
+        'writer_locked',
+        false,
+        error instanceof GfsStoreWriterOwnershipError ? error.detail : undefined
+      )
     }
   }
 
@@ -1408,8 +1432,12 @@ export class GfsDownloadStore {
     if (this.unsafe) throw new GfsDownloadStoreError('storage_write_failed')
     try {
       this.writerLease?.assertHeld()
-    } catch {
-      throw new GfsDownloadStoreError('writer_locked')
+    } catch (error) {
+      throw new GfsDownloadStoreError(
+        'writer_locked',
+        false,
+        error instanceof GfsStoreWriterOwnershipError ? error.detail : undefined
+      )
     }
   }
 }

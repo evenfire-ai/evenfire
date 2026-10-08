@@ -166,5 +166,45 @@
   {
     "suite": "config.toolProgressInterval.test.ts",
     "fullName": "CLERUM_TOOL_PROGRESS_INTERVAL_MS (#1028 P2) P2-b: malformed and sub-second values stop startup with the exact message and do not echo the value"
+  },
+  {
+    "suite": "gfsStoreWriterFence.test.ts",
+    "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T1: accepts a v2 fence whose device changed when its inode matches, keeps it byte-for-byte and logs both devices"
+  },
+  {
+    "suite": "gfsStoreWriterFence.test.ts",
+    "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T2: refuses a v2 fence naming another database inode as permanent database_identity_changed"
+  },
+  {
+    "suite": "gfsStoreWriterFence.test.ts",
+    "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T3: bootstrap writes the v3 fence, a v3 reopen acquires, and reacquisition leaves its hash unchanged"
+  },
+  {
+    "suite": "gfsStoreWriterFence.test.ts",
+    "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T4: a second real SQLite connection excludes the writer as verified transient contention while v2 stays on disk"
+  },
+  {
+    "suite": "gfsStoreWriterFence.test.ts",
+    "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T5: refuses the empty fence as legacy_fence and leaves it in place"
+  },
+  {
+    "suite": "gfsStoreWriterFence.test.ts",
+    "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T5: refuses the unknown schema version fence as legacy_fence and leaves it in place"
+  },
+  {
+    "suite": "gfsStoreWriterFence.test.ts",
+    "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T6: operator recovery accepts a v2 fence with another device in place and refuses another inode"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "first boot of a Host locked by a persistent-disk reattach (#1028) T7: recovers the store behind a stale-device v2 fence and keeps every record it must keep"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap T8: the serialized recovery-required line names the writer refusal branch as writerDetail"
+  },
+  {
+    "suite": "gfsStoreWriterFence.test.ts",
+    "fullName": "GFS writer fence across a persistent-disk reattach (#1028) T9: assertInitialized and assertWriterOwnership propagate ownership_lost"
   }
 ]

@@ -8,6 +8,17 @@ import { type GfsRuntime, bootstrapGfsRuntime } from '../gfsRuntime'
 import { GfsDownloadStore, GfsDownloadStoreError } from '../internalTools/gfsDownloadStore'
 import { logger } from '../logger'
 
+// The logger binds its error sink when its module is evaluated and keeps only
+// name/code/status of an Error. Installing this sink before any import makes
+// it the logger's error sink, so T8 reads the exact JSON line written.
+const serializedErrorLines = vi.hoisted(() => {
+  const lines: string[] = []
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map(String).join(' '))
+  }
+  return lines
+})
+
 const roots: string[] = []
 const stores: GfsDownloadStore[] = []
 const runtimes: GfsRuntime[] = []
@@ -321,5 +332,46 @@ describe('GFS runtime bootstrap', () => {
     expect(initialize).toHaveBeenCalledTimes(3)
     expect(cleanup).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('T8: the serialized recovery-required line names the writer refusal branch as writerDetail', async () => {
+    const value = await root()
+    const bootstrap = new GfsDownloadStore(value)
+    await bootstrap.initialize()
+    await bootstrap.close()
+    const storeRoot = join(await fs.realpath(value), '.gfs-download-store')
+    const database = await fs.stat(join(storeRoot, 'writer-v2.sqlite'), { bigint: true })
+    await fs.writeFile(
+      join(storeRoot, 'writer.lock'),
+      JSON.stringify({
+        schemaVersion: 2,
+        ownership: 'sqlite-exclusive-v1',
+        databaseDevice: String(database.dev),
+        databaseInode: String(database.ino + 1n),
+      }),
+      { mode: 0o600 }
+    )
+
+    serializedErrorLines.length = 0
+    const runtime = await bootstrapGfsRuntime(value)
+    runtimes.push(runtime)
+    expect(runtime.store.isAvailable()).toBe(false)
+
+    const entries = serializedErrorLines
+      .filter(line => line.startsWith('{'))
+      .map(line => JSON.parse(line) as Record<string, unknown>)
+    const recovery = entries.filter(
+      entry =>
+        entry.msg ===
+        'GFS download store entered recovery-required state; managed GFS operations are disabled'
+    )
+    expect(recovery).toHaveLength(1)
+    expect(recovery[0]).toMatchObject({
+      level: 'error',
+      component: 'gfs-runtime',
+      writerDetail: 'database_identity_changed',
+      err: { name: 'GfsDownloadStoreError', code: 'writer_locked' },
+      available: false,
+    })
   })
 })
