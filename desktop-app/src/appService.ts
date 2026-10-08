@@ -1131,10 +1131,12 @@ export class AppService {
 
   private async commitSessionToken(
     token: string,
-    options: { refreshMe?: boolean } = {}
+    options: { advanceSessionGeneration?: boolean; refreshMe?: boolean } = {}
   ): Promise<void> {
     const tokenChanged = token !== this.sessionToken
-    if (tokenChanged) this.sessionGeneration += 1
+    if (tokenChanged && options.advanceSessionGeneration !== false) {
+      this.sessionGeneration += 1
+    }
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
@@ -1159,7 +1161,11 @@ export class AppService {
   }
 
   /** Caller must hold the native auth/environment commit owner. */
-  private async switchSessionToTeam(teamId: string, token: string) {
+  private async switchSessionToTeam(
+    teamId: string,
+    token: string,
+    options: { advanceSessionGeneration?: boolean } = {}
+  ) {
     const releaseTransientHop = this.enterGfsTransientTeamHop()
     const targetTeamId = String(teamId || '').trim()
     try {
@@ -1177,7 +1183,10 @@ export class AppService {
         if (this.sessionGeneration !== switchGeneration || this.sessionToken !== token) {
           throw new Error('stale_auth_epoch: authenticated team scope changed during switch')
         }
-        await this.commitSessionToken(switched.token, { refreshMe: true })
+        await this.commitSessionToken(switched.token, {
+          advanceSessionGeneration: options.advanceSessionGeneration,
+          refreshMe: true,
+        })
         if (!this.me) throw new Error('Team switch ended without an authenticated session')
         return switched.token
       } catch (error) {
@@ -1341,7 +1350,9 @@ export class AppService {
         if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
 
         try {
-          const activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
+          const activeToken = await this.switchSessionToTeam(targetTeamId, originalToken, {
+            advanceSessionGeneration: false,
+          })
 
           try {
             return await operation(activeToken)
@@ -1351,7 +1362,9 @@ export class AppService {
           } finally {
             if (shouldRestore) {
               try {
-                await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
+                await this.switchSessionToTeam(originalTeamId, this.requireSessionToken(), {
+                  advanceSessionGeneration: false,
+                })
                 restoredOriginalTeam = true
               } catch (restoreError) {
                 if (!operationError) throw restoreError

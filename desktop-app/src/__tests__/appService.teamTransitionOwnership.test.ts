@@ -129,6 +129,44 @@ describe('AppService deliberate team transition ownership', () => {
     await expect(restore).resolves.toEqual({ authenticated: true, me })
   })
 
+  it('keeps the public session generation stable through transient team hops', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const meA = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const meB = { ...meA, teamId: 'team-b', teamName: 'Team B' }
+    const app = service as unknown as {
+      authClient: unknown
+      readWorkflow(ns: string, name: string): Promise<unknown>
+      workflowTeamByKey: Map<string, string>
+      workflowKey(ns: string, name: string): string
+      getSessionGeneration(): number
+    }
+    let currentTeamId = 'team-a'
+    app.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({ token: 'session-a', me: meA }),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => {
+        currentTeamId = teamId
+        return { token: `session-${teamId}`, team: { id: teamId, name: teamId, role: 'member' } }
+      }),
+      getMe: vi.fn(async () => (currentTeamId === 'team-a' ? meA : meB)),
+      readWorkflow: vi.fn().mockResolvedValue({ workflow: 'result' }),
+    }
+    await service.googleLogin('synthetic-google-token')
+    app.workflowTeamByKey.set(app.workflowKey('team-a', 'flow-a'), 'team-b')
+    const sessionGeneration = app.getSessionGeneration()
+
+    await expect(app.readWorkflow('team-a', 'flow-a')).resolves.toEqual({ workflow: 'result' })
+
+    expect(app.getSessionGeneration()).toBe(sessionGeneration)
+  })
+
   it('rejects a stale handoff generation after a public login advances the session', async () => {
     const { service, runtimeConfig, optionA } = await createNativeCommitTestHarness()
     const app = service as unknown as {
