@@ -592,6 +592,71 @@ describe('AddRemoteServerWizard', () => {
       expect(installMock).not.toHaveBeenCalled()
     })
 
+    function chooseGrantScope(value: 'user' | 'context') {
+      fireEvent.change(screen.getByRole('combobox', { name: /grant scope/i }), {
+        target: { value },
+      })
+    }
+
+    function contextCreates() {
+      return apiSendMock.mock.calls.filter(
+        ([method, path]) => method === 'POST' && path === '/api/v1/admin/contexts'
+      )
+    }
+
+    it('blocks a shared grant with no agents: no private scope, no install', async () => {
+      await detectLinear([])
+      chooseGrantScope('context')
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'A shared OAuth identity needs at least one agent. Select the agents that will share it, or choose Per user.'
+      )
+      const continueButton = screen.getByRole('button', { name: 'Continue' })
+      expect(continueButton).toBeDisabled()
+      fireEvent.click(continueButton)
+      expect(
+        screen.queryByRole('button', { name: 'Install remote server' })
+      ).not.toBeInTheDocument()
+      expect(contextCreates()).toHaveLength(0)
+      expect(installMock).not.toHaveBeenCalled()
+    })
+
+    it('installs a shared grant for one agent into its Context', async () => {
+      const { onInstalled } = await detectLinear(['Research'])
+      chooseGrantScope('context')
+      expect(screen.queryByText(/shared OAuth identity/i)).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+      await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
+      expect(installMock).toHaveBeenCalledWith(
+        expect.objectContaining({ contextRef: 'research', grantScope: 'context' })
+      )
+      expect(contextCreates()).toHaveLength(0)
+    })
+
+    it('installs a shared grant for two agents that share one Context', async () => {
+      getHostsMock.mockResolvedValue({
+        items: [
+          ...HOSTS.items,
+          {
+            metadata: { name: 'research-helper' },
+            spec: { contextRef: 'research', host: 'Research helper' },
+          },
+        ],
+      })
+      const { onInstalled } = await detectLinear(['Research', 'Research helper'])
+      chooseGrantScope('context')
+      expect(screen.queryByText(/shared OAuth identity/i)).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+      await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
+      expect(installMock).toHaveBeenCalledWith(
+        expect.objectContaining({ contextRef: 'research', grantScope: 'context' })
+      )
+      expect(updateContextMock).not.toHaveBeenCalled()
+    })
+
     it('reports agents it could not give access to, but keeps the installed connector', async () => {
       updateContextMock.mockRejectedValueOnce(new Error('conflict'))
       const { onInstalled } = await detectLinear(['Research', 'Ops'])

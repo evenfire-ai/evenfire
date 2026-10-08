@@ -10,7 +10,7 @@ import { Button, Field, SelectInput, TextInput } from '@components/ui'
 import { attachServerToAgentContexts, resolveAgentContextRefs } from '@lib/agentAccessTargets'
 import { isSilentApiError } from '@lib/api'
 import { copyTextToClipboard } from '@lib/clipboard'
-import { connectorContextAssignmentError } from '@lib/connectorOAuthAccess'
+import { sharedGrantScopeError } from '@lib/connectorOAuthAccess'
 import { useAgentAccessTargets } from '@lib/hooks/useAgentAccessTargets'
 import { createPrivateContext } from '@lib/privateContext'
 import {
@@ -130,16 +130,11 @@ export function AddRemoteServerWizard({
 
   const credentialsComplete =
     !needsCredentials || (clientId.trim().length > 0 && clientSecret.length > 0)
-  // A shared (per-context) grant belongs to one scope, so it cannot be spread
-  // across agents with different Contexts. Checked before install: a remote
-  // install may already have registered a client at the provider.
-  const grantScopeError =
-    selectedContextRefs.length > 1
-      ? (connectorContextAssignmentError(
-          { contextRef: selectedContextRefs[0], oauth: { grantScope } },
-          selectedContextRefs
-        ) ?? '')
-      : ''
+  // A shared (per-context) grant belongs to one scope: it needs at least one
+  // agent (a generated private scope has no member who could consent) and cannot
+  // be spread across agents with different Contexts. Checked before install: a
+  // remote install may already have registered a client at the provider.
+  const grantScopeError = sharedGrantScopeError(grantScope, selectedContextRefs) ?? ''
   const step1Valid =
     Boolean(detected) &&
     identifiersValid &&
@@ -215,6 +210,12 @@ export function AddRemoteServerWizard({
 
   async function runInstall() {
     if (!detected || !installMode) return
+    // Guard again here: never create a private scope or install a shared grant
+    // that no selected agent could consent to.
+    if (grantScopeError) {
+      setInstallError(grantScopeError)
+      return
+    }
     setInstalling(true)
     setInstallError('')
     try {
