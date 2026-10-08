@@ -6,6 +6,7 @@ import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 let clerum: MockClerum
+let controller: ReturnType<typeof renderController> | undefined
 let uuidCounter = 0
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -21,27 +22,30 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  controller?.unmount()
+  controller = undefined
   vi.restoreAllMocks()
   uninstallMockClerum()
 })
 
 describe('blank send clears stale pending selection', () => {
   it('selects the send-created chat after leaving and returning to chat', async () => {
-    const controller = renderController({ navItem: 'chat', loadMenuData: false })
-    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+    const currentController = renderController({ navItem: 'chat', loadMenuData: false })
+    controller = currentController
+    await waitFor(() => expect(currentController.result.current.chatListLoading).toBe(false))
 
     act(() => {
-      controller.result.current.setPendingChatSelection('agent-x', null, {
+      currentController.result.current.setPendingChatSelection('agent-x', null, {
         suppressAutoSelect: true,
       })
-      controller.result.current.clearActiveChat()
+      currentController.result.current.clearActiveChat()
     })
-    expect(controller.result.current.activeChatId).toBeNull()
+    expect(currentController.result.current.activeChatId).toBeNull()
 
     await act(async () => {
-      await controller.result.current.handleSendAgentMessage('start the next conversation')
+      await currentController.result.current.handleSendAgentMessage('start the next conversation')
     })
-    const createdChatId = controller.result.current.activeChatId
+    const createdChatId = currentController.result.current.activeChatId
     expect(createdChatId).toMatch(/^uuid-/)
     expect(await clerum.persistedMessages('agent-x', createdChatId!)).toEqual(
       expect.arrayContaining([
@@ -54,25 +58,25 @@ describe('blank send clears stale pending selection', () => {
     const indexCallCount = clerum.chat.getIndex.mock.calls.length
     const heldIndex = deferred<Awaited<ReturnType<typeof clerum.chat.getIndex>>>()
     clerum.chat.getIndex.mockReturnValue(heldIndex.promise)
-    controller.rerender({ navItem: 'agents' })
+    currentController.rerender({ navItem: 'agents' })
     await waitFor(() =>
       expect(clerum.chat.getIndex.mock.calls.length).toBeGreaterThan(indexCallCount)
     )
-    controller.rerender({ navItem: 'chat' })
+    currentController.rerender({ navItem: 'chat' })
     await waitFor(() =>
       expect(clerum.chat.getIndex.mock.calls.length).toBeGreaterThan(indexCallCount + 1)
     )
     await act(async () => {
       heldIndex.resolve(routeIndex)
     })
-    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
-    await waitFor(() => expect(controller.result.current.activeChatId).toBe(createdChatId))
-    expect(controller.result.current.chatMessages).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ content: 'start the next conversation' }),
-        expect.objectContaining({ content: 'accepted reply' }),
-      ])
+    await waitFor(() =>
+      expect(currentController.result.current.chatMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ content: 'start the next conversation' }),
+          expect.objectContaining({ content: 'accepted reply' }),
+        ])
+      )
     )
-    controller.unmount()
+    expect(currentController.result.current.activeChatId).toBe(createdChatId)
   })
 })
