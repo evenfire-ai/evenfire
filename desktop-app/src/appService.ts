@@ -1394,9 +1394,7 @@ export class AppService {
               // A failed restore leaves the hop team as the actual committed
               // session. Publish it as a new session before releasing the owner,
               // then rebind session-scoped consumers to the token that remains.
-              if (this.sessionGeneration === context.sessionGeneration) {
-                this.sessionGeneration += 1
-              }
+              this.sessionGeneration += 1
               this.updateEntityChangeSessionToken(this.sessionToken)
               this.restartEntityChangeStreamForSessionReplacement()
             }
@@ -2492,7 +2490,6 @@ export class AppService {
       const logoutGeneration = this.sessionGeneration
       const logoutToken = this.sessionToken
       const logoutMe = this.me
-      const logoutEnvironment = this.captureAuthEnvironmentBinding()
       const releasePrewarm = this.beginPrewarmAuthTransition()
       try {
         const envKey = getActiveEnvKey()
@@ -2503,21 +2500,7 @@ export class AppService {
           await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
           this.assertSessionGeneration(logoutGeneration)
         } catch (error) {
-          let environmentBindingMatches = false
-          try {
-            this.assertAuthEnvironmentBinding(logoutEnvironment)
-            environmentBindingMatches = true
-          } catch {
-            // A selected profile change means the failed clear no longer owns this boundary.
-          }
-          const capturedSessionStillOwnsBoundary =
-            this.sessionGeneration === logoutGeneration &&
-            this.sessionToken === logoutToken &&
-            this.me === logoutMe &&
-            environmentBindingMatches
-          if (capturedSessionStillOwnsBoundary) {
-            if (logoutToken && logoutMe) this.activateGfsAuthScope()
-          }
+          if (logoutToken && logoutMe) this.activateGfsAuthScope()
           throw error
         }
         this.clearAuthenticatedSessionState()

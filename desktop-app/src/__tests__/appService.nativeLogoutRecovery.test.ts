@@ -14,16 +14,6 @@ describe('AppService logout recovery ownership', () => {
       googleLogin: vi.fn().mockResolvedValue(testLoginResult()),
     } as never
     await service.googleLogin('initial-login')
-    const assertAuthEnvironmentBinding = vi.spyOn(
-      service as unknown as {
-        assertAuthEnvironmentBinding: (binding: {
-          environmentKey: string
-          profileId: string | null
-          restBaseUrl: string
-        }) => void
-      },
-      'assertAuthEnvironmentBinding'
-    )
     service.tokenStore.clearSessionToken = vi
       .fn()
       .mockRejectedValue(new Error('keychain unavailable'))
@@ -32,7 +22,6 @@ describe('AppService logout recovery ownership', () => {
 
     expect(service.getCachedUserId()).toBe('user-a')
     expect(service.sessionToken).toBe('synthetic-session-a')
-    expect(assertAuthEnvironmentBinding).toHaveBeenCalledOnce()
     await expect(service.listGfsUploadSessions()).resolves.toEqual([])
   })
 })
