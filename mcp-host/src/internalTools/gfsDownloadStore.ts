@@ -11,7 +11,11 @@ import {
   GFS_HOST_ACTIVE_DOWNLOADS,
   GFS_HOST_RETAINED_FILES,
 } from './gfsFilePolicy'
-import { openPrivateStoreObject, verifyPrivateStoreDirectory } from './gfsStorePrivateFiles'
+import {
+  PrivateStoreUntrustedError,
+  openPrivateStoreObject,
+  verifyPrivateStoreDirectory,
+} from './gfsStorePrivateFiles'
 
 const GFS_DOWNLOAD_STORE_LOG_COMPONENT = 'GfsDownloadStore'
 
@@ -157,9 +161,14 @@ export interface GfsDownloadInventory {
   byCaller: Map<string, { bytes: number; files: number }>
 }
 
+/**
+ * `unknown`: the disk did not answer (EMFILE, EIO, ...). Nothing is decided
+ * about the directory; it is kept as it is and inspected again later.
+ */
 type DirectoryState =
   | { state: 'absent' }
   | { state: 'incomplete' }
+  | { state: 'unknown'; code: string }
   | { state: 'complete'; entry: Entry }
 
 function isValidSource(value: unknown): value is GfsImageSource {
@@ -237,6 +246,38 @@ function isWithinDirectory(child: string, parent: string): boolean {
 function errorCode(error: unknown): string {
   const code = (error as NodeJS.ErrnoException)?.code
   return typeof code === 'string' ? code : 'unknown'
+}
+
+/**
+ * Errnos that are an answer about the object itself rather than about the
+ * process or the volume at this instant: it is gone, it is a symlink or sits
+ * under a non-directory, or its mode refuses the owner.
+ */
+const DEFINITIVE_ERRNO = new Set(['ENOENT', 'ELOOP', 'ENOTDIR', 'EACCES'])
+
+/**
+ * True only when a failure proves that a copy or directory is not what the
+ * store wrote: a size, inode or digest mismatch (raised as a store error), an
+ * untrusted owner, mode or type, or a definitive errno. Anything else (EMFILE,
+ * EIO, ENOMEM, ...) is transient: the object is kept and checked again later,
+ * never removed on its account.
+ */
+function isDefinitiveMismatch(error: unknown): boolean {
+  if (error instanceof GfsDownloadStoreError) return error.code !== 'publication_cancelled'
+  if (error instanceof PrivateStoreUntrustedError) return true
+  return DEFINITIVE_ERRNO.has(errorCode(error))
+}
+
+/** Errno, or the error class name for the store's own refusals; never a path. */
+function diagnosticCode(error: unknown): string {
+  const code = errorCode(error)
+  return code === 'unknown' && error instanceof Error ? error.name : code
+}
+
+function stateFor(error: unknown): DirectoryState {
+  return isDefinitiveMismatch(error)
+    ? { state: 'incomplete' }
+    : { state: 'unknown', code: errorCode(error) }
 }
 
 /** A removal is proven by ENOENT, not by `fs.rm` returning. */
@@ -676,6 +717,7 @@ export class GfsDownloadStore {
       )
       if (!entry) return undefined
       let verified = false
+      let transient: string | undefined
       try {
         const handle = await this.openEntryContent(entry)
         try {
@@ -692,7 +734,17 @@ export class GfsDownloadStore {
       } catch (error) {
         if (error instanceof GfsDownloadStoreError && error.code === 'publication_cancelled')
           throw error
+        if (!isDefinitiveMismatch(error)) transient = errorCode(error)
         verified = false
+      }
+      if (transient !== undefined) {
+        // The disk did not answer: this is not evidence against the copy,
+        // which another task may still hold. It stays; this caller downloads.
+        logger.warn(
+          { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: transient },
+          'GFS download store could not verify a published copy for reuse; it is kept and checked again later'
+        )
+        return undefined
       }
       if (!verified) {
         await this.removeEntry(entry, 'incomplete_removed')
@@ -749,7 +801,8 @@ export class GfsDownloadStore {
       } finally {
         await handle.close()
       }
-    } catch {
+    } catch (error) {
+      this.reportManagedReadFailure(error)
       throw new GfsDownloadStoreError('download_missing')
     }
     if (createHash('sha256').update(bytes).digest('hex') !== entry.sha256) {
@@ -781,7 +834,8 @@ export class GfsDownloadStore {
       } finally {
         await handle.close()
       }
-    } catch {
+    } catch (error) {
+      this.reportManagedReadFailure(error)
       throw new GfsDownloadStoreError('download_missing')
     }
   }
@@ -925,6 +979,15 @@ export class GfsDownloadStore {
           : await this.inspectDirectory(directory, id, now)
       if (state.state === 'absent') {
         this.forget(id)
+        continue
+      }
+      if (state.state === 'unknown') {
+        // Kept as it is, indexed or not; the next sweep inspects it again.
+        recordGfsDownloadExpiry('sweep_failed')
+        logger.warn(
+          { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: state.code },
+          'GFS download store could not inspect a download directory; it is kept and the next sweep retries it'
+        )
         continue
       }
       if (state.state === 'incomplete') {
@@ -1088,7 +1151,7 @@ export class GfsDownloadStore {
       info = await fs.lstat(directory)
     } catch (error) {
       if (errorCode(error) === 'ENOENT') return { state: 'absent' }
-      return { state: 'incomplete' }
+      return stateFor(error)
     }
     if (!info.isDirectory()) return { state: 'incomplete' }
     let raw: string
@@ -1104,16 +1167,16 @@ export class GfsDownloadStore {
       } finally {
         await handle.close()
       }
-    } catch {
-      return { state: 'incomplete' }
+    } catch (error) {
+      return stateFor(error)
     }
     const meta = parseMeta(raw, id, now)
     if (!meta) return { state: 'incomplete' }
     try {
       const source = await fs.lstat(path.join(directory, SOURCE_FILE))
       if (!source.isFile() || source.size !== meta.sizeBytes) return { state: 'incomplete' }
-    } catch {
-      return { state: 'incomplete' }
+    } catch (error) {
+      return stateFor(error)
     }
     return {
       state: 'complete',
@@ -1127,19 +1190,23 @@ export class GfsDownloadStore {
     }
   }
 
-  /** An indexed entry is re-checked with one lstat; meta.json is not re-read. */
+  /**
+   * An indexed entry is re-checked with one lstat; meta.json is not re-read.
+   * Only a definitive answer makes it incomplete; a transient errno keeps it.
+   */
   private async recheckIndexed(entry: Entry): Promise<DirectoryState> {
     try {
       const source = await fs.lstat(path.join(entry.directory, SOURCE_FILE))
       if (source.isFile() && source.size === entry.sizeBytes) return { state: 'complete', entry }
+      return { state: 'incomplete' }
     } catch (error) {
-      if (errorCode(error) === 'ENOENT') {
-        try {
-          await fs.lstat(entry.directory)
-        } catch (directoryError) {
-          if (errorCode(directoryError) === 'ENOENT') return { state: 'absent' }
-        }
-      }
+      if (errorCode(error) !== 'ENOENT') return stateFor(error)
+    }
+    try {
+      await fs.lstat(entry.directory)
+    } catch (directoryError) {
+      if (errorCode(directoryError) === 'ENOENT') return { state: 'absent' }
+      return stateFor(directoryError)
     }
     return { state: 'incomplete' }
   }
@@ -1206,9 +1273,13 @@ export class GfsDownloadStore {
   }
 
   /**
-   * A `.gfs-downloads` that is a symlink, not a directory, or not private to
-   * this process is removed without following it and recreated, so a shell
-   * command can cost a caller its cached copies but never block its downloads.
+   * A `.gfs-downloads` proven not to be the store's (a symlink, not a
+   * directory, gone, unreadable to its owner, or not owned by this process
+   * with a private mode) is removed without following it and recreated, so a
+   * shell command can cost a caller its cached copies but never block its
+   * downloads. Any other failure to verify it (EMFILE, EIO, ...) proves
+   * nothing: it is rethrown, the admission fails and the directory and its
+   * copies stay.
    */
   private async ensureDownloadsRoot(downloadsRoot: string): Promise<void> {
     try {
@@ -1220,8 +1291,8 @@ export class GfsDownloadStore {
     try {
       await verifyPrivateStoreDirectory(downloadsRoot)
       return
-    } catch {
-      // Not a private directory: replaced below.
+    } catch (error) {
+      if (!isDefinitiveMismatch(error)) throw error
     }
     for (const id of this.idsUnder(downloadsRoot)) this.forget(id)
     await this.removeVerified(downloadsRoot)
@@ -1404,6 +1475,20 @@ export class GfsDownloadStore {
       throw error
     }
     if (real !== parent) throw new GfsDownloadStoreError('workspace_unavailable')
+  }
+
+  /**
+   * The caller always gets download_missing, so a read failure reveals
+   * nothing about the copy. The owner's own published copy failing for any
+   * reason but its absence is worth an operator's attention; code only.
+   */
+  private reportManagedReadFailure(error: unknown): void {
+    if (errorCode(error) === 'ENOENT') return
+    if (error instanceof GfsDownloadStoreError && error.code === 'download_missing') return
+    logger.warn(
+      { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: diagnosticCode(error) },
+      'GFS download store could not read a published copy for its caller'
+    )
   }
 
   private reportSweepFailure(error: unknown): void {

@@ -10,7 +10,17 @@ import * as syncFs from 'node:fs'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
-import { callerDirectory, completedCopy, sourceFor } from '../__tests__/fixtures/gfsStoreTestKit'
+import {
+  callerDirectory,
+  completedCopy,
+  exists,
+  expiryCount,
+  metaFor,
+  plantDownload,
+  sourceFor,
+  startTransfer,
+} from '../__tests__/fixtures/gfsStoreTestKit'
+import { logger } from '../logger'
 import { deriveUserKey } from '../workspace/userKey'
 import { GfsDownloadStore } from './gfsDownloadStore'
 
@@ -50,6 +60,36 @@ vi.mock('node:fs/promises', async original => {
 function injectFault(operation: FsOperation, fault: Fault): void {
   faults.set(operation, fault)
 }
+
+/**
+ * Watches `operation` on every path ending with `suffix`: records each call
+ * and fails it with `code`, or only records it when `code` is undefined.
+ */
+function watch(operation: FsOperation, suffix: string, code?: string): string[] {
+  const calls: string[] = []
+  injectFault(operation, target => {
+    if (!target.endsWith(suffix)) return undefined
+    calls.push(target)
+    return code
+  })
+  return calls
+}
+
+/** Every warning logged, as `{ code, message }`. */
+function warnings(warn: {
+  mock: { calls: unknown[][] }
+}): Array<{ code: unknown; message: unknown }> {
+  return warn.mock.calls.map(call => ({
+    code: (call[0] as { code?: unknown }).code,
+    message: call[1],
+  }))
+}
+
+const REUSE_KEPT =
+  'GFS download store could not verify a published copy for reuse; it is kept and checked again later'
+const SWEEP_KEPT =
+  'GFS download store could not inspect a download directory; it is kept and the next sweep retries it'
+const READ_FAILED = 'GFS download store could not read a published copy for its caller'
 
 let hostRoot: string
 const stores: GfsDownloadStore[] = []
@@ -163,4 +203,131 @@ describe('GFS download store adversarial round: caller root shape (F9)', () => {
       })
     ).resolves.toMatchObject({ sizeBytes: 8 })
   })
+})
+
+describe('GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3)', () => {
+  const KEY = 'alice-key'
+
+  it('reuse that cannot open a pinned copy keeps it for the task that holds it', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { receipt, bytes } = await completedCopy(store, root, KEY, 1, 128, { owner: 'task-1' })
+    const warn = vi.spyOn(logger, 'warn')
+    const opens = watch('open', `input-${receipt.id}/source`, 'EMFILE')
+
+    await expect(
+      store.reusableReceipt(KEY, sourceFor(1), 128, { retentionOwnerId: 'task-2' })
+    ).resolves.toBeUndefined()
+    faults.clear()
+
+    // Witness: reuse reached the copy and failed on it.
+    expect(opens.length).toBeGreaterThan(0)
+    expect(warnings(warn)).toContainEqual({ code: 'EMFILE', message: REUSE_KEPT })
+    expect(exists(path.join(root, receipt.path))).toBe(true)
+    await expect(store.readManagedFile(receipt.path, KEY)).resolves.toEqual(bytes)
+    // Once the disk answers, the same copy is reused.
+    await expect(store.reusableReceipt(KEY, sourceFor(1), 128)).resolves.toMatchObject({
+      id: receipt.id,
+    })
+  })
+
+  it('reuse still removes a copy whose bytes no longer match its receipt', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { receipt } = await completedCopy(store, root, KEY, 2, 64)
+    const removed = await expiryCount('incomplete_removed')
+    syncFs.writeFileSync(path.join(root, receipt.path), Buffer.alloc(64, 0xee))
+
+    await expect(store.reusableReceipt(KEY, sourceFor(2), 64)).resolves.toBeUndefined()
+    expect(exists(path.join(root, `.gfs-downloads/input-${receipt.id}`))).toBe(false)
+    expect(await expiryCount('incomplete_removed')).toBe(removed + 1)
+  })
+
+  it('a sweep that cannot lstat a published copy keeps it and counts sweep_failed', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { receipt, bytes } = await completedCopy(store, root, KEY, 3, 96, { owner: 'task-1' })
+    const swept = await expiryCount('sweep_failed')
+    const warn = vi.spyOn(logger, 'warn')
+    const lstats = watch('lstat', `input-${receipt.id}/source`, 'EMFILE')
+
+    const result = await store.cleanupExpired()
+    faults.clear()
+
+    expect(lstats.length).toBeGreaterThan(0)
+    expect(result).toMatchObject({ removedIncomplete: 0, removedExpired: 0, removeFailed: 0 })
+    expect(await expiryCount('sweep_failed')).toBe(swept + 1)
+    expect(warnings(warn)).toContainEqual({ code: 'EMFILE', message: SWEEP_KEPT })
+    await expect(store.readManagedFile(receipt.path, KEY)).resolves.toEqual(bytes)
+    // Contrast: a source that is really gone is removed by the next sweep.
+    syncFs.rmSync(path.join(root, receipt.path))
+    await expect(store.cleanupExpired()).resolves.toMatchObject({ removedIncomplete: 1 })
+  })
+
+  it('a startup sweep that cannot open meta.json keeps the copy for the next start', async () => {
+    const root = callerDirectory(hostRoot, KEY)
+    const bytes = Buffer.alloc(100, 7)
+    const id = '00000000-0000-4000-8000-000000000001'
+    const planted = plantDownload(root, { id, bytes, meta: metaFor(id, bytes, Date.now()) })
+    const opens = watch('open', '/meta.json', 'EMFILE')
+
+    await openStore()
+    faults.clear()
+
+    expect(opens.length).toBeGreaterThan(0)
+    expect(exists(planted.directory)).toBe(true)
+    // Witness: a start that can read it adopts it.
+    const second = await openStore()
+    expect((await second.debugInventory()).byCaller.get(KEY)).toEqual({ files: 1, bytes: 100 })
+  })
+
+  it('an admission that cannot verify .gfs-downloads fails and keeps every copy', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { receipt, bytes } = await completedCopy(store, root, KEY, 4, 80, { owner: 'task-1' })
+    const opens = watch('open', `${KEY}/.gfs-downloads`, 'EMFILE')
+
+    await expect(startTransfer(store, root, KEY, 5, 40)).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    faults.clear()
+
+    expect(opens.length).toBeGreaterThan(0)
+    await expect(store.readManagedFile(receipt.path, KEY)).resolves.toEqual(bytes)
+    // Contrast: a `.gfs-downloads` with a non-private mode is replaced.
+    syncFs.chmodSync(path.join(root, '.gfs-downloads'), 0o755)
+    const replaced = await startTransfer(store, root, KEY, 6, 40)
+    expect(exists(path.join(root, receipt.path))).toBe(false)
+    expect(exists(path.join(root, replaced.transfer.partialPath))).toBe(true)
+  })
+
+  it.each([
+    ['readManagedFile', (store: GfsDownloadStore, p: string) => store.readManagedFile(p, KEY)],
+    [
+      'readManagedFilePrefix',
+      (store: GfsDownloadStore, p: string) => store.readManagedFilePrefix(p, KEY),
+    ],
+  ])(
+    '%s logs a non-ENOENT failure of the owner’s copy and still answers download_missing',
+    async (_name, read) => {
+      const store = await openStore()
+      const root = callerDirectory(hostRoot, KEY)
+      const { receipt } = await completedCopy(store, root, KEY, 7, 32)
+      const warn = vi.spyOn(logger, 'warn')
+      const failed = watch('open', `input-${receipt.id}/source`, 'EMFILE')
+
+      await expect(read(store, receipt.path)).rejects.toMatchObject({ code: 'download_missing' })
+      expect(failed).toHaveLength(1)
+      expect(warnings(warn)).toContainEqual({ code: 'EMFILE', message: READ_FAILED })
+
+      // ENOENT is the copy's absence: the same answer, nothing logged. The
+      // witness is the open the read had to attempt.
+      warn.mockClear()
+      syncFs.rmSync(path.join(root, receipt.path))
+      const attempted = watch('open', `input-${receipt.id}/source`)
+      await expect(read(store, receipt.path)).rejects.toMatchObject({ code: 'download_missing' })
+      expect(attempted).toHaveLength(1)
+      expect(warnings(warn).map(entry => entry.message)).not.toContain(READ_FAILED)
+    }
+  )
 })
