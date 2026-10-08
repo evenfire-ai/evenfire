@@ -137,6 +137,7 @@ type ActiveView = {
   rpcProxyOrigin: string
   cleanupClientRouteHandoff?: () => void
   cleanupParentClosed?: () => void
+  cleanupRenderProcessGone?: () => void
   cleanupShortcutRouting?: () => void
   cleanupDocumentLifecycle?: () => void
   cleanupFindResults?: () => void
@@ -313,13 +314,16 @@ export async function installSandboxUiCookie(setCookie: string | string[]): Prom
   })
 }
 
-async function teardownActive(reason: 'replaced' | 'closed' | 'parent_closed'): Promise<void> {
+async function teardownActive(
+  reason: 'replaced' | 'closed' | 'parent_closed' | 'crashed'
+): Promise<void> {
   if (!active) return
   const current = active
   active = null
   try {
     current.cleanupClientRouteHandoff?.()
     current.cleanupParentClosed?.()
+    current.cleanupRenderProcessGone?.()
     current.cleanupShortcutRouting?.()
     current.cleanupDocumentLifecycle?.()
     current.cleanupFindResults?.()
@@ -436,11 +440,10 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     },
   })
 
-  // The closed callback fires when the renderer gives up the view (parent
-  // window closed, teardown via removeChildView, or the embed crashed).
-  // For now we only wire the parent-window-closed case so the renderer can
-  // re-render its picker; teardown via `unmountSandboxUiView` is a
-  // synchronous user action (no callback needed).
+  // `onClosed` reports a teardown nobody asked for: the parent window closed
+  // or the embed's renderer died. Solicited teardowns (`unmountSandboxUiView`,
+  // a replacing mount) stay silent — the caller already knows, and the
+  // renderer drops its owner of the embed on that signal.
   const onParentClosed = (): void => {
     void teardownActive('parent_closed')
     onClosed?.()
@@ -448,6 +451,20 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   parentWindow.once('closed', onParentClosed)
   const cleanupParentClosed = (): void => {
     parentWindow.removeListener('closed', onParentClosed)
+  }
+  // A dead renderer leaves its last frame painted over the app with nothing
+  // behind it, whatever the reason. The identity check keeps a late signal
+  // from a view that was already replaced from tearing down its successor.
+  // `mountGeneration` is deliberately left alone: bumping it would abort an
+  // unrelated mount that is in flight.
+  const onRenderProcessGone = (): void => {
+    if (active?.view !== view) return
+    void teardownActive('crashed')
+    onClosed?.()
+  }
+  view.webContents.on('render-process-gone', onRenderProcessGone)
+  const cleanupRenderProcessGone = (): void => {
+    view.webContents.removeListener('render-process-gone', onRenderProcessGone)
   }
 
   active = {
@@ -459,6 +476,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     parentWindow,
     rpcProxyOrigin: proxyOriginUrl,
     cleanupParentClosed,
+    cleanupRenderProcessGone,
     documentGeneration: 0,
     documentReady: false,
   }

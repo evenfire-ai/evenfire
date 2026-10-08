@@ -435,6 +435,94 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
   })
 
+  // main tags `sandboxUi:closed` with the appRef it composed from the open
+  // request (`${recipeNs}/${recipeName}` in the `sandboxUi:open` handler).
+  // Derive it from the open() call the real page sent instead of restating it.
+  function closedEventFor(openCall: number): { appRef: string } {
+    const request = sandboxUi.open.mock.calls[openCall]![0] as {
+      recipeNs: string
+      recipeName: string
+    }
+    return { appRef: `${request.recipeNs}/${request.recipeName}` }
+  }
+
+  function emitSandboxUiClosed(event: { appRef: string }) {
+    const listeners = sandboxUi.onClosed.mock.calls as unknown as Array<
+      [(args: { appRef: string }) => void]
+    >
+    const unsubscribed = new Set(
+      sandboxUi.onClosed.mock.results
+        .map((result, index) =>
+          (result.value as ReturnType<typeof vi.fn>).mock.calls.length > 0 ? index : -1
+        )
+        .filter(index => index >= 0)
+    )
+    act(() => {
+      listeners.forEach(([listener], index) => {
+        if (!unsubscribed.has(index)) listener(event)
+      })
+    })
+  }
+
+  it('keeps the live embed owned when a late closed event belongs to the app it replaced', async () => {
+    await renderWithLiveApp(ALPHA)
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+
+    emitSandboxUiClosed(closedEventFor(0))
+
+    await handOffMarkdownFromPlugin()
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps the newer launch owned when a superseded open resolves late and its view then dies', async () => {
+    render(<App />)
+    await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    let resolveAlphaOpen: () => void = () => {}
+    sandboxUi.open.mockImplementationOnce(
+      () => new Promise<undefined>(resolve => (resolveAlphaOpen = () => resolve(undefined)))
+    )
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+
+    // main serves the opens in order: Alpha mounts first, and its renderer dies
+    // before Beta's open replaces it.
+    await act(async () => {
+      resolveAlphaOpen()
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+    emitSandboxUiClosed(closedEventFor(0))
+
+    await handOffMarkdownFromPlugin()
+    await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+  })
+
+  it('drops the owner when the closed event belongs to the live embed', async () => {
+    await renderWithLiveApp(ALPHA)
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+
+    emitSandboxUiClosed(closedEventFor(1))
+
+    await handOffMarkdownFromPlugin()
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+    // main already tore the view down: nothing is left to close.
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+  })
+
   it('opens a grid pick shown inside an app tab after back-to-apps as its own tab, leaving that tab intact', async () => {
     await renderWithLiveApp(ALPHA)
     const alphaTab = activeWorkspaceTab(currentController.workspaceTabs)

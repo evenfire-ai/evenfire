@@ -223,7 +223,20 @@ export function SandboxUiPage({
 }: SandboxUiPageProps) {
   const [apps, setApps] = useState<SandboxUiAppListing[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [launch, setLaunch] = useState<LaunchState>({ kind: 'idle' })
+  const [launch, setLaunchState] = useState<LaunchState>({ kind: 'idle' })
+  // Mirrors `launch` synchronously: the `sandboxUi:closed` listener must judge
+  // the launch that is current when the event lands, not the last committed
+  // render.
+  const launchRef = useRef<LaunchState>({ kind: 'idle' })
+  // Bumped by every launch and by back-to-apps. An open that resolves after a
+  // newer one took over must not write its outcome: that would re-point
+  // `launchRef` at the superseded app, so a later `closed` for it would release
+  // the owner of the embed that is actually live.
+  const launchSeqRef = useRef(0)
+  const setLaunch = useCallback((next: LaunchState) => {
+    launchRef.current = next
+    setLaunchState(next)
+  }, [])
   const [refreshError, setRefreshError] = useState<{ appRef: string; message: string } | null>(null)
   const [appsPage, setAppsPage] = useState(0)
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
@@ -267,16 +280,22 @@ export function SandboxUiPage({
   }, [apps?.length])
 
   // Re-render the picker if the main process tears the view down (e.g. on
-  // app quit, parent window close, or partition GC).
+  // app quit, parent window close, or the embed's renderer crashing).
   useEffect(() => {
-    return window.clerum.sandboxUi.onClosed(() => {
-      setLaunch(current =>
-        current.kind === 'mounted' || current.kind === 'minting' ? { kind: 'idle' } : current
-      )
+    return window.clerum.sandboxUi.onClosed(({ appRef }) => {
+      // A closed event can land after the renderer has already launched
+      // another app (it was in flight when the switch happened). Reconciling it
+      // would drop the owner of the NEW embed, which then stays painted over
+      // every later surface. Only the launch it names may be released.
+      const current = launchRef.current
+      if (current.kind === 'idle' || current.appRef !== appRef) return
+      if (current.kind === 'mounted' || current.kind === 'minting') {
+        setLaunch({ kind: 'idle' })
+      }
       setRefreshError(null)
       onEmbeddedAppBack?.()
     })
-  }, [onEmbeddedAppBack])
+  }, [onEmbeddedAppBack, setLaunch])
 
   // Surface refresh failures (403 / 410 / network) as an in-chrome banner.
   // The main-process timer has already stopped firing by the time we get
@@ -401,6 +420,7 @@ export function SandboxUiPage({
       // position (otherwise we'd be reading before React has rendered the
       // slot, and the fallback would mount the WebContentsView full-window —
       // covering the close button until the next ResizeObserver tick).
+      const seq = ++launchSeqRef.current
       setLaunch({ kind: 'minting', appRef: app.appRef })
       onEmbeddedAppOpening?.({
         appRef: app.appRef,
@@ -425,8 +445,10 @@ export function SandboxUiPage({
           ...(app.routePath ? { routePath: app.routePath } : {}),
           bounds,
         })
-        setLaunch({ kind: 'mounted', appRef: app.appRef })
-        onEmbeddedAppMounted?.()
+        if (seq === launchSeqRef.current) {
+          setLaunch({ kind: 'mounted', appRef: app.appRef })
+          onEmbeddedAppMounted?.()
+        }
         return { status: 'mounted' }
       } catch (err) {
         const { status, message } = statusFromError(err)
@@ -438,15 +460,18 @@ export function SandboxUiPage({
               : status === 409
                 ? 'This app is starting up — try again in a moment.'
                 : message
-        setLaunch({ kind: 'error', appRef: app.appRef, message: userFacing })
-        onEmbeddedAppOpenFailed?.()
+        if (seq === launchSeqRef.current) {
+          setLaunch({ kind: 'error', appRef: app.appRef, message: userFacing })
+          onEmbeddedAppOpenFailed?.()
+        }
         return { status: 'failed', message: userFacing }
       }
     },
-    [onEmbeddedAppMounted, onEmbeddedAppOpening, onEmbeddedAppOpenFailed]
+    [onEmbeddedAppMounted, onEmbeddedAppOpening, onEmbeddedAppOpenFailed, setLaunch]
   )
 
   const closeEmbed = useCallback(async () => {
+    launchSeqRef.current += 1
     try {
       await window.clerum.sandboxUi.close()
     } catch {
@@ -455,7 +480,7 @@ export function SandboxUiPage({
     }
     setLaunch({ kind: 'idle' })
     setRefreshError(null)
-  }, [])
+  }, [setLaunch])
 
   const onBackToApps = useCallback(async () => {
     await closeEmbed()

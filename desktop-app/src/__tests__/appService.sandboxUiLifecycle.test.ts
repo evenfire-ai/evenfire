@@ -47,6 +47,10 @@ const electronMocks = vi.hoisted(() => {
       return this
     }
 
+    emit(event: string, ...args: unknown[]): void {
+      this.listeners.get(event)?.forEach(handler => handler(...args))
+    }
+
     getURL(): string {
       return this.currentUrl
     }
@@ -391,5 +395,22 @@ describe('AppService sandbox-ui open replaces the live view whatever its outcome
     await expect(location).resolves.toMatchObject({ appRef: 'sandbox-recipes/first-app' })
     await reopen
     expect(getActiveSandboxUi()?.appRef).toBe('sandbox-recipes/second-app')
+  })
+})
+
+describe('AppService sandbox-ui embed whose renderer dies', () => {
+  it('leaves no view, no refresh loop and no pin, and reports the close once', async () => {
+    const onClosed = vi.fn()
+    const { parentWindow, firstWebContentsId, firstView } = await setupWithLiveFirstApp(onClosed)
+
+    firstView!.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 139 })
+
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledWith(firstView)
+    expect(resolvePluginSurface(firstWebContentsId)).toBeNull()
+    expect(onClosed).toHaveBeenCalledOnce()
+    const mintsBefore = mintCallsFor('first-app')
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(mintsBefore)
   })
 })

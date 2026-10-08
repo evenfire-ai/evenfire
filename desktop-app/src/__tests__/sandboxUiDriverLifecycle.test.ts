@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   findInActiveSandboxUi,
   focusActiveSandboxUi,
+  getActiveSandboxUi,
   installSandboxUiCookie,
   mountSandboxUiView,
   unmountSandboxUiView,
@@ -40,6 +41,10 @@ const electronMocks = vi.hoisted(() => {
 
     emit(event: string, ...args: unknown[]): void {
       this.listeners.get(event)?.forEach(handler => handler(...args))
+    }
+
+    listenerCount(event: string): number {
+      return this.listeners.get(event)?.size ?? 0
     }
 
     getURL(): string {
@@ -202,6 +207,62 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
       'clearSelection'
     )
     parentWindow.emit('closed')
+    expect(onClosed).not.toHaveBeenCalled()
+  })
+
+  // Electron's payload for a dead renderer; any reason (crash, OOM, kill)
+  // leaves the view painting its last frame.
+  const RENDER_PROCESS_GONE: [unknown, Electron.RenderProcessGoneDetails] = [
+    {},
+    { reason: 'crashed', exitCode: 139 },
+  ]
+
+  it('tears the active view down and reports it closed once when its renderer dies', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onClosed = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onClosed }))
+    const view = electronMocks.views[0]!
+
+    view.webContents.emit('render-process-gone', ...RENDER_PROCESS_GONE)
+
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledOnce()
+    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledWith(view)
+    expect(onClosed).toHaveBeenCalledOnce()
+    // The listener went with the view: a repeated signal reports nothing more.
+    expect(view.webContents.listenerCount('render-process-gone')).toBe(0)
+    view.webContents.emit('render-process-gone', ...RENDER_PROCESS_GONE)
+    expect(onClosed).toHaveBeenCalledOnce()
+  })
+
+  it('the dead-renderer listener of a replaced view no longer fires', async () => {
+    const parentWindow = new FakeParentWindow()
+    const firstClosed = vi.fn()
+    const secondClosed = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onClosed: firstClosed }))
+    await mountSandboxUiView(
+      mountArgs({ parentWindow, recipeName: 'support-desk', onClosed: secondClosed })
+    )
+    const [first, second] = electronMocks.views
+
+    first!.webContents.emit('render-process-gone', ...RENDER_PROCESS_GONE)
+
+    expect(getActiveSandboxUi()?.webContentsId).toBe(second!.webContents.id)
+    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledTimes(1)
+    expect(firstClosed).not.toHaveBeenCalled()
+    expect(secondClosed).not.toHaveBeenCalled()
+  })
+
+  it('removes the dead-renderer listener when the active view is unmounted', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onClosed = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onClosed }))
+    const view = electronMocks.views[0]!
+    expect(view.webContents.listenerCount('render-process-gone')).toBe(1)
+
+    await unmountSandboxUiView()
+
+    expect(view.webContents.listenerCount('render-process-gone')).toBe(0)
     expect(onClosed).not.toHaveBeenCalled()
   })
 
