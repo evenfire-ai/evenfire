@@ -57,7 +57,7 @@ realPg('RP-1010-05 authenticated principal binding', () => {
       await login.verifyUserPassword({
         userId: firstId,
         email: 'second@example.invalid',
-        password: 'incorrect',
+        password: 'Synthetic-RP005-wrong-password',
       })
     ).toBe(false)
     expect((await db.pool.query('SELECT * FROM password_identifier_state')).rows).toEqual([])
@@ -88,7 +88,7 @@ realPg('RP-1010-05 authenticated principal binding', () => {
       await login.verifyUserPassword({
         userId: firstId,
         email: 'second@example.invalid',
-        password: 'incorrect',
+        password: 'Synthetic-RP005-wrong-password',
       })
     ).toBe(false)
     expect((await db.pool.query('SELECT * FROM password_identifier_state')).rows).toEqual(before)
@@ -99,7 +99,7 @@ realPg('RP-1010-05 authenticated principal binding', () => {
       await login.verifyUserPassword({
         userId: firstId,
         email: 'first@example.invalid',
-        password: 'incorrect',
+        password: 'Synthetic-RP005-wrong-password',
       })
     ).toBe(false)
     expect(
