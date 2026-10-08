@@ -125,6 +125,18 @@ export function rateLimitMiddleware(
   }
 }
 
+/** Remove every quota family when no authoritative count may be advertised. */
+export function clearRateLimitHeaders(res: Response): void {
+  res.removeHeader('X-RateLimit-Limit')
+  res.removeHeader('X-RateLimit-Remaining')
+  res.removeHeader('X-RateLimit-Reset')
+  res.removeHeader('RateLimit')
+  res.removeHeader('RateLimit-Policy')
+  res.removeHeader('RateLimit-Limit')
+  res.removeHeader('RateLimit-Remaining')
+  res.removeHeader('RateLimit-Reset')
+}
+
 /**
  * The limiter behind `rateLimitMiddleware`, for a route that can only derive
  * its key inside the handler (after authenticating the caller). Create it once
@@ -149,14 +161,7 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
         'rate limit backend unavailable'
       )
     }
-    res.removeHeader('X-RateLimit-Limit')
-    res.removeHeader('X-RateLimit-Remaining')
-    res.removeHeader('X-RateLimit-Reset')
-    res.removeHeader('RateLimit')
-    res.removeHeader('RateLimit-Policy')
-    res.removeHeader('RateLimit-Limit')
-    res.removeHeader('RateLimit-Remaining')
-    res.removeHeader('RateLimit-Reset')
+    clearRateLimitHeaders(res)
     res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
     res.setHeader('Cache-Control', 'no-store')
     res.status(503).json({

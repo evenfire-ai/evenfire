@@ -124,6 +124,34 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(sql).not.toMatch(/\b(?:CREATE OR REPLACE|DROP|GRANT|REVOKE|OWNER TO)\b/i)
   })
 
+  it('recognizes deployed BUG-192 admission without reapplying its schema', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb, assertDbReady } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0126_bug192_password_admission'
+    )
+    expect(migration?.legacyVersions).toEqual(['0125_bug192_password_admission'])
+    const appliedVersions = CONTROL_API_MIGRATIONS.filter(
+      candidate => candidate.version !== migration?.version
+    ).map(candidate => ({ version: candidate.version }))
+    appliedVersions.push({ version: '0125_bug192_password_admission' })
+    const query = vi.fn(async (sql: string) =>
+      sql.includes('SELECT version FROM schema_migrations')
+        ? { rows: appliedVersions, rowCount: appliedVersions.length }
+        : { rows: [], rowCount: 0 }
+    )
+    const release = vi.fn()
+    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+    expect(query.mock.calls.map(([sql]) => sql)).not.toContainEqual(
+      expect.stringContaining('CREATE TABLE IF NOT EXISTS password_identifier_state')
+    )
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO schema_migrations(version)'),
+      ['0126_bug192_password_admission']
+    )
+    await expect(assertDbReady({ query } as never)).resolves.toBeUndefined()
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it('recognizes all previously deployed feed migration versions without reapplying DDL', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(

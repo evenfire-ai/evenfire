@@ -17,6 +17,11 @@ import {
   backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
+import {
+  applyPasswordAdmissionSchema,
+  applyPasswordEvaluationRetentionSchema,
+} from './services/auth/passwordAdmissionSchema.js'
+import { applyPasswordWorkOwnershipSchema } from './services/auth/passwordWorkOwnershipSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
@@ -6421,6 +6426,20 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0138_authorization_revision_delete_compatibility',
     apply: applyAuthorizationRevisionDeleteCompatibility,
+  },
+  {
+    version: '0126_bug192_password_admission',
+    // Preserve the deployed identity after dev assigned slot 0125 to admin admission.
+    legacyVersions: ['0125_bug192_password_admission'],
+    apply: applyPasswordAdmissionSchema,
+  },
+  {
+    version: '0127_password_evaluation_retention',
+    apply: applyPasswordEvaluationRetentionSchema,
+  },
+  {
+    version: '0128_password_work_ownership',
+    apply: applyPasswordWorkOwnershipSchema,
   },
 ]
 

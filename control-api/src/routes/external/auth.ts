@@ -9,10 +9,16 @@ import {
   handleExternalSessionBackendFailure,
   requireExternalSessionRateLimitContext,
 } from '../../middleware/externalSessionAuth.js'
+import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
 import {
   externalUserRateLimitOptions,
   requireAuthenticatedExternalUserRateLimitContext,
 } from '../../middleware/externalUserRateLimitPolicy.js'
+import {
+  passwordLoginSourceAdmission,
+  sendPasswordAdmissionError,
+  validatePasswordLogin,
+} from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { RpcScope } from '../../profileTypes.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
@@ -181,6 +187,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/password-login',
+    validatePasswordLogin,
+    passwordLoginSourceAdmission,
     rateLimitMiddleware(externalUserRateLimitOptions('authentication_attempt', 'pre_auth')),
     async (req, res, next) => {
       try {
@@ -226,6 +234,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           },
         })
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }
