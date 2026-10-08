@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import {
@@ -19,6 +19,7 @@ import type { SingleTurnProvider } from '../../llm/types'
 import type { Task } from '../../queue/types'
 import { resolveVisualDeliveryLimits } from '../../visualInput/deliveryLimits'
 import { ScopedWorkspaceProvider } from '../../workspace/scopedWorkspace'
+import { deriveUserKeyFromSource } from '../../workspace/userKey'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 
 const { clientFactory } = vi.hoisted(() => ({ clientFactory: vi.fn() }))
@@ -201,7 +202,10 @@ it('keeps the exact workspace receipt through same-batch image suspension, SQLit
     responseCallback: vi.fn(async () => undefined),
   }
   const callerRoot = new ScopedWorkspaceProvider(root).forSource(task.sourceMessage).userRootPath
-  taskOwner = { id: task.id, caller: task.sourceMessage!.sender }
+  // The store keys the caller like its root: the channel-namespaced key, never the raw sender.
+  const storeCaller = deriveUserKeyFromSource(task.sourceMessage)
+  expect(basename(callerRoot)).toBe(storeCaller)
+  taskOwner = { id: task.id, caller: storeCaller }
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
   const onFail = vi.fn()
@@ -305,6 +309,6 @@ it('keeps the exact workspace receipt through same-batch image suspension, SQLit
   expect(proof).toBeDefined()
   expect(JSON.parse(proof!)).toEqual({ bytes: bytes.byteLength, sha256: digest })
   expect(contentRequests).toBe(1)
-  expect(releaseOwner).toHaveBeenCalledExactlyOnceWith(task.id, task.sourceMessage!.sender)
+  expect(releaseOwner).toHaveBeenCalledExactlyOnceWith(task.id, storeCaller)
   expect(JSON.stringify(requests)).not.toContain(bytes.toString('base64'))
 })

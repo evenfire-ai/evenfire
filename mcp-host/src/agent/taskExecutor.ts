@@ -132,8 +132,8 @@ import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
 import { referencedFilesForTurnContext } from './fileReferenceResolver'
 import {
-  GFS_SYSTEM_CALLER_IDENTITY,
   gfsManagedWorkspaceExecution,
+  gfsStoreCallerIdentity,
   gfsWorkspaceExecutionEnabled,
 } from './gfsExecutionCapability'
 import { hasLargeAvailableGfsReferences, prepareGfsFiles } from './gfsFilePreparation'
@@ -1079,9 +1079,9 @@ export class TaskExecutor {
       return Promise.resolve()
     if (this.gfsRetentionOwnerSettlement) return this.gfsRetentionOwnerSettlement
     this.gfsRetentionOwnerSettlement = (async () => {
-      const callerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
+      const callerIdentity = gfsStoreCallerIdentity(this.task.sourceMessage)
       const store = this.deps.gfsDownloadStore
-      if (!callerIdentity || !store?.isAvailable()) return
+      if (!store?.isAvailable()) return
       try {
         await store.releaseReceiptOwner(this.taskId, callerIdentity)
       } catch (error) {
@@ -2228,7 +2228,8 @@ export class TaskExecutor {
     // #1003 — native-tool presentation is host-wide and provider-independent:
     // it never depends on the MCP presentation resolved above.
     const nativeAuto = appConfig.nativeToolPresentation === 'auto'
-    const gfsCallerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
+    // The store is keyed like the caller root, never by the raw sender.
+    const gfsCallerIdentity = gfsStoreCallerIdentity(this.task.sourceMessage)
     const gfsWorkspace = gfsManagedWorkspaceExecution({
       approvalEnabled: appConfig.enableApproval,
       source: this.task.source,

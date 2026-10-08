@@ -17,6 +17,7 @@ const GFS_DOWNLOAD_STORE_LOG_COMPONENT = 'GfsDownloadStore'
 
 /** Caller-root directory that holds every download of that caller. */
 const DOWNLOADS_DIRECTORY = '.gfs-downloads'
+const USERS_DIRECTORY = 'users'
 const META_FILE = 'meta.json'
 const SOURCE_FILE = 'source'
 const PARTIAL_FILE = 'source.partial'
@@ -420,6 +421,11 @@ export class GfsDownloadStore {
       throw new RangeError('GFS download expiry must be within the retention window')
     if (input.retentionOwnerId !== undefined) this.assertReceiptOwner(input.retentionOwnerId)
     const callerRoot = await this.validateCallerRoot(input.callerWorkspacePath)
+    // The identity is the caller root's own key, so every later identity check
+    // (reuse, managed reads, pins, active counts) is bound to this root. A raw
+    // sender is not unique across channels and is refused here.
+    if (path.basename(callerRoot) !== input.callerIdentity)
+      throw new GfsDownloadStoreError('caller_mismatch')
     const id = randomUUID()
     const downloadsRoot = path.join(callerRoot, DOWNLOADS_DIRECTORY)
     const directory = path.join(downloadsRoot, `input-${id}`)
@@ -1024,7 +1030,7 @@ export class GfsDownloadStore {
     totals?: SweepTotals
   ): Promise<Array<{ id: string; directory: string }>> {
     const found: Array<{ id: string; directory: string }> = []
-    const usersRoot = path.join(this.hostRoot, 'users')
+    const usersRoot = path.join(this.hostRoot, USERS_DIRECTORY)
     let users: import('node:fs').Dirent[]
     try {
       const info = await fs.lstat(usersRoot)
@@ -1481,7 +1487,12 @@ export class GfsDownloadStore {
     const real = await fs.realpath(lexical).catch(() => {
       throw new GfsDownloadStoreError('workspace_unavailable')
     })
-    if (real !== expected || !isWithinDirectory(real, await fs.realpath(this.hostRoot)))
+    // Exactly `<host>/users/<key>`: never the Host root, `users/` itself, or a
+    // directory nested inside a caller root.
+    if (
+      real !== expected ||
+      path.dirname(real) !== path.join(await fs.realpath(this.hostRoot), USERS_DIRECTORY)
+    )
       throw new GfsDownloadStoreError('workspace_unavailable')
     const info = await fs.lstat(real)
     if (!info.isDirectory() || info.isSymbolicLink())

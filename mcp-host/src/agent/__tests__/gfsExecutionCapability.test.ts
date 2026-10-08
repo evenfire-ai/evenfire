@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { ApprovalConfig } from '../../core/extensions/approvalTypes'
 import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import { deriveUserKeyFromSource } from '../../workspace/userKey'
 import {
+  GFS_SYSTEM_CALLER_IDENTITY,
   gfsManagedWorkspaceExecution,
+  gfsStoreCallerIdentity,
   gfsWorkspaceExecutionEnabled,
 } from '../gfsExecutionCapability'
 
@@ -118,5 +121,22 @@ describe('store-associated executable workspace', () => {
     )
     expect(managed?.callerIdentity).toBe('_system')
     expect(managed?.callerWorkspacePath).toBeUndefined()
+  })
+})
+
+describe('gfsStoreCallerIdentity', () => {
+  it('keys the store by the channel-namespaced caller-root key, never the raw sender', () => {
+    const slack = { sender: 'same-sender', channelType: 'slack' as const }
+    const rpc = { sender: 'same-sender', channelType: 'rpc' as const }
+    expect(gfsStoreCallerIdentity(slack)).not.toBe(gfsStoreCallerIdentity(rpc))
+    expect(gfsStoreCallerIdentity(slack)).not.toBe('same-sender')
+    // Equal to the key that names the caller root `users/<key>`.
+    expect(gfsStoreCallerIdentity(slack)).toBe(deriveUserKeyFromSource(slack))
+    expect(gfsStoreCallerIdentity(rpc)).toBe(deriveUserKeyFromSource(rpc))
+  })
+
+  it('gives a task without a source message the system key of its caller root', () => {
+    expect(gfsStoreCallerIdentity(undefined)).toBe(GFS_SYSTEM_CALLER_IDENTITY)
+    expect(deriveUserKeyFromSource(undefined)).toBe(GFS_SYSTEM_CALLER_IDENTITY)
   })
 })

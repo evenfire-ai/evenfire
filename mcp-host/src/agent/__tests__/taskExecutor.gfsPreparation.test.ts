@@ -14,7 +14,11 @@ import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import type { Task } from '../../queue/types'
+import { deriveUserKey } from '../../workspace/userKey'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
+
+/** The store keys the caller like its root: the channel-namespaced key, never the raw sender. */
+const UNIT_CALLER_STORE_KEY = deriveUserKey('unit-caller', 'rpc')
 
 const { clientFactory } = vi.hoisted(() => ({ clientFactory: vi.fn() }))
 // Only GFSC's external HTTP/token-file boundary is doubled. The real client,
@@ -93,7 +97,9 @@ async function scenario(
 ) {
   const root = await fs.mkdtemp(join(tmpdir(), 'gfs-preparation-task-'))
   roots.push(root)
-  const callerRoot = join(root, 'users', 'unit-caller')
+  // The same `users/<key>` the Agent binds for an rpc sender: the store refuses
+  // an identity that is not its caller root's key.
+  const callerRoot = join(root, 'users', deriveUserKey(options.sender ?? 'unit-caller', 'rpc'))
   await fs.mkdir(callerRoot, { recursive: true, mode: 0o700 })
   const store = new GfsDownloadStore(root)
   await store.initialize()
@@ -392,7 +398,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.createTransfer).toHaveBeenCalledWith(
       expect.objectContaining({ retentionOwnerId: test.task.id })
     )
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
   })
 
   it('keeps graceful-shutdown completion pending until the real owner release settles', async () => {
@@ -530,7 +536,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.executor.executorState).toBe('waiting_approval')
     await test.executor.deny()
 
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
     expect(test.onApprovalNeeded).toHaveBeenCalledExactlyOnceWith(
       test.executor.pendingApproval?.request_id ?? expect.any(String),
       test.task.id,
@@ -548,7 +554,10 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     test.executor.abort()
     await test.executor.waitForCompletion()
 
-    expect(test.releaseReceiptOwner).toHaveBeenCalledExactlyOnceWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledExactlyOnceWith(
+      test.task.id,
+      UNIT_CALLER_STORE_KEY
+    )
     expect(test.contentRequests).toBe(1)
     expect(test.lifecycle.getStatus(test.task.id)).toBe('cancelled')
   })
@@ -574,7 +583,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.contentRequests).toBe(1)
     expect(test.requests).toEqual([])
     expect((await test.store.debugInventory()).files).toBe(0)
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
   })
 
   it('joins a cancelled large clerum__gfs_read producer before terminal release', async () => {
@@ -591,7 +600,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.contentRequests).toBe(1)
     expect(test.requests).toHaveLength(1)
     expect((await test.store.debugInventory()).files).toBe(0)
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
   })
 
   it.each([
@@ -673,7 +682,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
 
     expect(test.requests).toEqual([])
     expect((await test.store.debugInventory()).files).toBe(0)
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
   })
 
   it.each([

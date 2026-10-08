@@ -1,6 +1,8 @@
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskSource } from '../queue/types'
+import type { IncomingMessage } from '../server/types'
+import { deriveUserKeyFromSource } from '../workspace/userKey'
 
 export interface GfsManagedWorkspaceExecution {
   /** Trusted task/caller identity for store admission; system tasks use the existing `_system` namespace. */
@@ -14,6 +16,20 @@ export interface GfsManagedWorkspaceExecution {
 }
 
 export const GFS_SYSTEM_CALLER_IDENTITY = '_system'
+
+/**
+ * The download store's caller identity for a task: the channel-namespaced key
+ * that also names the caller root `users/<key>`. The raw sender is not unique
+ * across channels, so keying the store by it would let two humans with the
+ * same sender on different channels share reuse, managed reads and pins while
+ * their copies live in different roots. Tasks with no source message get the
+ * `_system` key, the same as their caller root.
+ */
+export function gfsStoreCallerIdentity(
+  sourceMessage?: Pick<IncomingMessage, 'sender' | 'channelType'> | null
+): string {
+  return deriveUserKeyFromSource(sourceMessage)
+}
 
 export interface GfsExecutionCapabilityInput {
   approvalEnabled: boolean
