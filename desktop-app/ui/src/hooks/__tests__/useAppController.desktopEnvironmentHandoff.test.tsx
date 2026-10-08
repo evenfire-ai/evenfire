@@ -112,4 +112,20 @@ describe('useAppController desktop environment handoff', () => {
       activeOptionId: 'target-profile',
     })
   })
+
+  it('keeps the committed logout when renderer session reload fails', async () => {
+    const { app, handle, handoff } = await openSwitchConfirmation()
+    handle.setSessionStateError(new Error('session read unavailable'))
+
+    await act(async () => app.result.current.handleConfirmDesktopEnvironmentSwitchConfirmation())
+    await act(async () => handoff)
+
+    expect(handle.logout).toHaveBeenCalledOnce()
+    expect(handle.selectRuntimeConfigForHandoff).toHaveBeenCalledWith('target-profile', 1)
+    expect(app.result.current.isAuthenticated).toBe(false)
+    expect(app.result.current.runtimeConfigState?.activeOptionId).toBe('target-profile')
+    expect(app.result.current.statusText).toContain(
+      'Could not load the selected desktop environment'
+    )
+  })
 })

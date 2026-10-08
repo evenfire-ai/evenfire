@@ -105,6 +105,8 @@ export interface AppControllerClerumOptions {
   healthError?: unknown
   /** Make `auth.passwordLogin` reject with this instead of signing in. */
   passwordLoginError?: unknown
+  /** Make `auth.getSessionState` reject after mount when requested by a test. */
+  sessionStateError?: unknown
   /** Payload for `auth.getDesktopReleaseStatus`. */
   desktopReleaseStatus?: typeof DEFAULT_DESKTOP_RELEASE_STATUS
   /** Payload for `team.directory` / `team.initialDirectory` / `team.list`. */
@@ -144,6 +146,7 @@ export interface AppControllerClerumHandle {
   resolveHealth: () => void
   /** Settles whatever `delayAuthenticatedLoad` is holding open. */
   resolveAuthenticatedLoad: () => void
+  setSessionStateError: (error: unknown) => void
 }
 
 /**
@@ -161,6 +164,7 @@ export function extendMockClerumForAppController(
 
   let authenticated = options.startAuthenticated ?? true
   let sessionGeneration = 0
+  let sessionStateError = options.sessionStateError
   let runtimeConfigState: DesktopRuntimeConfigState = options.runtimeConfigState ?? {
     configured: true,
     isLocalhost: false,
@@ -186,7 +190,10 @@ export function extendMockClerumForAppController(
     if (options.healthError) throw options.healthError
     return options.delayHealth ? healthDeferred.promise : createHealth()
   })
-  const getSessionState = vi.fn(async () => createSessionState(authenticated, sessionMe))
+  const getSessionState = vi.fn(async () => {
+    if (sessionStateError) throw sessionStateError
+    return createSessionState(authenticated, sessionMe)
+  })
   const passwordLogin = vi.fn(async () => {
     if (options.passwordLoginError) throw options.passwordLoginError
     authenticated = true
@@ -386,6 +393,9 @@ export function extendMockClerumForAppController(
       teamDirectoryDeferred.resolve(teamDirectoryPayload)
       catalogDeferred.resolve(createCatalog(agentNames))
       approvalsDeferred.resolve([])
+    },
+    setSessionStateError(error) {
+      sessionStateError = error
     },
   }
 }
