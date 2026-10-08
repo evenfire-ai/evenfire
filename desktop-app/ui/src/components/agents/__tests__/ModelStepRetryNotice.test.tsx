@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { parseModelStepCheckpointView } from '../../../../../src/modelStepCheckpointWire'
 import {
   type MockClerum,
   installMockClerum,
@@ -16,6 +17,7 @@ import {
   CONTINUATION_TASK_ID,
   checkpointView,
   continueAnswer,
+  modelStepFixture,
   sendAndFail,
 } from '../../../hooks/domain/__tests__/__fixtures__/modelStepCheckpoint'
 import { ModelStepRetryNotice } from '../ModelStepRetryNotice'
@@ -59,7 +61,7 @@ describe('ModelStepRetryNotice (#1044)', () => {
     expect(screen.getByTestId('model-step-retry-btn')).toBeTruthy()
   })
 
-  it('names the blocked reason and offers no button', () => {
+  it('names the blocked reason, offers no button and points at sending again', () => {
     render(
       <ModelStepRetryNotice
         checkpoint={checkpointView('session-view.blocked.json')}
@@ -72,8 +74,54 @@ describe('ModelStepRetryNotice (#1044)', () => {
     expect(notice.dataset.status).toBe('blocked')
     expect(notice.textContent).toContain('This turn cannot continue.')
     expect(notice.textContent).toContain('The model this turn used is no longer available.')
+    expect(notice.textContent).toContain('Send the message again to start a new turn.')
     expect(screen.queryByTestId('model-step-retry-btn')).toBeNull()
     expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('says an attached file is no longer kept when its bytes expired, and points at sending again', () => {
+    // The C0 blocked view with the reason PR 1 added (addendum A7), read through
+    // the main-process wire parser so an unmirrored reason fails here.
+    const wire = modelStepFixture('session-view.blocked.json') as Record<string, unknown>
+    const checkpoint = parseModelStepCheckpointView({
+      ...wire,
+      blockedReason: 'attachment_expired',
+    })
+    expect(checkpoint.blockedReason).toBe('attachment_expired')
+    expect(() =>
+      parseModelStepCheckpointView({ ...wire, blockedReason: 'attachment_gone' })
+    ).toThrow('Invalid model step checkpoint.blockedReason')
+
+    render(<ModelStepRetryNotice checkpoint={checkpoint} retry={null} onRetry={vi.fn()} />)
+
+    const notice = screen.getByTestId('model-step-retry-notice')
+    expect(notice.dataset.status).toBe('blocked')
+    expect(notice.textContent).toContain(
+      'This turn cannot continue. A file attached to this turn is no longer kept on the Host.'
+    )
+    expect(notice.textContent).toContain('Send the message again to start a new turn.')
+    expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('says the step is no longer available after a not_found answer', () => {
+    const { container, rerender } = render(
+      <ModelStepRetryNotice
+        checkpoint={null}
+        retry={{ pending: false, error: null, unavailable: true }}
+        onRetry={vi.fn()}
+      />
+    )
+
+    const notice = screen.getByTestId('model-step-retry-notice')
+    expect(notice.dataset.status).toBe('unavailable')
+    expect(notice.textContent).toContain(
+      'This model step can no longer be retried. Send the message again to start a new turn.'
+    )
+    expect(screen.queryByRole('button')).toBeNull()
+
+    // Without the not_found answer there is nothing to say.
+    rerender(<ModelStepRetryNotice checkpoint={null} retry={null} onRetry={vi.fn()} />)
+    expect(container.innerHTML).toBe('')
   })
 
   it('renders nothing while a continuation is claimed', () => {

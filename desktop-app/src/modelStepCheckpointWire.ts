@@ -26,6 +26,7 @@ const BLOCKED_REASONS: readonly ModelStepBlockedReason[] = [
   'model_unavailable',
   'budget_exhausted',
   'reference_unavailable',
+  'attachment_expired',
 ]
 
 export const MODEL_STEP_CONTINUE_ERROR_CODES = {
