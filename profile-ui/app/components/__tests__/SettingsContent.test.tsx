@@ -5,7 +5,6 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
 import type { Me } from '@/app/types/profile'
 import desktopEnvironmentFixture from '@/test/fixtures/desktop-environment-response.json'
-import { PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE } from '../../../../external-rest-api/src/routes/mePasswordErrors.js'
 import { SettingsContent } from '../../settings/SettingsContent'
 
 const mocks = vi.hoisted(() => ({
@@ -156,8 +155,9 @@ describe('Settings desktop setup handoff', () => {
 
 describe('Settings password update recovery messaging', () => {
   it('shows actionable guidance from the External REST credential-change response', async () => {
-    const publicResponse = PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE
-    const publicMessage = publicResponse.body.error
+    const publicMessage =
+      'Your password changed during this request. Sign in again with your new password.'
+    const publicResponse = { status: 409, body: { error: publicMessage } }
     const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
     mocks.updatePassword.mockImplementation(actualApi.updatePassword)
     const upstreamFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
