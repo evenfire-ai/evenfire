@@ -125,6 +125,12 @@ export type MountSandboxUiArgs = {
    * viewer, so a click reveals nothing to the plugin.
    */
   onGfsOpen?: (uri: string) => void
+  /**
+   * Re-checked at every await before a session effect (cookie write, view
+   * creation). False means the caller's authenticated session ended while this
+   * mount was in flight, so it must not attach anything for it.
+   */
+  isCurrent?: () => boolean
 }
 
 type ActiveView = {
@@ -356,6 +362,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     routePath,
     onClosed,
     onTitleChanged,
+    isCurrent = () => true,
   } = args
 
   if (parentWindow.isDestroyed()) {
@@ -374,7 +381,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // per-recipe partition is left in place so storage survives a re-mount
   // within the ACL window.
   await teardownActive('replaced')
-  if (generation !== mountGeneration) return
+  if (generation !== mountGeneration || !isCurrent()) return
 
   const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
@@ -396,7 +403,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     setCookie,
     partition,
   })
-  if (generation !== mountGeneration) return
+  if (generation !== mountGeneration || !isCurrent()) return
   if (parentWindow.isDestroyed()) {
     throw new Error('parent window is destroyed')
   }

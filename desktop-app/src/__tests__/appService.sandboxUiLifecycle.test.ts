@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { shell } from 'electron'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { AppService } from '../appService.js'
+import { __setChatStoreBaseDirForTests, unbindChatStore } from '../chatStoreBinding.js'
 import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
 import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
 import { _resetPluginSurfacesForTests, resolvePluginSurface } from '../pluginSurfaceRegistry.js'
@@ -239,9 +241,18 @@ function shrinkMintBound(toMs = 25) {
 }
 
 const mintResponders = new Map<string, (init?: RequestInit) => Response | Promise<Response>>()
+const authorizeUrlResponders = new Map<string, () => Response | Promise<Response>>()
 const fetchMock = vi.fn(
   async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = String(input instanceof Request ? input.url : input)
+    const authorize = /\/api\/v1\/sandbox-ui\/sandbox-recipes\/([^/]+)\/oauth\/authorize-url$/.exec(
+      url
+    )
+    if (authorize) {
+      const respond = authorizeUrlResponders.get(decodeURIComponent(authorize[1]!))
+      if (!respond) throw new Error(`unexpected authorize-url fetch ${url}`)
+      return respond()
+    }
     const match = /\/api\/v1\/sandbox-ui\/sandbox-recipes\/([^/]+)\/session$/.exec(url)
     if (!match) throw new Error(`unexpected fetch ${url}`)
     const recipeName = decodeURIComponent(match[1]!)
@@ -288,12 +299,15 @@ beforeEach(async () => {
   electronMocks.views.length = 0
   electronMocks.sessionObject.cookies.set.mockResolvedValue(undefined)
   mintResponders.clear()
+  authorizeUrlResponders.clear()
   vi.stubGlobal('fetch', fetchMock)
   userDataDir = await mkdtemp(path.join(tmpdir(), 'clerum-sandbox-lifecycle-'))
 })
 
 afterEach(async () => {
   vi.restoreAllMocks()
+  unbindChatStore()
+  __setChatStoreBaseDirForTests(null)
   await unmountSandboxUiView()
   _resetSandboxUiRefreshForTests()
   _resetPluginSurfacesForTests()
@@ -587,7 +601,25 @@ describe('AppService sandbox-ui embed across a session clear', () => {
     return (response: Response) => answer(response)
   }
 
-  it('an open whose mint lands after logout is torn down with no refresh loop', async () => {
+  // Effects observable outside main: a cookie written to a partition, a view
+  // created, attached or navigated, a pinned SDK surface, a refresh mint.
+  async function expectNothingMountedFor(
+    parentWindow: FakeParentWindow,
+    service: AppService
+  ): Promise<void> {
+    // Drain the serial queue so the close queued by the session clear has run.
+    await (
+      service as unknown as { enqueueSandboxUiLifecycle(op: () => Promise<void>): Promise<void> }
+    ).enqueueSandboxUiLifecycle(async () => undefined)
+    expect(electronMocks.sessionObject.cookies.set).not.toHaveBeenCalled()
+    expect(electronMocks.views).toHaveLength(0)
+    expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
+    expect(getActiveSandboxUi()).toBeNull()
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(1)
+  }
+
+  it('an open whose mint lands after logout installs nothing and rejects', async () => {
     const onClosed = vi.fn()
     const service = makeService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
@@ -595,20 +627,126 @@ describe('AppService sandbox-ui embed across a session clear', () => {
     const answerMint = holdMint('first-app')
 
     const open = service.openSandboxUi(openArgs('first-app', parentWindow, onClosed))
+    const outcome = open.then(
+      () => 'opened',
+      (error: unknown) => error
+    )
     await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(1), { timeout: 1_000 })
     await service.logout()
     answerMint(mintOk('first-app'))
-    await open
 
-    const mountedView = electronMocks.views[0]
-    expect(mountedView).toBeDefined()
-    await vi.waitFor(() => expect(getActiveSandboxUi()).toBeNull(), { timeout: 1_000 })
-    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledWith(mountedView)
-    expect(mountedView?.webContents.isDestroyed()).toBe(true)
-    expect(resolvePluginSurface(mountedView!.webContents.id)).toBeNull()
+    const settled = await outcome
+    await expectNothingMountedFor(parentWindow, service)
+    expect(settled).toMatchObject({ message: expect.stringMatching(/session changed/) })
     expect(onClosed).not.toHaveBeenCalled()
+  })
+
+  it('an open whose mint lands after another user logged in installs nothing and rejects', async () => {
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    const parentWindow = new FakeParentWindow()
+    const answerMint = holdMint('first-app')
+
+    const open = service.openSandboxUi(openArgs('first-app', parentWindow))
+    const outcome = open.then(
+      () => 'opened',
+      (error: unknown) => error
+    )
+    await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(1), { timeout: 1_000 })
+    await service.logout()
+    __setChatStoreBaseDirForTests(userDataDir)
+    const authClient = (service as unknown as { authClient: Record<string, unknown> }).authClient
+    authClient.googleLogin = vi.fn().mockResolvedValue({
+      token: 'session-token-b',
+      me: { id: 'user-b', teamId: 'team-b' },
+    })
+    await service.googleLogin('id-token-b')
+    answerMint(mintOk('first-app'))
+
+    const settled = await outcome
+    await expectNothingMountedFor(parentWindow, service)
+    expect(settled).toMatchObject({ message: expect.stringMatching(/session changed/) })
+  })
+
+  it('an open whose cookie write is in flight at logout creates no view and rejects', async () => {
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    const parentWindow = new FakeParentWindow()
+    let finishCookieWrite: () => void = () => undefined
+    electronMocks.sessionObject.cookies.set.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishCookieWrite = resolve
+        })
+    )
+
+    const outcome = service.openSandboxUi(openArgs('first-app', parentWindow)).then(
+      () => 'opened',
+      (error: unknown) => error
+    )
+    await vi.waitFor(() => expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledOnce(), {
+      timeout: 1_000,
+    })
+    await service.logout()
+    finishCookieWrite()
+
+    const settled = await outcome
+    expect(electronMocks.views).toHaveLength(0)
+    expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(settled).toMatchObject({ message: expect.stringMatching(/session changed/) })
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
     expect(mintCallsFor('first-app')).toBe(1)
+  })
+
+  it('a refresh whose mint lands after logout writes no cookie and reports nothing', async () => {
+    const onRefreshError = vi.fn()
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    const parentWindow = new FakeParentWindow()
+    await service.openSandboxUi({ ...openArgs('first-app', parentWindow), onRefreshError })
+    const answerMint = holdMint('first-app')
+    electronMocks.sessionObject.cookies.set.mockClear()
+
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1)
+    await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(2), { timeout: 1_000 })
+    await service.logout()
+    answerMint(mintOk('first-app'))
+    await vi.waitFor(() => expect(getActiveSandboxUi()).toBeNull(), { timeout: 1_000 })
+    await (
+      service as unknown as { enqueueSandboxUiLifecycle(op: () => Promise<void>): Promise<void> }
+    ).enqueueSandboxUiLifecycle(async () => undefined)
+
+    expect(electronMocks.sessionObject.cookies.set).not.toHaveBeenCalled()
+    expect(onRefreshError).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(2)
+  })
+
+  it('an OAuth connect whose authorize URL lands after logout opens no browser', async () => {
+    const service = makeService()
+    let answer: (response: Response) => void = () => undefined
+    authorizeUrlResponders.set(
+      'first-app',
+      () =>
+        new Promise<Response>(resolve => {
+          answer = resolve
+        })
+    )
+
+    const connect = service
+      .requestSandboxUiOauthAuthorize('sandbox-recipes', 'first-app', 'client-1')
+      .then(
+        () => 'opened',
+        (error: unknown) => error
+      )
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce(), { timeout: 1_000 })
+    await service.logout()
+    answer(Response.json({ authorizeUrl: 'https://provider.example/authorize?state=a' }))
+
+    const settled = await connect
+    expect(shell.openExternal).not.toHaveBeenCalled()
+    expect(settled).toMatchObject({ message: expect.stringMatching(/session changed/) })
   })
 
   it('an open whose mint fails after logout leaves nothing behind and rejects once', async () => {
