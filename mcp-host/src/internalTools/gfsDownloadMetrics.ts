@@ -45,7 +45,12 @@ export type GfsDownloadQuotaReason =
   | 'active_downloads'
   | 'free_space'
 
-export type GfsDownloadExpiryOutcome = 'expired_removed' | 'cleanup_failed' | 'sweep_failed'
+export type GfsDownloadExpiryOutcome =
+  | 'expired_removed'
+  | 'incomplete_removed'
+  | 'remove_failed'
+  | 'cleanup_failed'
+  | 'sweep_failed'
 
 const gfsDownloadAdmissionsTotal = getOrCreateCounter({
   name: 'clerum_gfs_download_admissions_total',

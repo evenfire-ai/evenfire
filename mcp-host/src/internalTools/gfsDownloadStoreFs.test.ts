@@ -1,0 +1,811 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import * as path from 'node:path'
+import { register } from 'prom-client'
+import { logger } from '../logger'
+import type { GfsImageSource } from '../visualInput/policy'
+import { GfsDownloadStoreError, GfsDownloadStoreFs } from './gfsDownloadStoreFs'
+
+const { statfsBoundary, renameBoundary, rmBoundary, lstatBoundary, hashBoundary } = vi.hoisted(
+  () => ({
+    statfsBoundary: vi.fn(),
+    renameBoundary: vi.fn(),
+    rmBoundary: vi.fn(),
+    lstatBoundary: vi.fn(),
+    hashBoundary: vi.fn(),
+  })
+)
+// Pass-through boundaries: every test starts with the real implementation and
+// overrides one call only where it simulates a filesystem failure or observes
+// an order. Test setup and assertions use the actual modules.
+vi.mock('node:fs/promises', async original => ({
+  ...(await original<typeof fs>()),
+  statfs: statfsBoundary,
+  rename: renameBoundary,
+  rm: rmBoundary,
+  lstat: lstatBoundary,
+}))
+vi.mock('node:crypto', async original => ({
+  ...(await original<typeof crypto>()),
+  createHash: hashBoundary,
+}))
+
+let nativeFs: typeof fs
+let nativeCrypto: typeof crypto
+let hostRoot: string
+let callerRoot: string
+let store: GfsDownloadStoreFs
+const extraStores: GfsDownloadStoreFs[] = []
+
+const CALLER = 'caller-a'
+
+function sourceFor(index: number, version = 1): GfsImageSource {
+  const resourceId = index.toString(16).padStart(32, '0')
+  return {
+    kind: 'gfs',
+    drive: 'main',
+    resourceId,
+    gfsUri: `gfs://main/${resourceId}`,
+    name: `fixture-${index}.bin`,
+    version,
+  }
+}
+
+function future(ms = 60 * 60_000): string {
+  return new Date(Date.now() + ms).toISOString()
+}
+
+function digest(bytes: Buffer): string {
+  return nativeCrypto.createHash('sha256').update(bytes).digest('hex')
+}
+
+async function callerDirectory(host: string, caller: string): Promise<string> {
+  const root = path.join(host, 'users', caller)
+  await nativeFs.mkdir(root, { recursive: true, mode: 0o700 })
+  return root
+}
+
+function downloadDirectory(root: string, id: string): string {
+  return path.join(root, '.gfs-downloads', `input-${id}`)
+}
+
+async function exists(target: string): Promise<boolean> {
+  try {
+    await nativeFs.lstat(target)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+async function startTransfer(
+  target: GfsDownloadStoreFs,
+  root: string,
+  caller: string,
+  index: number,
+  sizeBytes: number,
+  options: { version?: number; owner?: string } = {}
+) {
+  const bytes = Buffer.alloc(sizeBytes, (index % 251) + 1)
+  const transfer = await target.createTransfer({
+    callerIdentity: caller,
+    callerWorkspacePath: root,
+    source: sourceFor(index, options.version ?? 1),
+    sizeBytes,
+    expiresAt: future(),
+    ...(options.owner === undefined ? {} : { retentionOwnerId: options.owner }),
+  })
+  await nativeFs.writeFile(path.join(root, transfer.partialPath), bytes)
+  return { transfer, bytes }
+}
+
+async function completedCopy(
+  target: GfsDownloadStoreFs,
+  root: string,
+  caller: string,
+  index: number,
+  sizeBytes: number,
+  options: { version?: number; owner?: string } = {}
+) {
+  const { transfer, bytes } = await startTransfer(target, root, caller, index, sizeBytes, options)
+  const receipt = await target.publish(transfer.id, caller, digest(bytes))
+  return { receipt, bytes }
+}
+
+async function metricValue(name: string, labels: Record<string, string>): Promise<number> {
+  const metric = register.getSingleMetric(name)
+  if (metric === undefined) throw new Error(`metric ${name} is not registered`)
+  const { values } = await metric.get()
+  return values
+    .filter(sample => Object.entries(labels).every(([key, value]) => sample.labels[key] === value))
+    .reduce((sum, sample) => sum + sample.value, 0)
+}
+
+const expiryCount = (outcome: string) =>
+  metricValue('clerum_gfs_download_expiry_total', { outcome })
+const quotaCount = (scope: string, reason: string) =>
+  metricValue('clerum_gfs_download_quota_total', { scope, reason })
+
+async function openStore(host: string): Promise<GfsDownloadStoreFs> {
+  const opened = new GfsDownloadStoreFs(host)
+  extraStores.push(opened)
+  await opened.initialize()
+  return opened
+}
+
+/** Re-imports the store with environment limits; the logger of that copy is not spied. */
+async function loadLimitedStore(env: Record<string, string>) {
+  const saved = { ...process.env }
+  Object.assign(process.env, env)
+  try {
+    vi.resetModules()
+    const storeModule = await import('./gfsDownloadStoreFs')
+    const policyModule = await import('./gfsFilePolicy')
+    return { Store: storeModule.GfsDownloadStoreFs, limits: policyModule.GFS_FILE_LIMITS }
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+async function limitedStore(env: Record<string, string>) {
+  const { Store, limits } = await loadLimitedStore(env)
+  const limited = new Store(hostRoot)
+  extraStores.push(limited as unknown as GfsDownloadStoreFs)
+  await limited.initialize()
+  return { limited, limits }
+}
+
+/** Distinct createdAt values so the oldest-first eviction order is deterministic. */
+function tick(): void {
+  vi.setSystemTime(Date.now() + 1_000)
+}
+
+async function writeMeta(directory: string, meta: Record<string, unknown>): Promise<void> {
+  await nativeFs.writeFile(path.join(directory, 'meta.json'), JSON.stringify(meta), {
+    mode: 0o600,
+  })
+}
+
+function metaFor(id: string, bytes: Buffer, overrides: Record<string, unknown> = {}) {
+  const now = Date.now()
+  return {
+    schemaVersion: 1,
+    id,
+    callerIdentity: CALLER,
+    source: sourceFor(900),
+    sizeBytes: bytes.byteLength,
+    sha256: digest(bytes),
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 60 * 60_000).toISOString(),
+    ...overrides,
+  }
+}
+
+async function handMadeDirectory(root: string): Promise<{ id: string; directory: string }> {
+  const id = nativeCrypto.randomUUID()
+  const directory = downloadDirectory(root, id)
+  await nativeFs.mkdir(directory, { recursive: true, mode: 0o700 })
+  await nativeFs.chmod(path.dirname(directory), 0o700)
+  return { id, directory }
+}
+
+beforeEach(async () => {
+  nativeFs = await vi.importActual<typeof fs>('node:fs/promises')
+  nativeCrypto = await vi.importActual<typeof crypto>('node:crypto')
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-10-08T10:00:00.000Z'))
+  for (const boundary of [statfsBoundary, renameBoundary, rmBoundary, lstatBoundary, hashBoundary])
+    boundary.mockReset()
+  statfsBoundary.mockImplementation(nativeFs.statfs)
+  renameBoundary.mockImplementation(nativeFs.rename)
+  rmBoundary.mockImplementation(nativeFs.rm)
+  lstatBoundary.mockImplementation(nativeFs.lstat)
+  hashBoundary.mockImplementation((algorithm: string) => nativeCrypto.createHash(algorithm))
+  hostRoot = await nativeFs.mkdtemp(path.join(tmpdir(), 'gfs-store-fs-'))
+  callerRoot = await callerDirectory(hostRoot, CALLER)
+  store = new GfsDownloadStoreFs(hostRoot)
+  await store.initialize()
+})
+
+afterEach(async () => {
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+  for (const opened of extraStores.splice(0)) await opened.close(0)
+  await store.close(0)
+  await nativeFs.rm(hostRoot, { recursive: true, force: true })
+})
+
+describe('filesystem-backed GFS download store: publication', () => {
+  it('F1: publish writes meta.json before source and every visible source has a meta.json', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 1, 32)
+    renameBoundary.mockClear()
+    const receipt = await store.publish(transfer.id, CALLER, digest(bytes))
+
+    const renamedTo = renameBoundary.mock.calls.map(([, to]) => path.basename(String(to)))
+    // Witness: both renames of the publication happened.
+    expect(renamedTo).toHaveLength(2)
+    expect(renamedTo).toEqual(['meta.json', 'source'])
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    expect((await nativeFs.readdir(directory)).sort()).toEqual(['meta.json', 'source'])
+    const meta = JSON.parse(await nativeFs.readFile(path.join(directory, 'meta.json'), 'utf8'))
+    expect(meta).toMatchObject({
+      schemaVersion: 1,
+      id: receipt.id,
+      callerIdentity: CALLER,
+      sizeBytes: 32,
+      sha256: digest(bytes),
+    })
+    expect(receipt.path).toBe(`.gfs-downloads/input-${receipt.id}/source`)
+  })
+
+  it('F2: a cancelled publish leaves an incomplete directory that is not reusable and is swept', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 2, 16)
+    const controller = new AbortController()
+    renameBoundary.mockImplementation(async (from: string, to: string) => {
+      await nativeFs.rename(from, to)
+      // Cancelled after meta.json is visible and before source is.
+      if (path.basename(to) === 'meta.json') controller.abort()
+    })
+    await expect(
+      store.publish(transfer.id, CALLER, digest(bytes), { signal: controller.signal })
+    ).rejects.toMatchObject({ code: 'publication_cancelled' })
+    renameBoundary.mockImplementation(nativeFs.rename)
+
+    const directory = downloadDirectory(callerRoot, transfer.id)
+    // Witness: the cancelled directory is on disk with meta.json and no source.
+    expect((await nativeFs.readdir(directory)).sort()).toEqual(['meta.json', 'source.partial'])
+    await expect(store.reusableReceipt(CALLER, sourceFor(2), 16)).resolves.toBeUndefined()
+
+    // A Host stop leaves the reservation behind; the next start sweeps it.
+    await store.close(0)
+    const info = vi.spyOn(logger, 'info')
+    await openStore(hostRoot)
+    expect(await exists(directory)).toBe(false)
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ component: 'GfsDownloadStore', removedIncomplete: 1 }),
+      'GFS download store initialized'
+    )
+  })
+
+  it('F3: a crash between the two renames leaves meta.json and source.partial and the next store removes it', async () => {
+    const bytes = Buffer.alloc(24, 7)
+    const { id, directory } = await handMadeDirectory(callerRoot)
+    await writeMeta(directory, metaFor(id, bytes))
+    await nativeFs.writeFile(path.join(directory, 'source.partial'), bytes, { mode: 0o600 })
+    const info = vi.spyOn(logger, 'info')
+
+    await openStore(hostRoot)
+
+    expect(await exists(directory)).toBe(false)
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ removedIncomplete: 1, retainedCompleted: 0 }),
+      'GFS download store initialized'
+    )
+  })
+
+  it('F4: an EIO while writing meta.json fails that publish only and the next admission succeeds', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 4, 16)
+    renameBoundary.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('injected EIO'), { code: 'EIO' })
+    })
+    await expect(store.publish(transfer.id, CALLER, digest(bytes))).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    // The producer's cleanup path: the id stayed active so fail() can remove it.
+    await store.fail(transfer.id, CALLER)
+    expect(await exists(downloadDirectory(callerRoot, transfer.id))).toBe(false)
+
+    const next = await completedCopy(store, callerRoot, CALLER, 5, 16)
+    expect(next.receipt.sha256).toBe(digest(next.bytes))
+    await expect(store.readManagedFile(next.receipt.path, CALLER)).resolves.toEqual(next.bytes)
+  })
+})
+
+describe('filesystem-backed GFS download store: reuse', () => {
+  it('F5: reuse returns the same id when the content hash matches', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 6, 40)
+    const reused = await store.reusableReceipt(CALLER, sourceFor(6), 40)
+    expect(reused).toMatchObject({ id: receipt.id, sha256: receipt.sha256, path: receipt.path })
+  })
+
+  it('F6: reuse deletes a directory whose content no longer matches and returns undefined', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 7, 40)
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    await nativeFs.writeFile(path.join(directory, 'source'), Buffer.alloc(40, 0xee))
+    hashBoundary.mockClear()
+
+    await expect(store.reusableReceipt(CALLER, sourceFor(7), 40)).resolves.toBeUndefined()
+
+    // Witness: the content was hashed exactly once before the verdict.
+    expect(hashBoundary).toHaveBeenCalledTimes(1)
+    expect(await exists(directory)).toBe(false)
+  })
+
+  it('F7: reuse does not match another caller, another version or an expired entry', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 8, 12)
+    await expect(store.reusableReceipt('caller-b', sourceFor(8), 12)).resolves.toBeUndefined()
+    await expect(store.reusableReceipt(CALLER, sourceFor(8, 2), 12)).resolves.toBeUndefined()
+    // Witness: the same parameters with the right caller do match.
+    await expect(store.reusableReceipt(CALLER, sourceFor(8), 12)).resolves.toMatchObject({
+      id: receipt.id,
+    })
+    vi.setSystemTime(Date.now() + 2 * 60 * 60_000)
+    await expect(store.reusableReceipt(CALLER, sourceFor(8), 12)).resolves.toBeUndefined()
+  })
+})
+
+/** The smallest limits the policy accepts with two callers' worth of Host storage. */
+const HOST_30_CALLER_15 = {
+  MCP_HOST_GFS_MAX_FILE_BYTES: '10',
+  MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '30',
+  MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '15',
+}
+
+describe('filesystem-backed GFS download store: quotas and eviction', () => {
+  it("F8: a caller over quota evicts its own oldest completed downloads, never another caller's", async () => {
+    const { limited, limits } = await limitedStore({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '2' })
+    expect(limits.callerRetainedFiles).toBe(2)
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    const other = await completedCopy(limited, otherRoot, 'caller-b', 10, 8)
+    tick()
+    const oldest = await completedCopy(limited, callerRoot, CALLER, 11, 8)
+    tick()
+    const newer = await completedCopy(limited, callerRoot, CALLER, 12, 8)
+    tick()
+
+    await startTransfer(limited, callerRoot, CALLER, 13, 8)
+
+    expect(await exists(downloadDirectory(callerRoot, oldest.receipt.id))).toBe(false)
+    // Witnesses: the caller's newer copy and the other caller's older copy stay.
+    expect(await exists(downloadDirectory(callerRoot, newer.receipt.id))).toBe(true)
+    expect(await exists(downloadDirectory(otherRoot, other.receipt.id))).toBe(true)
+  })
+
+  it("F9: a host over quota may evict any caller's oldest completed download", async () => {
+    const { limited } = await limitedStore(HOST_30_CALLER_15)
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
+    const other = await completedCopy(limited, otherRoot, 'caller-b', 20, 10)
+    tick()
+    const third = await completedCopy(limited, thirdRoot, 'caller-c', 21, 10)
+    tick()
+    const own = await completedCopy(limited, callerRoot, CALLER, 22, 10)
+    tick()
+
+    // caller-a stays within 15; the Host would reach 35 of 30.
+    await startTransfer(limited, callerRoot, CALLER, 23, 5)
+
+    expect(await exists(downloadDirectory(otherRoot, other.receipt.id))).toBe(false)
+    // Witnesses: only the oldest copy went, whoever owned the newer ones.
+    expect(await exists(downloadDirectory(thirdRoot, third.receipt.id))).toBe(true)
+    expect(await exists(downloadDirectory(callerRoot, own.receipt.id))).toBe(true)
+  })
+
+  it('F10: when eviction cannot make room nothing is deleted', async () => {
+    const { limited } = await limitedStore({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '2' })
+    await completedCopy(limited, callerRoot, CALLER, 30, 8, { owner: 'task-1' })
+    tick()
+    await completedCopy(limited, callerRoot, CALLER, 31, 8, { owner: 'task-1' })
+    const downloads = path.join(callerRoot, '.gfs-downloads')
+    const before = (await nativeFs.readdir(downloads)).sort()
+    const denied = await quotaCount('caller', 'retained_files')
+    lstatBoundary.mockClear()
+
+    await expect(startTransfer(limited, callerRoot, CALLER, 32, 8)).rejects.toMatchObject({
+      code: 'caller_quota_exceeded',
+    })
+
+    // Witness: the admission read the inventory before refusing.
+    expect(lstatBoundary.mock.calls.length).toBeGreaterThan(0)
+    expect((await nativeFs.readdir(downloads)).sort()).toEqual(before)
+    expect(before).toHaveLength(2)
+    expect(await quotaCount('caller', 'retained_files')).toBe(denied + 1)
+  })
+
+  it('F11: pinned and active downloads are never evicted', async () => {
+    const { limited } = await limitedStore({
+      ...HOST_30_CALLER_15,
+    })
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
+    const pinned = await completedCopy(limited, callerRoot, CALLER, 40, 10, { owner: 'task-40' })
+    tick()
+    const active = await startTransfer(limited, otherRoot, 'caller-b', 41, 10)
+    tick()
+    const unpinned = await completedCopy(limited, thirdRoot, 'caller-c', 42, 10)
+    tick()
+
+    // The Host would reach 40 of 30; one eviction makes room.
+    await startTransfer(limited, await callerDirectory(hostRoot, 'caller-d'), 'caller-d', 43, 10)
+
+    // Witness: the only eligible copy, although the newest, was evicted.
+    expect(await exists(downloadDirectory(thirdRoot, unpinned.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
+    expect(await exists(downloadDirectory(otherRoot, active.transfer.id))).toBe(true)
+  })
+
+  it('F12: free space is checked with active reservations and the 16 MiB reserve', async () => {
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    await startTransfer(store, otherRoot, 'caller-b', 50, 4096 * 10)
+    const observed = await nativeFs.statfs(hostRoot, { bigint: true })
+    const reserveBlocks = (16n * 1024n * 1024n) / 4096n
+    // Room for the request and the reserve, but not for the active reservation.
+    statfsBoundary.mockResolvedValue({ ...observed, bsize: 4096n, bavail: reserveBlocks + 2n })
+    const denied = await quotaCount('host', 'free_space')
+
+    await expect(startTransfer(store, callerRoot, CALLER, 51, 4096)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(statfsBoundary).toHaveBeenCalled()
+    expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
+
+    // Control: with room for the active reservation too, the same request is admitted.
+    statfsBoundary.mockResolvedValue({ ...observed, bsize: 4096n, bavail: reserveBlocks + 11n })
+    await expect(startTransfer(store, callerRoot, CALLER, 51, 4096)).resolves.toBeDefined()
+  })
+
+  it('F13: eviction candidates are not hashed', async () => {
+    const { limited } = await limitedStore({
+      ...HOST_30_CALLER_15,
+    })
+    const first = await completedCopy(limited, callerRoot, CALLER, 60, 3)
+    tick()
+    const second = await completedCopy(limited, callerRoot, CALLER, 61, 3)
+    tick()
+    const third = await completedCopy(limited, callerRoot, CALLER, 62, 9)
+    tick()
+    hashBoundary.mockClear()
+
+    // 15 retained + 6 requested against 15: the plan takes the two 3-byte copies.
+    await startTransfer(limited, callerRoot, CALLER, 64, 6)
+
+    // Witness: two candidates were evicted.
+    expect(await exists(downloadDirectory(callerRoot, first.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(callerRoot, second.receipt.id))).toBe(false)
+    expect(hashBoundary).not.toHaveBeenCalled()
+    expect(await exists(downloadDirectory(callerRoot, third.receipt.id))).toBe(true)
+  })
+
+  it('F14: size above maxFileBytes is refused before any filesystem work', async () => {
+    const { limited } = await limitedStore({ MCP_HOST_GFS_MAX_FILE_BYTES: '10' })
+    statfsBoundary.mockClear()
+    lstatBoundary.mockClear()
+    await expect(startTransfer(limited, callerRoot, CALLER, 70, 11)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(statfsBoundary).not.toHaveBeenCalled()
+    expect(lstatBoundary).not.toHaveBeenCalled()
+    // Witness: the boundaries are live for an admissible size.
+    await startTransfer(limited, callerRoot, CALLER, 71, 10)
+    expect(statfsBoundary).toHaveBeenCalled()
+    expect(lstatBoundary).toHaveBeenCalled()
+  })
+
+  it('F15: concurrency limits per caller and per host return download_busy', async () => {
+    const callerBusy = await quotaCount('caller', 'active_downloads')
+    const hostBusy = await quotaCount('host', 'active_downloads')
+    await startTransfer(store, callerRoot, CALLER, 80, 4)
+    await expect(startTransfer(store, callerRoot, CALLER, 81, 4)).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    expect(await quotaCount('caller', 'active_downloads')).toBe(callerBusy + 1)
+
+    await startTransfer(store, await callerDirectory(hostRoot, 'caller-b'), 'caller-b', 82, 4)
+    await expect(
+      startTransfer(store, await callerDirectory(hostRoot, 'caller-c'), 'caller-c', 83, 4)
+    ).rejects.toMatchObject({ code: 'download_busy' })
+    expect(await quotaCount('host', 'active_downloads')).toBe(hostBusy + 1)
+  })
+})
+
+describe('filesystem-backed GFS download store: sweep', () => {
+  it('F16: the sweep removes incomplete directories of every shape and keeps complete ones', async () => {
+    const kept = await completedCopy(store, callerRoot, CALLER, 90, 20)
+    const bytes = Buffer.alloc(20, 3)
+    const shapes: string[] = []
+
+    const orphanPartial = await handMadeDirectory(callerRoot)
+    await nativeFs.writeFile(path.join(orphanPartial.directory, 'source.partial'), bytes)
+    const metaWithoutSource = await handMadeDirectory(callerRoot)
+    await writeMeta(metaWithoutSource.directory, metaFor(metaWithoutSource.id, bytes))
+    const sourceWithoutMeta = await handMadeDirectory(callerRoot)
+    await nativeFs.writeFile(path.join(sourceWithoutMeta.directory, 'source'), bytes)
+    const invalidMeta = await handMadeDirectory(callerRoot)
+    await writeMeta(invalidMeta.directory, metaFor(invalidMeta.id, bytes, { sha256: 'nope' }))
+    await nativeFs.writeFile(path.join(invalidMeta.directory, 'source'), bytes)
+    const wrongSize = await handMadeDirectory(callerRoot)
+    await writeMeta(wrongSize.directory, metaFor(wrongSize.id, bytes))
+    await nativeFs.writeFile(path.join(wrongSize.directory, 'source'), Buffer.alloc(21, 3))
+    for (const shape of [
+      orphanPartial,
+      metaWithoutSource,
+      sourceWithoutMeta,
+      invalidMeta,
+      wrongSize,
+    ])
+      shapes.push(shape.directory)
+    const removed = await expiryCount('incomplete_removed')
+
+    await expect(store.cleanupExpired()).resolves.toEqual({
+      removedExpired: 0,
+      removedIncomplete: 5,
+      removeFailed: 0,
+    })
+
+    for (const directory of shapes) expect(await exists(directory)).toBe(false)
+    expect(await expiryCount('incomplete_removed')).toBe(removed + 5)
+    // Witness: the complete download stays on disk and readable through the index.
+    await expect(store.readManagedFile(kept.receipt.path, CALLER)).resolves.toEqual(kept.bytes)
+  })
+
+  it('F17: the sweep removes expired complete downloads unless pinned', async () => {
+    const pinned = await completedCopy(store, callerRoot, CALLER, 100, 8, { owner: 'task-100' })
+    const loose = await completedCopy(store, callerRoot, CALLER, 101, 8)
+    const later = Date.now() + 2 * 60 * 60_000
+
+    await expect(store.cleanupExpired(later)).resolves.toEqual({
+      removedExpired: 1,
+      removedIncomplete: 0,
+      removeFailed: 0,
+    })
+    expect(await exists(downloadDirectory(callerRoot, loose.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
+
+    await store.releaseReceiptOwner('task-100', CALLER)
+    await expect(store.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(false)
+  })
+
+  it('F18: the sweep ignores entries that are not input-<uuid>', async () => {
+    const downloads = path.join(callerRoot, '.gfs-downloads')
+    await nativeFs.mkdir(downloads, { mode: 0o700 })
+    const foreign = [
+      path.join(downloads, 'input-not-a-uuid'),
+      path.join(downloads, `input-${nativeCrypto.randomUUID().toUpperCase()}`),
+      path.join(downloads, 'notes'),
+    ]
+    for (const directory of foreign) await nativeFs.mkdir(directory, { mode: 0o700 })
+    await nativeFs.writeFile(path.join(downloads, 'readme.txt'), 'kept')
+    const incomplete = await handMadeDirectory(callerRoot)
+
+    await expect(store.cleanupExpired()).resolves.toMatchObject({ removedIncomplete: 1 })
+
+    // Witness: the incomplete store directory next to them was removed.
+    expect(await exists(incomplete.directory)).toBe(false)
+    for (const directory of foreign) expect(await exists(directory)).toBe(true)
+    expect(await exists(path.join(downloads, 'readme.txt'))).toBe(true)
+  })
+
+  it('F19: a symlinked .gfs-downloads is removed without following it', async () => {
+    const outside = await nativeFs.mkdtemp(path.join(tmpdir(), 'gfs-store-fs-outside-'))
+    try {
+      const victim = path.join(outside, `input-${nativeCrypto.randomUUID()}`)
+      await nativeFs.mkdir(victim, { mode: 0o700 })
+      await nativeFs.writeFile(path.join(victim, 'source.partial'), 'outside')
+      const link = path.join(callerRoot, '.gfs-downloads')
+      await nativeFs.symlink(outside, link)
+
+      await expect(store.cleanupExpired()).resolves.toMatchObject({ removedIncomplete: 1 })
+
+      expect(await exists(link)).toBe(false)
+      await expect(nativeFs.readFile(path.join(victim, 'source.partial'), 'utf8')).resolves.toBe(
+        'outside'
+      )
+    } finally {
+      await nativeFs.rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('F20: a failed removal is logged and counted, does not block admission and is retried', async () => {
+    const stuck = await handMadeDirectory(callerRoot)
+    rmBoundary.mockImplementation(async (target: string, options: unknown) => {
+      // The store renames the directory to a private `.trash-<uuid>` name, then removes that.
+      if (path.basename(target).startsWith('.trash-'))
+        throw Object.assign(new Error('injected EACCES'), { code: 'EACCES' })
+      return nativeFs.rm(target, options as Parameters<typeof nativeFs.rm>[1])
+    })
+    const warn = vi.spyOn(logger, 'warn')
+    const failed = await expiryCount('remove_failed')
+
+    await expect(store.cleanupExpired()).resolves.toMatchObject({ removeFailed: 1 })
+
+    expect(warn).toHaveBeenCalledWith(
+      { component: 'GfsDownloadStore', code: 'EACCES' },
+      expect.stringContaining('could not remove')
+    )
+    expect(await expiryCount('remove_failed')).toBe(failed + 1)
+    const downloads = path.dirname(stuck.directory)
+    const leftover = (await nativeFs.readdir(downloads)).filter(name => name.startsWith('.trash-'))
+    expect(leftover).toHaveLength(1)
+    expect(await exists(stuck.directory)).toBe(false)
+    const next = await completedCopy(store, callerRoot, CALLER, 110, 8)
+    await expect(store.readManagedFile(next.receipt.path, CALLER)).resolves.toEqual(next.bytes)
+
+    // Once removal works again, the next sweep removes the renamed leftover.
+    rmBoundary.mockImplementation(nativeFs.rm)
+    await expect(store.cleanupExpired()).resolves.toMatchObject({ removedIncomplete: 1 })
+    expect(await exists(path.join(downloads, leftover[0]!))).toBe(false)
+  })
+})
+
+describe('filesystem-backed GFS download store: managed reads', () => {
+  it('F21: readManagedFile returns the exact bytes and answers another caller like a missing copy', async () => {
+    const { receipt, bytes } = await completedCopy(store, callerRoot, CALLER, 120, 33)
+    await expect(store.readManagedFile(receipt.path, CALLER)).resolves.toEqual(bytes)
+    await expect(store.readManagedFile(receipt.path, 'caller-b')).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+    await expect(
+      store.readManagedFile(`.gfs-downloads/input-${nativeCrypto.randomUUID()}/source`, CALLER)
+    ).rejects.toMatchObject({ code: 'download_missing' })
+    await expect(store.readManagedFile('../escape/source', CALLER)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+  })
+
+  it('F22: readManagedFile deletes a tampered source and reports download_missing', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 122, 16)
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    await nativeFs.writeFile(path.join(directory, 'source'), Buffer.alloc(16, 0xab))
+    hashBoundary.mockClear()
+
+    await expect(store.readManagedFile(receipt.path, CALLER)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+
+    // Witness: the bytes were hashed once, then the directory was removed.
+    expect(hashBoundary).toHaveBeenCalledTimes(1)
+    expect(await exists(directory)).toBe(false)
+  })
+
+  it('F23: readManagedFilePrefix bounds and size check', async () => {
+    const bytes = Buffer.from('0123456789abcdef0123')
+    const transfer = await store.createTransfer({
+      callerIdentity: CALLER,
+      callerWorkspacePath: callerRoot,
+      source: sourceFor(123),
+      sizeBytes: bytes.byteLength,
+      expiresAt: future(),
+    })
+    await nativeFs.writeFile(path.join(callerRoot, transfer.partialPath), bytes)
+    const receipt = await store.publish(transfer.id, CALLER, digest(bytes))
+
+    await expect(store.readManagedFilePrefix(receipt.path, CALLER, 4)).resolves.toEqual(
+      Buffer.from('0123')
+    )
+    await expect(store.readManagedFilePrefix(receipt.path, CALLER)).resolves.toEqual(
+      bytes.subarray(0, 16)
+    )
+    for (const invalid of [0, -1, 4097, 1.5])
+      await expect(store.readManagedFilePrefix(receipt.path, CALLER, invalid)).rejects.toThrow(
+        RangeError
+      )
+    await nativeFs.appendFile(path.join(downloadDirectory(callerRoot, receipt.id), 'source'), 'x')
+    await expect(store.readManagedFilePrefix(receipt.path, CALLER, 4)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+  })
+})
+
+describe('filesystem-backed GFS download store: pins, lifecycle and errors', () => {
+  it('F24: releaseReceiptOwner unpins only its own caller and a second store on the same root sees no pins', async () => {
+    const pinned = await completedCopy(store, callerRoot, CALLER, 130, 8, { owner: 'task-130' })
+    const rootB = await callerDirectory(hostRoot, 'caller-b')
+    // The same owner id under another caller is another pin, not a refusal.
+    const other = await completedCopy(store, rootB, 'caller-b', 131, 8, { owner: 'task-130' })
+    const later = Date.now() + 2 * 60 * 60_000
+    await expect(store.releaseReceiptOwner('unknown-owner', CALLER)).resolves.toBeUndefined()
+    await expect(store.releaseReceiptOwner('task-130', 'caller-b')).resolves.toBeUndefined()
+    // Witness: caller-b's release freed only caller-b's copy; CALLER's pin holds.
+    await expect(store.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
+    expect(await exists(downloadDirectory(rootB, other.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
+
+    await store.close()
+    const second = await openStore(hostRoot)
+    await expect(second.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(false)
+  })
+
+  it('F25: close drains active transfers and refuses new admissions', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 140, 8)
+    let closed = false
+    const closing = store.close().then(() => {
+      closed = true
+    })
+    await expect(
+      startTransfer(store, await callerDirectory(hostRoot, 'caller-b'), 'caller-b', 141, 8)
+    ).rejects.toMatchObject({ code: 'download_busy' })
+    expect(store.isAvailable()).toBe(false)
+    expect(closed).toBe(false)
+
+    const receipt = await store.publish(transfer.id, CALLER, digest(bytes))
+    await closing
+    expect(closed).toBe(true)
+    expect(receipt.id).toBe(transfer.id)
+    await expect(store.initialize()).rejects.toMatchObject({ code: 'download_busy' })
+  })
+
+  it('F25b: close with an active transfer that never finishes resolves within the deadline', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 150, 8)
+    const warn = vi.spyOn(logger, 'warn')
+    const started = performance.now()
+
+    await store.close(50)
+
+    expect(performance.now() - started).toBeLessThan(2_000)
+    // Witness: the store reports the transfer it left behind.
+    expect(warn).toHaveBeenCalledWith(
+      { component: 'GfsDownloadStore', active: 1 },
+      expect.stringContaining('closed with active transfers')
+    )
+    await expect(store.publish(transfer.id, CALLER, digest(bytes))).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    await expect(store.fail(transfer.id, CALLER)).rejects.toMatchObject({ code: 'download_busy' })
+    await expect(store.close()).resolves.toBeUndefined()
+  })
+
+  it('F26: error codes for an uninitialized, a closed and an unknown transfer', async () => {
+    const uninitialized = new GfsDownloadStoreFs(hostRoot)
+    const probe = `.gfs-downloads/input-${nativeCrypto.randomUUID()}/source`
+    await expect(uninitialized.readManagedFile(probe, CALLER)).rejects.toMatchObject({
+      code: 'workspace_unavailable',
+    })
+    await expect(
+      uninitialized.createTransfer({
+        callerIdentity: CALLER,
+        callerWorkspacePath: callerRoot,
+        source: sourceFor(160),
+        sizeBytes: 1,
+        expiresAt: future(),
+      })
+    ).rejects.toMatchObject({ code: 'workspace_unavailable' })
+    await expect(uninitialized.close()).resolves.toBeUndefined()
+    await expect(uninitialized.initialize()).rejects.toMatchObject({ code: 'download_busy' })
+
+    const { transfer } = await startTransfer(store, callerRoot, CALLER, 161, 4)
+    // Another caller's transfer is answered exactly like an unknown id.
+    await expect(store.fail(transfer.id, 'caller-b')).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    await expect(store.fail(nativeCrypto.randomUUID(), CALLER)).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    await expect(
+      store.publish(nativeCrypto.randomUUID(), CALLER, 'a'.repeat(64))
+    ).rejects.toMatchObject({ code: 'download_missing' })
+    await expect(store.publish(transfer.id, CALLER, 'not-a-digest')).rejects.toThrow(RangeError)
+    // Witness: the transfer is live and the caller's fail() removes it.
+    await store.fail(transfer.id, CALLER)
+    expect(await exists(downloadDirectory(callerRoot, transfer.id))).toBe(false)
+
+    await store.close()
+    await expect(store.readManagedFile(probe, CALLER)).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    await expect(store.close()).resolves.toBeUndefined()
+  })
+
+  it('F27: a Host root that is a symlink makes initialize reject with workspace_unavailable', async () => {
+    const real = path.join(hostRoot, 'real-store')
+    await nativeFs.mkdir(real, { mode: 0o700 })
+    const link = path.join(hostRoot, 'store-link')
+    await nativeFs.symlink(real, link)
+    const linked = new GfsDownloadStoreFs(link)
+    extraStores.push(linked)
+
+    await expect(linked.initialize()).rejects.toBeInstanceOf(GfsDownloadStoreError)
+    await expect(linked.initialize()).rejects.toMatchObject({ code: 'workspace_unavailable' })
+    expect(linked.isAvailable()).toBe(false)
+    // Witness: the same directory through its real path initializes.
+    await expect(openStore(real)).resolves.toBeInstanceOf(GfsDownloadStoreFs)
+  })
+})
