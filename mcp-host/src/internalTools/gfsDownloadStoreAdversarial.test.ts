@@ -7,6 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import * as syncFs from 'node:fs'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -16,6 +17,7 @@ import {
   callerDirectory,
   completedCopy,
   digestOf,
+  downloadDirectory,
   exists,
   expiryCount,
   metaFor,
@@ -32,6 +34,7 @@ import {
 } from '../workspace/protectedPaths'
 import { deriveUserKey } from '../workspace/userKey'
 import { GfsDownloadStore } from './gfsDownloadStore'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 
 type FsOperation = 'open' | 'lstat' | 'rename' | 'rm' | 'readdir' | 'realpath'
 /**
@@ -693,5 +696,121 @@ describe('GFS download store adversarial round: a FIFO never blocks publication'
     expect(swapped).toBe(true)
     expect(syncFs.lstatSync(directory).isFIFO()).toBe(true)
     expect(outcome).toBe('refused')
+  })
+})
+
+describe('GFS download store adversarial round: a failed duplicate removal stays charged', () => {
+  const OWNER = 'erin-key'
+  const PLANTER = 'frank-key'
+
+  /**
+   * Fails the removal rename of every `input-<id>` directory for `ids`, under
+   * the caller keys given (the store works on the real path of the host root,
+   * so callers are matched by their key segment).
+   */
+  function failRemovals(keys: readonly string[], ids: readonly string[]): string[] {
+    const names = new Set(ids.map(id => `input-${id}`))
+    const calls: string[] = []
+    injectFault('rename', target => {
+      const inCaller = keys.some(key => target.includes(`${path.sep}${key}${path.sep}`))
+      if (!inCaller || !names.has(path.basename(target))) return undefined
+      calls.push(target)
+      return 'EIO'
+    })
+    return calls
+  }
+
+  it('duplicates of a full caller’s ids whose removal fails keep both callers charged', async () => {
+    const owner = callerDirectory(hostRoot, OWNER)
+    const planter = callerDirectory(hostRoot, PLANTER)
+    const bytes = Buffer.from('quota')
+    const ids = Array.from({ length: GFS_FILE_LIMITS.callerRetainedFiles }, () => randomUUID())
+    for (const id of ids) plantDownload(owner, { id, bytes, meta: metaFor(id, bytes, Date.now()) })
+    const store = await openStore()
+    expect((await store.debugInventory()).byCaller.get(OWNER)?.files).toBe(ids.length)
+    const renames = failRemovals([OWNER, PLANTER], ids)
+
+    // Control: without duplicates the full caller is refused; its one eviction
+    // attempt fails like every other removal here.
+    await expect(startTransfer(store, owner, OWNER, 1, 5)).rejects.toMatchObject({
+      code: 'caller_quota_exceeded',
+    })
+    expect(renames).toHaveLength(1)
+    for (const id of ids)
+      plantDownload(planter, { id, bytes, meta: metaFor(id, bytes, Date.now()) })
+
+    const sweep = await store.cleanupExpired()
+
+    // Witness: every copy of every id was a removal attempt, and each failed.
+    expect(sweep.removeFailed).toBe(ids.length * 2)
+    expect(renames).toHaveLength(1 + ids.length * 2)
+    for (const id of ids) {
+      expect(exists(downloadDirectory(owner, id))).toBe(true)
+      expect(exists(downloadDirectory(planter, id))).toBe(true)
+    }
+    // The copies left on disk are still charged to the caller root holding them.
+    await expect(startTransfer(store, owner, OWNER, 2, 5)).rejects.toMatchObject({
+      code: 'caller_quota_exceeded',
+    })
+    await expect(startTransfer(store, planter, PLANTER, 3, 5)).rejects.toMatchObject({
+      code: 'caller_quota_exceeded',
+    })
+
+    // Once the removals succeed, both callers have their capacity back.
+    faults.clear()
+    await store.cleanupExpired()
+    for (const id of ids) {
+      expect(exists(downloadDirectory(owner, id))).toBe(false)
+      expect(exists(downloadDirectory(planter, id))).toBe(false)
+    }
+    const admitted = await startTransfer(store, owner, OWNER, 4, 5)
+    await store.fail(admitted.transfer.id, OWNER)
+    const planted = await startTransfer(store, planter, PLANTER, 5, 5)
+    await store.fail(planted.transfer.id, PLANTER)
+  })
+
+  it('a duplicate of a published copy whose removal fails stays charged to its caller', async () => {
+    const limited = await withEnvironment(
+      { MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '1' },
+      async () => {
+        vi.resetModules()
+        const { GfsDownloadStore: Store } = await import('./gfsDownloadStore')
+        const opened = new Store(hostRoot) as unknown as GfsDownloadStore
+        stores.push(opened)
+        await opened.initialize()
+        return opened
+      }
+    )
+    const owner = callerDirectory(hostRoot, OWNER)
+    const planter = callerDirectory(hostRoot, PLANTER)
+    const { receipt, bytes } = await completedCopy(limited, owner, OWNER, 6, 16)
+    // Control: the planter has capacity for one copy.
+    const control = await startTransfer(limited, planter, PLANTER, 7, 16)
+    await limited.fail(control.transfer.id, PLANTER)
+    plantDownload(planter, {
+      id: receipt.id,
+      bytes,
+      meta: metaFor(receipt.id, bytes, Date.now()),
+    })
+    const renames = failRemovals([PLANTER], [receipt.id])
+
+    const sweep = await limited.cleanupExpired()
+
+    // Witness: the duplicate's removal was attempted and failed; the published
+    // copy is not replaced by it.
+    expect(sweep.removeFailed).toBe(1)
+    expect(renames).toHaveLength(1)
+    expect(exists(downloadDirectory(planter, receipt.id))).toBe(true)
+    await expect(limited.readManagedFile(receipt.path, OWNER)).resolves.toEqual(bytes)
+    await expect(startTransfer(limited, planter, PLANTER, 8, 16)).rejects.toMatchObject({
+      code: 'caller_quota_exceeded',
+    })
+
+    faults.clear()
+    await limited.cleanupExpired()
+    expect(exists(downloadDirectory(planter, receipt.id))).toBe(false)
+    const admitted = await startTransfer(limited, planter, PLANTER, 9, 16)
+    await limited.fail(admitted.transfer.id, PLANTER)
+    await expect(limited.readManagedFile(receipt.path, OWNER)).resolves.toEqual(bytes)
   })
 })

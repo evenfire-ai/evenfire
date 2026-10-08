@@ -146,6 +146,12 @@ interface ActiveTransfer {
   expiresAt: string
 }
 
+/** A duplicate directory the last sweep could not remove; it stays charged. */
+interface HeldCopy {
+  callerRoot: string
+  sizeBytes: number
+}
+
 export interface GfsDownloadSweepResult {
   removedExpired: number
   removedIncomplete: number
@@ -383,6 +389,8 @@ export class GfsDownloadStore {
   private readonly requestedHostRoot: string
   private readonly entries = new Map<string, Entry>()
   private readonly active = new Map<string, ActiveTransfer>()
+  /** Duplicates the last sweep could not remove, by directory; see sweep(). */
+  private held = new Map<string, HeldCopy>()
   private readonly activeByCaller = new Map<string, number>()
   /** Keyed by `pinKey(callerIdentity, ownerId)`: callers never share or see a pin. */
   private readonly pins = new Map<string, Set<string>>()
@@ -981,6 +989,19 @@ export class GfsDownloadStore {
       else if (result === 'failed') totals.removeFailed += 1
       return result !== 'failed'
     }
+    // A duplicate this sweep could not remove is still on disk, so it stays
+    // charged to the caller root that holds it: a failed cleanup never turns
+    // into free capacity.
+    const held = new Map<string, HeldCopy>()
+    const removeDuplicate = async (id: string, directory: string): Promise<void> => {
+      if (await removeIncomplete(directory)) return
+      const state = await this.inspectDirectory(directory, id, now)
+      if (state.state === 'complete')
+        held.set(directory, {
+          callerRoot: state.entry.callerRoot,
+          sizeBytes: state.entry.sizeBytes,
+        })
+    }
 
     for (const [id, directories] of candidates) {
       const indexed = this.entries.get(id)
@@ -988,13 +1009,17 @@ export class GfsDownloadStore {
         this.active.get(id)?.directory ??
         (indexed?.provenance === 'published' ? indexed.directory : undefined)
       if (owned === undefined && directories.length > 1) {
-        this.forget(id)
-        for (const duplicate of directories) await removeIncomplete(duplicate)
+        // The indexed directory is forgotten only once it is gone; a failed
+        // removal leaves it indexed and charged, like any other entry.
+        for (const duplicate of directories) {
+          if (duplicate !== indexed?.directory) await removeDuplicate(id, duplicate)
+          else if (await removeIncomplete(duplicate)) this.forget(id)
+        }
         continue
       }
       if (owned !== undefined)
         for (const duplicate of directories)
-          if (duplicate !== owned) await removeIncomplete(duplicate)
+          if (duplicate !== owned) await removeDuplicate(id, duplicate)
       if (this.active.has(id)) continue
       const directory = owned ?? directories[0]!
       const state =
@@ -1033,6 +1058,7 @@ export class GfsDownloadStore {
       totals.retainedBytes += entry.sizeBytes
       if (entry.provenance === 'adopted') totals.adopted += 1
     }
+    this.held = held
     return totals
   }
 
@@ -1393,6 +1419,7 @@ export class GfsDownloadStore {
     for (const entry of this.entries.values())
       if (!excluded.has(entry.id)) add(entry.callerRoot, entry.sizeBytes)
     for (const transfer of this.active.values()) add(transfer.callerRoot, transfer.sizeBytes)
+    for (const copy of this.held.values()) add(copy.callerRoot, copy.sizeBytes)
     return usage
   }
 

@@ -778,5 +778,13 @@
   {
     "suite": "gfsContentDownload.test.ts",
     "fullName": "governed GFS content download fails at once when source.partial is replaced by a FIFO before the download opens it"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged duplicates of a full caller’s ids whose removal fails keep both callers charged"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged a duplicate of a published copy whose removal fails stays charged to its caller"
   }
 ]
