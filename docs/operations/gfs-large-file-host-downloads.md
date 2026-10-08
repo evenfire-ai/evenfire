@@ -316,9 +316,21 @@ the free-space check reads at each admission, so a resized volume counts from
 the next admission without a restart. By default the cache can therefore use
 up to 85% of the volume. An admission is refused with `host_quota_exceeded`
 (reason `storage_bytes`) when usage plus its size would exceed the budget; a
-usage exactly at the budget is admitted. There is no per-caller byte or file
-limit and no file count: per-user limits were removed by user decision, and one
-caller can hold any number of copies while the budget has room.
+usage exactly at the budget is admitted. There is no per-caller file count and
+no per-caller limit on unpinned copies: those per-user limits were removed by
+user decision, and one caller can hold any number of unpinned copies while the
+budget has room.
+
+Eviction cannot reclaim what a caller protects: the copies its tasks pin and
+its active reservations. A caller's protected bytes (each copy once, whichever
+of its tasks pins it) may therefore reach at most `floor(budget / 2)`, so one
+caller's open tasks always leave half the budget reclaimable for everyone else.
+An admission that would take a caller over that half, or a reuse that would pin
+a copy the caller does not protect yet, is refused with `host_quota_exceeded`
+(scope `caller`, reason `protected_bytes`) before any eviction. The decision and
+the error use only that caller's own usage; the error is the same as a full
+Host budget. A single download larger than half the budget is always refused
+(about 4.25 GiB on a 10 Gi volume at 85%, far above the per-file limit).
 
 Before refusing, the store plans an eviction of complete, unpinned copies that
 are not being transferred, in any caller's directory: adopted copies first
@@ -387,7 +399,9 @@ A directory that cannot be listed is skipped and retried by the next sweep
 (`remove_failed`) and retried by the next sweep; the copy stays where it is,
 indexed and charged, and a published copy stays published. A duplicate
 directory whose removal failed stays charged against the Host budget until a
-removal succeeds or `lstat` answers `ENOENT` for it. When a later sweep cannot
+removal succeeds or `lstat` proves it gone: `ENOENT`, `ENOTDIR` (a parent such
+as the caller root is no longer a directory) or a path that is no longer a
+directory. Any other `lstat` error keeps the charge. When a later sweep cannot
 inspect it (an error other than a size, type or content mismatch) or cannot
 list its `.gfs-downloads`, the charge of the previous sweep carries over;
 a directory that is now indexed or being transferred is charged once, through
@@ -416,7 +430,10 @@ approval or execution can still use it. A pin protects the copy from expiry and
 eviction and is released when the task reaches a terminal state. Pins are per
 caller: another caller using the same owner ID holds a different pin. Pins are
 held in memory, so after a restart a resumed task finds its copy unpinned and
-not reusable, and downloads it again. A shell command never pins a copy.
+not reusable, and downloads it again. A shell command never pins a copy. A pin
+is not bounded by the TTL or by the task's active-time budget (a task waiting
+for approval keeps its pins), which is why a caller's pinned and reserved bytes
+are capped at half the budget (see Quotas and eviction).
 
 ### Integrity
 
@@ -492,8 +509,9 @@ The global `/metrics` endpoint exposes fixed-cardinality instruments:
 - `clerum_gfs_download_duration_seconds`
 - `clerum_gfs_download_active`
 - `clerum_gfs_download_quota_total{scope,reason}`, with `reason` one of
-  `storage_bytes`, `active_downloads`, `free_space` (`storage_bytes` and
-  `free_space` are Host-scope only)
+  `storage_bytes`, `active_downloads`, `free_space`, `protected_bytes`
+  (`storage_bytes` and `free_space` are Host-scope only, `protected_bytes`
+  caller-scope only)
 - `clerum_gfs_download_expiry_total{outcome}`, with `outcome` one of
   `expired_removed` (expired or evicted), `incomplete_removed`, `remove_failed`,
   `retired_legacy_store`, `sweep_failed`
