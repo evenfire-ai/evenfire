@@ -16,8 +16,14 @@ import {
   reservePasswordPace,
   verifyMemberPassword,
 } from '../src/services/auth/passwordCredentialVerification.js'
+import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
 import {
+  acceptInvitationForEmail,
+  createInvitationForTeams,
+  createSilentInvitationForTeams,
+  getInvitationByToken,
   setInvitationPasswordForEmail,
+  setInvitationPasswordForUser,
   updateUserPassword,
 } from '../src/services/directory/membership.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
@@ -26,6 +32,10 @@ const holder = vi.hoisted(() => ({
   pool: null as unknown as Pool,
   leaseClient: null as unknown as import('pg').PoolClient,
 }))
+const invitationFlow = vi.hoisted(() => ({
+  registerAndSendInvitation: vi.fn().mockResolvedValue(undefined),
+}))
+vi.mock('../src/services/invitationFlowRegistrationService.js', () => invitationFlow)
 vi.mock('../src/db.js', async importOriginal => {
   const real = await importOriginal<typeof import('../src/db.js')>()
   const proxy = {
@@ -69,6 +79,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   }, 60_000)
   beforeEach(async () => {
     vi.restoreAllMocks()
+    invitationFlow.registerAndSendInvitation.mockReset().mockResolvedValue(undefined)
     await holder.pool.query('DELETE FROM users')
     await holder.pool.query('UPDATE password_identifier_state SET retained_until_ms=0')
     await holder.pool.query('DELETE FROM password_identifier_state')
@@ -251,6 +262,337 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       await holder.pool.query('SELECT password_hash FROM users WHERE id=$1', [userId])
     ).rows[0]
     expect(bcrypt.getRounds(credential.password_hash)).toBe(12)
+  })
+  it('completes authenticated reset with a one-connection PostgreSQL pool', async () => {
+    const invitation = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    const previousPool = holder.pool
+    const singleConnectionPool = new Pool({
+      connectionString,
+      max: 1,
+      connectionTimeoutMillis: 2500,
+    })
+    holder.pool = singleConnectionPool
+    try {
+      const result = await setInvitationPasswordForUser(
+        userId,
+        email,
+        invitation.id,
+        'Synthetic-BUG192-single-pool-reset'
+      )
+      expect(result).not.toHaveProperty('error')
+      const after = (
+        await singleConnectionPool.query(
+          'SELECT password_hash, password_auth_generation FROM users WHERE id = $1',
+          [userId]
+        )
+      ).rows[0]
+      expect(after.password_hash).not.toBe(hash)
+      expect(Number(after.password_auth_generation)).toBeGreaterThan(1)
+      expect(
+        (
+          await singleConnectionPool.query('SELECT status FROM invitations WHERE id = $1', [
+            invitation.id,
+          ])
+        ).rows[0].status
+      ).toBe('accepted')
+    } finally {
+      holder.pool = previousPool
+      await endPoolAndWaitForClients(singleConnectionPool)
+    }
+  })
+  it('does not accept a pending password-reset link through generic invitation acceptance', async () => {
+    const invitation = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+
+    await expect(acceptInvitationForEmail(email, '', invitation.id)).resolves.toEqual({
+      error: 'not_pending',
+    })
+    expect(
+      (await holder.pool.query('SELECT status FROM invitations WHERE id = $1', [invitation.id]))
+        .rows[0].status
+    ).toBe('pending')
+    expect(
+      (await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])).rows[0]
+        .password_hash
+    ).toBe(hash)
+  })
+  it('revokes every other pending password-reset link for the same account only', async () => {
+    const makeReset = (address: string) =>
+      createSilentInvitationForTeams({
+        inviteeName: 'Synthetic member',
+        email: address,
+        purpose: 'password_reset',
+        teamAssignments: [],
+        fallbackRole: 'member',
+      })
+    const redeemed = await makeReset(email)
+    const sibling = await makeReset(email)
+    await expect(getInvitationByToken(redeemed.token)).resolves.toMatchObject({
+      id: redeemed.id,
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    const otherEmail = 'other-member@example.invalid'
+    await holder.pool.query('INSERT INTO users(email) VALUES ($1)', [otherEmail])
+    const otherMember = await makeReset(otherEmail)
+    const before = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
+
+    const result = await setInvitationPasswordForEmail(
+      email,
+      redeemed.id,
+      'Synthetic-BUG192-recovered-password'
+    )
+
+    expect(result).not.toHaveProperty('error')
+    const rows = (
+      await holder.pool.query(
+        'SELECT id, email, purpose, status FROM invitations WHERE id = ANY($1::uuid[]) ORDER BY id',
+        [[redeemed.id, sibling.id, otherMember.id]]
+      )
+    ).rows
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: redeemed.id,
+          email,
+          purpose: 'password_reset',
+          status: 'accepted',
+        }),
+        expect.objectContaining({
+          id: sibling.id,
+          email,
+          purpose: 'password_reset',
+          status: 'revoked',
+        }),
+        expect.objectContaining({
+          id: otherMember.id,
+          email: otherEmail,
+          purpose: 'password_reset',
+          status: 'pending',
+        }),
+      ])
+    )
+    const after = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
+    expect(Number(after)).toBe(Number(before) + 1)
+    const replayHash = vi.spyOn(bcrypt, 'hash')
+    await expect(
+      setInvitationPasswordForEmail(email, redeemed.id, 'Synthetic-BUG192-used-link-replay')
+    ).resolves.toMatchObject({ error: 'not_pending' })
+    await expect(
+      setInvitationPasswordForEmail(email, sibling.id, 'Synthetic-BUG192-replay-password')
+    ).resolves.toMatchObject({ error: 'not_pending' })
+    expect(replayHash).not.toHaveBeenCalled()
+    expect(
+      Number(
+        (
+          await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [
+            userId,
+          ])
+        ).rows[0].password_auth_generation
+      )
+    ).toBe(Number(after))
+  })
+
+  it('maps the email producer token to its distinct recovery row ID', async () => {
+    const invitation = await createInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    expect(invitationFlow.registerAndSendInvitation).toHaveBeenCalledWith(
+      email,
+      invitation.token,
+      null,
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ purpose: 'password_reset' })
+    )
+    expect(invitation.token).toBeTruthy()
+    expect(invitation.token).not.toBe(invitation.id)
+
+    const preview = await getInvitationByToken(invitation.token)
+    expect(preview).toMatchObject({
+      id: invitation.id,
+      email,
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+
+    const result = await setInvitationPasswordForEmail(
+      email,
+      preview!.id,
+      'Synthetic-BUG192-token-mapped-recovery'
+    )
+    expect(result).not.toHaveProperty('error')
+    expect(
+      (await holder.pool.query('SELECT status FROM invitations WHERE id = $1', [invitation.id]))
+        .rows[0].status
+    ).toBe('accepted')
+  })
+
+  it('allows at most one credential mutation when sibling reset links race', async () => {
+    const makeReset = () =>
+      createSilentInvitationForTeams({
+        inviteeName: 'Synthetic member',
+        email,
+        purpose: 'password_reset',
+        teamAssignments: [],
+        fallbackRole: 'member',
+      })
+    const first = await makeReset()
+    const second = await makeReset()
+    const hash = vi.spyOn(bcrypt, 'hash')
+    const before = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
+
+    const outcomes = await Promise.allSettled([
+      setInvitationPasswordForEmail(email, first.id, 'Synthetic-BUG192-race-password-a'),
+      setInvitationPasswordForEmail(email, second.id, 'Synthetic-BUG192-race-password-b'),
+    ])
+
+    expect(
+      outcomes.filter(result => result.status === 'fulfilled' && !('error' in result.value))
+    ).toHaveLength(1)
+    expect(hash).toHaveBeenCalledTimes(1)
+    const after = (
+      await holder.pool.query('SELECT password_auth_generation FROM users WHERE id = $1', [userId])
+    ).rows[0].password_auth_generation
+    expect(Number(after)).toBe(Number(before) + 1)
+    expect(
+      (
+        await holder.pool.query('SELECT status FROM invitations WHERE id = ANY($1::uuid[])', [
+          [first.id, second.id],
+        ])
+      ).rows
+        .map(row => row.status)
+        .sort()
+    ).toEqual(['accepted', 'revoked'])
+    const redeemedId = (
+      await holder.pool.query(
+        "SELECT id FROM invitations WHERE id = ANY($1::uuid[]) AND status = 'accepted'",
+        [[first.id, second.id]]
+      )
+    ).rows[0].id
+    const siblingId = redeemedId === first.id ? second.id : first.id
+    await expect(
+      setInvitationPasswordForEmail(email, siblingId, 'Synthetic-BUG192-race-replay')
+    ).resolves.toMatchObject({ error: 'not_pending' })
+  })
+  it('rejects expired, revoked, wrong-purpose and wrong-account recovery credentials', async () => {
+    const makeInvitation = (purpose: 'password_reset' | 'member_invitation') =>
+      createSilentInvitationForTeams({
+        inviteeName: 'Synthetic member',
+        email,
+        purpose,
+        teamAssignments: [],
+        fallbackRole: 'member',
+      })
+    const expired = await makeInvitation('password_reset')
+    const revoked = await makeInvitation('password_reset')
+    const wrongAccount = await makeInvitation('password_reset')
+    const memberInvite = await makeInvitation('member_invitation')
+    await holder.pool.query(
+      "UPDATE invitations SET expires_at = NOW() - interval '1 second' WHERE id = $1",
+      [expired.id]
+    )
+    await holder.pool.query("UPDATE invitations SET status = 'revoked' WHERE id = $1", [revoked.id])
+
+    await expect(
+      setInvitationPasswordForEmail(email, expired.id, 'Synthetic-BUG192-expired-reset')
+    ).resolves.toMatchObject({ error: 'expired' })
+    await expect(
+      setInvitationPasswordForEmail(email, revoked.id, 'Synthetic-BUG192-revoked-reset')
+    ).resolves.toMatchObject({ error: 'not_pending' })
+    await expect(
+      setInvitationPasswordForEmail(
+        'other@example.invalid',
+        wrongAccount.id,
+        'Synthetic-BUG192-wrong-account'
+      )
+    ).resolves.toMatchObject({ error: 'forbidden' })
+    await expect(
+      setInvitationPasswordForEmail(email, memberInvite.id, 'Synthetic-BUG192-wrong-purpose')
+    ).resolves.toMatchObject({ error: 'not_found' })
+    expect(
+      (await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])).rows[0]
+        .password_hash
+    ).toBe(hash)
+  })
+  it('fails recovery closed when durable password work authority is unavailable', async () => {
+    const invitation = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    await holder.pool.query(
+      'ALTER TABLE password_verification_work RENAME TO password_verification_work_unavailable'
+    )
+    try {
+      await expect(
+        setInvitationPasswordForEmail(email, invitation.id, 'Synthetic-BUG192-no-authority')
+      ).rejects.toMatchObject({ status: 503 })
+      expect(
+        (await holder.pool.query('SELECT status FROM invitations WHERE id = $1', [invitation.id]))
+          .rows[0].status
+      ).toBe('pending')
+      expect(
+        (await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])).rows[0]
+          .password_hash
+      ).toBe(hash)
+    } finally {
+      await holder.pool.query(
+        'ALTER TABLE password_verification_work_unavailable RENAME TO password_verification_work'
+      )
+    }
+  })
+  it('bounds recovery hashing with the shared owner and does not hash while it is busy', async () => {
+    const invitation = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    const lease = await acquirePasswordWork()
+    expect(lease).not.toBeNull()
+    const hashSpy = vi.spyOn(bcrypt, 'hash')
+    try {
+      await expect(
+        setInvitationPasswordForEmail(email, invitation.id, 'Synthetic-BUG192-owner-busy')
+      ).rejects.toMatchObject({ status: 429, reason: 'verification_busy' })
+      expect(hashSpy).not.toHaveBeenCalled()
+      expect(
+        (await holder.pool.query('SELECT status FROM invitations WHERE id = $1', [invitation.id]))
+          .rows[0].status
+      ).toBe('pending')
+      expect(
+        (await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])).rows[0]
+          .password_hash
+      ).toBe(hash)
+    } finally {
+      hashSpy.mockRestore()
+      await lease?.release()
+    }
   })
   it('provisioning and lifecycle changes fence stale completions at the database boundary', async () => {
     for (const update of ['password_hash = NULL', 'lifecycle_version = lifecycle_version + 1']) {

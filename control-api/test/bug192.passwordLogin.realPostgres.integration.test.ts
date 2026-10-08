@@ -5,8 +5,13 @@ import { createPublicKey, randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import request from 'supertest'
 import { initDb } from '../src/db.js'
+import { passwordAdmissionDenialsTotal } from '../src/observability/metrics.js'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
+import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
+import { passwordIdentifierKey } from '../src/services/auth/passwordAdmissionState.js'
+import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
 import { verifyUserPassword } from '../src/services/directory/login.js'
+import { createInvitationForTeams } from '../src/services/directory/membership.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -14,6 +19,19 @@ const holder = vi.hoisted(() => ({
   pool: null as unknown as Pool,
   leaseClient: null as unknown as import('pg').PoolClient,
 }))
+const invitationFlow = vi.hoisted(() => ({
+  registerAndSendInvitation: vi.fn().mockResolvedValue(undefined),
+  validateInvitationFlowToken: vi.fn(),
+}))
+vi.mock('../src/services/invitationFlowRegistrationService.js', async importOriginal => {
+  const real =
+    await importOriginal<typeof import('../src/services/invitationFlowRegistrationService.js')>()
+  return {
+    ...real,
+    registerAndSendInvitation: invitationFlow.registerAndSendInvitation,
+    validateInvitationFlowToken: invitationFlow.validateInvitationFlowToken,
+  }
+})
 vi.mock('../src/db.js', async importOriginal => {
   const real = await importOriginal<typeof import('../src/db.js')>()
   const proxy = {
@@ -67,6 +85,78 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       .set('x-external-client-ip', ip)
       .send({ email, password: submitted })
   }
+  async function denialCount(reason: string) {
+    const metric = await passwordAdmissionDenialsTotal.get()
+    return metric.values.find(value => value.labels.reason === reason)?.value ?? 0
+  }
+  async function recoverPassword(nextPassword: string) {
+    const invitation = await createInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email: 'member@example.invalid',
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    const proof = 'synthetic-trusted-reset-proof'
+    invitationFlow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'member@example.invalid',
+      invitationUuid: invitation.token,
+    })
+    const lookup = await request(app).get(`/external/invitations/token/${proof}`).expect(200)
+    expect(lookup.body).toMatchObject({
+      id: invitation.id,
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    expect(lookup.body).not.toHaveProperty('token')
+
+    const originalPasswordHash = (
+      await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])
+    ).rows[0].password_hash
+    await request(app)
+      .post('/external/invitations/password-token')
+      .send({
+        email: 'member@example.invalid',
+        token: proof,
+        invitationId: '00000000-0000-4000-8000-000000000000',
+        password: nextPassword,
+      })
+      .expect(403)
+    expect(
+      (await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])).rows[0]
+        .password_hash
+    ).toBe(originalPasswordHash)
+
+    const reset = await request(app)
+      .post('/external/invitations/password-token')
+      .send({
+        email: 'member@example.invalid',
+        token: proof,
+        invitationId: invitation.id,
+        password: nextPassword,
+      })
+      .expect(200)
+    expect(reset.body).not.toHaveProperty('sessionContext')
+    expect(reset.body.token).toEqual(expect.any(String))
+
+    const replay = await request(app)
+      .post('/external/invitations/password-token')
+      .send({
+        email: 'member@example.invalid',
+        token: proof,
+        invitationId: invitation.id,
+        password: 'Synthetic-replay-password',
+      })
+      .expect(409)
+    expect(replay.body).not.toHaveProperty('token')
+
+    const access = await request(app)
+      .post('/external/auth/verify')
+      .send({ token: reset.body.token })
+    expect(access.status).toBe(200)
+    expect(access.body.claims).toMatchObject({ userId, email: 'member@example.invalid' })
+    return access.body.claims
+  }
   beforeAll(async () => {
     admin = new Pool({ connectionString: adminUrl })
     await admin.query(`CREATE DATABASE "${database}"`)
@@ -82,6 +172,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       req.internalService = { name: 'external-rest-api' }
       next()
     })
+    app.use(createExternalInvitationsRouter())
     app.use(createExternalAuthRouter({} as Parameters<typeof createExternalAuthRouter>[0]))
     app.use(
       (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) =>
@@ -90,6 +181,8 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
   }, 60_000)
   beforeEach(async () => {
     vi.restoreAllMocks()
+    invitationFlow.registerAndSendInvitation.mockReset().mockResolvedValue(undefined)
+    invitationFlow.validateInvitationFlowToken.mockReset()
     await holder.pool.query('DELETE FROM team_members')
     await holder.pool.query('DELETE FROM invitations')
     await holder.pool.query('DELETE FROM teams')
@@ -158,13 +251,16 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
   it('denies a sixth source attempt before bcrypt', async () => {
     for (let i = 0; i < 5; i++) {
       await openPace()
-      await login(`source-${i}@example.invalid`)
+      expect((await login(`source-${i}@example.invalid`)).status).toBe(401)
     }
+    expect(compare).toHaveBeenCalledTimes(5)
+    const sourceDenials = await denialCount('source_rate')
     const before = compare.mock.calls.length
     const response = await login('sixth@example.invalid')
     expect(response.status).toBe(429)
     expect(response.body.error).toBe('rate_limited')
     expect(compare.mock.calls.length).toBe(before)
+    expect(await denialCount('source_rate')).toBe(sourceDenials + 1)
   })
   it('denies rotating sources and canonical identifier variants after five attempts', async () => {
     for (let i = 0; i < 5; i++) {
@@ -175,19 +271,129 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
         `192.0.2.${i + 1}`
       )
     }
+    const cooldownDenials = await denialCount('identifier_cooldown')
     const before = compare.mock.calls.length
     const response = await login('Member@Example.Invalid', 'wrong', '192.0.2.100')
     expect(response.status).toBe(429)
     expect(response.body.error).toBe('rate_limited')
     expect(compare.mock.calls.length).toBe(before)
+    expect(await denialCount('identifier_cooldown')).toBe(cooldownDenials + 1)
   })
   it('applies the same pace to unknown and existing evaluations with burst one', async () => {
     expect((await login('unknown@example.invalid')).status).toBe(401)
+    const globalPaceDenials = await denialCount('global_pace')
     const response = await login('member@example.invalid', 'wrong', '192.0.2.2')
     expect(response.status).toBe(429)
     expect(compare).toHaveBeenCalledTimes(1)
     expect(Number(response.headers['retry-after'])).toBeGreaterThan(0)
     expect(Number(response.headers['retry-after'])).toBeLessThanOrEqual(8)
+    expect(await denialCount('global_pace')).toBe(globalPaceDenials + 1)
+  })
+  it('restores authenticated access after global pace exhaustion without refunding attempts', async () => {
+    expect((await login('unknown@example.invalid', 'wrong', '192.0.2.31')).status).toBe(401)
+    const denied = await login('member@example.invalid', password, '192.0.2.32')
+    expect(denied.status).toBe(429)
+    expect(compare).toHaveBeenCalledTimes(1)
+
+    const attemptsBefore = (
+      await holder.pool.query(
+        'SELECT attempts FROM password_identifier_state WHERE identifier_key = $1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0].attempts
+    await recoverPassword('Synthetic-BUG192-recovered-under-global-saturation')
+    const attemptsAfter = (
+      await holder.pool.query(
+        'SELECT attempts FROM password_identifier_state WHERE identifier_key = $1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0].attempts
+    expect(attemptsAfter).toEqual(attemptsBefore)
+    expect(
+      (
+        await login(
+          'member@example.invalid',
+          'Synthetic-BUG192-recovered-under-global-saturation',
+          '192.0.2.33'
+        )
+      ).status
+    ).toBe(429)
+  })
+  it('restores authenticated access during identifier cooldown and preserves public attempts', async () => {
+    for (let i = 0; i < 5; i++) {
+      await openPace()
+      await login('member@example.invalid', 'wrong', `192.0.2.${40 + i}`)
+    }
+    const before = compare.mock.calls.length
+    await openPace()
+    const denied = await login('member@example.invalid', password, '192.0.2.49')
+    expect(denied.status).toBe(429)
+    expect(compare.mock.calls.length).toBe(before)
+
+    const stateBeforeRecovery = (
+      await holder.pool.query(
+        'SELECT attempts FROM password_identifier_state WHERE identifier_key = $1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0].attempts
+    expect(stateBeforeRecovery).toHaveLength(5)
+    const teamId = (
+      await holder.pool.query(
+        "INSERT INTO teams(name) VALUES ('Synthetic recovery team') RETURNING id"
+      )
+    ).rows[0].id
+    await holder.pool.query(
+      "INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'admin', 'active')",
+      [teamId, userId]
+    )
+    const claims = await recoverPassword('Synthetic-BUG192-recovered-during-identifier-cooldown')
+    expect(claims).toMatchObject({ teamId, role: 'admin' })
+    const stateAfterRecovery = (
+      await holder.pool.query(
+        'SELECT attempts FROM password_identifier_state WHERE identifier_key = $1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0].attempts
+    expect(stateAfterRecovery).toEqual(stateBeforeRecovery)
+
+    const attemptDenials = await denialCount('identifier_attempts')
+    const comparisons = compare.mock.calls.length
+    await openPace()
+    const stillDenied = await login(
+      'member@example.invalid',
+      'Synthetic-BUG192-recovered-during-identifier-cooldown',
+      '192.0.2.50'
+    )
+    expect(stillDenied.status).toBe(429)
+    expect(compare.mock.calls.length).toBe(comparisons)
+    expect(await denialCount('identifier_attempts')).toBe(attemptDenials + 1)
+  })
+  it('keeps the account attempt budget after correct-password successes', async () => {
+    for (let i = 0; i < 5; i++) {
+      await openPace()
+      expect((await login('member@example.invalid', password, `192.0.2.${60 + i}`)).status).toBe(
+        200
+      )
+    }
+    const attemptDenials = await denialCount('identifier_attempts')
+    await openPace()
+    const denied = await login('member@example.invalid', password, '192.0.2.69')
+    expect(denied.status).toBe(429)
+    expect(await denialCount('identifier_attempts')).toBe(attemptDenials + 1)
+  })
+  it('records durable verification-owner contention without running bcrypt', async () => {
+    const lease = await acquirePasswordWork()
+    expect(lease).not.toBeNull()
+    try {
+      const busyDenials = await denialCount('verification_busy')
+      const before = compare.mock.calls.length
+      const response = await login('member@example.invalid', password)
+      expect(response.status).toBe(429)
+      expect(compare.mock.calls.length).toBe(before)
+      expect(await denialCount('verification_busy')).toBe(busyDenials + 1)
+    } finally {
+      await lease?.release()
+    }
   })
   it('keeps real and shadow cooldown status/body/retry metadata identical', async () => {
     // Backdate admitted attempts and completed failures using the DB clock,
@@ -270,6 +476,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     // Real database producer: temporarily revoke table access by making its
     // relation unavailable, then restore it even when the assertion fails.
     const exists = await newStateExists()
+    const authorityFailures = await denialCount('authority_failure')
     if (exists)
       await holder.pool.query(
         'ALTER TABLE password_identifier_state RENAME TO password_identifier_state_unavailable'
@@ -281,6 +488,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       expect(b.status).toBe(503)
       expect(a.body).toEqual(b.body)
       expect(compare).not.toHaveBeenCalled()
+      expect(await denialCount('authority_failure')).toBe(authorityFailures + 2)
     } finally {
       if (exists)
         await holder.pool.query(

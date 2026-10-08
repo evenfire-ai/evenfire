@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
-import { withTransaction } from '../../db.js'
+import { type DbTransactionClient, withTransaction } from '../../db.js'
 
 // Process-incarnation identity is distinct from reusable host/PID diagnostics.
 let ownerInstance: string | undefined
 
 /** Null means immediately busy. A persistence error propagates for sanitized fail-closed handling. */
-export async function acquirePasswordWork(): Promise<{ release: () => Promise<void> } | null> {
+export async function acquirePasswordWork(): Promise<{
+  release: () => Promise<void>
+  releaseWithin: (db: Pick<DbTransactionClient, 'query'>) => Promise<void>
+} | null> {
   const owner = (ownerInstance ??= randomUUID())
   const operation = randomUUID()
   const admitted = await withTransaction(async db => {
@@ -22,18 +25,24 @@ export async function acquirePasswordWork(): Promise<{ release: () => Promise<vo
     return result.rows.length === 1
   })
   if (!admitted) return null
+  const releaseOwned = async (db: Pick<DbTransactionClient, 'query'>) => {
+    await db.query('SET LOCAL synchronous_commit = on')
+    const result = await db.query(
+      `DELETE FROM password_verification_work
+       WHERE singleton AND operation_id = $1 AND owner_instance = $2 RETURNING singleton`,
+      [operation, owner]
+    )
+    if (result.rows.length !== 1) throw new Error('password work ownership lost')
+  }
   let released: Promise<void> | undefined
   return {
+    // Password credential updates can release the durable owner in the same
+    // transaction as their commit. If that transaction rolls back, callers
+    // must fall back to release() so the persisted owner does not linger.
+    releaseWithin: releaseOwned,
     release: () => {
       released ??= withTransaction(async db => {
-        await db.query('SET LOCAL synchronous_commit = on')
-        const result = await db.query(
-          `DELETE FROM password_verification_work
-           WHERE singleton AND operation_id = $1 AND owner_instance = $2 RETURNING singleton`,
-          [operation, owner]
-        )
-        // An externally removed/replaced owner is not proof that our authority was preserved.
-        if (result.rows.length !== 1) throw new Error('password work ownership lost')
+        await releaseOwned(db)
       })
       return released
     },

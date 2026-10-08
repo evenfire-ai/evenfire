@@ -51,7 +51,7 @@ export const passwordLoginSourceAdmission = rateLimitMiddleware({
   },
   onLimited: (_req, res, retryAfterSeconds) => {
     sendPasswordAdmissionError(
-      new PasswordAdmissionError(429, Math.min(60, retryAfterSeconds)),
+      new PasswordAdmissionError(429, Math.min(60, retryAfterSeconds), 'source_rate'),
       res
     )
   },
