@@ -123,6 +123,12 @@ type PendingSandboxUiDeepLinkLaunch = {
   conversationOrigin: SandboxUiConversationOrigin | null
 }
 
+function formatLinkProvidedEnvironmentName(name: string): string {
+  const characters = Array.from(name.trim())
+  if (characters.length <= 64) return characters.join('')
+  return `${characters.slice(0, 63).join('')}…`
+}
+
 const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
   'ECONNRESET',
   'ECONNREFUSED',
@@ -2722,17 +2728,33 @@ export function App() {
         }
       })()
     : ''
+  const pendingSwitchCurrentHost = vm.pendingDesktopEnvironmentSwitchConfirmation
+    ? (() => {
+        try {
+          return new URL(
+            vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl
+          ).host
+        } catch {
+          return vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl
+        }
+      })()
+    : ''
   const environmentSwitchConfirmationDialog = vm.pendingDesktopEnvironmentSwitchConfirmation ? (
     <ConfirmDialog
       title="Switch desktop environment?"
       body={
         <>
           <p>
-            You are signed in to{' '}
-            <strong>{vm.pendingDesktopEnvironmentSwitchConfirmation.activeEnvironmentName}</strong>.
-            Switching to{' '}
-            <strong>{vm.pendingDesktopEnvironmentSwitchConfirmation.targetEnvironmentName}</strong>{' '}
+            You are signed in to the REST API host{' '}
+            <strong>{pendingSwitchCurrentHost || 'unknown'}</strong>. The Profile UI link requests{' '}
+            the REST API host <strong>{pendingSwitchTargetHost || 'unknown'}</strong>. Switching
             will sign you out and interrupt activity in the current environment.
+          </p>
+          <p className="muted">
+            Profile link label (unverified):{' '}
+            {formatLinkProvidedEnvironmentName(
+              vm.pendingDesktopEnvironmentSwitchConfirmation.targetEnvironmentName
+            )}
           </p>
           {vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl ? (
             <p className="auth-environment-confirm-url">
@@ -2761,15 +2783,21 @@ export function App() {
       title="Add desktop environment?"
       body={
         <>
-          <p>
-            Review the External REST API for{' '}
-            <strong>{vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'}</strong>. Continue
-            only if you trust this host.
+          <p>Review this External REST API host. Continue only if you trust it.</p>
+          {pendingEnvironmentHost ? (
+            <p>
+              Host: <strong>{pendingEnvironmentHost}</strong>
+            </p>
+          ) : null}
+          <p className="muted">
+            Profile link label (unverified):{' '}
+            {formatLinkProvidedEnvironmentName(
+              vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'
+            )}
           </p>
           <p className="auth-environment-confirm-url">
             {vm.pendingDesktopEnvironmentSetup.externalRestApiBaseUrl}
           </p>
-          {pendingEnvironmentHost ? <p className="muted">Host: {pendingEnvironmentHost}</p> : null}
         </>
       }
       cancelLabel="Cancel"
