@@ -469,7 +469,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.executor.executorState).toBe('waiting_approval')
     expect(test.onApprovalNeeded).toHaveBeenCalledTimes(1)
     expect(test.requests).toHaveLength(1)
-    expect(test.store.debugUsage().files).toBe(1)
+    expect((await test.store.debugInventory()).files).toBe(1)
     expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
     expect(JSON.stringify(test.executor.pendingApproval)).not.toContain(bytes.toString())
     expect(JSON.stringify(test.executor.pendingApproval)).not.toContain(bytes.toString('base64'))
@@ -573,7 +573,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
 
     expect(test.contentRequests).toBe(1)
     expect(test.requests).toEqual([])
-    expect(test.store.debugUsage().files).toBe(0)
+    expect((await test.store.debugInventory()).files).toBe(0)
     expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
   })
 
@@ -590,7 +590,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
 
     expect(test.contentRequests).toBe(1)
     expect(test.requests).toHaveLength(1)
-    expect(test.store.debugUsage().files).toBe(0)
+    expect((await test.store.debugInventory()).files).toBe(0)
     expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
   })
 
@@ -639,7 +639,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     await run
 
     expect(order).toEqual(['admission-settled', 'owner-release'])
-    expect(test.store.debugUsage().files).toBe(0)
+    expect((await test.store.debugInventory()).files).toBe(0)
     expect(test.onFail).not.toHaveBeenCalled()
     expect(test.lifecycle.getStatus(test.task.id)).toBe('cancelled')
   })
@@ -672,7 +672,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     await run
 
     expect(test.requests).toEqual([])
-    expect(test.store.debugUsage().files).toBe(0)
+    expect((await test.store.debugInventory()).files).toBe(0)
     expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
   })
 

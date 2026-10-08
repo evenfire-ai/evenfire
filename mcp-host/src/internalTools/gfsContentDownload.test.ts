@@ -3,9 +3,34 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
+import { register } from 'prom-client'
 import { downloadGfsContent } from './gfsContentDownload'
 import { readGfsMetadata } from './gfsContentRead'
 import { GfsDownloadStore } from './gfsDownloadStore'
+
+const { rmFailure } = vi.hoisted(() => ({
+  /** `target` is a name prefix under `.gfs-downloads`, e.g. the store's `.trash-` names. */
+  rmFailure: { target: undefined as string | undefined, injected: 0 },
+}))
+// Pass-through `rm`: one test makes the store's removal of a transfer
+// directory fail once, as a read-only parent or a busy mount would.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    rm: async (...values: Parameters<typeof actual.rm>) => {
+      if (
+        rmFailure.target !== undefined &&
+        String(values[0]).includes(`/.gfs-downloads/${rmFailure.target}`)
+      ) {
+        rmFailure.target = undefined
+        rmFailure.injected += 1
+        throw Object.assign(new Error('simulated rm failure'), { code: 'EACCES' })
+      }
+      return actual.rm(...values)
+    },
+  }
+})
 
 const args = { drive: 'main', resourceId: 'a'.repeat(32) }
 const uri = `gfs://main/${args.resourceId}`
@@ -73,6 +98,16 @@ function options(overrides: Record<string, unknown> = {}) {
   }
 }
 
+async function expiryCount(outcome: string): Promise<number> {
+  const metric = register.getSingleMetric('clerum_gfs_download_expiry_total')
+  if (metric === undefined)
+    throw new Error('metric clerum_gfs_download_expiry_total is not registered')
+  const { values } = await metric.get()
+  return values
+    .filter(sample => sample.labels.outcome === outcome)
+    .reduce((sum, sample) => sum + sample.value, 0)
+}
+
 async function retainedDirectories(): Promise<string[]> {
   return fs.readdir(path.join(callerRoot, '.gfs-downloads')).catch(() => [])
 }
@@ -86,6 +121,8 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  rmFailure.target = undefined
+  rmFailure.injected = 0
   vi.useRealTimers()
   vi.restoreAllMocks()
   await fs.rm(hostRoot, { recursive: true, force: true })
@@ -306,7 +343,7 @@ describe('governed GFS content download', () => {
     releaseSync()
     await rejected
     expect(await retainedDirectories()).toEqual([])
-    expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
+    expect(await store.debugInventory()).toMatchObject({ bytes: 0, files: 0 })
     await downloadGfsContent(harness(new Uint8Array([1])), args, options())
   })
 
@@ -346,11 +383,11 @@ describe('governed GFS content download', () => {
     releaseRead()
     await rejected
     expect(await retainedDirectories()).toEqual([])
-    expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
+    expect(await store.debugInventory()).toMatchObject({ bytes: 0, files: 0 })
     await downloadGfsContent(harness(new Uint8Array([1])), args, options())
   })
 
-  it('keeps quota reserved when cancellation cleanup fails', async () => {
+  it('releases the reservation when cancellation cleanup fails and a later sweep removes the leftover', async () => {
     const controller = new AbortController()
     const bytes = new Uint8Array([1, 2, 3, 4, 5])
     const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
@@ -380,36 +417,46 @@ describe('governed GFS content download', () => {
     const rejected = expect(pending).rejects.toMatchObject({ code: 'cancelled' })
     await syncStarted
     const [name] = await retainedDirectories()
-    const directory = path.join(callerRoot, '.gfs-downloads', name)
-    await fs.rename(directory, `${directory}.parked`)
-    await fs.writeFile(directory, 'not-a-directory')
+    const removeFailed = await expiryCount('remove_failed')
+    // The store renames a directory to a private `.trash-<uuid>` name before rm.
+    rmFailure.target = '.trash-'
     controller.abort()
     releaseSync()
     await rejected
-    expect(store.debugUsage()).toMatchObject({ bytes: bytes.byteLength, files: 1 })
-    const ledger = JSON.parse(
-      await fs.readFile(path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json'), 'utf8')
-    ) as { records: Record<string, { state: string; sha256?: string }> }
-    const [record] = Object.values(ledger.records)
-    expect(record?.state).toBe('cleanup_failed')
-    expect(record?.sha256).toBeUndefined()
+
+    // Witness: the store's removal was attempted and failed exactly once.
+    expect(rmFailure.injected).toBe(1)
+    expect(await expiryCount('remove_failed')).toBe(removeFailed + 1)
+    // The leftover is the renamed transfer: incomplete and holding no reservation.
+    const retained = await retainedDirectories()
+    expect(retained).not.toContain(name)
+    expect(retained).toHaveLength(1)
+    expect(retained[0]).toMatch(/^\.trash-[0-9a-f-]{36}$/)
+    const directory = path.join(callerRoot, '.gfs-downloads', retained[0]!)
+    await expect(fs.lstat(directory)).resolves.toBeDefined()
+    await expect(fs.lstat(path.join(directory, 'meta.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+    expect(await store.debugInventory()).toMatchObject({ bytes: 0, files: 0 })
     await expect(
       downloadGfsContent(harness(new Uint8Array([1])), args, options())
     ).resolves.toMatchObject({
       sizeBytes: 1,
     })
+    // The next admission read the disk and removed the leftover.
+    await expect(fs.lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('reuses a verified copy only after fresh authorization without renewing its TTL', async () => {
     const bytes = new Uint8Array([1, 2, 3, 4])
     const request = vi.fn(harness(bytes))
     const first = await downloadGfsContent(request, args, options())
-    const usage = store.debugUsage()
+    const usage = await store.debugInventory()
     const second = await downloadGfsContent(request, args, options())
 
     expect(second).toEqual(first)
     expect(second.expiresAt).toBe(first.expiresAt)
-    expect(store.debugUsage()).toEqual(usage)
+    expect(await store.debugInventory()).toEqual(usage)
     expect(request.mock.calls).toHaveLength(3)
     expect(request.mock.calls.filter(([url]) => url.includes('/content?'))).toHaveLength(1)
   })
@@ -421,7 +468,7 @@ describe('governed GFS content download', () => {
 
     await expect(downloadGfsContent(request, args, options())).rejects.toThrow('gfsc 403')
     expect(request).toHaveBeenCalledOnce()
-    expect(store.debugUsage()).toMatchObject({ bytes: bytes.byteLength, files: 1 })
+    expect(await store.debugInventory()).toMatchObject({ bytes: bytes.byteLength, files: 1 })
   })
 
   it('does not substitute a retained version for a newly stale reference', async () => {
@@ -437,7 +484,7 @@ describe('governed GFS content download', () => {
     expect(request).toHaveBeenCalledOnce()
   })
 
-  it('replaces an invalid cached copy through the authorized source and keeps old bytes accounted', async () => {
+  it('replaces an invalid cached copy through the authorized source and removes the invalid copy', async () => {
     const bytes = new Uint8Array([1, 2, 3])
     const first = await downloadGfsContent(harness(bytes), args, options())
     await fs.writeFile(path.join(callerRoot, first.path), new Uint8Array([3, 2, 1]))
@@ -447,8 +494,10 @@ describe('governed GFS content download', () => {
     expect(second.id).not.toBe(first.id)
     expect(second.sha256).toBe(first.sha256)
     expect(request).toHaveBeenCalledTimes(2)
-    expect(store.debugRecord(first.id)?.state).toBe('missing')
-    expect(store.debugUsage()).toMatchObject({ bytes: bytes.byteLength * 2, files: 2 })
+    await expect(
+      fs.lstat(path.join(callerRoot, '.gfs-downloads', `input-${first.id}`))
+    ).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await store.debugInventory()).toMatchObject({ bytes: bytes.byteLength, files: 1 })
     await expect(store.readManagedFile(second.path, 'caller-a')).resolves.toEqual(
       Buffer.from(bytes)
     )

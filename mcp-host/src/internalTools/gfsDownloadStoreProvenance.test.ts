@@ -27,7 +27,7 @@ import {
   withEnvironment,
 } from '../__tests__/fixtures/gfsStoreTestKit'
 import { logger } from '../logger'
-import { GfsDownloadStoreFs } from './gfsDownloadStoreFs'
+import { GfsDownloadStore } from './gfsDownloadStore'
 
 const { hashBoundary } = vi.hoisted(() => ({ hashBoundary: vi.fn() }))
 // Pass-through: the store hashes through createHash; the kit uses crypto.hash.
@@ -44,8 +44,8 @@ let nativeCrypto: typeof crypto
 let hostRoot: string
 let rootA: string
 let rootB: string
-let store: GfsDownloadStoreFs
-const extraStores: GfsDownloadStoreFs[] = []
+let store: GfsDownloadStore
+const extraStores: GfsDownloadStore[] = []
 const outsideRoots: string[] = []
 
 function receiptPathOf(id: string): string {
@@ -68,8 +68,8 @@ function plantComplete(
   })
 }
 
-async function openStore(): Promise<GfsDownloadStoreFs> {
-  const opened = new GfsDownloadStoreFs(hostRoot)
+async function openStore(): Promise<GfsDownloadStore> {
+  const opened = new GfsDownloadStore(hostRoot)
   extraStores.push(opened)
   await opened.initialize()
   return opened
@@ -81,7 +81,7 @@ function outsideDirectory(): string {
   return outside
 }
 
-async function expectNotServed(target: GfsDownloadStoreFs, id: string, identity: string) {
+async function expectNotServed(target: GfsDownloadStore, id: string, identity: string) {
   await expect(target.readManagedFile(receiptPathOf(id), identity)).rejects.toMatchObject({
     code: 'download_missing',
   })
@@ -106,7 +106,7 @@ beforeEach(async () => {
   hostRoot = syncFs.mkdtempSync(path.join(tmpdir(), 'gfs-store-provenance-'))
   rootA = callerDirectory(hostRoot, A)
   rootB = callerDirectory(hostRoot, B)
-  store = new GfsDownloadStoreFs(hostRoot)
+  store = new GfsDownloadStore(hostRoot)
   await store.initialize()
 })
 
@@ -187,9 +187,9 @@ describe('GFS download store provenance: planted copies', () => {
       },
       async () => {
         vi.resetModules()
-        const { GfsDownloadStoreFs: Store } = await import('./gfsDownloadStoreFs')
+        const { GfsDownloadStore: Store } = await import('./gfsDownloadStore')
         const opened = new Store(hostRoot)
-        extraStores.push(opened as unknown as GfsDownloadStoreFs)
+        extraStores.push(opened as unknown as GfsDownloadStore)
         await opened.initialize()
         return opened
       }

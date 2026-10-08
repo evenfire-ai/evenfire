@@ -7,9 +7,7 @@ import {
   recordGfsDownloadExpiry,
   recordGfsDownloadQuota,
   recordGfsDownloadTransfer,
-  recordGfsLegacyProcessingLeasesDiscarded,
   recordGfsShellOutputLimit,
-  setGfsQuarantinedRecords,
 } from './gfsDownloadMetrics'
 
 async function counterValue(name: string): Promise<number> {
@@ -17,6 +15,16 @@ async function counterValue(name: string): Promise<number> {
   if (metric === undefined) throw new Error(`metric ${name} is not registered`)
   const { values } = await metric.get()
   return values.reduce((sum, sample) => sum + sample.value, 0)
+}
+
+async function expiryValue(outcome: string): Promise<number> {
+  const metric = register.getSingleMetric('clerum_gfs_download_expiry_total')
+  if (metric === undefined)
+    throw new Error('metric clerum_gfs_download_expiry_total is not registered')
+  const { values } = await metric.get()
+  return values
+    .filter(sample => sample.labels.outcome === outcome)
+    .reduce((sum, sample) => sum + sample.value, 0)
 }
 
 describe('GFS download metrics', () => {
@@ -38,7 +46,7 @@ describe('GFS download metrics', () => {
     exitGfsDownloadTransfer()
     recordGfsShellOutputLimit('output_limit_exceeded')
     recordGfsDownloadQuota('caller', 'storage_bytes')
-    recordGfsDownloadExpiry('cleanup_failed')
+    recordGfsDownloadExpiry('remove_failed')
 
     const scraped = await register.metrics()
     expect(scraped).toContain('clerum_gfs_download_admissions_total{outcome="workspace_attempt"}')
@@ -50,25 +58,34 @@ describe('GFS download metrics', () => {
     expect(scraped).toContain(
       'clerum_gfs_download_quota_total{scope="caller",reason="storage_bytes"}'
     )
-    expect(scraped).toContain('clerum_gfs_download_expiry_total{outcome="cleanup_failed"}')
+    expect(scraped).toContain('clerum_gfs_download_expiry_total{outcome="remove_failed"}')
   })
 
-  it('U10: registers the legacy-lease discard counter and the quarantined-records gauge', async () => {
+  it('U10: counts every expiry outcome and no longer registers the ledger-era instruments', async () => {
+    const outcomes = [
+      'expired_removed',
+      'incomplete_removed',
+      'remove_failed',
+      'retired_legacy_store',
+      'sweep_failed',
+    ] as const
+    const before = new Map<string, number>()
+    for (const outcome of outcomes) before.set(outcome, await expiryValue(outcome))
+    for (const outcome of outcomes) recordGfsDownloadExpiry(outcome)
+    for (const outcome of outcomes)
+      expect(await expiryValue(outcome)).toBe(before.get(outcome)! + 1)
+
     const scraped = await register.metrics()
-    expect(scraped).toContain('# TYPE clerum_gfs_legacy_processing_leases_discarded_total counter')
-    expect(scraped).toContain('# TYPE clerum_gfs_download_store_quarantined_records gauge')
-    const discardedBefore = await counterValue(
-      'clerum_gfs_legacy_processing_leases_discarded_total'
+    // Witness: the scrape carries the instruments this module still registers.
+    expect(scraped).toContain('# TYPE clerum_gfs_download_expiry_total counter')
+    expect(scraped).toContain('# TYPE clerum_gfs_download_quota_total counter')
+    expect(scraped).not.toContain('clerum_gfs_legacy_processing_leases_discarded_total')
+    expect(scraped).not.toContain('clerum_gfs_download_store_quarantined_records')
+    expect(register.getSingleMetric('clerum_gfs_legacy_processing_leases_discarded_total')).toBe(
+      undefined
     )
-    recordGfsLegacyProcessingLeasesDiscarded(2)
-    expect(await counterValue('clerum_gfs_legacy_processing_leases_discarded_total')).toBe(
-      discardedBefore + 2
+    expect(register.getSingleMetric('clerum_gfs_download_store_quarantined_records')).toBe(
+      undefined
     )
-    // A gauge carries the current count: setting it twice never accumulates.
-    setGfsQuarantinedRecords(3)
-    setGfsQuarantinedRecords(3)
-    expect(await counterValue('clerum_gfs_download_store_quarantined_records')).toBe(3)
-    setGfsQuarantinedRecords(0)
-    expect(await counterValue('clerum_gfs_download_store_quarantined_records')).toBe(0)
   })
 })

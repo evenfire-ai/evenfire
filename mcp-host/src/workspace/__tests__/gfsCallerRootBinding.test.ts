@@ -41,6 +41,18 @@ describe('NativeRegistry GFS caller file-tool binding', () => {
     fs.rmSync(root, { recursive: true, force: true })
   })
 
+  /**
+   * Host-root accounting the file tools must never reach. The filesystem store
+   * writes none, so tests seed the protected pre-#1028 namespace after the
+   * store has initialized.
+   */
+  function seedHostAccounting(): string {
+    const ledger = path.join(root, '.gfs-download-store', 'ledger-v1.json')
+    fs.mkdirSync(path.dirname(ledger), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(ledger, 'accounting-sentinel', { mode: 0o600 })
+    return ledger
+  }
+
   function source(): IncomingMessage {
     return {
       content: 'process file',
@@ -89,7 +101,7 @@ describe('NativeRegistry GFS caller file-tool binding', () => {
     expect(fs.existsSync(path.join(callerRoot, 'own.txt'))).toBe(true)
     expect(fs.existsSync(path.join(root, 'own.txt'))).toBe(false)
 
-    const ledger = path.join(root, '.gfs-download-store', 'ledger-v1.json')
+    const ledger = seedHostAccounting()
     const before = fs.readFileSync(ledger, 'utf-8')
     const directRead = await registryForCaller.get('file_read')!.execute({
       path: '.gfs-download-store/ledger-v1.json',
@@ -147,7 +159,7 @@ describe('NativeRegistry GFS caller file-tool binding', () => {
     const provider = new ScopedWorkspaceProvider(root)
     const lexicalCallerRoot = provider.forSource(source()).userRootPath
     fs.rmSync(lexicalCallerRoot, { recursive: true, force: true })
-    fs.symlinkSync(path.join(root, '.gfs-download-store'), lexicalCallerRoot)
+    fs.symlinkSync(path.dirname(seedHostAccounting()), lexicalCallerRoot)
 
     const binding = resolveCallerRootBinding(provider, source())
     expect(binding.root).toBeUndefined()
@@ -183,8 +195,8 @@ describe('NativeRegistry GFS caller file-tool binding', () => {
     store = new GfsDownloadStore(root)
     stores.push(store)
     await store.initialize()
-    const accountingRoot = path.join(root, '.gfs-download-store')
-    const ledger = path.join(accountingRoot, 'ledger-v1.json')
+    const ledger = seedHostAccounting()
+    const accountingRoot = path.dirname(ledger)
     const before = fs.readFileSync(ledger, 'utf-8')
     fs.symlinkSync(accountingRoot, path.join(root, 'users'))
     const provider = new ScopedWorkspaceProvider(root)
@@ -219,7 +231,7 @@ describe('NativeRegistry GFS caller file-tool binding', () => {
     const binding = resolveCallerRootBinding(provider, source())
     expect(binding.root).toBeDefined()
     const bound = registry(binding.root)
-    const ledger = path.join(root, '.gfs-download-store', 'ledger-v1.json')
+    const ledger = seedHostAccounting()
     const before = fs.readFileSync(ledger, 'utf-8')
 
     fs.rmSync(binding.root!, { recursive: true, force: true })

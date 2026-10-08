@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawn } from 'child_process'
 import * as fs from 'node:fs/promises'
-import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { buildDevStore } from '../../__tests__/fixtures/devGfsStoreFixture'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
@@ -98,53 +98,56 @@ afterEach(async () => {
   Object.assign(appConfig.nativeTool, savedNativeTool)
 })
 
+/**
+ * A store whose Host root is a symlink: initialize refuses it with
+ * workspace_unavailable. The shell workspace stays on the real temp root.
+ */
 async function unavailableStore() {
   const root = await fs.mkdtemp(join(tmpdir(), 'gfs-shell-safety-'))
   roots.push(root)
-  await fs.mkdir(join(root, '.gfs-download-store'), { mode: 0o700 })
-  const store = new GfsDownloadStore(root)
+  const target = join(root, 'store-target')
+  await fs.mkdir(target, { mode: 0o700 })
+  const link = join(root, 'store-link')
+  await fs.symlink(target, link)
+  const store = new GfsDownloadStore(link)
   stores.push(store)
-  // A store directory without a ledger must refuse to initialize. Capture the
-  // rejection instead of swallowing it so tests can assert which failure the
-  // store reported; an initialize that resolves breaks the fixture loudly.
+  // Capture the rejection instead of swallowing it so tests can assert which
+  // failure the store reported; an initialize that resolves breaks the fixture
+  // loudly.
   const initError = await store.initialize().then(
     () => {
-      throw new Error('unavailableStore fixture: initialize() resolved on a ledger-less store')
+      throw new Error('unavailableStore fixture: initialize() resolved on a symlinked Host root')
     },
     (error: unknown) => error
   )
+  expect(initError).toMatchObject({ code: 'workspace_unavailable' })
   return { root, store, initError }
 }
 
 /**
- * A closed store whose ledger carries a processing lease written by a pre-#1019
- * Host that crashed: empty and owned by a foreign writer session. By default
- * the lease is expired; `live` seeds one whose expiry is still in the future.
+ * A store whose Host root still holds what the pre-#1028 image left on disk: a
+ * ledger with an empty processing lease written by a crashed Host, the v2
+ * writer fence and its database. By default the lease is expired; `live`
+ * seeds one whose expiry is still in the future.
  */
-async function seedLegacyLeaseLedger({ live = false }: { live?: boolean } = {}) {
+async function preRedesignStore({ live = false }: { live?: boolean } = {}) {
   const root = await fs.mkdtemp(join(tmpdir(), 'gfs-shell-safety-legacy-'))
   roots.push(root)
-  const first = new GfsDownloadStore(root)
-  await first.initialize()
-  await first.close()
-  const ledgerPath = join(root, '.gfs-download-store', 'ledger-v1.json')
-  const ledger = JSON.parse(await fs.readFile(ledgerPath, 'utf8'))
-  const leaseId = '77777777-7777-4777-8777-777777777777'
-  const seededLease = {
-    leaseId,
-    callerIdentity: '_system',
-    recordIds: [],
-    acquiredAt: new Date(Date.now() - 120_000).toISOString(),
-    expiresAt: new Date(Date.now() + (live ? 600_000 : -60_000)).toISOString(),
-    writerSessionId: '88888888-8888-4888-8888-888888888888',
+  const devStore = await buildDevStore(root, {
+    ledger: 'processingLeasesEmpty',
+    fence: 'v2-matching',
+    sqlite: true,
+    userDirs: [],
+    lease: live ? 'live' : 'expired',
+  })
+  if (devStore.ledgerText === undefined)
+    throw new Error('preRedesignStore fixture: no ledger was written')
+  const ledger = JSON.parse(devStore.ledgerText) as {
+    processingLeases: Record<string, { expiresAt: string }>
   }
-  ledger.processingLeases = { [leaseId]: seededLease }
-  await fs.writeFile(ledgerPath, JSON.stringify(ledger), { mode: 0o600 })
-  return { root, ledgerPath, seededLease }
-}
-
-async function legacyLeaseStore({ live = false }: { live?: boolean } = {}) {
-  const { root, seededLease } = await seedLegacyLeaseLedger({ live })
+  const [seededLease] = Object.values(ledger.processingLeases)
+  if (seededLease === undefined)
+    throw new Error('preRedesignStore fixture: no processing lease was written')
   const store = new GfsDownloadStore(root)
   stores.push(store)
   await store.initialize()
@@ -173,7 +176,7 @@ async function shellScenario({
   approvalEnabled = true,
   shellApprovalDisabled = false,
   healthy = false,
-  legacyLease = false,
+  preRedesign = false,
   channelCaller = false,
   missingCallerRoot = false,
   calls = [{ id: 'shell-safety', name: 'shell_exec', arguments: { command: 'pwd' } }],
@@ -185,7 +188,7 @@ async function shellScenario({
   approvalEnabled?: boolean
   shellApprovalDisabled?: boolean
   healthy?: boolean
-  legacyLease?: boolean
+  preRedesign?: boolean
   channelCaller?: boolean
   missingCallerRoot?: boolean
   calls?: ToolCall[]
@@ -198,8 +201,8 @@ async function shellScenario({
   appConfig.enableApproval = approvalEnabled
   const fixture: StoreFixture = storeFixture
     ? await storeFixture()
-    : legacyLease
-      ? await legacyLeaseStore()
+    : preRedesign
+      ? await preRedesignStore()
       : healthy
         ? await healthyStore()
         : await unavailableStore()
@@ -323,10 +326,10 @@ it.each([
   }
 )
 
-it('X1: an inherited legacy lease no longer blocks an approved shell or GFS delivery', async () => {
+it('X1: a store left by the pre-#1028 image no longer blocks an approved shell or GFS delivery', async () => {
   const scenario = await shellScenario({
     source: 'channel',
-    legacyLease: true,
+    preRedesign: true,
     channelCaller: true,
   })
   expect(scenario.store.isAvailable()).toBe(true)
@@ -346,7 +349,7 @@ it('X1: an inherited legacy lease no longer blocks an approved shell or GFS deli
   expect(toolResult).not.toContain('download_busy')
 })
 
-it('X2: a store at corrupt_store_ledger keeps shell and GFS reads but withdraws delivery', async () => {
+it('X2: a store at workspace_unavailable keeps shell and GFS reads but withdraws delivery', async () => {
   const scenario = await shellScenario({
     source: 'cron',
     calls: [
@@ -358,10 +361,10 @@ it('X2: a store at corrupt_store_ledger keeps shell and GFS reads but withdraws 
       { id: 'shell-safety', name: 'shell_exec', arguments: { command: 'pwd' } },
     ],
   })
-  // Witness: the store refused to initialize with exactly corrupt_store_ledger,
+  // Witness: the store refused to initialize with exactly workspace_unavailable,
   // not with any other initialize failure.
   expect(scenario.storeInitError).toBeInstanceOf(GfsDownloadStoreError)
-  expect(scenario.storeInitError).toMatchObject({ code: 'corrupt_store_ledger' })
+  expect(scenario.storeInitError).toMatchObject({ code: 'workspace_unavailable' })
   expect(scenario.store.isAvailable()).toBe(false)
   await scenario.executor.run()
 
@@ -383,7 +386,7 @@ it('X2: a store at corrupt_store_ledger keeps shell and GFS reads but withdraws 
   expect(JSON.stringify(scenario.providerCalls.at(-1))).toContain(scenario.callerWorkspace)
 })
 
-it('X2b: a store at corrupt_store_ledger still answers admitted inline reads, accessible and resolve', async () => {
+it('X2b: a store at workspace_unavailable still answers admitted inline reads, accessible and resolve', async () => {
   const smallResourceId = 'd'.repeat(32)
   const smallSource = {
     kind: 'gfs' as const,
@@ -425,9 +428,9 @@ it('X2b: a store at corrupt_store_ledger still answers admitted inline reads, ac
       { id: 'gfs-resolve', name: 'clerum__gfs_resolve', arguments: { uri: accessibleUri } },
     ],
   })
-  // Same fixture as X2: the store refused to initialize with corrupt_store_ledger.
+  // Same fixture as X2: the store refused to initialize with workspace_unavailable.
   expect(scenario.storeInitError).toBeInstanceOf(GfsDownloadStoreError)
-  expect(scenario.storeInitError).toMatchObject({ code: 'corrupt_store_ledger' })
+  expect(scenario.storeInitError).toMatchObject({ code: 'workspace_unavailable' })
   expect(scenario.store.isAvailable()).toBe(false)
   await scenario.executor.run()
 
@@ -617,10 +620,10 @@ function shellDispatchWindows(timeline: string[]) {
   }
 }
 
-it('X1-shell: an inherited legacy lease does not stop an approved shell (#1019)', async () => {
+it('X1-shell: a store left by the pre-#1028 image does not stop an approved shell (#1019)', async () => {
   const scenario = await shellScenario({
     source: 'channel',
-    legacyLease: true,
+    preRedesign: true,
     channelCaller: true,
   })
   await scenario.executor.run()
@@ -636,10 +639,10 @@ it('X1-shell: an inherited legacy lease does not stop an approved shell (#1019)'
   expect(scenario.onFail).not.toHaveBeenCalled()
 })
 
-it('X1-delivery: an inherited legacy lease is discarded and GFS delivery stays advertised (#1019)', async () => {
+it('X1-delivery: a store left by the pre-#1028 image is ignored and GFS delivery stays advertised (#1019)', async () => {
   const scenario = await shellScenario({
     source: 'channel',
-    legacyLease: true,
+    preRedesign: true,
     channelCaller: true,
   })
   await scenario.executor.run()
@@ -668,34 +671,28 @@ function shellToolResult(providerCalls: ChatMessage[][], toolCallId: string): st
   return typeof message.content === 'string' ? message.content : JSON.stringify(message.content)
 }
 
-async function liveLegacyLeaseScenario(call: ToolCall) {
+async function livePreRedesignScenario(call: ToolCall) {
   let seededLease: { expiresAt: string } | undefined
   const scenario = await shellScenario({
     source: 'channel',
     channelCaller: true,
     calls: [call],
     storeFixture: async () => {
-      const fixture = await legacyLeaseStore({ live: true })
+      const fixture = await preRedesignStore({ live: true })
       seededLease = fixture.seededLease
       return fixture
     },
   })
-  // Witness: the seeded lease is live by its own expiry, so its discard cannot
+  // Witness: the seeded lease is live by its own expiry, so ignoring it cannot
   // be explained by expiry.
   expect(seededLease).toBeDefined()
   expect(Date.parse(seededLease!.expiresAt)).toBeGreaterThan(Date.now())
   return scenario
 }
 
-async function persistedLedger(root: string): Promise<Record<string, unknown>> {
-  return JSON.parse(
-    await fs.readFile(join(root, '.gfs-download-store', 'ledger-v1.json'), 'utf8')
-  ) as Record<string, unknown>
-}
-
-it('X1-shell-live: an inherited non-expired legacy lease does not stop an approved shell (#1019)', async () => {
+it('X1-shell-live: a store with a non-expired legacy lease left by the pre-#1028 image does not stop an approved shell (#1019)', async () => {
   const { call, marker } = markerCall('shell-live', 'X1_SHELL_LIVE')
-  const scenario = await liveLegacyLeaseScenario(call)
+  const scenario = await livePreRedesignScenario(call)
   await scenario.executor.run()
   // Witness: the executor reached the live approval gate for shell_exec.
   expect(scenario.onApprovalNeeded).toHaveBeenCalledTimes(1)
@@ -707,14 +704,11 @@ it('X1-shell-live: an inherited non-expired legacy lease does not stop an approv
   expect(vi.mocked(spawn).mock.calls[0]![2]).toMatchObject({ cwd: scenario.callerWorkspace })
   expect(shellToolResult(scenario.providerCalls, call.id)).toContain(marker)
   expect(scenario.onFail).not.toHaveBeenCalled()
-  const onDisk = await persistedLedger(scenario.root)
-  expect(onDisk).toHaveProperty('records')
-  expect(onDisk).not.toHaveProperty('processingLeases')
 })
 
-it('X1-delivery-live: an inherited non-expired legacy lease is discarded and GFS delivery stays advertised (#1019)', async () => {
+it('X1-delivery-live: a store with a non-expired legacy lease left by the pre-#1028 image is ignored and GFS delivery stays advertised (#1019)', async () => {
   const { call, marker } = markerCall('shell-live-delivery', 'X1_DELIVERY_LIVE')
-  const scenario = await liveLegacyLeaseScenario(call)
+  const scenario = await livePreRedesignScenario(call)
   await scenario.executor.run()
   // Witness: the provider received a tool list built by the executor's registry.
   expect(scenario.advertisedTools.length).toBeGreaterThan(0)
@@ -727,9 +721,6 @@ it('X1-delivery-live: an inherited non-expired legacy lease is discarded and GFS
 
   expect(shellToolResult(scenario.providerCalls, call.id)).toContain(marker)
   expect(scenario.onFail).not.toHaveBeenCalled()
-  const onDisk = await persistedLedger(scenario.root)
-  expect(onDisk).toHaveProperty('records')
-  expect(onDisk).not.toHaveProperty('processingLeases')
 })
 
 describe('U5-TE: TaskExecutor runs a managed shell with a timeout above the former lease ceiling (#1021)', () => {
@@ -792,25 +783,15 @@ it('X3-TE: a shell dispatch inside TaskExecutor makes zero GFS download store ca
   expect(executeWindows[0]!.storeCalls).toEqual([])
 })
 
-/** Another live writer holds the store directory, so this store cannot initialize. */
-async function contendedStore(): Promise<StoreFixture> {
-  const root = await fs.mkdtemp(join(tmpdir(), 'gfs-shell-safety-contended-'))
+/** A store that was constructed but never initialized. */
+async function uninitializedStore(): Promise<StoreFixture> {
+  const root = await fs.mkdtemp(join(tmpdir(), 'gfs-shell-safety-uninitialized-'))
   roots.push(root)
-  const holder = new GfsDownloadStore(root)
-  stores.push(holder)
-  await holder.initialize()
   const store = new GfsDownloadStore(root)
   stores.push(store)
-  const initError = await store.initialize().then(
-    () => {
-      throw new Error('contendedStore fixture: initialize() resolved while another writer held it')
-    },
-    (error: unknown) => error
-  )
-  // Witness: the holder is the live writer the contended store lost to.
-  expect(holder.isAvailable()).toBe(true)
-  expect(initError).toMatchObject({ code: 'writer_locked', transientWriterContention: true })
-  return { root, store, initError }
+  // Witness: a store that never ran initialize() reports itself unavailable.
+  expect(store.isAvailable()).toBe(false)
+  return { root, store }
 }
 
 /** A store that initialized and was then closed. */
@@ -822,58 +803,11 @@ async function closedStore(): Promise<StoreFixture> {
   return { root, store }
 }
 
-/**
- * A store whose initialize rejects because the persist of the legacy-lease
- * discard fails with EIO before the ledger rename.
- */
-async function discardPersistFailedStore(): Promise<StoreFixture> {
-  const { root, ledgerPath } = await seedLegacyLeaseLedger()
-  const probe = await fs.open(ledgerPath, 'r')
-  const prototype = Object.getPrototypeOf(probe) as FileHandle
-  await probe.close()
-  const originalWriteFile = prototype.writeFile
-  let failedLedgerWrite: Record<string, unknown> | undefined
-  const writeSpy = vi.spyOn(prototype, 'writeFile').mockImplementation(async function (
-    this: FileHandle,
-    ...args: Parameters<FileHandle['writeFile']>
-  ) {
-    const [data] = args
-    if (failedLedgerWrite === undefined && typeof data === 'string') {
-      const written = JSON.parse(data) as Record<string, unknown>
-      if ('records' in written && !('processingLeases' in written)) {
-        failedLedgerWrite = written
-        throw Object.assign(new Error('injected ledger write failure'), { code: 'EIO' })
-      }
-    }
-    return originalWriteFile.apply(this, args)
-  })
-  const store = new GfsDownloadStore(root)
-  stores.push(store)
-  let initError: unknown
-  try {
-    initError = await store.initialize().then(
-      () => {
-        throw new Error('discardPersistFailedStore fixture: initialize() resolved')
-      },
-      (error: unknown) => error
-    )
-  } finally {
-    writeSpy.mockRestore()
-  }
-  // Witness: the failing write was the discard's own lease-free ledger, and the
-  // lease is still on disk.
-  expect(initError).toMatchObject({ code: 'EIO', message: 'injected ledger write failure' })
-  expect(failedLedgerWrite).toBeDefined()
-  expect(failedLedgerWrite).not.toHaveProperty('processingLeases')
-  expect(JSON.parse(await fs.readFile(ledgerPath, 'utf8'))).toHaveProperty('processingLeases')
-  return { root, store, initError }
-}
-
 describe('X6: an approved shell runs while the store is unavailable', () => {
   it.each([
-    ['writer contention', contendedStore],
+    ['never initialized', uninitializedStore],
     ['store closed', closedStore],
-    ['initialize rejected by an EIO persist during the legacy discard', discardPersistFailedStore],
+    ['initialize rejected with workspace_unavailable', unavailableStore],
   ] as const)('%s', async (_label, storeFixture) => {
     const { call, marker } = markerCall('shell-unavailable', 'X6_SHELL')
     const timeline: string[] = []

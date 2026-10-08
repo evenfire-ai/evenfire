@@ -27,7 +27,7 @@ import {
   withEnvironment,
 } from '../__tests__/fixtures/gfsStoreTestKit'
 import { logger } from '../logger'
-import { GfsDownloadStoreError, GfsDownloadStoreFs } from './gfsDownloadStoreFs'
+import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
 import { GFS_FILE_LIMITS, GFS_HOST_RETAINED_FILES } from './gfsFilePolicy'
 
 const { statfsBoundary, renameBoundary, openBoundary, realpathBoundary } = vi.hoisted(() => ({
@@ -62,8 +62,8 @@ let nativeFs: typeof fs
 let hostRoot: string
 let rootA: string
 let rootB: string
-let store: GfsDownloadStoreFs
-const extraStores: GfsDownloadStoreFs[] = []
+let store: GfsDownloadStore
+const extraStores: GfsDownloadStore[] = []
 const outsideRoots: string[] = []
 
 function receiptPathOf(id: string): string {
@@ -88,11 +88,11 @@ function plantComplete(root: string, identity: string, index: number, bytes: Buf
   })
 }
 
-async function limitedStore(env: Record<string, string>): Promise<GfsDownloadStoreFs> {
+async function limitedStore(env: Record<string, string>): Promise<GfsDownloadStore> {
   return withEnvironment(env, async () => {
     vi.resetModules()
-    const { GfsDownloadStoreFs: Store } = await import('./gfsDownloadStoreFs')
-    const opened = new Store(hostRoot) as unknown as GfsDownloadStoreFs
+    const { GfsDownloadStore: Store } = await import('./gfsDownloadStore')
+    const opened = new Store(hostRoot) as unknown as GfsDownloadStore
     extraStores.push(opened)
     await opened.initialize()
     return opened
@@ -123,7 +123,7 @@ beforeEach(async () => {
   hostRoot = syncFs.mkdtempSync(path.join(tmpdir(), 'gfs-store-boundaries-'))
   rootA = callerDirectory(hostRoot, A)
   rootB = callerDirectory(hostRoot, B)
-  store = new GfsDownloadStoreFs(hostRoot)
+  store = new GfsDownloadStore(hostRoot)
   await store.initialize()
 })
 
@@ -566,7 +566,7 @@ describe('GFS download store boundaries: in-process concurrency', () => {
 
   it('C4: a sweep requested during publication runs after it and keeps the copy', async () => {
     const { transfer, bytes } = await startTransfer(store, rootA, A, 353, 12)
-    let sweep: ReturnType<GfsDownloadStoreFs['cleanupExpired']> | undefined
+    let sweep: ReturnType<GfsDownloadStore['cleanupExpired']> | undefined
     renameBoundary.mockImplementation(async (from: string, to: string) => {
       await nativeFs.rename(from, to)
       // Between the two renames: meta.json is visible, source is not yet.
@@ -696,9 +696,9 @@ function opensUnder(id: string): number {
 
 describe('GFS download store boundaries: caller isolation', () => {
   const reads = {
-    readManagedFile: (target: GfsDownloadStoreFs, receiptPath: string, caller: string) =>
+    readManagedFile: (target: GfsDownloadStore, receiptPath: string, caller: string) =>
       target.readManagedFile(receiptPath, caller),
-    readManagedFilePrefix: (target: GfsDownloadStoreFs, receiptPath: string, caller: string) =>
+    readManagedFilePrefix: (target: GfsDownloadStore, receiptPath: string, caller: string) =>
       target.readManagedFilePrefix(receiptPath, caller, 4),
   } as const
 

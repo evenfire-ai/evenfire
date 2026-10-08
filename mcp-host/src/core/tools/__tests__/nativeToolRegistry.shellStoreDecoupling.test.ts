@@ -139,7 +139,7 @@ describe('managed shell_exec without the GFS download store (#1019), registry-le
         'publish',
         'reusableReceipt',
         'fail',
-        'inspect',
+        'readManagedFile',
         'releaseReceiptOwner',
         'cleanupExpired',
         'close',

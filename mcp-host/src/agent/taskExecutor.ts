@@ -1067,9 +1067,12 @@ export class TaskExecutor {
   }
 
   /**
-   * A retention owner spans preparation, an approval suspension, and cold resume.
-   * Release happens only after this executor reaches a terminal state. A failed
-   * release leaves the owner recorded, so its retained records stay protected.
+   * A retention owner spans preparation and an approval suspension in this
+   * process; pins live in memory, so after a Host restart a cold resume finds
+   * no pin and its file may have expired or been evicted, and the model
+   * downloads it again. Release happens only after this executor reaches a
+   * terminal state. A failed release leaves the pin in place, so its files stay
+   * protected until the Host restarts.
    */
   private settleGfsRetentionOwner(): Promise<void> {
     if (this.state === 'waiting_approval' && !this.abortController.signal.aborted)

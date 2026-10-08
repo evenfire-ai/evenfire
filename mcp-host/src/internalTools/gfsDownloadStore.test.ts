@@ -1,842 +1,811 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createHash } from 'node:crypto'
+import * as crypto from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
-import { ShellTool } from '../core/tools/shell'
+import { register } from 'prom-client'
+import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
-import { GfsDownloadStore } from './gfsDownloadStore'
-import { GFS_FILE_LIMITS } from './gfsFilePolicy'
+import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
 
-const source: GfsImageSource = {
-  kind: 'gfs',
-  drive: 'main',
-  resourceId: 'a'.repeat(32),
-  gfsUri: `gfs://main/${'a'.repeat(32)}`,
-  name: 'input.csv',
-  version: 7,
-}
+const { statfsBoundary, renameBoundary, rmBoundary, lstatBoundary, hashBoundary } = vi.hoisted(
+  () => ({
+    statfsBoundary: vi.fn(),
+    renameBoundary: vi.fn(),
+    rmBoundary: vi.fn(),
+    lstatBoundary: vi.fn(),
+    hashBoundary: vi.fn(),
+  })
+)
+// Pass-through boundaries: every test starts with the real implementation and
+// overrides one call only where it simulates a filesystem failure or observes
+// an order. Test setup and assertions use the actual modules.
+vi.mock('node:fs/promises', async original => ({
+  ...(await original<typeof fs>()),
+  statfs: statfsBoundary,
+  rename: renameBoundary,
+  rm: rmBoundary,
+  lstat: lstatBoundary,
+}))
+vi.mock('node:crypto', async original => ({
+  ...(await original<typeof crypto>()),
+  createHash: hashBoundary,
+}))
 
+let nativeFs: typeof fs
+let nativeCrypto: typeof crypto
 let hostRoot: string
 let callerRoot: string
 let store: GfsDownloadStore
+const extraStores: GfsDownloadStore[] = []
+
+const CALLER = 'caller-a'
+
+function sourceFor(index: number, version = 1): GfsImageSource {
+  const resourceId = index.toString(16).padStart(32, '0')
+  return {
+    kind: 'gfs',
+    drive: 'main',
+    resourceId,
+    gfsUri: `gfs://main/${resourceId}`,
+    name: `fixture-${index}.bin`,
+    version,
+  }
+}
+
+function future(ms = 60 * 60_000): string {
+  return new Date(Date.now() + ms).toISOString()
+}
+
+function digest(bytes: Buffer): string {
+  return nativeCrypto.createHash('sha256').update(bytes).digest('hex')
+}
+
+async function callerDirectory(host: string, caller: string): Promise<string> {
+  const root = path.join(host, 'users', caller)
+  await nativeFs.mkdir(root, { recursive: true, mode: 0o700 })
+  return root
+}
+
+function downloadDirectory(root: string, id: string): string {
+  return path.join(root, '.gfs-downloads', `input-${id}`)
+}
+
+async function exists(target: string): Promise<boolean> {
+  try {
+    await nativeFs.lstat(target)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+async function startTransfer(
+  target: GfsDownloadStore,
+  root: string,
+  caller: string,
+  index: number,
+  sizeBytes: number,
+  options: { version?: number; owner?: string } = {}
+) {
+  const bytes = Buffer.alloc(sizeBytes, (index % 251) + 1)
+  const transfer = await target.createTransfer({
+    callerIdentity: caller,
+    callerWorkspacePath: root,
+    source: sourceFor(index, options.version ?? 1),
+    sizeBytes,
+    expiresAt: future(),
+    ...(options.owner === undefined ? {} : { retentionOwnerId: options.owner }),
+  })
+  await nativeFs.writeFile(path.join(root, transfer.partialPath), bytes)
+  return { transfer, bytes }
+}
+
+async function completedCopy(
+  target: GfsDownloadStore,
+  root: string,
+  caller: string,
+  index: number,
+  sizeBytes: number,
+  options: { version?: number; owner?: string } = {}
+) {
+  const { transfer, bytes } = await startTransfer(target, root, caller, index, sizeBytes, options)
+  const receipt = await target.publish(transfer.id, caller, digest(bytes))
+  return { receipt, bytes }
+}
+
+async function metricValue(name: string, labels: Record<string, string>): Promise<number> {
+  const metric = register.getSingleMetric(name)
+  if (metric === undefined) throw new Error(`metric ${name} is not registered`)
+  const { values } = await metric.get()
+  return values
+    .filter(sample => Object.entries(labels).every(([key, value]) => sample.labels[key] === value))
+    .reduce((sum, sample) => sum + sample.value, 0)
+}
+
+const expiryCount = (outcome: string) =>
+  metricValue('clerum_gfs_download_expiry_total', { outcome })
+const quotaCount = (scope: string, reason: string) =>
+  metricValue('clerum_gfs_download_quota_total', { scope, reason })
+
+async function openStore(host: string): Promise<GfsDownloadStore> {
+  const opened = new GfsDownloadStore(host)
+  extraStores.push(opened)
+  await opened.initialize()
+  return opened
+}
+
+/** Re-imports the store with environment limits; the logger of that copy is not spied. */
+async function loadLimitedStore(env: Record<string, string>) {
+  const saved = { ...process.env }
+  Object.assign(process.env, env)
+  try {
+    vi.resetModules()
+    const storeModule = await import('./gfsDownloadStore')
+    const policyModule = await import('./gfsFilePolicy')
+    return { Store: storeModule.GfsDownloadStore, limits: policyModule.GFS_FILE_LIMITS }
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+async function limitedStore(env: Record<string, string>) {
+  const { Store, limits } = await loadLimitedStore(env)
+  const limited = new Store(hostRoot)
+  extraStores.push(limited as unknown as GfsDownloadStore)
+  await limited.initialize()
+  return { limited, limits }
+}
+
+/** Distinct createdAt values so the oldest-first eviction order is deterministic. */
+function tick(): void {
+  vi.setSystemTime(Date.now() + 1_000)
+}
+
+async function writeMeta(directory: string, meta: Record<string, unknown>): Promise<void> {
+  await nativeFs.writeFile(path.join(directory, 'meta.json'), JSON.stringify(meta), {
+    mode: 0o600,
+  })
+}
+
+function metaFor(id: string, bytes: Buffer, overrides: Record<string, unknown> = {}) {
+  const now = Date.now()
+  return {
+    schemaVersion: 1,
+    id,
+    callerIdentity: CALLER,
+    source: sourceFor(900),
+    sizeBytes: bytes.byteLength,
+    sha256: digest(bytes),
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 60 * 60_000).toISOString(),
+    ...overrides,
+  }
+}
+
+async function handMadeDirectory(root: string): Promise<{ id: string; directory: string }> {
+  const id = nativeCrypto.randomUUID()
+  const directory = downloadDirectory(root, id)
+  await nativeFs.mkdir(directory, { recursive: true, mode: 0o700 })
+  await nativeFs.chmod(path.dirname(directory), 0o700)
+  return { id, directory }
+}
 
 beforeEach(async () => {
-  hostRoot = await fs.mkdtemp(path.join(tmpdir(), 'gfs-download-store-'))
-  callerRoot = path.join(hostRoot, 'users', 'caller-a')
-  await fs.mkdir(callerRoot, { recursive: true, mode: 0o700 })
+  nativeFs = await vi.importActual<typeof fs>('node:fs/promises')
+  nativeCrypto = await vi.importActual<typeof crypto>('node:crypto')
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-10-08T10:00:00.000Z'))
+  for (const boundary of [statfsBoundary, renameBoundary, rmBoundary, lstatBoundary, hashBoundary])
+    boundary.mockReset()
+  statfsBoundary.mockImplementation(nativeFs.statfs)
+  renameBoundary.mockImplementation(nativeFs.rename)
+  rmBoundary.mockImplementation(nativeFs.rm)
+  lstatBoundary.mockImplementation(nativeFs.lstat)
+  hashBoundary.mockImplementation((algorithm: string) => nativeCrypto.createHash(algorithm))
+  hostRoot = await nativeFs.mkdtemp(path.join(tmpdir(), 'gfs-store-'))
+  callerRoot = await callerDirectory(hostRoot, CALLER)
   store = new GfsDownloadStore(hostRoot)
   await store.initialize()
 })
 
 afterEach(async () => {
   vi.restoreAllMocks()
-  await store.close(0).catch(async () => {
-    // Fixture consumers are settled by test teardown, even for negative paths.
-    await (
-      store as unknown as { writerLease?: { release(): Promise<void> } }
-    ).writerLease?.release()
-  })
-  await fs.rm(hostRoot, { recursive: true, force: true })
+  vi.useRealTimers()
+  for (const opened of extraStores.splice(0)) await opened.close(0)
+  await store.close(0)
+  await nativeFs.rm(hostRoot, { recursive: true, force: true })
 })
 
-describe('GFS download store', () => {
-  it('creates a caller-relative transfer and publishes an exact completed record', async () => {
-    const expiresAt = new Date(Date.now() + 60_000).toISOString()
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt,
-    })
+describe('GFS download store: publication', () => {
+  it('F1: publish writes meta.json before source and every visible source has a meta.json', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 1, 32)
+    renameBoundary.mockClear()
+    const receipt = await store.publish(transfer.id, CALLER, digest(bytes))
 
-    expect(transfer.path).toMatch(/^\.gfs-downloads\/input-[a-f0-9-]+\/source$/)
-    expect(path.isAbsolute(transfer.path)).toBe(false)
-    expect(await fs.realpath(path.dirname(path.join(callerRoot, transfer.path)))).toBe(
-      await fs.realpath(
-        path.join(callerRoot, '.gfs-downloads', path.basename(path.dirname(transfer.path)))
-      )
-    )
-    expect((await fs.stat(path.join(callerRoot, `${transfer.path}.partial`))).mode & 0o777).toBe(
-      0o600
-    )
-
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-    const receipt = await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-
-    expect(receipt).toMatchObject({
-      source,
-      path: transfer.path,
-      sizeBytes: 7,
-      sha256: createHash('sha256').update('fixture').digest('hex'),
-      expiresAt,
+    const renamedTo = renameBoundary.mock.calls.map(([, to]) => path.basename(String(to)))
+    // Witness: both renames of the publication happened.
+    expect(renamedTo).toHaveLength(2)
+    expect(renamedTo).toEqual(['meta.json', 'source'])
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    expect((await nativeFs.readdir(directory)).sort()).toEqual(['meta.json', 'source'])
+    const meta = JSON.parse(await nativeFs.readFile(path.join(directory, 'meta.json'), 'utf8'))
+    expect(meta).toMatchObject({
+      schemaVersion: 1,
+      id: receipt.id,
+      callerIdentity: CALLER,
+      sizeBytes: 32,
+      sha256: digest(bytes),
     })
-    await expect(fs.stat(path.join(callerRoot, `${transfer.path}.partial`))).rejects.toMatchObject({
-      code: 'ENOENT',
-    })
-    expect((await fs.stat(path.join(callerRoot, transfer.path))).mode & 0o777).toBe(0o600)
+    expect(receipt.path).toBe(`.gfs-downloads/input-${receipt.id}/source`)
   })
 
-  it('binds receipts to the caller and fails closed on expiry or missing bytes', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 1,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'x')
-    const receipt = await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('x').digest('hex')
-    )
-
-    await expect(store.inspect(receipt.path, 'caller-b')).rejects.toMatchObject({
-      code: 'caller_mismatch',
-    })
-    await expect(store.inspect(receipt.path, 'caller-a')).resolves.toMatchObject({
-      id: transfer.id,
-    })
-
-    await fs.writeFile(path.join(callerRoot, receipt.path), 'y')
-    await expect(store.inspect(receipt.path, 'caller-a')).rejects.toMatchObject({
-      code: 'download_missing',
-    })
-    await fs.writeFile(path.join(callerRoot, receipt.path), 'x')
-    await expect(store.inspect(receipt.path, 'caller-a')).resolves.toMatchObject({
-      id: transfer.id,
-    })
-
-    const record = store.debugRecord(transfer.id)!
-    record.expiresAt = new Date(Date.now() - 1).toISOString()
-    await store.debugPersist()
-    await expect(store.inspect(receipt.path, 'caller-a')).rejects.toMatchObject({
-      code: 'download_expired',
-    })
-
-    await fs.unlink(path.join(callerRoot, receipt.path))
-    record.expiresAt = new Date(Date.now() + 60_000).toISOString()
-    await store.debugPersist()
-    await expect(store.inspect(receipt.path, 'caller-a')).rejects.toMatchObject({
-      code: 'download_missing',
-    })
-  })
-
-  it('enforces caller and aggregate byte/file quotas from the durable ledger', async () => {
-    await expect(
-      store.createTransfer({
-        callerIdentity: 'caller-a',
-        callerWorkspacePath: callerRoot,
-        source,
-        sizeBytes: GFS_FILE_LIMITS.maxFileBytes + 1,
-        expiresAt: new Date().toISOString(),
-      })
-    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
-
-    const bytes = Buffer.alloc(1024)
-    for (let index = 0; index < GFS_FILE_LIMITS.callerRetainedFiles; index += 1) {
-      const transfer = await store.createTransfer({
-        callerIdentity: 'caller-a',
-        callerWorkspacePath: callerRoot,
-        source,
-        sizeBytes: 1024,
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        retentionOwnerId: 'quota-fixture-task',
-      })
-      await fs.writeFile(path.join(callerRoot, transfer.partialPath), bytes)
-      await store.publish(transfer.id, 'caller-a', createHash('sha256').update(bytes).digest('hex'))
-    }
-
-    await expect(
-      store.createTransfer({
-        callerIdentity: 'caller-a',
-        callerWorkspacePath: callerRoot,
-        source,
-        sizeBytes: 1024,
-        expiresAt: new Date().toISOString(),
-      })
-    ).rejects.toMatchObject({ code: 'caller_quota_exceeded' })
-    expect(store.debugUsage()).toMatchObject({
-      bytes: GFS_FILE_LIMITS.callerRetainedFiles * 1024,
-      files: GFS_FILE_LIMITS.callerRetainedFiles,
-      callerBytes: { 'caller-a': GFS_FILE_LIMITS.callerRetainedFiles * 1024 },
-      callerFiles: { 'caller-a': GFS_FILE_LIMITS.callerRetainedFiles },
-    })
-    await store.releaseReceiptOwner('quota-fixture-task', 'caller-a')
-  })
-
-  it('reconstructs completed charges after process restart', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 1024,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerRoot, transfer.partialPath), Buffer.alloc(1024))
-    await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update(Buffer.alloc(1024)).digest('hex')
-    )
-
-    await store.close()
-    const reopened = new GfsDownloadStore(hostRoot)
-    await reopened.initialize()
-    expect(reopened.debugUsage()).toEqual({
-      bytes: 1024,
-      files: 1,
-      callerBytes: { 'caller-a': 1024 },
-      callerFiles: { 'caller-a': 1 },
-    })
-
-    reopened.debugRecord(transfer.id)!.sizeBytes = GFS_FILE_LIMITS.callerStorageBytes - 512
-    await reopened.debugPersist()
-    await expect(
-      reopened.createTransfer({
-        callerIdentity: 'caller-a',
-        callerWorkspacePath: callerRoot,
-        source,
-        sizeBytes: 1024,
-        expiresAt: new Date().toISOString(),
-      })
-    ).rejects.toMatchObject({ code: 'caller_quota_exceeded' })
-    await reopened.close()
-  })
-
-  it('releases a failed transfer when its exact directory is removed', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 1024,
-      expiresAt: new Date().toISOString(),
-    })
-    await store.fail(transfer.id, 'caller-a')
-    expect(store.debugUsage()).toEqual({ bytes: 0, files: 0, callerBytes: {}, callerFiles: {} })
-    await expect(fs.stat(path.join(callerRoot, transfer.path))).rejects.toMatchObject({
-      code: 'ENOENT',
-    })
-  })
-
-  it('releases a failed transfer whose directory is already absent', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 1024,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    // Crash-after-rm analogue: the directory is gone while the durable charge
-    // and its ledger entry remain.
-    await fs.rm(path.join(callerRoot, path.dirname(transfer.path)), {
-      recursive: true,
-      force: true,
-    })
-
-    await store.fail(transfer.id, 'caller-a')
-
-    expect(store.debugRecord(transfer.id)).toBeUndefined()
-    expect(store.debugUsage()).toEqual({ bytes: 0, files: 0, callerBytes: {}, callerFiles: {} })
-  })
-
-  it('keeps the charge when absence cannot be proven at lstat', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-    await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-    const record = store.debugRecord(transfer.id)!
-    record.expiresAt = new Date(Date.now() - 1).toISOString()
-    await store.debugPersist()
-    // A regular file where the download directory belongs makes lstat fail with
-    // ENOTDIR. Only ENOENT proves absence; this must stay charged.
-    await fs.rm(path.join(callerRoot, '.gfs-downloads'), { recursive: true, force: true })
-    await fs.writeFile(path.join(callerRoot, '.gfs-downloads'), 'not-a-directory')
-
-    await store.cleanupExpired()
-
-    expect(store.debugRecord(transfer.id)).toMatchObject({ state: 'cleanup_failed' })
-    expect(store.debugUsage()).toEqual({
-      bytes: 7,
-      files: 1,
-      callerBytes: { 'caller-a': 7 },
-      callerFiles: { 'caller-a': 1 },
-    })
-  })
-
-  it('reserves active-transfer slots atomically per caller and Host', async () => {
-    const first = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 1,
-      expiresAt: new Date().toISOString(),
-    })
-
-    await expect(
-      store.createTransfer({
-        callerIdentity: 'caller-a',
-        callerWorkspacePath: callerRoot,
-        source,
-        sizeBytes: 1,
-        expiresAt: new Date().toISOString(),
-      })
-    ).rejects.toMatchObject({ code: 'download_busy' })
-
-    const callerBRoot = path.join(hostRoot, 'users', 'caller-b')
-    await fs.mkdir(callerBRoot, { recursive: true, mode: 0o700 })
-    const second = await store.createTransfer({
-      callerIdentity: 'caller-b',
-      callerWorkspacePath: callerBRoot,
-      source,
-      sizeBytes: 1,
-      expiresAt: new Date().toISOString(),
-    })
-
-    const callerCRoot = path.join(hostRoot, 'users', 'caller-c')
-    await fs.mkdir(callerCRoot, { recursive: true, mode: 0o700 })
-    await expect(
-      store.createTransfer({
-        callerIdentity: 'caller-c',
-        callerWorkspacePath: callerCRoot,
-        source,
-        sizeBytes: 1,
-        expiresAt: new Date().toISOString(),
-      })
-    ).rejects.toMatchObject({ code: 'download_busy' })
-
-    await store.fail(first.id, 'caller-a')
-    await store.fail(second.id, 'caller-b')
-    await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 1,
-      expiresAt: new Date().toISOString(),
-    })
-  })
-
-  it('rejects a second live writer and accepts initialization after close', async () => {
-    const second = new GfsDownloadStore(hostRoot)
-    await expect(second.initialize()).rejects.toMatchObject({ code: 'writer_locked' })
-    await store.close()
-    await second.initialize()
-    await second.close()
-  })
-
-  it('fails closed on a corrupt durable ledger', async () => {
-    await store.close()
-    await fs.writeFile(path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json'), '{bad')
-    const reopened = new GfsDownloadStore(hostRoot)
-    await expect(reopened.initialize()).rejects.toMatchObject({
-      code: 'corrupt_store_ledger',
-    })
-  })
-
-  it('fails closed on an existing zero-byte ledger and keeps the retained source', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-    const receipt = await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-    await store.close()
-
-    const ledgerPath = path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json')
-    await fs.writeFile(ledgerPath, '')
-
-    const reopened = new GfsDownloadStore(hostRoot)
-    await expect(reopened.initialize()).rejects.toMatchObject({
-      code: 'corrupt_store_ledger',
-    })
-    // The unreadable ledger and the retained source must survive untouched.
-    expect(await fs.readFile(ledgerPath, 'utf8')).toBe('')
-    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
-  })
-
-  it('fails closed on an array-shaped persisted ledger and keeps the retained source', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-    const receipt = await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-    await store.close()
-
-    const ledgerPath = path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json')
-    // `typeof [] === 'object'` and Object.entries([]) is empty, so an array-shaped
-    // records map reads as an empty ledger unless it is rejected explicitly.
-    const persisted = JSON.stringify({ schemaVersion: 1, records: [] })
-    await fs.writeFile(ledgerPath, persisted)
-
-    const reopened = new GfsDownloadStore(hostRoot)
-    await expect(reopened.initialize()).rejects.toMatchObject({
-      code: 'corrupt_store_ledger',
-    })
-    expect(await fs.readFile(ledgerPath, 'utf8')).toBe(persisted)
-    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
-  })
-
-  it('rejects an existing store whose durable ledger is missing', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-    const receipt = await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-    await store.close()
-
-    const ledgerPath = path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json')
-    await fs.rm(ledgerPath)
-
-    // The directory already existed with no durable ledger: unknown state, not
-    // a fresh store. Reject without recreating the ledger or touching sources.
-    await expect(new GfsDownloadStore(hostRoot).initialize()).rejects.toMatchObject({
-      code: 'corrupt_store_ledger',
-    })
-    await expect(fs.stat(ledgerPath)).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
-    // A retry must fail on state, not on a writer lease leaked by the failure.
-    await expect(new GfsDownloadStore(hostRoot).initialize()).rejects.toMatchObject({
-      code: 'corrupt_store_ledger',
-    })
-  })
-
-  it('rejects a preexisting store directory that has no durable ledger', async () => {
-    const isolatedRoot = await fs.mkdtemp(path.join(tmpdir(), 'gfs-store-existing-'))
-    const isolatedStoreRoot = path.join(isolatedRoot, '.gfs-download-store')
-    await fs.mkdir(isolatedStoreRoot, { mode: 0o700 })
-    try {
-      await expect(new GfsDownloadStore(isolatedRoot).initialize()).rejects.toMatchObject({
-        code: 'corrupt_store_ledger',
-      })
-      expect(await fs.readdir(isolatedStoreRoot)).not.toContain('ledger-v1.json')
-    } finally {
-      await fs.rm(isolatedRoot, { recursive: true, force: true })
-    }
-  })
-
-  it('rejects an array-shaped processingLeases map and keeps the retained source', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-    const receipt = await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-    await store.close()
-
-    const ledgerPath = path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json')
-    const persisted = JSON.parse(await fs.readFile(ledgerPath, 'utf8')) as {
-      processingLeases?: unknown
-    }
-    persisted.processingLeases = []
-    const rewritten = JSON.stringify(persisted)
-    await fs.writeFile(ledgerPath, rewritten)
-
-    await expect(new GfsDownloadStore(hostRoot).initialize()).rejects.toMatchObject({
-      code: 'corrupt_store_ledger',
-    })
-    expect(await fs.readFile(ledgerPath, 'utf8')).toBe(rewritten)
-    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
-  })
-
-  it('does not commit a publication released after abort and keeps failed cleanup reserved', async () => {
-    const expiresAt = new Date(Date.now() + 60_000).toISOString()
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt,
-    })
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-    const sha256 = createHash('sha256').update('fixture').digest('hex')
-    const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
-    const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
-    await probe.close()
+  it('F2: a cancelled publish leaves an incomplete directory that is not reusable and is swept', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 2, 16)
     const controller = new AbortController()
-    let releaseRead!: () => void
-    const readBlocked = new Promise<void>(resolve => {
-      releaseRead = resolve
+    renameBoundary.mockImplementation(async (from: string, to: string) => {
+      await nativeFs.rename(from, to)
+      // Cancelled after meta.json is visible and before source is.
+      if (path.basename(to) === 'meta.json') controller.abort()
     })
-    let readEntered!: () => void
-    const readStarted = new Promise<void>(resolve => {
-      readEntered = resolve
-    })
-    let heldRead = false
-    const originalRead = prototype.read
-    vi.spyOn(prototype, 'read').mockImplementation(async function (
-      this: fs.FileHandle,
-      ...values: unknown[]
-    ) {
-      const info = await this.stat()
-      if (!heldRead && info.isFile() && info.size === 7) {
-        heldRead = true
-        readEntered()
-        await readBlocked
-      }
-      return originalRead.apply(this, values as never)
-    })
+    await expect(
+      store.publish(transfer.id, CALLER, digest(bytes), { signal: controller.signal })
+    ).rejects.toMatchObject({ code: 'publication_cancelled' })
+    renameBoundary.mockImplementation(nativeFs.rename)
 
-    const pending = store.publish(transfer.id, 'caller-a', sha256, { signal: controller.signal })
-    const rejected = expect(pending).rejects.toMatchObject({ code: 'publication_cancelled' })
-    await readStarted
-    controller.abort()
-    releaseRead()
-    await rejected
-    expect(store.debugRecord(transfer.id)).toMatchObject({ state: 'transferring' })
-    expect(store.debugRecord(transfer.id)?.sha256).toBeUndefined()
-    vi.restoreAllMocks()
+    const directory = downloadDirectory(callerRoot, transfer.id)
+    // Witness: the cancelled directory is on disk with meta.json and no source.
+    expect((await nativeFs.readdir(directory)).sort()).toEqual(['meta.json', 'source.partial'])
+    await expect(store.reusableReceipt(CALLER, sourceFor(2), 16)).resolves.toBeUndefined()
 
-    // Force an unproven absence: a regular file where the download directory
-    // belongs makes lstat fail with ENOTDIR, so the charge must stay reserved.
-    await fs.rm(path.join(callerRoot, '.gfs-downloads'), { recursive: true, force: true })
-    await fs.writeFile(path.join(callerRoot, '.gfs-downloads'), 'not-a-directory')
-    await expect(store.fail(transfer.id, 'caller-a')).rejects.toMatchObject({
+    // A Host stop leaves the reservation behind; the next start sweeps it.
+    await store.close(0)
+    const info = vi.spyOn(logger, 'info')
+    await openStore(hostRoot)
+    expect(await exists(directory)).toBe(false)
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ component: 'GfsDownloadStore', removedIncomplete: 1 }),
+      'GFS download store initialized'
+    )
+  })
+
+  it('F3: a crash between the two renames leaves meta.json and source.partial and the next store removes it', async () => {
+    const bytes = Buffer.alloc(24, 7)
+    const { id, directory } = await handMadeDirectory(callerRoot)
+    await writeMeta(directory, metaFor(id, bytes))
+    await nativeFs.writeFile(path.join(directory, 'source.partial'), bytes, { mode: 0o600 })
+    const info = vi.spyOn(logger, 'info')
+
+    await openStore(hostRoot)
+
+    expect(await exists(directory)).toBe(false)
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ removedIncomplete: 1, retainedCompleted: 0 }),
+      'GFS download store initialized'
+    )
+  })
+
+  it('F4: an EIO while writing meta.json fails that publish only and the next admission succeeds', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 4, 16)
+    renameBoundary.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('injected EIO'), { code: 'EIO' })
+    })
+    await expect(store.publish(transfer.id, CALLER, digest(bytes))).rejects.toMatchObject({
       code: 'storage_write_failed',
     })
-    expect(store.debugRecord(transfer.id)).toMatchObject({
-      state: 'cleanup_failed',
-      sizeBytes: 7,
-    })
-    expect(store.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
+    // The producer's cleanup path: the id stayed active so fail() can remove it.
+    await store.fail(transfer.id, CALLER)
+    expect(await exists(downloadDirectory(callerRoot, transfer.id))).toBe(false)
+
+    const next = await completedCopy(store, callerRoot, CALLER, 5, 16)
+    expect(next.receipt.sha256).toBe(digest(next.bytes))
+    await expect(store.readManagedFile(next.receipt.path, CALLER)).resolves.toEqual(next.bytes)
   })
-
-  it('rejects a managed file that grows after its size check without reading the extra body', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-    const receipt = await store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-    await expect(store.readManagedFile(receipt.path, 'caller-a')).resolves.toEqual(
-      Buffer.from('fixture')
-    )
-
-    const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
-    const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
-    await probe.close()
-    let grown = false
-    const sourceInfo = await fs.stat(path.join(callerRoot, receipt.path))
-    let readBytes = 0
-    const originalRead = prototype.read
-    vi.spyOn(prototype, 'read').mockImplementation(async function (
-      this: fs.FileHandle,
-      ...values: unknown[]
-    ) {
-      const info = await this.stat()
-      if (!grown && info.isFile() && info.ino === sourceInfo.ino) {
-        grown = true
-        // Mutate immediately after the reader admitted the original size, so
-        // the bounded EOF probe must detect growth before returning its bytes.
-        await fs.appendFile(path.join(callerRoot, receipt.path), 'X'.repeat(64))
-      }
-      const result = await originalRead.apply(this, values as never)
-      readBytes += result.bytesRead
-      return result
-    })
-
-    await expect(store.readManagedFile(receipt.path, 'caller-a')).rejects.toMatchObject({
-      code: 'download_missing',
-    })
-    expect(grown).toBe(true)
-    expect(readBytes).toBe(receipt.sizeBytes + 1)
-  })
-
-  it.each([
-    ['temporary journal sync', 'abort'],
-    ['temporary journal sync', 'deadline'],
-    ['committed journal directory sync', 'abort'],
-    ['committed journal directory sync', 'deadline'],
-  ] as const)(
-    'keeps publication unreadable during cancellation at %s (%s)',
-    async (phase, cancellation) => {
-      const transfer = await store.createTransfer({
-        callerIdentity: 'caller-a',
-        callerWorkspacePath: callerRoot,
-        source,
-        sizeBytes: 7,
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      })
-      await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
-      const ledgerDirectory = path.join(hostRoot, '.gfs-download-store')
-      const directoryInfo = await fs.stat(ledgerDirectory)
-      const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
-      const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
-      await probe.close()
-      let release!: () => void
-      const blocked = new Promise<void>(resolve => {
-        release = resolve
-      })
-      let entered!: () => void
-      const started = new Promise<void>(resolve => {
-        entered = resolve
-      })
-      let held = false
-      const originalSync = prototype.sync
-      vi.spyOn(prototype, 'sync').mockImplementation(async function (this: fs.FileHandle) {
-        const info = await this.stat()
-        const atBoundary =
-          phase === 'temporary journal sync'
-            ? info.isFile() && info.size > 7
-            : info.isDirectory() && info.ino === directoryInfo.ino
-        if (!held && atBoundary && store.debugRecord(transfer.id)?.state === 'completed') {
-          held = true
-          entered()
-          await blocked
-        }
-        return originalSync.call(this)
-      })
-      const controller = new AbortController()
-      let now = Date.now()
-      const deadlineMs = now + 1000
-      if (cancellation === 'deadline') vi.spyOn(Date, 'now').mockImplementation(() => now)
-      const pending = store.publish(
-        transfer.id,
-        'caller-a',
-        createHash('sha256').update('fixture').digest('hex'),
-        { signal: controller.signal, deadlineMs }
-      )
-      const rejected = expect(pending).rejects.toMatchObject({ code: 'publication_cancelled' })
-      await started
-      if (cancellation === 'abort') controller.abort()
-      else now = deadlineMs
-      release()
-      await rejected
-
-      expect(store.debugRecord(transfer.id)).toMatchObject({ state: 'transferring' })
-      expect(store.debugRecord(transfer.id)?.sha256).toBeUndefined()
-      await expect(store.readManagedFile(transfer.path, 'caller-a')).rejects.toMatchObject({
-        code: 'download_missing',
-      })
-      const ledger = JSON.parse(
-        await fs.readFile(path.join(ledgerDirectory, 'ledger-v1.json'), 'utf8')
-      )
-      expect(ledger.records[transfer.id].state).toBe('transferring')
-      expect(ledger.records[transfer.id].sha256).toBeUndefined()
-      expect((await fs.readdir(ledgerDirectory)).filter(name => name.includes('.tmp-'))).toEqual([])
-      expect(store.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
-      await store.fail(transfer.id, 'caller-a')
-      expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
-    }
-  )
 })
 
-describe('S6: expiry and admission without processing-lease exemptions (#1019)', () => {
-  async function publishFixture(
-    expiresAt = new Date(Date.now() + 60_000).toISOString(),
-    retentionOwnerId?: string
-  ) {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt,
-      retentionOwnerId,
-    })
-    await fs.writeFile(path.join(callerRoot, transfer.partialPath), 'fixture')
-    return store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-  }
-
-  // Store behaviour only: this shell has no store reference, so the test shows
-  // that expiry is unaffected by a shell run that read the copy. Decoupling of
-  // the shell from the store is proven by the TaskExecutor-level X3-TE test.
-  it('removes an expired record even after a shell read it: expiry is unaffected by the shell run', async () => {
-    const receipt = await publishFixture()
-    const shell = new ShellTool(callerRoot, 5_000, ['PATH'], () => ({}), undefined, true)
-    const read = await shell.execute({ command: `cat ${JSON.stringify(receipt.path)}` })
-    expect(read.is_error).toBe(false)
-    expect(read.content).toContain('fixture')
-    await store.cleanupExpired(Date.parse(receipt.expiresAt) + 1)
-    expect(store.debugRecord(receipt.id)).toBeUndefined()
-    await expect(fs.lstat(path.join(callerRoot, path.dirname(receipt.path)))).rejects.toMatchObject(
-      { code: 'ENOENT' }
-    )
-    expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
+describe('GFS download store: reuse', () => {
+  it('F5: reuse returns the same id when the content hash matches', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 6, 40)
+    const reused = await store.reusableReceipt(CALLER, sourceFor(6), 40)
+    expect(reused).toMatchObject({ id: receipt.id, sha256: receipt.sha256, path: receipt.path })
   })
 
-  it('keeps an expired record only while a retention owner holds it', async () => {
-    const receipt = await publishFixture(undefined, 'waiting-approval-task')
-    await store.cleanupExpired(Date.parse(receipt.expiresAt) + 1)
-    expect(store.debugRecord(receipt.id)).toBeDefined()
-    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
-    await store.releaseReceiptOwner('waiting-approval-task', 'caller-a')
-    await store.cleanupExpired(Date.parse(receipt.expiresAt) + 1)
-    expect(store.debugRecord(receipt.id)).toBeUndefined()
+  it('F6: reuse deletes a directory whose content no longer matches and returns undefined', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 7, 40)
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    await nativeFs.writeFile(path.join(directory, 'source'), Buffer.alloc(40, 0xee))
+    hashBoundary.mockClear()
+
+    await expect(store.reusableReceipt(CALLER, sourceFor(7), 40)).resolves.toBeUndefined()
+
+    // Witness: the content was hashed exactly once before the verdict.
+    expect(hashBoundary).toHaveBeenCalledTimes(1)
+    expect(await exists(directory)).toBe(false)
   })
 
-  it('fences a transfer whose caller validation completes after shutdown', async () => {
-    const receipt = await publishFixture()
-    let resume!: () => void
-    let entered!: () => void
-    const barrier = new Promise<void>(resolve => {
-      resume = resolve
+  it('F7: reuse does not match another caller, another version or an expired entry', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 8, 12)
+    await expect(store.reusableReceipt('caller-b', sourceFor(8), 12)).resolves.toBeUndefined()
+    await expect(store.reusableReceipt(CALLER, sourceFor(8, 2), 12)).resolves.toBeUndefined()
+    // Witness: the same parameters with the right caller do match.
+    await expect(store.reusableReceipt(CALLER, sourceFor(8), 12)).resolves.toMatchObject({
+      id: receipt.id,
     })
-    const waiting = new Promise<void>(resolve => {
-      entered = resolve
-    })
-    const validatingStore = store as unknown as {
-      validateCallerRoot: (root: string) => Promise<string>
-    }
-    const validate = validatingStore.validateCallerRoot.bind(store)
-    vi.spyOn(validatingStore, 'validateCallerRoot').mockImplementationOnce(async root => {
-      const validated = await validate(root)
-      entered()
-      await barrier
-      return validated
-    })
-    const outcome = Promise.allSettled([
-      store.createTransfer({
-        callerIdentity: 'caller-a',
-        callerWorkspacePath: callerRoot,
-        source,
-        sizeBytes: 7,
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      }),
-    ])
-    await waiting
-    await store.close()
-    resume()
+    vi.setSystemTime(Date.now() + 2 * 60 * 60_000)
+    await expect(store.reusableReceipt(CALLER, sourceFor(8), 12)).resolves.toBeUndefined()
+  })
+})
 
-    const [result] = await outcome
-    expect(result!.status).toBe('rejected')
-    if (result!.status === 'rejected')
-      expect(result!.reason).toMatchObject({ code: 'workspace_unavailable' })
-    expect(await fs.readdir(path.join(callerRoot, '.gfs-downloads'))).toEqual([
-      path.basename(path.dirname(receipt.path)),
-    ])
-    const restarted = new GfsDownloadStore(hostRoot)
-    await restarted.initialize()
-    expect(restarted.debugUsage().bytes).toBe(7)
-    await restarted.close()
+/** The smallest limits the policy accepts with two callers' worth of Host storage. */
+const HOST_30_CALLER_15 = {
+  MCP_HOST_GFS_MAX_FILE_BYTES: '10',
+  MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '30',
+  MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '15',
+}
+
+describe('GFS download store: quotas and eviction', () => {
+  it("F8: a caller over quota evicts its own oldest completed downloads, never another caller's", async () => {
+    const { limited, limits } = await limitedStore({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '2' })
+    expect(limits.callerRetainedFiles).toBe(2)
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    const other = await completedCopy(limited, otherRoot, 'caller-b', 10, 8)
+    tick()
+    const oldest = await completedCopy(limited, callerRoot, CALLER, 11, 8)
+    tick()
+    const newer = await completedCopy(limited, callerRoot, CALLER, 12, 8)
+    tick()
+
+    await startTransfer(limited, callerRoot, CALLER, 13, 8)
+
+    expect(await exists(downloadDirectory(callerRoot, oldest.receipt.id))).toBe(false)
+    // Witnesses: the caller's newer copy and the other caller's older copy stay.
+    expect(await exists(downloadDirectory(callerRoot, newer.receipt.id))).toBe(true)
+    expect(await exists(downloadDirectory(otherRoot, other.receipt.id))).toBe(true)
   })
 
-  it('keeps another caller admissible while one caller has an expired record', async () => {
-    const expired = await publishFixture()
-    const callerBRoot = path.join(hostRoot, 'users', 'caller-b')
-    await fs.mkdir(callerBRoot, { recursive: true, mode: 0o700 })
-    // Caller B's expiry is derived from caller A's, so the mocked clock below
-    // is strictly before it however fast the fixtures run.
-    const callerBTransfer = await store.createTransfer({
-      callerIdentity: 'caller-b',
-      callerWorkspacePath: callerBRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.parse(expired.expiresAt) + 60_000).toISOString(),
-    })
-    await fs.writeFile(path.join(callerBRoot, callerBTransfer.partialPath), 'fixture')
-    const callerBReceipt = await store.publish(
-      callerBTransfer.id,
-      'caller-b',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(expired.expiresAt) + 1)
+  it("F9: a host over quota may evict any caller's oldest completed download", async () => {
+    const { limited } = await limitedStore(HOST_30_CALLER_15)
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
+    const other = await completedCopy(limited, otherRoot, 'caller-b', 20, 10)
+    tick()
+    const third = await completedCopy(limited, thirdRoot, 'caller-c', 21, 10)
+    tick()
+    const own = await completedCopy(limited, callerRoot, CALLER, 22, 10)
+    tick()
 
-    await store.cleanupExpired()
-    expect(store.debugRecord(expired.id)).toBeUndefined()
-    expect(store.isAvailable()).toBe(true)
-    expect(await store.reusableReceipt('caller-b', source, 7)).toMatchObject({
-      id: callerBReceipt.id,
-    })
+    // caller-a stays within 15; the Host would reach 35 of 30.
+    await startTransfer(limited, callerRoot, CALLER, 23, 5)
+
+    expect(await exists(downloadDirectory(otherRoot, other.receipt.id))).toBe(false)
+    // Witnesses: only the oldest copy went, whoever owned the newer ones.
+    expect(await exists(downloadDirectory(thirdRoot, third.receipt.id))).toBe(true)
+    expect(await exists(downloadDirectory(callerRoot, own.receipt.id))).toBe(true)
   })
 
-  it('rechecks failed-transfer ownership after a queued publication', async () => {
-    const transfer = await store.createTransfer({
-      callerIdentity: 'caller-a',
-      callerWorkspacePath: callerRoot,
-      source,
-      sizeBytes: 7,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  it('F10: when eviction cannot make room nothing is deleted', async () => {
+    const { limited } = await limitedStore({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '2' })
+    await completedCopy(limited, callerRoot, CALLER, 30, 8, { owner: 'task-1' })
+    tick()
+    await completedCopy(limited, callerRoot, CALLER, 31, 8, { owner: 'task-1' })
+    const downloads = path.join(callerRoot, '.gfs-downloads')
+    const before = (await nativeFs.readdir(downloads)).sort()
+    const denied = await quotaCount('caller', 'retained_files')
+    lstatBoundary.mockClear()
+
+    await expect(startTransfer(limited, callerRoot, CALLER, 32, 8)).rejects.toMatchObject({
+      code: 'caller_quota_exceeded',
     })
-    await fs.writeFile(path.join(callerRoot, transfer.partialPath), 'fixture')
-    const persistedStore = store as unknown as { persist: () => Promise<void> }
-    const persist = persistedStore.persist.bind(store)
-    let resume!: () => void
-    let entered!: () => void
-    const barrier = new Promise<void>(resolve => {
-      resume = resolve
+
+    // Witness: the admission read the inventory before refusing.
+    expect(lstatBoundary.mock.calls.length).toBeGreaterThan(0)
+    expect((await nativeFs.readdir(downloads)).sort()).toEqual(before)
+    expect(before).toHaveLength(2)
+    expect(await quotaCount('caller', 'retained_files')).toBe(denied + 1)
+  })
+
+  it('F11: pinned and active downloads are never evicted', async () => {
+    const { limited } = await limitedStore({
+      ...HOST_30_CALLER_15,
     })
-    const waiting = new Promise<void>(resolve => {
-      entered = resolve
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
+    const pinned = await completedCopy(limited, callerRoot, CALLER, 40, 10, { owner: 'task-40' })
+    tick()
+    const active = await startTransfer(limited, otherRoot, 'caller-b', 41, 10)
+    tick()
+    const unpinned = await completedCopy(limited, thirdRoot, 'caller-c', 42, 10)
+    tick()
+
+    // The Host would reach 40 of 30; one eviction makes room.
+    await startTransfer(limited, await callerDirectory(hostRoot, 'caller-d'), 'caller-d', 43, 10)
+
+    // Witness: the only eligible copy, although the newest, was evicted.
+    expect(await exists(downloadDirectory(thirdRoot, unpinned.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
+    expect(await exists(downloadDirectory(otherRoot, active.transfer.id))).toBe(true)
+  })
+
+  it('F12: free space is checked with active reservations and the 16 MiB reserve', async () => {
+    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
+    await startTransfer(store, otherRoot, 'caller-b', 50, 4096 * 10)
+    const observed = await nativeFs.statfs(hostRoot, { bigint: true })
+    const reserveBlocks = (16n * 1024n * 1024n) / 4096n
+    // Room for the request and the reserve, but not for the active reservation.
+    statfsBoundary.mockResolvedValue({ ...observed, bsize: 4096n, bavail: reserveBlocks + 2n })
+    const denied = await quotaCount('host', 'free_space')
+
+    await expect(startTransfer(store, callerRoot, CALLER, 51, 4096)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
     })
-    vi.spyOn(persistedStore, 'persist').mockImplementationOnce(async () => {
-      await persist()
-      entered()
-      await barrier
+    expect(statfsBoundary).toHaveBeenCalled()
+    expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
+
+    // Control: with room for the active reservation too, the same request is admitted.
+    statfsBoundary.mockResolvedValue({ ...observed, bsize: 4096n, bavail: reserveBlocks + 11n })
+    await expect(startTransfer(store, callerRoot, CALLER, 51, 4096)).resolves.toBeDefined()
+  })
+
+  it('F13: eviction candidates are not hashed', async () => {
+    const { limited } = await limitedStore({
+      ...HOST_30_CALLER_15,
     })
-    const published = store.publish(
-      transfer.id,
-      'caller-a',
-      createHash('sha256').update('fixture').digest('hex')
-    )
-    await waiting
-    const failed = expect(store.fail(transfer.id, 'caller-a')).rejects.toMatchObject({
+    const first = await completedCopy(limited, callerRoot, CALLER, 60, 3)
+    tick()
+    const second = await completedCopy(limited, callerRoot, CALLER, 61, 3)
+    tick()
+    const third = await completedCopy(limited, callerRoot, CALLER, 62, 9)
+    tick()
+    hashBoundary.mockClear()
+
+    // 15 retained + 6 requested against 15: the plan takes the two 3-byte copies.
+    await startTransfer(limited, callerRoot, CALLER, 64, 6)
+
+    // Witness: two candidates were evicted.
+    expect(await exists(downloadDirectory(callerRoot, first.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(callerRoot, second.receipt.id))).toBe(false)
+    expect(hashBoundary).not.toHaveBeenCalled()
+    expect(await exists(downloadDirectory(callerRoot, third.receipt.id))).toBe(true)
+  })
+
+  it('F14: size above maxFileBytes is refused before any filesystem work', async () => {
+    const { limited } = await limitedStore({ MCP_HOST_GFS_MAX_FILE_BYTES: '10' })
+    statfsBoundary.mockClear()
+    lstatBoundary.mockClear()
+    await expect(startTransfer(limited, callerRoot, CALLER, 70, 11)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
+    })
+    expect(statfsBoundary).not.toHaveBeenCalled()
+    expect(lstatBoundary).not.toHaveBeenCalled()
+    // Witness: the boundaries are live for an admissible size.
+    await startTransfer(limited, callerRoot, CALLER, 71, 10)
+    expect(statfsBoundary).toHaveBeenCalled()
+    expect(lstatBoundary).toHaveBeenCalled()
+  })
+
+  it('F15: concurrency limits per caller and per host return download_busy', async () => {
+    const callerBusy = await quotaCount('caller', 'active_downloads')
+    const hostBusy = await quotaCount('host', 'active_downloads')
+    await startTransfer(store, callerRoot, CALLER, 80, 4)
+    await expect(startTransfer(store, callerRoot, CALLER, 81, 4)).rejects.toMatchObject({
       code: 'download_busy',
     })
-    resume()
-    const receipt = await published
-    await failed
-    expect(store.debugRecord(receipt.id)).toMatchObject({ state: 'completed' })
-    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
-    const ledger = JSON.parse(
-      await fs.readFile(path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json'), 'utf8')
+    expect(await quotaCount('caller', 'active_downloads')).toBe(callerBusy + 1)
+
+    await startTransfer(store, await callerDirectory(hostRoot, 'caller-b'), 'caller-b', 82, 4)
+    await expect(
+      startTransfer(store, await callerDirectory(hostRoot, 'caller-c'), 'caller-c', 83, 4)
+    ).rejects.toMatchObject({ code: 'download_busy' })
+    expect(await quotaCount('host', 'active_downloads')).toBe(hostBusy + 1)
+  })
+})
+
+describe('GFS download store: sweep', () => {
+  it('F16: the sweep removes incomplete directories of every shape and keeps complete ones', async () => {
+    const kept = await completedCopy(store, callerRoot, CALLER, 90, 20)
+    const bytes = Buffer.alloc(20, 3)
+    const shapes: string[] = []
+
+    const orphanPartial = await handMadeDirectory(callerRoot)
+    await nativeFs.writeFile(path.join(orphanPartial.directory, 'source.partial'), bytes)
+    const metaWithoutSource = await handMadeDirectory(callerRoot)
+    await writeMeta(metaWithoutSource.directory, metaFor(metaWithoutSource.id, bytes))
+    const sourceWithoutMeta = await handMadeDirectory(callerRoot)
+    await nativeFs.writeFile(path.join(sourceWithoutMeta.directory, 'source'), bytes)
+    const invalidMeta = await handMadeDirectory(callerRoot)
+    await writeMeta(invalidMeta.directory, metaFor(invalidMeta.id, bytes, { sha256: 'nope' }))
+    await nativeFs.writeFile(path.join(invalidMeta.directory, 'source'), bytes)
+    const wrongSize = await handMadeDirectory(callerRoot)
+    await writeMeta(wrongSize.directory, metaFor(wrongSize.id, bytes))
+    await nativeFs.writeFile(path.join(wrongSize.directory, 'source'), Buffer.alloc(21, 3))
+    for (const shape of [
+      orphanPartial,
+      metaWithoutSource,
+      sourceWithoutMeta,
+      invalidMeta,
+      wrongSize,
+    ])
+      shapes.push(shape.directory)
+    const removed = await expiryCount('incomplete_removed')
+
+    await expect(store.cleanupExpired()).resolves.toEqual({
+      removedExpired: 0,
+      removedIncomplete: 5,
+      removeFailed: 0,
+    })
+
+    for (const directory of shapes) expect(await exists(directory)).toBe(false)
+    expect(await expiryCount('incomplete_removed')).toBe(removed + 5)
+    // Witness: the complete download stays on disk and readable through the index.
+    await expect(store.readManagedFile(kept.receipt.path, CALLER)).resolves.toEqual(kept.bytes)
+  })
+
+  it('F17: the sweep removes expired complete downloads unless pinned', async () => {
+    const pinned = await completedCopy(store, callerRoot, CALLER, 100, 8, { owner: 'task-100' })
+    const loose = await completedCopy(store, callerRoot, CALLER, 101, 8)
+    const later = Date.now() + 2 * 60 * 60_000
+
+    await expect(store.cleanupExpired(later)).resolves.toEqual({
+      removedExpired: 1,
+      removedIncomplete: 0,
+      removeFailed: 0,
+    })
+    expect(await exists(downloadDirectory(callerRoot, loose.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
+
+    await store.releaseReceiptOwner('task-100', CALLER)
+    await expect(store.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(false)
+  })
+
+  it('F18: the sweep ignores entries that are not input-<uuid>', async () => {
+    const downloads = path.join(callerRoot, '.gfs-downloads')
+    await nativeFs.mkdir(downloads, { mode: 0o700 })
+    const foreign = [
+      path.join(downloads, 'input-not-a-uuid'),
+      path.join(downloads, `input-${nativeCrypto.randomUUID().toUpperCase()}`),
+      path.join(downloads, 'notes'),
+    ]
+    for (const directory of foreign) await nativeFs.mkdir(directory, { mode: 0o700 })
+    await nativeFs.writeFile(path.join(downloads, 'readme.txt'), 'kept')
+    const incomplete = await handMadeDirectory(callerRoot)
+
+    await expect(store.cleanupExpired()).resolves.toMatchObject({ removedIncomplete: 1 })
+
+    // Witness: the incomplete store directory next to them was removed.
+    expect(await exists(incomplete.directory)).toBe(false)
+    for (const directory of foreign) expect(await exists(directory)).toBe(true)
+    expect(await exists(path.join(downloads, 'readme.txt'))).toBe(true)
+  })
+
+  it('F19: a symlinked .gfs-downloads is removed without following it', async () => {
+    const outside = await nativeFs.mkdtemp(path.join(tmpdir(), 'gfs-store-outside-'))
+    try {
+      const victim = path.join(outside, `input-${nativeCrypto.randomUUID()}`)
+      await nativeFs.mkdir(victim, { mode: 0o700 })
+      await nativeFs.writeFile(path.join(victim, 'source.partial'), 'outside')
+      const link = path.join(callerRoot, '.gfs-downloads')
+      await nativeFs.symlink(outside, link)
+
+      await expect(store.cleanupExpired()).resolves.toMatchObject({ removedIncomplete: 1 })
+
+      expect(await exists(link)).toBe(false)
+      await expect(nativeFs.readFile(path.join(victim, 'source.partial'), 'utf8')).resolves.toBe(
+        'outside'
+      )
+    } finally {
+      await nativeFs.rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('F20: a failed removal is logged and counted, does not block admission and is retried', async () => {
+    const stuck = await handMadeDirectory(callerRoot)
+    rmBoundary.mockImplementation(async (target: string, options: unknown) => {
+      // The store renames the directory to a private `.trash-<uuid>` name, then removes that.
+      if (path.basename(target).startsWith('.trash-'))
+        throw Object.assign(new Error('injected EACCES'), { code: 'EACCES' })
+      return nativeFs.rm(target, options as Parameters<typeof nativeFs.rm>[1])
+    })
+    const warn = vi.spyOn(logger, 'warn')
+    const failed = await expiryCount('remove_failed')
+
+    await expect(store.cleanupExpired()).resolves.toMatchObject({ removeFailed: 1 })
+
+    expect(warn).toHaveBeenCalledWith(
+      { component: 'GfsDownloadStore', code: 'EACCES' },
+      expect.stringContaining('could not remove')
     )
-    expect(ledger.records[receipt.id].state).toBe('completed')
-    expect(ledger).not.toHaveProperty('processingLeases')
+    expect(await expiryCount('remove_failed')).toBe(failed + 1)
+    const downloads = path.dirname(stuck.directory)
+    const leftover = (await nativeFs.readdir(downloads)).filter(name => name.startsWith('.trash-'))
+    expect(leftover).toHaveLength(1)
+    expect(await exists(stuck.directory)).toBe(false)
+    const next = await completedCopy(store, callerRoot, CALLER, 110, 8)
+    await expect(store.readManagedFile(next.receipt.path, CALLER)).resolves.toEqual(next.bytes)
+
+    // Once removal works again, the next sweep removes the renamed leftover.
+    rmBoundary.mockImplementation(nativeFs.rm)
+    await expect(store.cleanupExpired()).resolves.toMatchObject({ removedIncomplete: 1 })
+    expect(await exists(path.join(downloads, leftover[0]!))).toBe(false)
+  })
+})
+
+describe('GFS download store: managed reads', () => {
+  it('F21: readManagedFile returns the exact bytes and answers another caller like a missing copy', async () => {
+    const { receipt, bytes } = await completedCopy(store, callerRoot, CALLER, 120, 33)
+    await expect(store.readManagedFile(receipt.path, CALLER)).resolves.toEqual(bytes)
+    await expect(store.readManagedFile(receipt.path, 'caller-b')).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+    await expect(
+      store.readManagedFile(`.gfs-downloads/input-${nativeCrypto.randomUUID()}/source`, CALLER)
+    ).rejects.toMatchObject({ code: 'download_missing' })
+    await expect(store.readManagedFile('../escape/source', CALLER)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+  })
+
+  it('F22: readManagedFile deletes a tampered source and reports download_missing', async () => {
+    const { receipt } = await completedCopy(store, callerRoot, CALLER, 122, 16)
+    const directory = downloadDirectory(callerRoot, receipt.id)
+    await nativeFs.writeFile(path.join(directory, 'source'), Buffer.alloc(16, 0xab))
+    hashBoundary.mockClear()
+
+    await expect(store.readManagedFile(receipt.path, CALLER)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+
+    // Witness: the bytes were hashed once, then the directory was removed.
+    expect(hashBoundary).toHaveBeenCalledTimes(1)
+    expect(await exists(directory)).toBe(false)
+  })
+
+  it('F23: readManagedFilePrefix bounds and size check', async () => {
+    const bytes = Buffer.from('0123456789abcdef0123')
+    const transfer = await store.createTransfer({
+      callerIdentity: CALLER,
+      callerWorkspacePath: callerRoot,
+      source: sourceFor(123),
+      sizeBytes: bytes.byteLength,
+      expiresAt: future(),
+    })
+    await nativeFs.writeFile(path.join(callerRoot, transfer.partialPath), bytes)
+    const receipt = await store.publish(transfer.id, CALLER, digest(bytes))
+
+    await expect(store.readManagedFilePrefix(receipt.path, CALLER, 4)).resolves.toEqual(
+      Buffer.from('0123')
+    )
+    await expect(store.readManagedFilePrefix(receipt.path, CALLER)).resolves.toEqual(
+      bytes.subarray(0, 16)
+    )
+    for (const invalid of [0, -1, 4097, 1.5])
+      await expect(store.readManagedFilePrefix(receipt.path, CALLER, invalid)).rejects.toThrow(
+        RangeError
+      )
+    await nativeFs.appendFile(path.join(downloadDirectory(callerRoot, receipt.id), 'source'), 'x')
+    await expect(store.readManagedFilePrefix(receipt.path, CALLER, 4)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+  })
+})
+
+describe('GFS download store: pins, lifecycle and errors', () => {
+  it('F24: releaseReceiptOwner unpins only its own caller and a second store on the same root sees no pins', async () => {
+    const pinned = await completedCopy(store, callerRoot, CALLER, 130, 8, { owner: 'task-130' })
+    const rootB = await callerDirectory(hostRoot, 'caller-b')
+    // The same owner id under another caller is another pin, not a refusal.
+    const other = await completedCopy(store, rootB, 'caller-b', 131, 8, { owner: 'task-130' })
+    const later = Date.now() + 2 * 60 * 60_000
+    await expect(store.releaseReceiptOwner('unknown-owner', CALLER)).resolves.toBeUndefined()
+    await expect(store.releaseReceiptOwner('task-130', 'caller-b')).resolves.toBeUndefined()
+    // Witness: caller-b's release freed only caller-b's copy; CALLER's pin holds.
+    await expect(store.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
+    expect(await exists(downloadDirectory(rootB, other.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
+
+    await store.close()
+    const second = await openStore(hostRoot)
+    await expect(second.cleanupExpired(later)).resolves.toMatchObject({ removedExpired: 1 })
+    expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(false)
+  })
+
+  it('F25: close drains active transfers and refuses new admissions', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 140, 8)
+    let closed = false
+    const closing = store.close().then(() => {
+      closed = true
+    })
+    await expect(
+      startTransfer(store, await callerDirectory(hostRoot, 'caller-b'), 'caller-b', 141, 8)
+    ).rejects.toMatchObject({ code: 'download_busy' })
+    expect(store.isAvailable()).toBe(false)
+    expect(closed).toBe(false)
+
+    const receipt = await store.publish(transfer.id, CALLER, digest(bytes))
+    await closing
+    expect(closed).toBe(true)
+    expect(receipt.id).toBe(transfer.id)
+    await expect(store.initialize()).rejects.toMatchObject({ code: 'download_busy' })
+  })
+
+  it('F25b: close with an active transfer that never finishes resolves within the deadline', async () => {
+    const { transfer, bytes } = await startTransfer(store, callerRoot, CALLER, 150, 8)
+    const warn = vi.spyOn(logger, 'warn')
+    const started = performance.now()
+
+    await store.close(50)
+
+    expect(performance.now() - started).toBeLessThan(2_000)
+    // Witness: the store reports the transfer it left behind.
+    expect(warn).toHaveBeenCalledWith(
+      { component: 'GfsDownloadStore', active: 1 },
+      expect.stringContaining('closed with active transfers')
+    )
+    await expect(store.publish(transfer.id, CALLER, digest(bytes))).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    await expect(store.fail(transfer.id, CALLER)).rejects.toMatchObject({ code: 'download_busy' })
+    await expect(store.close()).resolves.toBeUndefined()
+  })
+
+  it('F26: error codes for an uninitialized, a closed and an unknown transfer', async () => {
+    const uninitialized = new GfsDownloadStore(hostRoot)
+    const probe = `.gfs-downloads/input-${nativeCrypto.randomUUID()}/source`
+    await expect(uninitialized.readManagedFile(probe, CALLER)).rejects.toMatchObject({
+      code: 'workspace_unavailable',
+    })
+    await expect(
+      uninitialized.createTransfer({
+        callerIdentity: CALLER,
+        callerWorkspacePath: callerRoot,
+        source: sourceFor(160),
+        sizeBytes: 1,
+        expiresAt: future(),
+      })
+    ).rejects.toMatchObject({ code: 'workspace_unavailable' })
+    await expect(uninitialized.close()).resolves.toBeUndefined()
+    await expect(uninitialized.initialize()).rejects.toMatchObject({ code: 'download_busy' })
+
+    const { transfer } = await startTransfer(store, callerRoot, CALLER, 161, 4)
+    // Another caller's transfer is answered exactly like an unknown id.
+    await expect(store.fail(transfer.id, 'caller-b')).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    await expect(store.fail(nativeCrypto.randomUUID(), CALLER)).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    await expect(
+      store.publish(nativeCrypto.randomUUID(), CALLER, 'a'.repeat(64))
+    ).rejects.toMatchObject({ code: 'download_missing' })
+    await expect(store.publish(transfer.id, CALLER, 'not-a-digest')).rejects.toThrow(RangeError)
+    // Witness: the transfer is live and the caller's fail() removes it.
+    await store.fail(transfer.id, CALLER)
+    expect(await exists(downloadDirectory(callerRoot, transfer.id))).toBe(false)
+
+    await store.close()
+    await expect(store.readManagedFile(probe, CALLER)).rejects.toMatchObject({
+      code: 'download_busy',
+    })
+    await expect(store.close()).resolves.toBeUndefined()
+  })
+
+  it('F27: a Host root that is a symlink makes initialize reject with workspace_unavailable', async () => {
+    const real = path.join(hostRoot, 'real-store')
+    await nativeFs.mkdir(real, { mode: 0o700 })
+    const link = path.join(hostRoot, 'store-link')
+    await nativeFs.symlink(real, link)
+    const linked = new GfsDownloadStore(link)
+    extraStores.push(linked)
+
+    await expect(linked.initialize()).rejects.toBeInstanceOf(GfsDownloadStoreError)
+    await expect(linked.initialize()).rejects.toMatchObject({ code: 'workspace_unavailable' })
+    expect(linked.isAvailable()).toBe(false)
+    // Witness: the same directory through its real path initializes.
+    await expect(openStore(real)).resolves.toBeInstanceOf(GfsDownloadStore)
   })
 })

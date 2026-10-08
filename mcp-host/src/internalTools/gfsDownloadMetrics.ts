@@ -49,7 +49,7 @@ export type GfsDownloadExpiryOutcome =
   | 'expired_removed'
   | 'incomplete_removed'
   | 'remove_failed'
-  | 'cleanup_failed'
+  | 'retired_legacy_store'
   | 'sweep_failed'
 
 const gfsDownloadAdmissionsTotal = getOrCreateCounter({
@@ -93,25 +93,6 @@ const gfsDownloadExpiryTotal = getOrCreateCounter({
   help: 'Governed GFS workspace-copy expiry and cleanup outcomes.',
   labelNames: ['outcome'] as const as Array<'outcome'>,
 })
-
-const gfsLegacyProcessingLeasesDiscardedTotal = getOrCreateCounter({
-  name: 'clerum_gfs_legacy_processing_leases_discarded_total',
-  help: 'Legacy shell processing leases discarded from the GFS download store ledger at initialize.',
-  labelNames: [] as const as Array<never>,
-})
-
-const gfsDownloadStoreQuarantinedRecords = getOrCreateGauge({
-  name: 'clerum_gfs_download_store_quarantined_records',
-  help: 'GFS download store records currently quarantined, set at each initialize after reconcile; they stay charged to quota. Operator recovery reclassifies only copies whose content still matches their recorded hash; any other quarantined copy stays charged, and the operator recovery tool cannot release it.',
-})
-
-export function recordGfsLegacyProcessingLeasesDiscarded(count: number): void {
-  gfsLegacyProcessingLeasesDiscardedTotal.inc(count)
-}
-
-export function setGfsQuarantinedRecords(count: number): void {
-  gfsDownloadStoreQuarantinedRecords.set(count)
-}
 
 export function recordGfsDownloadAdmission(outcome: GfsDownloadAdmissionOutcome): void {
   gfsDownloadAdmissionsTotal.labels(outcome).inc()
