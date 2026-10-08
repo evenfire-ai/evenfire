@@ -57,6 +57,9 @@ export type UpstreamEvidence = {
     finalResponses: number
     unexpectedRetries: number
   }
+  // #1044: the deterministic upstream's model-step retry turns
+  // (`codex-llm-proxy/test/approvedToolsUpstream.ts`).
+  modelStepRetry: ModelStepRetryEvidence
   requests: Array<{
     definitionCount: number
     explicitNonStrictCount: number
@@ -67,6 +70,19 @@ export type UpstreamEvidence = {
     stage: string
   }>
 }
+export const modelStepRetryFields = [
+  'turns',
+  'markerSearches',
+  'unavailableResponses',
+  'zeroToolUnavailable',
+  'continuationUnavailable',
+  'continuations',
+  'toolResults',
+  'resends',
+  'followUps',
+  'unexpectedRetries',
+] as const
+export type ModelStepRetryEvidence = Record<(typeof modelStepRetryFields)[number], number>
 export function required(name: string): string {
   const value = process.env[name]?.trim()
   if (!value) throw new Error(`Missing required isolated-profile precondition: ${name}`)
@@ -179,6 +195,11 @@ export async function readUpstreamEvidence(scenario: Scenario): Promise<Upstream
     const value = evidence.limitBoundary?.[field]
     if (!Number.isSafeInteger(value) || value < 0)
       throw new Error(`Missing upstream limit boundary evidence ${field}`)
+  }
+  for (const field of modelStepRetryFields) {
+    const value = evidence.modelStepRetry?.[field]
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error(`Missing upstream model-step retry evidence ${field}`)
   }
   if (!Array.isArray(evidence.requests)) throw new Error('Missing upstream request evidence')
   return evidence

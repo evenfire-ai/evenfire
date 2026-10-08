@@ -104,3 +104,91 @@ export async function waitForAgentRollout(
       JSON.stringify(last)
   )
 }
+
+type AgentPod = { uid: string; name: string; ready: boolean; deleting: boolean }
+
+// The Host Deployment selects its pods by `app: <hostName>`
+// (`host-context-controller/src/hostReconciler.ts:3593`).
+function readAgentPods(agentName: string): AgentPod[] {
+  const raw = execFileSync(
+    'kubectl',
+    [
+      '--context',
+      required('MINIKUBE_PROFILE'),
+      '--request-timeout=30s',
+      '-n',
+      NAMESPACE,
+      'get',
+      'pods',
+      '-l',
+      `app=${agentName}`,
+      '-o',
+      'json',
+    ],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+  )
+  const list = JSON.parse(raw) as {
+    items?: Array<{
+      metadata?: { uid?: string; name?: string; deletionTimestamp?: string }
+      status?: { conditions?: Array<{ type?: string; status?: string }> }
+    }>
+  }
+  return (list.items ?? []).map(pod => {
+    if (!pod.metadata?.uid || !pod.metadata.name) throw new Error('Agent pod without identity')
+    return {
+      uid: pod.metadata.uid,
+      name: pod.metadata.name,
+      ready: (pod.status?.conditions ?? []).some(
+        condition => condition.type === 'Ready' && condition.status === 'True'
+      ),
+      deleting: Boolean(pod.metadata.deletionTimestamp),
+    }
+  })
+}
+
+/**
+ * Restarts the agent's Host process by deleting its pod, the way a node drain
+ * or a crash would: the Deployment's ReplicaSet creates a replacement on the
+ * same workspace volume. This changes no Deployment spec, so the generation
+ * does not move and `waitForAgentRollout` cannot witness it. The witness here
+ * is a Ready pod whose UID was not present before the deletion.
+ */
+export async function restartAgentPod(agentName: string, timeoutMs = 180_000): Promise<string> {
+  const before = readAgentPods(agentName)
+  if (before.length !== 1 || !before[0]!.ready || before[0]!.deleting)
+    throw new Error(`Agent ${agentName} must run exactly one Ready pod: ${JSON.stringify(before)}`)
+  const previous = before[0]!
+  execFileSync(
+    'kubectl',
+    [
+      '--context',
+      required('MINIKUBE_PROFILE'),
+      '--request-timeout=30s',
+      '-n',
+      NAMESPACE,
+      'delete',
+      'pod',
+      previous.name,
+      '--wait=false',
+    ],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+  )
+  const deadline = Date.now() + timeoutMs
+  let last: AgentPod[] = before
+  while (Date.now() < deadline) {
+    last = readAgentPods(agentName)
+    const replacement = last.filter(pod => pod.uid !== previous.uid)
+    if (
+      replacement.length === 1 &&
+      replacement[0]!.ready &&
+      !replacement[0]!.deleting &&
+      last.every(pod => pod.uid !== previous.uid)
+    )
+      return replacement[0]!.uid
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS))
+  }
+  throw new Error(
+    `Agent ${agentName} had no Ready replacement for pod ${previous.uid} within ${timeoutMs} ms: ` +
+      JSON.stringify(last)
+  )
+}
