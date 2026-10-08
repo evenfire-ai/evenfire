@@ -2352,7 +2352,7 @@ export class TaskExecutor {
             appConfig.enableApproval &&
             this.task.source === 'channel' &&
             this.deps.approvalConfig?.tools?.shell_exec !== false
-            ? new Set(['shell_exec', 'clerum__gfs_download'])
+            ? new Set(['clerum__gfs_download'])
             : undefined
         )
       : baseController

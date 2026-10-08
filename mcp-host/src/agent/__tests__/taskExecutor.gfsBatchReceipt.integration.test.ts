@@ -81,7 +81,7 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
-it('keeps the exact workspace receipt through same-batch image suspension, SQLite cold resume and fresh CLI consent', async () => {
+it('keeps the exact workspace receipt through same-batch image suspension, SQLite cold resume and one turn-wide shell approval', async () => {
   root = await fs.mkdtemp(join(tmpdir(), 'gfs-batch-receipt-'))
   store = new GfsDownloadStore(root)
   await store.initialize()
@@ -284,25 +284,19 @@ it('keeps the exact workspace receipt through same-batch image suspension, SQLit
   ).toMatchObject(expected)
   const cold = new TaskExecutor(task, { ...deps, conversationManager: coldManager })
   await cold.rehydrateWaitingApproval(sessionKey, coldConversation.pending_approval!)
+  // The shell approval covers the rest of the turn, so the follow-up shell
+  // that processes the retained copy runs without a second approval.
   await cold.resumeAfterApproval(false)
   expect(onFail).not.toHaveBeenCalled()
-  expect(cold.executorState).toBe('waiting_approval')
-  expect(cold.pendingApproval?.tool_call_id).toBe('process-retained')
-  expect(cold.pendingApproval?.authorization_scope).toBe('exact_invocation')
   expect(requests[1].find(message => message.tool_call_id === firstShell.id)?.content).toContain(
     'batch-approved'
   )
   expect(
     requests[1].flatMap(message => message.contentParts ?? []).some(part => part.type === 'image')
   ).toBe(false)
-  expect(contentRequests).toBe(1)
-  expect(releaseOwner).not.toHaveBeenCalled()
-
-  await cold.resumeAfterApproval(false)
-  expect(onFail).not.toHaveBeenCalled()
   expect(cold.executorState).toBe('completed')
   expect(onComplete).toHaveBeenCalledExactlyOnceWith(task)
-  expect(onApprovalNeeded).toHaveBeenCalledTimes(2)
+  expect(onApprovalNeeded).toHaveBeenCalledTimes(1)
   const output = requests[2].find(message => message.tool_call_id === 'process-retained')!.content
   // Shell output keeps the production safety envelope around the bounded proof.
   const proof = /\{"bytes":\d+,"sha256":"[0-9a-f]{64}"\}/.exec(output)?.[0]

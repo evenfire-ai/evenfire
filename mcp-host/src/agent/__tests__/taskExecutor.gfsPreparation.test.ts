@@ -361,6 +361,7 @@ async function scenario(
     store,
     sessionKey: resolveTaskSessionKey(task),
     createCold: () => new TaskExecutor(task, deps),
+    manager,
     get contentRequests() {
       return contentRequests
     },
@@ -716,6 +717,25 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
       { status: 'unavailable', code: 'approval_required' },
     ])
     expect(test.metadataRequests).toBe(0)
+    expect(test.contentRequests).toBe(0)
+  })
+
+  // shell_exec follows the turn and "always" approval rules; a configured
+  // clerum__gfs_download approval stays per call (TaskExecutor live set).
+  it('asks for each configured clerum__gfs_download despite turn and persistent approval', async () => {
+    const test = await scenario({ mode: 'download-again', requireDownloadApproval: true })
+    const conversation = await test.manager.getOrCreate(test.sessionKey)
+    conversation.auto_approved_tools = new Set(['*', 'clerum__gfs_download'])
+    await test.executor.run()
+
+    expect(test.onFail).not.toHaveBeenCalled()
+    expect(test.executor.executorState).toBe('waiting_approval')
+    expect(test.executor.pendingApproval).toMatchObject({
+      tool_name: 'clerum__gfs_download',
+      tool_call_id: 'unit-download-again',
+      authorization_scope: 'exact_invocation',
+    })
+    expect(test.onApprovalNeeded).toHaveBeenCalledTimes(1)
     expect(test.contentRequests).toBe(0)
   })
 

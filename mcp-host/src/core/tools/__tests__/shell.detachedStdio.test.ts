@@ -665,4 +665,56 @@ describe('ShellTool single finalizer races (#1028 P1, hermetic child)', () => {
     ])
     expect(vi.getTimerCount()).toBe(0)
   })
+
+  it('R1-H1: a natural exit whose group probe always fails with EPERM is bounded by the execution timeout plus the cleanup budget', async () => {
+    useFakeClock()
+    const child = hermeticChild()
+    vi.mocked(spawn).mockImplementationOnce(() => child as never)
+    // EPERM means the group exists under another owner: never proof of absence.
+    const signals: Array<{ pid: number; signal: unknown; at: number }> = []
+    vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
+      signals.push({ pid, signal, at: performance.now() })
+      if (signal === 0) throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' })
+      return true
+    })
+    const timeoutMs = 3 * SHELL_STDIO_DRAIN_MS + SHELL_STDIO_DRAIN_MS / 2
+    const startedAt = performance.now()
+    let settledAt: number | undefined
+    const execution = new ShellTool(workspacePath, timeoutMs, []).execute({
+      command: 'hermetic command',
+    })
+    void execution.then(() => {
+      settledAt = performance.now()
+    })
+    child.stdout.emit('data', Buffer.from('natural output'))
+    child.exitCode = 0
+    child.emit('exit', 0, null)
+
+    await vi.advanceTimersByTimeAsync(timeoutMs)
+    // Witness: the drain poll probed the group and got EPERM before the timeout.
+    const drainProbes = signals.filter(
+      entry => entry.signal === 0 && entry.at < startedAt + timeoutMs
+    )
+    expect(drainProbes).toHaveLength(3)
+    expect(signals.filter(entry => entry.signal === 'SIGTERM')).toEqual([
+      { pid: -FAKE_PID, signal: 'SIGTERM', at: startedAt + timeoutMs },
+    ])
+
+    await vi.advanceTimersByTimeAsync(SHELL_TIMEOUT_CLEANUP_MS - 1)
+    expect(settledAt).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(settledAt).toBe(startedAt + timeoutMs + SHELL_TIMEOUT_CLEANUP_MS)
+    const result = await execution
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe(
+      `${notice('timeout')}stdout:\nnatural output\n\n${TIMEOUT_FOOTER(timeoutMs)}\n\n[process_group_termination_failed]`
+    )
+    // EPERM is an expected probe answer, so it logs no probe-failure warning.
+    expect(heldWarnings()).toEqual([
+      expect.objectContaining({ reason: 'timeout', processGroupTerminated: false }),
+    ])
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('probe failed')
+    expect(vi.getTimerCount()).toBe(0)
+  })
 })

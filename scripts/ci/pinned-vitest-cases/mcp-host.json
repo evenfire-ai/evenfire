@@ -136,16 +136,40 @@
     "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) R1-H1: a natural exit whose group never disappears and whose stdio never closes is bounded by the execution timeout plus the cleanup budget"
   },
   {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) R1-H1: a natural exit whose group probe always fails with EPERM is bounded by the execution timeout plus the cleanup budget"
+  },
+  {
     "suite": "config.toolProgressInterval.test.ts",
     "fullName": "CLERUM_TOOL_PROGRESS_INTERVAL_MS (#1028 P2) P2-b: malformed and sub-second values stop startup with the exact message and do not echo the value"
   },
   {
     "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
-    "fullName": "requires live shell approval while the GFS download store is unavailable: store closed"
+    "fullName": "applies persistent shell approval while the GFS download store is unavailable: store closed"
   },
   {
     "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
-    "fullName": "requires live shell approval while the GFS download store is unavailable: store never initialized"
+    "fullName": "applies persistent shell approval while the GFS download store is unavailable: store never initialized"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "runs shell without a new approval when shell_exec is persistently approved"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "one shell approval covers the rest of the turn: two shell calls, one approval"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "approval parity: http_request asks once per turn and the approval covers the next call"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "approval parity: shell_exec asks once per turn and the approval covers the next call"
+  },
+  {
+    "suite": "taskExecutor.gfsPreparation.test.ts",
+    "fullName": "TaskExecutor prepares admitted GFS files before its first model call asks for each configured clerum__gfs_download despite turn and persistent approval"
   },
   {
     "suite": "gfsDownloadStore.test.ts",

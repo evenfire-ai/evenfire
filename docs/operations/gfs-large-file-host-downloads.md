@@ -120,20 +120,19 @@ a new ID, after fresh GFS authorization.
 `shell_exec` remains the trust boundary:
 
 - The working directory and `HOME` are the caller workspace. A supplied allowlisted or dynamic `HOME` cannot relocate execution outside it.
-- Each command on this managed workspace surface requires fresh live user
-  approval. Consent authorizes the exact frozen invocation. It does not grant
-  `*`, another tool, an entire MCP server, a future shell call or unattended
-  execution. Deliberately turn-wide approvals on other surfaces retain their
-  proven scope. Persisted approvals without a scope are treated as individual
-  invocations.
+- `shell_exec` follows the same approval rules as every other native tool,
+  such as `http_request` (as before #979): approving one call authorizes the
+  rest of that turn, and "always" approval authorizes later turns. A guardrail
+  rule with `action: 'ask'` on `shell_exec` restores per-call approval.
+  Persisted approvals without a scope are treated as individual invocations.
 - Combined retained command output is bounded to 1 MiB. Live progress is bounded to 64 KiB. Exceeding the output bound terminates the process group and returns a truthful `output_limit_exceeded` result.
 - `shell_exec` never calls the GFS download store (#1019). It takes nothing
   from the store, does not depend on `store.isAvailable()`, and keeps
   running while the store is unavailable. When a Host-owned store exists,
   the shell stays bound to the verified caller root; before every command it
   re-verifies that the caller root is still canonical. That check is per-user
-  directory scoping, not store state. Live approval of `shell_exec` and
-  `clerum__gfs_download` is forced only for channel tasks on a Host with
+  directory scoping, not store state. Per-call live approval is forced only
+  for `clerum__gfs_download`, and only for channel tasks on a Host with
   approval enabled, unless the approval configuration sets `shell_exec` to
   `false`. Cron, internal and approval-disabled tasks keep their existing
   approval policy.
@@ -191,6 +190,11 @@ a new ID, after fresh GFS authorization.
    if the parent moved). The windows that remain can be won only by a process
    running with the Host UID, which can already alter or delete those files
    directly (risk 3); winning one gives no capability beyond that.
+8. A turn-wide or "always" approval of `shell_exec` also authorizes shell
+   commands the model issues after it has read untrusted GFS content in the
+   same turn (or, with "always", in later turns). The shell runs with the Host
+   UID. Operators who need per-call approval add a guardrail rule with
+   `action: 'ask'` for `shell_exec`.
 
 Partial reads are not possible, because publication is an atomic `rename` of
 `source.partial`.

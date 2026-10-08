@@ -44,8 +44,9 @@ export interface GfsExecutionCapabilityInput {
 /**
  * GFS workspace delivery requires an attended channel caller, live approval,
  * an explicit shell tool policy, and the Host-owned caller-bound store/root.
- * Cron and internal tasks stay unattended; persistent approvals are handled at
- * the live shell controller boundary, not by this static capability check.
+ * Cron and internal tasks stay unattended. Turn and persistent approvals of
+ * shell_exec follow the ordinary approval rules; only clerum__gfs_download is
+ * forced to per-call approval, at the TaskExecutor controller boundary.
  */
 export function gfsWorkspaceExecutionEnabled(
   input: GfsExecutionCapabilityInput

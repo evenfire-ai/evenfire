@@ -12,6 +12,7 @@ import {
 } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { SqliteConversationStore } from '../../core/conversation/persistence/sqliteConversationStore'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import { HttpRequestTool } from '../../core/tools/httpRequest'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
@@ -79,7 +80,8 @@ async function scenario(
   calls: ToolCall[],
   guardrailAsk = false,
   conversationManager = new ConversationManager(),
-  storeState: StoreState = 'available'
+  storeState: StoreState = 'available',
+  persistentShellApproval = true
 ) {
   const root = await mkdtemp(join(tmpdir(), 'gfs-live-approval-'))
   roots.push(root)
@@ -144,7 +146,7 @@ async function scenario(
     channelType: task.sourceMessage!.channelType,
     channelId: task.sourceMessage!.channelId,
   })
-  conversation.auto_approved_tools = new Set(['shell_exec'])
+  conversation.auto_approved_tools = new Set(persistentShellApproval ? ['shell_exec'] : [])
 
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
@@ -202,32 +204,28 @@ async function scenario(
   }
 }
 
-it('requires live shell approval despite persistent shell auto-approval', async () => {
+// Shell approval follows the same turn and "always" rules as every other native
+// tool (as before #979). Only clerum__gfs_download keeps per-call live approval.
+it('runs shell without a new approval when shell_exec is persistently approved', async () => {
   const call = shellCall('first-shell-call', firstCommand)
   const s = await scenario([call])
   await s.executor.run()
 
   expect(s.onFail).not.toHaveBeenCalled()
-  expect(s.executor.executorState).toBe('waiting_approval')
-  expect(s.executor.pendingApproval).toMatchObject({
-    tool_name: call.name,
-    tool_call_id: call.id,
-    parameters: call.arguments,
-  })
-
-  expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
-  expect(s.providerCalls).toHaveLength(1)
-  expect(spawn).not.toHaveBeenCalled()
+  // Witness: the command ran, with its exact arguments, and the turn finished.
+  expect(spawn).toHaveBeenCalledTimes(1)
+  expect(vi.mocked(spawn).mock.calls[0].slice(0, 2)).toEqual(['/bin/sh', ['-c', firstCommand]])
+  expect(s.executor.executorState).toBe('completed')
+  expect(s.onApprovalNeeded).not.toHaveBeenCalled()
 })
 
-// X6 covers an unavailable store with source 'cron', where the forced live
-// approval set never applies. These cases pin the channel path: delivery is
-// withdrawn, yet persistent shell auto-approval still does not run a command.
+// X6 covers an unavailable store with source 'cron'. These cases pin the channel
+// path: delivery is withdrawn, and persistent shell approval still applies.
 it.each([
   ['store closed', 'closed'] as const,
   ['store never initialized', 'uninitialized'] as const,
 ])(
-  'requires live shell approval while the GFS download store is unavailable: %s',
+  'applies persistent shell approval while the GFS download store is unavailable: %s',
   async (_label, storeState) => {
     const call = shellCall('unavailable-store-shell-call', firstCommand)
     const s = await scenario([call], false, new ConversationManager(), storeState)
@@ -240,38 +238,79 @@ it.each([
     // Witness: the executor consulted the unavailable store for this task.
     expect(isAvailable.mock.calls.length).toBeGreaterThan(0)
     expect(s.onFail).not.toHaveBeenCalled()
-    expect(s.executor.executorState).toBe('waiting_approval')
-    expect(s.executor.pendingApproval).toMatchObject({
-      tool_name: 'shell_exec',
-      tool_call_id: call.id,
-      parameters: call.arguments,
-    })
-    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
-    expect(s.providerCalls).toHaveLength(1)
-    expect(spawn).not.toHaveBeenCalled()
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(spawn).mock.calls[0].slice(0, 2)).toEqual(['/bin/sh', ['-c', firstCommand]])
+    expect(s.executor.executorState).toBe('completed')
+    expect(s.onApprovalNeeded).not.toHaveBeenCalled()
   }
 )
 
-it.each(['http_request', 'cron_manage'] as const)(
-  'does not turn an exact GFS shell approval into turn-wide consent for %s',
+it('one shell approval covers the rest of the turn: two shell calls, one approval', async () => {
+  const firstCall = shellCall('first-shell-call', firstCommand)
+  const secondCall = shellCall('second-shell-call', secondCommand)
+  const s = await scenario(
+    [firstCall, secondCall],
+    false,
+    new ConversationManager(),
+    'available',
+    false
+  )
+  await s.executor.run()
+
+  expect(s.executor.pendingApproval).toMatchObject({
+    tool_name: 'shell_exec',
+    tool_call_id: firstCall.id,
+    authorization_scope: 'turn_tools',
+  })
+  expect(spawn).not.toHaveBeenCalled()
+  await s.executor.resumeAfterApproval(false)
+
+  expect(s.onFail).not.toHaveBeenCalled()
+  // Witness: both commands ran, in order, after a single approval.
+  expect(vi.mocked(spawn).mock.calls.map(call => call[1])).toEqual([
+    ['-c', firstCommand],
+    ['-c', secondCommand],
+  ])
+  const secondResult = s.providerCalls[2].find(
+    message => message.role === 'tool' && message.tool_call_id === secondCall.id
+  )
+  expect(secondResult?.content).toContain('second-approved-result')
+  expect(s.executor.executorState).toBe('completed')
+  expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
+})
+
+it.each(['http_request', 'shell_exec'] as const)(
+  'approval parity: %s asks once per turn and the approval covers the next call',
   async toolName => {
-    const fetchMock = vi.fn(async () => new Response('untrusted follow-up body', { status: 200 }))
-    vi.stubGlobal('fetch', fetchMock)
-    const s = await scenario([shellCall('gfs-shell', firstCommand), riskyFollowUp(toolName)])
+    // http_request resolves and pins its own socket; the tool boundary is the witness.
+    const httpExecute = vi
+      .spyOn(HttpRequestTool.prototype, 'execute')
+      .mockResolvedValue({ content: 'follow-up body', duration_ms: 1, is_error: false })
+    const first: ToolCall =
+      toolName === 'shell_exec'
+        ? shellCall('parity-first', firstCommand)
+        : { ...riskyFollowUp('http_request'), id: 'parity-first' }
+    const s = await scenario(
+      [first, riskyFollowUp('http_request')],
+      false,
+      new ConversationManager(),
+      'available',
+      false
+    )
     await s.executor.run()
 
     expect(s.executor.pendingApproval).toMatchObject({
-      tool_name: 'shell_exec',
-      authorization_scope: 'exact_invocation',
+      tool_name: toolName,
+      authorization_scope: 'turn_tools',
     })
     await s.executor.resumeAfterApproval(false)
 
     expect(s.onFail).not.toHaveBeenCalled()
-    expect(s.executor.executorState).toBe('waiting_approval')
-    expect(s.executor.pendingApproval).toMatchObject({ tool_name: toolName })
-    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(2)
-    expect(s.releaseReceiptOwner).not.toHaveBeenCalled()
-    expect(fetchMock).not.toHaveBeenCalled()
+    // Witness: the follow-up HTTP call ran without a new approval.
+    expect(httpExecute).toHaveBeenCalledTimes(toolName === 'http_request' ? 2 : 1)
+    expect(spawn).toHaveBeenCalledTimes(toolName === 'shell_exec' ? 1 : 0)
+    expect(s.executor.executorState).toBe('completed')
+    expect(s.onApprovalNeeded).toHaveBeenCalledTimes(1)
   }
 )
 
@@ -284,7 +323,9 @@ it.each(['http_request', 'cron_manage'] as const)(
     const s = await scenario(
       [shellCall('legacy-shell', firstCommand), riskyFollowUp(followUp)],
       false,
-      manager
+      manager,
+      'available',
+      false
     )
     const listJobs = vi.spyOn(s.deps.cronScheduler!, 'getAllJobs')
     const fetchMock = vi.fn(async () => new Response('Unexpected remote result'))
@@ -327,7 +368,9 @@ it('preserves separately explicit cron consent after a legacy SQLite shell resum
   const s = await scenario(
     [shellCall('legacy-shell', firstCommand), riskyFollowUp('cron_manage')],
     false,
-    new ConversationManager(handle.store)
+    new ConversationManager(handle.store),
+    'available',
+    false
   )
   await s.executor.run()
   handle.worker.db
@@ -356,7 +399,9 @@ const resumeCases = [
   { firstExit: 127, repeatedCommand: true, alwaysApprove: false, rehydrate: false },
   { firstExit: 0, repeatedCommand: true, alwaysApprove: false, rehydrate: true },
   { firstExit: 127, repeatedCommand: false, alwaysApprove: false, rehydrate: true },
-].flatMap(c => [false, true].map(guardrailAsk => ({ ...c, guardrailAsk })))
+  // A guardrail `action: 'ask'` rule is what keeps shell approval per call now
+  // that shell_exec follows the turn and "always" rules of every native tool.
+].map(c => ({ ...c, guardrailAsk: true }))
 
 it.each(resumeCases)(
   'requires new approval after exit $firstExit (repeated=$repeatedCommand, persistent=$alwaysApprove, rehydrated=$rehydrate, guardrailAsk=$guardrailAsk)',
@@ -428,7 +473,7 @@ it.each(resumeCases)(
   }
 )
 
-it.each([false, true])(
+it.each([true])(
   'reissues live approval without a frozen snapshot (guardrailAsk=%s)',
   async guardrailAsk => {
     const firstCall = shellCall('first-shell-call', firstCommand)
