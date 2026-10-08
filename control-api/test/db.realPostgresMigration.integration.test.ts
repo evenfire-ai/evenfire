@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express, { type Request as ExpressRequest } from 'express'
+import { execFileSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -55,6 +58,46 @@ function quoteIdent(value: string): string {
 
 function expectPrivileges(actual: string[], expected: string[]): void {
   expect([...actual].sort()).toEqual([...expected].sort())
+}
+
+function deploymentRuntimeAccessQueries(): string[] {
+  const script = readFileSync(
+    new URL('../../deploy/scripts/run-control-api-db-migration.sh', import.meta.url),
+    'utf8'
+  )
+  const start = script.indexOf('\nruntime_access_contract_values() {')
+  const end = script.indexOf('\nverify_trace_maintenance_access_contract() {', start)
+  if (start < 0 || end < 0) throw new Error('Deployment runtime access verifier is missing')
+
+  // Execute the real profile parser and verifier to capture their SQL, without
+  // entering the migration script's Kubernetes operations or copying its policy.
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+RUNTIME_ACCESS_PROFILES_FILE="$1"
+RUNTIME_SEQUENCE_ACCESS_PROFILES_FILE="$2"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+assert_db_query_equals() { printf '%s\\0' "$3"; }
+${script.slice(start, end)}
+verify_runtime_access_contract`,
+      'deployment-runtime-access',
+      fileURLToPath(
+        new URL('../../deploy/scripts/control-api-runtime-access-profiles.tsv', import.meta.url)
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/control-api-runtime-sequence-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+    ],
+    { encoding: 'utf8', timeout: 10_000 }
+  )
+  const queries = output.split('\0').filter(Boolean)
+  expect(queries).toHaveLength(2)
+  return queries
 }
 
 async function relationPrivileges(pool: Pool, roleName: string): Promise<PrivilegeExpectation> {
@@ -156,6 +199,42 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await adminPool?.end()
     }
   })
+
+  it('verifies the deployment access contract against migrated schema and rejects drift', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+    const [relationQuery, sequenceQuery] = deploymentRuntimeAccessQueries()
+    const violations = async (sql: string) =>
+      Number((await dbPool.query({ text: sql, rowMode: 'array' })).rows[0][0])
+
+    expect(await violations(relationQuery)).toBe(0)
+    expect(await violations(sequenceQuery)).toBe(0)
+    const privileges = await relationPrivileges(dbPool, 'control_api_runtime')
+    for (const relation of ['password_identifier_state', 'password_verification_pace']) {
+      expectPrivileges([...privileges[relation]], ['SELECT', 'INSERT', 'UPDATE', 'DELETE'])
+    }
+    expectPrivileges([...privileges.password_verification_work], ['SELECT', 'INSERT', 'DELETE'])
+
+    try {
+      await dbPool.query('GRANT UPDATE ON password_verification_work TO control_api_runtime')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('REVOKE UPDATE ON password_verification_work FROM control_api_runtime')
+    }
+    try {
+      await dbPool.query('REVOKE DELETE ON password_verification_work FROM control_api_runtime')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('GRANT DELETE ON password_verification_work TO control_api_runtime')
+    }
+    try {
+      await dbPool.query('CREATE TABLE runtime_access_contract_probe (id INTEGER)')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('DROP TABLE IF EXISTS runtime_access_contract_probe')
+    }
+    expect(await violations(relationQuery)).toBe(0)
+  }, 60_000)
 
   it('applies initDb twice and leaves the exact runtime privilege envelopes', async () => {
     const { initDb } = await import('../src/db.js')
