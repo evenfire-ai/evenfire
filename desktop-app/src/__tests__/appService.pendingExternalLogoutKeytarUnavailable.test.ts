@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -12,7 +12,11 @@ vi.mock('electron', () => ({
     getPath: vi.fn(() => testRuntime.userDataDirectory),
     isReady: vi.fn(() => true),
   },
-  safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
+  safeStorage: {
+    isEncryptionAvailable: vi.fn(() => false),
+    encryptString: vi.fn((value: string) => Buffer.from(value, 'utf8')),
+    decryptString: vi.fn((value: Buffer) => value.toString('utf8')),
+  },
 }))
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
@@ -68,6 +72,8 @@ afterEach(async () => {
 describe('AppService pending logout when Keytar is unavailable', () => {
   it('retains the marker through startup and verified file-backed login', async () => {
     const tokenStore = new TokenStoreClass()
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
     const service = new AppServiceClass({
       tokenStore,
       getUserDataDirectory: () => userDataDirectory,
@@ -97,6 +103,9 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     ).resolves.toEqual({ authenticated: true, me: user })
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('new-file-backed-session')
+    const files = await readdir(userDataDirectory)
+    expect(files).toContain(`session-token-${activeEnvKey}.enc`)
+    expect(files).not.toContain(`session-token-${activeEnvKey}.json`)
 
     await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)

@@ -1969,11 +1969,15 @@ export class AppService {
             // Keep the logout marker until a later Keytar cleanup succeeds.
             // The read-back below still rejects a stale credential left in Keytar.
             retirePendingLogoutMarker = false
-            await this.tokenStore.setSessionToken(result.token, envKey)
+            await this.tokenStore.setSessionToken(result.token, envKey, {
+              requireSafeStorageFallback: true,
+            })
             this.reportDeferredLogoutFailureSafely(keytarError)
           }
         } else {
-          await this.tokenStore.setSessionToken(result.token, envKey)
+          await this.tokenStore.setSessionToken(result.token, envKey, {
+            ...(pendingLogout.present ? { requireSafeStorageFallback: true } : {}),
+          })
         }
         pendingCredentialPersisted = pendingLogout.present
         if (pendingLogout.present) {

@@ -44,6 +44,16 @@ describe('TokenStore plain-text fallback (no keytar, no safeStorage)', () => {
     expect(await fs.readdir(userDataDir)).toEqual([])
   })
 
+  it('does not use plaintext fallback when safeStorage is required but unavailable', async () => {
+    const store = new TokenStore()
+
+    await expect(
+      store.setSessionToken('fresh-token', ENV_A, { requireSafeStorageFallback: true })
+    ).rejects.toThrow('Electron safeStorage is unavailable for session-token fallback')
+
+    expect(await fs.readdir(userDataDir)).toEqual([])
+  })
+
   it('reads back a token it wrote to the per-env plain-text file (restart survival)', async () => {
     const store = new TokenStore()
     await store.setSessionToken('tok-a', ENV_A)

@@ -46,7 +46,11 @@ vi.mock('electron', () => ({
     getPath: vi.fn(() => userDataDirectory),
     isReady: vi.fn(() => true),
   },
-  safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
+  safeStorage: {
+    isEncryptionAvailable: vi.fn(() => false),
+    encryptString: vi.fn((value: string) => Buffer.from(value, 'utf8')),
+    decryptString: vi.fn((value: Buffer) => value.toString('utf8')),
+  },
 }))
 
 beforeEach(async () => {
@@ -372,6 +376,8 @@ describe('AppService pending external logout', () => {
     const reportFailure = vi.fn()
     const { service, tokenStore } = createService(undefined, reportFailure)
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
     const keytar = await import('keytar')
     const account = `session-token::${activeEnvKey}`
     const originalGet = vi.mocked(keytar.getPassword).getMockImplementation()!
@@ -522,7 +528,9 @@ describe('AppService pending external logout', () => {
         me: loginResult.me,
       })
 
-      expect(persistToken).toHaveBeenCalledWith(loginResult.token, activeEnvKey)
+      expect(persistToken).toHaveBeenCalledWith(loginResult.token, activeEnvKey, {
+        requireSafeStorageFallback: true,
+      })
       expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
       expect(keychain.get(keyOf('Evenfire', legacyAccount))).toBe('legacy-session-token')
     } finally {
@@ -530,10 +538,12 @@ describe('AppService pending external logout', () => {
     }
   })
 
-  it('allows file-backed login when the whole Keytar store fails and retains the marker', async () => {
+  it('allows encrypted file-backed login when the whole Keytar store fails and retains the marker', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
     const keytar = await import('keytar')
     const originalGet = vi.mocked(keytar.getPassword).getMockImplementation()!
     const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
@@ -557,6 +567,44 @@ describe('AppService pending external logout', () => {
       )
       expect(internals(service).sessionToken).toBe(loginResult.token)
       await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(loginResult.token)
+      expect(await fs.readdir(userDataDirectory)).toContain(`session-token-${activeEnvKey}.enc`)
+      expect(await fs.readdir(userDataDirectory)).not.toContain(
+        `session-token-${activeEnvKey}.json`
+      )
+    } finally {
+      vi.mocked(keytar.getPassword).mockReset().mockImplementation(originalGet)
+      vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
+  })
+
+  it('fails closed without Keytar or safeStorage instead of writing a plaintext fallback', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const { service, tokenStore } = createService()
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const keytar = await import('keytar')
+    const originalGet = vi.mocked(keytar.getPassword).getMockImplementation()!
+    const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    const unavailable = async () => {
+      throw new Error('keychain temporarily locked')
+    }
+    vi.mocked(keytar.getPassword).mockImplementation(unavailable)
+    vi.mocked(keytar.setPassword).mockImplementation(unavailable)
+    vi.mocked(keytar.deletePassword).mockImplementation(unavailable)
+
+    try {
+      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
+        'Electron safeStorage is unavailable for session-token fallback'
+      )
+
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+      expect(internals(service).sessionToken).toBeNull()
+      expect(internals(service).me).toBeNull()
+      expect(await fs.readdir(userDataDirectory)).not.toContain(
+        `session-token-${activeEnvKey}.json`
+      )
     } finally {
       vi.mocked(keytar.getPassword).mockReset().mockImplementation(originalGet)
       vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
