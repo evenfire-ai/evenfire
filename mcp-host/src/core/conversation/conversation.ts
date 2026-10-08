@@ -429,6 +429,11 @@ export class ConversationManager {
     // `recordSessionUsage`). The turn lifecycle owns `updated_at`.
   }
 
+  /** #1043 — durable turn number of the turn in flight; see the store method. */
+  activeTurnNumber(conversation: Conversation): number | undefined {
+    return this.store.activeTurnNumber?.(conversation)
+  }
+
   /**
    * Fail the current turn.
    * Transitions: Processing → Idle

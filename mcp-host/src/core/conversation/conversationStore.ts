@@ -305,6 +305,12 @@ export interface ConversationStore {
   persistTurnCancel(conv: Conversation): Promise<void> | void
   /** Called when a turn fails (no response written). */
   persistTurnFail(conv: Conversation): Promise<void> | void
+  /**
+   * #1043 — durable `turn_number` of the turn in flight (the one
+   * `persistTurnStart` wrote). Only durable stores answer; `undefined` when the
+   * session is not tracked.
+   */
+  activeTurnNumber?(conv: Conversation): number | undefined
   /** Called when a tool call records a result. */
   persistToolCall(conv: Conversation, toolCall: TurnToolCall): Promise<void> | void
 

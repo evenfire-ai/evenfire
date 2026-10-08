@@ -12,6 +12,7 @@
  *
  * Phase 6: Added approval handler wiring and approval config propagation.
  */
+import { randomUUID } from 'node:crypto'
 import * as path from 'node:path'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
@@ -45,6 +46,7 @@ import {
   SqliteColdStartLoader,
   createConversationStore,
 } from './core/conversation/persistence'
+import { ModelStepCheckpointStore } from './core/conversation/persistence/modelStepCheckpointStore'
 import { validateApprovalConfig } from './core/extensions'
 import type { ApprovalDecision } from './core/extensions/approvalTypes'
 import { BasicSafety } from './core/safety/safety'
@@ -228,6 +230,11 @@ let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
 // round and exposes no pre-tick hook, so eviction runs on its own timer rather
 // than being folded into a probe round.
 let mcpPartitionEvictionTimer: ReturnType<typeof setInterval> | null = null
+// #1043 — expires resumable model-step checkpoints, purges expired inline
+// file bytes and deletes terminal headers past retention. The cadence bounds
+// how long expired bytes can stay at rest past their own TTL.
+const MODEL_STEP_CHECKPOINT_SWEEP_INTERVAL_MS = 5 * 60_000
+let modelStepCheckpointSweepTimer: ReturnType<typeof setInterval> | null = null
 let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
 let mcpManager: McpManager | null = null
@@ -1655,8 +1662,55 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     },
   })
   agent.setColdStartLoader(loader)
+  await initializeModelStepCheckpoints(handle)
 
   return handle
+}
+
+/**
+ * #1043 — durable model-step checkpoints over the conversation store's
+ * persist queue. Boot-reap runs before any task is admitted; a failure there
+ * fails startup.
+ */
+async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): Promise<void> {
+  if (!agent) return
+  const persistQueue = handle.persistQueue
+  if (!persistQueue) {
+    throw new Error(
+      `Conversation store mode=${handle.mode} has no persist queue for model-step checkpoints`
+    )
+  }
+  const store = new ModelStepCheckpointStore(persistQueue, { now: () => Date.now() })
+  const hostInstanceId = randomUUID()
+  const reaped = await store.bootReap(hostInstanceId)
+  logger.info(
+    { component: 'ModelStepCheckpoint', hostInstanceId, ...reaped },
+    'model-step checkpoints ready'
+  )
+  agent.setModelStepCheckpoints({
+    store,
+    hostInstanceId,
+    hostId: config.hostName,
+    resumableTtlMs: config.modelStepCheckpointTtlMs,
+    claimLeaseMs: config.modelStepClaimLeaseMs,
+    attachmentTtlMs: config.modelStepAttachmentTtlMs,
+  })
+  modelStepCheckpointSweepTimer = setInterval(() => {
+    store.sweep(config.modelStepCheckpointTtlMs).then(
+      swept => {
+        if (swept.expired + swept.purgedCheckpoints + swept.purgedAttachments > 0) {
+          logger.info({ component: 'ModelStepCheckpoint', ...swept }, 'model-step checkpoint sweep')
+        }
+      },
+      err => {
+        logger.error(
+          { component: 'ModelStepCheckpoint', err },
+          'model-step checkpoint sweep failed'
+        )
+      }
+    )
+  }, MODEL_STEP_CHECKPOINT_SWEEP_INTERVAL_MS)
+  modelStepCheckpointSweepTimer.unref()
 }
 
 /**
@@ -3060,6 +3114,10 @@ async function shutdown(signal: string): Promise<void> {
   if (guardrailResolveTimer) {
     clearInterval(guardrailResolveTimer)
     guardrailResolveTimer = null
+  }
+  if (modelStepCheckpointSweepTimer) {
+    clearInterval(modelStepCheckpointSweepTimer)
+    modelStepCheckpointSweepTimer = null
   }
 
   if (agent) {

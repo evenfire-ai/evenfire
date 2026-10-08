@@ -31,6 +31,11 @@ export interface TaskError {
    */
   httpStatus?: number
   providerCode?: string
+  /**
+   * #1043 — set when the failed turn left a resumable model-step checkpoint;
+   * the client offers **Retry model step** against this id. Additive.
+   */
+  modelStepCheckpointId?: string
 }
 
 export interface TaskResponsePayload {

@@ -58,6 +58,7 @@ function header(checkpointId = 'cp-1', sessionKey = SESSION_KEY): ModelStepCheck
     principal: 'user-1043',
     loopState: JSON.stringify({ iteration: 0 }),
     taskBudget: null,
+    sourceMessage: null,
   }
 }
 

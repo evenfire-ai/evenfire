@@ -39,6 +39,7 @@ export interface ModelStepCheckpointRow {
   principal: string
   loop_state: string | null
   task_budget: string | null
+  source_message: string | null
   claim_owner: string
   claim_generation: number
   claim_expires_at: number | null
@@ -127,6 +128,11 @@ export interface ModelStepCheckpointOpenHeader {
   principal: string
   loopState: string | null
   taskBudget: string | null
+  /**
+   * JSON of the turn's `ResumeSourceMessage` (metadata, no inline bytes); the
+   * continuation rebuilds file-reference pins and attachment lines from it.
+   */
+  sourceMessage: string | null
 }
 
 export type ModelStepCheckpointOp =
@@ -271,11 +277,13 @@ function statements(db: Database): Statements {
       INSERT INTO model_step_checkpoints (
         checkpoint_id, session_key, origin_turn_number, origin_task_id, continuation_task_id,
         version, status, provider, model, host_id, principal, loop_state, task_budget,
+        source_message,
         claim_owner, claim_generation, claim_expires_at, blocked_reason, failed_at, expires_at,
         created_at, updated_at
       ) VALUES (
         @checkpoint_id, @session_key, @origin_turn_number, @origin_task_id, NULL,
         1, 'open', @provider, @model, @host_id, @principal, @loop_state, @task_budget,
+        @source_message,
         @origin_task_id, 0, NULL, NULL, NULL, NULL,
         @now, @now
       )
@@ -543,6 +551,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
           principal: op.header.principal,
           loop_state: op.header.loopState,
           task_budget: op.header.taskBudget,
+          source_message: op.header.sourceMessage,
           now: op.now,
         })
         appendEntries(s, op.header.checkpointId, op.entries, op.now)

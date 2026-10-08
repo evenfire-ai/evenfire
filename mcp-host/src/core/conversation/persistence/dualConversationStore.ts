@@ -305,6 +305,10 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
+  activeTurnNumber(conv: Conversation): number | undefined {
+    return this.sqlite.activeTurnNumber?.(conv)
+  }
+
   async persistToolCall(conv: Conversation, toolCall: TurnToolCall): Promise<void> {
     await Promise.all([
       Promise.resolve(this.memory.persistToolCall(conv, toolCall)),

@@ -60,6 +60,7 @@ function harness() {
         model: 'gpt-5.5',
         hostId: 'host-a',
         principal: 'user-1043',
+        sourceMessage: SOURCE_MESSAGE,
       },
     },
     redact: text =>
@@ -99,12 +100,24 @@ const outage = () =>
   )
 
 const user: ChatMessage = { role: 'user', content: 'Inspect the repository files.' }
+const SOURCE_MESSAGE = JSON.stringify({
+  content: 'Inspect the repository files.',
+  sender: 'user-1043',
+})
 
 function header(worker: InProcessWorkerHandle) {
   return worker.db
-    .prepare('SELECT status, version, loop_state, task_budget FROM model_step_checkpoints')
+    .prepare(
+      'SELECT status, version, loop_state, task_budget, source_message FROM model_step_checkpoints'
+    )
     .get() as
-    | { status: string; version: number; loop_state: string; task_budget: string | null }
+    | {
+        status: string
+        version: number
+        loop_state: string
+        task_budget: string | null
+        source_message: string | null
+      }
     | undefined
 }
 
@@ -161,6 +174,7 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       version: 2,
       loop_state: JSON.stringify({ nextIteration: 2 }),
       task_budget: JSON.stringify({ iterationsUsed: 1 }),
+      source_message: SOURCE_MESSAGE,
     })
     // Inline file bytes are read once, at the resumable transition, and expire
     // after their own TTL.

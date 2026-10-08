@@ -44,6 +44,10 @@ import type { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
 import { buildLoopConfig } from '../core/orchestration/loopConfig'
 import type { LoopConfig } from '../core/orchestration/loopConfig'
 import { DefaultLoopController } from '../core/orchestration/loopConfig'
+import {
+  type ModelStepCheckpointRecorder,
+  createModelStepCheckpointRecorder,
+} from '../core/orchestration/modelStepCheckpointRecorder'
 import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
@@ -138,6 +142,7 @@ import {
   gfsWorkspaceExecutionEnabled,
 } from './gfsExecutionCapability'
 import { hasLargeAvailableGfsReferences, prepareGfsFiles } from './gfsFilePreparation'
+import { inlineFileAttachmentBytes } from './modelStepCheckpointAttachments'
 import {
   type ProviderWorkflowAccessDenialReason,
   isProviderWorkflowChannel,
@@ -338,6 +343,8 @@ export class TaskExecutor {
    * resume that continues the same turn.
    */
   private readonly attachmentReadLedger = new AttachmentReadLedger()
+  /** #1043 — resumable checkpoint left by this turn's failed loop, if any. */
+  private modelStepCheckpointId: string | undefined
   /**
    * P2 token budgets (§5.2) — snapshot of the conversation's lifetime token
    * counters captured at task start, used as the per-task brake baseline.
@@ -998,6 +1005,9 @@ export class TaskExecutor {
         provider: error.provider,
         httpStatus: error.httpStatus,
         providerCode: error.providerCode,
+        ...(this.modelStepCheckpointId !== undefined
+          ? { modelStepCheckpointId: this.modelStepCheckpointId }
+          : {}),
       }
     }
     return {
@@ -1259,7 +1269,62 @@ export class TaskExecutor {
       }
       this.turnTiming.setInputCharsApprox(inputChars)
     }
+    const recorder = this.createOriginCheckpointRecorder()
+    if (recorder) loopConfig.modelStepCheckpointRecorder = recorder
     return runToolUseLoop(loopConfig, messages)
+  }
+
+  /**
+   * #1043 — the recorder of a fresh turn. A turn resumed after an approval
+   * runs without one, and so does a turn without a sender: the continuation
+   * route authorizes against the recorded principal.
+   */
+  private createOriginCheckpointRecorder(): ModelStepCheckpointRecorder | undefined {
+    const support = this.deps.modelStepCheckpoints
+    if (!support) return undefined
+    const conversation = this.conversation!
+    const sessionKey = this.sessionKey
+    const principal = this.task.sourceMessage?.sender
+    if (!sessionKey || !principal) return undefined
+    const originTurnNumber = this.deps.conversationManager.activeTurnNumber(conversation)
+    if (originTurnNumber === undefined) {
+      throw new Error(
+        `Model-step checkpoints are wired but the conversation store has no durable turn number for session ${conversation.id}`
+      )
+    }
+    const sourceMessage = sourceMessageForResume(this.task.sourceMessage)
+    return createModelStepCheckpointRecorder({
+      store: support.store,
+      sessionKey,
+      mode: {
+        kind: 'origin',
+        header: {
+          checkpointId: randomUUID(),
+          sessionKey,
+          originTurnNumber,
+          originTaskId: this.taskId,
+          provider: this.deps.llmProvider.getProviderType(),
+          model: this.deps.modelName,
+          hostId: support.hostId,
+          principal,
+          sourceMessage: sourceMessage ? JSON.stringify(sourceMessage) : null,
+        },
+      },
+      redact: text =>
+        this.responseSafety.sanitizeFreeformContent(text, {
+          secretWarning: 'Potential secret detected in model-step checkpoint',
+        }).content,
+      taskBudget: () =>
+        JSON.stringify({
+          ...this.executionBudget.snapshot(),
+          attachmentReadLedger: this.attachmentReadLedger.snapshot(),
+        }),
+      resumableTtlMs: support.resumableTtlMs,
+      inlineFileAttachments: () => inlineFileAttachmentBytes(this.task.sourceMessage?.attachments),
+      attachmentTtlMs: support.attachmentTtlMs,
+      now: () => Date.now(),
+      onFenceLost: () => this.abort(),
+    })
   }
 
   /**
@@ -1448,6 +1513,7 @@ export class TaskExecutor {
       }
 
       case 'error': {
+        this.modelStepCheckpointId = result.checkpointId
         await this.deps.conversationManager.failTurn(this.conversation!)
         throw result.error
       }

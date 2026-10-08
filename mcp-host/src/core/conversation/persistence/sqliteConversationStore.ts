@@ -884,6 +884,11 @@ export class SqliteConversationStore implements ConversationStore {
     )
   }
 
+  activeTurnNumber(conv: Conversation): number | undefined {
+    if (!this.sessionKeyById.has(conv.id)) return undefined
+    return this.ordinals.get(conv.id)?.nextTurnNumber
+  }
+
   persistToolCall(conv: Conversation, toolCall: TurnToolCall): void {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
