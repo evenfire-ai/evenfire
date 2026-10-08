@@ -4,6 +4,11 @@ import {
   createNativeCommitTestHarness,
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
+import {
+  testLoginResult,
+  testSessionMe,
+  testTeamSwitchResult,
+} from '../../testSupport/authTestFixtures.js'
 
 afterEach(async () => {
   vi.useRealTimers()
@@ -16,15 +21,7 @@ describe('AppService deliberate team transition ownership', () => {
     const decisionResponse = deferred<{ approvalId: string; status: string }>()
     const decisionStarted = deferred<void>()
     const logoutCleanupStarted = vi.fn()
-    const me = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
+    const me = testSessionMe()
     const app = service as unknown as {
       authClient: unknown
       decideWorkflowApproval(
@@ -36,7 +33,7 @@ describe('AppService deliberate team transition ownership', () => {
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me }),
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult('synthetic-session-a', me)),
       decideWorkflowApproval: vi.fn(() => {
         decisionStarted.resolve()
         return decisionResponse.promise
@@ -74,25 +71,9 @@ describe('AppService deliberate team transition ownership', () => {
       appName: string
     }>()
     const discoveryStarted = deferred<void>()
-    const getMeResponse = deferred<{
-      id: string
-      email: string
-      name: string
-      picture: null
-      teamId: string
-      teamName: string
-      role: string
-    }>()
+    const getMeResponse = deferred<ReturnType<typeof testSessionMe>>()
     const getMeStarted = deferred<void>()
-    const me = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
+    const me = testSessionMe()
     const app = service as unknown as {
       authClient: unknown
       rpcClient: unknown
@@ -149,28 +130,9 @@ describe('AppService deliberate team transition ownership', () => {
       discoveryStarted.resolve()
       return discovery.promise
     })
-    const loginResponse = deferred<{
-      token: string
-      me: {
-        id: string
-        email: string
-        name: string
-        picture: null
-        teamId: string
-        teamName: string
-        role: string
-      }
-    }>()
+    const loginResponse = deferred<ReturnType<typeof testLoginResult>>()
     const loginStarted = deferred<void>()
-    const me = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
+    const me = testSessionMe()
     const app = service as unknown as {
       authClient: unknown
       rpcClient: unknown
@@ -199,7 +161,7 @@ describe('AppService deliberate team transition ownership', () => {
     })
     await healthRequest
     await loginStarted.promise
-    loginResponse.resolve({ token: 'synthetic-session-a', me })
+    loginResponse.resolve(testLoginResult('synthetic-session-a', me))
 
     await expect(login).resolves.toEqual({ authenticated: true, me })
   })
@@ -212,15 +174,7 @@ describe('AppService deliberate team transition ownership', () => {
       appName: string
     }>()
     const discoveryStarted = deferred<void>()
-    const me = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
+    const me = testSessionMe()
     const app = service as unknown as {
       authClient: unknown
       rpcClient: unknown
@@ -272,16 +226,8 @@ describe('AppService deliberate team transition ownership', () => {
     const { service } = await createNativeCommitTestHarness()
     const workflowResponse = deferred<{ workflow: string }>()
     const workflowStarted = deferred<void>()
-    const meA = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
-    const meB = { ...meA, teamId: 'team-b', teamName: 'Team B' }
+    const meA = testSessionMe()
+    const meB = testSessionMe({ teamId: 'team-b', teamName: 'Team B' })
     const app = service as unknown as {
       authClient: unknown
       rpcClient: unknown
@@ -293,10 +239,10 @@ describe('AppService deliberate team transition ownership', () => {
     }
     let currentTeamId = 'team-a'
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me: meA }),
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult('synthetic-session-a', meA)),
       switchTeam: vi.fn(async (_token: string, teamId: string) => {
         currentTeamId = teamId
-        return { token: `session-${teamId}`, team: { id: teamId, name: teamId, role: 'member' } }
+        return testTeamSwitchResult(teamId)
       }),
       getMe: vi.fn(async () => (currentTeamId === 'team-a' ? meA : meB)),
       readWorkflow: vi.fn(() => {
@@ -340,16 +286,8 @@ describe('AppService deliberate team transition ownership', () => {
 
   it('advances session generation when a failed restore leaves the borrowed team active', async () => {
     const { service } = await createNativeCommitTestHarness()
-    const meA = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
-    const meB = { ...meA, teamId: 'team-b', teamName: 'Team B' }
+    const meA = testSessionMe()
+    const meB = testSessionMe({ teamId: 'team-b', teamName: 'Team B' })
     const app = service as unknown as {
       authClient: unknown
       me: { teamId: string } | null
@@ -361,13 +299,13 @@ describe('AppService deliberate team transition ownership', () => {
     }
     let currentTeamId = 'team-a'
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me: meA }),
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult('synthetic-session-a', meA)),
       switchTeam: vi.fn(async (_token: string, teamId: string) => {
         if (teamId === 'team-a' && currentTeamId === 'team-b') {
           throw new Error('restore rejected')
         }
         currentTeamId = teamId
-        return { token: `session-${teamId}`, team: { id: teamId, name: teamId, role: 'member' } }
+        return testTeamSwitchResult(teamId)
       }),
       getMe: vi.fn(async () => (currentTeamId === 'team-a' ? meA : meB)),
       readWorkflow: vi.fn().mockResolvedValue({ workflow: 'result' }),
@@ -392,20 +330,12 @@ describe('AppService deliberate team transition ownership', () => {
         rpcProxyBaseUrl: '',
         appName: 'Environment A',
       })
-      const me = {
-        id: 'user-a',
-        email: 'user-a@example.test',
-        name: 'User A',
-        picture: null,
-        teamId: 'team-a',
-        teamName: 'Team A',
-        role: 'member',
-      }
+      const me = testSessionMe()
       const getDesktopEnvironment = vi
         .fn()
         .mockRejectedValue(new Error('RPC discovery unavailable'))
-      const googleLogin = vi.fn().mockResolvedValue({ token: 'google-session-a', me })
-      const passwordLogin = vi.fn().mockResolvedValue({ token: 'password-session-a', me })
+      const googleLogin = vi.fn().mockResolvedValue(testLoginResult('google-session-a', me))
+      const passwordLogin = vi.fn().mockResolvedValue(testLoginResult('password-session-a', me))
       const app = service as unknown as { authClient: unknown }
       app.authClient = { getDesktopEnvironment, googleLogin, passwordLogin }
 
@@ -433,18 +363,7 @@ describe('AppService deliberate team transition ownership', () => {
       selectRuntimeConfigForHandoff(optionId: string, generation: number): Promise<unknown>
     }
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({
-        token: 'fixture-session-a',
-        me: {
-          id: 'user-a',
-          email: 'user-a@example.test',
-          name: 'User A',
-          picture: null,
-          teamId: 'team-a',
-          teamName: 'Team A',
-          role: 'member',
-        },
-      }),
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult('fixture-session-a')),
     }
     const previousGeneration = service.getSessionGeneration()
     await service.googleLogin('synthetic-google-token')
@@ -476,18 +395,7 @@ describe('AppService deliberate team transition ownership', () => {
       getDependenciesHealth(): Promise<unknown>
     }
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({
-        token: 'synthetic-session-a',
-        me: {
-          id: 'user-a',
-          email: 'user-a@example.test',
-          name: 'User A',
-          picture: null,
-          teamId: 'team-a',
-          teamName: 'Team A',
-          role: 'member',
-        },
-      }),
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult()),
       getDesktopEnvironment,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
@@ -535,18 +443,7 @@ describe('AppService deliberate team transition ownership', () => {
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({
-        token: 'synthetic-session-a',
-        me: {
-          id: 'user-a',
-          email: 'user-a@example.test',
-          name: 'User A',
-          picture: null,
-          teamId: 'team-a',
-          teamName: 'Team A',
-          role: 'member',
-        },
-      }),
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult()),
     }
     await service.googleLogin('synthetic-google-token')
     app.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
@@ -565,15 +462,7 @@ describe('AppService deliberate team transition ownership', () => {
 
   it('lets logout commit during teamless session scope discovery', async () => {
     const { service } = await createNativeCommitTestHarness()
-    const meResponse = deferred<{
-      id: string
-      email: string
-      name: string
-      picture: null
-      teamId: string
-      teamName: string
-      role: string
-    }>()
+    const meResponse = deferred<ReturnType<typeof testSessionMe>>()
     const discoveryStarted = deferred<void>()
     const logoutStarted = deferred<void>()
     const app = service as unknown as {
@@ -592,18 +481,15 @@ describe('AppService deliberate team transition ownership', () => {
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({
-        token: 'synthetic-session-a',
-        me: {
-          id: 'user-a',
-          email: 'user-a@example.test',
-          name: 'User A',
-          picture: null,
-          teamId: null,
-          teamName: null,
-          role: 'member',
-        },
-      }),
+      googleLogin: vi.fn().mockResolvedValue(
+        testLoginResult(
+          'synthetic-session-a',
+          testSessionMe({
+            teamId: null,
+            teamName: null,
+          })
+        )
+      ),
       getMe: vi.fn(() => {
         discoveryStarted.resolve()
         return meResponse.promise
@@ -620,15 +506,7 @@ describe('AppService deliberate team transition ownership', () => {
       logoutStarted.promise.then(() => true),
       new Promise<boolean>(resolve => setTimeout(() => resolve(false), 50)),
     ])
-    meResponse.resolve({
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    })
+    meResponse.resolve(testSessionMe())
 
     await expect(contextRequest).rejects.toThrow(/stale_(auth_epoch|session_generation)/)
     await expect(logout).resolves.toBeTypeOf('number')
@@ -639,24 +517,13 @@ describe('AppService deliberate team transition ownership', () => {
 
   it('finishes GFS activation before a queued workflow read borrows another team', async () => {
     const { service, restA } = await createNativeCommitTestHarness()
-    const teamBResponse = deferred<{
-      token: string
-      team: { id: string; name: string; role: string }
-    }>()
+    const teamBResponse = deferred<ReturnType<typeof testTeamSwitchResult>>()
     const switchStarted = deferred<void>()
     const tokenTeams = new Map<string, string>([['synthetic-session-a', 'team-a']])
     let issuedToken = 0
-    const user = {
-      id: 'user-a',
-      email: 'user-a@example.test',
-      name: 'User A',
-      picture: null,
-      teamId: 'team-a',
-      teamName: 'Team A',
-      role: 'member',
-    }
+    const user = testSessionMe()
     const authClient = {
-      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me: user }),
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult('synthetic-session-a', user)),
       switchTeam: vi.fn(async (_token: string, teamId: string) => {
         if (teamId === 'team-b') {
           switchStarted.resolve()
@@ -666,7 +533,7 @@ describe('AppService deliberate team transition ownership', () => {
         }
         const token = `synthetic-${teamId}-${++issuedToken}`
         tokenTeams.set(token, teamId)
-        return { token, team: { id: teamId, name: teamId, role: 'member' } }
+        return testTeamSwitchResult(teamId, token)
       }),
       getMe: vi.fn(async (token: string) => {
         const teamId = tokenTeams.get(token) || 'team-a'
@@ -696,10 +563,7 @@ describe('AppService deliberate team transition ownership', () => {
     const switching = app.switchTeam('team-b')
     await switchStarted.promise
     const workflowRead = app.readWorkflow('workflows', 'approval')
-    teamBResponse.resolve({
-      token: 'synthetic-session-b',
-      team: { id: 'team-b', name: 'Team B', role: 'member' },
-    })
+    teamBResponse.resolve(testTeamSwitchResult('team-b', 'synthetic-session-b'))
 
     const [switchResult, workflowResult] = await Promise.all([switching, workflowRead])
 

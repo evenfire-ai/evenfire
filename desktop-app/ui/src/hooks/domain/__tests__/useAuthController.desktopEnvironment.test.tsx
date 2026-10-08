@@ -5,6 +5,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { AppService } from '../../../../../src/appService'
 import { useAuthController } from '../useAuthController'
 import { wrapLikeElectronIpc } from './__fixtures__/ipcErrors'
 
@@ -58,8 +59,9 @@ let cancelDesktopEnvironmentSwitchForTest: (() => void) | null = null
 let setBootingForTest: ((value: boolean) => void) | null = null
 let setAuthenticatedForTest: ((value: boolean) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
+let nativeAppService: AppService | null = null
+let mismatchLogoutGeneration: number | null = null
 let runtimeConfigDirectory = ''
-let nativeSessionGeneration = 0
 const originalOnboardingPreview = process.env.EVENFIRE_ONBOARDING_PREVIEW
 const frozenProfileIdMilliseconds = 1790000000000
 
@@ -126,8 +128,9 @@ beforeEach(async () => {
   setBootingForTest = null
   setAuthenticatedForTest = null
   runtimeConfigModule = null
+  nativeAppService = null
+  mismatchLogoutGeneration = null
   delete process.env.EVENFIRE_ONBOARDING_PREVIEW
-  nativeSessionGeneration = 0
   runtimeConfigDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-desktop-env-test-'))
   vi.doUnmock('electron')
   vi.resetModules()
@@ -146,6 +149,13 @@ beforeEach(async () => {
     rpcProxyBaseUrl: `${targetRpcProxyBaseUrl}/rpc`,
   })
   await runtimeConfigModule.saveDesktopRuntimeConfig(otherEnvironment)
+  const { AppService } = await import('../../../../../src/appService')
+  nativeAppService = new AppService()
+  ;(
+    nativeAppService as unknown as {
+      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+    }
+  ).tokenStore.clearSessionToken = vi.fn().mockResolvedValue(undefined)
 
   mocks.getRuntimeConfigState.mockImplementation(async () =>
     runtimeConfigModule!.getDesktopRuntimeConfigState()
@@ -154,25 +164,29 @@ beforeEach(async () => {
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
     return runtimeConfigModule!.getDesktopRuntimeConfigState()
   })
-  mocks.getSessionGeneration.mockImplementation(async () => nativeSessionGeneration)
+  mocks.getSessionGeneration.mockImplementation(async () =>
+    nativeAppService!.getSessionGeneration()
+  )
   mocks.selectRuntimeConfigForHandoff.mockImplementation(
     async (optionId: string, expectedSessionGeneration: number) => {
-      if (expectedSessionGeneration !== nativeSessionGeneration) {
-        throw new Error('stale_session_generation')
-      }
-      await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
-      nativeSessionGeneration += 1
-      return {
-        runtimeConfigState: await runtimeConfigModule!.getDesktopRuntimeConfigState(),
-        sessionGeneration: nativeSessionGeneration,
+      try {
+        return await nativeAppService!.selectRuntimeConfigForHandoff(
+          optionId,
+          expectedSessionGeneration
+        )
+      } catch (error) {
+        throw wrapLikeElectronIpc(
+          'auth:selectRuntimeConfigForHandoff',
+          error instanceof Error ? error : new Error(String(error))
+        )
       }
     }
   )
   mocks.loadSession.mockImplementation(async () => setBootingForTest?.(false))
   mocks.logoutForEnvironmentMismatch.mockImplementation(async () => {
     setAuthenticatedForTest?.(false)
-    nativeSessionGeneration += 1
-    return nativeSessionGeneration
+    mismatchLogoutGeneration = await nativeAppService!.logout()
+    return mismatchLogoutGeneration
   })
   mocks.onDesktopSetupToken.mockImplementation(listener => {
     desktopSetupTokenListener = listener
@@ -268,6 +282,7 @@ describe('Desktop environment handoff', () => {
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
     const targetOptionId = await savedTargetOptionId()
+    const generationBeforeHandoff = nativeAppService!.getSessionGeneration()
     mocks.loadSession.mockClear()
 
     await dispatchDesktopEnvironmentLink({
@@ -275,7 +290,10 @@ describe('Desktop environment handoff', () => {
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
     })
 
-    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(targetOptionId, 0)
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
+      targetOptionId,
+      generationBeforeHandoff
+    )
     expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
     expect(mocks.loadSession).toHaveBeenCalledWith({ preserveNav: true })
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
@@ -321,12 +339,16 @@ describe('Desktop environment handoff', () => {
 
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    const generationBeforeHandoff = nativeAppService!.getSessionGeneration()
     await dispatchDesktopEnvironmentLink({
       ...targetEnvironment,
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
     })
 
-    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(await savedTargetOptionId(), 0)
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
+      await savedTargetOptionId(),
+      generationBeforeHandoff
+    )
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
     expect(screen.getByTestId('pending-rpc')).toHaveTextContent('none')
     expect(
@@ -386,6 +408,7 @@ describe('Desktop environment handoff', () => {
 
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    const generationBeforeHandoff = nativeAppService!.getSessionGeneration()
     await dispatchDesktopEnvironmentLink(targetEnvironment)
 
     await act(async () => {
@@ -400,7 +423,10 @@ describe('Desktop environment handoff', () => {
     })
     expect(serviceInternals.authClient.getDesktopEnvironment).not.toHaveBeenCalled()
     expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
-    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(savedTarget.id, 0)
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
+      savedTarget.id,
+      generationBeforeHandoff
+    )
     expect(finalState.activeOptionId).toBe(savedTarget.id)
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
   })
@@ -726,7 +752,7 @@ describe('Desktop environment handoff', () => {
       )
     )
 
-    nativeSessionGeneration += 1
+    await nativeAppService!.logout()
     await act(async () => confirmDesktopEnvironmentSwitchForTest?.())
     await act(async () => handoff)
 
@@ -795,7 +821,10 @@ describe('Desktop environment handoff', () => {
     await act(async () => handoff)
 
     expect(mocks.logoutForEnvironmentMismatch).toHaveBeenCalledOnce()
-    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(await savedTargetOptionId(), 1)
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
+      await savedTargetOptionId(),
+      mismatchLogoutGeneration
+    )
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
   })
 

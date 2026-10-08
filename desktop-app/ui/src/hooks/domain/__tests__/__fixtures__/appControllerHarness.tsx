@@ -182,7 +182,6 @@ export function extendMockClerumForAppController(
   const bridge = clerum as unknown as Record<string, unknown>
 
   let authenticated = options.startAuthenticated ?? true
-  let sessionGeneration = 0
   let sessionStateError = options.sessionStateError
   let runtimeConfigState: DesktopRuntimeConfigState = options.runtimeConfigState ?? {
     configured: true,
@@ -220,62 +219,44 @@ export function extendMockClerumForAppController(
     authenticated = true
     return createSessionState(true, sessionMe)
   })
-  const getSessionGeneration = vi.fn(async () =>
-    handoffProducer ? handoffProducer.getSessionGeneration() : sessionGeneration
-  )
+  const getSessionGeneration = vi.fn(async () => {
+    if (!handoffProducer) {
+      throw new Error('Desktop environment handoff tests require the native auth producer')
+    }
+    return handoffProducer.getSessionGeneration()
+  })
   const getRuntimeConfigState = vi.fn(async () =>
     handoffProducer ? handoffProducer.getRuntimeConfigState() : runtimeConfigState
   )
   const selectRuntimeConfigForHandoff = vi.fn(
     async (optionId: string, expectedGeneration: number) => {
-      if (handoffProducer) {
-        try {
-          return await handoffProducer.selectRuntimeConfigForHandoff(optionId, expectedGeneration)
-        } catch (error) {
-          throw wrapLikeElectronIpc(
-            'auth:selectRuntimeConfigForHandoff',
-            error instanceof Error ? error : new Error(String(error))
-          )
-        }
+      if (!handoffProducer) {
+        throw new Error('Desktop environment handoff tests require the native auth producer')
       }
-      if (expectedGeneration !== sessionGeneration) {
-        throw wrapLikeElectronIpc(
-          'auth:selectRuntimeConfigForHandoff',
-          new Error('stale_session_generation')
-        )
-      }
-      const selected = runtimeConfigState.options.find(option => option.id === optionId)
-      if (!selected) throw new Error('runtime configuration not found')
-      runtimeConfigState = {
-        ...runtimeConfigState,
-        activeOptionId: selected.id,
-        currentConfig: {
-          externalRestApiBaseUrl: selected.externalRestApiBaseUrl,
-          rpcProxyBaseUrl: selected.rpcProxyBaseUrl,
-          appName: selected.appName,
-        },
-        envKey: `harness-${selected.id}`,
-      }
-      sessionGeneration += 1
-      return { runtimeConfigState, sessionGeneration }
-    }
-  )
-  const logout = vi.fn(async () => {
-    if (handoffProducer) {
       try {
-        const generation = await handoffProducer.logout()
-        authenticated = false
-        return { ok: true as const, sessionGeneration: generation }
+        return await handoffProducer.selectRuntimeConfigForHandoff(optionId, expectedGeneration)
       } catch (error) {
         throw wrapLikeElectronIpc(
-          'auth:logout',
+          'auth:selectRuntimeConfigForHandoff',
           error instanceof Error ? error : new Error(String(error))
         )
       }
     }
-    authenticated = false
-    sessionGeneration += 1
-    return { ok: true as const, sessionGeneration }
+  )
+  const logout = vi.fn(async () => {
+    if (!handoffProducer) {
+      throw new Error('Desktop environment handoff tests require the native auth producer')
+    }
+    try {
+      const generation = await handoffProducer.logout()
+      authenticated = false
+      return { ok: true as const, sessionGeneration: generation }
+    } catch (error) {
+      throw wrapLikeElectronIpc(
+        'auth:logout',
+        error instanceof Error ? error : new Error(String(error))
+      )
+    }
   })
   const getDesktopReleaseStatus = vi.fn(
     async () => options.desktopReleaseStatus ?? DEFAULT_DESKTOP_RELEASE_STATUS

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { DesktopRuntimeConfigHandoffSelection } from '../../../../../src/types'
 import { createDesktopEnvironmentSetupHandler } from '../desktopEnvironmentHandoff'
 
 const targetEnvironment = {
@@ -81,14 +82,19 @@ function createHandler(
       sessionGeneration += 1
       return sessionGeneration
     })
-  const selectRuntimeConfig = vi.fn(async (optionId: string, _expectedGeneration?: number) => {
-    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
-    sessionGeneration += 1
-    return {
-      runtimeConfigState: await runtimeConfigModule!.getDesktopRuntimeConfigState(),
-      sessionGeneration,
+  const selectRuntimeConfig = vi.fn(
+    async (
+      optionId: string,
+      _expectedGeneration?: number
+    ): Promise<DesktopRuntimeConfigHandoffSelection | null> => {
+      await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
+      sessionGeneration += 1
+      return {
+        runtimeConfigState: await runtimeConfigModule!.getDesktopRuntimeConfigState(),
+        sessionGeneration,
+      }
     }
-  })
+  )
   const setPendingDesktopEnvironmentSetup = vi.fn()
   const setStatus = vi.fn()
   const handler = createDesktopEnvironmentSetupHandler({
