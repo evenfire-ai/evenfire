@@ -678,7 +678,10 @@ export function useAuthController({
           savedOption.id,
           expectedSessionGeneration
         )
-        if (!selection) return
+        if (!selection) {
+          setPendingDesktopEnvironmentSetup(null)
+          return
+        }
         let selectedSessionGeneration: number
         try {
           selectedSessionGeneration = await getSessionGeneration()

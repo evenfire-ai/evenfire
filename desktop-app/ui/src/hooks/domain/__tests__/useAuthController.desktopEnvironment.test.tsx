@@ -860,6 +860,60 @@ describe('Desktop environment handoff', () => {
     expect(mocks.loadSession).not.toHaveBeenCalled()
   })
 
+  it('clears setup confirmation when the native producer rejects a saved-profile selection', async () => {
+    const linkedEnvironment = {
+      appName: 'Linked target',
+      externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
+    }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linkedEnvironment)
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      linkedEnvironment.externalRestApiBaseUrl
+    )
+
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      ...linkedEnvironment,
+      rpcProxyBaseUrl: 'https://rpc.new-api.example.test',
+    })
+    const otherOption = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
+      option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+    )
+    if (!otherOption) throw new Error('The config producer did not return the current profile')
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(otherOption.id)
+
+    const app = nativeAppService as unknown as {
+      authClient: { googleLogin: ReturnType<typeof vi.fn> }
+      tokenStore: { setSessionToken: ReturnType<typeof vi.fn> }
+    }
+    app.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({
+        token: 'synthetic-session-user-a',
+        me: {
+          id: 'user-a',
+          email: 'user-a@example.test',
+          name: 'User A',
+          picture: null,
+          teamId: 'team-a',
+          teamName: 'Team A',
+          role: 'member',
+        },
+      }),
+    }
+    app.tokenStore.setSessionToken = vi.fn().mockResolvedValue(undefined)
+    await nativeAppService!.googleLogin('synthetic-google-login')
+    mocks.setStatus.mockClear()
+
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledOnce()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
   it('logs out and selects the linked saved environment after switch confirmation', async () => {
     const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
     const otherOption = state.options.find(
