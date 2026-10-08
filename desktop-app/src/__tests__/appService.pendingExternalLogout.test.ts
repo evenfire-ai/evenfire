@@ -430,13 +430,23 @@ describe('AppService pending external logout', () => {
   })
 
   it('does not let environment B consume environment A logout intent', async () => {
-    const envA = 'env_a-000000000000'
+    const envA = activeEnvKey === 'env_a-000000000000' ? 'env_b-111111111111' : 'env_a-000000000000'
     markerStore.recordPendingExternalLogout(userDataDirectory, envA)
-    const { service } = createService()
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('environment-b-token', activeEnvKey)
+    const authClient = service as unknown as {
+      authClient: { getMe: (token: string) => Promise<typeof loginResult.me> }
+    }
+    vi.spyOn(authClient.authClient, 'getMe').mockResolvedValue(loginResult.me)
 
-    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
 
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, envA)).toBe(true)
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('environment-b-token')
+    expect(internals(service).sessionToken).toBe('environment-b-token')
   })
 })
