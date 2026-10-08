@@ -12,9 +12,11 @@ export function retryPendingExternalLogoutAfterQuitCancellation(
   onFailure: (error: unknown) => void
 ): void {
   cancelQuitPreparation()
-  void applyPendingLogout().then(applied => {
-    if (applied) onApplied()
-  }, onFailure)
+  void applyPendingLogout()
+    .then(applied => {
+      if (applied) onApplied()
+    })
+    .catch(onFailure)
 }
 
 type MainWindowHandle = {

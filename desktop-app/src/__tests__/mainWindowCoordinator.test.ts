@@ -3,6 +3,7 @@ import {
   createMainWindowCoordinator,
   createRetryableInitializer,
   registerQuitDrain,
+  retryPendingExternalLogoutAfterQuitCancellation,
 } from '../mainWindowCoordinator.js'
 
 type TestWindow = {
@@ -112,6 +113,36 @@ describe('retryable initializer', () => {
 
 describe('quit drain registration', () => {
   const nextImmediate = () => new Promise<void>(resolve => setImmediate(resolve))
+
+  it('reports retry callback errors and does not notify when no logout was applied', async () => {
+    const cancelQuitPreparation = vi.fn()
+    const onApplied = vi.fn()
+    const onFailure = vi.fn()
+    retryPendingExternalLogoutAfterQuitCancellation(
+      cancelQuitPreparation,
+      async () => false,
+      onApplied,
+      onFailure
+    )
+    await nextImmediate()
+
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+    expect(onApplied).not.toHaveBeenCalled()
+    expect(onFailure).not.toHaveBeenCalled()
+
+    const callbackError = new Error('renderer notification failed')
+    retryPendingExternalLogoutAfterQuitCancellation(
+      cancelQuitPreparation,
+      async () => true,
+      () => {
+        throw callbackError
+      },
+      onFailure
+    )
+    await nextImmediate()
+
+    expect(onFailure).toHaveBeenCalledWith(callbackError)
+  })
 
   function createAppHarness() {
     const listeners = new Map<string, (...args: any[]) => void>()
