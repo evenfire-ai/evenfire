@@ -6,10 +6,12 @@
  * a real temporary directory.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import * as syncFs from 'node:fs'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import {
   callerDirectory,
   completedCopy,
@@ -647,5 +649,49 @@ describe('GFS download store adversarial round: expiry, close, recency and remov
 
     expect(events).toContain('rename-source')
     expect(events.slice(events.indexOf('rename-source'))).toContain('open-directory')
+  })
+})
+
+describe('GFS download store adversarial round: a FIFO never blocks publication', () => {
+  const KEY = 'dave-key'
+
+  it('a download directory swapped for a FIFO before its sync fails the publication at once', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { transfer, bytes } = await startTransfer(store, root, KEY, 1, 12)
+    const directory = syncFs.realpathSync(path.join(root, `.gfs-downloads/input-${transfer.id}`))
+    let renamedSource = false
+    let swapped = false
+    injectFault('rename', target => {
+      if (target.endsWith(`input-${transfer.id}/source.partial`)) renamedSource = true
+      return undefined
+    })
+    injectFault('open', target => {
+      if (!renamedSource || swapped || path.resolve(target) !== directory) return undefined
+      swapped = true
+      syncFs.renameSync(directory, `${directory}-moved`)
+      execFileSync('mkfifo', [directory])
+      return undefined
+    })
+
+    const publication = store.publish(transfer.id, KEY, digestOf(bytes))
+    const observed = publication.then(
+      () => 'published',
+      () => 'refused'
+    )
+    const outcome = await Promise.race([observed, delay(2_000).then(() => 'blocked')])
+    if (outcome === 'blocked') {
+      // Release the blocked open so the run ends; the assertion below fails.
+      syncFs.closeSync(
+        syncFs.openSync(directory, syncFs.constants.O_WRONLY | syncFs.constants.O_NONBLOCK)
+      )
+      await observed
+    }
+    faults.clear()
+
+    // Witness: the swap happened after the source rename, at the sync's open.
+    expect(swapped).toBe(true)
+    expect(syncFs.lstatSync(directory).isFIFO()).toBe(true)
+    expect(outcome).toBe('refused')
   })
 })

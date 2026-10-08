@@ -301,7 +301,11 @@ async function assertAbsent(target: string): Promise<void> {
 }
 
 async function syncDirectory(directory: string): Promise<void> {
-  const handle = await fs.open(directory, 'r')
+  // A name swapped for a FIFO must fail, never block: O_DIRECTORY refuses it.
+  const handle = await fs.open(
+    directory,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  )
   try {
     await handle.sync()
   } finally {
@@ -527,7 +531,11 @@ export class GfsDownloadStore {
         transfer.directoryIdentity = await fs.lstat(directory, { bigint: true })
         const partial = await fs.open(
           path.join(directory, PARTIAL_FILE),
-          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          constants.O_WRONLY |
+            constants.O_CREAT |
+            constants.O_EXCL |
+            constants.O_NOFOLLOW |
+            constants.O_NONBLOCK,
           0o600
         )
         await partial.close()
@@ -645,7 +653,11 @@ export class GfsDownloadStore {
     try {
       const handle = await fs.open(
         temporary,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_NOFOLLOW |
+          constants.O_NONBLOCK,
         0o600
       )
       temporaryExists = true
@@ -1189,9 +1201,13 @@ export class GfsDownloadStore {
     if (!info.isDirectory()) return { state: 'incomplete' }
     let raw: string
     try {
+      // Anything in the tree may have been replaced from a shell. A FIFO with
+      // no writer would block a plain open, and with it the sweep, startup and
+      // every admission behind them; O_NONBLOCK opens it at once and the
+      // descriptor's type decides.
       const handle = await fs.open(
         path.join(directory, META_FILE),
-        constants.O_RDONLY | constants.O_NOFOLLOW
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
       )
       try {
         const metaInfo = await handle.stat()

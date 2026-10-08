@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import * as syncFs from 'node:fs'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { register } from 'prom-client'
 import { downloadGfsContent } from './gfsContentDownload'
 import { readGfsMetadata } from './gfsContentRead'
@@ -501,5 +504,40 @@ describe('governed GFS content download', () => {
     await expect(store.readManagedFile(second.path, 'caller-a')).resolves.toEqual(
       Buffer.from(bytes)
     )
+  })
+
+  it('fails at once when source.partial is replaced by a FIFO before the download opens it', async () => {
+    const createTransfer = store.createTransfer.bind(store)
+    let fifo: string | undefined
+    vi.spyOn(store, 'createTransfer').mockImplementationOnce(async input => {
+      const transfer = await createTransfer(input)
+      fifo = path.join(callerRoot, transfer.partialPath)
+      await fs.rm(fifo)
+      execFileSync('mkfifo', [fifo])
+      return transfer
+    })
+    const bytes = Buffer.from('fifo partial')
+
+    const download = downloadGfsContent(harness(bytes), args, options())
+    const observed = download.then(
+      () => 'downloaded',
+      () => 'refused'
+    )
+    const outcome = await Promise.race([observed, delay(2_000).then(() => 'blocked')])
+    if (outcome === 'blocked' && fifo !== undefined) {
+      // Release the blocked open so the run ends; the assertion below fails.
+      syncFs.closeSync(
+        syncFs.openSync(fifo, syncFs.constants.O_RDONLY | syncFs.constants.O_NONBLOCK)
+      )
+      await observed
+    }
+
+    // Witness: the partial really was a FIFO when the download opened it.
+    expect(fifo).toBeDefined()
+    expect(outcome).toBe('refused')
+    await expect(download).rejects.toMatchObject({ code: 'storage_write_failed' })
+    // The next download of the same file works.
+    const next = await downloadGfsContent(harness(bytes), args, options())
+    await expect(store.readManagedFile(next.path, 'caller-a')).resolves.toEqual(bytes)
   })
 })

@@ -758,5 +758,25 @@
   {
     "suite": "gfsExecutionCapability.test.ts",
     "fullName": "gfsStoreCallerIdentity gives a task without a source message the system key of its caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreNonBlocking.test.ts",
+    "fullName": "GFS download store: a FIFO in the store tree never blocks Host bootstrap settles with a meta.json FIFO and removes its directory"
+  },
+  {
+    "suite": "gfsDownloadStoreNonBlocking.test.ts",
+    "fullName": "GFS download store: a FIFO in the store tree never blocks a runtime sweep settles with a meta.json FIFO and removes its directory"
+  },
+  {
+    "suite": "gfsDownloadStoreNonBlocking.test.ts",
+    "fullName": "GFS download store: a FIFO in the store tree never blocks managed reads of a published copy whose source became a FIFO refuse without blocking"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: a FIFO never blocks publication a download directory swapped for a FIFO before its sync fails the publication at once"
+  },
+  {
+    "suite": "gfsContentDownload.test.ts",
+    "fullName": "governed GFS content download fails at once when source.partial is replaced by a FIFO before the download opens it"
   }
 ]
