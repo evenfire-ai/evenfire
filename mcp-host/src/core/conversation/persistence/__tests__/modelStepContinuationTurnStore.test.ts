@@ -9,6 +9,7 @@ import { ConversationManager } from '../../conversation'
 import { InMemoryConversationStore } from '../../conversationStore'
 import { DualConversationStore } from '../dualConversationStore'
 import { ModelStepCheckpointStore } from '../modelStepCheckpointStore'
+import { SqliteConversationStore } from '../sqliteConversationStore'
 import { type StoreHandle, makeSqliteStore } from './testHelpers'
 
 const SESSION_KEY = 'user-1043:rpc:agent:default'
@@ -114,9 +115,9 @@ async function claimedCheckpoint(
         attachmentId: `${checkpointId}-att`,
         digestHex: 'ab'.repeat(32),
         bytes: INLINE_BYTES,
+        expiresAt: CLOCK + 3_600_000,
       },
     ],
-    attachmentsExpireAt: CLOCK + 3_600_000,
   })
   if (version === null) throw new Error('checkpoint fixture transition was rejected')
   const claim = await checkpoints.claim({
@@ -134,6 +135,143 @@ async function claimedCheckpoint(
 }
 
 describe('SqliteConversationStore — reopened continuation turns (#1043)', () => {
+  it('continues and completes the same origin after boot recovery while an ordinary restart is answered', async () => {
+    const handle = freshStore()
+    const manager = new ConversationManager(handle.store)
+    const origin = await manager.getOrCreate(SESSION_KEY)
+    await manager.startTurn(origin, 'origin input', 'task-origin')
+    await manager.failTurn(origin)
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => CLOCK })
+    const fence = await checkpoints.open(
+      {
+        checkpointId: 'cp-restart',
+        sessionKey: SESSION_KEY,
+        originTurnNumber: 1,
+        originTaskId: 'task-origin',
+        provider: 'codex-subscription',
+        model: 'gpt-5.5',
+        hostId: 'host-a',
+        principal: 'user-1043',
+        loopState: JSON.stringify({ nextIteration: 1, originUserMessageIndex: 0 }),
+        taskBudget: JSON.stringify({
+          elapsedActiveMs: 12,
+          iterationsUsed: 2,
+          durationMs: 300_000,
+          maxIterations: 10,
+        }),
+        sourceMessage: JSON.stringify({
+          content: 'origin input',
+          sender: 'user-1043',
+          channelType: 'rpc',
+          channelId: 'agent',
+          messageId: 'origin-message',
+          timestamp: new Date(CLOCK).toISOString(),
+          hostRef: 'host-a',
+        }),
+      },
+      [
+        {
+          kind: 'message',
+          toolCallId: null,
+          payload: JSON.stringify({ role: 'user', content: 'origin input' }),
+        },
+      ]
+    )
+    await checkpoints.append(SESSION_KEY, fence, [
+      {
+        kind: 'message',
+        toolCallId: null,
+        payload: JSON.stringify({
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'tc-restart', name: 'list_files', arguments: {} }],
+        }),
+      },
+      {
+        kind: 'tool_dispatch',
+        toolCallId: 'tc-restart',
+        payload: JSON.stringify({ name: 'list_files' }),
+      },
+      {
+        kind: 'tool_result',
+        toolCallId: 'tc-restart',
+        payload: JSON.stringify({ name: 'list_files', isError: false }),
+      },
+      {
+        kind: 'message',
+        toolCallId: 'tc-restart',
+        payload: JSON.stringify({
+          role: 'tool',
+          tool_call_id: 'tc-restart',
+          name: 'list_files',
+          content: 'confirmed files',
+        }),
+      },
+    ])
+    const version = await checkpoints.transition(SESSION_KEY, fence, {
+      from: ['open'],
+      to: 'resumable',
+      failedAt: CLOCK,
+      expiresAt: CLOCK + 7 * 24 * 3_600_000,
+    })
+    expect(version).not.toBeNull()
+    const first = await checkpoints.claim({
+      sessionKey: SESSION_KEY,
+      checkpointId: 'cp-restart',
+      version: version!,
+      hostInstanceId: 'host-old',
+      newTaskId: 'task-old',
+      leaseMs: LEASE_MS,
+    })
+    expect(first.outcome).toBe('claimed')
+    await manager.resumeTurnForContinuation(origin, 'task-old', 1, null)
+    const ordinary = await manager.getOrCreate('ordinary:rpc:agent:default')
+    await manager.startTurn(ordinary, 'ordinary input', 'task-ordinary')
+
+    expect(await checkpoints.bootReap('host-new')).toEqual({ abandoned: 0, reopened: 1 })
+    await handle.persistQueue.enqueueSync({ kind: 'reap_processing_sessions', nowEpoch: CLOCK + 1 })
+    expect(turnRows(handle, ordinary.id, 1).map(row => row.content)).toEqual([
+      'ordinary input',
+      '[Task interrupted by server restart]',
+    ])
+    const recovered = await checkpoints.loadLive(SESSION_KEY)
+    expect(recovered?.header.status).toBe('resumable')
+    if (!recovered) throw new Error('recovered checkpoint is missing')
+    const next = await checkpoints.claim({
+      sessionKey: SESSION_KEY,
+      checkpointId: 'cp-restart',
+      version: recovered.header.version,
+      hostInstanceId: 'host-new',
+      newTaskId: 'task-new',
+      leaseMs: LEASE_MS,
+    })
+    expect(next.outcome).toBe('claimed')
+    if (next.outcome !== 'claimed') throw new Error('recovered claim was rejected')
+    expect(next.snapshot.tools.confirmed).toBe(1)
+    // A new store facade cold-loads the durable turn after the restart reaper.
+    const coldManager = new ConversationManager(
+      new SqliteConversationStore(handle.persistQueue, { cacheSize: 8 })
+    )
+    const coldOrigin = await coldManager.getOrCreate(SESSION_KEY)
+    expect(coldOrigin.turns[0]?.response).toBeUndefined()
+    await coldManager.resumeTurnForContinuation(coldOrigin, 'task-new', 1, null)
+    await coldManager.completeTurn(coldOrigin, 'recovered answer', {
+      completeModelStepCheckpoint: next.fence,
+      modelStepTurnFence: { fence: next.fence, activeTaskId: 'task-new', originTurnNumber: 1 },
+    })
+    expect(checkpointStatus(handle, 'cp-restart')).toBe('completed')
+    expect(turnRows(handle, origin.id, 1)).toEqual([
+      expect.objectContaining({ role: 'user', content: 'origin input', turn_number: 1 }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'recovered answer',
+        turn_number: 1,
+        model_step_checkpoint_id: 'cp-restart',
+      }),
+    ])
+    expect(coldOrigin.turns).toHaveLength(1)
+  })
+
   it('keeps continuation tool calls and completion in the origin turn, then numbers the next message', async () => {
     const handle = freshStore()
     const manager = new ConversationManager(handle.store)

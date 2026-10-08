@@ -1,12 +1,25 @@
+import {
+  type CheckpointImageCapture,
+  type RecordedCheckpointContentPart,
+  type RecordedCheckpointMessage,
+  createCheckpointImageCapture,
+  inlineFileAttachmentBytes,
+} from '../../agent/modelStepCheckpointAttachments'
 import type {
   ModelStepCheckpointAttachmentInput,
+  ModelStepCheckpointAttachmentRow,
   ModelStepCheckpointEntryInput,
   ModelStepCheckpointFence,
   ModelStepCheckpointOpenHeader,
 } from '../../db/worker/modelStepCheckpointOps'
+import {
+  parseModelStepCheckpointLoopState,
+  serializeModelStepCheckpointLoopState,
+} from '../../db/worker/protocol'
 import { logger } from '../../logger'
 import type { ModelStepCheckpointStore } from '../conversation/persistence/modelStepCheckpointStore'
 import {
+  type Attachment,
   type ChatMessage,
   type LoopResult,
   type ToolCall,
@@ -50,12 +63,25 @@ export type ModelStepCheckpointRecorderMode =
   | {
       kind: 'origin'
       header: Omit<ModelStepCheckpointOpenHeader, 'loopState' | 'taskBudget'>
+      /**
+       * 0-based index of THIS turn's user message inside the messages the loop
+       * is started with — the executor's origin-capture boundary. It is frozen
+       * into `loop_state.originUserMessageIndex`; the recorder never scans for
+       * a user message, so an earlier turn's user message or a later
+       * loop-injected one can never be taken for the origin (C7).
+       */
+      originUserMessageIndex: number
     }
   | {
       kind: 'continuation'
       fence: ModelStepCheckpointFence
       /** Confirmed tool results already in the checkpoint. */
       confirmedResults: number
+      /**
+       * Durable `loop_state` of the checkpoint being continued. Its frozen
+       * origin-user index is retained by every state update (C7).
+       */
+      loopState: string | null
     }
 
 export interface ModelStepCheckpointRecorderOptions {
@@ -69,12 +95,18 @@ export interface ModelStepCheckpointRecorderOptions {
   /** Lifetime of a `resumable` checkpoint from the failure. */
   resumableTtlMs: number
   /**
-   * Raw bytes of the turn's inline uploaded files, read only when the
+   * Inline bytes of the turn's source-message files, read only when the
    * checkpoint becomes `resumable` (never on `open`), so a turn that ends
    * normally never writes them.
    */
-  inlineFileAttachments: () => ModelStepCheckpointAttachmentInput[]
-  /** Lifetime of those bytes from the failure. */
+  sourceAttachments?: readonly Attachment[]
+  /**
+   * Byte rows a continuation restored from this checkpoint. Their identity and
+   * first-capture deadlines are reused, so a retry can never extend retention
+   * — even after the sweep deleted the row (C8).
+   */
+  restoredAttachments?: readonly ModelStepCheckpointAttachmentRow[]
+  /** Lifetime of a first-captured byte set. */
   attachmentTtlMs: number
   now: () => number
   onFenceLost: () => void
@@ -90,8 +122,18 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   private confirmedResults: number
   private isPoisoned = false
   private settled = false
+  private readonly imageCapture: CheckpointImageCapture
+  /**
+   * 0-based index of the origin user message among the recorded message
+   * entries (C7). Frozen at the first recording of that message.
+   */
+  private originUserMessageIndex: number | undefined
 
   constructor(private readonly opts: ModelStepCheckpointRecorderOptions) {
+    this.imageCapture = createCheckpointImageCapture(opts.restoredAttachments ?? [], {
+      now: opts.now,
+      ttlMs: opts.attachmentTtlMs,
+    })
     if (opts.mode.kind === 'origin') {
       this.checkpointId = opts.mode.header.checkpointId
       this.currentFence = null
@@ -100,6 +142,9 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       this.checkpointId = opts.mode.fence.checkpointId
       this.currentFence = opts.mode.fence
       this.confirmedResults = opts.mode.confirmedResults
+      this.originUserMessageIndex = parseModelStepCheckpointLoopState(
+        opts.mode.loopState
+      ).originUserMessageIndex
     }
   }
 
@@ -116,11 +161,28 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     const { mode } = this.opts
     // A continuation's initial messages are rebuilt from its own entries.
     if (mode.kind === 'continuation') return
+    // The origin identity comes from the executor's capture boundary, never
+    // from scanning for a user message: history already contains earlier turns'
+    // user messages, and the loop appends synthetic ones later (C7).
+    const originIndex = mode.originUserMessageIndex
+    if (
+      !Number.isSafeInteger(originIndex) ||
+      originIndex < 0 ||
+      originIndex >= initialMessages.length
+    ) {
+      throw new Error('Model-step checkpoint origin user message index is out of range')
+    }
+    if (initialMessages[originIndex].role !== 'user') {
+      throw new Error(
+        'Model-step checkpoint origin user message index does not point at a user message'
+      )
+    }
+    this.originUserMessageIndex = originIndex
     await this.write('open', async () => {
       this.currentFence = await this.opts.store.open(
         {
           ...mode.header,
-          loopState: JSON.stringify({ nextIteration: 0 }),
+          loopState: this.loopState(0),
           taskBudget: this.opts.taskBudget(),
         },
         initialMessages.map(message => this.messageEntry(message))
@@ -168,7 +230,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       this.opts.store.updateState(
         this.opts.sessionKey,
         fence,
-        JSON.stringify({ nextIteration }),
+        this.loopState(nextIteration),
         this.opts.taskBudget()
       )
     )
@@ -190,15 +252,17 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     ) {
       const now = this.opts.now()
       const resumable = await this.write('transition', async () => {
-        const attachments = this.opts.inlineFileAttachments()
+        const bytes = this.pendingByteAttachments(now)
+        // The failed call's iterations and active time stay spent (C6). A null
+        // snapshot keeps the stored one instead of clearing it.
+        const taskBudget = this.opts.taskBudget()
         const version = await this.opts.store.transition(this.opts.sessionKey, fence, {
           from: [source],
           to: 'resumable',
           failedAt: now,
           expiresAt: now + this.opts.resumableTtlMs,
-          ...(attachments.length > 0
-            ? { attachments, attachmentsExpireAt: now + this.opts.attachmentTtlMs }
-            : {}),
+          ...(taskBudget === null ? {} : { taskBudget }),
+          ...(bytes.length > 0 ? { attachments: bytes } : {}),
         })
         return version !== null
       })
@@ -273,11 +337,65 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   }
 
   private messageEntry(message: ChatMessage): ModelStepCheckpointEntryInput {
+    const recorded = this.recordMessage(message)
     return {
       kind: 'message',
       toolCallId: message.tool_call_id ?? null,
-      payload: JSON.stringify(this.sanitizeMessage(message)),
+      payload: JSON.stringify(recorded),
     }
+  }
+
+  /** `loop_state` with the frozen origin-user identity retained (C7). */
+  private loopState(nextIteration: number): string {
+    return serializeModelStepCheckpointLoopState({
+      nextIteration,
+      ...(this.originUserMessageIndex === undefined
+        ? {}
+        : { originUserMessageIndex: this.originUserMessageIndex }),
+    })
+  }
+
+  /**
+   * Byte sets this transition may persist. A set whose first-capture deadline
+   * has already elapsed is left out: its recorded reference and rows stay
+   * untouched, the header still goes `resumable`, and the next continuation
+   * blocks `attachment_expired` exactly like an expired file attachment. The
+   * store refuses an expired insert, so the recorder never attempts one (C8).
+   */
+  private pendingByteAttachments(now: number): ModelStepCheckpointAttachmentInput[] {
+    const bytes = [
+      ...inlineFileAttachmentBytes(
+        this.opts.sourceAttachments,
+        { now: this.opts.now, ttlMs: this.opts.attachmentTtlMs },
+        this.opts.restoredAttachments ?? []
+      ),
+      ...this.imageCapture.pendingAttachments(),
+    ]
+    const live = bytes.filter(attachment => attachment.expiresAt > now)
+    if (live.length < bytes.length) {
+      logger.warn(
+        {
+          component: 'ModelStepCheckpoint',
+          checkpointId: this.checkpointId,
+          droppedBytes: bytes.length - live.length,
+        },
+        'model-step checkpoint byte retention elapsed before the failure; a resend is required'
+      )
+    }
+    return live
+  }
+
+  /**
+   * Redacts model-authored text, then replaces inline image bytes with durable
+   * references: the entry JSON never carries `data` (C3).
+   */
+  private recordMessage(message: ChatMessage): RecordedCheckpointMessage {
+    const sanitized = this.sanitizeMessage(message)
+    if (!sanitized.contentParts) return { ...sanitized, contentParts: undefined }
+    const contentParts: RecordedCheckpointContentPart[] = sanitized.contentParts.map(part =>
+      part.type === 'image' ? this.imageCapture.capture(part) : part
+    )
+    return { ...sanitized, contentParts }
   }
 
   /**

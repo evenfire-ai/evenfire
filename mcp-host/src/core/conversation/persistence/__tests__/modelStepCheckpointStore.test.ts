@@ -550,9 +550,155 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     expect(statusOf(worker, 'cp-1')).toBe('abandoned')
   })
 
+  it('6c. claim answers not_found for an expired resumable or blocked row before the sweep', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+
+    // Positive witness: a resumable row inside its window is claimable.
+    const liveFence = await checkpoints.open(header('cp-live', 'user-a:rpc:agent:default'), [
+      userEntry,
+    ])
+    const liveVersion = await checkpoints.transition('user-a:rpc:agent:default', liveFence, {
+      from: ['open'],
+      to: 'resumable',
+      failedAt: clock,
+      expiresAt: clock + 100,
+    })
+    expect(
+      (
+        await checkpoints.claim({
+          sessionKey: 'user-a:rpc:agent:default',
+          checkpointId: 'cp-live',
+          version: liveVersion as number,
+          hostInstanceId: 'host-instance-a',
+          newTaskId: 'task-live',
+          leaseMs: LEASE_MS,
+        })
+      ).outcome
+    ).toBe('claimed')
+
+    // An expired resumable row that the sweep has not reached yet answers like
+    // a swept (abandoned) one and stays untouched.
+    const expiredFence = await checkpoints.open(header('cp-expired', 'user-b:rpc:agent:default'), [
+      userEntry,
+    ])
+    const expiredVersion = await checkpoints.transition('user-b:rpc:agent:default', expiredFence, {
+      from: ['open'],
+      to: 'resumable',
+      failedAt: clock,
+      expiresAt: clock + 50,
+    })
+    clock += 51
+    expect(
+      await checkpoints.claim({
+        sessionKey: 'user-b:rpc:agent:default',
+        checkpointId: 'cp-expired',
+        version: expiredVersion as number,
+        hostInstanceId: 'host-instance-a',
+        newTaskId: 'task-expired',
+        leaseMs: LEASE_MS,
+      })
+    ).toEqual({ outcome: 'not_found' })
+    expect(statusOf(worker, 'cp-expired')).toBe('resumable')
+
+    // A blocked row answers its blocked reason while it is live...
+    const blockedFence = await checkpoints.open(header('cp-blocked', 'user-c:rpc:agent:default'), [
+      userEntry,
+    ])
+    await checkpoints.transition('user-c:rpc:agent:default', blockedFence, {
+      from: ['open'],
+      to: 'resumable',
+      failedAt: clock,
+      expiresAt: clock + 100,
+    })
+    await checkpoints.transition('user-c:rpc:agent:default', blockedFence, {
+      from: ['resumable'],
+      to: 'blocked',
+      blockedReason: 'reference_unavailable',
+    })
+    expect(
+      await checkpoints.claim({
+        sessionKey: 'user-c:rpc:agent:default',
+        checkpointId: 'cp-blocked',
+        version: 3,
+        hostInstanceId: 'host-instance-a',
+        newTaskId: 'task-blocked',
+        leaseMs: LEASE_MS,
+      })
+    ).toEqual({ outcome: 'blocked', blockedReason: 'reference_unavailable' })
+
+    // ...and not_found once its header expired without a sweep.
+    clock += 100
+    expect(
+      await checkpoints.claim({
+        sessionKey: 'user-c:rpc:agent:default',
+        checkpointId: 'cp-blocked',
+        version: 3,
+        hostInstanceId: 'host-instance-a',
+        newTaskId: 'task-blocked',
+        leaseMs: LEASE_MS,
+      })
+    ).toEqual({ outcome: 'not_found' })
+    expect(statusOf(worker, 'cp-blocked')).toBe('blocked')
+  })
+
+  it('6d. claim replays a claimed row whose lease outlives the header expiry', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+    const fence = await checkpoints.open(header(), [userEntry])
+    const version = await checkpoints.transition(SESSION_KEY, fence, {
+      from: ['open'],
+      to: 'resumable',
+      failedAt: clock,
+      expiresAt: clock + 100,
+    })
+    const claim = await checkpoints.claim({
+      sessionKey: SESSION_KEY,
+      checkpointId: 'cp-1',
+      version: version as number,
+      hostInstanceId: 'host-instance-a',
+      newTaskId: 'task-cont-1',
+      leaseMs: 500,
+    })
+    expect(claim.outcome).toBe('claimed')
+
+    // Header expired at +100, lease alive until +500: the in-flight
+    // continuation keeps its claim and the POST replays it.
+    clock += 200
+    expect(
+      await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'cp-1',
+        version: version as number,
+        hostInstanceId: 'host-instance-b',
+        newTaskId: 'task-cont-2',
+        leaseMs: LEASE_MS,
+      })
+    ).toEqual({ outcome: 'replayed', taskId: 'task-cont-1' })
+    expect(statusOf(worker, 'cp-1')).toBe('claimed')
+
+    // Once that lease lapses, the expired row is not resumable: not_found.
+    clock += 400
+    expect(
+      await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'cp-1',
+        version: version as number,
+        hostInstanceId: 'host-instance-b',
+        newTaskId: 'task-cont-2',
+        leaseMs: LEASE_MS,
+      })
+    ).toEqual({ outcome: 'not_found' })
+  })
+
   describe('7. inline attachment bytes (migration 018)', () => {
     const bytes = new Uint8Array([0, 255, 1, 254, 10, 13, 37])
-    const attachment = { attachmentId: 'att-1', digestHex: 'ab'.repeat(32), bytes }
+    const attachmentInput = (expiresAt: number) => ({
+      attachmentId: 'att-1',
+      digestHex: 'ab'.repeat(32),
+      bytes,
+      expiresAt,
+    })
     const attachmentRows = (worker: InProcessWorkerHandle) =>
       (
         worker.db.prepare('SELECT COUNT(*) AS n FROM model_step_checkpoint_attachments').get() as {
@@ -569,8 +715,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
         to: 'resumable',
         failedAt: clock,
         expiresAt: clock + 7 * 24 * 3_600_000,
-        attachments: [attachment],
-        attachmentsExpireAt: clock + ttlMs,
+        attachments: [attachmentInput(clock + ttlMs)],
       })
       return { checkpoints, fence, version: version as number }
     }
@@ -618,6 +763,65 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       expect(statusOf(worker, 'cp-1')).toBe('resumable')
     })
 
+    it('keep the first-capture deadline, refuse to move it and refuse expired bytes', async () => {
+      const worker = createInProcessWorker(tempDbPath())
+      const { checkpoints, fence } = await resumableWithBytes(worker)
+      const first = (await checkpoints.loadAttachments(SESSION_KEY, 'cp-1'))[0]!
+      expect(first.expires_at).toBe(clock + 3_600_000)
+
+      // A repeat transition that repeats the same deadline and bytes is a
+      // no-op insert, not a new window.
+      const repeated = await checkpoints.transition(SESSION_KEY, fence, {
+        from: ['resumable'],
+        to: 'resumable',
+        failedAt: clock,
+        expiresAt: clock + 7 * 24 * 3_600_000,
+        attachments: [attachmentInput(first.expires_at)],
+      })
+      expect(repeated).not.toBeNull()
+      expect(attachmentRows(worker)).toBe(1)
+
+      // Moving the deadline forward is refused; the row keeps the first one.
+      await expect(
+        checkpoints.transition(SESSION_KEY, fence, {
+          from: ['resumable'],
+          to: 'resumable',
+          failedAt: clock,
+          expiresAt: clock + 7 * 24 * 3_600_000,
+          attachments: [attachmentInput(first.expires_at + 60_000)],
+        })
+      ).rejects.toThrow(/conflicts with its first capture/)
+      expect((await checkpoints.loadAttachments(SESSION_KEY, 'cp-1'))[0]!.expires_at).toBe(
+        first.expires_at
+      )
+
+      // Once the sweep deleted the expired row, the same bytes cannot return.
+      clock = first.expires_at
+      await checkpoints.sweep(1000)
+      expect(attachmentRows(worker)).toBe(0)
+      await expect(
+        checkpoints.transition(SESSION_KEY, fence, {
+          from: ['resumable'],
+          to: 'resumable',
+          failedAt: clock,
+          expiresAt: clock + 7 * 24 * 3_600_000,
+          attachments: [attachmentInput(first.expires_at)],
+        })
+      ).rejects.toThrow(/invalid or expired deadline/)
+      expect(attachmentRows(worker)).toBe(0)
+
+      // Positive witness: a byte set inside its own window is still accepted.
+      const accepted = await checkpoints.transition(SESSION_KEY, fence, {
+        from: ['resumable'],
+        to: 'resumable',
+        failedAt: clock,
+        expiresAt: clock + 7 * 24 * 3_600_000,
+        attachments: [{ ...attachmentInput(clock + 1000), attachmentId: 'att-2' }],
+      })
+      expect(accepted).not.toBeNull()
+      expect(attachmentRows(worker)).toBe(1)
+    })
+
     it('are deleted when the checkpoint is blocked or retired by a new turn', async () => {
       // blocked
       const blockedWorker = createInProcessWorker(tempDbPath())
@@ -653,8 +857,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
         to: 'resumable',
         failedAt: clock,
         expiresAt: clock + 1000,
-        attachments: [attachment],
-        attachmentsExpireAt: clock + 1000,
+        attachments: [attachmentInput(clock + 1000)],
       })
       await manager.failTurn(conv)
       expect(attachmentRows(handle.worker)).toBe(1)
@@ -671,8 +874,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
         checkpoints.transition(SESSION_KEY, fence, {
           from: ['open'],
           to: 'abandoned',
-          attachments: [attachment],
-          attachmentsExpireAt: clock + 1000,
+          attachments: [attachmentInput(clock + 1000)],
         })
       ).rejects.toThrow(/only with resumable/)
       expect(statusOf(worker, 'cp-1')).toBe('open')

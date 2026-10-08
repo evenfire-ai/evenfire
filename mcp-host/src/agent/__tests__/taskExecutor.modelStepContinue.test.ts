@@ -12,6 +12,7 @@ import {
   classifyBytes,
 } from '@clerum/gfs-interaction-policy'
 import { config as appConfig } from '../../config'
+import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../../core/conversation/conversation'
 import {
   type StoreHandle,
@@ -25,6 +26,8 @@ import { type AgentEvent, type ChatMessage, FinishReason, type ToolCall } from '
 import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
 import { GfscHttpError } from '../../internalTools/gfsClient'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { FailoverEngine } from '../../llm/failover/engine'
+import type { LlmPolicy } from '../../llm/failover/types'
 import type { SingleTurnProvider } from '../../llm/types'
 import { McpManager } from '../../mcp/manager'
 import type { ModelStepContinuationRef, Task, TaskError } from '../../queue/types'
@@ -36,7 +39,6 @@ import {
 } from '../fileReferenceResolver'
 import { fileReferenceCheckError } from '../incomingAdmission'
 import { validateIncomingAttachments } from '../incomingAttachments'
-import { TaskLimitError } from '../taskExecutionBudget'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
 
 const USER = 'user-b2'
@@ -252,7 +254,7 @@ async function claimedCheckpoint(options: {
       model: 'checkpoint-model',
       hostId: 'host-a',
       principal: USER,
-      loopState: JSON.stringify({ nextIteration: 0 }),
+      loopState: JSON.stringify({ nextIteration: 0, originUserMessageIndex: 0 }),
       taskBudget: options.taskBudget ?? budget(),
       sourceMessage: JSON.stringify(message),
     },
@@ -268,6 +270,7 @@ async function claimedCheckpoint(options: {
             attachmentId: 'file-b2',
             digestHex: createHash('sha256').update(UPLOAD).digest('hex'),
             bytes: UPLOAD,
+            expiresAt: NOW + ATTACHMENT_TTL_MS,
           },
         ]
       : []
@@ -276,9 +279,7 @@ async function claimedCheckpoint(options: {
     to: 'resumable',
     failedAt: NOW,
     expiresAt: NOW + RESUMABLE_TTL_MS,
-    ...(attachments.length > 0
-      ? { attachments, attachmentsExpireAt: NOW + ATTACHMENT_TTL_MS }
-      : {}),
+    ...(attachments.length > 0 ? { attachments } : {}),
   })
   if (resumableVersion === null) throw new Error('checkpoint fixture could not become resumable')
   const claim = await checkpoints.claim({
@@ -306,7 +307,8 @@ async function claimedCheckpoint(options: {
 
 function continuationRef(
   fixture: CheckpointFixture,
-  onVerdict: ModelStepContinuationRef['onVerdict']
+  onVerdict: ModelStepContinuationRef['onVerdict'],
+  options: { taskId?: string; fence?: ModelStepCheckpointFence } = {}
 ): ModelStepContinuationRef {
   return {
     checkpointId: fixture.fence.checkpointId,
@@ -314,7 +316,7 @@ function continuationRef(
     originTurnNumber: 1,
     provider: 'openai',
     model: 'checkpoint-model',
-    fence: fixture.fence,
+    fence: options.fence ?? fixture.fence,
     confirmedResults: fixture.confirmedResults,
     taskBudget: fixture.taskBudget,
     onVerdict,
@@ -328,6 +330,8 @@ async function runContinuation(
     events?: SimpleEventEmitter
     onVerdict?: ModelStepContinuationRef['onVerdict']
     deps?: Partial<TaskExecutorDeps>
+    taskId?: string
+    fence?: ModelStepCheckpointFence
   } = {}
 ): Promise<{
   task: Task
@@ -341,8 +345,9 @@ async function runContinuation(
   const onComplete = vi.fn<(task: Task) => void>()
   const onApprovalNeeded = vi.fn()
   const verdict = vi.fn(options.onVerdict)
+  const taskId = options.taskId ?? 'task-continuation-b2'
   const task: Task = {
-    id: 'task-continuation-b2',
+    id: taskId,
     source: 'channel',
     sourceMessage: fixture.message,
     traceContext: null,
@@ -353,7 +358,10 @@ async function runContinuation(
       { role: 'user', content: fixture.message.content, timestamp: new Date(NOW) },
     ],
     responseCallback: vi.fn(async () => {}),
-    modelStepContinuation: continuationRef(fixture, verdict),
+    modelStepContinuation: continuationRef(fixture, verdict, {
+      taskId: options.taskId,
+      fence: options.fence,
+    }),
   }
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
@@ -393,6 +401,28 @@ async function runContinuation(
     ...(options.events ? { coreEvents: options.events } : {}),
   } satisfies TaskExecutorDeps)
   return { task, executor, onFail, onComplete, onApprovalNeeded, verdict }
+}
+
+async function expireAndReclaimFixture(
+  fixture: CheckpointFixture,
+  taskId: string
+): Promise<ModelStepCheckpointFence> {
+  // Advance the injected checkpoint clock past A's lease while its provider
+  // call is still pending. B claims directly from the expired claimed row.
+  clock += LEASE_MS + 1
+  expect(header(fixture.handle).status).toBe('claimed')
+  const reclaimed = await fixture.checkpoints.claim({
+    sessionKey: SESSION_KEY,
+    checkpointId: fixture.fence.checkpointId,
+    version: header(fixture.handle).version,
+    hostInstanceId: 'host-instance-replacement',
+    newTaskId: taskId,
+    leaseMs: LEASE_MS,
+  })
+  if (reclaimed.outcome !== 'claimed') {
+    throw new Error(`fixture replacement claim failed: ${reclaimed.outcome}`)
+  }
+  return reclaimed.fence
 }
 
 interface HeaderRow {
@@ -1158,6 +1188,130 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     ])
   })
 
+  it('9a. a stale cancelled continuation leaves the turn for its replacement', async () => {
+    const fixture = await claimedCheckpoint({})
+    const stale = provider(undefined, () => new Promise(() => {}))
+    const staleRun = await runContinuation(fixture, stale)
+    const staleExecution = staleRun.executor.run()
+    await vi.waitFor(() => {
+      expect(staleRun.verdict).toHaveBeenCalledWith({ kind: 'started' })
+      expect(stale.calls()).toBe(1)
+    })
+    const replacementFence = await expireAndReclaimFixture(fixture, 'task-continuation-replacement')
+    const replacement = provider(undefined, () => ({ content: 'replacement final answer' }))
+    const replacementRun = await runContinuation(fixture, replacement, {
+      taskId: 'task-continuation-replacement',
+      fence: replacementFence,
+    })
+
+    staleRun.executor.abort()
+    await staleExecution
+    await fixture.handle.persistQueue.drain()
+
+    expect(stale.calls()).toBe(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'claimed', version: 4 })
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', turn_number: 1 }),
+    ])
+    expect(
+      fixture.handle.worker.db
+        .prepare(
+          `SELECT state, active_task_id FROM sessions WHERE session_key = ?
+           UNION ALL SELECT status, continuation_task_id FROM model_step_checkpoints WHERE checkpoint_id = ?`
+        )
+        .all(SESSION_KEY, 'checkpoint-b2')
+    ).toEqual([
+      { state: 'processing', active_task_id: 'task-continuation-b2' },
+      { state: 'claimed', active_task_id: 'task-continuation-replacement' },
+    ])
+    expect(fixture.manager.getSessionByKey(SESSION_KEY)).toMatchObject({
+      state: 'processing',
+      activeTaskId: 'task-continuation-b2',
+    })
+
+    await replacementRun.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(replacement.calls()).toBe(1)
+    expect(replacementRun.onComplete).toHaveBeenCalledTimes(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 5 })
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', turn_number: 1 }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'replacement final answer',
+        turn_number: 1,
+        model_step_checkpoint_id: 'checkpoint-b2',
+      }),
+    ])
+  })
+
+  it('9b. rejected stale completion rolls back RAM and lets the replacement finish', async () => {
+    const fixture = await claimedCheckpoint({})
+    const originalPersistComplete = fixture.handle.store.persistTurnComplete.bind(
+      fixture.handle.store
+    )
+    let enterPersistGate!: () => void
+    let releasePersistGate!: () => void
+    const persistGate = new Promise<void>(resolve => {
+      releasePersistGate = resolve
+    })
+    const persistEntered = new Promise<void>(resolve => {
+      enterPersistGate = resolve
+    })
+    fixture.handle.store.persistTurnComplete = async (conversation, response, options) => {
+      enterPersistGate()
+      await persistGate
+      return originalPersistComplete(conversation, response, options)
+    }
+
+    let resolveStaleProvider!: (value: {}) => void
+    const stale = provider(
+      undefined,
+      () =>
+        new Promise<{}>(resolve => {
+          resolveStaleProvider = resolve
+        })
+    )
+    const staleRun = await runContinuation(fixture, stale)
+    const staleExecution = staleRun.executor.run()
+    await vi.waitFor(() => {
+      expect(staleRun.verdict).toHaveBeenCalledWith({ kind: 'started' })
+      expect(stale.calls()).toBe(1)
+    })
+    resolveStaleProvider({})
+    await persistEntered
+    const replacementFence = await expireAndReclaimFixture(fixture, 'task-continuation-replacement')
+    releasePersistGate()
+    await staleExecution
+    await fixture.handle.persistQueue.drain()
+
+    expect(staleRun.onComplete).toHaveBeenCalledTimes(0)
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', turn_number: 1 }),
+    ])
+
+    const replacement = provider(undefined, () => ({ content: 'winner final answer' }))
+    const replacementRun = await runContinuation(fixture, replacement, {
+      taskId: 'task-continuation-replacement',
+      fence: replacementFence,
+    })
+    await replacementRun.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(replacementRun.onComplete).toHaveBeenCalledTimes(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 5 })
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', turn_number: 1 }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'winner final answer',
+        turn_number: 1,
+        model_step_checkpoint_id: 'checkpoint-b2',
+      }),
+    ])
+  })
+
   it('9. abandons and fails the reopened turn after a non-abort error', async () => {
     const fixture = await claimedCheckpoint({})
     const llm = provider(undefined, () => ({ error: new Error('model transport failed') }))
@@ -1178,8 +1332,11 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
   })
 
   it('10. ends a reopened turn with the limit message and abandons the checkpoint', async () => {
-    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 25 }) })
-    const llm = provider(undefined, () => new Promise(resolve => setTimeout(() => resolve({}), 80)))
+    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
+    const llm = provider(
+      undefined,
+      () => new Promise(resolve => setTimeout(() => resolve({}), 250))
+    )
     const run = await runContinuation(fixture, llm)
     await run.executor.run()
     await fixture.handle.persistQueue.drain()
@@ -1192,7 +1349,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
       expect.objectContaining({ role: 'user', turn_number: 1 }),
       expect.objectContaining({
         role: 'assistant',
-        content: expect.stringContaining('active execution reached 25ms'),
+        content: expect.stringContaining('active execution reached 100ms'),
         turn_number: 1,
         model_step_checkpoint_id: null,
       }),
@@ -1244,6 +1401,354 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
         turn_number: 1,
         model_step_checkpoint_id: null,
       }),
+    ])
+  })
+
+  it('12. keeps the fresh turn-context on the origin user when a later user message exists', async () => {
+    const reference = gfsReference()
+    const staleResolutions = [{ availability: 'stale' as const, reference, resolvedVersion: 3 }]
+    const message = sourceMessage({ fileReferenceResolutions: staleResolutions })
+    const originDate = new Date('2020-01-02T03:04:05.000Z')
+    const originBlock = buildTurnContextBlock({
+      date: originDate,
+      channel: { type: 'rpc', sender: USER },
+      referencedFiles: referencedFilesForTurnContext(staleResolutions),
+    })
+    const fixture = await claimedCheckpoint({
+      message,
+      recordedUserContent: originBlock + message.content,
+      entries: [
+        {
+          kind: 'message',
+          toolCallId: null,
+          payload: JSON.stringify({ role: 'user', content: 'LOOP-INJECTED-USER' }),
+        },
+      ],
+    })
+    const resolve = vi.fn<FileReferenceGfscClient['resolve']>(async () => gfsView())
+    const llm = provider()
+    const run = await runContinuation(fixture, llm, {
+      deps: {
+        modelStepCheckpoints: {
+          store: fixture.checkpoints,
+          hostInstanceId: 'host-instance-b2',
+          hostId: 'host-a',
+          resumableTtlMs: RESUMABLE_TTL_MS,
+          claimLeaseMs: LEASE_MS,
+          attachmentTtlMs: ATTACHMENT_TTL_MS,
+          fileReferenceGfsGate: () => ({ status: 'available', client: { resolve } }),
+          gfsSurfaceRuntimeCapability: () => ({
+            workspaceFile: true,
+            localExecutor: true,
+            visual: false,
+          }),
+        },
+      },
+    })
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+    expect(llm.calls()).toBe(1)
+    const users = llm.requests[0]!.filter(item => item.role === 'user')
+    expect(users.map(item => item.content)).toEqual([
+      expect.stringContaining('availability=available'),
+      'LOOP-INJECTED-USER',
+    ])
+    expect(users[1]!.content).not.toContain('<turn-context>')
+    expect(users[0]!.content).not.toContain('availability=stale')
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed' })
+  })
+
+  it('13. blocks a missing checkpoint image while a live image reaches the provider and completes', async () => {
+    const missing = await claimedCheckpoint({
+      entries: [
+        {
+          kind: 'message',
+          toolCallId: null,
+          payload: JSON.stringify({
+            role: 'user',
+            content: 'image turn',
+            contentParts: [
+              {
+                type: 'checkpoint-image',
+                checkpointAttachmentId: 'img-missing',
+                checkpointAttachmentExpiresAt: NOW + ATTACHMENT_TTL_MS,
+                checkpointAttachmentDigestHex: 'ab'.repeat(32),
+                mimeType: 'image/png',
+              },
+            ],
+          }),
+        },
+      ],
+    })
+    const blocked = provider()
+    const blockedRun = await runContinuation(missing, blocked)
+    await blockedRun.executor.run()
+    await missing.handle.persistQueue.drain()
+    expect(blocked.calls()).toBe(0)
+    expect(blockedRun.verdict).toHaveBeenCalledWith({
+      kind: 'blocked',
+      blockedReason: 'attachment_expired',
+    })
+
+    const imageBytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jbi0AAAAASUVORK5CYII=',
+      'base64'
+    )
+    const imageDigest = createHash('sha256').update(imageBytes).digest('hex')
+    const imageSource = {
+      kind: 'attachment' as const,
+      attachmentId: 'img-live',
+      messageId: 'message-b2',
+    }
+    const healthy = await claimedCheckpoint({
+      entries: [
+        {
+          kind: 'message',
+          toolCallId: null,
+          payload: JSON.stringify({
+            role: 'user',
+            content: '',
+            contentParts: [
+              {
+                type: 'checkpoint-image',
+                checkpointAttachmentId: 'img-live',
+                checkpointAttachmentExpiresAt: NOW + ATTACHMENT_TTL_MS,
+                checkpointAttachmentDigestHex: imageDigest,
+                mimeType: 'image/png',
+                width: 1,
+                height: 1,
+                source: imageSource,
+              },
+            ],
+          }),
+        },
+      ],
+    })
+    healthy.handle.worker.db
+      .prepare(
+        `INSERT INTO model_step_checkpoint_attachments
+       (checkpoint_id, attachment_id, digest_hex, size_bytes, bytes, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        'checkpoint-b2',
+        'img-live',
+        imageDigest,
+        imageBytes.byteLength,
+        imageBytes,
+        NOW + ATTACHMENT_TTL_MS,
+        NOW
+      )
+    const llm = provider(undefined, () => ({ content: 'image continuation answer' }))
+    const run = await runContinuation(healthy, llm, {
+      deps: {
+        imageInput: () => ({
+          capability: {
+            state: 'supported',
+            evidence: {
+              source: 'curated',
+              reference: 'https://example.test/vision-capability',
+              checkedAt: new Date(NOW).toISOString(),
+            },
+          },
+        }),
+      },
+    })
+    await run.executor.run()
+    await healthy.handle.persistQueue.drain()
+    expect(llm.calls()).toBe(1)
+    const image = llm.requests[0]!.flatMap(message => message.contentParts ?? []).find(
+      part => part.type === 'image'
+    )
+    expect(image).toMatchObject({
+      type: 'image',
+      data: imageBytes.toString('base64'),
+      mimeType: 'image/png',
+      width: 1,
+      height: 1,
+      source: imageSource,
+    })
+    expect(image).not.toHaveProperty('checkpointAttachmentId')
+    expect(
+      healthy.handle.worker.db
+        .prepare('SELECT COUNT(*) AS n FROM model_step_checkpoint_attachments')
+        .get()
+    ).toEqual({ n: 0 })
+    expect(header(healthy.handle)).toMatchObject({ status: 'completed' })
+    expect(turnRows(healthy.handle)).toEqual([
+      expect.objectContaining({ role: 'user', turn_number: 1 }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'image continuation answer',
+        turn_number: 1,
+      }),
+    ])
+  })
+
+  it('14. keeps a pinned continuation off failover and still completes on the primary', async () => {
+    const entries = [
+      {
+        kind: 'message' as const,
+        toolCallId: null,
+        payload: JSON.stringify({
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'confirmed-k1', name: 'system_info', arguments: {} }],
+        }),
+      },
+      {
+        kind: 'tool_dispatch' as const,
+        toolCallId: 'confirmed-k1',
+        payload: '{"name":"system_info"}',
+      },
+      {
+        kind: 'tool_result' as const,
+        toolCallId: 'confirmed-k1',
+        payload: '{"name":"system_info","isError":false}',
+      },
+      {
+        kind: 'message' as const,
+        toolCallId: 'confirmed-k1',
+        payload: JSON.stringify({
+          role: 'tool',
+          tool_call_id: 'confirmed-k1',
+          name: 'system_info',
+          content: 'old confirmed result',
+        }),
+      },
+    ]
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['provider_unavailable'],
+      fallbacks: [{ provider: 'fallback', model: 'fallback-model' }],
+    }
+    const fallback = provider('fallback', () => ({ content: 'fallback answer' }))
+    const buildProvider = vi.fn(() => fallback)
+    const failover = {
+      engine: new FailoverEngine(policy, { metricInc: () => {} }),
+      policy,
+      buildProvider,
+    }
+    const fixture = await claimedCheckpoint({ entries, confirmedResults: 1 })
+    const outage = provider(undefined, () => ({ error: new Error('upstream 503') }))
+    const failed = await runContinuation(fixture, outage, { deps: { failover } })
+    await failed.executor.run()
+    await fixture.handle.persistQueue.drain()
+    expect(buildProvider).not.toHaveBeenCalled()
+    expect(fallback.calls()).toBe(0)
+    expect(header(fixture.handle)).toMatchObject({ status: 'resumable' })
+
+    const reclaimed = await fixture.checkpoints.claim({
+      sessionKey: SESSION_KEY,
+      checkpointId: fixture.fence.checkpointId,
+      version: header(fixture.handle).version,
+      hostInstanceId: 'host-instance-b2',
+      newTaskId: 'task-continuation-retry',
+      leaseMs: LEASE_MS,
+    })
+    if (reclaimed.outcome !== 'claimed') throw new Error(reclaimed.outcome)
+    const primary = provider(undefined, () => ({ content: 'pinned primary answer' }))
+    const retried = await runContinuation(fixture, primary, {
+      taskId: 'task-continuation-retry',
+      fence: reclaimed.fence,
+      deps: { failover },
+    })
+    await retried.executor.run()
+    await fixture.handle.persistQueue.drain()
+    expect(buildProvider).not.toHaveBeenCalled()
+    expect(primary.calls()).toBe(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed' })
+    expect(turnRows(fixture.handle)).toContainEqual(
+      expect.objectContaining({ role: 'assistant', content: 'pinned primary answer' })
+    )
+
+    const plainTask: Task = {
+      id: 'task-ordinary-failover',
+      source: 'channel',
+      sourceMessage: fixture.message,
+      traceContext: null,
+      priority: 'normal',
+      status: 'pending',
+      createdAt: new Date(NOW),
+      conversationHistory: [],
+    }
+    const ordinary = new TaskExecutor(plainTask, {
+      conversationManager: fixture.manager,
+      llmProvider: outage,
+      mcpManager: new McpManager(),
+      workspaceService: undefined,
+      approvalConfig: undefined,
+      modelName: 'checkpoint-model',
+      contextWindowTokens: 100_000,
+      config: {
+        maxTaskDuration: 300_000,
+        maxToolCallsPerTask: 20,
+        autoStart: true,
+        taskDelay: 0,
+        approvalTimeout: 300_000,
+      },
+      coreEvents: new SimpleEventEmitter(),
+      cronScheduler: null,
+      taskLifecycle: new TaskLifecycle(),
+      onApprovalNeeded: vi.fn(),
+      onComplete: vi.fn(),
+      onFail: vi.fn(),
+      dynamicEnvProvider: () => ({}),
+      failover,
+    })
+    const wrapped = (
+      ordinary as unknown as {
+        wrapFailoverPort: (
+          port: LlmPortAdapter,
+          conversation: unknown
+        ) => { completeWithTools: (request: unknown) => Promise<unknown> }
+      }
+    ).wrapFailoverPort(
+      new LlmPortAdapter(outage, 'checkpoint-model', 'openai'),
+      fixture.manager.getSessionByKey(SESSION_KEY)
+    )
+    await wrapped.completeWithTools({
+      messages: [{ role: 'user', content: 'ordinary failover' }],
+      tools: [],
+    })
+    expect(buildProvider).toHaveBeenCalledTimes(1)
+    expect(fallback.calls()).toBe(1)
+  })
+
+  it('15. a rejected response completion abandons the owned checkpoint and a later turn can finish', async () => {
+    const fixture = await claimedCheckpoint({})
+    const originalPersistComplete = fixture.handle.store.persistTurnComplete.bind(
+      fixture.handle.store
+    )
+    let completions = 0
+    fixture.handle.store.persistTurnComplete = async (conversation, response, options) => {
+      completions += 1
+      if (completions === 1) throw new Error('durable completion rejected')
+      return originalPersistComplete(conversation, response, options)
+    }
+    const llm = provider(undefined, () => ({ content: 'false response' }))
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(run.onComplete).not.toHaveBeenCalled()
+    expect(header(fixture.handle)).toMatchObject({ status: 'abandoned' })
+    expect(turnRows(fixture.handle).map(row => row.content)).not.toContain('false response')
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+    ])
+
+    const conversation = fixture.manager.getSessionByKey(SESSION_KEY)
+    if (!conversation) throw new Error('continuation conversation is missing')
+    await fixture.manager.startTurn(conversation, 'next question', 'task-next')
+    await fixture.manager.completeTurn(conversation, 'next answer')
+    await fixture.handle.persistQueue.drain()
+
+    expect(turnRows(fixture.handle).map(row => row.content)).not.toContain('false response')
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+      expect.objectContaining({ role: 'user', content: 'next question', turn_number: 2 }),
+      expect.objectContaining({ role: 'assistant', content: 'next answer', turn_number: 2 }),
     ])
   })
 })

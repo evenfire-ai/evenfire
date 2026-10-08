@@ -8,6 +8,7 @@
  * its CAS are the production ones.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
@@ -25,6 +26,7 @@ import type {
   ModelStepCheckpointFence,
   ModelStepCheckpointOpenHeader,
 } from '../../db/worker/modelStepCheckpointOps'
+import { logger } from '../../logger'
 import type { ModelStepContinuationRef, ModelStepContinuationVerdict } from '../../queue/types'
 import type { IncomingMessage } from '../../server'
 import {
@@ -47,9 +49,16 @@ const USER_ID = 'user-1043'
 const AGENT = 'agent-x'
 const CHAT_ID = 'chat-1'
 const SESSION_KEY = `${USER_ID}:rpc:${AGENT}:${CHAT_ID}`
+/** The session suffix rpc-proxy and the session routes use for a blank threadId. */
+const DEFAULT_CHAT_ID = 'default'
+const DEFAULT_SESSION_KEY = `${USER_ID}:rpc:${AGENT}:${DEFAULT_CHAT_ID}`
 const CHECKPOINT_ID = 'cp-1043'
 const ORIGIN_TASK_ID = 'task-origin'
 const ORIGIN_TURN_NUMBER = 3
+const ATTACHMENT_ID = 'attachment-1'
+const ATTACHMENT_TEXT = 'inline file bytes of the default session'
+const ATTACHMENT_BYTES = Buffer.from(ATTACHMENT_TEXT, 'utf8')
+const ATTACHMENT_DIGEST = createHash('sha256').update(ATTACHMENT_BYTES).digest('hex')
 
 const openHandles: StoreHandle[] = []
 
@@ -89,14 +98,17 @@ function sourceMessage(): IncomingMessage {
 interface HeaderOverrides {
   principal?: string
   hostId?: string
+  checkpointId?: string
+  /** Defaults to {@link SESSION_KEY}; a default-session checkpoint overrides it. */
+  sessionKey?: string
   /** Explicit `null` stores no source message; `undefined` stores the valid one. */
   sourceMessage?: string | null
 }
 
 function header(overrides: HeaderOverrides = {}): ModelStepCheckpointOpenHeader {
   return {
-    checkpointId: CHECKPOINT_ID,
-    sessionKey: SESSION_KEY,
+    checkpointId: overrides.checkpointId ?? CHECKPOINT_ID,
+    sessionKey: overrides.sessionKey ?? SESSION_KEY,
     originTurnNumber: ORIGIN_TURN_NUMBER,
     originTaskId: ORIGIN_TASK_ID,
     provider: 'codex-subscription',
@@ -387,6 +399,104 @@ describe('ModelStepContinuationService — status-first claim precedence (#1043)
   })
 })
 
+describe('ModelStepContinuationService — default session (#1043)', () => {
+  /**
+   * The stored source message of a session the client opened without a
+   * threadId: rpc-proxy forwards `threadId: undefined`, so the persisted JSON
+   * carries no `threadId` key at all.
+   */
+  function defaultSessionHeader(checkpointId: string): ModelStepCheckpointOpenHeader {
+    const stored = sourceMessage()
+    delete stored.threadId
+    return {
+      ...header({ checkpointId, sessionKey: DEFAULT_SESSION_KEY }),
+      sourceMessage: JSON.stringify(stored),
+    }
+  }
+
+  async function openDefaultSessionResumable(
+    checkpoints: ModelStepCheckpointStore,
+    checkpointId: string
+  ): Promise<{ fence: ModelStepCheckpointFence; version: number }> {
+    const fence = await checkpoints.open(defaultSessionHeader(checkpointId), [userEntry])
+    expect(
+      await checkpoints.append(DEFAULT_SESSION_KEY, fence, [
+        dispatch('tc-1'),
+        toolResult('tc-1'),
+        dispatch('tc-2'),
+      ])
+    ).toBe(true)
+    const version = await checkpoints.transition(DEFAULT_SESSION_KEY, fence, {
+      from: ['open'],
+      to: 'resumable',
+      failedAt: NOW,
+      expiresAt: NOW + RESUMABLE_TTL_MS,
+      attachments: [
+        {
+          attachmentId: ATTACHMENT_ID,
+          digestHex: ATTACHMENT_DIGEST,
+          bytes: ATTACHMENT_BYTES,
+          expiresAt: NOW + ATTACHMENT_TTL_MS,
+        },
+      ],
+    })
+    expect(version).toBe(2)
+    return { fence, version: version as number }
+  }
+
+  it('keeps the claim live and the inline bytes readable when the threadId was blank', async () => {
+    const { handle, checkpoints, service, enqueue, captured } = createHarness({
+      verdict: { kind: 'started' },
+    })
+    const { version } = await openDefaultSessionResumable(checkpoints, CHECKPOINT_ID)
+
+    // The client addresses the default session as `default`; its source message
+    // omitted the threadId, so an identity comparison on the raw field would
+    // mismatch and abandon the claim with its inline bytes.
+    const result = await service.continue({
+      userId: USER_ID,
+      agent: AGENT,
+      chatId: DEFAULT_CHAT_ID,
+      checkpointId: CHECKPOINT_ID,
+      version,
+    })
+
+    const call = await captured
+    const fixture = readVector('continue-response.claimed.json')
+    expect(result.status).toBe(fixture.httpStatus)
+    expect(result.body).toEqual({
+      taskId: call.taskId,
+      checkpointId: CHECKPOINT_ID,
+      status: 'claimed',
+      replayed: false,
+    })
+    expectKeysAsInVector(result.body, fixture.body, 'default-session claimed body')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    // The re-admitted message stays in the same default session.
+    expect(call.message.threadId).toBeUndefined()
+    expect(call.continuation.fence).toEqual({
+      checkpointId: CHECKPOINT_ID,
+      owner: HOST_INSTANCE_ID,
+      generation: 1,
+    })
+    // Live witness: the claim survives and its inline bytes are still readable.
+    expect(checkpointRow(handle, CHECKPOINT_ID)).toMatchObject({
+      status: 'claimed',
+      continuation_task_id: call.taskId,
+      claim_generation: 1,
+      version: version + 1,
+    })
+    const attachments = await checkpoints.loadAttachments(DEFAULT_SESSION_KEY, CHECKPOINT_ID)
+    expect(attachments).toHaveLength(1)
+    expect(attachments[0]).toMatchObject({
+      attachment_id: ATTACHMENT_ID,
+      digest_hex: ATTACHMENT_DIGEST,
+      size_bytes: ATTACHMENT_BYTES.byteLength,
+    })
+    expect(Buffer.from(attachments[0].bytes).toString('utf8')).toBe(ATTACHMENT_TEXT)
+  })
+})
+
 describe('ModelStepContinuationService — Host revalidation (#1043)', () => {
   it('blocks a claim whose principal is not the session owner, without enqueueing', async () => {
     const { handle, checkpoints, service, enqueue } = createHarness({
@@ -591,6 +701,51 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
     expect(enqueue).not.toHaveBeenCalled()
   })
 
+  it.each(['sender', 'threadId'] as const)(
+    'rejects a source message whose %s only coerces to the session key',
+    async field => {
+      const { handle, checkpoints, service, enqueue, captured } = createHarness({
+        verdict: { kind: 'started' },
+      })
+      // A one-element array serializes into the same session key as its plain
+      // string field, so the source validation must reject the array itself.
+      const { version } = await openResumable(checkpoints, {
+        sourceMessage: JSON.stringify({
+          ...sourceMessage(),
+          [field]: [field === 'sender' ? USER_ID : CHAT_ID],
+        }),
+      })
+
+      await expect(service.continue(continuationRequest(version))).rejects.toThrow(
+        'Model-step checkpoint source message does not match its session'
+      )
+      expect(checkpointRow(handle, CHECKPOINT_ID)).toMatchObject({
+        status: 'abandoned',
+        claim_generation: 1,
+      })
+      expect(enqueue).not.toHaveBeenCalled()
+
+      // Positive liveness witness: the identical message with the field as a
+      // plain string continues through the ordinary path.
+      const validCheckpointId = 'cp-sender-string-1043'
+      const { version: validVersion } = await openResumable(checkpoints, {
+        checkpointId: validCheckpointId,
+      })
+      const valid = await service.continue({
+        userId: USER_ID,
+        agent: AGENT,
+        chatId: CHAT_ID,
+        checkpointId: validCheckpointId,
+        version: validVersion,
+      })
+      const call = await captured
+      expect(valid.status).toBe(202)
+      expect(valid.body).toMatchObject({ taskId: call.taskId, status: 'claimed', replayed: false })
+      expect(enqueue).toHaveBeenCalledTimes(1)
+      expect(checkpointRow(handle, validCheckpointId)).toMatchObject({ status: 'claimed' })
+    }
+  )
+
   it('abandons the claim and rethrows when admission itself fails', async () => {
     const handle = makeSqliteStore()
     openHandles.push(handle)
@@ -655,6 +810,75 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
       checkpointId: CHECKPOINT_ID,
       owner: HOST_INSTANCE_ID,
       generation: 1,
+    })
+  })
+
+  it('logs a fixed code for a corrupt source message and still admits a fresh checkpoint', async () => {
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    const { handle, checkpoints, service, enqueue, captured } = createHarness({
+      verdict: { kind: 'started' },
+    })
+    // V8 quotes a fragment of the offending input in a SyntaxError message, so
+    // this marker would surface if the raw parse error were logged.
+    const userFragment = 'user-content-fragment-1043'
+    const corruptSource = `{"content":"${userFragment}"`
+    const { version } = await openResumable(checkpoints, { sourceMessage: corruptSource })
+
+    await expect(service.continue(continuationRequest(version))).rejects.toThrow(
+      'Model-step checkpoint source message is not valid JSON'
+    )
+    // The cleanup contract is unchanged: the claim is abandoned and nothing is
+    // admitted.
+    expect(checkpointRow(handle, CHECKPOINT_ID)).toMatchObject({
+      status: 'abandoned',
+      claim_generation: 1,
+      version: version + 2,
+    })
+    expect(enqueue).not.toHaveBeenCalled()
+    // Only the fixed classification is logged: no `err` field exists, so the
+    // SyntaxError message cannot travel through the log fields. The exact shape
+    // is the falsifier — the structured logger already strips an Error's
+    // message, so a spy on the raw fields is what proves the producer never
+    // passes it on.
+    expect(errorSpy.mock.calls.at(-1)).toEqual([
+      {
+        checkpointId: CHECKPOINT_ID,
+        taskId: expect.any(String),
+        code: 'source_message_invalid_json',
+        errorName: 'SourceMessageParseError',
+      },
+      'Model-step continuation admission failed',
+    ])
+    const loggedWithMessages = JSON.stringify(errorSpy.mock.calls, (_key, value) =>
+      value instanceof Error ? { message: value.message } : value
+    )
+    expect(loggedWithMessages).not.toContain(userFragment)
+
+    // Positive liveness witness: after the corrupt checkpoint was abandoned, the
+    // same store and service admit a valid one through the ordinary path.
+    const validCheckpointId = 'cp-valid-1043'
+    const { version: validVersion } = await openResumable(checkpoints, {
+      checkpointId: validCheckpointId,
+    })
+    const valid = await service.continue({
+      userId: USER_ID,
+      agent: AGENT,
+      chatId: CHAT_ID,
+      checkpointId: validCheckpointId,
+      version: validVersion,
+    })
+    const call = await captured
+    expect(valid.status).toBe(202)
+    expect(valid.body).toEqual({
+      taskId: call.taskId,
+      checkpointId: validCheckpointId,
+      status: 'claimed',
+      replayed: false,
+    })
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(checkpointRow(handle, validCheckpointId)).toMatchObject({
+      status: 'claimed',
+      claim_generation: 1,
     })
   })
 })

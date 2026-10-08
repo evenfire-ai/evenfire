@@ -122,6 +122,8 @@ import type {
   ModelStepCheckpointEntryRow,
   ModelStepCheckpointFence,
 } from '../db/worker/modelStepCheckpointOps'
+import type { ModelStepTurnFence } from '../db/worker/protocol'
+import { parseModelStepCheckpointLoopState } from '../db/worker/protocol'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { GfsProcessingLeaseProvider } from '../internalTools/gfsProcessingLease'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
@@ -160,7 +162,10 @@ import {
 import { hasLargeAvailableGfsReferences, prepareGfsFiles } from './gfsFilePreparation'
 import type { GfsSurfaceRuntimeCapability } from './gfsReferenceSurfaces'
 import { fileReferenceCheckError } from './incomingAdmission'
-import { inlineFileAttachmentBytes } from './modelStepCheckpointAttachments'
+import {
+  type RecordedCheckpointMessage,
+  restoreCheckpointMessages,
+} from './modelStepCheckpointAttachments'
 import {
   type ProviderWorkflowAccessDenialReason,
   isProviderWorkflowChannel,
@@ -372,6 +377,8 @@ export class TaskExecutor {
   private modelStepCheckpointId: string | undefined
   private continuationVerdictEmitted = false
   private continuationCompletionFence: ModelStepCheckpointFence | undefined
+  private continuationFenceLost = false
+  private continuationClaimReleased = false
   /**
    * P2 token budgets (§5.2) — snapshot of the conversation's lifetime token
    * counters captured at task start, used as the per-task brake baseline.
@@ -628,29 +635,42 @@ export class TaskExecutor {
 
       this.finishRun()
     } catch (error) {
-      const canEndTurn =
-        !this.task.modelStepContinuation || this.conversation?.activeTaskId === this.taskId
+      let canEndTurn =
+        !this.task.modelStepContinuation ||
+        (!this.continuationFenceLost && this.conversation?.activeTaskId === this.taskId)
       if (this.task.modelStepContinuation) {
         await this.abandonModelStepContinuation()
         this.emitContinuationVerdict({ kind: 'lost' })
+        canEndTurn = !this.continuationFenceLost && this.conversation?.activeTaskId === this.taskId
       }
       if (
         this.abortController.signal.aborted &&
         !(this.abortController.signal.reason instanceof TaskLimitError)
       ) {
-        if (this.conversation && canEndTurn)
+        if (this.conversation && canEndTurn) {
           await this.handleLoopResult({ type: 'cancelled', reason: 'signal_aborted' })
+        }
         return
       }
       if (this.abortController.signal.reason instanceof TaskLimitError)
         error = this.abortController.signal.reason
       if (error instanceof TaskLimitError && this.conversation && canEndTurn) {
         this.executionBudget.pause()
+        const fence = this.continuationTurnFence()
         try {
-          if (this.conversation.state === 'processing')
-            await this.deps.conversationManager.completeTurn(this.conversation, error.message)
-          else await this.deps.conversationManager.failTurn(this.conversation)
+          if (this.conversation.state === 'processing') {
+            await this.deps.conversationManager.completeTurn(
+              this.conversation,
+              error.message,
+              fence ? { modelStepTurnFence: fence } : undefined
+            )
+          } else if (this.task.modelStepContinuation) {
+            await this.failContinuationTurnIfFenced()
+          } else {
+            await this.deps.conversationManager.failTurn(this.conversation)
+          }
         } catch (persistError) {
+          if (this.isContinuationFenceMismatch(persistError)) this.continuationFenceLost = true
           // A failed durable write must not prevent lifecycle failure or completion release.
           logger.error(
             { taskId: this.taskId, err: persistError },
@@ -658,7 +678,7 @@ export class TaskExecutor {
           )
         }
       } else if (this.task.modelStepContinuation && this.conversation && canEndTurn) {
-        await this.deps.conversationManager.failTurn(this.conversation)
+        await this.failContinuationTurnIfFenced()
       }
       const taskError = this.toTaskError(error)
       logger.error(
@@ -742,11 +762,42 @@ export class TaskExecutor {
     const continuation = this.task.modelStepContinuation
     const support = this.deps.modelStepCheckpoints
     if (!continuation || !support) return
-    await support.store.transition(resolveTaskSessionKey(this.task), continuation.fence, {
-      from: ['claimed'],
-      to: 'abandoned',
-    })
+    if (this.continuationClaimReleased) return
+    const version = await support.store.transition(
+      resolveTaskSessionKey(this.task),
+      continuation.fence,
+      {
+        from: ['claimed'],
+        to: 'abandoned',
+      }
+    )
+    if (version === null) this.continuationFenceLost = true
     this.continuationCompletionFence = undefined
+  }
+
+  private continuationTurnFence(): ModelStepTurnFence | undefined {
+    const continuation = this.task.modelStepContinuation
+    if (!continuation || this.continuationFenceLost) return undefined
+    return {
+      fence: continuation.fence,
+      activeTaskId: this.taskId,
+      originTurnNumber: continuation.originTurnNumber,
+    }
+  }
+
+  private isContinuationFenceMismatch(err: unknown): boolean {
+    return err instanceof Error && err.message === 'model-step continuation fence mismatch'
+  }
+
+  private async failContinuationTurnIfFenced(): Promise<void> {
+    const fence = this.continuationTurnFence()
+    if (!fence || !this.conversation) return
+    try {
+      await this.deps.conversationManager.failTurn(this.conversation, fence)
+    } catch (err) {
+      if (!this.isContinuationFenceMismatch(err)) throw err
+      this.continuationFenceLost = true
+    }
   }
 
   private async runModelStepContinuation(): Promise<LoopResult | undefined> {
@@ -756,6 +807,7 @@ export class TaskExecutor {
     if (!support || !message) throw new Error('Model-step continuation execution is not wired')
     const sessionKey = resolveTaskSessionKey(this.task)
     if (!(await support.store.renewLease(sessionKey, continuation.fence, support.claimLeaseMs))) {
+      this.continuationFenceLost = true
       this.failContinuationPreparation({ kind: 'lost' })
       return undefined
     }
@@ -847,7 +899,7 @@ export class TaskExecutor {
     const entries = await support.store.loadEntries(sessionKey, continuation.checkpointId)
     const recordedMessages = entries
       .filter(entry => entry.kind === 'message')
-      .map(entry => JSON.parse(entry.payload) as ChatMessage)
+      .map(entry => JSON.parse(entry.payload) as RecordedCheckpointMessage)
     if (recordedMessages.length === 0) throw new Error('Model-step checkpoint has no messages')
     const { registry, discoverableNatives } = await withAbort(
       () => this.buildToolRegistry(),
@@ -865,7 +917,26 @@ export class TaskExecutor {
     this.executionBudget.assertTime()
     // Preparation can outlast a lease. Fence again before reopening the turn.
     if (!(await support.store.renewLease(sessionKey, continuation.fence, support.claimLeaseMs))) {
+      this.continuationFenceLost = true
       this.failContinuationPreparation({ kind: 'lost' })
+      return undefined
+    }
+    const live = await support.store.loadLive(sessionKey)
+    const liveHeader = live?.header
+    if (
+      !liveHeader ||
+      liveHeader.checkpoint_id !== continuation.checkpointId ||
+      liveHeader.status !== 'claimed' ||
+      liveHeader.claim_owner !== continuation.fence.owner ||
+      liveHeader.claim_generation !== continuation.fence.generation
+    ) {
+      this.continuationFenceLost = true
+      this.failContinuationPreparation({ kind: 'lost' })
+      return undefined
+    }
+    const restoredMessages = restoreCheckpointMessages(recordedMessages, attachments, Date.now())
+    if (!restoredMessages.ok) {
+      await this.blockModelStepContinuation('attachment_expired')
       return undefined
     }
     this.emitContinuationVerdict({ kind: 'started' })
@@ -873,7 +944,8 @@ export class TaskExecutor {
       this.conversation,
       this.taskId,
       continuation.originTurnNumber,
-      this.task.traceContext ?? null
+      this.task.traceContext ?? null,
+      this.conversation.state === 'processing' ? this.conversation.activeTaskId : undefined
     )
     this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
     this.captureTaskTokenBaseline()
@@ -886,13 +958,17 @@ export class TaskExecutor {
         .renewLease(sessionKey, continuation.fence, support.claimLeaseMs)
         .then(
           applied => {
-            if (!applied) this.abort()
+            if (!applied) {
+              this.continuationFenceLost = true
+              this.abort()
+            }
           },
           err => {
             logger.error(
               { taskId: this.taskId, checkpointId: continuation.checkpointId, err },
               'Model-step continuation lease renewal failed'
             )
+            this.continuationFenceLost = true
             this.abort()
           }
         )
@@ -920,8 +996,21 @@ export class TaskExecutor {
         })
         this.executionBudget.assertTime()
       }
-      const messages = this.rebuildCheckpointMessages(recordedMessages, entries)
-      this.replaceRecordedTurnContextBlock(messages)
+      const messages = this.rebuildCheckpointMessages(restoredMessages.messages, entries)
+      const originUserMessageIndex = parseModelStepCheckpointLoopState(
+        liveHeader.loop_state
+      ).originUserMessageIndex
+      if (originUserMessageIndex === undefined) {
+        throw new Error('Model-step continuation is missing its origin user message index')
+      }
+      const originMessage = restoredMessages.messages[originUserMessageIndex]
+      const originIndex = originMessage ? messages.indexOf(originMessage) : -1
+      if (!originMessage || originMessage.role !== 'user' || originIndex < 0) {
+        throw new Error(
+          'Model-step continuation origin user message index does not point at a user message'
+        )
+      }
+      this.replaceRecordedTurnContextBlock(messages, originIndex)
       validateToolLinkages(messages)
       const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
       const recorder = createModelStepCheckpointRecorder({
@@ -931,6 +1020,7 @@ export class TaskExecutor {
           kind: 'continuation',
           fence: continuation.fence,
           confirmedResults: continuation.confirmedResults,
+          loopState: liveHeader.loop_state,
         },
         redact: text =>
           this.responseSafety.sanitizeFreeformContent(text, {
@@ -942,10 +1032,14 @@ export class TaskExecutor {
             attachmentReadLedger: this.attachmentReadLedger.snapshot(),
           }),
         resumableTtlMs: support.resumableTtlMs,
-        inlineFileAttachments: () => inlineFileAttachmentBytes(message.attachments),
+        sourceAttachments: message.attachments,
+        restoredAttachments: attachments,
         attachmentTtlMs: support.attachmentTtlMs,
         now: () => Date.now(),
-        onFenceLost: () => this.abort(),
+        onFenceLost: () => {
+          this.continuationFenceLost = true
+          this.abort()
+        },
       })
       // Stop and join renewals before settle releases the claim; a late renewal
       // must not mistake our own resumable/abandoned transition for a lost fence.
@@ -956,7 +1050,18 @@ export class TaskExecutor {
       }
       loopConfig.modelStepCheckpointRecorder = recorder
       this.currentTurnToolNames.clear()
-      const result = await runToolUseLoop(loopConfig, messages)
+      let result: LoopResult
+      try {
+        result = await runToolUseLoop(loopConfig, messages)
+      } catch (err) {
+        // The loop settles before an exception leaves it. That settle already
+        // released this claim, so the outer catch must not abandon again.
+        this.continuationClaimReleased = true
+        throw err
+      }
+      // A clean response keeps the claim for the final turn boundary. Every
+      // other settled result has already left `claimed`.
+      this.continuationClaimReleased = result.type !== 'response' || recorder.poisoned
       this.continuationCompletionFence =
         result.type === 'response' && !recorder.poisoned ? continuation.fence : undefined
       return result
@@ -1015,10 +1120,6 @@ export class TaskExecutor {
     if (header.failed_at === null || header.expires_at === null) {
       throw new Error('Claimed model-step checkpoint has no failure or expiry time')
     }
-    const attachmentsExpireAt = attachments[0]?.expires_at
-    if (attachments.some(attachment => attachment.expires_at !== attachmentsExpireAt)) {
-      throw new Error('Model-step checkpoint attachments have inconsistent expiry times')
-    }
     const version = await support.store.transition(sessionKey, continuation.fence, {
       from: ['claimed'],
       to: 'resumable',
@@ -1029,9 +1130,9 @@ export class TaskExecutor {
             attachments: attachments.map(attachment => ({
               attachmentId: attachment.attachment_id,
               digestHex: attachment.digest_hex,
-              bytes: attachment.bytes,
+              bytes: Buffer.from(attachment.bytes),
+              expiresAt: attachment.expires_at,
             })),
-            attachmentsExpireAt,
           }
         : {}),
     })
@@ -1701,7 +1802,7 @@ export class TaskExecutor {
       }
       this.turnTiming.setInputCharsApprox(inputChars)
     }
-    const recorder = this.createOriginCheckpointRecorder()
+    const recorder = this.createOriginCheckpointRecorder(messages)
     if (recorder) loopConfig.modelStepCheckpointRecorder = recorder
     return runToolUseLoop(loopConfig, messages)
   }
@@ -1711,7 +1812,9 @@ export class TaskExecutor {
    * runs without one, and so does a turn without a sender: the continuation
    * route authorizes against the recorded principal.
    */
-  private createOriginCheckpointRecorder(): ModelStepCheckpointRecorder | undefined {
+  private createOriginCheckpointRecorder(
+    messages: ChatMessage[]
+  ): ModelStepCheckpointRecorder | undefined {
     if (this.task.modelStepContinuation) return undefined
     const support = this.deps.modelStepCheckpoints
     if (!support) return undefined
@@ -1742,6 +1845,7 @@ export class TaskExecutor {
           principal,
           sourceMessage: sourceMessage ? JSON.stringify(sourceMessage) : null,
         },
+        originUserMessageIndex: messages.length - 1,
       },
       redact: text =>
         this.responseSafety.sanitizeFreeformContent(text, {
@@ -1753,7 +1857,7 @@ export class TaskExecutor {
           attachmentReadLedger: this.attachmentReadLedger.snapshot(),
         }),
       resumableTtlMs: support.resumableTtlMs,
-      inlineFileAttachments: () => inlineFileAttachmentBytes(this.task.sourceMessage?.attachments),
+      sourceAttachments: this.task.sourceMessage?.attachments,
       attachmentTtlMs: support.attachmentTtlMs,
       now: () => Date.now(),
       onFenceLost: () => this.abort(),
@@ -1778,8 +1882,14 @@ export class TaskExecutor {
    * Replace it with one built from the continuation's own re-resolved
    * references and prepared files (mutates in place).
    */
-  private replaceRecordedTurnContextBlock(messages: ChatMessage[]): void {
-    for (let i = messages.length - 1; i >= 0; i--) {
+  private replaceRecordedTurnContextBlock(messages: ChatMessage[], originIndex: number): void {
+    const origin = messages[originIndex]
+    if (!origin || origin.role !== 'user') {
+      throw new Error(
+        'Model-step continuation origin user message index does not point at a user message'
+      )
+    }
+    for (let i = originIndex; i >= originIndex; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
       if (m.contentParts && m.contentParts.length > 0) {
@@ -1796,7 +1906,7 @@ export class TaskExecutor {
       }
       break
     }
-    if (this.needsTurnContextBlock()) this.prependTurnContextBlock(messages)
+    if (this.needsTurnContextBlock()) this.prependTurnContextBlock(messages, originIndex)
   }
 
   /**
@@ -1806,8 +1916,10 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[]): void {
-    for (let i = messages.length - 1; i >= 0; i--) {
+  private prependTurnContextBlock(messages: ChatMessage[], onlyIndex?: number): void {
+    const start = onlyIndex ?? messages.length - 1
+    const end = onlyIndex ?? 0
+    for (let i = start; i >= end; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
       const block = buildTurnContextBlock({
@@ -1897,16 +2009,30 @@ export class TaskExecutor {
         // turn that was not persisted.
         this.executionBudget.assertTime()
         this.executionBudget.pause()
+        if (this.task.modelStepContinuation && this.continuationFenceLost) {
+          throw new Error('Model-step continuation lost its checkpoint completion fence')
+        }
+        const continuationFence = this.continuationTurnFence()
         try {
           await this.deps.conversationManager.completeTurn(
             this.conversation!,
             content,
-            this.continuationCompletionFence
-              ? { completeModelStepCheckpoint: this.continuationCompletionFence }
+            continuationFence || this.continuationCompletionFence
+              ? {
+                  ...(this.continuationCompletionFence
+                    ? { completeModelStepCheckpoint: this.continuationCompletionFence }
+                    : {}),
+                  ...(continuationFence ? { modelStepTurnFence: continuationFence } : {}),
+                }
               : undefined
           )
         } catch (err) {
-          await this.deps.conversationManager.failTurn(this.conversation!)
+          if (this.isContinuationFenceMismatch(err)) {
+            this.continuationFenceLost = true
+            throw err
+          }
+          if (this.task.modelStepContinuation) await this.failContinuationTurnIfFenced()
+          else await this.deps.conversationManager.failTurn(this.conversation!)
           throw err
         }
         if (this.task.responseCallback) {
@@ -1977,7 +2103,18 @@ export class TaskExecutor {
         // LLM history so it does not leak into the next turn (BUG-9).
         // cancelTurn sets a synthetic assistant response on the current turn so that
         // buildMessageHistory emits a clean user↔assistant alternation.
-        this.deps.conversationManager.cancelTurn(this.conversation!)
+        if (this.task.modelStepContinuation) {
+          const fence = this.continuationTurnFence()
+          if (!fence) break
+          try {
+            await this.deps.conversationManager.cancelTurn(this.conversation!, fence)
+          } catch (err) {
+            if (!this.isContinuationFenceMismatch(err)) throw err
+            this.continuationFenceLost = true
+          }
+        } else {
+          this.deps.conversationManager.cancelTurn(this.conversation!)
+        }
         // NOTE: We do NOT write task.status or task.completedAt here — TaskLifecycle is the
         // single writer (Invariant I1). The cancel subscriber in AgentStateMachine already
         // transitioned the task to cancelled before the loop checkpoint fired executor.abort().
@@ -1992,7 +2129,8 @@ export class TaskExecutor {
 
       case 'error': {
         this.modelStepCheckpointId = result.checkpointId
-        await this.deps.conversationManager.failTurn(this.conversation!)
+        if (this.task.modelStepContinuation) await this.failContinuationTurnIfFenced()
+        else await this.deps.conversationManager.failTurn(this.conversation!)
         throw result.error
       }
 
@@ -2064,6 +2202,7 @@ export class TaskExecutor {
    */
   private wrapFailoverPort(primaryPort: LlmPortAdapter, conversation: Conversation): LlmPort {
     const support = this.deps.failover
+    if (this.task.modelStepContinuation) return primaryPort
     if (!support || support.policy.fallbacks.length === 0) return primaryPort
     const primaryProvider = this.deps.llmProvider.getProviderType()
     const primaryModel = this.deps.modelName

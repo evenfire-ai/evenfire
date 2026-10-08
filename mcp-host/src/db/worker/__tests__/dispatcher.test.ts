@@ -933,6 +933,84 @@ describe('dbWorker dispatcher', () => {
     expect(page.last_turn_number).toBeNull()
   })
 
+  it('keeps a live checkpoint turn unanswered while ordinary restarts get the marker', async () => {
+    const deps = createDispatcher(db)
+    const continuation = {
+      ...makeSession('conv-reap-live', 'u-live:rpc:agent:chat'),
+      state: 'processing',
+      active_task_id: 'task-live-continuation',
+    }
+    const ordinary = {
+      ...makeSession('conv-reap-ordinary', 'u-ordinary:rpc:agent:chat'),
+      state: 'processing',
+      active_task_id: 'task-ordinary',
+    }
+    for (const session of [continuation, ordinary]) {
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+      await dispatch(
+        {
+          kind: 'insert_message',
+          payload: {
+            session_id: session.id,
+            ordinal: 0,
+            role: 'user',
+            content: `request-${session.id}`,
+            content_parts: null,
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 10,
+            token_count: null,
+            finish_reason: null,
+            spillover_ref: null,
+            is_error: 0,
+            turn_number: 1,
+          },
+        },
+        deps
+      )
+    }
+    db.prepare(
+      `INSERT INTO model_step_checkpoints (
+         checkpoint_id, session_key, origin_turn_number, origin_task_id, continuation_task_id,
+         version, status, provider, model, host_id, principal, claim_owner, claim_generation,
+         created_at, updated_at
+       ) VALUES (?, ?, 1, 'task-live-origin', 'task-live-continuation',
+         3, 'claimed', 'openai', 'checkpoint-model', 'host-a', 'u-live',
+         'task-live-continuation', 1, 20, 20)`
+    ).run('checkpoint-reap-live', continuation.session_key)
+
+    await dispatch(
+      { kind: 'model_step_checkpoint_boot_reap', hostInstanceId: 'host-instance-new', now: 25 },
+      deps
+    )
+    await dispatch({ kind: 'reap_processing_sessions', nowEpoch: 30_000 }, deps)
+
+    const states = db
+      .prepare('SELECT id, state, active_task_id FROM sessions ORDER BY id')
+      .all() as Array<{ id: string; state: string; active_task_id: string | null }>
+    expect(states).toEqual([
+      { id: continuation.id, state: 'idle', active_task_id: null },
+      { id: ordinary.id, state: 'idle', active_task_id: null },
+    ])
+    const continuationMessages = db
+      .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+      .all(continuation.id) as Array<{ role: string; content: string }>
+    expect(continuationMessages).toEqual([{ role: 'user', content: 'request-conv-reap-live' }])
+    const ordinaryMessages = db
+      .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+      .all(ordinary.id) as Array<{ role: string; content: string }>
+    expect(ordinaryMessages).toEqual([
+      { role: 'user', content: 'request-conv-reap-ordinary' },
+      { role: 'assistant', content: '[Task interrupted by server restart]' },
+    ])
+    expect(
+      db
+        .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get('checkpoint-reap-live')
+    ).toEqual({ status: 'resumable' })
+  })
+
   it('R1-M1 — awaiting-approval reaper leaves no phantom turn 0 for untracked-turn sessions', async () => {
     const deps = createDispatcher(db)
     // Orphan awaiting_approval session (no live approval row) with only an
@@ -983,6 +1061,121 @@ describe('dbWorker dispatcher', () => {
     expect(page.total_turns).toBe(0)
     expect(page.first_turn_number).toBeNull()
     expect(page.last_turn_number).toBeNull()
+  })
+
+  it('rejects a stale continuation boundary and still accepts the owning fence', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-fence', 'u-fence:rpc:agent:chat'),
+      state: 'processing',
+      active_task_id: 'task-a',
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    await dispatch(
+      {
+        kind: 'insert_message',
+        payload: {
+          session_id: session.id,
+          ordinal: 0,
+          role: 'user',
+          content: 'origin request',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: 10,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: 1,
+        },
+      },
+      deps
+    )
+    db.prepare(
+      `INSERT INTO model_step_checkpoints (
+         checkpoint_id, session_key, origin_turn_number, origin_task_id, continuation_task_id,
+         version, status, provider, model, host_id, principal, claim_owner, claim_generation,
+         created_at, updated_at
+       ) VALUES (?, ?, 1, 'task-origin', 'task-a',
+         2, 'claimed', 'openai', 'checkpoint-model', 'host-a', 'u-fence',
+         'host-a', 2, 20, 20)`
+    ).run('cp-fence', session.session_key)
+    const boundary = {
+      session_id: session.id,
+      ordinal: 1,
+      role: 'assistant' as const,
+      content: 'stale answer',
+      content_parts: null,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: 11,
+      token_count: null,
+      finish_reason: 'stop' as const,
+      spillover_ref: null,
+      is_error: 0 as const,
+      turn_number: 1,
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
+    }
+    const owned = {
+      fence: { checkpointId: 'cp-fence', owner: 'host-a', generation: 2 },
+      activeTaskId: 'task-a',
+      originTurnNumber: 1,
+    }
+    await expect(
+      dispatch(
+        {
+          kind: 'persist_turn_boundary',
+          message: boundary,
+          sessionId: session.id,
+          state: 'idle',
+          activeTaskId: null,
+          activeTraceContext: null,
+          modelStepTurnFence: {
+            ...owned,
+            fence: { ...owned.fence, generation: 9 },
+          },
+        },
+        deps
+      )
+    ).rejects.toThrow('model-step continuation fence mismatch')
+    expect(
+      db
+        .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+        .all(session.id)
+    ).toEqual([{ role: 'user', content: 'origin request' }])
+    expect(
+      db.prepare('SELECT state, active_task_id FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ state: 'processing', active_task_id: 'task-a' })
+
+    await dispatch(
+      {
+        kind: 'persist_turn_boundary',
+        message: { ...boundary, content: 'owner answer' },
+        sessionId: session.id,
+        state: 'idle',
+        activeTaskId: null,
+        activeTraceContext: null,
+        modelStepTurnFence: owned,
+      },
+      deps
+    )
+    expect(
+      db
+        .prepare('SELECT role, content FROM messages WHERE session_id = ? ORDER BY ordinal')
+        .all(session.id)
+    ).toEqual([
+      { role: 'user', content: 'origin request' },
+      { role: 'assistant', content: 'owner answer' },
+    ])
+    expect(
+      db.prepare('SELECT state, active_task_id FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ state: 'idle', active_task_id: null })
   })
 
   it('integrity_check returns ok', async () => {

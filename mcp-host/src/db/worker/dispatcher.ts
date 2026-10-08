@@ -19,6 +19,7 @@ import {
 import type {
   LoadAllPendingApprovalsRow,
   ModelSelectionWriteOutcome,
+  ModelStepTurnFence,
   PendingApprovalRow,
   PersistedSession,
   PersistedSessionMessagePage,
@@ -56,6 +57,56 @@ function updateSessionSummaryAfterInsert(
         ? 1
         : 0,
   })
+}
+
+function hasRecoverableModelStepCheckpointForTurn(
+  db: Database,
+  sessionKey: string,
+  turnNumber: number | null
+): boolean {
+  if (turnNumber === null) return false
+  const row = db
+    .prepare(
+      `SELECT 1
+         FROM model_step_checkpoints
+        WHERE session_key = ?
+          AND origin_turn_number = ?
+          AND status IN ('resumable', 'claimed')
+        LIMIT 1`
+    )
+    .get(sessionKey, turnNumber)
+  return row !== undefined
+}
+
+function assertModelStepTurnFence(
+  db: Database,
+  sessionId: string,
+  fence: ModelStepTurnFence
+): void {
+  const row = db
+    .prepare(
+      `SELECT 1 AS ok
+         FROM model_step_checkpoints c
+         JOIN sessions s ON s.session_key = c.session_key
+        WHERE s.id = ?
+          AND s.active_task_id = ?
+          AND c.checkpoint_id = ?
+          AND c.claim_owner = ?
+          AND c.claim_generation = ?
+          AND c.origin_turn_number = ?
+          AND c.status IN ('claimed', 'resumable', 'abandoned')`
+    )
+    .get(
+      sessionId,
+      fence.activeTaskId,
+      fence.fence.checkpointId,
+      fence.fence.owner,
+      fence.fence.generation,
+      fence.originTurnNumber
+    )
+  if (row === undefined) {
+    throw new Error('model-step continuation fence mismatch')
+  }
 }
 
 /**
@@ -152,6 +203,9 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'update_session_state':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          if (op.modelStepTurnFence) {
+            assertModelStepTurnFence(db, op.sessionId, op.modelStepTurnFence)
+          }
           // active_task_id: a string sets it; null/undefined pass NULL to the
           // COALESCE (keeps current). The explicit clear below handles null.
           s.updateSessionState.run({
@@ -205,41 +259,48 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 max_ordinal: number
                 max_turn: number | null
               }
+              const preserveForContinuation = hasRecoverableModelStepCheckpointForTurn(
+                db,
+                sess.session_key,
+                agg.max_turn
+              )
               // Synthetic assistant message on the open turn. The marker lives
               // in content_parts JSON (machine-detectable) while finish_reason
               // stays a conventional 'error' (cross-ref D.2 P3 — no overload of
               // finish_reason, no non-existent error_code column).
-              s.insertMessage.run({
-                session_id: sess.id,
-                ordinal: agg.max_ordinal + 1,
-                role: 'assistant',
-                content: '[Task interrupted by server restart]',
-                content_parts: JSON.stringify({
-                  kind: 'system_error',
-                  error_code: 'POD_RESTART_DURING_EXECUTION',
-                  synthetic: true,
-                }),
-                tool_call_id: null,
-                tool_calls: null,
-                tool_name: null,
-                timestamp: nowMs / 1000,
-                token_count: null,
-                finish_reason: 'error',
-                spillover_ref: null,
-                is_error: 1,
-                turn_number: agg.max_turn,
-                input_tokens: null,
-                output_tokens: null,
-                cache_read_tokens: null,
-                cache_write_tokens: null,
-              })
-              updateSessionSummaryAfterInsert(s, {
-                session_id: sess.id,
-                role: 'assistant',
-                tool_calls: null,
-                timestamp: nowMs / 1000,
-                turn_number: agg.max_turn,
-              })
+              if (!preserveForContinuation) {
+                s.insertMessage.run({
+                  session_id: sess.id,
+                  ordinal: agg.max_ordinal + 1,
+                  role: 'assistant',
+                  content: '[Task interrupted by server restart]',
+                  content_parts: JSON.stringify({
+                    kind: 'system_error',
+                    error_code: 'POD_RESTART_DURING_EXECUTION',
+                    synthetic: true,
+                  }),
+                  tool_call_id: null,
+                  tool_calls: null,
+                  tool_name: null,
+                  timestamp: nowMs / 1000,
+                  token_count: null,
+                  finish_reason: 'error',
+                  spillover_ref: null,
+                  is_error: 1,
+                  turn_number: agg.max_turn,
+                  input_tokens: null,
+                  output_tokens: null,
+                  cache_read_tokens: null,
+                  cache_write_tokens: null,
+                })
+                updateSessionSummaryAfterInsert(s, {
+                  session_id: sess.id,
+                  role: 'assistant',
+                  tool_calls: null,
+                  timestamp: nowMs / 1000,
+                  turn_number: agg.max_turn,
+                })
+              }
               s.updateSessionState.run({
                 id: sess.id,
                 state: 'idle',
@@ -553,6 +614,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       // the two writes is impossible by construction.
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          if (op.modelStepTurnFence) {
+            if (op.message.turn_number !== op.modelStepTurnFence.originTurnNumber) {
+              throw new Error('model-step continuation fence mismatch')
+            }
+            assertModelStepTurnFence(db, op.sessionId, op.modelStepTurnFence)
+          }
           s.insertMessage.run({
             session_id: op.message.session_id,
             ordinal: op.message.ordinal,

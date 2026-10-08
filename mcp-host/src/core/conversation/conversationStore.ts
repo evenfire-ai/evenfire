@@ -1,5 +1,9 @@
 import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
-import type { ModelSelectionWriteOutcome, ReapedSession } from '../../db/worker/protocol'
+import type {
+  ModelSelectionWriteOutcome,
+  ModelStepTurnFence,
+  ReapedSession,
+} from '../../db/worker/protocol'
 import {
   type Conversation,
   ConversationState,
@@ -16,6 +20,11 @@ export interface PersistTurnCompleteOptions {
    * fence that no longer matches rolls the whole boundary back.
    */
   completeModelStepCheckpoint?: ModelStepCheckpointFence
+  /**
+   * #1043 — checked in the same transaction as this boundary. A mismatch
+   * rolls the write back. Absent on ordinary turns.
+   */
+  modelStepTurnFence?: ModelStepTurnFence
 }
 
 /**
@@ -324,9 +333,9 @@ export interface ConversationStore {
    */
   persistContinuationStart?(conv: Conversation, turnNumber: number): Promise<void>
   /** Called when a turn is cancelled (synthetic response injected). */
-  persistTurnCancel(conv: Conversation): Promise<void> | void
+  persistTurnCancel(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> | void
   /** Called when a turn fails (no response written). */
-  persistTurnFail(conv: Conversation): Promise<void> | void
+  persistTurnFail(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> | void
   /**
    * #1043 — durable `turn_number` of the turn in flight (the one
    * `persistTurnStart` wrote). Only durable stores answer; `undefined` when the
@@ -541,15 +550,23 @@ export class InMemoryConversationStore implements ConversationStore {
     opts?: PersistTurnCompleteOptions
   ): void {
     // #1043 — checkpoints exist only with the SQLite store; a fence here is a wiring error.
-    if (opts?.completeModelStepCheckpoint) {
+    if (opts?.completeModelStepCheckpoint || opts?.modelStepTurnFence) {
       throw new Error('The in-memory conversation store cannot complete a model-step checkpoint')
     }
   }
-  persistTurnCancel(_conv: Conversation): void {
-    /* no-op */
+  persistTurnCancel(_conv: Conversation, fence?: ModelStepTurnFence): void {
+    if (fence) {
+      throw new Error(
+        'The in-memory conversation store cannot fence a model-step continuation turn'
+      )
+    }
   }
-  persistTurnFail(_conv: Conversation): void {
-    /* no-op */
+  persistTurnFail(_conv: Conversation, fence?: ModelStepTurnFence): void {
+    if (fence) {
+      throw new Error(
+        'The in-memory conversation store cannot fence a model-step continuation turn'
+      )
+    }
   }
   persistToolCall(_conv: Conversation, _toolCall: TurnToolCall): void {
     /* no-op */

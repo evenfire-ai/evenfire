@@ -89,9 +89,16 @@ export class ModelStepCheckpointStore {
       failedAt?: number
       expiresAt?: number
       blockedReason?: string
-      /** Inline file bytes; only with `to: 'resumable'`. */
+      /**
+       * Serialized `TaskExecutionBudget` snapshot taken with this transition
+       * (C6): a failed call's iterations and active time stay spent.
+       */
+      taskBudget?: string
+      /**
+       * Inline bytes of files and transcript images; only with
+       * `to: 'resumable'`, each with its immutable first-capture deadline.
+       */
       attachments?: ModelStepCheckpointAttachmentInput[]
-      attachmentsExpireAt?: number
     }
   ): Promise<number | null> {
     const result = await this.queue.enqueueSync<{ applied: boolean; version?: number }>(

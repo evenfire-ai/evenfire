@@ -769,6 +769,13 @@ const hccAuthorityMaxStalenessMs = Math.min(
 // local fixture runs. Every cluster-mode process must satisfy it at startup.
 if (!devMode) validateHccAuthorityTiming(contextMapperPollInterval, hccAuthorityMaxStalenessMs)
 
+// A continuation refreshes its claim through `setInterval(..., claimLeaseMs / 3)`
+// (taskExecutor.ts), so the seconds knob must keep that interval at or below
+// Node's maximum timer delay (2_147_483_647 ms). A longer lease overflows the
+// timer and Node clamps it to a 1 ms retry loop. 6_442_450 s is the largest
+// whole second that still fits: 6_442_450 * 1000 / 3 = 2_147_483_333 ms.
+const MODEL_STEP_CLAIM_LEASE_MAX_SECONDS = 6_442_450
+
 export const config: Config = {
   devMode,
   devHostConfig: getDevHostConfig(),
@@ -873,12 +880,21 @@ export const config: Config = {
   agentApprovalTimeout: parseInt(getEnv('CLERUM_APPROVAL_TIMEOUT', '0')!, 10),
   pendingApprovalTtlMs:
     parseInt(getEnv('CLERUM_PENDING_APPROVAL_TTL_HOURS', '168')!, 10) * 3600 * 1000, // 7d default
+  // Continuation timing knobs share the bounded-integer contract of the
+  // execution limits: absence keeps the documented default, and a set value
+  // that is not a positive safe integer stops the Host at config load instead
+  // of silently shortening or extending a claim/retention window.
   modelStepCheckpointTtlMs:
-    parseInt(getEnv('CLERUM_MODEL_STEP_CHECKPOINT_TTL_HOURS', '168')!, 10) * 3600 * 1000, // 7d
+    getExecutionLimit('CLERUM_MODEL_STEP_CHECKPOINT_TTL_HOURS', 168) * 3600 * 1000, // 7d
   modelStepClaimLeaseMs:
-    parseInt(getEnv('CLERUM_MODEL_STEP_CLAIM_LEASE_SECONDS', '300')!, 10) * 1000, // 5 min
+    getExecutionLimit(
+      'CLERUM_MODEL_STEP_CLAIM_LEASE_SECONDS',
+      300,
+      false,
+      MODEL_STEP_CLAIM_LEASE_MAX_SECONDS
+    ) * 1000, // 5 min
   modelStepAttachmentTtlMs:
-    parseInt(getEnv('CLERUM_MODEL_STEP_ATTACHMENT_TTL_MINUTES', '60')!, 10) * 60 * 1000, // 1 h
+    getExecutionLimit('CLERUM_MODEL_STEP_ATTACHMENT_TTL_MINUTES', 60) * 60 * 1000, // 1 h
 
   // Workflow step iteration limit — max LLM↔tool rounds per step before forced wrap-up.
   // Override per step via CRD spec.steps[].maxIterations. Default 50.

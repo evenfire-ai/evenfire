@@ -1,4 +1,4 @@
-import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
+import type { ModelSelectionWriteOutcome, ModelStepTurnFence } from '../../db/worker/protocol'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
@@ -48,6 +48,21 @@ import { userIdFromRpcPrefix } from './sessionKeyParts'
  */
 export class ConversationManager {
   private store: ConversationStore
+  private readonly turnCompletionOwners = new WeakMap<Conversation, object>()
+  private readonly turnResponseOwners = new WeakMap<Turn, object>()
+
+  private restoreTurnResponse(
+    turn: Turn,
+    owner: object,
+    writtenResponse: string,
+    previousResponse: string | undefined,
+    previousOwner: object | undefined
+  ): void {
+    if (this.turnResponseOwners.get(turn) !== owner) return
+    if (turn.response === writtenResponse) turn.response = previousResponse
+    if (previousOwner === undefined) this.turnResponseOwners.delete(turn)
+    else this.turnResponseOwners.set(turn, previousOwner)
+  }
 
   constructor(store: ConversationStore = new InMemoryConversationStore()) {
     this.store = store
@@ -260,6 +275,9 @@ export class ConversationManager {
 
     const previousTraceContext = conversation.traceContext
     const previousTitle = conversation.title
+    const previousCompletionOwner = this.turnCompletionOwners.get(conversation)
+    const startOwner = {}
+    this.turnCompletionOwners.set(conversation, startOwner)
     conversation.state = ConversationState.Processing
     // D.1 — record the in-flight task so it can be exposed via /sessions and
     // mirrored to sessions.active_task_id by persistTurnStart.
@@ -286,6 +304,7 @@ export class ConversationManager {
     try {
       await Promise.resolve(this.store.persistTurnStart(conversation, userInput))
     } catch (err) {
+      if (this.turnCompletionOwners.get(conversation) !== startOwner) throw err
       // Roll back the in-RAM mutation so the cached conversation is not left
       // poisoned in Processing — the next startTurn would otherwise throw
       // InvalidTransition forever. The ordinal consumed by the failed write
@@ -298,7 +317,12 @@ export class ConversationManager {
       // title that SQLite never persisted (would break dual-store parity).
       conversation.title = previousTitle
       conversation.updated_at = new Date()
+      if (previousCompletionOwner === undefined) this.turnCompletionOwners.delete(conversation)
+      else this.turnCompletionOwners.set(conversation, previousCompletionOwner)
       throw err
+    }
+    if (this.turnCompletionOwners.get(conversation) === startOwner) {
+      this.turnCompletionOwners.delete(conversation)
     }
     return turn
   }
@@ -327,9 +351,20 @@ export class ConversationManager {
     }
 
     const currentTurn = conversation.turns[conversation.turns.length - 1]
+    const previousResponse = currentTurn?.response
+    const previousResponseOwner = currentTurn && this.turnResponseOwners.get(currentTurn)
+    const previousCompletedAt = currentTurn?.completed_at
+    const previousPendingApproval = conversation.pending_approval
+    const previousActiveTaskId = conversation.activeTaskId
+    const previousTraceContext = conversation.traceContext
+    const previousUpdatedAt = conversation.updated_at
+    const completionOwner = {}
+    this.turnCompletionOwners.set(conversation, completionOwner)
+    const writtenCompletedAt = new Date()
     if (currentTurn) {
+      this.turnResponseOwners.set(currentTurn, completionOwner)
       currentTurn.response = response
-      currentTurn.completed_at = new Date()
+      currentTurn.completed_at = writtenCompletedAt
     }
 
     conversation.state = ConversationState.Idle
@@ -337,7 +372,37 @@ export class ConversationManager {
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-    await Promise.resolve(this.store.persistTurnComplete(conversation, response, opts))
+    try {
+      await Promise.resolve(this.store.persistTurnComplete(conversation, response, opts))
+    } catch (err) {
+      if (currentTurn) {
+        this.restoreTurnResponse(
+          currentTurn,
+          completionOwner,
+          response,
+          previousResponse,
+          previousResponseOwner
+        )
+        if (currentTurn.completed_at === writtenCompletedAt) {
+          currentTurn.completed_at = previousCompletedAt
+        }
+      }
+      if (this.turnCompletionOwners.get(conversation) === completionOwner) {
+        conversation.state = ConversationState.Processing
+        conversation.pending_approval = previousPendingApproval
+        conversation.activeTaskId = previousActiveTaskId
+        conversation.traceContext = previousTraceContext
+        conversation.updated_at = previousUpdatedAt
+        this.turnCompletionOwners.delete(conversation)
+      }
+      throw err
+    }
+    if (this.turnCompletionOwners.get(conversation) === completionOwner) {
+      this.turnCompletionOwners.delete(conversation)
+    }
+    if (currentTurn && this.turnResponseOwners.get(currentTurn) === completionOwner) {
+      this.turnResponseOwners.delete(currentTurn)
+    }
   }
 
   /**
@@ -351,16 +416,25 @@ export class ConversationManager {
     conversation: Conversation,
     taskId: string,
     turnNumber: number,
-    traceContext: TraceContextV1 | null
+    traceContext: TraceContextV1 | null,
+    replaceActiveTaskId?: string
   ): Promise<void> {
-    if (conversation.state !== ConversationState.Idle) {
+    const replacingStaleTask =
+      conversation.state === ConversationState.Processing &&
+      replaceActiveTaskId !== undefined &&
+      conversation.activeTaskId === replaceActiveTaskId
+    if (conversation.state !== ConversationState.Idle && !replacingStaleTask) {
       throw new ConversationError(
         `Cannot reopen turn: conversation is ${conversation.state}`,
         ConversationErrorCode.InvalidTransition
       )
     }
     const currentTurn = conversation.turns[conversation.turns.length - 1]
-    if (!currentTurn || currentTurn.response !== undefined) {
+    if (
+      !currentTurn ||
+      currentTurn.response !== undefined ||
+      (replacingStaleTask && currentTurn.completed_at !== undefined)
+    ) {
       throw new ConversationError(
         'Cannot reopen turn: the last turn is missing or already answered',
         ConversationErrorCode.InvalidTransition
@@ -371,6 +445,11 @@ export class ConversationManager {
     }
     const previousTraceContext = conversation.traceContext
     const previousCompletedAt = currentTurn.completed_at
+    const previousState = conversation.state
+    const previousActiveTaskId = conversation.activeTaskId
+    const previousCompletionOwner = this.turnCompletionOwners.get(conversation)
+    const continuationOwner = {}
+    this.turnCompletionOwners.set(conversation, continuationOwner)
     conversation.state = ConversationState.Processing
     conversation.activeTaskId = taskId
     conversation.traceContext = traceContext
@@ -380,12 +459,22 @@ export class ConversationManager {
     try {
       await this.store.persistContinuationStart(conversation, turnNumber)
     } catch (err) {
-      conversation.state = ConversationState.Idle
-      conversation.activeTaskId = undefined
-      conversation.traceContext = previousTraceContext
-      currentTurn.completed_at = previousCompletedAt
-      conversation.updated_at = new Date()
+      if (this.turnCompletionOwners.get(conversation) === continuationOwner) {
+        conversation.state = previousState
+        conversation.activeTaskId = previousActiveTaskId
+        conversation.traceContext = previousTraceContext
+        currentTurn.completed_at = previousCompletedAt
+        conversation.updated_at = new Date()
+        if (previousCompletionOwner === undefined) {
+          this.turnCompletionOwners.delete(conversation)
+        } else {
+          this.turnCompletionOwners.set(conversation, previousCompletionOwner)
+        }
+      }
       throw err
+    }
+    if (this.turnCompletionOwners.get(conversation) === continuationOwner) {
+      this.turnCompletionOwners.delete(conversation)
     }
   }
 
@@ -496,18 +585,42 @@ export class ConversationManager {
    * under the SQLite store the state flip + `active_task_id` clear commit as
    * one awaited worker op. A rejected write propagates — never swallowed.
    */
-  async failTurn(conversation: Conversation): Promise<void> {
+  async failTurn(conversation: Conversation, fence?: ModelStepTurnFence): Promise<void> {
+    const previousState = conversation.state
+    const previousPendingApproval = conversation.pending_approval
+    const previousActiveTaskId = conversation.activeTaskId
+    const previousTraceContext = conversation.traceContext
+    const previousUpdatedAt = conversation.updated_at
+    const currentTurn = conversation.turns[conversation.turns.length - 1]
+    const previousCompletedAt = currentTurn?.completed_at
+    const failOwner = {}
+    this.turnCompletionOwners.set(conversation, failOwner)
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-
-    const currentTurn = conversation.turns[conversation.turns.length - 1]
-    if (currentTurn) {
-      currentTurn.completed_at = new Date()
+    const writtenCompletedAt = new Date()
+    if (currentTurn) currentTurn.completed_at = writtenCompletedAt
+    try {
+      await Promise.resolve(this.store.persistTurnFail(conversation, fence))
+    } catch (err) {
+      if (currentTurn?.completed_at === writtenCompletedAt) {
+        currentTurn.completed_at = previousCompletedAt
+      }
+      if (this.turnCompletionOwners.get(conversation) === failOwner) {
+        conversation.state = previousState
+        conversation.pending_approval = previousPendingApproval
+        conversation.activeTaskId = previousActiveTaskId
+        conversation.traceContext = previousTraceContext
+        conversation.updated_at = previousUpdatedAt
+        this.turnCompletionOwners.delete(conversation)
+      }
+      throw err
     }
-    await Promise.resolve(this.store.persistTurnFail(conversation))
+    if (this.turnCompletionOwners.get(conversation) === failOwner) {
+      this.turnCompletionOwners.delete(conversation)
+    }
   }
 
   /**
@@ -524,18 +637,68 @@ export class ConversationManager {
    *
    * Transitions: Processing | AwaitingApproval → Idle
    */
-  cancelTurn(conversation: Conversation): void {
+  cancelTurn(conversation: Conversation, fence?: ModelStepTurnFence): Promise<void> {
+    const previousState = conversation.state
+    const previousPendingApproval = conversation.pending_approval
+    const previousActiveTaskId = conversation.activeTaskId
+    const previousTraceContext = conversation.traceContext
+    const previousUpdatedAt = conversation.updated_at
+    const currentTurn = conversation.turns[conversation.turns.length - 1]
+    const previousResponse = currentTurn?.response
+    const previousResponseOwner = currentTurn && this.turnResponseOwners.get(currentTurn)
+    const previousCompletedAt = currentTurn?.completed_at
+    const cancelOwner = {}
+    this.turnCompletionOwners.set(conversation, cancelOwner)
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-    const currentTurn = conversation.turns[conversation.turns.length - 1]
+    const writtenResponse = '[Task cancelled by user before completion]'
+    const writtenCompletedAt = new Date()
     if (currentTurn) {
-      currentTurn.response = '[Task cancelled by user before completion]'
-      currentTurn.completed_at = new Date()
+      this.turnResponseOwners.set(currentTurn, cancelOwner)
+      currentTurn.response = writtenResponse
+      currentTurn.completed_at = writtenCompletedAt
     }
-    void this.store.persistTurnCancel(conversation)
+    const pending = Promise.resolve(this.store.persistTurnCancel(conversation, fence))
+    if (!fence) {
+      void pending
+      return Promise.resolve()
+    }
+    return pending.then(
+      () => {
+        if (this.turnCompletionOwners.get(conversation) === cancelOwner) {
+          this.turnCompletionOwners.delete(conversation)
+        }
+        if (currentTurn && this.turnResponseOwners.get(currentTurn) === cancelOwner) {
+          this.turnResponseOwners.delete(currentTurn)
+        }
+      },
+      err => {
+        if (currentTurn) {
+          this.restoreTurnResponse(
+            currentTurn,
+            cancelOwner,
+            writtenResponse,
+            previousResponse,
+            previousResponseOwner
+          )
+          if (currentTurn.completed_at === writtenCompletedAt) {
+            currentTurn.completed_at = previousCompletedAt
+          }
+        }
+        if (this.turnCompletionOwners.get(conversation) === cancelOwner) {
+          conversation.state = previousState
+          conversation.pending_approval = previousPendingApproval
+          conversation.activeTaskId = previousActiveTaskId
+          conversation.traceContext = previousTraceContext
+          conversation.updated_at = previousUpdatedAt
+          this.turnCompletionOwners.delete(conversation)
+        }
+        throw err
+      }
+    )
   }
 
   /**

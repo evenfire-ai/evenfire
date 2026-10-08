@@ -9,9 +9,28 @@ import { toModelStepCheckpointView } from '../core/conversation/modelStepCheckpo
 import { logger } from '../logger'
 import type { ModelStepContinuationRef, ModelStepContinuationVerdict } from '../queue/types'
 import type { IncomingMessage } from '../server/types'
+import { serializeSessionKey } from '../session/types.js'
 import type { ModelStepCheckpointSupport } from './types'
 
 export const MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = 10_000
+
+/** Fixed log code for every admission failure that is not a corrupt source message. */
+const ADMISSION_FAILED_CODE = 'model_step_continuation_admission_failed'
+
+/**
+ * A stored `source_message` that is not valid JSON. V8 embeds a fragment of the
+ * offending input in a SyntaxError message, so the raw parse error is replaced
+ * by this fixed, content-free one before it can reach a log or the continuation
+ * route's 500 handler.
+ */
+class SourceMessageParseError extends Error {
+  readonly code = 'source_message_invalid_json'
+
+  constructor() {
+    super('Model-step checkpoint source message is not valid JSON')
+    this.name = 'SourceMessageParseError'
+  }
+}
 
 export interface ModelStepContinuationRequest {
   userId: string
@@ -57,7 +76,16 @@ export class ModelStepContinuationService {
 
   async continue(request: ModelStepContinuationRequest): Promise<ModelStepContinuationResult> {
     const { checkpoints } = this.deps
-    const sessionKey = `${request.userId}:rpc:${request.agent}:${request.chatId}`
+    // The same normalisation the session store uses: a blank/omitted chat id
+    // (the blank rpc threadId) and its literal `default` spelling are one
+    // session, so a continuation addressed as `default` reaches the checkpoint
+    // whose source message omitted its threadId.
+    const sessionKey = serializeSessionKey({
+      userId: request.userId,
+      channelType: 'rpc',
+      channelId: request.agent,
+      threadId: request.chatId,
+    })
     const claim = await checkpoints.store.claim({
       sessionKey,
       checkpointId: request.checkpointId,
@@ -137,16 +165,33 @@ export class ModelStepContinuationService {
     })
     try {
       if (!header.source_message) throw new Error('Model-step checkpoint has no source message')
-      const source = JSON.parse(header.source_message) as IncomingMessage
+      let source: IncomingMessage
+      try {
+        source = JSON.parse(header.source_message) as IncomingMessage
+      } catch {
+        // A SyntaxError message can quote the persisted user content, so the
+        // failure is re-thrown as a fixed error instead of the parse error.
+        throw new SourceMessageParseError()
+      }
+      // The raw field guards stay strict: a serializer call would coerce a
+      // number or array into a matching string. Only the session identity is
+      // normalised exactly as the stored session key is, so a blank/omitted
+      // threadId and its literal `default` spelling are one session.
       if (
         !source ||
         typeof source.content !== 'string' ||
         source.channelType !== 'rpc' ||
         source.sender !== request.userId ||
         source.channelId !== request.agent ||
-        source.threadId !== request.chatId ||
+        (source.threadId !== undefined && typeof source.threadId !== 'string') ||
         typeof source.timestamp !== 'string' ||
-        typeof source.hostRef !== 'string'
+        typeof source.hostRef !== 'string' ||
+        serializeSessionKey({
+          userId: source.sender,
+          channelType: source.channelType,
+          channelId: source.channelId,
+          threadId: source.threadId,
+        }) !== sessionKey
       ) {
         throw new Error('Model-step checkpoint source message does not match its session')
       }
@@ -173,7 +218,12 @@ export class ModelStepContinuationService {
         to: 'abandoned',
       })
       logger.error(
-        { checkpointId: request.checkpointId, taskId: claim.taskId, err },
+        {
+          checkpointId: request.checkpointId,
+          taskId: claim.taskId,
+          code: err instanceof SourceMessageParseError ? err.code : ADMISSION_FAILED_CODE,
+          errorName: err instanceof Error ? err.name : typeof err,
+        },
         'Model-step continuation admission failed'
       )
       throw err

@@ -75,6 +75,8 @@ export interface ModelStepCheckpointAttachmentInput {
   /** sha256 of `bytes`, lowercase hex; re-verified when loaded. */
   digestHex: string
   bytes: Uint8Array
+  /** Absolute first-capture expiry; a duplicate write cannot change it. */
+  expiresAt: number
 }
 
 export interface ModelStepCheckpointAttachmentRow {
@@ -166,11 +168,12 @@ export type ModelStepCheckpointOp =
       expiresAt?: number
       blockedReason?: string
       /**
-       * Bytes of inline uploaded files, written in the same transaction and
-       * only with `to: 'resumable'`; they expire at `attachmentsExpireAt`.
+       * Bytes of inline uploaded files and transcript images, written in the
+       * same transaction and only with `to: 'resumable'`. Each byte carries
+       * its immutable first-capture expiry.
        */
       attachments?: ModelStepCheckpointAttachmentInput[]
-      attachmentsExpireAt?: number
+      taskBudget?: string
     }
   | {
       kind: 'model_step_checkpoint_renew_lease'
@@ -260,6 +263,7 @@ interface Statements {
   deleteTerminalHeaders: Statement
   ledgerKinds: Statement
   insertAttachment: Statement
+  selectAttachmentById: Statement
   selectAttachments: Statement
   deleteAttachmentsOf: Statement
   deleteDeadAttachments: Statement
@@ -319,6 +323,7 @@ function statements(db: Database): Statements {
           failed_at = COALESCE(@failed_at, failed_at),
           expires_at = COALESCE(@expires_at, expires_at),
           blocked_reason = CASE WHEN @to = 'blocked' THEN @blocked_reason ELSE NULL END,
+          task_budget = COALESCE(@task_budget, task_budget),
           claim_expires_at = CASE WHEN @to = 'claimed' THEN claim_expires_at ELSE NULL END
       WHERE checkpoint_id = @checkpoint_id AND claim_owner = @owner AND claim_generation = @generation
         AND status = @from
@@ -377,9 +382,15 @@ function statements(db: Database): Statements {
       WHERE checkpoint_id = ? AND kind IN ('tool_dispatch','tool_result')
     `),
     insertAttachment: db.prepare(`
-      INSERT OR REPLACE INTO model_step_checkpoint_attachments
+      INSERT INTO model_step_checkpoint_attachments
         (checkpoint_id, attachment_id, digest_hex, size_bytes, bytes, expires_at, created_at)
       VALUES (@checkpoint_id, @attachment_id, @digest_hex, @size_bytes, @bytes, @expires_at, @now)
+      ON CONFLICT(checkpoint_id, attachment_id) DO NOTHING
+    `),
+    selectAttachmentById: db.prepare(`
+      SELECT attachment_id, digest_hex, size_bytes, bytes, expires_at
+      FROM model_step_checkpoint_attachments
+      WHERE checkpoint_id = @checkpoint_id AND attachment_id = @attachment_id
     `),
     selectAttachments: db.prepare(`
       SELECT a.attachment_id, a.digest_hex, a.size_bytes, a.bytes, a.expires_at
@@ -522,6 +533,8 @@ export function completeModelStepCheckpointWithMessage(
     failed_at: null,
     expires_at: null,
     blocked_reason: null,
+    // Completion keeps the budget the checkpoint already holds.
+    task_budget: null,
   })
   if (result.changes !== 1) {
     throw new Error('model-step checkpoint fence mismatch on completion')
@@ -586,9 +599,6 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
       if (op.attachments !== undefined && op.to !== 'resumable') {
         throw new Error('model-step checkpoint attachments are written only with resumable')
       }
-      if (op.attachments !== undefined && op.attachmentsExpireAt === undefined) {
-        throw new Error('model-step checkpoint attachments need an expiry')
-      }
       const tx = db.transaction((): { applied: boolean; version?: number } => {
         for (const from of op.from) {
           const changed = s.transition.run({
@@ -599,10 +609,33 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
             failed_at: op.failedAt ?? null,
             expires_at: op.expiresAt ?? null,
             blocked_reason: op.blockedReason ?? null,
+            task_budget: op.taskBudget ?? null,
           }).changes
           if (changed === 1) {
             if (op.to === 'resumable') {
               for (const attachment of op.attachments ?? []) {
+                if (!Number.isSafeInteger(attachment.expiresAt) || attachment.expiresAt <= op.now) {
+                  throw new Error(
+                    `model-step checkpoint attachment ${attachment.attachmentId} has an invalid or expired deadline`
+                  )
+                }
+                const existing = s.selectAttachmentById.get({
+                  checkpoint_id: op.fence.checkpointId,
+                  attachment_id: attachment.attachmentId,
+                }) as ModelStepCheckpointAttachmentRow | undefined
+                if (existing) {
+                  if (
+                    existing.digest_hex !== attachment.digestHex ||
+                    existing.size_bytes !== attachment.bytes.byteLength ||
+                    existing.expires_at !== attachment.expiresAt ||
+                    Buffer.compare(Buffer.from(existing.bytes), Buffer.from(attachment.bytes)) !== 0
+                  ) {
+                    throw new Error(
+                      `model-step checkpoint attachment ${attachment.attachmentId} conflicts with its first capture`
+                    )
+                  }
+                  continue
+                }
                 s.insertAttachment.run({
                   checkpoint_id: op.fence.checkpointId,
                   attachment_id: attachment.attachmentId,
@@ -613,7 +646,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
                     attachment.bytes.byteOffset,
                     attachment.bytes.byteLength
                   ),
-                  expires_at: op.attachmentsExpireAt,
+                  expires_at: attachment.expiresAt,
                   now: op.now,
                 })
               }
@@ -650,6 +683,27 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
           header.session_key !== op.sessionKey ||
           header.status === 'abandoned' ||
           header.status === 'open'
+        ) {
+          return { outcome: 'not_found' }
+        }
+        // C9 — the periodic sweep abandons an expired non-terminal row; a claim
+        // that arrives before the sweep must answer exactly the same way
+        // instead of resurrecting it. A claimed row whose lease is still alive
+        // keeps replaying: the in-flight continuation owns it, header expiry or
+        // not.
+        const nonTerminal =
+          header.status === 'resumable' ||
+          header.status === 'claimed' ||
+          header.status === 'blocked'
+        const leaseAlive =
+          header.status === 'claimed' &&
+          header.claim_expires_at !== null &&
+          header.claim_expires_at > op.now
+        if (
+          nonTerminal &&
+          header.expires_at !== null &&
+          header.expires_at <= op.now &&
+          !leaseAlive
         ) {
           return { outcome: 'not_found' }
         }

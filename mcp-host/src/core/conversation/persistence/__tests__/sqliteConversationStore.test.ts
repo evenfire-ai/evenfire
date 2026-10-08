@@ -995,6 +995,12 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
       expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(2)
 
       enqueueSpy.mockRestore()
+      // A rejected boundary rolls RAM back to the unfinished turn. Complete
+      // its durable failure cleanup before admitting another user turn.
+      await expect(
+        manager.startTurn(conv, 'premature next turn', 'task-premature')
+      ).rejects.toThrow(/conversation is processing/)
+      await manager.failTurn(conv)
       await manager.startTurn(conv, 'second', 'task-next')
       await manager.completeTurn(conv, 'durable response')
       expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(3)

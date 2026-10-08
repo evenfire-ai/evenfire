@@ -10,7 +10,11 @@
  * flip the canary to `sqlite`.
  */
 import { Counter } from 'prom-client'
-import type { ModelSelectionWriteOutcome, ReapedSession } from '../../../db/worker/protocol'
+import type {
+  ModelSelectionWriteOutcome,
+  ModelStepTurnFence,
+  ReapedSession,
+} from '../../../db/worker/protocol'
 import type { Conversation, PendingApproval, TurnToolCall } from '../../types'
 import type {
   ConversationSessionMessages,
@@ -304,17 +308,19 @@ export class DualConversationStore implements ConversationStore {
     await this.sqlite.persistContinuationStart(conv, turnNumber)
   }
 
-  async persistTurnCancel(conv: Conversation): Promise<void> {
+  async persistTurnCancel(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {
     await Promise.all([
+      // The fence is a SQLite checkpoint guard. The memory mirror stays a no-op
+      // so a dual write cannot reject after the durable boundary commits.
       Promise.resolve(this.memory.persistTurnCancel(conv)),
-      Promise.resolve(this.sqlite.persistTurnCancel(conv)),
+      Promise.resolve(this.sqlite.persistTurnCancel(conv, fence)),
     ])
   }
 
-  async persistTurnFail(conv: Conversation): Promise<void> {
+  async persistTurnFail(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {
     await Promise.all([
       Promise.resolve(this.memory.persistTurnFail(conv)),
-      Promise.resolve(this.sqlite.persistTurnFail(conv)),
+      Promise.resolve(this.sqlite.persistTurnFail(conv, fence)),
     ])
   }
 

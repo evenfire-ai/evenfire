@@ -130,7 +130,7 @@ async function claimedCheckpoint(handle: StoreHandle, manager?: ConversationMana
       model: PIN.model,
       hostId: 'host-a',
       principal: USER,
-      loopState: JSON.stringify({ nextIteration: 0 }),
+      loopState: JSON.stringify({ nextIteration: 0, originUserMessageIndex: 0 }),
       taskBudget: JSON.stringify({
         elapsedActiveMs: 0,
         iterationsUsed: 0,
