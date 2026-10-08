@@ -16,6 +16,15 @@ const LIMIT_PROBE_CALLS = 257
 // the continuation must carry every result back before the final answer.
 const LIMIT_BOUNDARY = 'tool call limit boundary'
 const LIMIT_BOUNDARY_CALLS = 256
+// #1044 model-step retry. A user turn containing `model step retry probe <marker>` gets
+// one read-only search carrying the marker, then a 503 for the model step that
+// follows its result, then (only after Retry model step) the final answer.
+// A turn containing `model step retry followup <marker>` is a new message sent instead of
+// the retry; it gets a plain answer.
+const MODEL_STEP_PROBE = /\bmodel step retry probe ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
+const MODEL_STEP_FOLLOWUP = /\bmodel step retry followup ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
+const MODEL_STEP_PREFIX = 'model step retry '
+const MODEL_STEP_MAX_TURNS = 64
 
 function record(value: unknown): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -105,6 +114,28 @@ function boundaryResults(rows: Row[], sent: Set<string>): number {
     if (failed(result) || !Array.isArray(result.results)) throw new Error('boundary_search_failed')
   }
   return calls.length
+}
+
+// The continuation of a model-step probe turn must carry the one search call
+// the first completion emitted, once, plus its results. Returns how many
+// results for that call it carried; any other row shape is a protocol error.
+function modelStepToolResults(rows: Row[], callId: string, marker: string): number {
+  const calls = rows.filter(row => row.type === 'function_call')
+  if (calls.length !== 1 || calls[0]!.call_id !== callId || calls[0]!.name !== BRIDGES[0])
+    throw new Error('model_step_call_not_replayed')
+  if (!isDeepStrictEqual(parse(calls[0]!.arguments), { query: marker, limit: 1 }))
+    throw new Error('model_step_call_arguments_changed')
+  const outputs = rows.filter(row => row.type === 'function_call_output')
+  if (outputs.some(output => output.call_id !== callId))
+    throw new Error('uncorrelated_result')
+  if (rows.some(row => row.type !== 'function_call' && row.type !== 'function_call_output'))
+    throw new Error('unexpected_continuation_row')
+  for (const output of outputs) {
+    if (rows.indexOf(output) < rows.indexOf(calls[0]!)) throw new Error('uncorrelated_result')
+    const result = textResult(output.output, BRIDGES[0])
+    if (failed(result) || !Array.isArray(result.results)) throw new Error('model_step_search_failed')
+  }
+  return outputs.length
 }
 
 function described(exchange: Exchange): string {
@@ -327,6 +358,20 @@ export function createApprovedToolsUpstream() {
       finalResponses: 0,
       unexpectedRetries: 0,
     },
+    // #1044 model-step retry turns: probe turns started, searches emitted with
+    // a probe marker (the only tool the turn runs), 503 answers, continuations
+    // answered, results of the original search those continuations carried,
+    // follow-up messages answered, and completions served for a stage that was
+    // already served (a retry the Host must never make).
+    modelStepRetry: {
+      turns: 0,
+      markerSearches: 0,
+      unavailableResponses: 0,
+      continuations: 0,
+      toolResults: 0,
+      followUps: 0,
+      unexpectedRetries: 0,
+    },
     // Only bounded measurements, never request or result contents.
     requests: [] as Array<{
       definitionCount: number
@@ -343,6 +388,12 @@ export function createApprovedToolsUpstream() {
   const answeredProbeTurns = new Set<string>()
   // Call IDs sent for each boundary turn, and whether its final answer was sent.
   const boundaryTurns = new Map<string, { sent: Set<string>; finalized: boolean }>()
+  // Model-step probe turns by marker: the search call ID emitted for the turn
+  // and the last stage served for it.
+  const modelStepTurns = new Map<
+    string,
+    { callId: string; stage: 'searched' | 'unavailable' | 'continued' | 'followed_up' }
+  >()
 
   const fetchFn: typeof fetch = async (input, init) => {
     try {
@@ -464,6 +515,91 @@ export function createApprovedToolsUpstream() {
             },
           }))
         )
+      }
+      if (user.content.includes(MODEL_STEP_PREFIX)) {
+        if (evidence.requests.length >= 512) throw new Error('evidence_capacity_exceeded')
+        const text = user.content
+        const rows = history.slice(lastUser + 1)
+        const measured = (stage: string) => ({
+          definitionCount: tools.length,
+          explicitNonStrictCount: tools.filter(tool => tool.strict === false).length,
+          definitionBytes: Buffer.byteLength(JSON.stringify(tools)),
+          inputBytes: Buffer.byteLength(JSON.stringify(payload.input)),
+          connectorDefinitionCount: 0,
+          leakedSchema: false,
+          stage,
+        })
+        const followUp = MODEL_STEP_FOLLOWUP.exec(text)
+        if (followUp) {
+          const turn = modelStepTurns.get(followUp[1]!)
+          // A follow-up answers a probe turn that was left on its 503.
+          if (!turn || rows.length) throw new Error('unknown_model_step_turn')
+          if (turn.stage !== 'unavailable') {
+            evidence.modelStepRetry.unexpectedRetries++
+            throw new Error('unexpected_retry')
+          }
+          turn.stage = 'followed_up'
+          evidence.modelStepRetry.followUps++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_followup'))
+          return stream({
+            type: 'response.output_text.delta',
+            delta: `followup ${followUp[1]} answered`,
+          })
+        }
+        const probe = MODEL_STEP_PROBE.exec(text)
+        if (!probe) throw new Error('invalid_model_step_marker')
+        const marker = probe[1]!
+        const turn = modelStepTurns.get(marker)
+        if (!turn) {
+          if (rows.length) throw new Error('unknown_model_step_turn')
+          if (modelStepTurns.size >= MODEL_STEP_MAX_TURNS)
+            throw new Error('evidence_capacity_exceeded')
+          if (!names.has(BRIDGES[0]!)) throw new Error('unadvertised_function')
+          const item = {
+            type: 'function_call',
+            id: randomUUID(),
+            call_id: randomUUID(),
+            name: BRIDGES[0],
+            arguments: JSON.stringify({ query: marker, limit: 1 }),
+          }
+          modelStepTurns.set(marker, { callId: item.call_id, stage: 'searched' })
+          evidence.modelStepRetry.turns++
+          evidence.modelStepRetry.markerSearches++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_search'))
+          return stream({ type: 'response.output_item.done', item })
+        }
+        if (!rows.length || (turn.stage !== 'searched' && turn.stage !== 'unavailable')) {
+          evidence.modelStepRetry.unexpectedRetries++
+          throw new Error('unexpected_retry')
+        }
+        const received = modelStepToolResults(rows, turn.callId, marker)
+        if (turn.stage === 'searched') {
+          // The model step after the confirmed search result: the provider is
+          // unavailable, so the Host keeps the turn as a resumable checkpoint.
+          if (received !== 1) throw new Error('incomplete_model_step_batch')
+          turn.stage = 'unavailable'
+          evidence.modelStepRetry.unavailableResponses++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_unavailable'))
+          return Response.json(
+            { error: { code: 'server_is_overloaded', message: 'fixture provider unavailable' } },
+            { status: 503 }
+          )
+        }
+        // The continuation after Retry model step. The answer reports how many
+        // results of the original search it carried, so a duplicated or lost
+        // result is visible in the chat as well as in this evidence.
+        turn.stage = 'continued'
+        evidence.modelStepRetry.continuations++
+        evidence.modelStepRetry.toolResults += received
+        evidence.completions++
+        evidence.requests.push(measured('model_step_continued'))
+        return stream({
+          type: 'response.output_text.delta',
+          delta: `continued ${marker} toolResults=${received}`,
+        })
       }
       const isWorkflow = /\bworkflow\b/i.test(user.content)
       if (!isWorkflow && !user.content.toLowerCase().includes(FIXTURE_QUERY))
