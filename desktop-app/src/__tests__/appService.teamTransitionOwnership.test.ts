@@ -33,7 +33,7 @@ describe('AppService deliberate team transition ownership', () => {
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({ token: 'session-a', me }),
+      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me }),
       decideWorkflowApproval: vi.fn(() => {
         decisionStarted.resolve()
         return decisionResponse.promise
@@ -196,7 +196,7 @@ describe('AppService deliberate team transition ownership', () => {
     })
     await healthRequest
     await loginStarted.promise
-    loginResponse.resolve({ token: 'session-a', me })
+    loginResponse.resolve({ token: 'synthetic-session-a', me })
 
     await expect(login).resolves.toEqual({ authenticated: true, me })
   })
@@ -286,7 +286,7 @@ describe('AppService deliberate team transition ownership', () => {
     }
     let currentTeamId = 'team-a'
     app.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({ token: 'session-a', me: meA }),
+      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me: meA }),
       switchTeam: vi.fn(async (_token: string, teamId: string) => {
         currentTeamId = teamId
         return { token: `session-${teamId}`, team: { id: teamId, name: teamId, role: 'member' } }
@@ -354,7 +354,7 @@ describe('AppService deliberate team transition ownership', () => {
     }
     app.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
-        token: 'session-a',
+        token: 'synthetic-session-a',
         me: {
           id: 'user-a',
           email: 'user-a@example.test',
@@ -413,7 +413,7 @@ describe('AppService deliberate team transition ownership', () => {
     }
     app.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
-        token: 'session-a',
+        token: 'synthetic-session-a',
         me: {
           id: 'user-a',
           email: 'user-a@example.test',
@@ -470,7 +470,7 @@ describe('AppService deliberate team transition ownership', () => {
     }
     app.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
-        token: 'session-a',
+        token: 'synthetic-session-a',
         me: {
           id: 'user-a',
           email: 'user-a@example.test',

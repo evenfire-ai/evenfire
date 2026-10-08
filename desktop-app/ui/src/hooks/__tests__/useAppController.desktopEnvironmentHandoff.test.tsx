@@ -34,7 +34,7 @@ describe('useAppController desktop environment handoff', () => {
     }
     producer.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
-        token: 'session-a',
+        token: 'synthetic-session-a',
         me: {
           id: 'user-1',
           email: 'test@clerum.io',
