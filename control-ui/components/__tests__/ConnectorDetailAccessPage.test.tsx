@@ -158,7 +158,12 @@ describe('connector detail access tabs', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add agent' }))
 
     const dialog = screen.getByRole('dialog', { name: 'Give agents access to this connector' })
-    expect(within(dialog).getByRole('checkbox', { name: /Beta Agent/ })).toBeInTheDocument()
+    const betaAgentOption = within(dialog).getByRole('checkbox', {
+      name: /Beta Agent.*agent-beta/,
+    })
+    expect(betaAgentOption).toBeInTheDocument()
+    expect(betaAgentOption.closest('label')).toHaveClass('eft-multi-select__option--inline')
+    expect(betaAgentOption.closest('label')).toHaveAttribute('title', 'Beta Agent (agent-beta)')
     fireEvent.click(within(dialog).getByRole('checkbox', { name: /Beta Agent/ }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Add to agent' }))
 

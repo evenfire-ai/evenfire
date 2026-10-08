@@ -29,6 +29,7 @@ export function ConnectorAgentAccessDialog({
           id: target.name,
           label: target.label,
           description: target.name,
+          title: `${target.label} (${target.name})`,
           searchText: `${target.label} ${target.name}`,
         })),
     [agentTargets, boundAgentNamesSet, connectorSpec]
@@ -41,6 +42,7 @@ export function ConnectorAgentAccessDialog({
       error={error || undefined}
       items={items}
       noMatchesMessage="No matching agents."
+      optionLayout="inline"
       onAction={async selectedIds => {
         const selected = agentTargets.filter(target => selectedIds.includes(target.name))
         const added = await onAdd(
