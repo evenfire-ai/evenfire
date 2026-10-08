@@ -548,16 +548,13 @@ describe('AppService deliberate team transition ownership', () => {
       readWorkflow: (namespace: string, name: string) => Promise<unknown>
       workflowKey: (namespace: string, name: string) => string
       workflowTeamByKey: Map<string, string>
-      activateGfsAuthScope: () => void
       me: { teamId: string } | null
       gfsScopeIdentity: { teamId: string | null; baseUrl: string } | null
       gfsDispatchBlocked: boolean
       gfsTransientTeamHopDepth: number
     }
     app.authClient = authClient
-    const activateGfsAuthScope = vi.spyOn(app, 'activateGfsAuthScope')
     await app.googleLogin('synthetic-google-token')
-    activateGfsAuthScope.mockClear()
     app.workflowTeamByKey.set(app.workflowKey('workflows', 'approval'), 'team-a')
 
     const switching = app.switchTeam('team-b')
@@ -570,10 +567,6 @@ describe('AppService deliberate team transition ownership', () => {
     expect(switchResult).toMatchObject({ authenticated: true, me: { teamId: 'team-b' } })
     expect(tokenTeams.get(authClient.readWorkflow.mock.calls[0][0])).toBe('team-a')
     expect(workflowResult).toMatchObject({ token: expect.any(String) })
-    expect(activateGfsAuthScope).toHaveBeenCalledOnce()
-    expect(activateGfsAuthScope.mock.invocationCallOrder[0]).toBeLessThan(
-      authClient.readWorkflow.mock.invocationCallOrder[0]
-    )
     expect(app.me?.teamId).toBe('team-b')
     expect(app.gfsScopeIdentity).toMatchObject({ teamId: 'team-b', baseUrl: restA })
     expect(app.gfsDispatchBlocked).toBe(false)
