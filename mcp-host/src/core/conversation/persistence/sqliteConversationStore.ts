@@ -741,6 +741,9 @@ export class SqliteConversationStore implements ConversationStore {
         // `turnNumber` (not `turns.length`, which is RAM-fragile). The dispatcher
         // runs a COALESCE write so a retried turn 1 is idempotent.
         title: turnNumber === 1 ? (conv.title ?? undefined) : undefined,
+        // #1043 — admitting a new turn retires any live model-step checkpoint
+        // of this session in the same transaction (Resend and new messages).
+        retireModelStepCheckpointsOf: sessionKey,
       },
       sessionKey
     )

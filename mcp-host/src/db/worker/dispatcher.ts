@@ -8,6 +8,13 @@
 import type { Database } from 'better-sqlite3'
 import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
+import {
+  completeModelStepCheckpointWithMessage,
+  dispatchModelStepCheckpointOp,
+  isModelStepCheckpointOp,
+  isModelStepCheckpointWriteOp,
+  retireLiveModelStepCheckpoints,
+} from './modelStepCheckpointOps'
 import type {
   LoadAllPendingApprovalsRow,
   ModelSelectionWriteOutcome,
@@ -94,6 +101,11 @@ export function parseIsoSinceOrThrow(raw: unknown): number | null {
  */
 export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unknown> {
   const { db, statements: s } = deps
+  if (isModelStepCheckpointOp(op)) {
+    return isModelStepCheckpointWriteOp(op)
+      ? withBusyRetry(() => dispatchModelStepCheckpointOp(op, db))
+      : dispatchModelStepCheckpointOp(op, db)
+  }
   switch (op.kind) {
     case 'ping':
       return { pong: true }
@@ -590,6 +602,21 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           // rename. Run in the SAME transaction as the boundary message.
           if (op.title !== undefined) {
             s.setSessionTitleIfAbsent.run({ id: op.sessionId, title: op.title })
+          }
+          // #1043 — a new turn retires every live model-step checkpoint, and a
+          // continuation's final message completes its fenced checkpoint; both
+          // in the SAME transaction as the boundary message.
+          const now = Date.now()
+          if (op.retireModelStepCheckpointsOf !== undefined) {
+            retireLiveModelStepCheckpoints(db, op.retireModelStepCheckpointsOf, now)
+          }
+          if (op.completeModelStepCheckpoint !== undefined) {
+            completeModelStepCheckpointWithMessage(
+              db,
+              op.completeModelStepCheckpoint,
+              { session_id: op.message.session_id, ordinal: op.message.ordinal },
+              now
+            )
           }
         })
         tx.immediate()

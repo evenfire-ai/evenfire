@@ -8,6 +8,12 @@
  * `error`/`result` payloads.
  */
 import type { ChatMessage, PendingApproval, ToolResult } from '../../core/types'
+import {
+  type ModelStepCheckpointFence,
+  type ModelStepCheckpointOp,
+  isModelStepCheckpointOp,
+  isModelStepCheckpointWriteOp,
+} from './modelStepCheckpointOps'
 
 // ─── Row shapes (DB-side representation) ───────────────────────────────
 
@@ -292,7 +298,20 @@ export type WorkerOp =
        * never overwrites, and a rename set earlier wins.
        */
       title?: string
+      /**
+       * #1043 — set on a turn start: every live model-step checkpoint of this
+       * session is retired (`abandoned`) in the same transaction, so a new
+       * turn can never coexist with a resumable one.
+       */
+      retireModelStepCheckpointsOf?: string
+      /**
+       * #1043 — set on the final message of a model-step continuation: the
+       * fenced checkpoint flips `claimed` → `completed` and stamps this message
+       * in the same transaction. A fence mismatch rolls the message back.
+       */
+      completeModelStepCheckpoint?: ModelStepCheckpointFence
     }
+  | ModelStepCheckpointOp
   | { kind: 'replace_messages'; sessionId: string; messages: MessageRow[] }
   | {
       kind: 'insert_pending_approval'
@@ -393,7 +412,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'sweep_closed_sessions':
       return true
     default:
-      return false
+      return isModelStepCheckpointOp(op) && isModelStepCheckpointWriteOp(op)
   }
 }
 
