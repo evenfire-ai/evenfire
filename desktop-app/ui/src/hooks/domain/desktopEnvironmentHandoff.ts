@@ -306,6 +306,18 @@ export function createDesktopEnvironmentSetupHandler({
         rejectSameOriginPathConflict(setStatus)
         return
       }
+      activeRestEndpointMatches = isActiveRestEndpointMatch(
+        configState,
+        linkedConfig.externalRestApiBaseUrl
+      )
+      if (restMatches.saved.length > 1 && !activeRestEndpointMatches) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop setup link rejected because multiple saved environments use this REST API.',
+          'error'
+        )
+        return
+      }
     }
 
     if (authState.isAuthenticated) {

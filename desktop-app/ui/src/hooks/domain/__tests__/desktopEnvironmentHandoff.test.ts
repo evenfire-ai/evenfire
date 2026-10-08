@@ -597,4 +597,81 @@ describe('Desktop environment REST endpoint matching', () => {
       )
     }
   )
+
+  it('rechecks duplicate saved REST profiles after logout before selecting', async () => {
+    let authenticated = true
+    let sessionGeneration = 0
+    const logout = vi.fn(async () => {
+      const before = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+      const original = before.options.find(
+        option =>
+          option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+      )
+      if (!original?.configPath) throw new Error('The config producer did not persist the target')
+      await runtimeConfigModule!.saveDesktopRuntimeConfig({
+        appName: 'Second exact REST profile',
+        externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v2`,
+        rpcProxyBaseUrl: 'https://second-rpc.example.test',
+      })
+      const afterSave = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+      const duplicate = afterSave.options.find(
+        option => option.appName === 'Second exact REST profile'
+      )
+      if (!duplicate?.configPath)
+        throw new Error('The config producer did not persist the duplicate')
+      const configPaths: string[] = []
+      for (const option of [original, duplicate]) {
+        if (!option.configPath) throw new Error('The config producer did not persist the profile')
+        configPaths.push(option.configPath)
+      }
+      for (const configPath of configPaths) {
+        const contents = JSON.parse(await fsp.readFile(configPath, 'utf8')) as {
+          externalRestApiBaseUrl: string
+        }
+        contents.externalRestApiBaseUrl = `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+        await fsp.writeFile(configPath, JSON.stringify(contents), 'utf8')
+      }
+      vi.resetModules()
+      runtimeConfigModule = await import('../../../../../src/config')
+      const refreshed = await runtimeConfigModule.getDesktopRuntimeConfigState()
+      const current = refreshed.options.find(
+        option => option.externalRestApiBaseUrl === currentEnvironment.externalRestApiBaseUrl
+      )
+      if (!current) throw new Error('The config producer did not return the active profile')
+      await runtimeConfigModule.selectDesktopRuntimeConfigOption(current.id)
+      authenticated = false
+      sessionGeneration += 1
+      return sessionGeneration
+    })
+    const refreshRuntimeConfigState = vi.fn(async () =>
+      runtimeConfigModule!.getDesktopRuntimeConfigState()
+    )
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(
+        () => ({
+          booting: false,
+          busy: false,
+          authTransitioning: false,
+          isAuthenticated: authenticated,
+        }),
+        refreshRuntimeConfigState,
+        logout,
+        vi.fn(async () => {}),
+        async () => sessionGeneration
+      )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(refreshRuntimeConfigState).toHaveBeenCalledTimes(2)
+    expect(logout).toHaveBeenCalledOnce()
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      'Desktop setup link rejected because multiple saved environments use this REST API.',
+      'error'
+    )
+  })
 })
