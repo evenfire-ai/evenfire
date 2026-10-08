@@ -17,6 +17,22 @@ type SetupActivation = {
 }
 
 describe('AppService setup and saved-session ownership', () => {
+  it('does not advance the session generation when saved-session restore fails while signed out', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const app = service as unknown as {
+      authClient: { getMe: ReturnType<typeof vi.fn> }
+      tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
+      getSessionGeneration: () => number
+    }
+    app.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session-a')
+    app.authClient = {
+      getMe: vi.fn().mockRejectedValue(new Error('synthetic network failure')),
+    }
+
+    await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+    expect(app.getSessionGeneration()).toBe(0)
+  })
+
   it.each(['Google', 'password'] as const)(
     'lets a pending %s login win over a background saved-session restore',
     async provider => {

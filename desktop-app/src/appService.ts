@@ -1744,7 +1744,7 @@ export class AppService {
     } catch (error) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
-        this.clearAuthenticatedSessionState()
+        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
         if (AppService.isRejectedStoredSessionError(error)) {
           await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
             legacyEnvKeys: getActiveLegacyEnvKeys(),
