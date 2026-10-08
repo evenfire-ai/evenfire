@@ -67,10 +67,33 @@ async function databaseNow(db: Pick<DbTransactionClient, 'query'>): Promise<numb
 export async function capturePasswordEvaluation(
   email: string,
   chargeAttempt: boolean
-): Promise<PasswordCapture> {
+): Promise<PasswordCapture>
+export async function capturePasswordEvaluation(
+  email: string,
+  chargeAttempt: boolean,
+  userId: string
+): Promise<PasswordCapture | null>
+export async function capturePasswordEvaluation(
+  email: string,
+  chargeAttempt: boolean,
+  userId?: string
+): Promise<PasswordCapture | null> {
   const normalized = email.trim().toLowerCase()
   const key = passwordIdentifierKey(normalized)
   const snapshot = await withTransaction(async db => {
+    let principal: PasswordUser | null = null
+    if (userId !== undefined) {
+      // Authenticated capture binds its principal before any identifier effect.
+      // Match completion/credential writers: user first, then identifier; no lock spans bcrypt.
+      const users = await db.query(
+        `SELECT id, email, name, picture, password_hash, lifecycle_state,
+         lifecycle_version, password_auth_generation FROM users
+         WHERE email = $1 AND id::text = $2 FOR SHARE`,
+        [normalized, userId]
+      )
+      principal = (users.rows[0] as PasswordUser) ?? null
+      if (!principal) return null
+    }
     await db.query(
       'INSERT INTO password_identifier_state(identifier_key) VALUES ($1) ON CONFLICT DO NOTHING',
       [key]
@@ -83,28 +106,33 @@ export async function capturePasswordEvaluation(
     const now = await databaseNow(db)
     const decision = admitPasswordIdentifier(stateOf(row), now, chargeAttempt)
     // A denied request never writes: it cannot move the rolling denial horizon.
-    if (decision.retryMs) return { retryMs: decision.retryMs, row }
+    if (decision.retryMs) return { retryMs: decision.retryMs, row, principal }
     const expiresAt = now + policy.evaluationMs
     await db.query(
       'UPDATE password_identifier_state SET attempts = $2, failures = $3, locked_until_ms = $4, retained_until_ms = greatest(retained_until_ms, $5) WHERE identifier_key = $1',
       [key, decision.state.attempts, decision.state.failures, decision.state.lockedUntil, expiresAt]
     )
-    return { retryMs: 0, row, expiresAt }
+    return { retryMs: 0, row, expiresAt, principal }
   })
+  if (!snapshot) return null
   if (snapshot.retryMs) denied(snapshot.retryMs)
   // No transaction or row lock survives into bcrypt.
-  const users = await pool.query(
-    `SELECT id, email, name, picture, password_hash, lifecycle_state,
-    lifecycle_version, password_auth_generation FROM users WHERE email = $1 LIMIT 1`,
-    [normalized]
-  )
+  let user = snapshot.principal
+  if (userId === undefined) {
+    const users = await pool.query(
+      `SELECT id, email, name, picture, password_hash, lifecycle_state,
+      lifecycle_version, password_auth_generation FROM users WHERE email = $1 LIMIT 1`,
+      [normalized]
+    )
+    user = (users.rows[0] as PasswordUser) ?? null
+  }
   return {
     email: normalized,
     key,
     instance: snapshot.row.instance,
     revision: String(snapshot.row.revision),
     expiresAt: snapshot.expiresAt!,
-    user: (users.rows[0] as PasswordUser) ?? null,
+    user,
   }
 }
 
@@ -172,7 +200,11 @@ export async function verifyMemberPassword(
   options: { publicLogin: boolean; userId?: string }
 ): Promise<PasswordUser | null> {
   try {
-    const capture = await capturePasswordEvaluation(email, options.publicLogin)
+    const capture =
+      options.userId === undefined
+        ? await capturePasswordEvaluation(email, options.publicLogin)
+        : await capturePasswordEvaluation(email, options.publicLogin, options.userId)
+    if (!capture) return null
     await reservePasswordPace()
     // The pace permit is deliberately not refunded on a busy lease.
     if (busy) denied(policy.paceMs)
@@ -183,10 +215,7 @@ export async function verifyMemberPassword(
       const user = capture.user
       let authenticated = false
       try {
-        const eligible =
-          !!user &&
-          user.lifecycle_state === 'active' &&
-          (!options.userId || options.userId === user.id)
+        const eligible = !!user && user.lifecycle_state === 'active'
         let supported = false
         if (eligible && user.password_hash) {
           try {
