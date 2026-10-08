@@ -187,9 +187,11 @@ describe('AppService quit producer admission', () => {
     expect(service.switchSessionToTeam).toHaveBeenCalledTimes(2)
   })
 
-  it('admits a queued team hop before quit closes producer admission', async () => {
+  it('holds quit behind queued hops but releases a no-hop reservation early', async () => {
     const firstOperation = deferred<string>()
     const firstOperationStarted = deferred<void>()
+    const homeOperation = deferred<string>()
+    const homeOperationStarted = deferred<void>()
     const tokenStore = new TokenStoreClass()
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
     const service = new AppServiceClass({ tokenStore }) as unknown as {
@@ -233,23 +235,29 @@ describe('AppService quit producer admission', () => {
     service.restartEntityChangeStreamForSessionReplacement = vi.fn()
     service.bindCurrentChatStore = vi.fn(async () => undefined)
 
-    const firstHop = service.runWithTeamContext('team-a', async () => {
+    const firstSameTeamRead = service.runWithTeamContext('team-home', async () => {
       firstOperationStarted.resolve()
       return firstOperation.promise
     })
     await firstOperationStarted.promise
-    const queuedHop = service.runWithTeamContext('team-b', async token => token)
+    const queuedHop = service.runWithTeamContext('team-a', async token => token)
+    const queuedHomeRead = service.runWithTeamContext('team-home', async () => {
+      homeOperationStarted.resolve()
+      return homeOperation.promise
+    })
     const preparation = service.prepareForQuit()
 
     expect(prepareForQuit).not.toHaveBeenCalled()
     firstOperation.resolve('team-a-complete')
-    await new Promise<void>(resolve => setImmediate(resolve))
-    await new Promise<void>(resolve => setImmediate(resolve))
-    service.cancelQuitPreparation()
+    await homeOperationStarted.promise
+    await vi.waitFor(() => expect(prepareForQuit).toHaveBeenCalledOnce())
+    await preparation
 
-    await expect(queuedHop).resolves.toBe('team-b-token')
-    await Promise.all([firstHop, preparation])
-    expect(prepareForQuit).toHaveBeenCalledOnce()
+    homeOperation.resolve('home-read-complete')
+    await expect(queuedHomeRead).resolves.toBe('home-read-complete')
+    await expect(queuedHop).resolves.toBe('team-a-token')
+    await expect(firstSameTeamRead).resolves.toBe('team-a-complete')
+    expect(service.pendingCredentialProducers.size).toBe(0)
   })
 
   it('keeps a queued home-team hop admitted when an earlier hop fails to restore', async () => {
