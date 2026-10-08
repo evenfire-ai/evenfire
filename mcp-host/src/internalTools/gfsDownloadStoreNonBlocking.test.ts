@@ -125,6 +125,28 @@ describe('GFS download store: a FIFO in the store tree never blocks', () => {
     await expect(store.readManagedFile(after.receipt.path, KEY)).resolves.toEqual(after.bytes)
   })
 
+  it('a meta.json FIFO with a writer attached is judged by its type, not read', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const directory = plantFifoMeta(root)
+    const fifo = path.join(directory, 'meta.json')
+    // A writer that never writes: a read would get EAGAIN, not end-of-file.
+    const reader = syncFs.openSync(fifo, syncFs.constants.O_RDONLY | syncFs.constants.O_NONBLOCK)
+    const writer = syncFs.openSync(fifo, syncFs.constants.O_WRONLY)
+    syncFs.closeSync(reader)
+    try {
+      const sweep = store.cleanupExpired()
+      expect(await settleWithin(sweep, fifo, 'reader')).toBe('settled')
+      await expect(sweep).resolves.toMatchObject({ removedIncomplete: 1 })
+      expect(exists(directory)).toBe(false)
+    } finally {
+      syncFs.closeSync(writer)
+    }
+    // Witness: the store keeps admitting and serving afterwards.
+    const copy = await completedCopy(store, root, KEY, 6, 24)
+    await expect(store.readManagedFile(copy.receipt.path, KEY)).resolves.toEqual(copy.bytes)
+  })
+
   it('managed reads of a published copy whose source became a FIFO refuse without blocking', async () => {
     const store = await openStore()
     const root = callerDirectory(hostRoot, KEY)
