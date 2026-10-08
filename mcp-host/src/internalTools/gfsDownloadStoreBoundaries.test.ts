@@ -643,6 +643,69 @@ describe('GFS download store boundaries: in-process concurrency', () => {
     expect(syncFs.readFileSync(path.join(rootA, receipt.path))).toEqual(bytes)
   })
 
+  // R3-M1: work accepted while close() waits replaces the mutation tail; close
+  // must wait for the new tail too, and still return at its deadline.
+  function blockSweeps(target: GfsDownloadStore) {
+    const internals = target as unknown as { sweep: (now: number) => Promise<unknown> }
+    const realSweep = internals.sweep.bind(target)
+    const started: number[] = []
+    const releases: Array<() => void> = []
+    const finished: number[] = []
+    vi.spyOn(internals, 'sweep').mockImplementation(async (now: number) => {
+      const index = started.length
+      started.push(index)
+      await new Promise<void>(resolve => releases.push(resolve))
+      const result = await realSweep(now)
+      finished.push(index)
+      return result
+    })
+    return { started, releases, finished }
+  }
+
+  it('C5b: close waits for a sweep accepted while it was already waiting', async () => {
+    const sweeps = blockSweeps(store)
+    const first = store.cleanupExpired()
+    await vi.waitFor(() => expect(sweeps.started).toEqual([0]))
+    let closed = false
+    const closing = store.close(5_000).then(() => {
+      closed = true
+    })
+    // close() is already waiting on the first sweep's tail when this arrives.
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const second = store.cleanupExpired()
+
+    sweeps.releases[0]!()
+    await first
+    // Witness: the second sweep started, so the first tail had resolved.
+    await vi.waitFor(() => expect(sweeps.started).toEqual([0, 1]))
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(closed).toBe(false)
+
+    sweeps.releases[1]!()
+    await second
+    await closing
+    expect(sweeps.finished).toEqual([0, 1])
+    expect(store.isAvailable()).toBe(false)
+  })
+
+  it('C5c: close still returns at its deadline when an accepted sweep never finishes', async () => {
+    const sweeps = blockSweeps(store)
+    const stuck = store.cleanupExpired()
+    await vi.waitFor(() => expect(sweeps.started).toEqual([0]))
+    const startedAt = performance.now()
+
+    await store.close(100)
+
+    const elapsed = performance.now() - startedAt
+    expect(elapsed).toBeGreaterThanOrEqual(90)
+    expect(elapsed).toBeLessThan(2_000)
+    // Witness: the sweep was still blocked when close returned.
+    expect(sweeps.finished).toEqual([])
+    expect(store.isAvailable()).toBe(false)
+    sweeps.releases[0]!()
+    await expect(stuck).resolves.toMatchObject({ removedExpired: 0 })
+  })
+
   it('C7: fail() after a partial write removes the directory and releases the reservation', async () => {
     const { transfer } = await startTransfer(store, rootA, A, 355, 12)
     const directory = downloadDirectory(rootA, transfer.id)

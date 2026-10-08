@@ -333,6 +333,14 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C5b: close waits for a sweep accepted while it was already waiting"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C5c: close still returns at its deadline when an accepted sweep never finishes"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
     "fullName": "GFS download store boundaries: in-process concurrency C7: fail() after a partial write removes the directory and releases the reservation"
   },
   {

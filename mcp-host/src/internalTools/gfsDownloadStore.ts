@@ -1004,8 +1004,9 @@ export class GfsDownloadStore {
   }
 
   /**
-   * Stops admitting, waits for active transfers until the deadline and then
-   * closes regardless. Transfers still active afterwards get download_busy
+   * Stops admitting, waits for active transfers and then for the mutation
+   * queue to be empty (including work accepted during the wait) until the
+   * deadline, and then closes regardless. Transfers still active afterwards get download_busy
    * from publish/fail; their directories are removed by the next start.
    */
   async close(drainTimeoutMs = 5_000): Promise<void> {
@@ -1016,16 +1017,26 @@ export class GfsDownloadStore {
     }
     this.closing = true
     let timer: NodeJS.Timeout | undefined
+    let deadlineReached = false
     const deadline = new Promise<void>(resolve => {
-      timer = setTimeout(resolve, drainTimeoutMs)
+      timer = setTimeout(() => {
+        deadlineReached = true
+        resolve()
+      }, drainTimeoutMs)
     })
     const drained = new Promise<void>(resolve => {
       if (this.active.size === 0) resolve()
       else this.drainWaiters.push(resolve)
     })
-    // Active transfers first, then whatever mutation is still in flight; both
-    // bounded by the same deadline.
-    await Promise.race([drained.then(() => this.mutationTail), deadline])
+    // Active transfers first, then the mutation queue until it is stable: a
+    // mutation accepted while close() waits replaces the tail, so wait again.
+    // Both phases are bounded by the same deadline.
+    await Promise.race([drained, deadline])
+    while (!deadlineReached) {
+      const tail = this.mutationTail
+      await Promise.race([tail, deadline])
+      if (tail === this.mutationTail) break
+    }
     clearTimeout(timer)
     if (this.active.size > 0)
       logger.warn(
