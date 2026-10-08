@@ -141,13 +141,78 @@ describe('AppService pending external logout', () => {
     await fs.mkdir(markerPath())
     const reportFailure = vi.fn()
     const { service } = createService(undefined, reportFailure)
+    const state = service as unknown as {
+      sessionToken: string | null
+      me: unknown
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    state.sessionToken = 'active-session-token'
+    state.me = loginResult.me
+    const suspendUploads = vi
+      .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
+      .mockResolvedValue()
     const restore = vi.spyOn(internals(service), 'restoreSavedSessionOnce')
 
     await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
 
     expect(restore).not.toHaveBeenCalled()
     expect(reportFailure).toHaveBeenCalledOnce()
+    expect(suspendUploads).toHaveBeenCalledOnce()
+    expect(state.sessionToken).toBeNull()
+    expect(state.me).toBeNull()
     expect((await fs.stat(markerPath())).isDirectory()).toBe(true)
+  })
+
+  it('fails closed when canceled-quit retry cannot inspect the marker', async () => {
+    await fs.mkdir(markerPath())
+    const reportFailure = vi.fn()
+    const { service } = createService(undefined, reportFailure)
+    const state = service as unknown as {
+      sessionToken: string | null
+      me: unknown
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    state.sessionToken = 'active-session-token'
+    state.me = loginResult.me
+    const suspendUploads = vi
+      .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
+      .mockResolvedValue()
+
+    await expect(service.applyPendingExternalLogoutIntent()).rejects.toThrow(
+      'Pending logout marker is not a regular file'
+    )
+
+    expect(state.sessionToken).toBeNull()
+    expect(state.me).toBeNull()
+    expect(suspendUploads).toHaveBeenCalledOnce()
+    expect(reportFailure).toHaveBeenCalledOnce()
+  })
+
+  it('fails closed on login when the pending marker cannot be inspected', async () => {
+    await fs.mkdir(markerPath())
+    const reportFailure = vi.fn()
+    const { service, tokenStore } = createService(undefined, reportFailure)
+    const state = service as unknown as {
+      sessionToken: string | null
+      me: unknown
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+    }
+    state.sessionToken = 'active-session-token'
+    state.me = loginResult.me
+    const suspendUploads = vi
+      .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
+      .mockResolvedValue()
+    const persistToken = vi.spyOn(tokenStore, 'setSessionToken')
+
+    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
+      'Pending logout marker is not a regular file'
+    )
+
+    expect(state.sessionToken).toBeNull()
+    expect(state.me).toBeNull()
+    expect(suspendUploads).toHaveBeenCalledOnce()
+    expect(persistToken).not.toHaveBeenCalled()
+    expect(reportFailure).toHaveBeenCalledOnce()
   })
 
   it('guards both marker credential producers after quit admission closes', async () => {
@@ -232,6 +297,34 @@ describe('AppService pending external logout', () => {
     )
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
     expect(internals(service).sessionToken).toBe(loginResult.token)
+  })
+
+  it('does not replace a credential when a legacy Keytar delete also fails', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const persistToken = vi.spyOn(tokenStore, 'setSessionToken')
+    const keytar = await import('keytar')
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    vi.mocked(keytar.deletePassword).mockImplementation(async () => {
+      throw new Error('keychain temporarily locked')
+    })
+
+    try {
+      await expect(
+        internals(service).installAuthenticatedLoginOnce(loginResult)
+      ).rejects.toMatchObject({ message: 'Failed to clear session token storage' })
+
+      expect(persistToken).not.toHaveBeenCalled()
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+      expect(keychain.get(keyOf('Evenfire', `session-token::${activeEnvKey}`))).toBe(
+        'previous-session-token'
+      )
+      expect(internals(service).sessionToken).toBeNull()
+      expect(internals(service).me).toBeNull()
+    } finally {
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
   })
 
   it('keeps a pending logout marker and stays unauthenticated when fresh persistence fails', async () => {
