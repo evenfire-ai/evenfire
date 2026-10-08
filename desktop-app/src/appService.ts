@@ -2489,13 +2489,18 @@ export class AppService {
           await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
           this.assertSessionGeneration(logoutGeneration)
         } catch (error) {
+          let environmentBindingMatches = false
+          try {
+            this.assertAuthEnvironmentBinding(logoutEnvironment)
+            environmentBindingMatches = true
+          } catch {
+            // A selected profile change means the failed clear no longer owns this boundary.
+          }
           const capturedSessionStillOwnsBoundary =
             this.sessionGeneration === logoutGeneration &&
             this.sessionToken === logoutToken &&
             this.me === logoutMe &&
-            getActiveEnvKey() === logoutEnvironment.environmentKey &&
-            normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) ===
-              logoutEnvironment.restBaseUrl
+            environmentBindingMatches
           if (capturedSessionStillOwnsBoundary) {
             if (logoutToken && logoutMe) this.activateGfsAuthScope()
           }
