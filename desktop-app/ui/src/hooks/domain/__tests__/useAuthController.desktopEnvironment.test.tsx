@@ -6,6 +6,7 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { AppService } from '../../../../../src/appService'
+import type { DesktopRuntimeConfigState } from '../../../../../src/types'
 import { useAuthController } from '../useAuthController'
 import { wrapLikeElectronIpc } from './__fixtures__/ipcErrors'
 
@@ -227,6 +228,65 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
+  it('preserves a session that starts while setup confirmation rereads configuration', async () => {
+    const linkedEnvironment = {
+      appName: 'New tenant',
+      externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
+    }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linkedEnvironment)
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      linkedEnvironment.externalRestApiBaseUrl
+    )
+
+    const stateBeforeConfirmation = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    let finishRefresh: ((state: DesktopRuntimeConfigState) => void) | undefined
+    mocks.getRuntimeConfigState.mockClear()
+    mocks.getRuntimeConfigState.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finishRefresh = resolve
+        })
+    )
+    mocks.saveRuntimeConfig.mockImplementationOnce(async config => {
+      await runtimeConfigModule!.saveDesktopRuntimeConfig({
+        ...config,
+        rpcProxyBaseUrl: 'https://rpc.new-api.example.test',
+      })
+      return runtimeConfigModule!.getDesktopRuntimeConfigState()
+    })
+
+    let confirmation: Promise<void> | undefined
+    await act(async () => {
+      confirmation = confirmDesktopEnvironmentSetupForTest?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(finishRefresh).toBeTypeOf('function'))
+    await act(async () => setAuthenticatedForTest?.(true))
+    finishRefresh?.(await runtimeConfigModule!.getDesktopRuntimeConfigState())
+    await act(async () => confirmation)
+
+    const saveRuntimeConfigCallCount = mocks.saveRuntimeConfig.mock.calls.length
+    mocks.saveRuntimeConfig.mockReset()
+    const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    expect(saveRuntimeConfigCallCount).toBe(0)
+    expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(finalState.activeOptionId).toBe(stateBeforeConfirmation.activeOptionId)
+    expect(
+      finalState.options.some(
+        option => option.externalRestApiBaseUrl === linkedEnvironment.externalRestApiBaseUrl
+      )
+    ).toBe(false)
+    expect(screen.getByTestId('is-authenticated')).toHaveTextContent('yes')
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
   it('rejects a same-origin REST path conflict added before setup confirmation', async () => {
     const linkedEnvironment = {
       appName: 'New tenant',
@@ -451,6 +511,12 @@ describe('Desktop environment handoff', () => {
       option => option.externalRestApiBaseUrl === linkedEnvironment.externalRestApiBaseUrl
     )
     if (!savedOption) throw new Error('The config producer did not return the newly saved profile')
+    const currentOption = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
+      option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+    )
+    if (!currentOption) throw new Error('The config producer did not return the current profile')
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(currentOption.id)
+    const generationBeforeConfirmation = nativeAppService!.getSessionGeneration()
 
     await act(async () => {
       await confirmDesktopEnvironmentSetupForTest?.()
@@ -458,13 +524,19 @@ describe('Desktop environment handoff', () => {
 
     expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
     expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
+      savedOption.id,
+      generationBeforeConfirmation
+    )
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
     expect((await runtimeConfigModule!.getDesktopRuntimeConfigState()).activeOptionId).toBe(
       savedOption.id
     )
-    expect(mocks.setStatus).toHaveBeenLastCalledWith(
-      `Opening ${linkedEnvironment.appName} in Evenfire Desktop.`,
-      'success'
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      expect.stringContaining(`Environment selected: ${linkedEnvironment.appName}`),
+      'success',
+      undefined,
+      { global: false, toast: true }
     )
   })
 

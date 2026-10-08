@@ -384,14 +384,30 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.clearRuntimeConfigSelection()
   })
-  ipcMain.handle('auth:saveRuntimeConfig', async (event, payload: DesktopRuntimeConfig) => {
-    assertTrustedSender(event)
-    return service.saveRuntimeConfig({
-      externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
-      rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
-      appName: sanitizeString(payload?.appName),
-    })
-  })
+  ipcMain.handle(
+    'auth:saveRuntimeConfig',
+    async (event, payload: DesktopRuntimeConfig & { expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      const rawExpectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        rawExpectedSessionGeneration !== undefined &&
+        (typeof rawExpectedSessionGeneration !== 'number' ||
+          !Number.isSafeInteger(rawExpectedSessionGeneration) ||
+          rawExpectedSessionGeneration < 0)
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      const runtimeConfig = {
+        externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
+        rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
+        appName: sanitizeString(payload?.appName),
+      }
+      if (rawExpectedSessionGeneration === undefined) {
+        return service.saveRuntimeConfig(runtimeConfig)
+      }
+      return service.saveRuntimeConfig(runtimeConfig, rawExpectedSessionGeneration)
+    }
+  )
   ipcMain.handle('auth:deleteRuntimeConfig', async (event, payload: { optionId: string }) => {
     assertTrustedSender(event)
     return service.deleteRuntimeConfig(sanitizeString(payload?.optionId))

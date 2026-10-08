@@ -140,24 +140,43 @@ describe('Desktop environment handoff concurrency', () => {
 
   it('rechecks the auth operation state after runtime configuration loads', async () => {
     let finishRefresh: (() => void) | undefined
+    let reportRefreshStarted!: () => void
+    const refreshStarted = new Promise<void>(resolve => {
+      reportRefreshStarted = resolve
+    })
     const runtimeConfigState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
-    const refreshRuntimeConfigState = () =>
-      new Promise<typeof runtimeConfigState>(resolve => {
+    const originalActiveOptionId = runtimeConfigState.activeOptionId
+    const refreshRuntimeConfigState = () => {
+      reportRefreshStarted()
+      return new Promise<typeof runtimeConfigState>(resolve => {
         finishRefresh = () => resolve(runtimeConfigState)
       })
+    }
     let busy = false
-    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
-      () => ({ booting: false, busy, authTransitioning: false, isAuthenticated: false }),
-      refreshRuntimeConfigState
-    )
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(
+        () => ({ booting: false, busy, authTransitioning: false, isAuthenticated: false }),
+        refreshRuntimeConfigState
+      )
 
-    const handling = handler(targetEnvironment)
+    const handling = handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+    await refreshStarted
     busy = true
     finishRefresh?.()
     await handling
 
     expect(selectRuntimeConfig).not.toHaveBeenCalled()
     expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalled()
+    expect((await runtimeConfigModule!.getDesktopRuntimeConfigState()).activeOptionId).toBe(
+      originalActiveOptionId
+    )
+    expect(setStatus).toHaveBeenCalledWith(
+      'Finish the current authentication action before continuing this desktop link.',
+      'info'
+    )
   })
 
   it.each([

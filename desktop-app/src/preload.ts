@@ -81,11 +81,18 @@ const clerum = Object.freeze({
         expectedSessionGeneration,
       }) as Promise<DesktopRuntimeConfigHandoffSelection>,
     clearRuntimeConfigSelection: () => ipcRenderer.invoke('auth:clearRuntimeConfigSelection'),
-    saveRuntimeConfig: (config: {
-      externalRestApiBaseUrl: string
-      rpcProxyBaseUrl?: string
-      appName?: string
-    }) => ipcRenderer.invoke('auth:saveRuntimeConfig', config),
+    saveRuntimeConfig: (
+      config: {
+        externalRestApiBaseUrl: string
+        rpcProxyBaseUrl?: string
+        appName?: string
+      },
+      expectedSessionGeneration?: number
+    ) =>
+      ipcRenderer.invoke(
+        'auth:saveRuntimeConfig',
+        expectedSessionGeneration === undefined ? config : { ...config, expectedSessionGeneration }
+      ),
     deleteRuntimeConfig: (optionId: string) =>
       ipcRenderer.invoke('auth:deleteRuntimeConfig', { optionId }),
     googleLogin: (idToken: string) => ipcRenderer.invoke('auth:googleLogin', { idToken }),

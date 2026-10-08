@@ -311,7 +311,8 @@ export function useAuthController({
   }
 
   const handleSaveRuntimeConfig = async (
-    nextConfig?: DesktopRuntimeConfig
+    nextConfig?: DesktopRuntimeConfig,
+    expectedSessionGeneration?: number
   ): Promise<DesktopRuntimeConfigState | null> => {
     try {
       setBusy(true)
@@ -326,11 +327,15 @@ export function useAuthController({
         throw new Error('environment name and external REST API are required')
       }
 
-      const state = await window.clerum.auth.saveRuntimeConfig({
+      const configToSave = {
         externalRestApiBaseUrl,
         rpcProxyBaseUrl,
         appName: name,
-      })
+      }
+      const state =
+        expectedSessionGeneration === undefined
+          ? await window.clerum.auth.saveRuntimeConfig(configToSave)
+          : await window.clerum.auth.saveRuntimeConfig(configToSave, expectedSessionGeneration)
       setRuntimeConfigState(state)
       setRuntimeConfigSetupName('')
       setRuntimeConfigSetupExternalRestApiBaseUrl('')
@@ -344,10 +349,25 @@ export function useAuthController({
       )
       return state
     } catch (error) {
-      setStatus(
-        `Environment setup failed: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      )
+      const message = error instanceof Error ? error.message : String(error)
+      if (
+        expectedSessionGeneration !== undefined &&
+        message.includes('auth_transition_in_progress')
+      ) {
+        setStatus(
+          'Finish the current authentication action before continuing this desktop link.',
+          'info'
+        )
+      } else if (
+        expectedSessionGeneration !== undefined &&
+        (message.includes('stale_session_generation') ||
+          message.includes('desktop_setup_requires_signout'))
+      ) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus('The desktop session changed while processing this link. Open it again.', 'info')
+      } else {
+        setStatus(`Environment setup failed: ${message}`, 'error')
+      }
       return null
     } finally {
       setBusy(false)
@@ -431,17 +451,29 @@ export function useAuthController({
         applySelectedRuntimeConfigState(selection.runtimeConfigState)
         return selection
       } catch (error) {
-        if (error instanceof Error && error.message.includes('stale_session_generation')) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (message.includes('stale_session_generation')) {
           setStatus(
             'The desktop session changed while processing this link. Open it again.',
             'info'
           )
           return null
         }
-        setStatus(
-          `Failed to switch environment: ${error instanceof Error ? error.message : String(error)}`,
-          'error'
-        )
+        if (message.includes('auth_transition_in_progress')) {
+          setStatus(
+            'Finish the current authentication action before continuing this desktop link.',
+            'info'
+          )
+          return null
+        }
+        if (message.includes('desktop_setup_requires_signout')) {
+          setStatus(
+            'The desktop session changed while processing this link. Open it again.',
+            'info'
+          )
+          return null
+        }
+        setStatus(`Failed to switch environment: ${message}`, 'error')
         return null
       } finally {
         setBusy(false)
@@ -531,13 +563,68 @@ export function useAuthController({
   const handleConfirmDesktopEnvironmentSetup = async (): Promise<void> => {
     const nextConfig = pendingDesktopEnvironmentSetup
     if (!nextConfig) return
+
+    const reportSessionChanged = () => {
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus('The desktop session changed while processing this link. Open it again.', 'info')
+    }
+    const reportAuthenticationInProgress = () => {
+      setStatus(
+        'Finish the current authentication action before continuing this desktop link.',
+        'info'
+      )
+    }
+
+    if (bootingRef.current || busyRef.current || authTransitioningRef.current) {
+      reportAuthenticationInProgress()
+      return
+    }
+    if (isAuthenticatedRef.current) {
+      reportSessionChanged()
+      return
+    }
+
     setAuthTransitioning(true)
     try {
+      let expectedSessionGeneration: number
+      try {
+        expectedSessionGeneration = await getSessionGeneration()
+      } catch {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
+        return
+      }
+      if (bootingRef.current || busyRef.current) {
+        reportAuthenticationInProgress()
+        return
+      }
+      if (isAuthenticatedRef.current) {
+        reportSessionChanged()
+        return
+      }
+
       let currentConfigState: DesktopRuntimeConfigState
       try {
         currentConfigState = await refreshRuntimeConfigState()
       } catch {
         setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
+        return
+      }
+
+      let currentSessionGeneration: number
+      try {
+        currentSessionGeneration = await getSessionGeneration()
+      } catch {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
+        return
+      }
+      if (currentSessionGeneration !== expectedSessionGeneration || isAuthenticatedRef.current) {
+        reportSessionChanged()
+        return
+      }
+      if (bootingRef.current || busyRef.current) {
+        reportAuthenticationInProgress()
         return
       }
 
@@ -587,8 +674,26 @@ export function useAuthController({
           return
         }
 
-        const selectedState = await handleSelectRuntimeConfig(savedOption.id)
-        if (!selectedState) return
+        const selection = await handleSelectRuntimeConfigForHandoff(
+          savedOption.id,
+          expectedSessionGeneration
+        )
+        if (!selection) return
+        let selectedSessionGeneration: number
+        try {
+          selectedSessionGeneration = await getSessionGeneration()
+        } catch {
+          reportSessionChanged()
+          return
+        }
+        if (selectedSessionGeneration !== selection.sessionGeneration) {
+          reportSessionChanged()
+          return
+        }
+        if (busyRef.current) {
+          reportAuthenticationInProgress()
+          return
+        }
         setPendingDesktopEnvironmentSetup(null)
         try {
           await onSessionNeedsLoad({ preserveNav: true })
@@ -601,7 +706,7 @@ export function useAuthController({
         return
       }
 
-      const state = await handleSaveRuntimeConfig(nextConfig)
+      const state = await handleSaveRuntimeConfig(nextConfig, expectedSessionGeneration)
       if (!state) return
       const selectedOption = state.options.find(option => option.id === state.activeOptionId)
       const selectedRestMatches = getDesktopEnvironmentRestMatches(

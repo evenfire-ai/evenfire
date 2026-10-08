@@ -114,6 +114,65 @@ describe('AppService native auth and environment commit ordering', () => {
     expect(service.gfsScopeIdentity).toEqual(gfsScopeBeforeSetup)
   })
 
+  it('rejects handoff environment saves after auth changes or while auth is active', async () => {
+    const { service, runtimeConfig, optionB, restA, restB } = await createNativeCommitTestHarness()
+    const loginStarted = deferred<void>()
+    const loginResponse = deferred<{
+      token: string
+      me: { id: string; email: string; teamId: string }
+    }>()
+    const me = { id: 'user-a', email: 'user-a@example.test', teamId: 'team-a' }
+    service.authClient = {
+      googleLogin: vi.fn(() => {
+        loginStarted.resolve()
+        return loginResponse.promise
+      }),
+    } as never
+
+    const nextConfig = {
+      appName: 'Environment B',
+      externalRestApiBaseUrl: restB,
+      rpcProxyBaseUrl: 'https://rpc-b.example.test',
+    }
+    const saveRuntimeConfigForHandoff = service.saveRuntimeConfig.bind(service) as (
+      config: Parameters<typeof service.saveRuntimeConfig>[0],
+      expectedSessionGeneration: number
+    ) => Promise<unknown>
+    const expectedGeneration = service.getSessionGeneration()
+    const login = service.googleLogin('synthetic-google-token')
+    await loginStarted.promise
+    const generationDuringLogin = service.getSessionGeneration()
+
+    await expect(
+      service.selectRuntimeConfigForHandoff(optionB.id, expectedGeneration)
+    ).rejects.toThrow('stale_session_generation')
+    await expect(
+      service.selectRuntimeConfigForHandoff(optionB.id, generationDuringLogin)
+    ).rejects.toThrow('auth_transition_in_progress')
+    await expect(saveRuntimeConfigForHandoff(nextConfig, expectedGeneration)).rejects.toThrow(
+      'stale_session_generation'
+    )
+    await expect(saveRuntimeConfigForHandoff(nextConfig, generationDuringLogin)).rejects.toThrow(
+      'auth_transition_in_progress'
+    )
+    expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restA)
+
+    loginResponse.resolve({ token: 'synthetic-session-a', me })
+    await expect(login).resolves.toMatchObject({ authenticated: true, me })
+    const authenticatedGeneration = service.getSessionGeneration()
+    await expect(
+      service.selectRuntimeConfigForHandoff(optionB.id, authenticatedGeneration)
+    ).rejects.toThrow('desktop_setup_requires_signout')
+    await expect(saveRuntimeConfigForHandoff(nextConfig, authenticatedGeneration)).rejects.toThrow(
+      'desktop_setup_requires_signout'
+    )
+    expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restA)
+    await expect(service.getSessionState()).resolves.toMatchObject({
+      authenticated: true,
+      me,
+    })
+  })
+
   it('keeps a pending environment selection ahead of a login commit', async () => {
     const { service, runtimeConfig, restA, restB, optionB } = await createNativeCommitTestHarness()
     const loginStarted = deferred<void>()

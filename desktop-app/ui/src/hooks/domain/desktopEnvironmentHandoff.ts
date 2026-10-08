@@ -206,6 +206,11 @@ export function createDesktopEnvironmentSetupHandler({
     }
 
     if (!(await ownsSessionGeneration(sessionGeneration))) return
+    let authState = getAuthState()
+    if (isAuthenticationOperationInProgress(authState)) {
+      reportAuthenticationStateChanged(authState, setStatus)
+      return
+    }
 
     let restMatches = getDesktopEnvironmentRestMatches(
       configState,
@@ -219,7 +224,7 @@ export function createDesktopEnvironmentSetupHandler({
       )
       return
     }
-    let authState = getAuthState()
+    authState = getAuthState()
     let activeRestEndpointMatches = restMatches.active
     if (
       !activeRestEndpointMatches &&

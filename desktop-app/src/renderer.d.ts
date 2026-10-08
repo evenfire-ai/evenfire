@@ -81,7 +81,10 @@ declare global {
           expectedSessionGeneration: number
         ) => Promise<DesktopRuntimeConfigHandoffSelection>
         clearRuntimeConfigSelection: () => Promise<DesktopRuntimeConfigState>
-        saveRuntimeConfig: (config: DesktopRuntimeConfig) => Promise<DesktopRuntimeConfigState>
+        saveRuntimeConfig: (
+          config: DesktopRuntimeConfig,
+          expectedSessionGeneration?: number
+        ) => Promise<DesktopRuntimeConfigState>
         deleteRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
         googleLogin: (idToken: string) => Promise<SessionState>
         passwordLogin: (email: string, password: string) => Promise<PasswordLoginResult>

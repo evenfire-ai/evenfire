@@ -1896,6 +1896,15 @@ export class AppService {
     }
   }
 
+  private assertProfileHandoffSessionIsSignedOut(): void {
+    if (this.interactiveLoginAttempts > 0) {
+      throw new Error('auth_transition_in_progress')
+    }
+    if (this.sessionToken || this.me) {
+      throw new Error('desktop_setup_requires_signout')
+    }
+  }
+
   private async applyRuntimeEnvironmentChange(
     operation: () => Promise<void>,
     expectedSessionGeneration?: number
@@ -1988,6 +1997,7 @@ export class AppService {
     return this.withNativeAuthEnvironmentCommit(async () => {
       if (expectedSessionGeneration !== undefined) {
         this.assertSessionGeneration(expectedSessionGeneration)
+        this.assertProfileHandoffSessionIsSignedOut()
       }
       const state = getDesktopRuntimeConfigState()
       const selected = state.options.find(option => option.id === String(optionId || '').trim())
@@ -2025,8 +2035,15 @@ export class AppService {
     })
   }
 
-  async saveRuntimeConfig(next: DesktopRuntimeConfig) {
+  async saveRuntimeConfig(next: DesktopRuntimeConfig, expectedSessionGeneration?: number) {
     await this.withNativeAuthEnvironmentCommit(async () => {
+      if (expectedSessionGeneration !== undefined) {
+        if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+          throw new Error('invalid_session_generation')
+        }
+        this.assertSessionGeneration(expectedSessionGeneration)
+        this.assertProfileHandoffSessionIsSignedOut()
+      }
       const nextEnvKey = resolveEnvKey(next.externalRestApiBaseUrl, next.rpcProxyBaseUrl || '')
       const sameUploadBoundary =
         nextEnvKey === getActiveEnvKey() &&
