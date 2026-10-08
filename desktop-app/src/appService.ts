@@ -47,7 +47,7 @@ import {
   SharedFileListResult,
   SharedFilesClient,
 } from './sharedFilesClient.js'
-import { TokenStore } from './tokenStore.js'
+import { SessionTokenStorageClearError, TokenStore } from './tokenStore.js'
 import {
   AccessCatalog,
   AgentWithMcpServers,
@@ -1660,14 +1660,29 @@ export class AppService {
   private async applyPendingExternalLogoutBeforeLogin(
     userDataDirectory: string,
     envKey: string
-  ): Promise<void> {
+  ): Promise<{ present: boolean; replaceKeytarEntry: boolean }> {
     try {
-      if (!hasPendingExternalLogout(userDataDirectory, envKey)) return
-      // A fresh login supersedes the pending intent only after the old
-      // environment credentials and runtime auth effects have been cleared.
-      await this.logoutOnce({ strictTokenClear: true })
-      clearPendingExternalLogout(userDataDirectory, envKey)
+      if (!hasPendingExternalLogout(userDataDirectory, envKey)) {
+        return { present: false, replaceKeytarEntry: false }
+      }
     } catch (error) {
+      await this.failClosedForPendingLogout(error)
+      throw error
+    }
+
+    try {
+      // Keep the marker until a fresh credential is durably installed. If only
+      // the active Keytar slot resisted deletion, a successful write to that
+      // same slot safely replaces the old credential.
+      await this.logoutOnce({ strictTokenClear: true })
+      return { present: true, replaceKeytarEntry: false }
+    } catch (error) {
+      if (
+        error instanceof SessionTokenStorageClearError &&
+        error.canBeReplacedByFreshLoginCredential(envKey)
+      ) {
+        return { present: true, replaceKeytarEntry: true }
+      }
       await this.failClosedForPendingLogout(error)
       throw error
     }
@@ -1817,7 +1832,28 @@ export class AppService {
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const envKey = getActiveEnvKey()
-      await this.applyPendingExternalLogoutBeforeLogin(this.getUserDataDirectory(), envKey)
+      const pendingLogout = await this.applyPendingExternalLogoutBeforeLogin(
+        this.getUserDataDirectory(),
+        envKey
+      )
+      if (pendingLogout.present) {
+        let credentialPersisted = false
+        try {
+          await this.tokenStore.setSessionToken(result.token, envKey, {
+            requireKeytar: pendingLogout.replaceKeytarEntry,
+          })
+          credentialPersisted = true
+          clearPendingExternalLogout(this.getUserDataDirectory(), envKey)
+        } catch (error) {
+          if (credentialPersisted) {
+            await this.tokenStore
+              .clearSessionToken(envKey, { throwOnStorageError: true })
+              .catch(clearError => this.reportDeferredLogoutFailureSafely(clearError))
+          }
+          await this.failClosedForPendingLogout(error)
+          throw error
+        }
+      }
       const previousToken = this.sessionToken
       const previousMe = this.me
       const previousGeneration = this.sessionGeneration
@@ -1855,7 +1891,7 @@ export class AppService {
       this.workflowApprovalTeamById.clear()
       this.workflowTeamByKey.clear()
       this.rpcTokenManager.clear()
-      await this.tokenStore.setSessionToken(result.token, envKey)
+      if (!pendingLogout.present) await this.tokenStore.setSessionToken(result.token, envKey)
       this.activateGfsAuthScope()
       return { authenticated: true, me: result.me }
     } finally {

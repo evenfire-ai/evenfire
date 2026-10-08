@@ -65,6 +65,25 @@ export type TokenStoreOptions = {
   isolatedUserDataPath?: string
 }
 
+export class SessionTokenStorageClearError extends AggregateError {
+  constructor(
+    errors: readonly unknown[],
+    private readonly failedKeytarAccounts: readonly string[],
+    private readonly failedFileCount: number
+  ) {
+    super(errors, 'Failed to clear session token storage')
+    this.name = 'SessionTokenStorageClearError'
+  }
+
+  canBeReplacedByFreshLoginCredential(envKey: string): boolean {
+    return (
+      this.failedKeytarAccounts.length === 1 &&
+      this.failedKeytarAccounts[0] === accountFor(envKey) &&
+      this.failedFileCount === 0
+    )
+  }
+}
+
 async function loadKeytar(): Promise<KeytarModule | null> {
   try {
     const mod = await import('keytar')
@@ -415,20 +434,34 @@ export class TokenStore {
     }
   }
 
-  async setSessionToken(token: string, envKey: string): Promise<void> {
-    return this.trackOperation(() => this.setSessionTokenOnce(token, envKey))
+  async setSessionToken(
+    token: string,
+    envKey: string,
+    options: { requireKeytar?: boolean } = {}
+  ): Promise<void> {
+    return this.trackOperation(() => this.setSessionTokenOnce(token, envKey, options))
   }
 
-  private async setSessionTokenOnce(token: string, envKey: string): Promise<void> {
+  private async setSessionTokenOnce(
+    token: string,
+    envKey: string,
+    options: { requireKeytar?: boolean } = {}
+  ): Promise<void> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
     const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
+    if (options.requireKeytar && !keytar) {
+      throw new Error('Keytar is unavailable during session-token replacement')
+    }
     if (keytar) {
       try {
         await keytar.setPassword(SERVICE, account, token)
         return
-      } catch {
+      } catch (error) {
+        if (options.requireKeytar) {
+          throw new AggregateError([error], 'Failed to replace session token in Keytar')
+        }
         // Fall through to file storage when keychain writes fail.
       }
     }
@@ -467,16 +500,18 @@ export class TokenStore {
     const scopedEnvKeys = [envKey, ...legacyEnvKeys]
     const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
     const storageErrors: unknown[] = []
-    if (!keytar && this.isolatedUserDataPath === undefined && options.throwOnStorageError) {
-      storageErrors.push(new Error('Keytar is unavailable during strict session-token clearing'))
-    }
+    const failedKeytarAccounts: string[] = []
+    let failedFileCount = 0
     if (keytar) {
       const deleteKeychainPassword = async (account: string) => {
         try {
           await keytar.deletePassword(SERVICE, account)
         } catch (error) {
           // Keychain cleanup is best-effort; continue through the scoped files.
-          if (options.throwOnStorageError) storageErrors.push(error)
+          if (options.throwOnStorageError) {
+            storageErrors.push(error)
+            failedKeytarAccounts.push(account)
+          }
         }
       }
       for (const scopedEnvKey of scopedEnvKeys) {
@@ -501,12 +536,15 @@ export class TokenStore {
           await fs.unlink(await filePath)
         } catch (error) {
           const code = (error as NodeJS.ErrnoException | undefined)?.code
-          if (options.throwOnStorageError && code !== 'ENOENT') storageErrors.push(error)
+          if (options.throwOnStorageError && code !== 'ENOENT') {
+            storageErrors.push(error)
+            failedFileCount += 1
+          }
         }
       })
     )
     if (options.throwOnStorageError && storageErrors.length > 0) {
-      throw new AggregateError(storageErrors, 'Failed to clear session token storage')
+      throw new SessionTokenStorageClearError(storageErrors, failedKeytarAccounts, failedFileCount)
     }
   }
 }

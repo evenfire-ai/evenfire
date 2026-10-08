@@ -215,6 +215,42 @@ describe('AppService pending external logout', () => {
     )
   })
 
+  it('lets a fresh Keytar write replace a pending logout credential after delete fails', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const keytar = await import('keytar')
+    vi.mocked(keytar.deletePassword).mockRejectedValueOnce(new Error('keychain temporarily locked'))
+
+    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+
+    expect(keychain.get(keyOf('Evenfire', `session-token::${activeEnvKey}`))).toBe(
+      loginResult.token
+    )
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(internals(service).sessionToken).toBe(loginResult.token)
+  })
+
+  it('keeps a pending logout marker and stays unauthenticated when fresh persistence fails', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const reportFailure = vi.fn()
+    const { service, tokenStore } = createService(undefined, reportFailure)
+    await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    vi.spyOn(tokenStore, 'setSessionToken').mockRejectedValue(new Error('credential write failed'))
+
+    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
+      'credential write failed'
+    )
+
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+    expect(internals(service).sessionToken).toBeNull()
+    expect(internals(service).me).toBeNull()
+    expect(reportFailure).toHaveBeenCalledOnce()
+  })
+
   it('keeps login unauthenticated and the marker when marker retirement fails', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const reportFailure = vi.fn()
