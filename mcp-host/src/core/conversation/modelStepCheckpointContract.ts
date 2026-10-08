@@ -115,10 +115,12 @@ export interface ModelStepContinueBlocked {
 
 /**
  * 503: revalidation could not run (a transient GFS or credential failure).
- * The checkpoint stays `resumable` at the same version; the client may retry.
+ * The claim is released and the checkpoint is `resumable` again; every
+ * transition bumps the version, so `current` carries the version to retry with.
  */
 export interface ModelStepContinueCheckUnavailable {
   code: typeof MODEL_STEP_CONTINUE_ERROR_CODES.checkUnavailable
+  current: ModelStepCheckpointView
 }
 
 export type ModelStepContinueResponse =
