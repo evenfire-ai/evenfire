@@ -1,4 +1,5 @@
 import type { StepSpec } from '../config-loader/types'
+import { replaceTemplateReferences } from '../templateReferences'
 
 export const DEFAULT_PREVIOUS_OUTPUT_PROMPT_MAX_CHARS = 8192
 export const MIN_PREVIOUS_OUTPUT_PROMPT_MAX_CHARS = 1024
@@ -37,7 +38,7 @@ export function renderPrompt(
   context: PromptContext,
   previousOutputMaxChars = RUNTIME_PREVIOUS_OUTPUT_PROMPT_MAX_CHARS
 ): string {
-  return template.replace(/\{\{([^}]+)\}\}/g, (_match, key: string) => {
+  return replaceTemplateReferences(template, (key: string) => {
     const trimmed = key.trim()
 
     // {{workflow:name}}
