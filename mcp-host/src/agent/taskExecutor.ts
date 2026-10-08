@@ -75,6 +75,7 @@ import {
   type PreparedGfsFile,
   attachedFilesForTurnContext,
   buildTurnContextBlock,
+  stripTurnContextBlock,
 } from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
 import {
@@ -920,6 +921,7 @@ export class TaskExecutor {
         this.executionBudget.assertTime()
       }
       const messages = this.rebuildCheckpointMessages(recordedMessages, entries)
+      this.replaceRecordedTurnContextBlock(messages)
       validateToolLinkages(messages)
       const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
       const recorder = createModelStepCheckpointRecorder({
@@ -1684,10 +1686,7 @@ export class TaskExecutor {
     // `referenced_file` lines, so a message with file attachments or resolved
     // file references gets it with the cache off too; the attachment
     // condition also registers `clerum__attachment_read`.
-    const hasFileAttachments =
-      this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
-    const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
-    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences) {
+    if (this.needsTurnContextBlock()) {
       this.prependTurnContextBlock(messages)
     }
     const promptAssemblyStart = Date.now()
@@ -1759,6 +1758,45 @@ export class TaskExecutor {
       now: () => Date.now(),
       onFenceLost: () => this.abort(),
     })
+  }
+
+  /**
+   * #666 — the block is the only carrier of the `attached_file` and
+   * `referenced_file` lines, so a message with file attachments or resolved
+   * file references gets it with the prompt cache off too.
+   */
+  private needsTurnContextBlock(): boolean {
+    const hasFileAttachments =
+      this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
+    const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    return appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences
+  }
+
+  /**
+   * #1043 — the recorded turn carries the `<turn-context>` block of the origin
+   * attempt (its date, reference availability and prepared-file receipts).
+   * Replace it with one built from the continuation's own re-resolved
+   * references and prepared files (mutates in place).
+   */
+  private replaceRecordedTurnContextBlock(messages: ChatMessage[]): void {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role !== 'user') continue
+      if (m.contentParts && m.contentParts.length > 0) {
+        const textIndex = m.contentParts.findIndex(part => part.type === 'text')
+        const contentParts = m.contentParts.flatMap((part, index) => {
+          if (index !== textIndex || part.type !== 'text') return [part]
+          const text = stripTurnContextBlock(part.text)
+          // prependTextToParts adds a text part when the message had none.
+          return text.length > 0 ? [{ ...part, text }] : []
+        })
+        messages[i] = { ...m, contentParts, content: textContentFromParts(contentParts) }
+      } else {
+        messages[i] = { ...m, content: stripTurnContextBlock(m.content) }
+      }
+      break
+    }
+    if (this.needsTurnContextBlock()) this.prependTurnContextBlock(messages)
   }
 
   /**
