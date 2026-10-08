@@ -1,5 +1,9 @@
 import { Button, StatusBanner } from '@components/Common'
-import { MODEL_STEP_BLOCKED_REASON_LABELS, MODEL_STEP_RETRY_LABEL } from '@constants/agents'
+import {
+  MODEL_STEP_BLOCKED_REASON_LABELS,
+  MODEL_STEP_RESEND_HINT,
+  MODEL_STEP_RETRY_LABEL,
+} from '@constants/agents'
 import type { ModelStepRetryNoticeProps } from './ModelStepRetryNotice.types'
 
 function toolCallCount(count: number): string {
@@ -13,11 +17,28 @@ function toolCallCount(count: number): string {
  *   tool calls are kept on the Host, and **Retry model step** continues from
  *   there (it is not Resend: no second user message, no tool re-run).
  * - `blocked`: the Host cannot continue the turn; the notice says why and
- *   offers no action.
+ *   points at sending the message again (Resend), its only way forward.
  * - `claimed`: the continuation is running and its progress stepper is the
  *   surface, so the notice renders nothing.
+ * - no checkpoint after a `not_found` retry answer: the Host no longer holds
+ *   the step (abandoned or expired); the notice says so until the next send.
  */
 export function ModelStepRetryNotice({ checkpoint, retry, onRetry }: ModelStepRetryNoticeProps) {
+  if (!checkpoint) {
+    if (!retry?.unavailable) return null
+    return (
+      <section
+        className="model-step-retry-notice"
+        aria-label="Model step checkpoint"
+        data-testid="model-step-retry-notice"
+        data-status="unavailable"
+      >
+        <StatusBanner tone="error" compact>
+          <span>This model step can no longer be retried. {MODEL_STEP_RESEND_HINT}</span>
+        </StatusBanner>
+      </section>
+    )
+  }
   if (checkpoint.status === 'blocked') {
     const reason = checkpoint.blockedReason
       ? MODEL_STEP_BLOCKED_REASON_LABELS[checkpoint.blockedReason]
@@ -30,7 +51,9 @@ export function ModelStepRetryNotice({ checkpoint, retry, onRetry }: ModelStepRe
         data-status="blocked"
       >
         <StatusBanner tone="error" compact>
-          <span>This turn cannot continue.{reason ? ` ${reason}` : ''}</span>
+          <span>
+            This turn cannot continue.{reason ? ` ${reason}` : ''} {MODEL_STEP_RESEND_HINT}
+          </span>
         </StatusBanner>
       </section>
     )

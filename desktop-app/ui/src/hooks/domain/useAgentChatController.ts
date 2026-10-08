@@ -4008,8 +4008,11 @@ export function useAgentChatController({
         return
       case 'not_found':
         // Row 1: the checkpoint was abandoned, expired or never existed here.
+        // The notice stays to say so (a toast would vanish and leave the user
+        // with no reason); clearing the view makes the origin turn
+        // Resend-eligible again.
         recordModelStepCheckpoint(chatKey, undefined)
-        pushToast('This model step can no longer be retried.', 'info')
+        setModelStepRetryState(chatKey, { pending: false, error: null, unavailable: true })
         return
       case 'version_mismatch':
         // Row 5: another transition moved the checkpoint; adopt the Host's

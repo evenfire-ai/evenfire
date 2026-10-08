@@ -1101,6 +1101,8 @@ export type ModelStepBlockedReason =
   | 'model_unavailable'
   | 'budget_exhausted'
   | 'reference_unavailable'
+  /** The retained bytes of an inline uploaded file expired or are missing; Resend still works. */
+  | 'attachment_expired'
 
 export interface ModelStepCheckpointToolCounts {
   confirmed: number

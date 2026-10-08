@@ -984,7 +984,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
           onRefreshState={() => onSelectChat(activeChatId)}
         />
       )}
-      {activeChatId && selectedAgent && modelStepCheckpoint && (
+      {activeChatId && selectedAgent && (modelStepCheckpoint || modelStepRetry?.unavailable) && (
         <ModelStepRetryNotice
           checkpoint={modelStepCheckpoint}
           retry={modelStepRetry ?? null}

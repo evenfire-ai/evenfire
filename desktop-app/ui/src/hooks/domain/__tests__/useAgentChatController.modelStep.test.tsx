@@ -15,6 +15,7 @@ import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fix
 import {
   CHECKPOINT_ID,
   CONTINUATION_TASK_ID,
+  FAILED_TERMINAL,
   ORIGIN_PROMPT,
   ORIGIN_TASK_ID,
   checkpointReads,
@@ -177,22 +178,127 @@ describe('model-step checkpoint in the controller (#1044)', () => {
     expect(result.current.failedAgentSend).toBeNull()
   })
 
-  it('clears the checkpoint and says so when the Host no longer has it', async () => {
+  it('sends one continuation POST for two retries pressed while the first is in flight', async () => {
+    const { result } = await sendAndFail(view('session-view.resumable.json'))
+    // Every POST that goes out is answered, so a missing guard fails on the
+    // call count instead of leaving a request hanging.
+    const answers: Array<(value: ReturnType<typeof continueAnswer>) => void> = []
+    clerum.rpc.continueModelStep.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          answers.push(resolve)
+        })
+    )
+
+    let first!: Promise<void>
+    let second!: Promise<void>
+    await act(async () => {
+      first = result.current.handleRetryModelStep()
+      second = result.current.handleRetryModelStep()
+    })
+    // While the first POST is pending the button shows its in-progress state.
+    expect(result.current.modelStepRetry).toEqual({ pending: true, error: null })
+    await act(async () => {
+      for (const answer of answers) answer(continueAnswer('continue-response.claimed.json'))
+      await Promise.all([first, second])
+    })
+
+    expect(clerum.rpc.continueModelStep).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(clerum.hasProgressHandler(CONTINUATION_TASK_ID)).toBe(true))
+    expect(result.current.modelStepCheckpoint?.status).toBe('claimed')
+    expect(result.current.modelStepRetry).toBeNull()
+
+    // A third press once the continuation runs has no checkpoint to retry.
+    await act(async () => {
+      await result.current.handleRetryModelStep()
+    })
+    expect(clerum.rpc.continueModelStep).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers Retry model step again when the continuation also stops on the provider', async () => {
+    const { result } = await sendAndFail(view('session-view.resumable.json'))
+    clerum.rpc.continueModelStep.mockResolvedValue(continueAnswer('continue-response.claimed.json'))
+    await act(async () => {
+      await result.current.handleRetryModelStep()
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler(CONTINUATION_TASK_ID)).toBe(true))
+    expect(result.current.modelStepCheckpoint?.status).toBe('claimed')
+
+    // The Host keeps the same checkpoint resumable at the next version.
+    const readsBefore = checkpointReads(clerum).length
+    clerum.rpc.loadSessionMessages.mockResolvedValue(
+      sessionWith({ ...view('session-view.resumable.json'), version: 2 })
+    )
+    await act(async () => {
+      clerum.emitTaskProgress(CONTINUATION_TASK_ID, FAILED_TERMINAL)
+    })
+
+    await waitFor(() =>
+      expect(result.current.modelStepCheckpoint).toMatchObject({
+        checkpointId: CHECKPOINT_ID,
+        status: 'resumable',
+        retryAvailable: true,
+        version: 2,
+      })
+    )
+    // Witness: the notice came from a fresh session read, not the stale view.
+    expect(checkpointReads(clerum).length).toBeGreaterThan(readsBefore)
+    expect(result.current.failedAgentSend).toBeNull()
+    // The user sees the continuation's failure as its own error reply.
+    expect(
+      clerum.chat.appendMessages.mock.calls.some(call =>
+        (call[2] as Array<{ isError?: boolean; task_id?: string }>).some(
+          message => message.isError === true && message.task_id === CONTINUATION_TASK_ID
+        )
+      )
+    ).toBe(true)
+
+    clerum.rpc.continueModelStep.mockClear()
+    clerum.rpc.continueModelStep.mockResolvedValue(continueAnswer('continue-response.claimed.json'))
+    await act(async () => {
+      await result.current.handleRetryModelStep()
+    })
+    expect(clerum.rpc.continueModelStep).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      result.current.activeChatId,
+      CHECKPOINT_ID,
+      2
+    )
+    // Still a continuation, never Resend.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the checkpoint and keeps saying so when the Host no longer has it', async () => {
     const harness = await sendAndFail(view('session-view.resumable.json'))
     clerum.rpc.continueModelStep.mockResolvedValue(
       continueAnswer('continue-response.not-found.json')
     )
+    const toastsBefore = harness.spies.pushToast.mock.calls.length
 
     await act(async () => {
       await harness.result.current.handleRetryModelStep()
     })
 
     expect(clerum.rpc.continueModelStep).toHaveBeenCalledTimes(1)
-    expect(harness.spies.pushToast).toHaveBeenCalledWith(
-      'This model step can no longer be retried.',
-      'info'
-    )
     expect(harness.result.current.modelStepCheckpoint).toBeNull()
+    // The reason stays on the chat instead of a transient toast.
+    expect(harness.result.current.modelStepRetry).toEqual({
+      pending: false,
+      error: null,
+      unavailable: true,
+    })
+    expect(harness.spies.pushToast.mock.calls.length).toBe(toastsBefore)
+    // No dead end: the origin turn is Resend-eligible again.
+    expect(harness.result.current.failedAgentSend?.content).toBe(ORIGIN_PROMPT)
+
+    // The next send retires the notice.
+    clerum.rpc.invokeHostMessage.mockClear()
+    await act(async () => {
+      await harness.result.current.handleSendAgentMessage('next message')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(harness.result.current.modelStepRetry).toBeNull()
   })
 
   it('adopts the current view of a version mismatch', async () => {
@@ -281,5 +387,10 @@ describe('model-step checkpoint in the controller (#1044)', () => {
     await waitFor(() => expect(clerum.hasProgressHandler('task-next')).toBe(true))
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
     expect(result.current.modelStepCheckpoint).toBeNull()
+    expect(result.current.modelStepRetry).toBeNull()
+    // The abandoned turn falls back to the ordinary failed-send state, like any
+    // failed turn without a checkpoint: its Resend stays available.
+    expect(result.current.failedAgentSend?.content).toBe(ORIGIN_PROMPT)
+    expect(result.current.agentError).toBe('The provider is unavailable.')
   })
 })
