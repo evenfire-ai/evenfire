@@ -1378,6 +1378,13 @@ export class AppService {
     this.workflowTeamByKey.clear()
     this.rpcTokenManager.clear()
     unbindChatStore()
+    // The embed and its refresh loop run on the session being cleared. Queued
+    // rather than awaited: callers are synchronous and must not wait on a
+    // pending open's mint; the serial queue still tears down whatever that
+    // open mounts.
+    void this.closeSandboxUi().catch(error => {
+      console.error('[SandboxUI] Could not close the embed on session clear:', error)
+    })
   }
 
   private activateGfsAuthScope(identityOverride?: DesktopGfsUploadIdentity): void {

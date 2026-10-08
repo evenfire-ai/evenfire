@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { AppService } from '../appService.js'
+import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
 import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
 import { _resetPluginSurfacesForTests, resolvePluginSurface } from '../pluginSurfaceRegistry.js'
 import { SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
@@ -117,6 +118,7 @@ vi.mock('electron', () => ({
 
 vi.mock('../config.js', () => ({
   getActiveEnvKey: () => 'test-env',
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'https://rpc.example',
     externalRestApiBaseUrl: 'http://rest',
@@ -475,5 +477,175 @@ describe('AppService sandbox-ui mint against a hung rpc-proxy', () => {
     const mintsBefore = mintCallsFor('first-app')
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
     expect(mintCallsFor('first-app')).toBe(mintsBefore)
+  })
+})
+
+// The trusted renderer's webContents, wired exactly as main.ts wires the main
+// window: through the real readiness wiring into the real AppService close.
+class FakeMainWebContents {
+  private readonly listeners = new Map<string, Set<Listener>>()
+  reload = vi.fn()
+
+  on(event: string, handler: Listener): this {
+    if (!this.listeners.has(event)) this.listeners.set(event, new Set())
+    this.listeners.get(event)!.add(handler)
+    return this
+  }
+
+  emit(event: string, ...args: unknown[]): void {
+    this.listeners.get(event)?.forEach(handler => handler(...args))
+  }
+
+  isDestroyed(): boolean {
+    return false
+  }
+}
+
+function wireMainWindow(service: AppService): FakeMainWebContents {
+  const mainWebContents = new FakeMainWebContents()
+  wireMainWindowRendererReadiness({
+    webContents: mainWebContents as never,
+    isCurrentWindow: () => true,
+    markNotReady: vi.fn(),
+    closeSandboxUi: () => service.closeSandboxUi(),
+  })
+  return mainWebContents
+}
+
+async function expectEmbedGoneWithoutRefresh(
+  parentWindow: FakeParentWindow,
+  firstView: InstanceType<typeof electronMocks.FakeWebContentsView> | undefined,
+  firstWebContentsId: number
+): Promise<void> {
+  await vi.waitFor(() => expect(getActiveSandboxUi()).toBeNull(), { timeout: 1_000 })
+  expect(parentWindow.contentView.removeChildView).toHaveBeenCalledWith(firstView)
+  expect(firstView?.webContents.isDestroyed()).toBe(true)
+  expect(resolvePluginSurface(firstWebContentsId)).toBeNull()
+  const mintsBefore = mintCallsFor('first-app')
+  await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+  expect(mintCallsFor('first-app')).toBe(mintsBefore)
+}
+
+describe('AppService sandbox-ui embed whose trusted renderer is replaced', () => {
+  it('a committed document navigation of the main window closes the embed', async () => {
+    const onClosed = vi.fn()
+    const { service, parentWindow, firstWebContentsId, firstView } =
+      await setupWithLiveFirstApp(onClosed)
+    const mainWebContents = wireMainWindow(service)
+
+    // A reload (Cmd+R / View > Reload with the renderer focused) or a new
+    // document committed in the main frame. A load that ends on an error page
+    // emits no did-navigate and is not covered here.
+    mainWebContents.emit('did-navigate', {}, 'file:///ui-dist/index.html', 200, 'OK')
+
+    await expectEmbedGoneWithoutRefresh(parentWindow, firstView, firstWebContentsId)
+    // The replacement renderer starts without state: nothing to notify.
+    expect(onClosed).not.toHaveBeenCalled()
+  })
+
+  it('in-page, subframe and cancelled navigations of the main window leave the embed', async () => {
+    const { service, firstWebContentsId } = await setupWithLiveFirstApp()
+    const mainWebContents = wireMainWindow(service)
+
+    // An external link is started and then cancelled by will-navigate: the
+    // renderer that owns the embed stays.
+    mainWebContents.emit('did-start-navigation', {
+      url: 'https://example.com/',
+      isMainFrame: true,
+      isSameDocument: false,
+    })
+    mainWebContents.emit('did-navigate-in-page', {}, 'file:///ui-dist/index.html#/apps', true)
+    mainWebContents.emit('did-frame-navigate', {}, 'about:blank', 200, 'OK', false)
+    // Drain the serial lifecycle queue: a close enqueued by any of those events
+    // has run once this barrier settles.
+    await (
+      service as unknown as { enqueueSandboxUiLifecycle(op: () => Promise<void>): Promise<void> }
+    ).enqueueSandboxUiLifecycle(async () => undefined)
+
+    expect(getActiveSandboxUi()?.webContentsId).toBe(firstWebContentsId)
+  })
+
+  it('a crash of the main renderer closes the embed', async () => {
+    const { service, parentWindow, firstWebContentsId, firstView } = await setupWithLiveFirstApp()
+    const mainWebContents = wireMainWindow(service)
+
+    mainWebContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 139 })
+
+    expect(mainWebContents.reload).toHaveBeenCalledOnce()
+    await expectEmbedGoneWithoutRefresh(parentWindow, firstView, firstWebContentsId)
+  })
+})
+
+describe('AppService sandbox-ui embed across a session clear', () => {
+  // rpc-proxy holds the mint until the test answers it.
+  function holdMint(recipeName: string) {
+    let answer: (response: Response) => void = () => undefined
+    const held = new Promise<Response>(resolve => {
+      answer = resolve
+    })
+    mintResponders.set(recipeName, () => held)
+    return (response: Response) => answer(response)
+  }
+
+  it('an open whose mint lands after logout is torn down with no refresh loop', async () => {
+    const onClosed = vi.fn()
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    const parentWindow = new FakeParentWindow()
+    const answerMint = holdMint('first-app')
+
+    const open = service.openSandboxUi(openArgs('first-app', parentWindow, onClosed))
+    await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(1), { timeout: 1_000 })
+    await service.logout()
+    answerMint(mintOk('first-app'))
+    await open
+
+    const mountedView = electronMocks.views[0]
+    expect(mountedView).toBeDefined()
+    await vi.waitFor(() => expect(getActiveSandboxUi()).toBeNull(), { timeout: 1_000 })
+    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledWith(mountedView)
+    expect(mountedView?.webContents.isDestroyed()).toBe(true)
+    expect(resolvePluginSurface(mountedView!.webContents.id)).toBeNull()
+    expect(onClosed).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(1)
+  })
+
+  it('an open whose mint fails after logout leaves nothing behind and rejects once', async () => {
+    const onClosed = vi.fn()
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    const parentWindow = new FakeParentWindow()
+    const answerMint = holdMint('first-app')
+
+    const open = service.openSandboxUi(openArgs('first-app', parentWindow, onClosed))
+    const outcome = open.then(
+      () => 'opened',
+      (error: unknown) => error
+    )
+    await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(1), { timeout: 1_000 })
+    await service.logout()
+    answerMint(mintFails(409, 'app is starting'))
+
+    await expect(outcome).resolves.toMatchObject({ message: expect.stringMatching(/\(409\)/) })
+    // Drain the serial queue so the close queued by logout has run too.
+    await (
+      service as unknown as { enqueueSandboxUiLifecycle(op: () => Promise<void>): Promise<void> }
+    ).enqueueSandboxUiLifecycle(async () => undefined)
+    expect(electronMocks.views).toHaveLength(0)
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
+    expect(parentWindow.contentView.removeChildView).not.toHaveBeenCalled()
+    expect(onClosed).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(1)
+  })
+
+  it('logout closes the embed and stops its refresh loop', async () => {
+    const { service, parentWindow, firstWebContentsId, firstView } = await setupWithLiveFirstApp()
+
+    await service.logout()
+
+    await expectEmbedGoneWithoutRefresh(parentWindow, firstView, firstWebContentsId)
   })
 })
