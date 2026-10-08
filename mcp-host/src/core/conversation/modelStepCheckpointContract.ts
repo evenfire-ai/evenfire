@@ -75,6 +75,7 @@ export const MODEL_STEP_CONTINUE_ERROR_CODES = {
   notFound: 'model_step_checkpoint_not_found',
   versionMismatch: 'model_step_checkpoint_version_mismatch',
   blocked: 'model_step_checkpoint_blocked',
+  checkUnavailable: 'model_step_checkpoint_check_unavailable',
 } as const
 export type ModelStepContinueErrorCode =
   (typeof MODEL_STEP_CONTINUE_ERROR_CODES)[keyof typeof MODEL_STEP_CONTINUE_ERROR_CODES]
@@ -112,12 +113,21 @@ export interface ModelStepContinueBlocked {
   blockedReason: ModelStepBlockedReason
 }
 
+/**
+ * 503: revalidation could not run (a transient GFS or credential failure).
+ * The checkpoint stays `resumable` at the same version; the client may retry.
+ */
+export interface ModelStepContinueCheckUnavailable {
+  code: typeof MODEL_STEP_CONTINUE_ERROR_CODES.checkUnavailable
+}
+
 export type ModelStepContinueResponse =
   | ModelStepContinueClaimed
   | ModelStepContinueCompleted
   | ModelStepContinueNotFound
   | ModelStepContinueVersionMismatch
   | ModelStepContinueBlocked
+  | ModelStepContinueCheckUnavailable
 
 /** Runtime route on the Host, behind the same `rpc-proxy` edge guard as `/v1/runtime/messages`. */
 export const MODEL_STEP_CONTINUE_RUNTIME_ROUTE =
