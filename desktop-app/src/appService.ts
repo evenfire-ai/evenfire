@@ -878,6 +878,13 @@ export interface AppServiceOptions {
   reportDeferredLogoutFailure?: (error: unknown) => void
 }
 
+type ActiveTeamContextHop = {
+  homeTeamId: string
+  restoredToken: string | null
+  restorationError: unknown
+  homeTeamOperations: Array<() => Promise<void>>
+}
+
 export class QuitAdmissionClosedError extends Error {
   readonly code = 'QUIT_ADMISSION_CLOSED'
 
@@ -912,6 +919,7 @@ export class AppService {
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private pendingTeamContextHops = 0
+  private activeTeamContextHop: ActiveTeamContextHop | null = null
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
@@ -1295,6 +1303,11 @@ export class AppService {
       return operation(this.requireSessionToken())
     }
 
+    const activeHop = this.activeTeamContextHop
+    if (activeHop && targetTeamId === activeHop.homeTeamId) {
+      return this.enqueueHomeTeamOperation(activeHop, operation)
+    }
+
     // A queued cross-team hop is admitted at call time, before it can wait
     // behind another team operation. A request queued behind a possible hop
     // also reserves admission until its actual team is known.
@@ -1326,6 +1339,15 @@ export class AppService {
       let activeToken = originalToken
       const shouldSwitch = originalTeamId !== targetTeamId
       const shouldRestore = Boolean(originalTeamId && shouldSwitch)
+      const activeHop: ActiveTeamContextHop | null = shouldRestore
+        ? {
+            homeTeamId: originalTeamId,
+            restoredToken: null,
+            restorationError: null,
+            homeTeamOperations: [],
+          }
+        : null
+      if (activeHop) this.activeTeamContextHop = activeHop
       if (shouldSwitch && !hasHopReservation) {
         this.pendingTeamContextHops += 1
         hasHopReservation = true
@@ -1351,6 +1373,7 @@ export class AppService {
                 await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
                 restoredOriginalTeam = true
               } catch (restoreError) {
+                if (activeHop) activeHop.restorationError = restoreError
                 if (!operationError) throw restoreError
                 console.warn(
                   '[AppService] Failed to restore team context after operation:',
@@ -1375,6 +1398,13 @@ export class AppService {
             }
           }
         } finally {
+          if (activeHop) {
+            activeHop.restoredToken =
+              restoredOriginalTeam && this.me?.teamId === activeHop.homeTeamId
+                ? this.sessionToken
+                : null
+            await this.drainHomeTeamOperations(activeHop)
+          }
           if (shouldRestore) {
             this.chatStoreHomeTeamId = null
             // A failed switch back leaves the session on the hop team while the
@@ -1414,6 +1444,55 @@ export class AppService {
       if (hasHopReservation) this.pendingTeamContextHops -= 1
       releaseQueue()
     }
+  }
+
+  private enqueueHomeTeamOperation<T>(
+    activeHop: ActiveTeamContextHop,
+    operation: (sessionToken: string) => Promise<T>
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      activeHop.homeTeamOperations.push(async () => {
+        if (!activeHop.restoredToken) {
+          reject(
+            activeHop.restorationError instanceof Error
+              ? activeHop.restorationError
+              : new Error('Home-team context could not be restored after the team hop')
+          )
+          return
+        }
+        try {
+          resolve(await operation(activeHop.restoredToken))
+        } catch (error) {
+          reject(error)
+        }
+      })
+    })
+  }
+
+  private async drainHomeTeamOperations(activeHop: ActiveTeamContextHop): Promise<void> {
+    while (activeHop.homeTeamOperations.length > 0) {
+      if (
+        !activeHop.restoredToken &&
+        this.me &&
+        this.me.teamId !== activeHop.homeTeamId &&
+        this.sessionToken
+      ) {
+        try {
+          await this.switchSessionToTeam(activeHop.homeTeamId, this.requireSessionToken())
+          if (this.me?.teamId === activeHop.homeTeamId && this.sessionToken) {
+            activeHop.restoredToken = this.sessionToken
+            activeHop.restorationError = null
+            this.updateEntityChangeSessionToken(this.sessionToken)
+            this.restartEntityChangeStreamForSessionReplacement()
+          }
+        } catch (error) {
+          activeHop.restorationError = error
+        }
+      }
+      const operations = activeHop.homeTeamOperations.splice(0)
+      for (const operation of operations) await operation()
+    }
+    if (this.activeTeamContextHop === activeHop) this.activeTeamContextHop = null
   }
 
   private async resolveTeamForHostRefs(hostRefs: string[]): Promise<string | null> {
