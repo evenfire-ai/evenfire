@@ -82,6 +82,10 @@ export class SessionTokenStorageClearError extends AggregateError {
       this.failedFileCount === 0
     )
   }
+
+  canUseFileFallbackWhileMarkerRemains(): boolean {
+    return this.failedKeytarAccounts.length > 0 && this.failedFileCount === 0
+  }
 }
 
 export type StrictSessionTokenClearResult = {

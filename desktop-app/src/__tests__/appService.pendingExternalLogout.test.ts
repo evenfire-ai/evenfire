@@ -332,30 +332,36 @@ describe('AppService pending external logout', () => {
     expect(internals(service).sessionToken).toBe(loginResult.token)
   })
 
-  it('does not replace a credential when a legacy Keytar delete also fails', async () => {
+  it('allows file-backed login when the whole Keytar store fails and retains the marker', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
-    const persistToken = vi.spyOn(tokenStore, 'setSessionToken')
     const keytar = await import('keytar')
+    const originalGet = vi.mocked(keytar.getPassword).getMockImplementation()!
+    const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
     const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
-    vi.mocked(keytar.deletePassword).mockImplementation(async () => {
+    const unavailable = async () => {
       throw new Error('keychain temporarily locked')
-    })
+    }
+    vi.mocked(keytar.getPassword).mockImplementation(unavailable)
+    vi.mocked(keytar.setPassword).mockImplementation(unavailable)
+    vi.mocked(keytar.deletePassword).mockImplementation(unavailable)
 
     try {
-      await expect(
-        internals(service).installAuthenticatedLoginOnce(loginResult)
-      ).rejects.toMatchObject({ message: 'Failed to clear session token storage' })
+      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+        authenticated: true,
+        me: loginResult.me,
+      })
 
-      expect(persistToken).not.toHaveBeenCalled()
       expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
       expect(keychain.get(keyOf('Evenfire', `session-token::${activeEnvKey}`))).toBe(
         'previous-session-token'
       )
-      expect(internals(service).sessionToken).toBeNull()
-      expect(internals(service).me).toBeNull()
+      expect(internals(service).sessionToken).toBe(loginResult.token)
+      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(loginResult.token)
     } finally {
+      vi.mocked(keytar.getPassword).mockReset().mockImplementation(originalGet)
+      vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
       vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
     }
   })

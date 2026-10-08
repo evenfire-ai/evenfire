@@ -1766,6 +1766,13 @@ export class AppService {
       ) {
         return { present: true, replaceKeytarEntry: true, retireMarker: true }
       }
+      if (
+        error instanceof SessionTokenStorageClearError &&
+        error.canUseFileFallbackWhileMarkerRemains()
+      ) {
+        this.reportDeferredLogoutFailureSafely(error)
+        return { present: true, replaceKeytarEntry: false, retireMarker: false }
+      }
       await this.failClosedForPendingLogout(error)
       throw error
     }
