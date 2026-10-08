@@ -183,21 +183,28 @@ describe('GFS download store budget: share of the workspace volume', () => {
     { name: 'a zero block size', bsize: 0n, blocks: 1000n },
     { name: 'a zero block count', bsize: 1n, blocks: 0n },
     { name: 'a negative block count', bsize: 1n, blocks: -1n },
-  ])('BUD-5: statfs reporting $name refuses with free_space', async ({ bsize, blocks }) => {
-    const store = await openStore()
-    const observed = await nativeFs.statfs(hostRoot, { bigint: true })
-    statfsBoundary.mockResolvedValue({ ...observed, bsize, blocks })
-    const denied = await quotaCount('host', 'free_space')
+  ])(
+    'BUD-5: statfs reporting $name twice refuses as volume_unmeasurable with free_space',
+    async ({ bsize, blocks }) => {
+      const store = await openStore()
+      const observed = await nativeFs.statfs(hostRoot, { bigint: true })
+      statfsBoundary.mockResolvedValue({ ...observed, bsize, blocks })
+      statfsBoundary.mockClear()
+      const denied = await quotaCount('host', 'free_space')
 
-    await expect(startTransfer(store, rootA, A, 31, 4)).rejects.toMatchObject({
-      code: 'host_quota_exceeded',
-    })
-    expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
+      await expect(startTransfer(store, rootA, A, 31, 4)).rejects.toMatchObject({
+        code: 'volume_unmeasurable',
+        message: 'GFS download store failed (volume_unmeasurable)',
+      })
+      // Exactly one re-measure: the refusal follows the second invalid reading.
+      expect(statfsBoundary).toHaveBeenCalledTimes(2)
+      expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
 
-    // Witness: the real statfs admits the same request.
-    statfsBoundary.mockImplementation(nativeFs.statfs)
-    await expect(startTransfer(store, rootA, A, 31, 4)).resolves.toBeDefined()
-  })
+      // Witness: the real statfs admits the same request.
+      statfsBoundary.mockImplementation(nativeFs.statfs)
+      await expect(startTransfer(store, rootA, A, 31, 4)).resolves.toBeDefined()
+    }
+  )
 })
 
 describe('GFS download store budget: a full disk and a full cache are distinct refusals', () => {
@@ -238,21 +245,50 @@ describe('GFS download store budget: a full disk and a full cache are distinct r
     await expect(startTransfer(store, rootC, C, 43, 1)).resolves.toBeDefined()
   })
 
-  it('DSK-2: statfs reporting a negative available-block count keeps host_quota_exceeded, not disk_full', async () => {
+  it('DSK-2: statfs reporting a negative available-block count twice refuses as volume_unmeasurable, not disk_full or host_quota_exceeded', async () => {
     const store = await openStore()
     const observed = await nativeFs.statfs(hostRoot, { bigint: true })
     statfsBoundary.mockResolvedValue({ ...observed, bavail: -1n })
+    statfsBoundary.mockClear()
     const denied = await quotaCount('host', 'free_space')
+    const budgetDenied = await quotaCount('host', 'storage_bytes')
 
     const refusal = await startTransfer(store, rootA, A, 44, 4).catch((error: unknown) => error)
     expect(refusal).toBeInstanceOf(GfsDownloadStoreError)
-    expect((refusal as GfsDownloadStoreError).code).toBe('host_quota_exceeded')
+    expect((refusal as GfsDownloadStoreError).code).toBe('volume_unmeasurable')
+    expect(statfsBoundary).toHaveBeenCalledTimes(2)
     expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
+    expect(await quotaCount('host', 'storage_bytes')).toBe(budgetDenied)
 
     // Witness: the real statfs admits the same request.
     statfsBoundary.mockImplementation(nativeFs.statfs)
     await expect(startTransfer(store, rootA, A, 44, 4)).resolves.toBeDefined()
   })
+
+  it.each([
+    { name: 'a zero block size', fields: { bsize: 0n } },
+    { name: 'a zero block count', fields: { blocks: 0n } },
+    { name: 'a negative block count', fields: { blocks: -1n } },
+    { name: 'a negative available-block count', fields: { bavail: -1n } },
+  ])(
+    'DSK-4: one statfs reading with $name is measured again and a valid second reading admits',
+    async ({ fields }) => {
+      const store = await openStore()
+      const observed = await nativeFs.statfs(hostRoot, { bigint: true })
+      statfsBoundary.mockImplementation(nativeFs.statfs)
+      statfsBoundary.mockResolvedValueOnce({ ...observed, ...fields })
+      statfsBoundary.mockClear()
+      const denied = await quotaCount('host', 'free_space')
+
+      const admitted = await startTransfer(store, rootA, A, 46, 4)
+      expect(admitted.transfer.sizeBytes).toBe(4)
+      // The free-space check read twice (invalid, then valid) and the check
+      // after eviction once: a refusal on the first reading would stop at one.
+      expect(statfsBoundary).toHaveBeenCalledTimes(3)
+      expect(await quotaCount('host', 'free_space')).toBe(denied)
+      await store.fail(admitted.transfer.id, A)
+    }
+  )
 
   it.each([
     { name: 'one byte above the file limit', size: 11 },

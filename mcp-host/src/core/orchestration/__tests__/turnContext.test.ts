@@ -104,19 +104,23 @@ describe('prepared GFS receipts', () => {
     expect(block.split('\n').filter(line => line.includes(GFS_DISK_FULL_GUIDANCE))).toHaveLength(1)
   })
 
-  it('tells the model the download cache is full and that only the caller may delete its own copies', () => {
+  it('tells the model the download cache is full and that the user can only finish or cancel their own tasks, with no offer to delete copies', () => {
     const block = unavailable('quota_exceeded')
     expect(block).toContain('status=unavailable code=quota_exceeded')
     expect(block).toContain(`For code=quota_exceeded: ${GFS_CACHE_FULL_GUIDANCE}`)
-    expect(GFS_CACHE_FULL_GUIDANCE).toContain("Host's cache of downloaded files is full")
-    expect(GFS_CACHE_FULL_GUIDANCE).toContain('cached copies expire')
-    expect(GFS_CACHE_FULL_GUIDANCE).toContain('Tell the user')
-    expect(GFS_CACHE_FULL_GUIDANCE).toContain('under .gfs-downloads in their workspace')
-    expect(GFS_CACHE_FULL_GUIDANCE).toContain('that no running task is using')
-    expect(GFS_CACHE_FULL_GUIDANCE).toContain(
-      'a task that still needs a deleted copy downloads it again'
+    expect(GFS_CACHE_FULL_GUIDANCE).toBe(
+      "The Host's cache of downloaded files is full, so the file was not downloaded. " +
+        'Space frees as tasks finish and downloaded copies expire. Tell the user. ' +
+        'They can finish or cancel their own running tasks to free space sooner, then try again. ' +
+        "Never act on another user's tasks or files."
     )
-    expect(GFS_CACHE_FULL_GUIDANCE).toContain("Never delete another user's copies.")
+    // The store already evicted every unprotected copy before refusing, so a
+    // manual deletion cannot admit the download (Addendum 12 item 4).
+    const guidanceLine = block
+      .split('\n')
+      .find(line => line.startsWith('For code=quota_exceeded: '))
+    expect(guidanceLine).toBeDefined()
+    expect(guidanceLine).not.toMatch(/delete|\.gfs-downloads|shell_exec/)
     expect(block).not.toContain(GFS_DISK_FULL_GUIDANCE)
     expect(block.split('\n').filter(line => line.includes(GFS_CACHE_FULL_GUIDANCE))).toHaveLength(1)
   })
@@ -166,6 +170,23 @@ describe('prepared GFS receipts', () => {
     expect(other).not.toContain('For code=')
     expect(other).not.toContain(GFS_DISK_FULL_GUIDANCE)
     expect(other).not.toContain(GFS_CACHE_FULL_GUIDANCE)
+  })
+
+  it('renders an unmeasurable volume without any guidance line', () => {
+    const block = buildTurnContextBlock({
+      date: new Date('2026-10-02T00:00:00Z'),
+      channel: { type: 'rpc' },
+      preparedGfsFiles: [
+        { referenceId: 'gfs:main:a@v1', status: 'unavailable', code: 'volume_unmeasurable' },
+        { referenceId: 'gfs:main:b@v1', status: 'unavailable', code: 'disk_full' },
+      ],
+    })
+    expect(block).toContain('status=unavailable code=volume_unmeasurable')
+    // Witness: the guidance path ran for the other refusal in the same block.
+    const guidance = block.split('\n').filter(line => line.startsWith('For code='))
+    expect(guidance).toEqual([`For code=disk_full: ${GFS_DISK_FULL_GUIDANCE}`])
+    expect(block).not.toContain('For code=volume_unmeasurable')
+    expect(block).not.toContain(GFS_CACHE_FULL_GUIDANCE)
   })
 })
 

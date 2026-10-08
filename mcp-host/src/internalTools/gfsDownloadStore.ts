@@ -58,15 +58,18 @@ export type GfsDownloadStoreErrorCode =
   | 'download_busy'
   | 'download_expired'
   | 'download_missing'
-  /**
-   * The retained-download budget or one caller's protected share of it is
-   * full, or the volume cannot be measured.
-   */
+  /** The retained-download budget or one caller's protected share of it is full. */
   | 'host_quota_exceeded'
   /** The declared size is not a safe non-negative integer up to the file limit. */
   | 'limit_exceeded'
   | 'publication_cancelled'
   | 'storage_write_failed'
+  /**
+   * statfs gave an invalid reading (a non-positive block size or block count,
+   * or a negative available-block count) twice in a row, so the volume cannot
+   * be sized: neither the disk nor the cache is known to be full.
+   */
+  | 'volume_unmeasurable'
   | 'workspace_unavailable'
 
 export class GfsDownloadStoreError extends Error {
@@ -196,11 +199,35 @@ export interface GfsDownloadInventory {
 }
 
 /**
+ * `failed`: the directory was not moved and still holds its bytes under its
+ * own name. `trashed`: it was renamed to its trash name but not removed, so
+ * its bytes are on disk under that name; the retained-byte charge it carried
+ * moved there with it (see removeDirectory).
+ */
+type RemovalResult = 'removed' | 'absent' | 'failed' | 'trashed'
+
+/**
+ * A removal that renamed `directory` to `trash` and then could not remove
+ * `trash` (or could not prove it gone). `code` is the underlying errno or
+ * store code, so logs and errorCode() see the real cause.
+ */
+class TrashLeftError extends Error {
+  readonly code: string
+
+  constructor(
+    readonly trash: string,
+    cause: unknown
+  ) {
+    super('GFS download store left a renamed directory on disk')
+    this.name = 'TrashLeftError'
+    this.code = errorCode(cause)
+  }
+}
+
+/**
  * `unknown`: the disk did not answer (EMFILE, EIO, ...). Nothing is decided
  * about the directory; it is kept as it is and inspected again later.
  */
-type RemovalResult = 'removed' | 'absent' | 'failed'
-
 type DirectoryState =
   | { state: 'absent' }
   | { state: 'incomplete' }
@@ -545,11 +572,15 @@ export class GfsDownloadStore {
         throw new GfsDownloadStoreError('download_busy')
       }
       if (input.retentionOwnerId !== undefined) this.assertReceiptOwner(input.retentionOwnerId)
-      // Verified free capacity first: no eviction happens for an admission the
-      // volume cannot hold anyway. Measured again after eviction below. The
-      // same statfs sizes the budget, so a resized volume counts at once.
-      const volume = await this.assertPhysicalCapacity(input.sizeBytes)
+      // The sweep runs first: it removes only expired copies (pinned ones
+      // included) and incomplete directories, so bytes the store must delete
+      // anyway never refuse an admission as disk_full. Then verified free
+      // capacity, before any eviction: no live cached copy is evicted for an
+      // admission the volume cannot hold anyway. Measured again after
+      // eviction below. The same statfs sizes the budget, so a resized volume
+      // counts at once.
       await this.sweep(Date.now())
+      const volume = await this.assertPhysicalCapacity(input.sizeBytes)
       const budget = retainedBudget(volume)
       // The reservation itself is protected until it settles, pinned or not.
       this.assertProtectedRoom(input.callerIdentity, budget, { sizeBytes: input.sizeBytes })
@@ -823,6 +854,10 @@ export class GfsDownloadStore {
         return undefined
       }
       this.assertPublicationOpen(bounds)
+      // Expiry may have been crossed while the copy was hashed: an expired
+      // copy is a cache miss, never pinned or returned. The caller downloads
+      // the file again and the sweep removes this copy.
+      if (Date.parse(entry.expiresAt) <= Date.now()) return undefined
       entry.lastUsedMs = Date.now()
       if (bounds?.retentionOwnerId !== undefined)
         this.pin(bounds.retentionOwnerId, callerIdentity, entry.id)
@@ -846,7 +881,8 @@ export class GfsDownloadStore {
       if (this.active.get(id) !== transfer) throw new GfsDownloadStoreError('download_busy')
       this.releaseActive(id)
       this.unpinId(id)
-      if ((await this.removeDirectory(transfer.directory, 'incomplete_removed')) === 'failed')
+      const result = await this.removeDirectory(transfer.directory, 'incomplete_removed')
+      if (result === 'failed' || result === 'trashed')
         throw new GfsDownloadStoreError('storage_write_failed')
     })
   }
@@ -1028,11 +1064,16 @@ export class GfsDownloadStore {
     for (const { id, directory } of await this.listInputDirectories(totals))
       addCandidate(id, directory)
     for (const entry of this.entries.values()) addCandidate(entry.id, entry.directory)
-    const removeIncomplete = async (directory: string): Promise<boolean> => {
-      const result = await this.removeDirectory(directory, 'incomplete_removed')
+    /**
+     * A removal that leaves the directory under its trash name is not 'failed'
+     * for the index: the old name is gone and the charge, when `charge` or a
+     * held charge gives one, moved to the trash name (removeDirectory).
+     */
+    const removeIncomplete = async (directory: string, charge?: number): Promise<RemovalResult> => {
+      const result = await this.removeDirectory(directory, 'incomplete_removed', charge)
       if (result === 'removed') totals.removedIncomplete += 1
-      else if (result === 'failed') totals.removeFailed += 1
-      return result !== 'failed'
+      else if (result === 'failed' || result === 'trashed') totals.removeFailed += 1
+      return result
     }
     // A duplicate this sweep could not remove is still on disk, so it stays
     // charged: a failed cleanup never turns into free capacity. Its charge is
@@ -1040,13 +1081,23 @@ export class GfsDownloadStore {
     // directory gone: ENOENT, ENOTDIR (a parent is no longer a directory) or
     // a path that is no longer a directory. An inspection or listing that
     // fails, or any other lstat answer, carries the previous sweep's charge
-    // over instead of reading as zero.
+    // over instead of reading as zero. A charge that a removal moved to a
+    // trash name is held under that name by the same rule. `previousHeld` is
+    // the live `this.held`, so a charge removeDirectory moves during this
+    // sweep is carried by the loop below.
     const previousHeld = this.held
     const held = new Map<string, HeldCopy>()
     const settled = new Set<string>()
     const removeDuplicate = async (id: string, directory: string): Promise<void> => {
       settled.add(directory)
-      if (await removeIncomplete(directory)) return
+      // Sized before the removal when no earlier sweep charged it, so a copy
+      // left under a trash name stays charged.
+      let charge = previousHeld.get(directory)?.sizeBytes
+      if (charge === undefined) {
+        const before = await this.inspectDirectory(directory, id, now)
+        if (before.state === 'complete') charge = before.entry.sizeBytes
+      }
+      if ((await removeIncomplete(directory, charge)) !== 'failed') return
       const state = await this.inspectDirectory(directory, id, now)
       if (state.state === 'complete') held.set(directory, { sizeBytes: state.entry.sizeBytes })
       else if (state.state === 'unknown' || state.state === 'incomplete') {
@@ -1061,11 +1112,13 @@ export class GfsDownloadStore {
         this.active.get(id)?.directory ??
         (indexed?.provenance === 'published' ? indexed.directory : undefined)
       if (owned === undefined && directories.length > 1) {
-        // The indexed directory is forgotten only once it is gone; a failed
-        // removal leaves it indexed and charged, like any other entry.
+        // The indexed directory is forgotten only once its name is gone; a
+        // failed removal leaves it indexed and charged, like any other entry,
+        // and one left under a trash name is charged there instead.
         for (const duplicate of directories) {
           if (duplicate !== indexed?.directory) await removeDuplicate(id, duplicate)
-          else if (await removeIncomplete(duplicate)) this.forget(id)
+          else if ((await removeIncomplete(duplicate, indexed.sizeBytes)) !== 'failed')
+            this.forget(id)
         }
         continue
       }
@@ -1091,18 +1144,20 @@ export class GfsDownloadStore {
         )
         continue
       }
-      // An entry is forgotten only once its directory is gone: a failed
-      // removal leaves it indexed, charged and with its provenance.
+      // An entry is forgotten only once its directory name is gone: a failed
+      // removal leaves it indexed, charged and with its provenance; a removal
+      // that left it under a trash name moved its charge there.
       if (state.state === 'incomplete') {
-        if (await removeIncomplete(directory)) this.forget(id)
+        const charge = indexed?.directory === directory ? indexed.sizeBytes : undefined
+        if ((await removeIncomplete(directory, charge)) !== 'failed') this.forget(id)
         continue
       }
       const entry = state.entry
       if (Date.parse(entry.expiresAt) <= now) {
-        const result = await this.removeDirectory(directory, 'expired_removed')
+        const result = await this.removeDirectory(directory, 'expired_removed', entry.sizeBytes)
         if (result === 'removed') totals.removedExpired += 1
-        if (result === 'failed') totals.removeFailed += 1
-        else this.forget(id)
+        if (result === 'failed' || result === 'trashed') totals.removeFailed += 1
+        if (result !== 'failed') this.forget(id)
         continue
       }
       this.entries.set(id, entry)
@@ -1228,10 +1283,12 @@ export class GfsDownloadStore {
       this.reportSweepFailure(error)
       return found
     }
+    // A trash directory a held charge names keeps that charge through the
+    // removal: removeDirectory moves it to the next trash name or releases it.
     const removeStray = async (directory: string, sweep: SweepTotals) => {
       const result = await this.removeDirectory(directory, 'incomplete_removed')
       if (result === 'removed') sweep.removedIncomplete += 1
-      else if (result === 'failed') sweep.removeFailed += 1
+      else if (result === 'failed' || result === 'trashed') sweep.removeFailed += 1
     }
     for (const user of users) {
       if (!user.isDirectory()) continue
@@ -1442,7 +1499,15 @@ export class GfsDownloadStore {
       if (!isDefinitiveMismatch(error)) throw error
     }
     const replaced = this.idsUnder(downloadsRoot)
-    await this.removeVerified(downloadsRoot)
+    try {
+      await this.removeVerified(downloadsRoot)
+    } catch (error) {
+      // Renamed but not removed: every copy charged under the old name is
+      // now on disk under the trash name, so the charge moves there.
+      if (error instanceof TrashLeftError)
+        this.moveChargesToTrash(downloadsRoot, replaced, error.trash)
+      throw error
+    }
     for (const id of replaced) this.forget(id)
     await fs.mkdir(downloadsRoot, { mode: 0o700 })
     await verifyPrivateStoreDirectory(downloadsRoot)
@@ -1455,18 +1520,42 @@ export class GfsDownloadStore {
   }
 
   /**
-   * A statfs whose block size or block count is not positive cannot size
-   * anything; it records `free_space` but keeps `host_quota_exceeded`, because
-   * an unmeasurable volume is not proof that the disk is full, and `disk_full`
-   * tells the model to offer the user a workspace cleanup.
+   * `root` was renamed to `trash` and not removed: the indexed copies `ids`
+   * and every held charge below `root` are charged once, as one held charge
+   * on `trash`, and the copies are forgotten (their names are gone).
+   */
+  private moveChargesToTrash(root: string, ids: string[], trash: string): void {
+    let bytes = 0
+    for (const id of ids) {
+      const entry = this.entries.get(id)
+      if (entry) bytes += entry.sizeBytes
+      this.forget(id)
+    }
+    for (const [directory, copy] of this.held)
+      if (directory === root || isWithinDirectory(directory, root)) {
+        bytes += copy.sizeBytes
+        this.held.delete(directory)
+      }
+    if (bytes > 0) this.held.set(trash, { sizeBytes: bytes })
+  }
+
+  /**
+   * A statfs reading whose block size or block count is not positive, or
+   * whose available-block count is negative, cannot size anything. The volume
+   * is measured once more at once; a second invalid reading records
+   * `free_space` and refuses with `volume_unmeasurable`, never `disk_full` or
+   * `host_quota_exceeded`: an unmeasurable volume is proof of neither a full
+   * disk nor a full cache, and each of those codes tells the model something
+   * about space. A statfs that rejects is not a reading and propagates as is.
    */
   private async measureVolume(): Promise<VolumeSpace> {
-    const space = await fs.statfs(this.hostRoot, { bigint: true })
-    if (space.bsize <= 0n || space.blocks <= 0n || space.bavail < 0n) {
-      recordGfsDownloadQuota('host', 'free_space')
-      throw new GfsDownloadStoreError('host_quota_exceeded')
+    for (let reading = 0; reading < 2; reading += 1) {
+      const space = await fs.statfs(this.hostRoot, { bigint: true })
+      if (space.bsize > 0n && space.blocks > 0n && space.bavail >= 0n)
+        return { bsize: space.bsize, blocks: space.blocks, bavail: space.bavail }
     }
-    return { bsize: space.bsize, blocks: space.blocks, bavail: space.bavail }
+    recordGfsDownloadQuota('host', 'free_space')
+    throw new GfsDownloadStoreError('volume_unmeasurable')
   }
 
   private async assertPhysicalCapacity(sizeBytes: number): Promise<VolumeSpace> {
@@ -1510,12 +1599,15 @@ export class GfsDownloadStore {
    * Eviction never reclaims an unexpired pinned copy or a reservation, so
    * without a bound one caller's open tasks could hold the whole budget and
    * refuse every other caller. One caller's protected bytes may therefore
-   * reach at most half the budget. That bounds each caller, not their sum:
-   * several callers together can protect the whole budget, and then every
-   * positive-size admission is refused until protection is released or the
-   * pinned copies expire (expiry is absolute, so the retention window bounds
-   * that state). Only this caller's own usage decides; the refusal is the
-   * fixed code.
+   * reach at most `floor(budget / 2)`. That bounds each caller, not their
+   * sum: two callers at the cap protect `budget - (budget mod 2)` bytes, the
+   * whole budget when it is even and all but one byte when it is odd, and
+   * more callers can protect all of it. Then admissions larger than what is
+   * left are refused until protection is released or the pinned copies
+   * expire. Expiry is absolute, so one pinned copy cannot outlive its
+   * retention window, but re-pinning fresh copies (new downloads or reuse of
+   * unexpired ones) can keep that state beyond one TTL. Only this caller's
+   * own usage decides; the refusal is the fixed code.
    */
   private assertProtectedRoom(
     callerIdentity: string,
@@ -1583,15 +1675,21 @@ export class GfsDownloadStore {
   /**
    * Removes an indexed entry's directory, then forgets it. A failed removal
    * keeps the entry indexed: still charged to its caller, and a published
-   * copy stays published instead of coming back as adopted.
+   * copy stays published instead of coming back as adopted. A removal that
+   * left the directory under its trash name forgets the entry, whose name is
+   * gone, and its charge stays held on the trash name.
    */
   private async removeEntry(
     entry: Entry,
     outcome: 'incomplete_removed' | 'expired_removed',
     count = true
   ): Promise<void> {
-    if ((await this.removeDirectory(entry.directory, count ? outcome : undefined)) !== 'failed')
-      this.forget(entry.id)
+    const result = await this.removeDirectory(
+      entry.directory,
+      count ? outcome : undefined,
+      entry.sizeBytes
+    )
+    if (result !== 'failed') this.forget(entry.id)
   }
 
   /**
@@ -1601,11 +1699,22 @@ export class GfsDownloadStore {
    * must therefore be its own real path inside the Host root, and the
    * directory must be gone afterwards. A refusal or a failure is logged with
    * its code and counted; the next sweep retries what is still listed.
+   *
+   * Retained bytes stay charged while they are on disk. The charge is
+   * `charge` when the caller gives one (an indexed entry's size), otherwise a
+   * held charge already on `directory` (a held duplicate or a trash directory
+   * an earlier removal left). When the rename to the trash name succeeds but
+   * the trash is not removed, the charge moves to the trash name as a held
+   * charge, so the old name's absence never releases it; it is released only
+   * when a later removal of that trash succeeds or lstat proves it gone
+   * (sweep), and a failed retry moves it again to the next trash name.
    */
   private async removeDirectory(
     directory: string,
-    outcome: 'incomplete_removed' | 'expired_removed' | undefined
+    outcome: 'incomplete_removed' | 'expired_removed' | undefined,
+    charge?: number
   ): Promise<RemovalResult> {
+    const carried = charge ?? this.held.get(directory)?.sizeBytes
     let result: RemovalResult
     try {
       result = await this.removeVerified(directory)
@@ -1615,8 +1724,12 @@ export class GfsDownloadStore {
         { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error) },
         'GFS download store could not remove a download directory; the next sweep retries it'
       )
-      return 'failed'
+      if (!(error instanceof TrashLeftError)) return 'failed'
+      this.held.delete(directory)
+      if (carried !== undefined) this.held.set(error.trash, { sizeBytes: carried })
+      return 'trashed'
     }
+    this.held.delete(directory)
     // A directory that never existed is not a removal.
     if (result === 'removed' && outcome) recordGfsDownloadExpiry(outcome)
     return result
@@ -1628,7 +1741,9 @@ export class GfsDownloadStore {
    * renamed to a store-private name inside its verified parent; the parent is
    * then verified again, and only that private name is removed. When the
    * parent moved in between, the rename is undone and the removal refused,
-   * so whatever the swapped path led to keeps its name and content.
+   * so whatever the swapped path led to keeps its name and content. A
+   * failure after the rename throws TrashLeftError naming the trash path,
+   * because the bytes are then on disk under that name.
    */
   private async removeVerified(directory: string): Promise<'removed' | 'absent'> {
     await this.assertRemovable(directory)
@@ -1658,8 +1773,13 @@ export class GfsDownloadStore {
       }
       throw error
     }
-    await fs.rm(trash, { recursive: true, force: true })
-    await assertAbsent(trash)
+    try {
+      await fs.rm(trash, { recursive: true, force: true })
+      await assertAbsent(trash)
+    } catch (error) {
+      // The bytes are on disk under the trash name now, not under `directory`.
+      throw new TrashLeftError(trash, error)
+    }
     return 'removed'
   }
 

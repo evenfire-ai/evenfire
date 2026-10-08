@@ -3,7 +3,8 @@ import type { GfsDownloadStoreErrorCode } from './gfsDownloadStore'
 /**
  * Fixed model-facing guidance for the two space refusals of the GFS download
  * store. Both texts are constants: they carry no size, count, path or caller
- * identity, so they cannot reveal whose files use the space.
+ * identity, so they cannot reveal whose files use the space. An unmeasurable
+ * volume (`volume_unmeasurable`) carries no guidance: no user action helps.
  */
 export const GFS_DISK_FULL_GUIDANCE =
   'The Host workspace disk is full, so the file was not downloaded. Tell the user. ' +
@@ -12,12 +13,14 @@ export const GFS_DISK_FULL_GUIDANCE =
   'no longer need with a shell_exec command they approve. Never list, read or delete ' +
   "another user's directory or anything outside the workspace."
 
+// The store evicts every copy no running task protects before it refuses, so
+// deleting downloaded copies by hand cannot admit the download; only tasks
+// finishing (or being cancelled) and copies expiring free that space.
 export const GFS_CACHE_FULL_GUIDANCE =
   "The Host's cache of downloaded files is full, so the file was not downloaded. " +
-  'Space frees as other tasks finish and cached copies expire. Tell the user. ' +
-  'They may delete their own downloaded copies under .gfs-downloads in their workspace ' +
-  'that no running task is using, with a shell_exec command they approve; a task that ' +
-  "still needs a deleted copy downloads it again. Never delete another user's copies."
+  'Space frees as tasks finish and downloaded copies expire. Tell the user. ' +
+  'They can finish or cancel their own running tasks to free space sooner, then try again. ' +
+  "Never act on another user's tasks or files."
 
 /** The guidance a store refusal carries to the model, if it has one. */
 export function gfsStoreSpaceGuidance(code: GfsDownloadStoreErrorCode): string | undefined {

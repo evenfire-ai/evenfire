@@ -685,10 +685,6 @@
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
-    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a sweep keeps an incomplete entry indexed until its removal succeeds"
-  },
-  {
-    "suite": "gfsDownloadStoreAdversarial.test.ts",
     "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S17: createTransfer refuses an expiry at or before its creation instant"
   },
   {
@@ -790,18 +786,6 @@
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
     "fullName": "GFS download store budget: share of the workspace volume BUD-4: a large volume is sized in bigint without rounding"
-  },
-  {
-    "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a zero block size' refuses with free_space"
-  },
-  {
-    "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a zero block count' refuses with free_space"
-  },
-  {
-    "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a negative block count' refuses with free_space"
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
@@ -945,10 +929,6 @@
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-2: statfs reporting a negative available-block count keeps host_quota_exceeded, not disk_full"
-  },
-  {
-    "suite": "gfsDownloadStoreBudget.test.ts",
     "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-3: 'one byte above the file limit' is refused as limit_exceeded without a space metric"
   },
   {
@@ -1049,10 +1029,6 @@
   },
   {
     "suite": "turnContext.test.ts",
-    "fullName": "prepared GFS receipts tells the model the download cache is full and that only the caller may delete its own copies"
-  },
-  {
-    "suite": "turnContext.test.ts",
     "fullName": "prepared GFS receipts keeps the two space guidances distinct from each other"
   },
   {
@@ -1062,5 +1038,93 @@
   {
     "suite": "turnContext.test.ts",
     "fullName": "prepared GFS receipts adds each space guidance once for several refusals and none for other codes"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a sweep keeps an incomplete entry charged, under its trash name, until its removal succeeds"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a zero block size' twice refuses as volume_unmeasurable with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a zero block count' twice refuses as volume_unmeasurable with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a negative block count' twice refuses as volume_unmeasurable with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-2: statfs reporting a negative available-block count twice refuses as volume_unmeasurable, not disk_full or host_quota_exceeded"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-4: one statfs reading with 'a zero block size' is measured again and a valid second reading admits"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-4: one statfs reading with 'a zero block count' is measured again and a valid second reading admits"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-4: one statfs reading with 'a negative block count' is measured again and a valid second reading admits"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-4: one statfs reading with 'a negative available-block count' is measured again and a valid second reading admits"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: retention pins never outlive expiresAt (Addendum 10) an expired copy still on disk is not reused"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: expired copies never make the disk full (M1) an admission refused as disk_full only because of an expired pinned copy is admitted, and the expired directory is gone"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: expired copies never make the disk full (M1) a disk truly full after the sweep refuses as disk_full and leaves live cached copies intact"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) SOL-R5-TRASH-CHARGE: expired pinned copies whose trash cannot be removed keep their charge until cleanup succeeds"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: reuse that crosses expiry while hashing (R5-F2) SOL-R5-REUSE-CROSS-EXPIRY: a copy that expires while it is hashed is a cache miss and gets no pin"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code volume_unmeasurable to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code volume_unmeasurable to the model"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the bare volume_unmeasurable envelope to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the volume_unmeasurable envelope with the cache guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the volume_unmeasurable envelope with the disk guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the volume_unmeasurable envelope with an untrusted second line to its fixed category"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts tells the model the download cache is full and that the user can only finish or cancel their own tasks, with no offer to delete copies"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts renders an unmeasurable volume without any guidance line"
   }
 ]

@@ -353,9 +353,11 @@ describe('GFS download store errors at the tool boundary', () => {
     'limit_exceeded',
     'publication_cancelled',
     'storage_write_failed',
+    'volume_unmeasurable',
     'workspace_unavailable',
   ]
-  // Only the two space refusals carry guidance, as an exact second line.
+  // Only the two space refusals carry guidance, as an exact second line; an
+  // unmeasurable volume is the bare envelope.
   const toolError = (code: GfsDownloadStoreErrorCode): string =>
     code === 'disk_full'
       ? `GFS download store failed (disk_full)\n${GFS_DISK_FULL_GUIDANCE}`

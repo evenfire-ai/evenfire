@@ -130,10 +130,9 @@ describe('GFS download store: a FIFO in the store tree never blocks', () => {
     const root = callerDirectory(hostRoot, KEY)
     const directory = plantFifoMeta(root)
     const fifo = path.join(directory, 'meta.json')
-    // A writer that never writes: a read would get EAGAIN, not end-of-file.
-    const reader = syncFs.openSync(fifo, syncFs.constants.O_RDONLY | syncFs.constants.O_NONBLOCK)
-    const writer = syncFs.openSync(fifo, syncFs.constants.O_WRONLY)
-    syncFs.closeSync(reader)
+    // A writer that never writes: a read would get EAGAIN, not end-of-file. One O_RDWR open attaches
+    // the writer without blocking (Linux and macOS), so there is no separate reader open to race with.
+    const writer = syncFs.openSync(fifo, syncFs.constants.O_RDWR | syncFs.constants.O_NONBLOCK)
     try {
       const sweep = store.cleanupExpired()
       expect(await settleWithin(sweep, fifo, 'reader')).toBe('settled')

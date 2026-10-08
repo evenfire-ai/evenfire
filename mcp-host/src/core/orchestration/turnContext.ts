@@ -106,6 +106,8 @@ export type GfsPreparationFailure =
   | 'disk_full'
   /** The Host's cache of downloaded files has no room for the download. */
   | 'quota_exceeded'
+  /** The Host volume could not be measured, so no download was admitted. */
+  | 'volume_unmeasurable'
   | 'limit_exceeded'
   | 'timeout'
   | 'invalid_response'

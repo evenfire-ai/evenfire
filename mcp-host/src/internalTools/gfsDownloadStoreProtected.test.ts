@@ -275,6 +275,32 @@ describe('GFS download store: a caller protects at most half the budget (R3-F1)'
 })
 
 describe('GFS download store: retention pins never outlive expiresAt (Addendum 10)', () => {
+  it('an expired copy still on disk is not reused', async () => {
+    const store = await openStore()
+    const pinned = await completedCopy(store, rootA, A, 0, 10, { owner: 'task-a' })
+    const directory = downloadDirectory(rootA, pinned.receipt.id)
+    // Witness: before expiry the same lookup reuses the copy.
+    await expect(store.reusableReceipt(A, sourceFor(0), 10)).resolves.toMatchObject({
+      id: pinned.receipt.id,
+    })
+
+    // Past expiresAt with no sweep in between: the copy is still on disk.
+    vi.setSystemTime(Date.now() + 2 * HOUR_MS)
+    await expect(store.reusableReceipt(A, sourceFor(0), 10)).resolves.toBeUndefined()
+    await expect(
+      store.reusableReceipt(A, sourceFor(0), 10, { retentionOwnerId: 'task-b' })
+    ).resolves.toBeUndefined()
+    expect(exists(directory)).toBe(true)
+    await expect(store.readManagedFile(pinned.receipt.path, A)).rejects.toMatchObject({
+      code: 'download_expired',
+    })
+
+    // Witness: a fresh download of the same source is published and served.
+    const fresh = await completedCopy(store, rootA, A, 0, 10, { owner: 'task-b' })
+    expect(fresh.receipt.id).not.toBe(pinned.receipt.id)
+    await expect(store.readManagedFile(fresh.receipt.path, A)).resolves.toEqual(fresh.bytes)
+  })
+
   it('the sweep removes a pinned copy once it is past its expiry', async () => {
     const store = await openStore()
     const pinned = await completedCopy(store, rootA, A, 0, 10, { owner: 'task-a' })
@@ -373,10 +399,10 @@ describe('GFS download store: re-pinning an already protected copy (R4-F1)', () 
     expect(statfsBoundary.mock.calls.length).toBe(callsBefore)
 
     // Control: a copy A does not protect yet must size the budget, and the
-    // same armed EIO refuses it.
+    // same armed EIO refuses it with that exact errno.
     await expect(
       store.reusableReceipt(A, sourceFor(1), 5, { retentionOwnerId: 'task-b' })
-    ).rejects.toBeInstanceOf(Error)
+    ).rejects.toMatchObject({ code: 'EIO', message: 'EIO: injected by the test' })
     expect(statfsBoundary.mock.calls.length).toBe(callsBefore + 1)
   })
 })

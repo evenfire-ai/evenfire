@@ -488,7 +488,7 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
     expect(await expiryCount('incomplete_removed')).toBe(removed)
   })
 
-  it('a sweep keeps an incomplete entry indexed until its removal succeeds', async () => {
+  it('a sweep keeps an incomplete entry charged, under its trash name, until its removal succeeds', async () => {
     const store = await openStore()
     const root = callerDirectory(hostRoot, KEY)
     const { receipt } = await completedCopy(store, root, KEY, 8, 16)
@@ -501,16 +501,26 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
     await store.cleanupExpired()
     faults.clear()
 
-    // Witness: the sweep tried to remove it, and the removal failed.
+    // Witness: the sweep renamed it and its rm failed; the bytes now sit
+    // under the trash name, which carries the entry's 16-byte charge.
     expect(removals).toHaveLength(1)
     expect(await expiryCount('remove_failed')).toBe(failedRemovals + 1)
-    expect(indexedEntry(store, receipt.id)).toBeDefined()
+    expect(exists(directory)).toBe(false)
+    expect(exists(removals[0]!)).toBe(true)
+    expect(heldCharges(store)).toEqual(new Map([[removals[0]!, 16]]))
+    expect(() => indexedEntry(store, receipt.id)).toThrow('entry is not indexed')
 
     await store.cleanupExpired()
-    expect(exists(directory)).toBe(false)
-    expect(() => indexedEntry(store, receipt.id)).toThrow('entry is not indexed')
+    expect(exists(removals[0]!)).toBe(false)
+    expect(heldCharges(store).size).toBe(0)
   })
 })
+
+/** White-box view of the held charges, by directory. */
+function heldCharges(store: GfsDownloadStore): Map<string, number> {
+  const held = (store as unknown as { held: Map<string, { sizeBytes: number }> }).held
+  return new Map([...held].map(([directory, copy]) => [directory, copy.sizeBytes]))
+}
 
 interface IndexedEntryView {
   sourceIdentity?: { dev: bigint; ino: bigint }

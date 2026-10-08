@@ -1072,7 +1072,9 @@ export class TaskExecutor {
    * no pin and its file may have expired or been evicted, and the model
    * downloads it again. Release happens only after this executor reaches a
    * terminal state. A failed release leaves the pin in place, so its files stay
-   * protected until the Host restarts.
+   * protected until the Host restarts or until each copy reaches its
+   * `expiresAt`, whichever comes first: expiry is absolute and a pin never
+   * protects an expired copy.
    */
   private settleGfsRetentionOwner(): Promise<void> {
     if (this.state === 'waiting_approval' && !this.abortController.signal.aborted)
@@ -1087,7 +1089,7 @@ export class TaskExecutor {
       } catch (error) {
         logger.error(
           { taskId: this.taskId, callerIdentity, err: error },
-          'GFS retention owner release failed; retained records remain protected'
+          'GFS retention owner release failed; retained records remain protected until restart or expiry'
         )
       }
     })()

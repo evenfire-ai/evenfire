@@ -92,7 +92,8 @@ function ok(content: unknown): InternalToolResult {
 // never the response body, which could carry paths or server internals.
 // A store space refusal keeps its fixed envelope as the first line and adds the
 // fixed guidance for its code as a second line; gfsFilePreparation accepts that
-// exact second line and nothing else.
+// exact second line and nothing else. Every other store code, including
+// `volume_unmeasurable`, is the bare envelope.
 function fail(error: unknown): InternalToolResult {
   if (error instanceof VisualInputError) return { success: false, error: error.message }
   if (error instanceof GfsDownloadStoreError) {

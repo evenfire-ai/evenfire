@@ -302,6 +302,7 @@ describe('GFS file preparation', () => {
 
   const diskFull = 'Error: GFS download store failed (disk_full)'
   const cacheFull = 'Error: GFS download store failed (host_quota_exceeded)'
+  const volumeUnmeasurable = 'Error: GFS download store failed (volume_unmeasurable)'
   it.each([
     [
       'the disk_full envelope with its guidance',
@@ -342,6 +343,22 @@ describe('GFS file preparation', () => {
     [
       'the store limit_exceeded envelope with the cache guidance',
       `Error: GFS download store failed (limit_exceeded)\n${GFS_CACHE_FULL_GUIDANCE}`,
+      'download_failed',
+    ],
+    ['the bare volume_unmeasurable envelope', volumeUnmeasurable, 'volume_unmeasurable'],
+    [
+      'the volume_unmeasurable envelope with the cache guidance',
+      `${volumeUnmeasurable}\n${GFS_CACHE_FULL_GUIDANCE}`,
+      'download_failed',
+    ],
+    [
+      'the volume_unmeasurable envelope with the disk guidance',
+      `${volumeUnmeasurable}\n${GFS_DISK_FULL_GUIDANCE}`,
+      'download_failed',
+    ],
+    [
+      'the volume_unmeasurable envelope with an untrusted second line',
+      `${volumeUnmeasurable}\nuntrusted detail`,
       'download_failed',
     ],
   ] as const)('maps %s to its fixed category', async (_label, content, code) => {

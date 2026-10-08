@@ -63,6 +63,9 @@ function failureCode(content: string): GfsPreparationFailure {
   if (fixed === 'download_missing' || fixed === 'download_expired') return 'missing'
   if (fixed === 'disk_full') return 'disk_full'
   if (fixed === 'host_quota_exceeded') return 'quota_exceeded'
+  // Carries no guidance: only the bare envelope maps here; with any second line
+  // the anchored envelope does not match and the result is download_failed.
+  if (fixed === 'volume_unmeasurable') return 'volume_unmeasurable'
   if (fixed === 'workspace_unavailable') return 'workspace_unavailable'
   if (fixed === 'limit_exceeded') return 'limit_exceeded'
   if (fixed === 'timeout') return 'timeout'
