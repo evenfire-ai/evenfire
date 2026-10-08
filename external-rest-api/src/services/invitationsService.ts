@@ -1,4 +1,4 @@
-import { controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 
 type AuthContext = {
   userId: string
@@ -100,6 +100,7 @@ export async function createDesktopAuthorization(
     })
     return { data }
   } catch (error) {
+    if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
     const message = error instanceof Error ? error.message : ''
     if (message.includes('(404)')) return { error: 'not_found' }
     return { error: 'invalid_password' }
