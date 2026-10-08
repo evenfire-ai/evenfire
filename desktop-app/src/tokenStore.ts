@@ -467,6 +467,9 @@ export class TokenStore {
     const scopedEnvKeys = [envKey, ...legacyEnvKeys]
     const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
     const storageErrors: unknown[] = []
+    if (!keytar && this.isolatedUserDataPath === undefined && options.throwOnStorageError) {
+      storageErrors.push(new Error('Keytar is unavailable during strict session-token clearing'))
+    }
     if (keytar) {
       const deleteKeychainPassword = async (account: string) => {
         try {
