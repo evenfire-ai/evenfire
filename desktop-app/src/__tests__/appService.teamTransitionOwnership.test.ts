@@ -303,6 +303,51 @@ describe('AppService deliberate team transition ownership', () => {
     expect(app.getSessionGeneration()).toBe(sessionGeneration)
   })
 
+  it('advances session generation when a failed restore leaves the borrowed team active', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const meA = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const meB = { ...meA, teamId: 'team-b', teamName: 'Team B' }
+    const app = service as unknown as {
+      authClient: unknown
+      me: { teamId: string } | null
+      sessionToken: string | null
+      readWorkflow(ns: string, name: string): Promise<unknown>
+      workflowTeamByKey: Map<string, string>
+      workflowKey(ns: string, name: string): string
+      getSessionGeneration(): number
+    }
+    let currentTeamId = 'team-a'
+    app.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me: meA }),
+      switchTeam: vi.fn(async (_token: string, teamId: string) => {
+        if (teamId === 'team-a' && currentTeamId === 'team-b') {
+          throw new Error('restore rejected')
+        }
+        currentTeamId = teamId
+        return { token: `session-${teamId}`, team: { id: teamId, name: teamId, role: 'member' } }
+      }),
+      getMe: vi.fn(async () => (currentTeamId === 'team-a' ? meA : meB)),
+      readWorkflow: vi.fn().mockResolvedValue({ workflow: 'result' }),
+    }
+    await service.googleLogin('synthetic-google-token')
+    app.workflowTeamByKey.set(app.workflowKey('team-a', 'flow-a'), 'team-b')
+    const previousGeneration = app.getSessionGeneration()
+
+    await expect(app.readWorkflow('team-a', 'flow-a')).rejects.toThrow('restore rejected')
+
+    expect(app.me?.teamId).toBe('team-b')
+    expect(app.sessionToken).toBe('session-team-b')
+    expect(app.getSessionGeneration()).toBe(previousGeneration + 1)
+  })
+
   it('rejects a stale handoff generation after a public login advances the session', async () => {
     const { service, runtimeConfig, optionA } = await createNativeCommitTestHarness()
     const app = service as unknown as {

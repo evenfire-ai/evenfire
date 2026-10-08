@@ -1346,7 +1346,10 @@ export class AppService {
         const originalTeamId = context.teamId
         const shouldRestore = Boolean(originalTeamId)
         let restoredOriginalTeam = false
-        let operationError: unknown
+        let operationFailed = false
+        let restoreFailed = false
+        let restoreFailure: unknown
+        let hopSessionToken: string | null = null
         const releaseTransientHop = this.enterGfsTransientTeamHop()
         if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
 
@@ -1354,11 +1357,12 @@ export class AppService {
           const activeToken = await this.switchSessionToTeam(targetTeamId, originalToken, {
             advanceSessionGeneration: false,
           })
+          hopSessionToken = activeToken
 
           try {
             return await operation(activeToken)
           } catch (error) {
-            operationError = error
+            operationFailed = true
             throw error
           } finally {
             if (shouldRestore) {
@@ -1368,11 +1372,14 @@ export class AppService {
                 })
                 restoredOriginalTeam = true
               } catch (restoreError) {
-                if (!operationError) throw restoreError
-                console.warn(
-                  '[AppService] Failed to restore team context after operation:',
-                  restoreError
-                )
+                restoreFailed = true
+                restoreFailure = restoreError
+                if (operationFailed) {
+                  console.warn(
+                    '[AppService] Failed to restore team context after operation:',
+                    restoreError
+                  )
+                }
               }
             }
             if (restoredOriginalTeam && this.sessionToken) {
@@ -1380,15 +1387,21 @@ export class AppService {
               this.restartEntityChangeStreamForSessionReplacement()
             } else if (
               shouldRestore &&
-              this.sessionToken &&
+              hopSessionToken &&
+              this.sessionToken === hopSessionToken &&
               this.me &&
-              this.me.teamId !== originalTeamId
+              String(this.me.teamId || '').trim() !== originalTeamId
             ) {
               // A failed restore leaves the hop team as the actual committed
-              // session. Rebind the stream to the token that remains active.
+              // session. Publish it as a new session before releasing the owner,
+              // then rebind session-scoped consumers to the token that remains.
+              if (this.sessionGeneration === context.sessionGeneration) {
+                this.sessionGeneration += 1
+              }
               this.updateEntityChangeSessionToken(this.sessionToken)
               this.restartEntityChangeStreamForSessionReplacement()
             }
+            if (restoreFailed && !operationFailed) throw restoreFailure
           }
         } finally {
           if (shouldRestore) {
