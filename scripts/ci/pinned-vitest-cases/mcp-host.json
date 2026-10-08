@@ -705,6 +705,10 @@
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a sweep keeps an incomplete entry indexed until its removal succeeds"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
     "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S17: createTransfer refuses an expiry at or before its creation instant"
   },
   {

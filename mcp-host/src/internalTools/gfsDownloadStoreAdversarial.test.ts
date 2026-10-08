@@ -467,6 +467,29 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
     expect(exists(renames[0]!)).toBe(false)
     expect(await expiryCount('incomplete_removed')).toBe(removed)
   })
+
+  it('a sweep keeps an incomplete entry indexed until its removal succeeds', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { receipt } = await completedCopy(store, root, KEY, 8, 16)
+    const directory = path.join(root, `.gfs-downloads/input-${receipt.id}`)
+    // A shorter source makes the indexed copy incomplete for the sweep.
+    syncFs.writeFileSync(path.join(directory, 'source'), 'short')
+    const failedRemovals = await expiryCount('remove_failed')
+    const removals = watch('rm', '', 'EIO')
+
+    await store.cleanupExpired()
+    faults.clear()
+
+    // Witness: the sweep tried to remove it, and the removal failed.
+    expect(removals).toHaveLength(1)
+    expect(await expiryCount('remove_failed')).toBe(failedRemovals + 1)
+    expect(indexedEntry(store, receipt.id)).toBeDefined()
+
+    await store.cleanupExpired()
+    expect(exists(directory)).toBe(false)
+    expect(() => indexedEntry(store, receipt.id)).toThrow('entry is not indexed')
+  })
 })
 
 interface IndexedEntryView {
