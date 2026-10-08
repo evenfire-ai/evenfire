@@ -2054,13 +2054,22 @@ export async function updateUserPassword(
     return { error: 'invalid_current_password' as const }
   }
 
-  await pool.query(
+  const update = await pool.query(
     `UPDATE users
-        SET password_hash = $2,
+        SET password_hash = $3,
             password_set_at = NOW(),
             updated_at = NOW()
-      WHERE id = $1`,
-    [normalizedUserId, await bcrypt.hash(nextPassword, 12)]
+      WHERE id = $1
+        AND password_auth_generation = $2
+        AND password_hash = $4
+      RETURNING id`,
+    [
+      normalizedUserId,
+      user.password_auth_generation,
+      await bcrypt.hash(nextPassword, 12),
+      user.password_hash,
+    ]
   )
+  if (update.rows.length !== 1) return { error: 'credential_changed' as const }
   return { updated: true as const }
 }

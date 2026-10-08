@@ -239,6 +239,57 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     expect(await completePasswordEvaluation(success, true)).toBe(false)
     expect((await row()).failures).toEqual([])
   })
+  it('prevents a stale authenticated password change from overwriting verified recovery', async () => {
+    const invitation = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    let resolveCompareEntered!: () => void
+    let releaseCompare!: () => void
+    const compareEntered = new Promise<void>(resolve => {
+      resolveCompareEntered = resolve
+    })
+    const continueCompare = new Promise<void>(resolve => {
+      releaseCompare = resolve
+    })
+    const originalCompare = bcrypt.compare.bind(bcrypt)
+    let paused = false
+    vi.spyOn(bcrypt, 'compare').mockImplementation(async (candidate, encoded) => {
+      const matches = await originalCompare(candidate, encoded)
+      if (!paused) {
+        paused = true
+        resolveCompareEntered()
+        await continueCompare
+      }
+      return matches
+    })
+
+    const stalePasswordChange = updateUserPassword(
+      userId,
+      email,
+      password,
+      'Synthetic-BUG192-stale-password-change'
+    )
+    await compareEntered
+    const recoveryPassword = 'Synthetic-BUG192-recovered-password'
+    const recovery = await setInvitationPasswordForEmail(email, invitation.id, recoveryPassword)
+    expect(recovery).not.toHaveProperty('error')
+
+    releaseCompare()
+    await expect(stalePasswordChange).resolves.toEqual({ error: 'credential_changed' })
+    await expect(
+      verifyMemberPassword(email, recoveryPassword, { publicLogin: false, userId })
+    ).resolves.toMatchObject({ id: userId })
+    const finalHash = (
+      await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])
+    ).rows[0].password_hash
+    await expect(bcrypt.compare('Synthetic-BUG192-stale-password-change', finalHash)).resolves.toBe(
+      false
+    )
+  })
   it('real reset/establishment producer clears cooldown and fences old work', async () => {
     const stale = await capturePasswordEvaluation(email, false)
     await completedFailures()

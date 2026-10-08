@@ -27,6 +27,10 @@ import {
   updateProfile,
   updateUserPassword,
 } from '../../services/directory/index.js'
+import {
+  PASSWORD_CREDENTIAL_CHANGED_RESPONSE,
+  PASSWORD_NOT_SET_RESPONSE,
+} from './passwordErrorResponses.js'
 
 const MAX_TEAM_DIRECTORY_TEAMS = 50
 const TEAM_DIRECTORY_RATE_LIMIT_PER_MINUTE = 10
@@ -304,10 +308,15 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         if ('error' in result) {
           if (result.error === 'not_found') return res.status(404).json({ error: 'not_found' })
           if (result.error === 'password_not_set') {
-            return res.status(409).json({ error: 'password_not_set' })
+            return res.status(PASSWORD_NOT_SET_RESPONSE.status).json(PASSWORD_NOT_SET_RESPONSE.body)
           }
           if (result.error === 'invalid_current_password') {
             return res.status(401).json({ error: 'invalid_current_password' })
+          }
+          if (result.error === 'credential_changed') {
+            return res
+              .status(PASSWORD_CREDENTIAL_CHANGED_RESPONSE.status)
+              .json(PASSWORD_CREDENTIAL_CHANGED_RESPONSE.body)
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
