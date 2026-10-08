@@ -1006,6 +1006,9 @@ build_image() {
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
   fi
+  if [ "$name" = profile-ui ]; then
+    docker_args+=(--build-arg "PROFILE_DESKTOP_HANDOFF_ENABLED=${PROFILE_DESKTOP_HANDOFF_ENABLED:-false}")
+  fi
   if [ "$name" = codex-approved-tools-control-api-e2e ]; then
     docker_args+=(--build-arg CONTROL_API_IMAGE=clerum/control-api:test)
     derived_base="clerum/control-api:test"
