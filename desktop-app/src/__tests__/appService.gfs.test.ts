@@ -949,7 +949,8 @@ describe('AppService GFS upload security scope', () => {
         expect(service.gfsDispatchBlocked).toBe(false)
         expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
           'token-b',
-          getActiveEnvKey()
+          getActiveEnvKey(),
+          {}
         )
       } finally {
         await rm(root, { recursive: true, force: true })
