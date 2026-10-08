@@ -88,6 +88,8 @@ modified MPL-licensed files. See [LICENSE](../../LICENSE).
 
 ## Related
 
+- [Evenfire on existing Amazon EKS (agent how-to)](aws-eks-agent-guide.md)
+- [Infrastructure questionnaire](client-infrastructure-requirements.md)
 - [WorkflowRecipes operations](workflow-recipes-guide.md)
 - [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md)
 - [Member invitations on self-hosted](../how-to/member-invitations-self-hosted.md)
