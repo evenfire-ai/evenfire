@@ -92,10 +92,6 @@ registerQuitDrain(
         }
       },
       error => {
-        if (isQuitAdmissionClosedError(error)) {
-          console.info('[Desktop] Deferred external logout remains pending while quit resumes.')
-          return
-        }
         const errorName = error instanceof Error && error.name ? error.name : typeof error
         console.error(`[Desktop] Deferred external logout failed (${errorName}).`)
         if (!appService.getCachedUserId() && mainWindow && !mainWindow.isDestroyed()) {
