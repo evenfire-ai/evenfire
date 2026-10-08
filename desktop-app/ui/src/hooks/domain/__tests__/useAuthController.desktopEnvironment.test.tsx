@@ -590,10 +590,30 @@ describe('Desktop environment handoff', () => {
     await act(async () => setAuthenticatedForTest?.(true))
     mocks.logoutForEnvironmentMismatch.mockClear()
 
-    await dispatchDesktopEnvironmentLink({
-      ...targetEnvironment,
-      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    let handoff!: Promise<void>
+    await act(async () => {
+      handoff = Promise.resolve(
+        desktopEnvironmentSetupListener!({
+          ...targetEnvironment,
+          externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+        })
+      )
     })
+    await waitFor(() => {
+      const wasRejected = mocks.setStatus.mock.calls.some(
+        ([message, tone]) =>
+          message ===
+            'Desktop setup link rejected because multiple saved environments use this REST API.' &&
+          tone === 'error'
+      )
+      const confirmationIsOpen =
+        screen.getByTestId('pending-environment-switch').textContent !== 'none'
+      expect(wasRejected || confirmationIsOpen).toBe(true)
+    })
+    if (screen.getByTestId('pending-environment-switch').textContent !== 'none') {
+      await act(async () => confirmDesktopEnvironmentSwitchForTest?.())
+    }
+    await act(async () => handoff)
 
     expect(screen.getByTestId('pending-environment-switch')).toHaveTextContent('none')
     expect(mocks.logoutForEnvironmentMismatch).not.toHaveBeenCalled()
