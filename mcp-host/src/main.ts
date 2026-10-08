@@ -20,14 +20,17 @@ import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
 import { createFileReferenceGfsGate } from './agent/fileReferenceGfsGate'
+import type { GfsSurfaceRuntimeCapability } from './agent/gfsReferenceSurfaces'
 import { createIncomingAdmission, replayedIncomingMessage } from './agent/incomingAdmission'
 import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
 import { IncomingDelivery } from './agent/incomingDelivery'
+import { ModelStepContinuationService } from './agent/modelStepContinuation'
 import {
   type SessionModelSelectionOptions,
   applySessionModelSelection as applySessionModelSelectionCore,
 } from './agent/sessionModelSelection'
 import { applySessionTitle as applySessionTitleCore } from './agent/sessionTitle'
+import type { ModelStepCheckpointExecutionSupport } from './agent/taskExecutor'
 import { BudgetClient } from './budget/budgetClient'
 // Structured JSON logging — must be first import
 import { config } from './config'
@@ -248,6 +251,7 @@ let gfsDownloadStore: GfsDownloadStore | null = null
 let gfsRuntimeStop: (() => Promise<void>) | null = null
 let spilloverStorage: SpilloverStorage | null = null
 let conversationStoreHandle: ConversationStoreHandle | null = null
+let modelStepContinuationService: ModelStepContinuationService | null = null
 let promptCache: PromptCache | null = null
 let sessionSearchService: SessionSearchService | null = null
 
@@ -1688,13 +1692,29 @@ async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): 
     { component: 'ModelStepCheckpoint', hostInstanceId, ...reaped },
     'model-step checkpoints ready'
   )
-  agent.setModelStepCheckpoints({
+  const support: ModelStepCheckpointExecutionSupport = {
     store,
     hostInstanceId,
     hostId: config.hostName,
     resumableTtlMs: config.modelStepCheckpointTtlMs,
     claimLeaseMs: config.modelStepClaimLeaseMs,
     attachmentTtlMs: config.modelStepAttachmentTtlMs,
+    fileReferenceGfsGate,
+    gfsSurfaceRuntimeCapability,
+  }
+  agent.setModelStepCheckpoints(support)
+  modelStepContinuationService = new ModelStepContinuationService({
+    checkpoints: support,
+    enqueue: async (message, taskId, continuation) => {
+      if (!messageQueue || !taskLifecycle || !sessionProcessor) {
+        throw new Error('Model-step continuation async admission is not initialized')
+      }
+      const task = messageQueue.createModelStepContinuationTask(message, taskId, continuation)
+      const response = await dispatchIncomingMessage(message, { async: true }, task)
+      if (!response.success || response.taskId !== taskId || response.status !== 'pending') {
+        throw new Error('Model-step continuation was not admitted as its claimed task')
+      }
+    },
   })
   modelStepCheckpointSweepTimer = setInterval(() => {
     store.sweep(config.modelStepCheckpointTtlMs).then(
@@ -2051,17 +2071,22 @@ const incomingDelivery = new IncomingDelivery()
 
 function dispatchIncomingMessage(
   message: IncomingMessage,
-  options?: { async?: boolean }
+  options?: { async?: boolean },
+  preparedTask?: Task
 ): MessageResponse | Promise<MessageResponse> {
-  const handler = new IncomingMessageHandler(message, {
-    messageQueue: messageQueue!,
-    agent,
-    pendingTaskResults,
-    getModel: () => currentHost?.spec.model?.name || 'unknown',
-    sanitizeAttachments,
-    sessionProcessor: sessionProcessor ?? undefined,
-    taskLifecycle: taskLifecycle!,
-  })
+  const handler = new IncomingMessageHandler(
+    message,
+    {
+      messageQueue: messageQueue!,
+      agent,
+      pendingTaskResults,
+      getModel: () => currentHost?.spec.model?.name || 'unknown',
+      sanitizeAttachments,
+      sessionProcessor: sessionProcessor ?? undefined,
+      taskLifecycle: taskLifecycle!,
+    },
+    preparedTask
+  )
 
   if (options?.async) {
     return handler.executeAsync()
@@ -2096,6 +2121,36 @@ const fileReferenceGfsGate = createFileReferenceGfsGate({
   logger,
 })
 
+function gfsSurfaceRuntimeCapability(message: IncomingMessage): GfsSurfaceRuntimeCapability {
+  const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
+  if (callerRootBinding.failureCode) {
+    logger.warn(
+      {
+        component: 'gfs-runtime',
+        event: 'gfs_caller_root_unavailable',
+        code: callerRootBinding.failureCode,
+      },
+      'GFS caller workspace unavailable; managed delivery and shell stay disabled'
+    )
+  }
+  const callerWorkspacePath = callerRootBinding.root
+  const shellApprovalEnabled =
+    (currentHost?.spec.approval || config.approvalConfig)?.tools?.shell_exec !== false
+  const workspaceFile = Boolean(
+    config.enableApproval &&
+    message.sender &&
+    gfsDownloadStore?.isAvailable() &&
+    callerWorkspacePath &&
+    shellApprovalEnabled
+  )
+  return {
+    workspaceFile,
+    localExecutor: workspaceFile,
+    // Visual support is decided per physical provider attempt, never here.
+    visual: false,
+  }
+}
+
 const prepareIncomingMessage = createIncomingAdmission({
   limits: {
     maxCount: INCOMING_ATTACHMENT_MAX_COUNT,
@@ -2112,35 +2167,7 @@ const prepareIncomingMessage = createIncomingAdmission({
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
   fileReferenceGfs: fileReferenceGfsGate,
-  gfsSurfaceRuntimeCapability: message => {
-    const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
-    if (callerRootBinding.failureCode) {
-      logger.warn(
-        {
-          component: 'gfs-runtime',
-          event: 'gfs_caller_root_unavailable',
-          code: callerRootBinding.failureCode,
-        },
-        'GFS caller workspace unavailable; managed delivery and shell stay disabled'
-      )
-    }
-    const callerWorkspacePath = callerRootBinding.root
-    const shellApprovalEnabled =
-      (currentHost?.spec.approval || config.approvalConfig)?.tools?.shell_exec !== false
-    const workspaceFile = Boolean(
-      config.enableApproval &&
-      message.sender &&
-      gfsDownloadStore?.isAvailable() &&
-      callerWorkspacePath &&
-      shellApprovalEnabled
-    )
-    return {
-      workspaceFile,
-      localExecutor: workspaceFile,
-      // Visual support is decided per physical provider attempt, never here.
-      visual: false,
-    }
-  },
+  gfsSurfaceRuntimeCapability,
   logger,
 })
 
@@ -2822,6 +2849,15 @@ async function startRPCServer(): Promise<void> {
     applySessionTitle(userSub, agentName, chatId, title)
 
   rpcServer.onMessage(handleIncomingMessage)
+  if (modelStepContinuationService) {
+    // Read the current service per request: re-initializing the agent replaces it.
+    rpcServer.onModelStepContinuation(request => {
+      if (!modelStepContinuationService) {
+        throw new Error('Model-step continuation service is no longer initialized')
+      }
+      return modelStepContinuationService.continue(request)
+    })
+  }
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
   rpcServer.onStatus(getStatus)
   rpcServer.onActivitySnapshot(getActivitySnapshot)

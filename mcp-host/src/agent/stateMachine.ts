@@ -16,6 +16,7 @@ import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
+import { MODEL_STEP_CONTINUE_ERROR_CODES } from '../core/conversation/modelStepCheckpointContract'
 import { LlmErrorCode } from '../core/errors'
 // Phase 6 imports
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
@@ -56,7 +57,11 @@ import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
 import { CronScheduler } from './cronScheduler'
-import { TaskExecutor, resolveTaskSessionKey } from './taskExecutor'
+import {
+  type ModelStepCheckpointExecutionSupport,
+  TaskExecutor,
+  resolveTaskSessionKey,
+} from './taskExecutor'
 import {
   AgentConfig,
   AgentEvent,
@@ -65,7 +70,7 @@ import {
   AgentStats,
   DEFAULT_AGENT_CONFIG,
   type FailoverSupportProvider,
-  type ModelStepCheckpointSupport,
+  type ResolvedTaskModel,
   type TaskModelResolver,
 } from './types'
 
@@ -265,7 +270,7 @@ export class AgentStateMachine extends EventEmitter {
   private sessionSearchService: SessionSearchService | undefined
 
   // #1043 — durable model-step checkpoints. Undefined in memory mode.
-  private modelStepCheckpoints: ModelStepCheckpointSupport | undefined
+  private modelStepCheckpoints: ModelStepCheckpointExecutionSupport | undefined
 
   // ConfigStore snapshot getter, merged into shell-tool spawn env
   private dynamicEnvProvider: (() => Record<string, string>) | undefined
@@ -488,11 +493,11 @@ export class AgentStateMachine extends EventEmitter {
    * #1043 — Inject durable model-step checkpoints. Each TaskExecutor then
    * records its tool-use turn and can leave a resumable checkpoint.
    */
-  setModelStepCheckpoints(support: ModelStepCheckpointSupport | undefined): void {
+  setModelStepCheckpoints(support: ModelStepCheckpointExecutionSupport | undefined): void {
     this.modelStepCheckpoints = support
   }
 
-  getModelStepCheckpoints(): ModelStepCheckpointSupport | undefined {
+  getModelStepCheckpoints(): ModelStepCheckpointExecutionSupport | undefined {
     return this.modelStepCheckpoints
   }
 
@@ -1413,6 +1418,61 @@ export class AgentStateMachine extends EventEmitter {
   public async executeTask(task: Task): Promise<boolean> {
     logger.info({ taskId: task.id }, 'Dispatching task')
 
+    const continuation = task.modelStepContinuation
+    let continuationModel: ResolvedTaskModel | null = null
+    if (continuation) {
+      try {
+        continuationModel = this.taskModelResolver
+          ? this.taskModelResolver({ [continuation.provider]: continuation.model })
+          : null
+      } catch (err) {
+        logger.warn(
+          { taskId: task.id, checkpointId: continuation.checkpointId, err },
+          'Model-step checkpoint model could not be resolved'
+        )
+      }
+      if (!this.modelStepCheckpoints) {
+        continuation.onVerdict({ kind: 'lost' })
+        this.handleTaskFailure(task, {
+          code: MODEL_STEP_CONTINUE_ERROR_CODES.notFound,
+          message: 'Model-step continuation is not configured on this Host.',
+          retryable: false,
+          provider: continuation.provider,
+        })
+        return false
+      }
+      if (
+        !this.llmProvider ||
+        !continuationModel ||
+        continuationModel.provider.getProviderType() !== continuation.provider ||
+        continuationModel.model !== continuation.model
+      ) {
+        const version = await this.modelStepCheckpoints.store.transition(
+          resolveTaskSessionKey(task),
+          continuation.fence,
+          { from: ['claimed'], to: 'blocked', blockedReason: 'model_unavailable' }
+        )
+        continuation.onVerdict(
+          version === null
+            ? { kind: 'lost' }
+            : { kind: 'blocked', blockedReason: 'model_unavailable' }
+        )
+        this.handleTaskFailure(task, {
+          code:
+            version === null
+              ? MODEL_STEP_CONTINUE_ERROR_CODES.notFound
+              : MODEL_STEP_CONTINUE_ERROR_CODES.blocked,
+          message:
+            version === null
+              ? 'The model-step checkpoint is no longer available.'
+              : `The checkpoint model ${continuation.provider}/${continuation.model} is unavailable.`,
+          retryable: false,
+          provider: continuation.provider,
+        })
+        return false
+      }
+    }
+
     if (!this.llmProvider) {
       this.handleTaskFailure(task, {
         code: 'LLM_API_CALL_FAILED',
@@ -1428,12 +1488,16 @@ export class AgentStateMachine extends EventEmitter {
     // (`IncomingMessage.imageModel`, populated after validation with the body
     // already stripped) and it PINS this task: a later selection change must not
     // redirect a queued image to another model.
-    const visualSelection = readVisualSelectionSnapshot(task)
+    const visualSelection = continuation ? undefined : readVisualSelectionSnapshot(task)
 
     let effectiveProvider = this.llmProvider
     let effectiveModel = this.modelName
     let effectiveContextWindow: number | undefined
-    if (this.taskModelResolver) {
+    if (continuationModel) {
+      effectiveProvider = continuationModel.provider
+      effectiveModel = continuationModel.model
+      effectiveContextWindow = continuationModel.contextWindowTokens
+    } else if (this.taskModelResolver) {
       try {
         const sessionKey = resolveTaskSessionKey(task)
         const existing = await this.conversationManager.getSessionByKeyAsync(sessionKey)
