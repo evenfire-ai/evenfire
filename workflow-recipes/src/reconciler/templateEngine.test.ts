@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import {
   type TemplateContext,
   TemplateInjectionError,
@@ -23,6 +24,38 @@ function makeContext(overrides: Partial<TemplateContext> = {}): TemplateContext 
 }
 
 describe('templateEngine.resolve', () => {
+  it('CodeQL 427 bounds malformed template scanning', () => {
+    if (process.env.TEMPLATE_REDOS_CHILD === '1') {
+      const value = '{{{{|'.repeat(200_000)
+      process.stdout.write('TEMPLATE_SCAN_STARTED\n')
+      expect(resolve(value, makeContext())).toBe(value)
+      return
+    }
+    const child = spawnSync(
+      process.execPath,
+      [
+        'node_modules/vitest/vitest.mjs',
+        'run',
+        'src/reconciler/templateEngine.test.ts',
+        '--pool=threads',
+        '--maxWorkers=1',
+        '-t',
+        'CodeQL 427 bounds malformed template scanning',
+      ],
+      {
+        env: { ...process.env, TEMPLATE_REDOS_CHILD: '1' },
+        encoding: 'utf8',
+        timeout: 15_000,
+        killSignal: 'SIGKILL',
+      }
+    )
+    expect(child.stdout).toContain('TEMPLATE_SCAN_STARTED')
+    expect(
+      child.error,
+      'interpolation must finish within the generous CPU deadline'
+    ).toBeUndefined()
+    expect(child.status, child.stdout + child.stderr).toBe(0)
+  }, 20_000)
   // ─── Basic Syntax (2.6a-e) ─────────────────────────────────────────
 
   it('should resolve inputs.name (2.6a)', () => {
@@ -127,5 +160,18 @@ describe('templateEngine.resolve', () => {
 
   it('should handle context with no inputs', () => {
     expect(() => resolve('{{inputs.name}}', { inputs: undefined })).toThrow(UnresolvedTemplateError)
+  })
+})
+
+describe('template delimiter consumer semantics', () => {
+  it('preserves literal backslashes, adjacent references and malformed delimiters', () => {
+    expect(resolve('before\\{{ inputs.name }}{{db:port}}after', makeContext())).toBe(
+      'before\\redis5432after'
+    )
+    for (const value of ['plain', '{{', '{{}}', '{{inputs.name}', '{{inputs.name}x}}']) {
+      expect(resolve(value, makeContext())).toBe(value)
+    }
+    expect(() => resolve('{{ }}', makeContext())).toThrow(UnresolvedTemplateError)
+    expect(() => resolve('{{{{inputs.name}}', makeContext())).toThrow(UnresolvedTemplateError)
   })
 })
