@@ -56,6 +56,8 @@ const PUBLIC_MESSAGE_BY_CODE: Readonly<Record<string, string>> = {
   internal_error: 'The request could not be completed.',
   upstream_unavailable: 'The upstream service is temporarily unavailable.',
   authority_unavailable: 'Authorization is temporarily unavailable.',
+  session_issuance_temporarily_unavailable:
+    'A session could not be issued right now. Try again in two seconds.',
   member_registration_unavailable: 'Member registration is temporarily unavailable.',
   member_registration_misconfigured: 'Member registration is not configured correctly.',
   upstream_timeout: 'The upstream service timed out.',
@@ -80,6 +82,7 @@ const ALLOWED_CODES_BY_STATUS: Readonly<Record<number, ReadonlySet<string>>> = {
   502: new Set(['upstream_unavailable']),
   503: new Set([
     'authority_unavailable',
+    'session_issuance_temporarily_unavailable',
     'member_registration_unavailable',
     'member_registration_misconfigured',
   ]),
@@ -229,13 +232,18 @@ export function sanitizeControlApiPublicError(
       : undefined
   const safeHeaders = safePublicRateLimitHeaders(responseHeaders)
   const publicHeaders =
-    code === 'rate_limited'
-      ? safeHeaders
-      : error.status === 413
-        ? safeUnsignedIntegerHeader(responseHeaders, 'upload-length')
-        : retryable && safeHeaders['retry-after']
-          ? { 'retry-after': safeHeaders['retry-after'] }
-          : {}
+    code === 'session_issuance_temporarily_unavailable'
+      ? {
+          'cache-control': 'no-store',
+          ...(safeHeaders['retry-after'] ? { 'retry-after': safeHeaders['retry-after'] } : {}),
+        }
+      : code === 'rate_limited'
+        ? safeHeaders
+        : error.status === 413
+          ? safeUnsignedIntegerHeader(responseHeaders, 'upload-length')
+          : retryable && safeHeaders['retry-after']
+            ? { 'retry-after': safeHeaders['retry-after'] }
+            : {}
 
   return {
     status: error.status,

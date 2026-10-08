@@ -320,6 +320,7 @@ describe('app router wiring', () => {
       expect.stringContaining('JOIN team_members'),
       expect.stringContaining('SELECT lifecycle_state, lifecycle_version'),
       expect.stringContaining('clock_timestamp()'),
+      expect.stringContaining('SELECT valid_after'),
       'COMMIT',
     ])
   })

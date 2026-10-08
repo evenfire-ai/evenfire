@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { ApiException } from '@kubernetes/client-node'
 import { STATUS_CODES } from 'node:http'
 import { rootLogger } from '../observability/logger.js'
+import { ExternalSessionIssuanceUnavailableError } from '../services/auth/externalSessionIssuanceError.js'
 import { memberRegistrationErrorResponse } from '../services/memberRegistrationErrors.js'
 import { sendPublicApiError } from './publicApiError.js'
 
@@ -158,6 +159,24 @@ export function clerumErrorHandler(
   // synthesize a short tag for legacy paths.
   const correlationId = req.correlationId ?? Math.random().toString(36).slice(2, 10)
   const log = req.log ?? rootLogger
+
+  if (err instanceof ExternalSessionIssuanceUnavailableError) {
+    log.warn(
+      { event: err.code, correlationId },
+      'external session issuance deferred by current security cutoff'
+    )
+    res.setHeader('Retry-After', '2')
+    res.setHeader('Cache-Control', 'no-store')
+    sendPublicApiError(
+      req,
+      res,
+      503,
+      err.code,
+      'A session could not be issued right now. Try again in two seconds.',
+      true
+    )
+    return
+  }
 
   // Typed member-registration failures map to 503 (spec §8.6) — scoped
   // instanceof check; the generic 5xx-collapse below stays intact.

@@ -6,6 +6,7 @@ import {
   compareSemanticVersions,
 } from '../access/userAccessPolicy.js'
 import type { ExternalSessionClient } from './externalSessionAuthentication.js'
+import { ExternalSessionIssuanceUnavailableError } from './externalSessionIssuanceError.js'
 import {
   createUserSession,
   loadSessionDatabaseNow,
@@ -13,6 +14,7 @@ import {
 } from './userSessionService.js'
 
 export type ExternalSessionContract = 'v1' | 'v2'
+export { ExternalSessionIssuanceUnavailableError } from './externalSessionIssuanceError.js'
 
 export type ExternalSessionSelection =
   | { status: 'selected'; contract: ExternalSessionContract }
@@ -108,6 +110,18 @@ export async function issueExternalUserSession(
       throw new Error('legacy user-session issuance requires an active lifecycle generation')
     }
     const issuedAt = Math.floor((await loadSessionDatabaseNow(db)).getTime() / 1000)
+    const epoch = await db.query(
+      `SELECT valid_after
+         FROM external_user_session_security_epochs
+        WHERE user_id = $1
+        LIMIT 1`,
+      [input.userId]
+    )
+    const validAfter = (epoch.rows[0] as { valid_after?: Date | string | null } | undefined)
+      ?.valid_after
+    if (validAfter && issuedAt * 1000 <= new Date(validAfter).getTime()) {
+      throw new ExternalSessionIssuanceUnavailableError()
+    }
     return signExternalSessionToken({
       userId: input.userId,
       email: input.email,

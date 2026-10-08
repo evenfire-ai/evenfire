@@ -10,6 +10,7 @@ export type PublicApiErrorCode =
   | 'access_path_required'
   | 'access_path_stale'
   | 'authority_unavailable'
+  | 'session_issuance_temporarily_unavailable'
   | 'invalid_request'
   | 'rate_limited'
   | 'upgrade_required'

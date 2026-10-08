@@ -78,6 +78,52 @@ describe('External REST public error contract', () => {
     expect(JSON.stringify(response.body)).not.toContain('secret')
   })
 
+  it('preserves bounded retry guidance for inadmissible V1 session issuance', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'session_issuance_temporarily_unavailable',
+              message: 'private upstream message',
+              correlationId: 'correlation_123',
+              retryable: true,
+            },
+          }),
+          {
+            status: 503,
+            headers: {
+              'content-type': 'application/json',
+              'retry-after': '2',
+              'cache-control': 'no-store',
+              'x-internal-secret': 'must-not-cross',
+            },
+          }
+        )
+      )
+    )
+
+    const upstream = await controlApiRequest('POST', '/external/auth/password-login').catch(
+      (error: unknown) => error
+    )
+    expect(upstream).toBeInstanceOf(ControlApiError)
+    if (!(upstream instanceof ControlApiError)) throw new Error('expected ControlApiError')
+
+    const response = await request(appThrowing(upstream)).get('/failure')
+    expect(response.status).toBe(503)
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
+    expect(response.body.error).toEqual({
+      code: 'session_issuance_temporarily_unavailable',
+      message: 'A session could not be issued right now. Try again in two seconds.',
+      correlationId: 'correlation_123',
+      retryable: true,
+    })
+    expect(response.headers['x-internal-secret']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toContain('private upstream')
+  })
+
   it('maps upstream throttling to the stable retryable rate-limit error', async () => {
     const upstream = new ControlApiError(
       'raw rate limiter state',

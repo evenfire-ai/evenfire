@@ -41,6 +41,14 @@ function legacyAuthorityDatabase() {
         state.validAfter = values[1] as Date
         return { rows: [], rowCount: 1 }
       }
+      if (
+        sql.includes('SELECT valid_after') &&
+        sql.includes('external_user_session_security_epochs')
+      ) {
+        return state.validAfter
+          ? { rows: [{ valid_after: state.validAfter }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+      }
       if (sql.includes('UPDATE external_user_sessions')) return { rows: [], rowCount: 0 }
       if (sql.includes('INSERT INTO external_v1_session_revocations')) {
         state.revokedFingerprints.add(values[0] as string)
