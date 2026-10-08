@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { QuitAdmissionClosedError } from '../appService.js'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
+import { isQuitAdmissionClosedError } from '../mainWindowCoordinator.js'
 
 type SentMessage = {
   channel: string
@@ -283,7 +284,7 @@ describe('evenfire deep-link router', () => {
     const harness = createHarness()
     const failure = new QuitAdmissionClosedError()
     harness.logout.mockRejectedValue(failure)
-    harness.deferLogout.mockReturnValue(true)
+    harness.deferLogout.mockImplementation(isQuitAdmissionClosedError)
 
     harness.router.handle('evenfire://logout')
     await new Promise<void>(resolve => setImmediate(resolve))

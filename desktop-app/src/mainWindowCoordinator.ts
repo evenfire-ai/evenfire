@@ -1,4 +1,21 @@
 import type { App } from 'electron'
+import { QuitAdmissionClosedError } from './appService.js'
+
+export function isQuitAdmissionClosedError(error: unknown): boolean {
+  return error instanceof QuitAdmissionClosedError
+}
+
+export function retryPendingExternalLogoutAfterQuitCancellation(
+  cancelQuitPreparation: () => void,
+  applyPendingLogout: () => Promise<boolean>,
+  onApplied: () => void,
+  onFailure: (error: unknown) => void
+): void {
+  cancelQuitPreparation()
+  void applyPendingLogout().then(applied => {
+    if (applied) onApplied()
+  }, onFailure)
+}
 
 type MainWindowHandle = {
   isDestroyed: () => boolean

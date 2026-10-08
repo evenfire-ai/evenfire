@@ -1,7 +1,7 @@
 import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import { AppService, QuitAdmissionClosedError } from './appService.js'
+import { AppService } from './appService.js'
 import { routeClerumOauthCompleted } from './clerumDeepLink.js'
 import {
   config,
@@ -23,7 +23,9 @@ import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import {
   createMainWindowCoordinator,
   createRetryableInitializer,
+  isQuitAdmissionClosedError,
   registerQuitDrain,
+  retryPendingExternalLogoutAfterQuitCancellation,
 } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
@@ -81,16 +83,16 @@ registerQuitDrain(
   app,
   () => appService.prepareForQuit(),
   () => {
-    appService.cancelQuitPreparation()
-    void appService
-      .applyPendingExternalLogoutIntent()
-      .then(applied => {
-        if (applied && mainWindow && !mainWindow.isDestroyed()) {
+    retryPendingExternalLogoutAfterQuitCancellation(
+      () => appService.cancelQuitPreparation(),
+      () => appService.applyPendingExternalLogoutIntent(),
+      () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('auth:externalLogout')
         }
-      })
-      .catch(error => {
-        if (error instanceof QuitAdmissionClosedError) {
+      },
+      error => {
+        if (isQuitAdmissionClosedError(error)) {
           console.info('[Desktop] Deferred external logout remains pending while quit resumes.')
           return
         }
@@ -99,7 +101,8 @@ registerQuitDrain(
         if (!appService.getCachedUserId() && mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('auth:externalLogout')
         }
-      })
+      }
+    )
   },
   error => {
     const errorName = error instanceof Error && error.name ? error.name : typeof error
@@ -340,7 +343,7 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   logout: () => appService.logout(),
   // AppService records the environment-scoped marker before rejecting this
   // shutdown-time logout. The router treats that rejection as deferred work.
-  deferLogout: error => error instanceof QuitAdmissionClosedError,
+  deferLogout: isQuitAdmissionClosedError,
   reportLogoutFailure: error => {
     // The main-process bootstrap has no service logger; log only the safe error
     // name because native storage errors must not leak credential or URL data.

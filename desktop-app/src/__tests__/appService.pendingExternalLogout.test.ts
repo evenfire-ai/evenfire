@@ -11,6 +11,7 @@ let AppServiceClass: typeof import('../appService.js').AppService
 let QuitAdmissionClosedErrorClass: typeof import('../appService.js').QuitAdmissionClosedError
 let TokenStoreClass: typeof import('../tokenStore.js').TokenStore
 let markerStore: typeof import('../pendingExternalLogout.js')
+let quitLifecycle: typeof import('../mainWindowCoordinator.js')
 
 const keychain = new Map<string, string>()
 const keyOf = (service: string, account: string) => `${service}::${account}`
@@ -46,17 +47,19 @@ beforeEach(async () => {
   userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-app-pending-logout-'))
   keychain.clear()
   vi.resetModules()
-  const [{ AppService, QuitAdmissionClosedError }, tokenStore, pendingLogout, config] =
+  const [{ AppService, QuitAdmissionClosedError }, tokenStore, pendingLogout, config, lifecycle] =
     await Promise.all([
       import('../appService.js'),
       import('../tokenStore.js'),
       import('../pendingExternalLogout.js'),
       import('../config.js'),
+      import('../mainWindowCoordinator.js'),
     ])
   AppServiceClass = AppService
   QuitAdmissionClosedErrorClass = QuitAdmissionClosedError
   TokenStoreClass = tokenStore.TokenStore
   markerStore = pendingLogout
+  quitLifecycle = lifecycle
   activeEnvKey = config.getActiveEnvKey()
 })
 
@@ -253,10 +256,26 @@ describe('AppService pending external logout', () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     internals(service).quitPreparationStarted = true
     await tokenStore.prepareForQuit()
+    const callbackOrder: string[] = []
+    const applied = vi.fn(() => callbackOrder.push('notified'))
+    const failed = vi.fn()
 
-    service.cancelQuitPreparation()
-    await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(true)
+    quitLifecycle.retryPendingExternalLogoutAfterQuitCancellation(
+      () => {
+        callbackOrder.push('cancel')
+        service.cancelQuitPreparation()
+      },
+      () => {
+        callbackOrder.push('apply')
+        return service.applyPendingExternalLogoutIntent()
+      },
+      applied,
+      failed
+    )
+    await vi.waitFor(() => expect(applied).toHaveBeenCalledOnce())
 
+    expect(callbackOrder).toEqual(['cancel', 'apply', 'notified'])
+    expect(failed).not.toHaveBeenCalled()
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
   })
@@ -377,9 +396,10 @@ describe('AppService pending external logout', () => {
     const { service, tokenStore } = createService()
     internals(service).quitPreparationStarted = true
     const clearToken = vi.spyOn(tokenStore, 'clearSessionToken')
+    const logoutError = await service.logout().catch(error => error)
 
-    await expect(service.logout()).rejects.toBeInstanceOf(QuitAdmissionClosedErrorClass)
-
+    expect(logoutError).toBeInstanceOf(QuitAdmissionClosedErrorClass)
+    expect(quitLifecycle.isQuitAdmissionClosedError(logoutError)).toBe(true)
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
     expect(clearToken).not.toHaveBeenCalled()
   })
