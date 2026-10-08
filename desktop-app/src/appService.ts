@@ -2061,7 +2061,7 @@ export class AppService {
         return sessionGeneration
       })
 
-      await this.resolveRuntimeConfigIfNeeded()
+      await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
       const binding = await this.withNativeAuthEnvironmentCommit(async () => {
         this.assertSessionGeneration(sessionGeneration)
         return this.captureAuthEnvironmentBinding()
@@ -2270,7 +2270,7 @@ export class AppService {
       await this.withNativeAuthEnvironmentCommit(async () => {
         this.assertSessionGeneration(loginGeneration)
       })
-      await this.resolveRuntimeConfigIfNeeded()
+      await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
       this.assertSessionGeneration(loginGeneration)
       const normalizedEmail = email.trim().toLowerCase()
       return await this.completePasswordLogin(normalizedEmail, password, loginGeneration)

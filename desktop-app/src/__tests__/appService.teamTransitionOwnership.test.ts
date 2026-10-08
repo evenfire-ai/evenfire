@@ -348,6 +348,49 @@ describe('AppService deliberate team transition ownership', () => {
     expect(app.getSessionGeneration()).toBe(previousGeneration + 1)
   })
 
+  it.each(['Google', 'password'])(
+    '%s login continues when optional RPC discovery fails',
+    async loginMethod => {
+      const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+      await runtimeConfig.saveDesktopRuntimeConfig({
+        externalRestApiBaseUrl: restA,
+        rpcProxyBaseUrl: '',
+        appName: 'Environment A',
+      })
+      const me = {
+        id: 'user-a',
+        email: 'user-a@example.test',
+        name: 'User A',
+        picture: null,
+        teamId: 'team-a',
+        teamName: 'Team A',
+        role: 'member',
+      }
+      const getDesktopEnvironment = vi
+        .fn()
+        .mockRejectedValue(new Error('RPC discovery unavailable'))
+      const googleLogin = vi.fn().mockResolvedValue({ token: 'google-session-a', me })
+      const passwordLogin = vi.fn().mockResolvedValue({ token: 'password-session-a', me })
+      const app = service as unknown as { authClient: unknown }
+      app.authClient = { getDesktopEnvironment, googleLogin, passwordLogin }
+
+      const result =
+        loginMethod === 'Google'
+          ? await service.googleLogin('synthetic-google-token')
+          : await service.passwordLogin('user-a@example.test', 'synthetic-password')
+
+      expect(result).toMatchObject({ authenticated: true, me })
+      expect(getDesktopEnvironment).toHaveBeenCalledOnce()
+      if (loginMethod === 'Google') {
+        expect(googleLogin).toHaveBeenCalledWith('synthetic-google-token')
+        expect(passwordLogin).not.toHaveBeenCalled()
+      } else {
+        expect(passwordLogin).toHaveBeenCalledWith('user-a@example.test', 'synthetic-password')
+        expect(googleLogin).not.toHaveBeenCalled()
+      }
+    }
+  )
+
   it('rejects a stale handoff generation after a public login advances the session', async () => {
     const { service, runtimeConfig, optionA } = await createNativeCommitTestHarness()
     const app = service as unknown as {
