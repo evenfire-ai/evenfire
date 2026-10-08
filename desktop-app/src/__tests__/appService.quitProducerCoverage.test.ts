@@ -131,6 +131,47 @@ describe('AppService quit producer admission', () => {
     expect(service.switchSessionToTeam).not.toHaveBeenCalled()
   })
 
+  it('does not retain a home-hop handle when quit rejects a queued hop', async () => {
+    const blockingOperation = deferred<string>()
+    const operationStarted = deferred<void>()
+    const service = createService()
+    service.quitPreparationStarted = false
+    service.me = { id: 'user-1', teamId: 'team-home' }
+    service.sessionToken = 'team-home-token'
+    service.requireSessionToken = vi.fn(() => service.sessionToken || '')
+    service.getCurrentSessionTeamId = vi.fn(async () => service.me?.teamId || '')
+
+    const sameTeamOperation = service.runWithTeamContext('team-home', async () => {
+      operationStarted.resolve()
+      return blockingOperation.promise
+    })
+    await operationStarted.promise
+    const queuedHomeHop = service.runWithTeamContext('team-home', async token => token)
+    service.me.teamId = 'team-b'
+    service.sessionToken = 'team-b-token'
+
+    await service.prepareForQuit()
+    blockingOperation.resolve('same-team-complete')
+    await expect(sameTeamOperation).resolves.toBe('same-team-complete')
+    await expect(queuedHomeHop).rejects.toThrow('Application is shutting down')
+
+    service.cancelQuitPreparation()
+    const currentTeamCall = service.runWithTeamContext('team-b', async token => `ok:${token}`)
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      currentTeamCall.then(
+        value => ({ status: 'fulfilled' as const, value }),
+        error => ({ status: 'rejected' as const, error })
+      ),
+      new Promise<{ status: 'pending' }>(resolve => {
+        timeout = setTimeout(() => resolve({ status: 'pending' }), 50)
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+
+    expect(outcome).toEqual({ status: 'fulfilled', value: 'ok:team-b-token' })
+  })
+
   it('waits for an admitted temporary team hop before draining TokenStore', async () => {
     const operation = deferred<string>()
     const operationStarted = deferred<void>()

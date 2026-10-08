@@ -1347,12 +1347,12 @@ export class AppService {
             homeTeamOperations: [],
           }
         : null
-      if (activeHop) this.activeTeamContextHop = activeHop
       if (shouldSwitch && !hasHopReservation) {
         this.pendingTeamContextHops += 1
         hasHopReservation = true
       }
       const runOperation = async (): Promise<T> => {
+        if (activeHop) this.activeTeamContextHop = activeHop
         let restoredOriginalTeam = false
         const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
         if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
