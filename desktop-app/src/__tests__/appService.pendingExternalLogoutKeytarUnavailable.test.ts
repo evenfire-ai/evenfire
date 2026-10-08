@@ -85,8 +85,8 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
     }
 
-    await tokenStore.setSessionToken('old-keychain-session', activeEnvKey)
-    internals.sessionToken = 'old-keychain-session'
+    await tokenStore.setSessionToken('test-token-old-keychain-session', activeEnvKey)
+    internals.sessionToken = 'test-token-old-keychain-session'
     internals.me = user
     internals.quitPreparationStarted = true
 
@@ -99,10 +99,12 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
 
     await expect(
-      internals.installAuthenticatedLogin({ token: 'new-file-backed-session', me: user })
+      internals.installAuthenticatedLogin({ token: 'test-token-new-file-backed-session', me: user })
     ).resolves.toEqual({ authenticated: true, me: user })
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('new-file-backed-session')
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(
+      'test-token-new-file-backed-session'
+    )
     const files = await readdir(userDataDirectory)
     expect(files).toContain(`session-token-${activeEnvKey}.enc`)
     expect(files).not.toContain(`session-token-${activeEnvKey}.json`)
