@@ -139,7 +139,7 @@ vi.mock('../sandboxUiPartitionGc.js', () => ({
 // real RpcProxyClient below.
 vi.mock('../rpcTokenManager.js', () => ({
   RpcTokenManager: class {
-    getOrIssue = vi.fn(async () => ({ token: 'rpc-token' }))
+    getOrIssue = vi.fn(async () => ({ token: 'fake-rpc-token' }))
     clear = vi.fn()
     getMetadata = vi.fn(() => ({ expiresAtMs: null, scopes: [], hostRefs: [] }))
   },

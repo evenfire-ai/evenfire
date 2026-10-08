@@ -96,7 +96,7 @@ beforeEach(() => {
   mocks.getOrIssue
     .mockResolvedValueOnce({ token: 'stale' })
     .mockResolvedValueOnce({ token: 'fresh' })
-    .mockResolvedValue({ token: 'unexpected-third' })
+    .mockResolvedValue({ token: 'fake-unexpected-third' })
   vi.stubGlobal('fetch', fetchMock)
 })
 
