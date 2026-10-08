@@ -13,7 +13,7 @@ import {
   Turn,
   TurnToolCall,
 } from '../types'
-import type { SessionTokenUsage } from './conversationStore'
+import type { PersistTurnCompleteOptions, SessionTokenUsage } from './conversationStore'
 import {
   ConversationSessionSummary,
   ConversationStore,
@@ -314,7 +314,11 @@ export class ConversationManager {
    * always durable. A rejected write propagates — never swallowed — and the
    * caller fails the turn (see TaskExecutor.handleLoopResult).
    */
-  async completeTurn(conversation: Conversation, response: string): Promise<void> {
+  async completeTurn(
+    conversation: Conversation,
+    response: string,
+    opts?: PersistTurnCompleteOptions
+  ): Promise<void> {
     if (conversation.state !== ConversationState.Processing) {
       throw new ConversationError(
         `Cannot complete turn: conversation is ${conversation.state}`,
@@ -333,7 +337,56 @@ export class ConversationManager {
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
     conversation.traceContext = null
     conversation.updated_at = new Date()
-    await Promise.resolve(this.store.persistTurnComplete(conversation, response))
+    await Promise.resolve(this.store.persistTurnComplete(conversation, response, opts))
+  }
+
+  /**
+   * #1043 — reopen the failed turn `turnNumber` for a model-step continuation.
+   * Transitions: Idle → Processing, without a new turn or user row: the
+   * failed turn is still the last one and keeps its original user input.
+   * Like `startTurn`, the durable flip is awaited and a rejected write rolls
+   * the in-RAM state back.
+   */
+  async resumeTurnForContinuation(
+    conversation: Conversation,
+    taskId: string,
+    turnNumber: number,
+    traceContext: TraceContextV1 | null
+  ): Promise<void> {
+    if (conversation.state !== ConversationState.Idle) {
+      throw new ConversationError(
+        `Cannot reopen turn: conversation is ${conversation.state}`,
+        ConversationErrorCode.InvalidTransition
+      )
+    }
+    const currentTurn = conversation.turns[conversation.turns.length - 1]
+    if (!currentTurn || currentTurn.response !== undefined) {
+      throw new ConversationError(
+        'Cannot reopen turn: the last turn is missing or already answered',
+        ConversationErrorCode.InvalidTransition
+      )
+    }
+    if (!this.store.persistContinuationStart) {
+      throw new Error('The conversation store cannot reopen a turn')
+    }
+    const previousTraceContext = conversation.traceContext
+    const previousCompletedAt = currentTurn.completed_at
+    conversation.state = ConversationState.Processing
+    conversation.activeTaskId = taskId
+    conversation.traceContext = traceContext
+    conversation.updated_at = new Date()
+    conversation.auto_approved_tools.delete('*')
+    currentTurn.completed_at = undefined
+    try {
+      await this.store.persistContinuationStart(conversation, turnNumber)
+    } catch (err) {
+      conversation.state = ConversationState.Idle
+      conversation.activeTaskId = undefined
+      conversation.traceContext = previousTraceContext
+      currentTurn.completed_at = previousCompletedAt
+      conversation.updated_at = new Date()
+      throw err
+    }
   }
 
   /**

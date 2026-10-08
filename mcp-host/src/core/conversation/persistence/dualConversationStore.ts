@@ -18,6 +18,7 @@ import type {
   ConversationStore,
   EvictCallback,
   GetOrCreateOptions,
+  PersistTurnCompleteOptions,
   PersistedSessionListing,
   SessionListQuery,
   SessionMessagesQuery,
@@ -284,11 +285,23 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
-  async persistTurnComplete(conv: Conversation, response: string): Promise<void> {
+  async persistTurnComplete(
+    conv: Conversation,
+    response: string,
+    opts?: PersistTurnCompleteOptions
+  ): Promise<void> {
     await Promise.all([
       Promise.resolve(this.memory.persistTurnComplete(conv, response)),
-      Promise.resolve(this.sqlite.persistTurnComplete(conv, response)),
+      // #1043 — the checkpoint lives only in SQLite.
+      Promise.resolve(this.sqlite.persistTurnComplete(conv, response, opts)),
     ])
+  }
+
+  async persistContinuationStart(conv: Conversation, turnNumber: number): Promise<void> {
+    if (!this.sqlite.persistContinuationStart) {
+      throw new Error('The SQLite side of the dual store cannot reopen a turn')
+    }
+    await this.sqlite.persistContinuationStart(conv, turnNumber)
   }
 
   async persistTurnCancel(conv: Conversation): Promise<void> {

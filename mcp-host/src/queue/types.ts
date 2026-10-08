@@ -2,7 +2,9 @@
  * Types for the message queue and task system.
  */
 import type { BudgetVerdict } from '../budget/types'
+import type { ModelStepBlockedReason } from '../core/conversation/modelStepCheckpointContract'
 import type { Attachment, TraceContextV1 } from '../core/types'
+import type { ModelStepCheckpointFence } from '../db/worker/modelStepCheckpointOps'
 import type { TaskRecord } from '../lifecycle/types'
 import { IncomingMessage } from '../server'
 
@@ -109,7 +111,45 @@ export interface Task {
    * budgets flag is off or the check failed open.
    */
   budgetVerdict?: BudgetVerdict
+
+  /**
+   * #1043 — present on the task that continues a claimed model-step
+   * checkpoint. The task reopens the origin turn instead of starting one.
+   * In-memory only: a restart leaves the checkpoint to the boot reaper.
+   */
+  modelStepContinuation?: ModelStepContinuationRef
 }
+
+/**
+ * #1043 — what the continuation task needs from its claim. The checkpoint's
+ * entries, bytes and budget are loaded by the executor under the same fence.
+ */
+export interface ModelStepContinuationRef {
+  checkpointId: string
+  originTaskId: string
+  originTurnNumber: number
+  /** The pair the checkpoint was created with; the task is pinned to it. */
+  provider: string
+  model: string
+  fence: ModelStepCheckpointFence
+  /** Confirmed tool results already in the checkpoint. */
+  confirmedResults: number
+  /** Raw checkpoint `task_budget` JSON (budget snapshot + attachment ledger). */
+  taskBudget: string | null
+  /**
+   * Called exactly once, when revalidation is decided, so the continuation
+   * POST can answer within its bounded wait.
+   */
+  onVerdict: (verdict: ModelStepContinuationVerdict) => void
+}
+
+export type ModelStepContinuationVerdict =
+  | { kind: 'started' }
+  | { kind: 'blocked'; blockedReason: ModelStepBlockedReason }
+  /** Revalidation could not run (transient GFS or credentials); still resumable. */
+  | { kind: 'check_unavailable' }
+  /** The fence was lost or preparation failed; the checkpoint is no longer offered. */
+  | { kind: 'lost' }
 
 /**
  * Conversation message for maintaining context.
