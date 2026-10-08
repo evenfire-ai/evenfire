@@ -43,6 +43,9 @@ function harness() {
   const store = new ModelStepCheckpointStore(queue, { now: () => 1_000_000 })
   const safety = new BasicSafety()
   const onFenceLost = vi.fn()
+  const inlineFileAttachments = vi.fn(() => [
+    { attachmentId: 'att-1', digestHex: 'cd'.repeat(32), bytes: new Uint8Array([1, 2, 3]) },
+  ])
   const recorder = createModelStepCheckpointRecorder({
     store,
     sessionKey: SESSION_KEY,
@@ -63,10 +66,12 @@ function harness() {
       safety.sanitizeFreeformContent(text, { secretWarning: 'secret in checkpoint' }).content,
     taskBudget: () => JSON.stringify({ iterationsUsed: 1 }),
     resumableTtlMs: 60_000,
+    inlineFileAttachments,
+    attachmentTtlMs: 3_600_000,
     now: () => 1_000_000,
     onFenceLost,
   })
-  return { worker, store, recorder, onFenceLost }
+  return { worker, store, recorder, onFenceLost, inlineFileAttachments }
 }
 
 function withRecorder(
@@ -103,6 +108,12 @@ function header(worker: InProcessWorkerHandle) {
     | undefined
 }
 
+function attachmentRows(worker: InProcessWorkerHandle) {
+  return worker.db
+    .prepare('SELECT attachment_id, size_bytes, expires_at FROM model_step_checkpoint_attachments')
+    .all()
+}
+
 function entries(worker: InProcessWorkerHandle) {
   return worker.db
     .prepare(
@@ -131,7 +142,7 @@ function twoIterationsThenOutage(error: Error): RespondResult[] {
 
 describe('runToolUseLoop model-step checkpoint (#1043)', () => {
   it('1. a 503 provider_unavailable after confirmed tools leaves a resumable checkpoint', async () => {
-    const { worker, store, recorder } = harness()
+    const { worker, store, recorder, inlineFileAttachments } = harness()
     const appendSpy = vi.spyOn(store, 'append')
     const reasoning = createMockReasoning(twoIterationsThenOutage(outage()))
     const tools = [createMockTool('read_file'), createMockTool('list_dir')]
@@ -151,6 +162,12 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       loop_state: JSON.stringify({ nextIteration: 2 }),
       task_budget: JSON.stringify({ iterationsUsed: 1 }),
     })
+    // Inline file bytes are read once, at the resumable transition, and expire
+    // after their own TTL.
+    expect(inlineFileAttachments).toHaveBeenCalledTimes(1)
+    expect(attachmentRows(worker)).toEqual([
+      { attachment_id: 'att-1', size_bytes: 3, expires_at: 1_000_000 + 3_600_000 },
+    ])
     const rows = entries(worker)
     expect(rows.map(r => [r.kind, r.tool_call_id])).toEqual([
       ['message', null],
@@ -311,7 +328,7 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     ]
 
     it.each(cases)('%s', async (_code, error) => {
-      const { worker, recorder } = harness()
+      const { worker, recorder, inlineFileAttachments } = harness()
       const reasoning = createMockReasoning(twoIterationsThenOutage(error))
       const tools = [createMockTool('read_file'), createMockTool('list_dir')]
 
@@ -322,6 +339,9 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       // Witness: the checkpoint existed and recorded the confirmed tools.
       expect(entries(worker).filter(r => r.kind === 'tool_result')).toHaveLength(3)
       expect(header(worker)?.status).toBe('abandoned')
+      // A checkpoint that cannot continue never writes inline file bytes.
+      expect(inlineFileAttachments).not.toHaveBeenCalled()
+      expect(attachmentRows(worker)).toEqual([])
     })
 
     it('cancellation', async () => {

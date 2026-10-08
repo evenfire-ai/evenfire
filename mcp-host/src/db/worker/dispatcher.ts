@@ -10,6 +10,7 @@ import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
 import {
   completeModelStepCheckpointWithMessage,
+  deleteModelStepCheckpointsOfSweptSessions,
   dispatchModelStepCheckpointOp,
   isModelStepCheckpointOp,
   isModelStepCheckpointWriteOp,
@@ -877,6 +878,11 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
           const expiredApprovals = s.sweepExpiredApprovals.run(op.nowEpoch)
+          // #1043 — checkpoints have no FK to sessions; delete them first.
+          deleteModelStepCheckpointsOfSweptSessions(db, {
+            kind: 'ended',
+            cutoff: op.nowEpoch - op.ttlSeconds,
+          })
           const expiredSessions = s.sweepEndedSessions.run(op.nowEpoch - op.ttlSeconds)
           return {
             approvals_removed: expiredApprovals.changes,
@@ -916,6 +922,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'sweep_closed_sessions':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          // #1043 — checkpoints have no FK to sessions; delete them first.
+          deleteModelStepCheckpointsOfSweptSessions(db, { kind: 'closed', cutoff: op.cutoffEpoch })
           const result = s.sweepClosedSessions.run({ cutoff: op.cutoffEpoch })
           return { deleted_sessions: result.changes }
         })

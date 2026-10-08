@@ -5,6 +5,8 @@
  * after the turn boundary that precedes it. Payloads are never logged.
  */
 import type {
+  ModelStepCheckpointAttachmentInput,
+  ModelStepCheckpointAttachmentRow,
   ModelStepCheckpointEntryInput,
   ModelStepCheckpointEntryRow,
   ModelStepCheckpointFence,
@@ -87,6 +89,9 @@ export class ModelStepCheckpointStore {
       failedAt?: number
       expiresAt?: number
       blockedReason?: string
+      /** Inline file bytes; only with `to: 'resumable'`. */
+      attachments?: ModelStepCheckpointAttachmentInput[]
+      attachmentsExpireAt?: number
     }
   ): Promise<number | null> {
     const result = await this.queue.enqueueSync<{ applied: boolean; version?: number }>(
@@ -142,6 +147,17 @@ export class ModelStepCheckpointStore {
     )
   }
 
+  /** Unexpired inline file bytes of a resumable or claimed checkpoint. */
+  loadAttachments(
+    sessionKey: string,
+    checkpointId: string
+  ): Promise<ModelStepCheckpointAttachmentRow[]> {
+    return this.queue.enqueueSync<ModelStepCheckpointAttachmentRow[]>(
+      { kind: 'model_step_checkpoint_load_attachments', checkpointId, now: this.opts.now() },
+      sessionKey
+    )
+  }
+
   /** Runs once at process start, before any task is admitted. */
   bootReap(hostInstanceId: string): Promise<{ abandoned: number; reopened: number }> {
     return this.queue.enqueueSync({
@@ -151,7 +167,11 @@ export class ModelStepCheckpointStore {
     })
   }
 
-  sweep(terminalRetentionMs: number): Promise<{ expired: number; purgedEntries: number }> {
+  sweep(terminalRetentionMs: number): Promise<{
+    expired: number
+    purgedCheckpoints: number
+    purgedAttachments: number
+  }> {
     return this.queue.enqueueSync({
       kind: 'model_step_checkpoint_sweep',
       now: this.opts.now(),

@@ -65,6 +65,25 @@ export interface ModelStepCheckpointEntryInput {
   payload: string
 }
 
+/**
+ * Raw bytes of one inline uploaded file, held for a continuation (migration
+ * 018). Crosses the worker boundary as a Uint8Array, never base64.
+ */
+export interface ModelStepCheckpointAttachmentInput {
+  attachmentId: string
+  /** sha256 of `bytes`, lowercase hex; re-verified when loaded. */
+  digestHex: string
+  bytes: Uint8Array
+}
+
+export interface ModelStepCheckpointAttachmentRow {
+  attachment_id: string
+  digest_hex: string
+  size_bytes: number
+  bytes: Uint8Array
+  expires_at: number
+}
+
 /** Identifies the single writer allowed to touch a checkpoint. */
 export interface ModelStepCheckpointFence {
   checkpointId: string
@@ -140,6 +159,12 @@ export type ModelStepCheckpointOp =
       failedAt?: number
       expiresAt?: number
       blockedReason?: string
+      /**
+       * Bytes of inline uploaded files, written in the same transaction and
+       * only with `to: 'resumable'`; they expire at `attachmentsExpireAt`.
+       */
+      attachments?: ModelStepCheckpointAttachmentInput[]
+      attachmentsExpireAt?: number
     }
   | {
       kind: 'model_step_checkpoint_renew_lease'
@@ -161,6 +186,12 @@ export type ModelStepCheckpointOp =
   | { kind: 'model_step_checkpoint_load_live'; sessionKey: string }
   | { kind: 'model_step_checkpoint_load_entries'; checkpointId: string }
   | {
+      /** Unexpired attachment bytes of a checkpoint that is resumable or claimed. */
+      kind: 'model_step_checkpoint_load_attachments'
+      checkpointId: string
+      now: number
+    }
+  | {
       /** Boot reaper: `open` → `abandoned`; `claimed` by another host → `resumable`. */
       kind: 'model_step_checkpoint_boot_reap'
       hostInstanceId: string
@@ -169,8 +200,9 @@ export type ModelStepCheckpointOp =
   | {
       /**
        * TTL: past `expires_at`, a `resumable`/`blocked` row, or a `claimed` row
-       * whose lease also lapsed, → `abandoned`; entries of old terminal rows
-       * are deleted.
+       * whose lease also lapsed, → `abandoned`; terminal headers older than
+       * the retention are deleted with their entries and attachments;
+       * expired or orphaned attachment bytes are deleted.
        */
       kind: 'model_step_checkpoint_sweep'
       now: number
@@ -219,8 +251,14 @@ interface Statements {
   abandonById: Statement
   reopenClaim: Statement
   expireLive: Statement
-  purgeTerminalEntries: Statement
+  deleteTerminalHeaders: Statement
   ledgerKinds: Statement
+  insertAttachment: Statement
+  selectAttachments: Statement
+  deleteAttachmentsOf: Statement
+  deleteDeadAttachments: Statement
+  deleteOfEndedSessions: Statement
+  deleteOfClosedSessions: Statement
 }
 
 const statementCache = new WeakMap<Database, Statements>()
@@ -321,15 +359,51 @@ function statements(db: Database): Statements {
         AND (status IN ('resumable','blocked')
              OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= @now))
     `),
-    purgeTerminalEntries: db.prepare(`
-      DELETE FROM model_step_checkpoint_entries WHERE checkpoint_id IN (
-        SELECT checkpoint_id FROM model_step_checkpoints
-        WHERE status IN ('completed','abandoned') AND updated_at <= @cutoff
-      )
+    // Entries and attachments go with the header (ON DELETE CASCADE).
+    deleteTerminalHeaders: db.prepare(`
+      DELETE FROM model_step_checkpoints
+      WHERE status IN ('completed','abandoned') AND updated_at <= @cutoff
     `),
     ledgerKinds: db.prepare(`
       SELECT kind, tool_call_id FROM model_step_checkpoint_entries
       WHERE checkpoint_id = ? AND kind IN ('tool_dispatch','tool_result')
+    `),
+    insertAttachment: db.prepare(`
+      INSERT OR REPLACE INTO model_step_checkpoint_attachments
+        (checkpoint_id, attachment_id, digest_hex, size_bytes, bytes, expires_at, created_at)
+      VALUES (@checkpoint_id, @attachment_id, @digest_hex, @size_bytes, @bytes, @expires_at, @now)
+    `),
+    selectAttachments: db.prepare(`
+      SELECT a.attachment_id, a.digest_hex, a.size_bytes, a.bytes, a.expires_at
+      FROM model_step_checkpoint_attachments a
+      JOIN model_step_checkpoints c ON c.checkpoint_id = a.checkpoint_id
+      WHERE a.checkpoint_id = @checkpoint_id AND a.expires_at > @now
+        AND c.status IN ('resumable','claimed')
+      ORDER BY a.attachment_id
+    `),
+    deleteAttachmentsOf: db.prepare(
+      'DELETE FROM model_step_checkpoint_attachments WHERE checkpoint_id = ?'
+    ),
+    // Bytes are needed only while a checkpoint can still continue.
+    deleteDeadAttachments: db.prepare(`
+      DELETE FROM model_step_checkpoint_attachments
+      WHERE expires_at <= @now OR checkpoint_id IN (
+        SELECT checkpoint_id FROM model_step_checkpoints
+        WHERE status NOT IN ('resumable','claimed')
+      )
+    `),
+    // Same predicates as `sweepEndedSessions` / `sweepClosedSessions`: the
+    // header has no FK to `sessions`, so its rows go in the same transaction.
+    deleteOfEndedSessions: db.prepare(`
+      DELETE FROM model_step_checkpoints WHERE session_key IN (
+        SELECT session_key FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?
+      )
+    `),
+    deleteOfClosedSessions: db.prepare(`
+      DELETE FROM model_step_checkpoints WHERE session_key IN (
+        SELECT session_key FROM sessions
+        WHERE end_reason IS NOT NULL AND ended_at IS NOT NULL AND ended_at < ?
+      )
     `),
   }
   statementCache.set(db, prepared)
@@ -401,7 +475,22 @@ export function retireLiveModelStepCheckpoints(
   sessionKey: string,
   now: number
 ): void {
-  statements(db).retireLiveBySession.run({ session_key: sessionKey, now })
+  const s = statements(db)
+  s.retireLiveBySession.run({ session_key: sessionKey, now })
+  s.deleteDeadAttachments.run({ now })
+}
+
+/**
+ * Deletes the checkpoints of the sessions a retention sweep is about to
+ * delete. Call inside that sweep's transaction, before the session DELETE.
+ */
+export function deleteModelStepCheckpointsOfSweptSessions(
+  db: Database,
+  sweep: { kind: 'ended' | 'closed'; cutoff: number }
+): number {
+  const s = statements(db)
+  const statement = sweep.kind === 'ended' ? s.deleteOfEndedSessions : s.deleteOfClosedSessions
+  return statement.run(sweep.cutoff).changes
 }
 
 /**
@@ -429,6 +518,7 @@ export function completeModelStepCheckpointWithMessage(
   if (result.changes !== 1) {
     throw new Error('model-step checkpoint fence mismatch on completion')
   }
+  s.deleteAttachmentsOf.run(fence.checkpointId)
   s.stampMessage.run({
     checkpoint_id: fence.checkpointId,
     session_id: message.session_id,
@@ -484,6 +574,12 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
     }
 
     case 'model_step_checkpoint_transition': {
+      if (op.attachments !== undefined && op.to !== 'resumable') {
+        throw new Error('model-step checkpoint attachments are written only with resumable')
+      }
+      if (op.attachments !== undefined && op.attachmentsExpireAt === undefined) {
+        throw new Error('model-step checkpoint attachments need an expiry')
+      }
       const tx = db.transaction((): { applied: boolean; version?: number } => {
         for (const from of op.from) {
           const changed = s.transition.run({
@@ -496,6 +592,25 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
             blocked_reason: op.blockedReason ?? null,
           }).changes
           if (changed === 1) {
+            if (op.to === 'resumable') {
+              for (const attachment of op.attachments ?? []) {
+                s.insertAttachment.run({
+                  checkpoint_id: op.fence.checkpointId,
+                  attachment_id: attachment.attachmentId,
+                  digest_hex: attachment.digestHex,
+                  size_bytes: attachment.bytes.byteLength,
+                  bytes: Buffer.from(
+                    attachment.bytes.buffer,
+                    attachment.bytes.byteOffset,
+                    attachment.bytes.byteLength
+                  ),
+                  expires_at: op.attachmentsExpireAt,
+                  now: op.now,
+                })
+              }
+            } else if (op.to !== 'claimed') {
+              s.deleteAttachmentsOf.run(op.fence.checkpointId)
+            }
             const header = s.selectHeader.get(op.fence.checkpointId) as ModelStepCheckpointRow
             return { applied: true, version: header.version }
           }
@@ -579,6 +694,12 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
     case 'model_step_checkpoint_load_entries':
       return s.selectEntries.all(op.checkpointId) as ModelStepCheckpointEntryRow[]
 
+    case 'model_step_checkpoint_load_attachments':
+      return s.selectAttachments.all({
+        checkpoint_id: op.checkpointId,
+        now: op.now,
+      }) as ModelStepCheckpointAttachmentRow[]
+
     case 'model_step_checkpoint_boot_reap': {
       const tx = db.transaction(() => {
         const open = s.selectOpen.all() as Array<{ checkpoint_id: string }>
@@ -588,6 +709,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
         }>
         for (const row of foreign)
           s.reopenClaim.run({ checkpoint_id: row.checkpoint_id, now: op.now })
+        s.deleteDeadAttachments.run({ now: op.now })
         return { abandoned: open.length, reopened: foreign.length }
       })
       return tx.immediate()
@@ -596,10 +718,11 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
     case 'model_step_checkpoint_sweep': {
       const tx = db.transaction(() => {
         const expired = s.expireLive.run({ now: op.now }).changes
-        const purged = s.purgeTerminalEntries.run({
+        const purgedCheckpoints = s.deleteTerminalHeaders.run({
           cutoff: op.now - op.terminalRetentionMs,
         }).changes
-        return { expired, purgedEntries: purged }
+        const purgedAttachments = s.deleteDeadAttachments.run({ now: op.now }).changes
+        return { expired, purgedCheckpoints, purgedAttachments }
       })
       return tx.immediate()
     }

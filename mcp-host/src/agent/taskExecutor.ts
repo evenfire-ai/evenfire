@@ -149,7 +149,7 @@ import {
 import { sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
-import type { AgentConfig, ExecutorFailoverSupport } from './types'
+import type { AgentConfig, ExecutorFailoverSupport, ModelStepCheckpointSupport } from './types'
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
 
@@ -267,6 +267,12 @@ export interface TaskExecutorDeps {
    * flag `CLERUM_SESSION_SEARCH_ENABLED` is OFF.
    */
   sessionSearchService?: SessionSearchService
+
+  /**
+   * #1043 — durable model-step checkpoints. Present only with the SQLite store;
+   * absent (memory mode) → no recorder, no Retry model step.
+   */
+  modelStepCheckpoints?: ModelStepCheckpointSupport
 
   /**
    * R5 — provider-fallback support for THIS task. When present with a non-empty
@@ -1383,7 +1389,7 @@ export class TaskExecutor {
         }
         // #666 R4-M2 — persist the sanitized source message so a cold restart
         // rebuilds the file-reference pins and attachment metadata. The inline
-        // bytes (dataBase64) never persist.
+        // bytes (dataBase64) never persist in the approval row.
         result.approval.sourceMessage = sourceMessageForResume(this.task.sourceMessage)
         // Durable write FIRST: under sqlite/dual the suspend can reject. We
         // must not tell the client "suspended" (SSE) or register the approval

@@ -474,7 +474,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     })
   })
 
-  it('6. TTL: expired rows are abandoned, terminal entries are purged after retention', async () => {
+  it('6. TTL: expired rows are abandoned, terminal checkpoints are deleted after retention', async () => {
     const worker = createInProcessWorker(tempDbPath())
     const { checkpoints } = storeOver(worker)
     const fence = await checkpoints.open(header(), [userEntry])
@@ -488,16 +488,30 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     const retention = 1000
 
     clock += 50
-    expect(await checkpoints.sweep(retention)).toEqual({ expired: 0, purgedEntries: 0 })
+    expect(await checkpoints.sweep(retention)).toEqual({
+      expired: 0,
+      purgedCheckpoints: 0,
+      purgedAttachments: 0,
+    })
     expect(statusOf(worker, 'cp-1')).toBe('resumable')
 
     clock += 100
-    expect(await checkpoints.sweep(retention)).toEqual({ expired: 1, purgedEntries: 0 })
+    expect(await checkpoints.sweep(retention)).toEqual({
+      expired: 1,
+      purgedCheckpoints: 0,
+      purgedAttachments: 0,
+    })
     expect(statusOf(worker, 'cp-1')).toBe('abandoned')
     expect(await checkpoints.loadEntries(SESSION_KEY, 'cp-1')).toHaveLength(3)
 
     clock += retention
-    expect(await checkpoints.sweep(retention)).toEqual({ expired: 0, purgedEntries: 3 })
+    expect(await checkpoints.sweep(retention)).toEqual({
+      expired: 0,
+      purgedCheckpoints: 1,
+      purgedAttachments: 0,
+    })
+    // The header goes too, and its entries with it (ON DELETE CASCADE).
+    expect(statusOf(worker, 'cp-1')).toBeUndefined()
     expect(await checkpoints.loadEntries(SESSION_KEY, 'cp-1')).toHaveLength(0)
   })
 
@@ -520,10 +534,186 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       leaseMs: 500,
     })
     clock += 200
-    expect(await checkpoints.sweep(1000)).toEqual({ expired: 0, purgedEntries: 0 })
+    expect(await checkpoints.sweep(1000)).toEqual({
+      expired: 0,
+      purgedCheckpoints: 0,
+      purgedAttachments: 0,
+    })
     expect(statusOf(worker, 'cp-1')).toBe('claimed')
     clock += 400
-    expect(await checkpoints.sweep(1000)).toEqual({ expired: 1, purgedEntries: 0 })
+    expect(await checkpoints.sweep(1000)).toEqual({
+      expired: 1,
+      purgedCheckpoints: 0,
+      purgedAttachments: 0,
+    })
     expect(statusOf(worker, 'cp-1')).toBe('abandoned')
+  })
+
+  describe('7. inline attachment bytes (migration 018)', () => {
+    const bytes = new Uint8Array([0, 255, 1, 254, 10, 13, 37])
+    const attachment = { attachmentId: 'att-1', digestHex: 'ab'.repeat(32), bytes }
+    const attachmentRows = (worker: InProcessWorkerHandle) =>
+      (
+        worker.db.prepare('SELECT COUNT(*) AS n FROM model_step_checkpoint_attachments').get() as {
+          n: number
+        }
+      ).n
+
+    async function resumableWithBytes(worker: InProcessWorkerHandle, ttlMs = 3_600_000) {
+      const { checkpoints } = storeOver(worker)
+      const fence = await checkpoints.open(header(), [userEntry])
+      await checkpoints.append(SESSION_KEY, fence, [dispatch('tc-1'), result('tc-1')])
+      const version = await checkpoints.transition(SESSION_KEY, fence, {
+        from: ['open'],
+        to: 'resumable',
+        failedAt: clock,
+        expiresAt: clock + 7 * 24 * 3_600_000,
+        attachments: [attachment],
+        attachmentsExpireAt: clock + ttlMs,
+      })
+      return { checkpoints, fence, version: version as number }
+    }
+
+    it('round-trip byte-exact after a cold reopen, and are readable while claimed', async () => {
+      const dbPath = tempDbPath()
+      const first = createInProcessWorker(dbPath)
+      await resumableWithBytes(first)
+      first.crash()
+      const reopened = createInProcessWorker(dbPath)
+      const { checkpoints } = storeOver(reopened)
+      const [row] = await checkpoints.loadAttachments(SESSION_KEY, 'cp-1')
+      expect(row?.attachment_id).toBe('att-1')
+      expect(row?.digest_hex).toBe('ab'.repeat(32))
+      expect(row?.size_bytes).toBe(bytes.byteLength)
+      expect(Buffer.compare(Buffer.from(row!.bytes), Buffer.from(bytes))).toBe(0)
+
+      const live = await checkpoints.loadLive(SESSION_KEY)
+      const claim = await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'cp-1',
+        version: live!.header.version,
+        hostInstanceId: 'host-instance-a',
+        newTaskId: 'task-cont-1',
+        leaseMs: LEASE_MS,
+      })
+      expect(claim.outcome).toBe('claimed')
+      expect(await checkpoints.loadAttachments(SESSION_KEY, 'cp-1')).toHaveLength(1)
+      reopened.terminate()
+    })
+
+    it('expire after their own TTL while the checkpoint stays resumable', async () => {
+      const worker = createInProcessWorker(tempDbPath())
+      const { checkpoints } = await resumableWithBytes(worker, 1000)
+      // Witness: the bytes are there before the TTL.
+      expect(await checkpoints.loadAttachments(SESSION_KEY, 'cp-1')).toHaveLength(1)
+      clock += 1000
+      expect(await checkpoints.loadAttachments(SESSION_KEY, 'cp-1')).toHaveLength(0)
+      expect(await checkpoints.sweep(1000)).toEqual({
+        expired: 0,
+        purgedCheckpoints: 0,
+        purgedAttachments: 1,
+      })
+      expect(attachmentRows(worker)).toBe(0)
+      expect(statusOf(worker, 'cp-1')).toBe('resumable')
+    })
+
+    it('are deleted when the checkpoint is blocked or retired by a new turn', async () => {
+      // blocked
+      const blockedWorker = createInProcessWorker(tempDbPath())
+      const blocked = await resumableWithBytes(blockedWorker)
+      const claim = await blocked.checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'cp-1',
+        version: blocked.version,
+        hostInstanceId: 'host-instance-a',
+        newTaskId: 'task-cont-1',
+        leaseMs: LEASE_MS,
+      })
+      if (claim.outcome !== 'claimed') throw new Error(claim.outcome)
+      expect(attachmentRows(blockedWorker)).toBe(1)
+      await blocked.checkpoints.transition(SESSION_KEY, claim.fence, {
+        from: ['claimed'],
+        to: 'blocked',
+        blockedReason: 'reference_unavailable',
+      })
+      expect(statusOf(blockedWorker, 'cp-1')).toBe('blocked')
+      expect(attachmentRows(blockedWorker)).toBe(0)
+
+      // retired by a new turn
+      const handle = makeSqliteStore({ dbPath: tempDbPath() })
+      openQueues.push(handle.persistQueue)
+      const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => clock })
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'first turn', 'task-1')
+      const fence = await checkpoints.open(header(), [userEntry])
+      await checkpoints.transition(SESSION_KEY, fence, {
+        from: ['open'],
+        to: 'resumable',
+        failedAt: clock,
+        expiresAt: clock + 1000,
+        attachments: [attachment],
+        attachmentsExpireAt: clock + 1000,
+      })
+      await manager.failTurn(conv)
+      expect(attachmentRows(handle.worker)).toBe(1)
+      await manager.startTurn(conv, 'a new message', 'task-2')
+      expect(statusOf(handle.worker, 'cp-1')).toBe('abandoned')
+      expect(attachmentRows(handle.worker)).toBe(0)
+    })
+
+    it('are refused with any status other than resumable', async () => {
+      const worker = createInProcessWorker(tempDbPath())
+      const { checkpoints } = storeOver(worker)
+      const fence = await checkpoints.open(header(), [userEntry])
+      await expect(
+        checkpoints.transition(SESSION_KEY, fence, {
+          from: ['open'],
+          to: 'abandoned',
+          attachments: [attachment],
+          attachmentsExpireAt: clock + 1000,
+        })
+      ).rejects.toThrow(/only with resumable/)
+      expect(statusOf(worker, 'cp-1')).toBe('open')
+    })
+  })
+
+  it("8. a session retention sweep deletes that session's checkpoints, and only those", async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints, queue } = storeOver(worker)
+    const insertSession = (
+      id: string,
+      key: string,
+      endedAt: number | null,
+      endReason: string | null
+    ) =>
+      worker.db
+        .prepare(
+          `INSERT INTO sessions(id, session_key, source, started_at, ended_at, end_reason, state)
+           VALUES (?, ?, 'rpc', 0, ?, ?, 'idle')`
+        )
+        .run(id, key, endedAt, endReason)
+    insertSession('s-ended', 'k-ended', 10, null)
+    insertSession('s-closed', 'k-closed', 10, 'closed')
+    insertSession('s-live', 'k-live', null, null)
+    await openResumable(checkpoints, 'cp-ended', 'k-ended')
+    await openResumable(checkpoints, 'cp-closed', 'k-closed')
+    await openResumable(checkpoints, 'cp-live', 'k-live')
+
+    await queue.enqueueSync({ kind: 'sweep_closed_sessions', cutoffEpoch: 20 }, 'k-closed')
+    expect(statusOf(worker, 'cp-closed')).toBeUndefined()
+    expect(statusOf(worker, 'cp-ended')).toBe('resumable')
+
+    await queue.enqueueSync({ kind: 'sweep_expired', nowEpoch: 30, ttlSeconds: 10 }, 'k-ended')
+    expect(statusOf(worker, 'cp-ended')).toBeUndefined()
+    // Witness: the live session and its checkpoint survive both sweeps.
+    expect(statusOf(worker, 'cp-live')).toBe('resumable')
+    expect(await checkpoints.loadEntries('k-live', 'cp-live')).toHaveLength(3)
+    const orphanEntries = worker.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM model_step_checkpoint_entries WHERE checkpoint_id IN ('cp-ended','cp-closed')"
+      )
+      .get() as { n: number }
+    expect(orphanEntries.n).toBe(0)
   })
 })

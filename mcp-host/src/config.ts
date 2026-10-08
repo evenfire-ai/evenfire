@@ -132,6 +132,16 @@ export interface Config {
   // pod restart). Default 7d. Independent from `agentApprovalTimeout`
   // (in-flight wait) and `spilloverTtlMs` (blob retention).
   pendingApprovalTtlMs: number
+  // #1043 — lifetime of a resumable model-step checkpoint from its failure,
+  // and retention of a terminal checkpoint's entries. Default 7d, like approvals.
+  modelStepCheckpointTtlMs: number
+  // #1043 — lease of a continuation's claim, renewed every third of it while
+  // the continuation runs. Independent from `maxTaskDuration`. Default 5 min.
+  modelStepClaimLeaseMs: number
+  // #1043 — how long a resumable checkpoint keeps the raw bytes of inline
+  // uploaded files (unredacted, unencrypted). After it, Retry of a turn that
+  // needs one is blocked with `attachment_expired`. Default 1 h.
+  modelStepAttachmentTtlMs: number
 
   // Approval system (default ON; tools advertise requiresApproval()).
   enableApproval: boolean
@@ -863,6 +873,12 @@ export const config: Config = {
   agentApprovalTimeout: parseInt(getEnv('CLERUM_APPROVAL_TIMEOUT', '0')!, 10),
   pendingApprovalTtlMs:
     parseInt(getEnv('CLERUM_PENDING_APPROVAL_TTL_HOURS', '168')!, 10) * 3600 * 1000, // 7d default
+  modelStepCheckpointTtlMs:
+    parseInt(getEnv('CLERUM_MODEL_STEP_CHECKPOINT_TTL_HOURS', '168')!, 10) * 3600 * 1000, // 7d
+  modelStepClaimLeaseMs:
+    parseInt(getEnv('CLERUM_MODEL_STEP_CLAIM_LEASE_SECONDS', '300')!, 10) * 1000, // 5 min
+  modelStepAttachmentTtlMs:
+    parseInt(getEnv('CLERUM_MODEL_STEP_ATTACHMENT_TTL_MINUTES', '60')!, 10) * 60 * 1000, // 1 h
 
   // Workflow step iteration limit — max LLM↔tool rounds per step before forced wrap-up.
   // Override per step via CRD spec.steps[].maxIterations. Default 50.

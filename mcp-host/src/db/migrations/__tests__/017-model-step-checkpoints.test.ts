@@ -33,8 +33,11 @@ const hasColumn = (db: Database.Database) =>
   )
 
 describe('migration 017 model-step checkpoints (#1043)', () => {
-  it('is the last registered migration', () => {
-    expect(migrations[migrations.length - 1]?.name).toBe('017-model-step-checkpoints')
+  it('is registered right after 016', () => {
+    const names = migrations.map(m => m.name)
+    expect(names.indexOf('017-model-step-checkpoints')).toBe(
+      names.indexOf('016-pending-approval-authorization-scope') + 1
+    )
   })
 
   it('up and down are idempotent and keep existing messages', () => {

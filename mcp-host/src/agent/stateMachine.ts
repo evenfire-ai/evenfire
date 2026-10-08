@@ -65,6 +65,7 @@ import {
   AgentStats,
   DEFAULT_AGENT_CONFIG,
   type FailoverSupportProvider,
+  type ModelStepCheckpointSupport,
   type TaskModelResolver,
 } from './types'
 
@@ -262,6 +263,9 @@ export class AgentStateMachine extends EventEmitter {
   // feature flag `CLERUM_SESSION_SEARCH_ENABLED` is false; populated from
   // main.ts and forwarded into each TaskExecutor.
   private sessionSearchService: SessionSearchService | undefined
+
+  // #1043 — durable model-step checkpoints. Undefined in memory mode.
+  private modelStepCheckpoints: ModelStepCheckpointSupport | undefined
 
   // ConfigStore snapshot getter, merged into shell-tool spawn env
   private dynamicEnvProvider: (() => Record<string, string>) | undefined
@@ -478,6 +482,18 @@ export class AgentStateMachine extends EventEmitter {
   setSessionSearchService(service: SessionSearchService | undefined): void {
     this.sessionSearchService = service
     logger.info({ configured: Boolean(service) }, 'Session search configured')
+  }
+
+  /**
+   * #1043 — Inject durable model-step checkpoints. Each TaskExecutor then
+   * records its tool-use turn and can leave a resumable checkpoint.
+   */
+  setModelStepCheckpoints(support: ModelStepCheckpointSupport | undefined): void {
+    this.modelStepCheckpoints = support
+  }
+
+  getModelStepCheckpoints(): ModelStepCheckpointSupport | undefined {
+    return this.modelStepCheckpoints
   }
 
   /**
@@ -1553,6 +1569,7 @@ export class AgentStateMachine extends EventEmitter {
       spilloverStorage: this.spilloverStorage,
       promptCache: this.promptCache,
       sessionSearchService: this.sessionSearchService,
+      modelStepCheckpoints: this.modelStepCheckpoints,
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,

@@ -1,4 +1,5 @@
 import type {
+  ModelStepCheckpointAttachmentInput,
   ModelStepCheckpointEntryInput,
   ModelStepCheckpointFence,
   ModelStepCheckpointOpenHeader,
@@ -67,6 +68,14 @@ export interface ModelStepCheckpointRecorderOptions {
   taskBudget: () => string | null
   /** Lifetime of a `resumable` checkpoint from the failure. */
   resumableTtlMs: number
+  /**
+   * Raw bytes of the turn's inline uploaded files, read only when the
+   * checkpoint becomes `resumable` (never on `open`), so a turn that ends
+   * normally never writes them.
+   */
+  inlineFileAttachments: () => ModelStepCheckpointAttachmentInput[]
+  /** Lifetime of those bytes from the failure. */
+  attachmentTtlMs: number
   now: () => number
   onFenceLost: () => void
 }
@@ -181,11 +190,15 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     ) {
       const now = this.opts.now()
       const resumable = await this.write('transition', async () => {
+        const attachments = this.opts.inlineFileAttachments()
         const version = await this.opts.store.transition(this.opts.sessionKey, fence, {
           from: [source],
           to: 'resumable',
           failedAt: now,
           expiresAt: now + this.opts.resumableTtlMs,
+          ...(attachments.length > 0
+            ? { attachments, attachmentsExpireAt: now + this.opts.attachmentTtlMs }
+            : {}),
         })
         return version !== null
       })

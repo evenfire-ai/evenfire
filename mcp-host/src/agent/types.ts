@@ -1,6 +1,7 @@
 /**
  * Types for the agent system.
  */
+import type { ModelStepCheckpointStore } from '../core/conversation/persistence/modelStepCheckpointStore'
 import type { SingleTurnProvider } from '../llm'
 import type { FailoverEngine } from '../llm/failover/engine'
 import type { FallbackEntry, LlmPolicy } from '../llm/failover/types'
@@ -32,6 +33,24 @@ export interface ExecutorFailoverSupport {
   buildProvider: (entry: FallbackEntry) => SingleTurnProvider | null
   /** Same per-model catalog used by the primary resolver; no provider construction. */
   contextWindowForPair?: (provider: string, model: string) => number | undefined
+}
+
+/**
+ * #1043 — durable model-step checkpoints, wired in `main.ts` only when the
+ * SQLite store runs. Absent (memory mode) → no recorder and no continuation.
+ */
+export interface ModelStepCheckpointSupport {
+  store: ModelStepCheckpointStore
+  /** Owner identity of this Host process; a claim names it. */
+  hostInstanceId: string
+  /** Runtime host name; recorded in the header and revalidated on continue. */
+  hostId: string
+  /** Lifetime of a resumable checkpoint from its failure. */
+  resumableTtlMs: number
+  /** Continuation claim lease, renewed every third of it. */
+  claimLeaseMs: number
+  /** Lifetime of inline uploaded file bytes held by a resumable checkpoint. */
+  attachmentTtlMs: number
 }
 
 /** Returns the current {@link ExecutorFailoverSupport}, or null when no policy. */
