@@ -586,13 +586,9 @@ describe('Desktop environment REST endpoint matching', () => {
       })
 
       expect(selectRuntimeConfig).not.toHaveBeenCalled()
-      expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith({
-        ...targetEnvironment,
-        externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
-        rpcProxyBaseUrl: '',
-      })
-      expect(setStatus).not.toHaveBeenCalledWith(
-        expect.stringMatching(/multiple saved environments/i),
+      expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+      expect(setStatus).toHaveBeenCalledWith(
+        'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
         'error'
       )
     }

@@ -790,51 +790,19 @@ describe('Desktop environment handoff', () => {
     )
   })
 
-  it('adds a REST API path when only another path on the same host is saved', async () => {
+  it('rejects a REST API path when another path on the same host is saved', async () => {
     const linkedEnvironment = {
       appName: 'API v2 tenant',
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v2`,
     }
-    const { AppService } = await import('../../../../../src/appService')
-    const service = new AppService()
-    const serviceInternals = service as unknown as {
-      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
-      applyRuntimeEnvironmentChange: (operation: () => Promise<void>) => Promise<void>
-      saveRuntimeConfig: typeof service.saveRuntimeConfig
-    }
-    serviceInternals.authClient = {
-      getDesktopEnvironment: vi.fn().mockResolvedValue({
-        ...linkedEnvironment,
-        rpcProxyBaseUrl: 'https://rpc.example.test/api-v2',
-      }),
-    }
-    serviceInternals.applyRuntimeEnvironmentChange = operation => operation()
-    mocks.saveRuntimeConfig.mockImplementation(serviceInternals.saveRuntimeConfig.bind(service))
-
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
     await dispatchDesktopEnvironmentLink(linkedEnvironment)
-    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
-      linkedEnvironment.externalRestApiBaseUrl
-    )
-
-    await act(async () => {
-      await confirmDesktopEnvironmentSetupForTest?.()
-    })
-
-    const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
-    const savedTarget = finalState.options.find(
-      option => option.externalRestApiBaseUrl === linkedEnvironment.externalRestApiBaseUrl
-    )
-    const originalTarget = finalState.options.find(
-      option =>
-        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
-    )
-    expect(serviceInternals.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
-    expect(savedTarget?.rpcProxyBaseUrl).toBe('https://rpc.example.test/api-v2')
-    expect(originalTarget).toBeDefined()
-    expect(finalState.activeOptionId).toBe(savedTarget?.id)
-    expect(screen.getByTestId('setup-complete')).toHaveTextContent('yes')
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
+      'error'
+    )
   })
 })
