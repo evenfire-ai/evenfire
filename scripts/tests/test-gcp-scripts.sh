@@ -8,6 +8,32 @@ FAIL=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
+# GCP deployment assets are maintained in the private infrastructure repository.
+# Public checkouts skip only tests whose required assets are absent. The private
+# infrastructure runner should set REQUIRE_PRIVATE_INFRA_TESTS=1 to fail closed
+# when that checkout is incomplete.
+run_private_infra_test() {
+  local label="$1" test_function="$2" path missing_paths=""
+  shift 2
+
+  for path in "$@"; do
+    if [[ ! -e "$path" ]]; then
+      missing_paths+="${missing_paths:+, }$path"
+    fi
+  done
+
+  if [[ -n "$missing_paths" ]]; then
+    if [[ "${REQUIRE_PRIVATE_INFRA_TESTS:-0}" == "1" ]]; then
+      fail "$label requires private infrastructure files: $missing_paths"
+    else
+      echo "SKIP: $label (requires private infrastructure files: $missing_paths)"
+    fi
+    return 0
+  fi
+
+  "$test_function"
+}
+
 assert_setup_defaults_prod() {
   local out
   out="$(DRY_RUN=1 bash deploy/scripts/gcp-setup.sh 2>&1 || true)"
@@ -1428,12 +1454,16 @@ assert_db_migration_context_fails_closed() {
 }
 
 assert_trace_maintenance_runtime_access_contract_is_exact() {
-  local relation_file sequence_file function_file migration_script
+  local relation_file sequence_file function_file migration_script maintenance_contract
   local relation_count sequence_count function_count
   relation_file="deploy/scripts/trace-maintenance-runtime-access-profiles.tsv"
   sequence_file="deploy/scripts/trace-maintenance-runtime-sequence-access-profiles.tsv"
   function_file="deploy/scripts/trace-maintenance-runtime-function-access-profiles.tsv"
   migration_script="$(cat deploy/scripts/run-control-api-db-migration.sh)"
+  maintenance_contract="$(
+    printf '%s\n' "$migration_script" |
+      sed -n '/^verify_trace_maintenance_access_contract() {/,/^verify_workflow_recipes_runtime_boundary() {/p'
+  )"
 
   relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$relation_file")"
   sequence_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$sequence_file")"
@@ -1442,6 +1472,8 @@ assert_trace_maintenance_runtime_access_contract_is_exact() {
   if [[ "$relation_count" == "8" && "$sequence_count" == "2" && "$function_count" == "11" ]] && \
      [[ "$migration_script" == *'verify_trace_maintenance_access_contract'* ]] && \
      [[ "$migration_script" == *'has_table_privilege('* ]] && \
+     [[ "$maintenance_contract" == *'has_any_column_privilege('* ]] && \
+     [[ "$maintenance_contract" == *'NOT required.allowed'* ]] && \
      [[ "$migration_script" == *'has_sequence_privilege('* ]] && \
      [[ "$migration_script" == *'has_function_privilege('* ]] && \
      [[ "$migration_script" == *"'trace_maintenance_runtime'"* ]] && \
@@ -1506,11 +1538,14 @@ assert_control_api_runtime_access_contract_is_exact() {
   fi
 }
 
-assert_setup_defaults_prod
-assert_setup_dev_overrides
-assert_teardown_dev
-assert_detect_k8s_api_ip
-assert_bump_tag
+run_private_infra_test "GCP setup defaults" assert_setup_defaults_prod \
+  deploy/scripts/gcp-setup.sh
+run_private_infra_test "GCP setup overrides" assert_setup_dev_overrides \
+  deploy/scripts/gcp-setup.sh
+run_private_infra_test "GCP teardown" assert_teardown_dev deploy/scripts/gcp-teardown.sh
+run_private_infra_test "GCP API IP detection" assert_detect_k8s_api_ip \
+  deploy/scripts/gcp-detect-k8s-api-ip.sh
+run_private_infra_test "image tag update" assert_bump_tag deploy/scripts/bump-image-tag.sh
 assert_apply_registry_secrets_patches_voucher_material
 assert_db_migration_job_uses_ci_suffix
 assert_db_migration_handles_concurrent_create_race
@@ -1519,18 +1554,33 @@ assert_db_migration_verifies_db_after_success
 assert_db_migration_reuses_existing_bound_pvc
 assert_db_migration_creates_missing_pvc
 assert_bootstrap_rbac_includes_cluster_wide_manifests
-assert_deploy_dev_keeps_mcp_proxy_gating
-assert_recreate_strategy_repair_script_patches_stateful_deployments
-assert_deploy_dev_repairs_recreate_strategy_before_server_side_apply
-assert_deploy_dev_hardens_control_api_migration_selection
-assert_deploy_dev_blocks_crd_drift_before_auth
-assert_deploy_dev_rollout_gate_is_baseline_aware
-assert_deploy_dev_restarts_subpath_gateway_after_apply
-assert_deploy_workflows_verify_networkpolicies_after_apply
-assert_deploy_dev_provisions_gfs_after_networkpolicy_verify
+run_private_infra_test "deploy-dev mcp-proxy gating" \
+  assert_deploy_dev_keeps_mcp_proxy_gating .github/workflows/deploy-dev.yaml
+run_private_infra_test "Recreate strategy repair" \
+  assert_recreate_strategy_repair_script_patches_stateful_deployments \
+  deploy/scripts/repair-recreate-strategy-rollout-fields.sh
+run_private_infra_test "deploy-dev repair ordering" \
+  assert_deploy_dev_repairs_recreate_strategy_before_server_side_apply \
+  .github/workflows/deploy-dev.yaml deploy/scripts/repair-recreate-strategy-rollout-fields.sh
+run_private_infra_test "deploy-dev migration selection" \
+  assert_deploy_dev_hardens_control_api_migration_selection .github/workflows/deploy-dev.yaml
+run_private_infra_test "deploy-dev CRD drift guard" \
+  assert_deploy_dev_blocks_crd_drift_before_auth .github/workflows/deploy-dev.yaml
+run_private_infra_test "deploy-dev rollout baseline" \
+  assert_deploy_dev_rollout_gate_is_baseline_aware .github/workflows/deploy-dev.yaml
+run_private_infra_test "deploy-dev gateway restart" \
+  assert_deploy_dev_restarts_subpath_gateway_after_apply .github/workflows/deploy-dev.yaml
+run_private_infra_test "deploy workflow NetworkPolicy checks" \
+  assert_deploy_workflows_verify_networkpolicies_after_apply \
+  .github/workflows/deploy-dev.yaml .github/workflows/deploy-prod.yaml
+run_private_infra_test "deploy-dev GFS provisioning" \
+  assert_deploy_dev_provisions_gfs_after_networkpolicy_verify \
+  .github/workflows/deploy-dev.yaml deploy/scripts/provision-gfs-runtime.sh
 assert_control_api_runtime_access_contract_is_exact
 assert_trace_maintenance_runtime_access_contract_is_exact
-assert_deploy_paths_reconcile_runtime_roles_after_migration
+run_private_infra_test "deploy runtime role reconciliation" \
+  assert_deploy_paths_reconcile_runtime_roles_after_migration \
+  .github/workflows/deploy-dev.yaml .github/workflows/deploy-prod.yaml
 assert_runtime_role_provisioning_script
 assert_db_migration_context_fails_closed
 
