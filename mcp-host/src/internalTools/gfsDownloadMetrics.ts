@@ -39,11 +39,7 @@ export type GfsDownloadShellLimitOutcome = 'output_limit_exceeded'
 
 export type GfsDownloadQuotaScope = 'host' | 'caller'
 
-export type GfsDownloadQuotaReason =
-  | 'storage_bytes'
-  | 'retained_files'
-  | 'active_downloads'
-  | 'free_space'
+export type GfsDownloadQuotaReason = 'storage_bytes' | 'active_downloads' | 'free_space'
 
 export type GfsDownloadExpiryOutcome =
   | 'expired_removed'

@@ -285,7 +285,7 @@ describe('GFS file preparation', () => {
     ['Error: GFS read failed (gfsc 403: forbidden)', 'denied'],
     ['Error: GFS read failed (gfsc 404: not_found)', 'missing'],
     ['Error: GFS download failed (version_conflict)', 'stale'],
-    ['Error: GFS download store failed (caller_quota_exceeded)', 'quota_exceeded'],
+    ['Error: GFS download store failed (host_quota_exceeded)', 'quota_exceeded'],
     ['Error: untrusted transport detail', 'download_failed'],
   ] as const)('publishes a fixed category for %s', async (content, code) => {
     const test = subject(vi.fn(async () => ({ content, duration_ms: 1, is_error: true })))

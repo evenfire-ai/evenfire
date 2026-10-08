@@ -47,16 +47,16 @@ without discarding the path, checksum, version or retained original.
 
 ## Effective limits
 
-| Environment variable                         |      Default |             Ceiling | Meaning                                                           |
-| -------------------------------------------- | -----------: | ------------------: | ----------------------------------------------------------------- |
-| `MCP_HOST_GFS_MAX_FILE_BYTES`                |   `16777216` |         `209715200` | Largest GFS source admitted by MCP Host.                          |
-| `MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`        | `1073741824` | deployment-approved | Aggregate retained download budget.                               |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES` |  `268435456` |    aggregate budget | Per-caller retained download budget.                              |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES`     |          `8` |                `64` | Retained files per caller, complete copies plus active transfers. |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY`   |          `1` |                 `2` | Simultaneous active transfers per caller.                         |
-| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`            |        `168` |              `8760` | Retention period for a completed copy.                            |
+| Environment variable                       |    Default |     Ceiling | Meaning                                                            |
+| ------------------------------------------ | ---------: | ----------: | ------------------------------------------------------------------ |
+| `MCP_HOST_GFS_MAX_FILE_BYTES`              | `16777216` | `209715200` | Largest GFS source admitted by MCP Host.                           |
+| `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT`    |       `85` |       `100` | Retained download budget, as a percentage of the workspace volume. |
+| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY` |        `1` |         `2` | Simultaneous active transfers per caller.                          |
+| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy.                             |
 
-All values are parsed as positive decimal byte/count/hour integers. Empty, fractional, negative, exponent, padded, partial, non-integer, and above-ceiling values fail startup. Per-caller storage cannot exceed aggregate storage.
+All values are parsed as positive decimal byte/percent/count/hour integers. Empty, zero, fractional, negative, exponent, padded, partial, non-integer, and above-ceiling values fail startup; the storage percent therefore accepts 1 to 100.
+
+`MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`, `MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES` and `MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES` were removed. The per-user byte and file limits were removed by user decision: a fixed byte budget did not follow the size of the workspace volume. A Host that still has any of them set starts normally, ignores it and logs one `warn` `GFS download store ignores a removed retained-storage variable; the budget is MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT of the workspace volume` per variable, naming the variable and never its value.
 
 The supported end-to-end size is the minimum of the applicable Desktop/GFS upload limit, GFSC transport limits, MCP Host admission, workspace PVC capacity, download quotas, and provider-specific visual limits. Raising only MCP Host admission does not raise any other layer.
 
@@ -172,11 +172,14 @@ a new ID, after fresh GFS authorization.
    files under `users/*`, including their `.gfs-downloads` copies. Per-user
    isolation of the shell (a per-user UID, a chroot or a sandbox) is out of
    scope of #1028; approval remains the shell's control.
-6. Quotas, free space and the Host-wide active-transfer limit are shared by
-   every caller on a Host. A caller can therefore observe aggregate pressure
-   from others (`host_quota_exceeded`, Host-scope `download_busy`, or a Host
-   eviction that removes one of its own unpinned copies). These signals carry
-   no identity, count, name or path of another caller's files.
+6. The retained-storage budget, free space and the Host-wide active-transfer
+   limit are shared by every caller on a Host; there is no per-caller byte or
+   file limit. A caller can therefore observe aggregate pressure from others
+   (`host_quota_exceeded`, Host-scope `download_busy`, or an eviction that
+   removes one of its own unpinned copies), and one caller's admission can
+   evict another caller's unpinned copies, which costs that caller a
+   re-download. These signals carry no identity, count, name or path of
+   another caller's files, and an evicted copy exposes no data.
 7. Check-then-use windows on paths are narrowed, not closed. Node has no
    `openat`/`renameat`/`unlinkat`, so the store cannot hold a directory
    descriptor across a check and the call that uses the path. It opens files
@@ -200,9 +203,8 @@ Host process published. Reuse and full managed reads re-hash the content against
 the digest held in memory, and a mismatch deletes the copy; the managed prefix
 read checks inode, size and mode only (see [Integrity](#integrity)).
 Directories found on disk that this process did not publish (left by a previous
-process or planted by a command) are counted against the quota of the
-`users/<key>` directory that contains them and removed when they expire or are
-evicted; they are never reused, never read back into a model and never pinned.
+process or planted by a command) are counted against the Host budget and
+removed when they expire or are evicted; they are never reused, never read back into a model and never pinned.
 A Host restart therefore loses reuse for every copy, at the cost of one extra
 download per file; accounting and cleanup survive the restart. Approved
 arbitrary shell access remains a documented Stage 1 residual; stronger executor
@@ -278,8 +280,8 @@ incomplete: it is not charged and the next sweep removes it.
 Each complete copy the store knows about is either _published_ (written by this
 Host process) or _adopted_ (found on disk by a sweep). Only published copies are
 reused, served by managed reads or pinned, and only for the caller that
-downloaded them. Adopted copies count against the quota of the `users/<key>`
-directory that holds them, are evicted first and are removed when they expire.
+downloaded them. Adopted copies count against the Host budget, are evicted
+first and are removed when they expire.
 A restart turns every copy into an adopted one: the files stay charged and are
 cleaned up on schedule, and a model that needs one downloads it again.
 
@@ -305,30 +307,48 @@ affected.
 
 ### Quotas and eviction
 
-Usage is the sum of complete copies plus the reservations of active transfers.
-A caller's usage is everything under its own `users/<key>` directory, whoever
-wrote it. Admission refuses with `caller_quota_exceeded` when the caller's bytes
-or files would exceed its limits, and with `host_quota_exceeded` when the Host
-totals would (1024 MiB and 64 files by default). Before refusing, the store
-plans an eviction of complete, unpinned copies that are not being transferred:
-adopted copies first (oldest `createdAt` first), then published copies least
-recently used first (publication, reuse or managed read). A caller-quota denial
-evicts only that caller's own copies; a Host-quota denial can evict any
-caller's. The whole plan is computed before anything is deleted: when no plan
-fits, nothing is deleted and the admission is refused. Eviction candidates are
-not hashed.
+The store has one retained-storage limit: Host bytes. Usage is the sum of
+complete copies, the reservations of active transfers and the duplicates a
+sweep could not remove, in every caller's directory. The budget is
+`floor(volume bytes × MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT / 100)`, where the
+volume bytes are `blocks × bsize` from the same `statfs` of the Host root that
+the free-space check reads at each admission, so a resized volume counts from
+the next admission without a restart. By default the cache can therefore use
+up to 85% of the volume. An admission is refused with `host_quota_exceeded`
+(reason `storage_bytes`) when usage plus its size would exceed the budget; a
+usage exactly at the budget is admitted. There is no per-caller byte or file
+limit and no file count: per-user limits were removed by user decision, and one
+caller can hold any number of copies while the budget has room.
+
+Before refusing, the store plans an eviction of complete, unpinned copies that
+are not being transferred, in any caller's directory: adopted copies first
+(oldest `createdAt` first), then published copies least recently used first
+(publication, reuse or managed read). Pinned copies are never evicted. One
+caller's admission can thus evict another caller's unpinned copies; that caller
+pays a re-download on its next use and learns nothing about who caused it, and
+the denial is the same code whoever's copies fill the budget. The whole plan is
+computed before anything is deleted: when no plan fits, nothing is deleted and
+the admission is refused. Eviction candidates are not hashed.
+
+Shell writes do not trigger eviction. Files a command writes elsewhere in a
+workspace share the volume with the cache but are not charged to the budget, so
+a full cache can make a shell write fail with `ENOSPC` until the next admission
+evicts copies or the next sweep removes expired ones.
 
 Free space is checked before the plan and again after it. Free space must cover
 the block-rounded size of the new download, every active reservation and a
 16 MiB margin; otherwise the admission is refused with `host_quota_exceeded`
 (reason `free_space`). The first check runs before any eviction, so a volume
-that cannot hold the download costs no cached copy. A Host runs at most 2
+that cannot hold the download costs no cached copy. A `statfs` that reports a
+block size or block count that is not positive cannot size a budget; the
+admission is refused the same way, as `host_quota_exceeded` with reason
+`free_space`. A Host runs at most 2
 transfers at once, and a caller at most its configured concurrency; beyond that
 admission returns `download_busy`.
 
-If the quota limits (`MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES`, the caller limits
-or the file counts) are lowered, existing copies remain charged and new
-admissions evict or are refused until usage falls below the new policy.
+If `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT` is lowered or the volume shrinks,
+existing copies remain charged and new admissions evict or are refused until
+usage falls below the new budget.
 Lowering `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS` or `MCP_HOST_GFS_MAX_FILE_BYTES` is
 different: a `meta.json` is validated against the limits in force, so after the
 restart every copy whose size or retention exceeds the new value is incomplete
@@ -365,7 +385,7 @@ it` and counts `sweep_failed`. All three log the error code only.
 A directory that cannot be listed is skipped and retried by the next sweep
 (`sweep_failed`). A removal that fails is logged with its error code
 (`remove_failed`) and retried by the next sweep; the copy stays where it is,
-indexed and charged to its caller, and a published copy stays published. Only a
+indexed and charged, and a published copy stays published. Only a
 removal that moved a directory counts as `incomplete_removed` or
 `expired_removed`; one whose directory never existed counts nothing. Expiry is the boundary itself: a
 copy whose `expiresAt` equals the current time is expired for reuse, managed
@@ -406,17 +426,16 @@ byte is sent to a model.
 
 ### Errors visible to the model
 
-| Code                    | Meaning                                                                                                                |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `caller_quota_exceeded` | The caller's retained bytes or files would exceed its limits and eviction cannot make room.                            |
-| `host_quota_exceeded`   | The Host's bytes or files, the admission size limit or free space would be exceeded.                                   |
-| `download_busy`         | Too many active transfers, the store is closed or closing, or no such transfer exists.                                 |
-| `download_missing`      | No copy this process published for this caller has that path, or the copy failed verification.                         |
-| `download_expired`      | The copy or the transfer is past its expiry.                                                                           |
-| `publication_cancelled` | The task was cancelled or ran out of time while the copy was being verified or published.                              |
-| `storage_write_failed`  | A filesystem operation failed during admission, publication or removal.                                                |
-| `workspace_unavailable` | The store is not initialized, or the Host root or caller directory is not a real directory inside the Host root.       |
-| `caller_mismatch`       | The request carries no caller identity, one that is not its caller directory's key, or a malformed retention owner ID. |
+| Code                    | Meaning                                                                                                                  |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `host_quota_exceeded`   | The Host's retained bytes would exceed the volume budget and eviction cannot make room, or free space would be exceeded. |
+| `download_busy`         | Too many active transfers, the store is closed or closing, or no such transfer exists.                                   |
+| `download_missing`      | No copy this process published for this caller has that path, or the copy failed verification.                           |
+| `download_expired`      | The copy or the transfer is past its expiry.                                                                             |
+| `publication_cancelled` | The task was cancelled or ran out of time while the copy was being verified or published.                                |
+| `storage_write_failed`  | A filesystem operation failed during admission, publication or removal.                                                  |
+| `workspace_unavailable` | The store is not initialized, or the Host root or caller directory is not a real directory inside the Host root.         |
+| `caller_mismatch`       | The request carries no caller identity, one that is not its caller directory's key, or a malformed retention owner ID.   |
 
 Another caller's download is answered with the same code and message as an ID
 that does not exist (`download_missing` for reads and publication,
@@ -467,7 +486,8 @@ The global `/metrics` endpoint exposes fixed-cardinality instruments:
 - `clerum_gfs_download_duration_seconds`
 - `clerum_gfs_download_active`
 - `clerum_gfs_download_quota_total{scope,reason}`, with `reason` one of
-  `storage_bytes`, `retained_files`, `active_downloads`, `free_space`
+  `storage_bytes`, `active_downloads`, `free_space` (`storage_bytes` and
+  `free_space` are Host-scope only)
 - `clerum_gfs_download_expiry_total{outcome}`, with `outcome` one of
   `expired_removed` (expired or evicted), `incomplete_removed`, `remove_failed`,
   `retired_legacy_store`, `sweep_failed`
@@ -485,6 +505,9 @@ sweep retries it` and `GFS download store could not list a download
 directory; the next sweep retries it`, each with an errno `code`.
 - `warn` `GFS download store closed with active transfers; their directories
 are removed at the next start` with the `active` count.
+- `warn` `GFS download store ignores a removed retained-storage variable; the
+budget is MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT of the workspace volume`, once
+  per removed variable that is set at startup, with the `variable` name only.
 
 ## Rollout and rollback
 
@@ -519,8 +542,8 @@ Rolling back to the dev image (`74e0d81d9`) is safe. That image creates a new
 the `meta.json` directories this image left. The dev image charges only its
 ledger records, so those directories are outside its accounting: they are not
 charged against its quota, only its free-space check sees them, and their size
-is bounded by the quota in force when this image wrote them (1024 MiB by
-default) plus any partial files. They stay until a later image sweeps them. A
+is bounded by the budget in force when this image wrote them (85% of the volume
+by default) plus any partial files. They stay until a later image sweeps them. A
 retired tree or a `.gfs-downloads.trash-*` tree left by a failed removal is not
 protected from workspace tools under that image. Rolling forward again retires
 the store the dev image created and keeps every copy that is still complete and

@@ -161,10 +161,6 @@
   },
   {
     "suite": "gfsDownloadStore.test.ts",
-    "fullName": "GFS download store: quotas and eviction F8: a caller over quota evicts its own oldest completed downloads, never another caller's"
-  },
-  {
-    "suite": "gfsDownloadStore.test.ts",
     "fullName": "GFS download store: quotas and eviction F10: when eviction cannot make room nothing is deleted"
   },
   {
@@ -241,19 +237,15 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: quota and capacity Q1: caller bytes exactly at the budget are admitted and one byte more is refused"
+    "fullName": "GFS download store boundaries: quota and capacity Q1: retained bytes exactly at the volume budget are admitted and one byte more is refused"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: quota and capacity Q2: caller file count at the limit is refused and one below is admitted"
+    "fullName": "GFS download store boundaries: quota and capacity Q2: there is no retained-file limit: one caller keeps 65 copies and only bytes refuse"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
     "fullName": "GFS download store boundaries: quota and capacity Q3: Host bytes exactly at the budget are admitted and one byte more is refused"
-  },
-  {
-    "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: quota and capacity Q4: Host file count at the limit is refused and one below is admitted"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
@@ -273,7 +265,7 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: quota and capacity Q10: caller eviction takes adopted copies in its own directory before its published copies"
+    "fullName": "GFS download store boundaries: quota and capacity Q10: an admission evicts adopted copies in any caller's directory before its own published copies"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
@@ -353,7 +345,7 @@
   },
   {
     "suite": "gfsDownloadStoreProvenance.test.ts",
-    "fullName": "GFS download store provenance: planted copies T-S4: a planted entry is charged to the directory that contains it"
+    "fullName": "GFS download store provenance: planted copies T-S4: a planted entry is inventoried under the directory that contains it and evicted first"
   },
   {
     "suite": "gfsDownloadStoreProvenance.test.ts",
@@ -405,10 +397,6 @@
   },
   {
     "suite": "gfsManagedImage.test.ts",
-    "fullName": "GFS download store errors at the tool boundary surfaces store code caller_quota_exceeded to the model"
-  },
-  {
-    "suite": "gfsManagedImage.test.ts",
     "fullName": "GFS download store errors at the tool boundary surfaces store code download_busy to the model"
   },
   {
@@ -438,10 +426,6 @@
   {
     "suite": "gfsManagedImage.test.ts",
     "fullName": "GFS download store errors at the tool boundary surfaces download admission code caller_mismatch to the model"
-  },
-  {
-    "suite": "gfsManagedImage.test.ts",
-    "fullName": "GFS download store errors at the tool boundary surfaces download admission code caller_quota_exceeded to the model"
   },
   {
     "suite": "gfsManagedImage.test.ts",
@@ -781,14 +765,114 @@
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
-    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged duplicates of a full caller’s ids whose removal fails keep both callers charged"
+    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged duplicates of another caller’s ids whose removal fails stay charged against the Host budget"
   },
   {
     "suite": "gfsDownloadStoreAdversarial.test.ts",
-    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged a duplicate of a published copy whose removal fails stays charged to its caller"
+    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged a duplicate of a published copy whose removal fails stays charged"
   },
   {
     "suite": "gfsDownloadStoreNonBlocking.test.ts",
     "fullName": "GFS download store: a FIFO in the store tree never blocks a meta.json FIFO with a writer attached is judged by its type, not read"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-1: the default 85% budget admits exactly up to floor(total * 85 / 100) bytes"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-2: percent '1' of a 1000n-byte volume admits 10 bytes and refuses one more"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-2: percent '100' of a 10n-byte volume admits 10 bytes and refuses one more"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-3: a volume resized between two admissions is used by the second, without restart"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-4: a large volume is sized in bigint without rounding"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a zero block size' refuses with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a zero block count' refuses with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a negative block count' refuses with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: no per-caller limit BUD-6: one caller fills the whole budget with 18 files of 16 MiB and another caller evicts its least recently used copy"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: no per-caller limit BUD-7: another caller's admission never evicts a pinned copy and takes an adopted one first"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: no per-caller limit BUD-8: the quota denial is identical whoever fills the budget"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9: MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES still set is warned about once, by name and never by value"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9: MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES still set is warned about once, by name and never by value"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9: MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES still set is warned about once, by name and never by value"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9b: every removed variable set at once gives one warning each"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-10: with no removed variable set nothing is warned and the store initializes"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy accepts a storage percent of 1"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy accepts a storage percent of 85"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy accepts a storage percent of 100"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"0\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"101\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"85.5\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"-1\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy removed retained-storage variables no longer shape the policy"
   }
 ]

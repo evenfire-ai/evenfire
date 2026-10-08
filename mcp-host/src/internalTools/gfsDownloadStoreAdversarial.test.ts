@@ -34,7 +34,6 @@ import {
 } from '../workspace/protectedPaths'
 import { deriveUserKey } from '../workspace/userKey'
 import { GfsDownloadStore } from './gfsDownloadStore'
-import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 
 type FsOperation = 'open' | 'lstat' | 'rename' | 'rm' | 'readdir' | 'realpath'
 /**
@@ -44,8 +43,9 @@ type FsOperation = 'open' | 'lstat' | 'rename' | 'rm' | 'readdir' | 'realpath'
 type Fault = (target: string) => string | undefined
 const SKIP_CALL = 'SKIP_CALL'
 
-const { faults } = vi.hoisted(() => ({
+const { faults, volume } = vi.hoisted(() => ({
   faults: new Map<string, (target: string) => string | undefined>(),
+  volume: { totalBytes: undefined as bigint | undefined },
 }))
 
 function errnoError(code: string): NodeJS.ErrnoException {
@@ -72,6 +72,13 @@ vi.mock('node:fs/promises', async original => {
     rm: wrap('rm', actual.rm),
     readdir: wrap('readdir', actual.readdir),
     realpath: wrap('realpath', actual.realpath),
+    // Real free space; a test that sets `volume.totalBytes` sizes the volume
+    // (block size 1), and with it the retained budget.
+    statfs: async (target: string, options: { bigint: true }) => {
+      const real = await actual.statfs(target, options)
+      if (volume.totalBytes === undefined) return real
+      return { ...real, bsize: 1n, blocks: volume.totalBytes, bavail: real.bavail * real.bsize }
+    },
   }
 })
 
@@ -121,6 +128,7 @@ async function openStore(): Promise<GfsDownloadStore> {
 
 beforeEach(() => {
   faults.clear()
+  volume.totalBytes = undefined
   hostRoot = syncFs.mkdtempSync(path.join(tmpdir(), 'gfs-store-adversarial-'))
 })
 
@@ -383,11 +391,11 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
   })
 
   it('an eviction whose removal fails keeps the copy published and charged', async () => {
+    volume.totalBytes = 15n
     const limited = await withEnvironment(
       {
         MCP_HOST_GFS_MAX_FILE_BYTES: '10',
-        MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '30',
-        MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '15',
+        MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '100',
       },
       async () => {
         vi.resetModules()
@@ -404,7 +412,7 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
     const renames = watch('rename', `input-${receipt.id}`, 'EIO')
 
     await expect(startTransfer(limited, root, KEY, 4, 10)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
+      code: 'host_quota_exceeded',
     })
     faults.clear()
 
@@ -564,11 +572,11 @@ describe('GFS download store adversarial round: expiry, close, recency and remov
   it('S28: a managed read refreshes recency, so the unread copy is evicted first', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(T0)
+    volume.totalBytes = 15n
     const limited = await withEnvironment(
       {
         MCP_HOST_GFS_MAX_FILE_BYTES: '10',
-        MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '30',
-        MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '15',
+        MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '100',
       },
       async () => {
         vi.resetModules()
@@ -720,22 +728,22 @@ describe('GFS download store adversarial round: a failed duplicate removal stays
     return calls
   }
 
-  it('duplicates of a full caller’s ids whose removal fails keep both callers charged', async () => {
+  it('duplicates of another caller’s ids whose removal fails stay charged against the Host budget', async () => {
     const owner = callerDirectory(hostRoot, OWNER)
     const planter = callerDirectory(hostRoot, PLANTER)
     const bytes = Buffer.from('quota')
-    const ids = Array.from({ length: GFS_FILE_LIMITS.callerRetainedFiles }, () => randomUUID())
+    const ids = Array.from({ length: 8 }, () => randomUUID())
     for (const id of ids) plantDownload(owner, { id, bytes, meta: metaFor(id, bytes, Date.now()) })
+    // 8 copies of 5 bytes plus one 5-byte admission fit; their duplicates do not.
+    volume.totalBytes = 80n
     const store = await openStore()
     expect((await store.debugInventory()).byCaller.get(OWNER)?.files).toBe(ids.length)
     const renames = failRemovals([OWNER, PLANTER], ids)
 
-    // Control: without duplicates the full caller is refused; its one eviction
-    // attempt fails like every other removal here.
-    await expect(startTransfer(store, owner, OWNER, 1, 5)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
-    })
-    expect(renames).toHaveLength(1)
+    // Control: without duplicates the budget has room and nothing is evicted.
+    const control = await startTransfer(store, owner, OWNER, 1, 5)
+    await store.fail(control.transfer.id, OWNER)
+    expect(renames).toHaveLength(0)
     for (const id of ids)
       plantDownload(planter, { id, bytes, meta: metaFor(id, bytes, Date.now()) })
 
@@ -743,19 +751,19 @@ describe('GFS download store adversarial round: a failed duplicate removal stays
 
     // Witness: every copy of every id was a removal attempt, and each failed.
     expect(sweep.removeFailed).toBe(ids.length * 2)
-    expect(renames).toHaveLength(1 + ids.length * 2)
+    expect(renames).toHaveLength(ids.length * 2)
     for (const id of ids) {
       expect(exists(downloadDirectory(owner, id))).toBe(true)
       expect(exists(downloadDirectory(planter, id))).toBe(true)
       // The indexed copy is forgotten only once its removal succeeds.
       expect(indexedEntry(store, id)).toBeDefined()
     }
-    // The copies left on disk are still charged to the caller root holding them.
+    // The copies left on disk are still charged: 80 retained + 5 > 80.
     await expect(startTransfer(store, owner, OWNER, 2, 5)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
+      code: 'host_quota_exceeded',
     })
     await expect(startTransfer(store, planter, PLANTER, 3, 5)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
+      code: 'host_quota_exceeded',
     })
 
     // Once the removals succeed, both callers have their capacity back.
@@ -771,9 +779,11 @@ describe('GFS download store adversarial round: a failed duplicate removal stays
     await store.fail(planted.transfer.id, PLANTER)
   })
 
-  it('a duplicate of a published copy whose removal fails stays charged to its caller', async () => {
+  it('a duplicate of a published copy whose removal fails stays charged', async () => {
+    // Room for the published copy and one more of its size, not for a duplicate too.
+    volume.totalBytes = 32n
     const limited = await withEnvironment(
-      { MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '1' },
+      { MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '100' },
       async () => {
         vi.resetModules()
         const { GfsDownloadStore: Store } = await import('./gfsDownloadStore')
@@ -785,7 +795,10 @@ describe('GFS download store adversarial round: a failed duplicate removal stays
     )
     const owner = callerDirectory(hostRoot, OWNER)
     const planter = callerDirectory(hostRoot, PLANTER)
-    const { receipt, bytes } = await completedCopy(limited, owner, OWNER, 6, 16)
+    // Pinned, so no admission can evict it to make room.
+    const { receipt, bytes } = await completedCopy(limited, owner, OWNER, 6, 16, {
+      owner: 'task-erin',
+    })
     // Control: the planter has capacity for one copy.
     const control = await startTransfer(limited, planter, PLANTER, 7, 16)
     await limited.fail(control.transfer.id, PLANTER)
@@ -805,7 +818,7 @@ describe('GFS download store adversarial round: a failed duplicate removal stays
     expect(exists(downloadDirectory(planter, receipt.id))).toBe(true)
     await expect(limited.readManagedFile(receipt.path, OWNER)).resolves.toEqual(bytes)
     await expect(startTransfer(limited, planter, PLANTER, 8, 16)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
+      code: 'host_quota_exceeded',
     })
 
     faults.clear()

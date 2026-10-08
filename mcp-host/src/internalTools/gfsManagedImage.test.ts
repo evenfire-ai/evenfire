@@ -344,7 +344,6 @@ describe('GFS managed image projection', () => {
 describe('GFS download store errors at the tool boundary', () => {
   const codes: GfsDownloadStoreErrorCode[] = [
     'caller_mismatch',
-    'caller_quota_exceeded',
     'download_busy',
     'download_expired',
     'download_missing',

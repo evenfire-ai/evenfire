@@ -27,7 +27,7 @@ import {
 } from '../__tests__/fixtures/gfsStoreTestKit'
 import { logger } from '../logger'
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
-import { GFS_FILE_LIMITS, GFS_HOST_RETAINED_FILES } from './gfsFilePolicy'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 
 const { statfsBoundary, renameBoundary, openBoundary, realpathBoundary } = vi.hoisted(() => ({
   statfsBoundary: vi.fn(),
@@ -51,10 +51,10 @@ const A = 'caller-a'
 const B = 'caller-b'
 const HOUR = 60 * 60_000
 const META_MAX_BYTES = 64 * 1024
-const HOST_30_CALLER_15 = {
+/** A 10-byte file limit and the whole (mocked) volume as the retained budget. */
+const SMALL_FILES_FULL_VOLUME = {
   MCP_HOST_GFS_MAX_FILE_BYTES: '10',
-  MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '30',
-  MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '15',
+  MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '100',
 }
 
 let nativeFs: typeof fs
@@ -95,6 +95,17 @@ async function limitedStore(env: Record<string, string>): Promise<GfsDownloadSto
     extraStores.push(opened)
     await opened.initialize()
     return opened
+  })
+}
+
+/**
+ * statfs reports the real free space but a volume of `totalBytes` (block size
+ * 1), so the retained budget is `floor(totalBytes * percent / 100)`.
+ */
+function volumeOf(totalBytes: number): void {
+  statfsBoundary.mockImplementation(async (target: string) => {
+    const real = await nativeFs.statfs(target, { bigint: true })
+    return { ...real, bsize: 1n, blocks: BigInt(totalBytes), bavail: real.bavail * real.bsize }
   })
 }
 
@@ -230,7 +241,7 @@ describe('GFS download store boundaries: meta.json validation', () => {
     const atLimit = Buffer.alloc(10, 0x34)
     const over = plantComplete(rootA, A, 301, tooLarge)
     const kept = plantComplete(rootB, B, 302, atLimit)
-    const limited = await limitedStore(HOST_30_CALLER_15)
+    const limited = await limitedStore({ MCP_HOST_GFS_MAX_FILE_BYTES: '10' })
 
     expect(exists(over.directory)).toBe(false)
     // Witness: the copy exactly at maxFileBytes is retained.
@@ -294,37 +305,45 @@ describe('GFS download store boundaries: meta.json validation', () => {
 })
 
 describe('GFS download store boundaries: quota and capacity', () => {
-  it('Q1: caller bytes exactly at the budget are admitted and one byte more is refused', async () => {
-    const limited = await limitedStore(HOST_30_CALLER_15)
+  it('Q1: retained bytes exactly at the volume budget are admitted and one byte more is refused', async () => {
+    volumeOf(15)
+    const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
     await completedCopy(limited, rootA, A, 310, 10, { owner: 'task-q1' })
-    const denied = await quotaCount('caller', 'storage_bytes')
+    const denied = await quotaCount('host', 'storage_bytes')
 
     const atBudget = await completedCopy(limited, rootA, A, 311, 5, { owner: 'task-q1' })
-    expect(await quotaCount('caller', 'storage_bytes')).toBe(denied)
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
     await expect(limited.readManagedFile(atBudget.receipt.path, A)).resolves.toEqual(atBudget.bytes)
 
     await expect(startTransfer(limited, rootA, A, 312, 1)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
+      code: 'host_quota_exceeded',
     })
-    expect(await quotaCount('caller', 'storage_bytes')).toBe(denied + 1)
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
   })
 
-  it('Q2: caller file count at the limit is refused and one below is admitted', async () => {
-    const limited = await limitedStore({ MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES: '2' })
-    await completedCopy(limited, rootA, A, 313, 4, { owner: 'task-q2' })
-    const denied = await quotaCount('caller', 'retained_files')
+  it('Q2: there is no retained-file limit: one caller keeps 65 copies and only bytes refuse', async () => {
+    // 65 one-byte copies: more than the removed 8-per-caller and 64-per-Host limits.
+    const files = 65
+    volumeOf(files)
+    const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
+    const denied = await quotaCount('host', 'storage_bytes')
+    for (let index = 0; index < files; index += 1)
+      await completedCopy(limited, rootA, A, 400 + index, 1, { owner: 'task-q2' })
+    expect((await limited.debugInventory()).byCaller.get(A)).toEqual({ files, bytes: files })
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
 
-    await completedCopy(limited, rootA, A, 314, 4, { owner: 'task-q2' })
-    expect(await quotaCount('caller', 'retained_files')).toBe(denied)
-
-    await expect(startTransfer(limited, rootA, A, 315, 4)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
+    // Every copy is pinned, so the byte budget is the only thing that can refuse.
+    await expect(startTransfer(limited, rootA, A, 400 + files, 1)).rejects.toMatchObject({
+      code: 'host_quota_exceeded',
     })
-    expect(await quotaCount('caller', 'retained_files')).toBe(denied + 1)
-  })
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
+    // 65 real publications: the timeout is explicit rather than the 5 s
+    // default that a loaded machine can exceed.
+  }, 60_000)
 
   it('Q3: Host bytes exactly at the budget are admitted and one byte more is refused', async () => {
-    const limited = await limitedStore(HOST_30_CALLER_15)
+    volumeOf(30)
+    const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
     const rootC = callerDirectory(hostRoot, 'caller-c')
     await completedCopy(limited, rootB, B, 316, 10, { owner: 'task-b' })
     await completedCopy(limited, rootC, 'caller-c', 317, 10, { owner: 'task-c' })
@@ -340,36 +359,6 @@ describe('GFS download store boundaries: quota and capacity', () => {
     })
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
   })
-
-  it('Q4: Host file count at the limit is refused and one below is admitted', async () => {
-    const perCaller = GFS_FILE_LIMITS.callerRetainedFiles
-    let index = 400
-    for (let n = 0; n < GFS_HOST_RETAINED_FILES - 1; n += 1) {
-      const caller = `caller-${Math.floor(n / perCaller)}`
-      await completedCopy(store, callerDirectory(hostRoot, caller), caller, index, 1, {
-        owner: `task-${caller}`,
-      })
-      index += 1
-    }
-    expect((await store.debugInventory()).files).toBe(GFS_HOST_RETAINED_FILES - 1)
-    const denied = await quotaCount('host', 'retained_files')
-    const lastCaller = `caller-${Math.floor((GFS_HOST_RETAINED_FILES - 1) / perCaller)}`
-
-    await completedCopy(store, callerDirectory(hostRoot, lastCaller), lastCaller, index, 1, {
-      owner: `task-${lastCaller}`,
-    })
-    expect(await quotaCount('host', 'retained_files')).toBe(denied)
-    expect((await store.debugInventory()).files).toBe(GFS_HOST_RETAINED_FILES)
-
-    const fresh = 'caller-fresh'
-    await expect(
-      startTransfer(store, callerDirectory(hostRoot, fresh), fresh, index + 1, 1)
-    ).rejects.toMatchObject({ code: 'host_quota_exceeded' })
-    expect(await quotaCount('host', 'retained_files')).toBe(denied + 1)
-    // 64 real publications: the bound is the Host file limit, which is a
-    // constant, so the timeout is explicit rather than the 5 s default that a
-    // loaded machine can exceed.
-  }, 60_000)
 
   it('Q5: free space exactly at the threshold is admitted and one byte less is refused', async () => {
     const observed = await nativeFs.statfs(hostRoot, { bigint: true })
@@ -411,7 +400,8 @@ describe('GFS download store boundaries: quota and capacity', () => {
   })
 
   it('Q9: Host eviction takes adopted copies before any published copy', async () => {
-    const limited = await limitedStore(HOST_30_CALLER_15)
+    volumeOf(30)
+    const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
     const published = await completedCopy(limited, rootB, B, 323, 10)
     tick()
     const rootC = callerDirectory(hostRoot, 'caller-c')
@@ -420,7 +410,7 @@ describe('GFS download store boundaries: quota and capacity', () => {
     await completedCopy(limited, rootA, A, 325, 10)
     tick()
 
-    // caller-a stays within 15; the Host would reach 35 of 30.
+    // The Host would reach 35 of 30.
     await startTransfer(limited, rootA, A, 326, 5)
 
     expect(exists(adopted.directory)).toBe(false)
@@ -428,25 +418,27 @@ describe('GFS download store boundaries: quota and capacity', () => {
     expect(exists(downloadDirectory(rootB, published.receipt.id))).toBe(true)
   })
 
-  it('Q10: caller eviction takes adopted copies in its own directory before its published copies', async () => {
-    const limited = await limitedStore(HOST_30_CALLER_15)
+  it("Q10: an admission evicts adopted copies in any caller's directory before its own published copies", async () => {
+    volumeOf(15)
+    const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
     const published = await completedCopy(limited, rootA, A, 327, 5)
     tick()
     const adopted = plantComplete(rootA, A, 328, Buffer.alloc(5, 0x37))
     const foreign = plantComplete(rootB, B, 329, Buffer.alloc(5, 0x38))
     tick()
 
-    // 5 + 5 + 10 against 15: one copy of caller-a's directory goes.
+    // 5 + 5 + 5 + 10 against 15: both adopted copies go, whoever's directory holds them.
     await startTransfer(limited, rootA, A, 330, 10)
 
     expect(exists(adopted.directory)).toBe(false)
+    expect(exists(foreign.directory)).toBe(false)
+    // Witness: the published copy, older than both, stays.
     expect(exists(downloadDirectory(rootA, published.receipt.id))).toBe(true)
-    // Witness: a caller denial never reaches another directory's adopted copy.
-    expect(exists(foreign.directory)).toBe(true)
   })
 
   it('Q11: published copies are evicted least recently used first', async () => {
-    const limited = await limitedStore(HOST_30_CALLER_15)
+    volumeOf(15)
+    const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
     const older = await completedCopy(limited, rootA, A, 331, 5)
     tick()
     const newer = await completedCopy(limited, rootA, A, 332, 5)
@@ -463,21 +455,22 @@ describe('GFS download store boundaries: quota and capacity', () => {
   })
 
   it('Q12: when every copy is pinned admission fails with the quota code and succeeds after release', async () => {
-    const limited = await limitedStore(HOST_30_CALLER_15)
+    volumeOf(15)
+    const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
     const pinned = await completedCopy(limited, rootA, A, 334, 10, { owner: 'task-q12' })
     const directory = downloadDirectory(rootA, pinned.receipt.id)
-    const denied = await quotaCount('caller', 'storage_bytes')
+    const denied = await quotaCount('host', 'storage_bytes')
 
     await expect(startTransfer(limited, rootA, A, 335, 10)).rejects.toMatchObject({
-      code: 'caller_quota_exceeded',
+      code: 'host_quota_exceeded',
     })
-    expect(await quotaCount('caller', 'storage_bytes')).toBe(denied + 1)
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
     expect(exists(directory)).toBe(true)
 
     await limited.releaseReceiptOwner('task-q12', A)
     await expect(startTransfer(limited, rootA, A, 335, 10)).resolves.toBeDefined()
     expect(exists(directory)).toBe(false)
-    expect(await quotaCount('caller', 'storage_bytes')).toBe(denied + 1)
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
   })
 })
 

@@ -41,7 +41,7 @@ describe('GFS download metrics', () => {
       ['clerum_gfs_download_admissions_total', { outcome: 'workspace_attempt' }],
       ['clerum_gfs_download_transfers_total', { outcome: 'success' }],
       ['clerum_gfs_shell_output_limits_total', { outcome: 'output_limit_exceeded' }],
-      ['clerum_gfs_download_quota_total', { scope: 'caller', reason: 'storage_bytes' }],
+      ['clerum_gfs_download_quota_total', { scope: 'host', reason: 'storage_bytes' }],
       ['clerum_gfs_download_expiry_total', { outcome: 'remove_failed' }],
     ] as const
     const before = await Promise.all(series.map(([name, labels]) => counterValue(name, labels)))
@@ -53,7 +53,7 @@ describe('GFS download metrics', () => {
     recordGfsDownloadTransfer('success', 0.25)
     exitGfsDownloadTransfer()
     recordGfsShellOutputLimit('output_limit_exceeded')
-    recordGfsDownloadQuota('caller', 'storage_bytes')
+    recordGfsDownloadQuota('host', 'storage_bytes')
     recordGfsDownloadExpiry('remove_failed')
 
     // Each call moved its own series by exactly one.
@@ -69,7 +69,7 @@ describe('GFS download metrics', () => {
       'clerum_gfs_shell_output_limits_total{outcome="output_limit_exceeded"}'
     )
     expect(scraped).toContain(
-      'clerum_gfs_download_quota_total{scope="caller",reason="storage_bytes"}'
+      'clerum_gfs_download_quota_total{scope="host",reason="storage_bytes"}'
     )
     expect(scraped).toContain('clerum_gfs_download_expiry_total{outcome="remove_failed"}')
   })

@@ -12,7 +12,7 @@ import { recordGfsDownloadExpiry, recordGfsDownloadQuota } from './gfsDownloadMe
 import {
   GFS_FILE_LIMITS,
   GFS_HOST_ACTIVE_DOWNLOADS,
-  GFS_HOST_RETAINED_FILES,
+  REMOVED_GFS_STORAGE_VARIABLES,
 } from './gfsFilePolicy'
 import {
   PrivateStoreUntrustedError,
@@ -53,7 +53,6 @@ const SHA256_RE = /^[0-9a-f]{64}$/
 
 export type GfsDownloadStoreErrorCode =
   | 'caller_mismatch'
-  | 'caller_quota_exceeded'
   | 'download_busy'
   | 'download_expired'
   | 'download_missing'
@@ -103,8 +102,8 @@ interface StoredMeta {
  * Provenance lives only in memory. A `published` entry was written by this
  * process, so its caller identity and sha256 are trusted. An `adopted` entry
  * was found on disk (left by an earlier process or planted by a shell command
- * running with the Host UID): it counts against the quota of the directory
- * that contains it and is swept, but it is never reused, read or pinned.
+ * running with the Host UID): it counts against the Host budget and is swept,
+ * but it is never reused, read or pinned.
  */
 /** dev/ino of an inode, compared against an open descriptor or a later lstat. */
 interface InodeIdentity {
@@ -125,7 +124,7 @@ interface Entry extends StoredMeta {
    * never served.
    */
   sourceIdentity?: InodeIdentity
-  /** `<hostRoot>/users/<key>` containing the entry: the owner for quota and inventory. */
+  /** `<hostRoot>/users/<key>` containing the entry: the owner for inventory. */
   callerRoot: string
   provenance: 'published' | 'adopted'
   /** Last publish, reuse or managed read in this process; adopted entries use createdAt. */
@@ -148,8 +147,22 @@ interface ActiveTransfer {
 
 /** A duplicate directory the last sweep could not remove; it stays charged. */
 interface HeldCopy {
-  callerRoot: string
   sizeBytes: number
+}
+
+/** The statfs fields admission uses, validated: bsize and blocks positive. */
+interface VolumeSpace {
+  bsize: bigint
+  blocks: bigint
+  bavail: bigint
+}
+
+/**
+ * The retained-storage budget, `floor(volumeTotalBytes * percent / 100)`,
+ * computed in bigint so no volume size loses precision.
+ */
+function retainedBudget(volume: VolumeSpace): bigint {
+  return (volume.blocks * volume.bsize * BigInt(GFS_FILE_LIMITS.storagePercent)) / 100n
 }
 
 export interface GfsDownloadSweepResult {
@@ -425,6 +438,13 @@ export class GfsDownloadStore {
   }
 
   private async runInitialize(): Promise<void> {
+    // Named, never echoed: a stale value could be anything an operator typed.
+    for (const variable of REMOVED_GFS_STORAGE_VARIABLES)
+      if (process.env[variable] !== undefined)
+        logger.warn(
+          { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, variable },
+          'GFS download store ignores a removed retained-storage variable; the budget is MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT of the workspace volume'
+        )
     try {
       await fs.mkdir(this.requestedHostRoot, { recursive: true, mode: 0o700 })
       const requested = await fs.lstat(this.requestedHostRoot)
@@ -518,16 +538,16 @@ export class GfsDownloadStore {
       }
       if (input.retentionOwnerId !== undefined) this.assertReceiptOwner(input.retentionOwnerId)
       // Verified free capacity first: no eviction happens for an admission the
-      // volume cannot hold anyway. Measured again after eviction below.
-      await this.assertPhysicalCapacity(input.sizeBytes)
+      // volume cannot hold anyway. Measured again after eviction below. The
+      // same statfs sizes the budget, so a resized volume counts at once.
+      const volume = await this.assertPhysicalCapacity(input.sizeBytes)
       await this.sweep(Date.now())
-      await this.reclaimForAdmission(callerRoot, input.sizeBytes)
-      const denial = this.quotaDenial(callerRoot, input.sizeBytes)
-      if (denial) {
-        recordGfsDownloadQuota(denial.scope, denial.reason)
-        throw new GfsDownloadStoreError(
-          denial.scope === 'host' ? 'host_quota_exceeded' : 'caller_quota_exceeded'
-        )
+      const budget = retainedBudget(volume)
+      await this.reclaimForAdmission(input.sizeBytes, budget)
+      if (this.overBudget(input.sizeBytes, budget)) {
+        // The code alone: whose copies fill the budget is never part of it.
+        recordGfsDownloadQuota('host', 'storage_bytes')
+        throw new GfsDownloadStoreError('host_quota_exceeded')
       }
       await this.assertPhysicalCapacity(input.sizeBytes)
 
@@ -990,17 +1010,12 @@ export class GfsDownloadStore {
       return result !== 'failed'
     }
     // A duplicate this sweep could not remove is still on disk, so it stays
-    // charged to the caller root that holds it: a failed cleanup never turns
-    // into free capacity.
+    // charged: a failed cleanup never turns into free capacity.
     const held = new Map<string, HeldCopy>()
     const removeDuplicate = async (id: string, directory: string): Promise<void> => {
       if (await removeIncomplete(directory)) return
       const state = await this.inspectDirectory(directory, id, now)
-      if (state.state === 'complete')
-        held.set(directory, {
-          callerRoot: state.entry.callerRoot,
-          sizeBytes: state.entry.sizeBytes,
-        })
+      if (state.state === 'complete') held.set(directory, { sizeBytes: state.entry.sizeBytes })
     }
 
     for (const [id, directories] of candidates) {
@@ -1382,9 +1397,13 @@ export class GfsDownloadStore {
       .map(entry => entry.id)
   }
 
-  private async assertPhysicalCapacity(sizeBytes: number): Promise<void> {
+  /**
+   * A statfs whose block size or block count is not positive cannot size
+   * anything; it refuses the admission as `free_space`, like a full volume.
+   */
+  private async assertPhysicalCapacity(sizeBytes: number): Promise<VolumeSpace> {
     const space = await fs.statfs(this.hostRoot, { bigint: true })
-    if (space.bsize <= 0n || space.bavail < 0n) {
+    if (space.bsize <= 0n || space.blocks <= 0n || space.bavail < 0n) {
       recordGfsDownloadQuota('host', 'free_space')
       throw new GfsDownloadStoreError('host_quota_exceeded')
     }
@@ -1400,71 +1419,47 @@ export class GfsDownloadStore {
       recordGfsDownloadQuota('host', 'free_space')
       throw new GfsDownloadStoreError('host_quota_exceeded')
     }
+    return { bsize: space.bsize, blocks: space.blocks, bavail: space.bavail }
   }
 
-  /** Caller usage is keyed by the caller directory that holds each copy, never by meta.json. */
-  private usage(excluded: ReadonlySet<string> = new Set()) {
-    const usage = {
-      bytes: 0,
-      files: 0,
-      callerBytes: new Map<string, number>(),
-      callerFiles: new Map<string, number>(),
-    }
-    const add = (callerRoot: string, sizeBytes: number) => {
-      usage.bytes += sizeBytes
-      usage.files += 1
-      usage.callerBytes.set(callerRoot, (usage.callerBytes.get(callerRoot) ?? 0) + sizeBytes)
-      usage.callerFiles.set(callerRoot, (usage.callerFiles.get(callerRoot) ?? 0) + 1)
-    }
+  /** Retained bytes: indexed copies, active reservations and held duplicates. */
+  private usageBytes(excluded: ReadonlySet<string> = new Set()): bigint {
+    let bytes = 0n
     for (const entry of this.entries.values())
-      if (!excluded.has(entry.id)) add(entry.callerRoot, entry.sizeBytes)
-    for (const transfer of this.active.values()) add(transfer.callerRoot, transfer.sizeBytes)
-    for (const copy of this.held.values()) add(copy.callerRoot, copy.sizeBytes)
-    return usage
+      if (!excluded.has(entry.id)) bytes += BigInt(entry.sizeBytes)
+    for (const transfer of this.active.values()) bytes += BigInt(transfer.sizeBytes)
+    for (const copy of this.held.values()) bytes += BigInt(copy.sizeBytes)
+    return bytes
   }
 
-  private quotaDenial(
-    callerRoot: string,
-    sizeBytes: number,
-    excluded?: ReadonlySet<string>
-  ): { scope: 'host' | 'caller'; reason: 'storage_bytes' | 'retained_files' } | undefined {
-    const usage = this.usage(excluded)
-    // Prove caller admission before considering eviction of another caller.
-    if ((usage.callerBytes.get(callerRoot) ?? 0) + sizeBytes > GFS_FILE_LIMITS.callerStorageBytes)
-      return { scope: 'caller', reason: 'storage_bytes' }
-    if ((usage.callerFiles.get(callerRoot) ?? 0) >= GFS_FILE_LIMITS.callerRetainedFiles)
-      return { scope: 'caller', reason: 'retained_files' }
-    if (usage.bytes + sizeBytes > GFS_FILE_LIMITS.storageBytes)
-      return { scope: 'host', reason: 'storage_bytes' }
-    if (usage.files >= GFS_HOST_RETAINED_FILES) return { scope: 'host', reason: 'retained_files' }
-    return undefined
+  /** The only retained-storage limit: Host bytes against the volume budget. */
+  private overBudget(sizeBytes: number, budget: bigint, excluded?: ReadonlySet<string>): boolean {
+    return this.usageBytes(excluded) + BigInt(sizeBytes) > budget
   }
 
   /**
-   * Completed, unpinned copies are a cache. The whole eviction plan is computed
-   * before anything is deleted: adopted copies first, so files planted in one
-   * directory can never cost another caller a copy this process published,
-   * then published copies least recently used first. A caller denial evicts
-   * only copies in that caller's directory. With no feasible plan nothing is
-   * deleted and the admission fails with the quota code; nothing is retained,
-   * so the next admission plans again. Candidates are not hashed: a corrupt
-   * copy is as good an eviction candidate as a sound one.
+   * Completed, unpinned copies are a cache, whoever downloaded them: one
+   * caller's admission may evict another caller's copy, which costs that
+   * caller a re-download and reveals nothing. The whole eviction plan is
+   * computed before anything is deleted: adopted copies first, so files
+   * planted in one directory can never cost another caller a copy this
+   * process published, then published copies least recently used first.
+   * With no feasible plan nothing is deleted and the admission fails with the
+   * quota code; nothing is retained, so the next admission plans again.
+   * Candidates are not hashed: a corrupt copy is as good an eviction
+   * candidate as a sound one.
    */
-  private async reclaimForAdmission(callerRoot: string, sizeBytes: number): Promise<void> {
-    if (!this.quotaDenial(callerRoot, sizeBytes)) return
+  private async reclaimForAdmission(sizeBytes: number, budget: bigint): Promise<void> {
+    if (!this.overBudget(sizeBytes, budget)) return
     const candidates = [...this.entries.values()]
       .filter(entry => !this.isPinned(entry.id))
       .sort(evictionOrder)
     const plan = new Set<string>()
-    for (;;) {
-      const denial = this.quotaDenial(callerRoot, sizeBytes, plan)
-      if (!denial) break
-      const next = candidates.find(
-        entry => !plan.has(entry.id) && (denial.scope === 'host' || entry.callerRoot === callerRoot)
-      )
-      if (!next) return
-      plan.add(next.id)
+    for (const candidate of candidates) {
+      if (!this.overBudget(sizeBytes, budget, plan)) break
+      plan.add(candidate.id)
     }
+    if (this.overBudget(sizeBytes, budget, plan)) return
     for (const id of plan) {
       const entry = this.entries.get(id)
       if (entry) await this.removeEntry(entry, 'expired_removed', false)

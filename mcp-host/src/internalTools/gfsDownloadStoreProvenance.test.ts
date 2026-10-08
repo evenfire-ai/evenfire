@@ -29,12 +29,28 @@ import {
 import { logger } from '../logger'
 import { GfsDownloadStore } from './gfsDownloadStore'
 
-const { hashBoundary } = vi.hoisted(() => ({ hashBoundary: vi.fn() }))
+const { hashBoundary, volume } = vi.hoisted(() => ({
+  hashBoundary: vi.fn(),
+  volume: { totalBytes: undefined as bigint | undefined },
+}))
 // Pass-through: the store hashes through createHash; the kit uses crypto.hash.
 vi.mock('node:crypto', async original => ({
   ...(await original<typeof crypto>()),
   createHash: hashBoundary,
 }))
+// statfs reports the real free space; a test that sets `volume.totalBytes`
+// sizes the volume (block size 1), and with it the retained budget.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  return {
+    ...actual,
+    statfs: async (target: string, options: { bigint: true }) => {
+      const real = await actual.statfs(target, options)
+      if (volume.totalBytes === undefined) return real
+      return { ...real, bsize: 1n, blocks: volume.totalBytes, bavail: real.bavail * real.bsize }
+    },
+  }
+})
 
 const A = 'caller-a'
 const B = 'caller-b'
@@ -103,6 +119,7 @@ beforeEach(async () => {
   vi.setSystemTime(new Date('2026-10-08T10:00:00.000Z'))
   hashBoundary.mockReset()
   hashBoundary.mockImplementation((algorithm: string) => nativeCrypto.createHash(algorithm))
+  volume.totalBytes = undefined
   hostRoot = syncFs.mkdtempSync(path.join(tmpdir(), 'gfs-store-provenance-'))
   rootA = callerDirectory(hostRoot, A)
   rootB = callerDirectory(hostRoot, B)
@@ -176,14 +193,14 @@ describe('GFS download store provenance: planted copies', () => {
     await expect(store.readManagedFile(published.receipt.path, B)).resolves.toEqual(published.bytes)
   })
 
-  it('T-S4: a planted entry is charged to the directory that contains it', async () => {
+  it('T-S4: a planted entry is inventoried under the directory that contains it and evicted first', async () => {
     const bytes = Buffer.alloc(10, 0x43)
     const planted = plantComplete(rootB, C, 9, bytes)
+    volume.totalBytes = 20n
     const limited = await withEnvironment(
       {
         MCP_HOST_GFS_MAX_FILE_BYTES: '10',
-        MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '30',
-        MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '15',
+        MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '100',
       },
       async () => {
         vi.resetModules()
@@ -197,17 +214,17 @@ describe('GFS download store provenance: planted copies', () => {
     const inventory = await limited.debugInventory()
     expect(inventory.byCaller.get(B)).toEqual({ files: 1, bytes: 10 })
     expect(inventory.byCaller.has(C)).toBe(false)
-    const callerDenied = await quotaCount('caller', 'storage_bytes')
+    const denied = await quotaCount('host', 'storage_bytes')
 
-    // C's directory holds nothing, so C's full budget is free and nothing is evicted.
+    // 10 planted + 10 requested fit the budget of 20, so nothing is evicted.
     const rootC = callerDirectory(hostRoot, C)
     await startTransfer(limited, rootC, C, 10, 10)
     expect(exists(planted.directory)).toBe(true)
 
-    // B's directory holds the plant: B's admission evicts it to fit 10 + 10 into 15.
+    // 10 + 10 + 10 does not: the plant goes, the active reservation stays.
     await startTransfer(limited, rootB, B, 11, 10)
     expect(exists(planted.directory)).toBe(false)
-    expect(await quotaCount('caller', 'storage_bytes')).toBe(callerDenied)
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
   })
 
   it('T-R1: a restart keeps the copy for accounting and cleanup but does not reuse it', async () => {

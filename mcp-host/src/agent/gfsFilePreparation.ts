@@ -50,7 +50,7 @@ function failureCode(content: string): GfsPreparationFailure {
   const fixed = /^Error: GFS (?:download(?: store)?|read) failed \(([a-z_]+)\)$/.exec(content)?.[1]
   if (fixed === 'version_conflict') return 'stale'
   if (fixed === 'download_missing' || fixed === 'download_expired') return 'missing'
-  if (fixed === 'caller_quota_exceeded' || fixed === 'host_quota_exceeded') return 'quota_exceeded'
+  if (fixed === 'host_quota_exceeded') return 'quota_exceeded'
   if (fixed === 'workspace_unavailable') return 'workspace_unavailable'
   if (fixed === 'limit_exceeded') return 'limit_exceeded'
   if (fixed === 'timeout') return 'timeout'
