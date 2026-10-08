@@ -673,6 +673,7 @@ describe('Desktop environment REST endpoint matching', () => {
 
     await handler({
       ...targetEnvironment,
+      appName: 'Acme Corp, verified secure workspace with an unbounded link-provided label',
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
     })
 
@@ -680,7 +681,7 @@ describe('Desktop environment REST endpoint matching', () => {
     expect(selectRuntimeConfig).not.toHaveBeenCalled()
     expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
     expect(setStatus).toHaveBeenLastCalledWith(
-      `Opening ${targetEnvironment.appName} in Evenfire Desktop.`,
+      'This link points to the active Evenfire Desktop environment.',
       'success'
     )
   })

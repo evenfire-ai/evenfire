@@ -379,7 +379,7 @@ describe('Desktop environment handoff', () => {
     expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
     expect(mocks.setStatus).toHaveBeenCalledWith(
-      'Opening Example tenant in Evenfire Desktop.',
+      'This link points to the active Evenfire Desktop environment.',
       'success'
     )
   })
@@ -542,7 +542,7 @@ describe('Desktop environment handoff', () => {
 
   it('keeps the exact active REST profile when a same-origin sibling appears before confirmation', async () => {
     const linkedEnvironment = {
-      appName: 'Linked target',
+      appName: 'Acme Corp, verified secure workspace with an unbounded link-provided label',
       externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
     }
     render(<Probe />)
@@ -577,7 +577,7 @@ describe('Desktop environment handoff', () => {
     expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
     expect(mocks.setStatus).toHaveBeenLastCalledWith(
-      `Opening ${linkedEnvironment.appName} in Evenfire Desktop.`,
+      'This link points to the active Evenfire Desktop environment.',
       'success'
     )
   })

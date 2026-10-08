@@ -359,13 +359,13 @@ export function createDesktopEnvironmentSetupHandler({
 
     if (authState.isAuthenticated) {
       setPendingDesktopEnvironmentSetup(null)
-      setStatus(`Opening ${linkedConfig.appName} in Evenfire Desktop.`, 'success')
+      setStatus('This link points to the active Evenfire Desktop environment.', 'success')
       return
     }
 
     if (activeRestEndpointMatches) {
       setPendingDesktopEnvironmentSetup(null)
-      setStatus(`Opening ${linkedConfig.appName} in Evenfire Desktop.`, 'success')
+      setStatus('This link points to the active Evenfire Desktop environment.', 'success')
       return
     }
 

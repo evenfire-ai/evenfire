@@ -644,7 +644,7 @@ export function useAuthController({
 
       if (restMatches.active) {
         setPendingDesktopEnvironmentSetup(null)
-        setStatus(`Opening ${nextConfig.appName} in Evenfire Desktop.`, 'success')
+        setStatus('This link points to the active Evenfire Desktop environment.', 'success')
         return
       }
 
