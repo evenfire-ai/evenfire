@@ -84,6 +84,10 @@ export class SessionTokenStorageClearError extends AggregateError {
   }
 }
 
+export type StrictSessionTokenClearResult = {
+  keytarAvailable: boolean
+}
+
 async function loadKeytar(): Promise<KeytarModule | null> {
   try {
     const mod = await import('keytar')
@@ -480,13 +484,24 @@ export class TokenStore {
     envKey: string,
     options: { legacyEnvKeys?: readonly string[]; throwOnStorageError?: boolean } = {}
   ): Promise<void> {
-    return this.trackOperation(() => this.clearSessionTokenOnce(envKey, options))
+    return this.trackOperation(async () => {
+      await this.clearSessionTokenOnce(envKey, options)
+    })
+  }
+
+  async clearSessionTokenStrictly(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] } = {}
+  ): Promise<StrictSessionTokenClearResult> {
+    return this.trackOperation(() =>
+      this.clearSessionTokenOnce(envKey, { ...options, throwOnStorageError: true })
+    )
   }
 
   private async clearSessionTokenOnce(
     envKey: string,
     options: { legacyEnvKeys?: readonly string[]; throwOnStorageError?: boolean }
-  ): Promise<void> {
+  ): Promise<StrictSessionTokenClearResult> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const legacyEnvKeys = Array.from(
@@ -546,5 +561,6 @@ export class TokenStore {
     if (options.throwOnStorageError && storageErrors.length > 0) {
       throw new SessionTokenStorageClearError(storageErrors, failedKeytarAccounts, failedFileCount)
     }
+    return { keytarAvailable: keytar !== null }
   }
 }

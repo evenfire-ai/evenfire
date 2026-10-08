@@ -1706,8 +1706,10 @@ export class AppService {
       return true
     }
     try {
-      await this.runCredentialProducer(() => this.logoutOnce({ strictTokenClear: true }))
-      clearPendingExternalLogout(userDataDirectory, envKey)
+      const result = await this.runCredentialProducer(() =>
+        this.logoutOnce({ strictTokenClear: true })
+      )
+      if (result.keytarAvailable) clearPendingExternalLogout(userDataDirectory, envKey)
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
     }
@@ -1737,10 +1739,10 @@ export class AppService {
   private async applyPendingExternalLogoutBeforeLogin(
     userDataDirectory: string,
     envKey: string
-  ): Promise<{ present: boolean; replaceKeytarEntry: boolean }> {
+  ): Promise<{ present: boolean; replaceKeytarEntry: boolean; retireMarker: boolean }> {
     try {
       if (!hasPendingExternalLogout(userDataDirectory, envKey)) {
-        return { present: false, replaceKeytarEntry: false }
+        return { present: false, replaceKeytarEntry: false, retireMarker: false }
       }
     } catch (error) {
       await this.failClosedForPendingLogout(error)
@@ -1751,14 +1753,18 @@ export class AppService {
       // Keep the marker until a fresh credential is durably installed. If only
       // the active Keytar slot resisted deletion, a successful write to that
       // same slot safely replaces the old credential.
-      await this.logoutOnce({ strictTokenClear: true })
-      return { present: true, replaceKeytarEntry: false }
+      const result = await this.logoutOnce({ strictTokenClear: true })
+      return {
+        present: true,
+        replaceKeytarEntry: false,
+        retireMarker: result.keytarAvailable === true,
+      }
     } catch (error) {
       if (
         error instanceof SessionTokenStorageClearError &&
         error.canBeReplacedByFreshLoginCredential(envKey)
       ) {
-        return { present: true, replaceKeytarEntry: true }
+        return { present: true, replaceKeytarEntry: true, retireMarker: true }
       }
       await this.failClosedForPendingLogout(error)
       throw error
@@ -1857,8 +1863,10 @@ export class AppService {
       await this.failClosedForPendingLogout(error)
       throw error
     }
-    await this.runCredentialProducer(() => this.logoutOnce({ strictTokenClear: true }))
-    clearPendingExternalLogout(userDataDirectory, envKey)
+    const result = await this.runCredentialProducer(() =>
+      this.logoutOnce({ strictTokenClear: true })
+    )
+    if (result.keytarAvailable) clearPendingExternalLogout(userDataDirectory, envKey)
     return true
   }
 
@@ -1920,7 +1928,13 @@ export class AppService {
             requireKeytar: pendingLogout.replaceKeytarEntry,
           })
           credentialPersisted = true
-          clearPendingExternalLogout(this.getUserDataDirectory(), envKey)
+          const readBack = await this.tokenStore.getSessionToken(envKey)
+          if (readBack !== result.token) {
+            throw new Error('Fresh session token could not be verified after storage fallback')
+          }
+          if (pendingLogout.retireMarker) {
+            clearPendingExternalLogout(this.getUserDataDirectory(), envKey)
+          }
         } catch (error) {
           if (credentialPersisted) {
             await this.tokenStore
@@ -2408,14 +2422,18 @@ export class AppService {
   logout(): Promise<void> {
     const envKey = getActiveEnvKey()
     return this.runCredentialProducer(
-      () => this.logoutOnce(),
+      async () => {
+        await this.logoutOnce()
+      },
       () => {
         recordPendingExternalLogout(this.getUserDataDirectory(), envKey)
       }
     )
   }
 
-  private async logoutOnce(options: { strictTokenClear?: boolean } = {}): Promise<void> {
+  private async logoutOnce(
+    options: { strictTokenClear?: boolean } = {}
+  ): Promise<{ keytarAvailable: boolean | null }> {
     this.logoutInProgress = true
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
@@ -2423,13 +2441,13 @@ export class AppService {
       const legacyEnvKeys = getActiveLegacyEnvKeys()
       await this.suspendDesktopGfsUploadsForAuthBoundary()
       this.clearAuthenticatedSessionState()
-      await this.tokenStore.clearSessionToken(envKey, {
-        legacyEnvKeys,
-        ...(options.strictTokenClear ? { throwOnStorageError: true } : {}),
-      })
+      const clearResult = options.strictTokenClear
+        ? await this.tokenStore.clearSessionTokenStrictly(envKey, { legacyEnvKeys })
+        : (await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys }), null)
       // Grants survive logout (they are keyed by userId), but every cached SDK
       // result must not: the next user of this machine gets nothing of this one's.
       tryGetPluginSdkRuntime()?.notifySessionChanged(false)
+      return { keytarAvailable: clearResult?.keytarAvailable ?? null }
     } finally {
       releasePrewarm()
       this.logoutInProgress = false

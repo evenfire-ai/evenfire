@@ -1,0 +1,106 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+const testRuntime = vi.hoisted(() => ({ userDataDirectory: '' }))
+const { notifySessionChanged } = vi.hoisted(() => ({ notifySessionChanged: vi.fn() }))
+
+vi.mock('keytar', () => ({}))
+vi.mock('electron', () => ({
+  app: {
+    getPath: vi.fn(() => testRuntime.userDataDirectory),
+    isReady: vi.fn(() => true),
+  },
+  safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
+}))
+vi.mock('../chatStoreBinding.js', () => ({
+  bindChatStoreForUser: vi.fn(),
+  unbindChatStore: vi.fn(),
+  __setChatStoreBaseDirForTests: vi.fn(),
+}))
+vi.mock('../pluginSdkRuntime.js', () => ({
+  tryGetPluginSdkRuntime: () => ({ notifySessionChanged }),
+}))
+
+let userDataDirectory = ''
+let AppServiceClass: typeof import('../appService.js').AppService
+let QuitAdmissionClosedErrorClass: typeof import('../appService.js').QuitAdmissionClosedError
+let TokenStoreClass: typeof import('../tokenStore.js').TokenStore
+let activeEnvKey = ''
+let markerStore: typeof import('../pendingExternalLogout.js')
+
+const user = {
+  id: 'user-1',
+  email: 'user@example.com',
+  name: null,
+  picture: null,
+  teamId: 'team-1',
+  teamName: 'Team 1',
+  role: 'member' as const,
+}
+
+beforeEach(async () => {
+  userDataDirectory = await mkdtemp(path.join(os.tmpdir(), 'evenfire-no-keytar-logout-'))
+  testRuntime.userDataDirectory = userDataDirectory
+  vi.clearAllMocks()
+  vi.resetModules()
+  const [appService, tokenStore, marker, config] = await Promise.all([
+    import('../appService.js'),
+    import('../tokenStore.js'),
+    import('../pendingExternalLogout.js'),
+    import('../config.js'),
+  ])
+  AppServiceClass = appService.AppService
+  QuitAdmissionClosedErrorClass = appService.QuitAdmissionClosedError
+  TokenStoreClass = tokenStore.TokenStore
+  markerStore = marker
+  activeEnvKey = config.getActiveEnvKey()
+})
+
+afterEach(async () => {
+  if (userDataDirectory) await rm(userDataDirectory, { recursive: true, force: true })
+  userDataDirectory = ''
+  testRuntime.userDataDirectory = ''
+  vi.resetModules()
+})
+
+describe('AppService pending logout when Keytar is unavailable', () => {
+  it('retains the marker through startup and verified file-backed login', async () => {
+    const tokenStore = new TokenStoreClass()
+    const service = new AppServiceClass({
+      tokenStore,
+      getUserDataDirectory: () => userDataDirectory,
+    })
+    const internals = service as unknown as {
+      sessionToken: string | null
+      me: typeof user | null
+      quitPreparationStarted: boolean
+      installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
+    }
+
+    await tokenStore.setSessionToken('old-keychain-session', activeEnvKey)
+    internals.sessionToken = 'old-keychain-session'
+    internals.me = user
+    internals.quitPreparationStarted = true
+
+    await expect(service.logout()).rejects.toBeInstanceOf(QuitAdmissionClosedErrorClass)
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+
+    service.cancelQuitPreparation()
+    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
+
+    await expect(
+      internals.installAuthenticatedLogin({ token: 'new-file-backed-session', me: user })
+    ).resolves.toEqual({ authenticated: true, me: user })
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('new-file-backed-session')
+
+    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+  })
+})
