@@ -1183,6 +1183,8 @@ export function useAgentChatController({
       dispatchSession,
       clearComposerDraft,
       getActiveChatId: () => activeChatId,
+      getChatMessagesLoading: () => chatMessagesLoading,
+      clearChatMessagesLoading: () => setChatMessagesLoading(false),
       getAutoSelectedChatId: () => autoSelectedChatIdRef.current,
       markAutoSelectedChat: chatId => {
         autoSelectedChatIdRef.current = chatId

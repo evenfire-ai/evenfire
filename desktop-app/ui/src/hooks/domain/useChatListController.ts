@@ -108,6 +108,8 @@ export interface ChatListControllerHost {
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
   getActiveChatId: () => string | null
+  getChatMessagesLoading: () => boolean
+  clearChatMessagesLoading: () => void
   getAutoSelectedChatId: () => string | null
   markAutoSelectedChat: (chatId: string | null) => void
   shouldAutoSelectLatest: () => boolean
@@ -1030,28 +1032,40 @@ export function useChatListController({
     const agentRef = selectedAgentRef.current
     if (!agentRef) return
     const pendingSelection = readPendingSelection(agentRef)
+    const activeChatIdAtCreate = host.current?.getActiveChatId() ?? null
+    const chatMessagesLoadingAtCreate = host.current?.getChatMessagesLoading() ?? false
     const selectionIntentRevision = host.current?.beginSelectionIntent()
     host.current?.clearPendingSelection(agentRef)
     const requestGeneration = requestGenerationRef.current
+    const authorityScopeGeneration = authorityScopeGenerationRef.current
+    const authorityScopeAtCreate = currentAuthorityScopeRef.current
     const chatId = crypto.randomUUID()
     let meta: ChatMetadata
     try {
       meta = await chatStore.createChat(agentRef, chatId)
     } catch (error) {
-      // The blank New chat intent invalidated an older specific load. If creation
-      // failed without a newer navigation or scope taking ownership, restore the
-      // requested conversation through the controller's authorized switch path.
+      // The failed New chat invalidated whichever selection was in flight. Restore
+      // its visible conversation only while this create still owns the same scope
+      // and selection revision; a newer navigation must remain authoritative.
       if (
-        pendingSelection?.mode === 'specific' &&
         selectedAgentRef.current === agentRef &&
         requestGenerationRef.current === requestGeneration &&
+        authorityScopeGenerationRef.current === authorityScopeGeneration &&
+        currentAuthorityScopeRef.current === authorityScopeAtCreate &&
         selectionIntentRevision !== undefined &&
         host.current?.getSelectionIntentRevision() === selectionIntentRevision
       ) {
-        try {
-          await host.current?.switchToChat(agentRef, pendingSelection.chatId)
-        } catch {
-          // Preserve the original create error for the caller.
+        const restoreChatId =
+          pendingSelection?.mode === 'specific'
+            ? pendingSelection.chatId
+            : chatMessagesLoadingAtCreate
+              ? activeChatIdAtCreate
+              : null
+        if (restoreChatId) {
+          const restore = host.current?.switchToChat(agentRef, restoreChatId)
+          void restore?.catch(() => undefined)
+        } else if (chatMessagesLoadingAtCreate) {
+          host.current?.clearChatMessagesLoading()
         }
       }
       throw error
