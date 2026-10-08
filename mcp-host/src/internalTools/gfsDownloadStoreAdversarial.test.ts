@@ -13,6 +13,7 @@ import * as path from 'node:path'
 import {
   callerDirectory,
   completedCopy,
+  digestOf,
   exists,
   expiryCount,
   metaFor,
@@ -31,8 +32,12 @@ import { deriveUserKey } from '../workspace/userKey'
 import { GfsDownloadStore } from './gfsDownloadStore'
 
 type FsOperation = 'open' | 'lstat' | 'rename' | 'rm' | 'readdir' | 'realpath'
-/** A fault returns the errno to throw for this call, or undefined to pass through. */
+/**
+ * A fault returns the errno to throw for this call, `SKIP_CALL` to resolve
+ * without calling the real function, or undefined to pass through.
+ */
 type Fault = (target: string) => string | undefined
+const SKIP_CALL = 'SKIP_CALL'
 
 const { faults } = vi.hoisted(() => ({
   faults: new Map<string, (target: string) => string | undefined>(),
@@ -50,6 +55,7 @@ vi.mock('node:fs/promises', async original => {
     <F extends (...args: never[]) => unknown>(operation: string, real: F) =>
     (...args: Parameters<F>) => {
       const code = faults.get(operation)?.(String(args[0]))
+      if (code === 'SKIP_CALL') return Promise.resolve(undefined)
       if (code !== undefined) return Promise.reject(errnoError(code))
       return real(...args)
     }
@@ -460,5 +466,163 @@ describe('GFS download store adversarial round: trash, eviction and undo (ADV-2/
     expect(renames).toHaveLength(1)
     expect(exists(renames[0]!)).toBe(false)
     expect(await expiryCount('incomplete_removed')).toBe(removed)
+  })
+})
+
+interface IndexedEntryView {
+  sourceIdentity?: { dev: bigint; ino: bigint }
+}
+
+/** White-box view of the index, for the one identity field no fs seam can reach. */
+function indexedEntry(store: GfsDownloadStore, id: string): IndexedEntryView {
+  const entry = (store as unknown as { entries: Map<string, IndexedEntryView> }).entries.get(id)
+  if (entry === undefined) throw new Error('entry is not indexed')
+  return entry
+}
+
+describe('GFS download store adversarial round: expiry, close, recency and removal proof', () => {
+  const KEY = 'carol-key'
+  const T0 = new Date('2026-10-08T10:00:00.000Z')
+
+  it('S17: createTransfer refuses an expiry at or before its creation instant', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(T0)
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const admit = (expiresAtMs: number) =>
+      store.createTransfer({
+        callerIdentity: KEY,
+        callerWorkspacePath: root,
+        source: sourceFor(1),
+        sizeBytes: 4,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+      })
+
+    await expect(admit(T0.getTime() - 1)).rejects.toThrow(RangeError)
+    await expect(admit(T0.getTime())).rejects.toThrow(RangeError)
+    // Witness: one millisecond later is admitted.
+    await expect(admit(T0.getTime() + 1)).resolves.toMatchObject({ sizeBytes: 4 })
+  })
+
+  it('S18: close() does not wait for pinned copies, only for active transfers', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    await completedCopy(store, root, KEY, 2, 16, { owner: 'task-1' })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let closed = false
+    const closing = store.close(60_000).then(() => {
+      closed = true
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(closed).toBe(true)
+    expect(store.isAvailable()).toBe(false)
+    await closing
+
+    // Contrast: an active transfer holds close() until its deadline.
+    const busy = await openStore()
+    await startTransfer(busy, root, KEY, 3, 16)
+    let busyClosed = false
+    const busyClosing = busy.close(60_000).then(() => {
+      busyClosed = true
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(busyClosed).toBe(false)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await busyClosing
+    expect(busyClosed).toBe(true)
+  })
+
+  it('S28: a managed read refreshes recency, so the unread copy is evicted first', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(T0)
+    const limited = await withEnvironment(
+      {
+        MCP_HOST_GFS_MAX_FILE_BYTES: '10',
+        MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES: '30',
+        MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES: '15',
+      },
+      async () => {
+        vi.resetModules()
+        const { GfsDownloadStore: Store } = await import('./gfsDownloadStore')
+        const opened = new Store(hostRoot) as unknown as GfsDownloadStore
+        stores.push(opened)
+        await opened.initialize()
+        return opened
+      }
+    )
+    const root = callerDirectory(hostRoot, KEY)
+    const tick = () => vi.setSystemTime(Date.now() + 1_000)
+    const older = await completedCopy(limited, root, KEY, 4, 5)
+    tick()
+    const newer = await completedCopy(limited, root, KEY, 5, 5)
+    tick()
+    await expect(limited.readManagedFile(older.receipt.path, KEY)).resolves.toEqual(older.bytes)
+    tick()
+
+    await startTransfer(limited, root, KEY, 6, 10)
+
+    expect(exists(path.join(root, `.gfs-downloads/input-${newer.receipt.id}`))).toBe(false)
+    expect(exists(path.join(root, `.gfs-downloads/input-${older.receipt.id}`))).toBe(true)
+  })
+
+  it('S31: a removal is proven by ENOENT, not by rm returning', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { transfer } = await startTransfer(store, root, KEY, 7, 16)
+    const failedRemovals = await expiryCount('remove_failed')
+    const removals = watch('rm', '', SKIP_CALL)
+
+    await expect(store.fail(transfer.id, KEY)).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    faults.clear()
+
+    expect(removals).toHaveLength(1)
+    expect(await expiryCount('remove_failed')).toBe(failedRemovals + 1)
+    const downloads = path.join(root, '.gfs-downloads')
+    const stranded = syncFs.readdirSync(downloads).filter(name => name.startsWith('.trash-'))
+    expect(stranded).toHaveLength(1)
+    // The next sweep removes what the failed removal left.
+    await store.cleanupExpired()
+    expect(exists(path.join(downloads, stranded[0]!))).toBe(false)
+  })
+
+  it('S01: a descriptor with the published inode number on another device is not served', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { receipt, bytes } = await completedCopy(store, root, KEY, 8, 24)
+    // Witness: the published identity serves the bytes.
+    await expect(store.readManagedFile(receipt.path, KEY)).resolves.toEqual(bytes)
+    const identity = indexedEntry(store, receipt.id).sourceIdentity!
+    identity.dev += 1n
+
+    await expect(store.readManagedFile(receipt.path, KEY)).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+    await expect(store.reusableReceipt(KEY, sourceFor(8), 24)).resolves.toBeUndefined()
+  })
+
+  it('S09: publication syncs the download directory after the source rename', async () => {
+    const store = await openStore()
+    const root = callerDirectory(hostRoot, KEY)
+    const { transfer, bytes } = await startTransfer(store, root, KEY, 9, 12)
+    const directory = path.join(root, `.gfs-downloads/input-${transfer.id}`)
+    const events: string[] = []
+    injectFault('rename', target => {
+      if (target.endsWith(`input-${transfer.id}/source.partial`)) events.push('rename-source')
+      return undefined
+    })
+    injectFault('open', target => {
+      if (path.resolve(target) === path.resolve(syncFs.realpathSync(directory)))
+        events.push('open-directory')
+      return undefined
+    })
+
+    await store.publish(transfer.id, KEY, digestOf(bytes))
+    faults.clear()
+
+    expect(events).toContain('rename-source')
+    expect(events.slice(events.indexOf('rename-source'))).toContain('open-directory')
   })
 })

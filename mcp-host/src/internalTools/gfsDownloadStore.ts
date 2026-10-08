@@ -464,7 +464,8 @@ export class GfsDownloadStore {
     if (!isValidSource(input.source)) throw new RangeError('GFS download source is malformed')
     const createdAtMs = Date.now()
     const expiresAtMs = Date.parse(input.expiresAt)
-    if (!Number.isFinite(expiresAtMs) || expiresAtMs < createdAtMs)
+    // A copy that expires at its own creation could never be read or reused.
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= createdAtMs)
       throw new RangeError('GFS download expiry must be a future ISO timestamp')
     // The same bound parseMeta applies, so a published copy stays valid on disk.
     if (expiresAtMs > createdAtMs + GFS_FILE_LIMITS.retentionMs)
