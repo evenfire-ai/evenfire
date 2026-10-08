@@ -279,14 +279,6 @@ export function createDesktopEnvironmentSetupHandler({
             )
             return
           }
-          authState = getAuthState()
-        }
-        if (isAuthenticationOperationInProgress(authState)) {
-          reportAuthenticationStateChanged(authState, setStatus)
-        } else if (authState.isAuthenticated) {
-          setStatus('Could not sign out before switching desktop environments.', 'error')
-        } else {
-          setStatus('Could not confirm sign out before switching desktop environments.', 'error')
         }
         return
       }
@@ -381,13 +373,7 @@ export function createDesktopEnvironmentSetupHandler({
       }
       setPendingDesktopEnvironmentSetup(null)
       const selection = await handleSelectRuntimeConfig(savedOption.id, sessionGeneration)
-      if (!selection) {
-        setStatus(
-          'Could not select the linked desktop environment. Try opening the link again.',
-          'error'
-        )
-        return
-      }
+      if (!selection) return
       if (!(await ownsSessionGeneration(selection.sessionGeneration))) return
       authState = getAuthState()
       if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
