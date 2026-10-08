@@ -5,7 +5,9 @@ import {
   hashCanonicalGrokRequest,
 } from '@clerum/grok-provider-attempt-contract'
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
-import { LlmErrorCode } from '../../core/errors'
+import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { LlmError, LlmErrorCode } from '../../core/errors'
+import { isModelStepCheckpointEligibleError } from '../../core/orchestration/modelStepCheckpointEligibility'
 import type { ChatMessage, MessageContentPart } from '../../core/types'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
@@ -2094,5 +2096,108 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     expect(abortInGap).toBe(false)
     expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
     expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('model-step checkpoint eligibility on the LlmError boundary (#1043)', () => {
+  const heldToolCall = { id: 'call-1', name: 'echo', arguments: { text: 'held' } }
+
+  async function failThroughAdapter(wired: ReturnType<typeof deps>): Promise<LlmError> {
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    const adapter = new LlmPortAdapter(provider, 'grok-4.6', 'grok-subscription')
+    const outcome = await adapter
+      .completeWithTools({ messages: [{ role: 'user', content: 'go' }], tools: [] })
+      .then(
+        response => ({ response }),
+        (error: unknown) => ({ error })
+      )
+    if (!('error' in outcome)) throw new Error('expected the adapter to reject')
+    expect(outcome.error).toBeInstanceOf(LlmError)
+    return outcome.error as LlmError
+  }
+
+  it.each([
+    [
+      'an HTTP 503 from the proxy',
+      () =>
+        vi
+          .fn()
+          .mockRejectedValue(
+            new GrokProxyError(
+              'provider_unavailable',
+              'proxy stream failed with 503 (provider_unavailable)'
+            )
+          ),
+    ],
+    [
+      'held tool frames without a success terminal',
+      () => vi.fn().mockResolvedValue({ text: '', toolCalls: [heldToolCall], outcome: 'error' }),
+    ],
+    [
+      'an error terminal',
+      () => vi.fn().mockResolvedValue({ text: 'partial', toolCalls: [], outcome: 'error' }),
+    ],
+  ])('%s reaches the loop as an eligible provider_unavailable', async (_label, makeStream) => {
+    const wired = deps({ stream: makeStream() })
+    const error = await failThroughAdapter(wired)
+    expect(wired.stream).toHaveBeenCalled()
+    expect(error).toMatchObject({
+      code: LlmErrorCode.ModelOverloaded,
+      retryable: true,
+      providerCode: 'provider_unavailable',
+    })
+    expect(isModelStepCheckpointEligibleError(error)).toBe(true)
+  })
+
+  it.each([
+    [
+      'connection_unavailable',
+      () => ({
+        authorize: vi
+          .fn()
+          .mockRejectedValue(new CodexAuthorizeError('connection_unavailable', 'catalog down')),
+      }),
+    ],
+    [
+      'client_upgrade_required',
+      () => ({
+        stream: vi
+          .fn()
+          .mockRejectedValue(new GrokProxyError('client_upgrade_required', 'upstream 426')),
+      }),
+    ],
+    [
+      'rate_limited',
+      () => ({
+        stream: vi.fn().mockRejectedValue(new GrokProxyError('rate_limited', 'upstream 429')),
+      }),
+    ],
+    [
+      'stream_duration_exceeded',
+      () => ({
+        stream: vi
+          .fn()
+          .mockRejectedValue(new GrokProxyError('stream_duration_exceeded', 'too long')),
+      }),
+    ],
+    [
+      'outcome_unknown',
+      () => ({
+        stream: vi.fn().mockResolvedValue({ text: 'partial', toolCalls: [], outcome: 'unknown' }),
+      }),
+    ],
+    [
+      'tool_call_limit_exceeded',
+      () => ({
+        stream: vi
+          .fn()
+          .mockRejectedValue(new GrokProxyError('tool_call_limit_exceeded', 'over limit')),
+      }),
+    ],
+  ])('%s is not eligible', async (providerCode, makeOverrides) => {
+    const error = await failThroughAdapter(deps(makeOverrides()))
+    // Witness: the classifier ran and kept the provider-native code.
+    expect(error.providerCode).toBe(providerCode)
+    expect(isModelStepCheckpointEligibleError(error)).toBe(false)
   })
 })
