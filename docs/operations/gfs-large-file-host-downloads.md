@@ -448,20 +448,32 @@ removal keeps failing stays charged until it is removed. An indexed entry left
 under a trash name is dropped from the index, because its name is gone, and is
 charged only on the trash name, never twice. An unindexed expired copy whose
 removal fails after the rename is charged on its trash name with the size read
-from its `meta.json`. A directory the store holds no charge for when it
-removes it (an unpublished transfer's partial, an unindexed incomplete
-directory, or a trash directory left before this process started, since
-charges are held in memory) is measured on its trash name (the bytes of its
-regular files, symlinks not followed) and charged that size if its removal
-fails. A tree that cannot be measured is logged and stays uncharged until a
-later sweep measures it. When the rename itself fails, the directory keeps its
-name: an indexed entry keeps its charge, and a directory with no charge is
-measured the same way and charged under its own name. When the parent check
-refuses after the rename and the rename back also fails, the refusal is
-reported, the undo failure is logged as `GFS download store could not restore a
-directory after refusing to remove it` with its error code, and a charge in
-hand moves to the trash name; a trash directory in a refused parent is not
-read to measure it.
+from its `meta.json`. A failed transfer keeps its reservation as the charge of
+whatever its removal leaves on disk, under its own name or a trash name. A
+directory the store holds no charge for when it removes it (an unindexed
+incomplete directory, or a trash directory left before this process started,
+since charges are held in memory) is measured on its trash name (the bytes of
+its regular files, symlinks not followed; each directory is checked again
+when its turn comes, so one that is not a real directory then, such as a
+symlinked `.gfs-downloads` or a child replaced by a symlink during the walk,
+measures zero) and charged that size if its removal fails. A tree that cannot
+be measured is logged and stays uncharged until a later sweep measures it.
+When a removal leaves the directory under its own name (the rename failed, the
+parent check refused before it, or a refusal after it was undone by renaming
+it back), an indexed entry keeps its own charge and is never charged a second
+time, and a charge in hand stays on the directory. A directory with no charge
+is measured the same way and charged under its own name if its parent passes
+the check again; one whose parent is still refused is not read and stays
+uncharged until a later removal finds the parent safe. When the parent check
+refuses after the rename and the rename back also
+fails, the refusal is reported (a replaced `.gfs-downloads` refuses the
+admission with `workspace_unavailable`), the undo failure is logged as `GFS
+download store could not restore a directory after refusing to remove it` with
+its error code, and a charge in hand moves to the trash name; a trash directory
+in a refused parent is not read to measure it. Measuring walks the tree inside
+the store's lock, so a large tree planted under a store name delays other
+admissions and sweeps for the walk (about 12 µs per entry); it never fails
+them.
 
 ### Retention pins and cold resume
 
@@ -531,9 +543,11 @@ user what happened and what they can do:
   who can finish or cancel their own running tasks to free space sooner and
   then try again. It never acts on another user's tasks or files. The text
   offers no deletion of downloaded copies, because that cannot admit the
-  download: the budget refusal comes only when evicting every copy no running
-  task protects would still not make room (the store then evicts nothing), and
-  the per-caller cap is checked before any eviction and counts only the copies
+  download: the budget refusal comes when evicting every copy no running task
+  protects would still not make room (the store then evicts nothing), or when a
+  planned eviction fails to remove a copy (the copies already removed stay
+  removed, and the one left on disk stays charged until a sweep removes it).
+  The per-caller cap is checked before any eviction and counts only the copies
   the caller's running tasks protect.
 
 `volume_unmeasurable` carries no guidance: the volume could not be measured,

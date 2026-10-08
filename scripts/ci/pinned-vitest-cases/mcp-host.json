@@ -1204,6 +1204,38 @@
     "fullName": "GFS download store removal charges RC-VOLUME-EIO-true: a rejected statfs propagates without treating it as an invalid reading"
   },
   {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-FAIL-PARENT-REFUSED: a failed transfer whose parent check refuses before the rename keeps its reservation charged"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-SYMLINK-ROOT: a .gfs-downloads symlink that cannot be removed is never walked into"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-REFUSED-TRASH-NOT-READ: a trash left in a refused parent with no charge in hand is not measured"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-ROOT-REFUSAL-CODE: a replaced .gfs-downloads whose undo fails reports the refusal and keeps its copies charged on the trash"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-INDEXED-KEPT: an evicted entry whose rename fails stays indexed and is charged once"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-UNDO-RESTORED-UNINDEXED: startup leftovers restored by an undone refusal are measured once their parent passes again"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-WALK-SWAP: a directory replaced by a symlink while a leftover is measured is not walked"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-REFUSED-IN-PLACE-NOT-READ: a leftover whose parent check keeps failing is not walked to measure it"
+  },
+  {
     "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
     "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) OPUS-R6-RESTART: after a Host restart a trash directory whose removal keeps failing is sized and charged again"
   },

@@ -17,6 +17,7 @@ import {
   completedCopy,
   digestOf,
   downloadDirectory,
+  plantDownload,
   quotaCount,
   sourceFor,
   startTransfer,
@@ -226,8 +227,9 @@ describe('GFS download store removal charges', () => {
         })
       expect(hits).toHaveLength(2)
       expect(storedBytes(hostRoot)).toBe(8 * MIB)
-      // Measured trees include meta.json, so the charge is at least the source bytes.
-      expect(view(store).charged).toBeGreaterThanOrEqual(8 * MIB)
+      // Each reservation moved, unchanged, to the trash name its removal left.
+      expect(view(store)).toMatchObject({ active: 0, held: 8 * MIB, charged: 8 * MIB })
+      expect([...view(store).state.held.keys()].sort()).toEqual([...hits].sort())
       await expectRefused(store)
       await recoverAndWitness(store)
     }
@@ -592,4 +594,256 @@ describe('GFS download store removal charges', () => {
       await store.fail(admitted.transfer.id, 'a')
     }
   )
+
+  it('RC-FAIL-PARENT-REFUSED: a failed transfer whose parent check refuses before the rename keeps its reservation charged', async () => {
+    const store = await storeWithBudget()
+    const a = await startTransfer(store, roots.a, 'a', 1, 4 * MIB)
+    const b = await startTransfer(store, roots.b, 'b', 2, 4 * MIB)
+    const faulted = new Set([
+      path.join(roots.a, '.gfs-downloads'),
+      path.join(roots.b, '.gfs-downloads'),
+    ])
+    const hits: string[] = []
+    boundaries.realpath.mockImplementation(async (...args: unknown[]) => {
+      if (faulted.has(String(args[0]))) {
+        hits.push(String(args[0]))
+        throw eio()
+      }
+      return Reflect.apply(nativeFs.realpath, nativeFs, args)
+    })
+    for (const [attempt, caller] of [
+      [a, 'a'],
+      [b, 'b'],
+    ] as const)
+      await expect(store.fail(attempt.transfer.id, caller)).rejects.toMatchObject({
+        code: 'storage_write_failed',
+      })
+    expect(hits.length).toBeGreaterThanOrEqual(2)
+    expect(storedBytes(hostRoot)).toBe(8 * MIB)
+    expect(view(store)).toMatchObject({ entries: 0, active: 0, held: 8 * MIB, charged: 8 * MIB })
+    await expectRefused(store)
+    await recoverAndWitness(store)
+  })
+
+  it('RC-SYMLINK-ROOT: a .gfs-downloads symlink that cannot be removed is never walked into', async () => {
+    const store = await storeWithBudget()
+    const copy = await completedCopy(store, roots.b, 'b', 2, 4 * MIB, {
+      owner: 'b-owner',
+      expiresAt: new Date(Date.now() + 24 * HOUR).toISOString(),
+    })
+    const link = path.join(roots.a, '.gfs-downloads')
+    syncFs.rmSync(link, { recursive: true, force: true })
+    syncFs.symlinkSync(path.join(roots.b, '.gfs-downloads'), link)
+    const renames: string[] = []
+    boundaries.rename.mockImplementation((...args: unknown[]) => {
+      if (String(args[0]) === link) {
+        renames.push(String(args[0]))
+        return Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }))
+      }
+      return Reflect.apply(nativeFs.rename, nativeFs, args)
+    })
+    const walked: string[] = []
+    boundaries.readdir.mockImplementation((...args: unknown[]) => {
+      const target = String(args[0])
+      if (target === link || target.startsWith(link + path.sep)) walked.push(target)
+      return Reflect.apply(nativeFs.readdir, nativeFs, args)
+    })
+    for (let i = 0; i < 3; i++) await store.cleanupExpired()
+    expect(renames).toHaveLength(3)
+    expect(walked).toEqual([])
+    expect(view(store)).toMatchObject({ held: 0, charged: 4 * MIB })
+    expect((await store.readManagedFile(copy.receipt.path, 'b')).equals(copy.bytes)).toBe(true)
+  })
+
+  it('RC-REFUSED-TRASH-NOT-READ: a trash left in a refused parent with no charge in hand is not measured', async () => {
+    const original = await storeWithBudget()
+    await expiredTrash(original)
+    await original.close(0)
+    const downloads = new Set([
+      path.join(roots.a, '.gfs-downloads'),
+      path.join(roots.b, '.gfs-downloads'),
+    ])
+    const renamedInto = new Set<string>()
+    const undone: string[] = []
+    boundaries.rename.mockImplementation(async (...args: unknown[]) => {
+      const from = String(args[0])
+      const to = String(args[1])
+      if (renamedInto.has(from)) {
+        undone.push(from)
+        throw eio()
+      }
+      const result = await Reflect.apply(nativeFs.rename, nativeFs, args)
+      if (downloads.has(path.dirname(to))) renamedInto.add(to)
+      return result
+    })
+    boundaries.realpath.mockImplementation(async (...args: unknown[]) => {
+      const target = String(args[0])
+      if (downloads.has(target) && renamedInto.size > undone.length) throw eio()
+      return Reflect.apply(nativeFs.realpath, nativeFs, args)
+    })
+    const walked: string[] = []
+    boundaries.readdir.mockImplementation((...args: unknown[]) => {
+      if (renamedInto.has(String(args[0]))) walked.push(String(args[0]))
+      return Reflect.apply(nativeFs.readdir, nativeFs, args)
+    })
+    const reopened = await storeWithBudget()
+    expect(undone).toHaveLength(2)
+    expect(walked).toEqual([])
+    for (const trash of undone) expect(view(reopened).state.held.has(trash)).toBe(false)
+    expect(storedBytes(hostRoot)).toBe(8 * MIB)
+    await recoverAndWitness(reopened)
+  })
+
+  it('RC-ROOT-REFUSAL-CODE: a replaced .gfs-downloads whose undo fails reports the refusal and keeps its copies charged on the trash', async () => {
+    const store = await storeWithBudget()
+    await completedCopy(store, roots.a, 'a', 1, 4 * MIB, { owner: 'keep' })
+    const downloads = path.join(roots.a, '.gfs-downloads')
+    syncFs.chmodSync(downloads, 0o755)
+    let trash: string | undefined
+    boundaries.rename.mockImplementation(async (...args: unknown[]) => {
+      const from = String(args[0])
+      if (from === downloads) {
+        trash = String(args[1])
+        return Reflect.apply(nativeFs.rename, nativeFs, args)
+      }
+      if (trash !== undefined && from === trash) throw eio()
+      return Reflect.apply(nativeFs.rename, nativeFs, args)
+    })
+    boundaries.realpath.mockImplementation(async (...args: unknown[]) => {
+      if (trash !== undefined && String(args[0]) === roots.a) return '/elsewhere'
+      return Reflect.apply(nativeFs.realpath, nativeFs, args)
+    })
+    await expect(startTransfer(store, roots.a, 'a', 2, 1024)).rejects.toMatchObject({
+      code: 'workspace_unavailable',
+    })
+    expect(trash).toBeDefined()
+    expect(view(store).state.held.get(trash!)?.sizeBytes).toBe(4 * MIB)
+    expect(view(store)).toMatchObject({ entries: 0, charged: 4 * MIB })
+  })
+
+  it('RC-INDEXED-KEPT: an evicted entry whose rename fails stays indexed and is charged once', async () => {
+    const store = await storeWithBudget()
+    await completedCopy(store, roots.a, 'a', 1, 4 * MIB)
+    await completedCopy(store, roots.b, 'b', 2, 4 * MIB)
+    const hits: string[] = []
+    boundaries.rename.mockImplementation((...args: unknown[]) => {
+      const source = String(args[0])
+      const cached = source.startsWith(roots.a) || source.startsWith(roots.b)
+      if (cached && path.basename(source).startsWith('input-')) {
+        hits.push(source)
+        return Promise.reject(eio())
+      }
+      return Reflect.apply(nativeFs.rename, nativeFs, args)
+    })
+    // The plan evicts one of the two copies (the frozen clock ties them); its
+    // rename fails, so the admission still exceeds the budget.
+    for (let i = 0; i < 3; i++) {
+      await expect(startTransfer(store, roots.c, 'c', 3 + i, 4 * MIB)).rejects.toMatchObject({
+        code: 'host_quota_exceeded',
+      })
+      expect(view(store)).toMatchObject({ entries: 8 * MIB, held: 0, active: 0, charged: 8 * MIB })
+    }
+    expect(hits).toHaveLength(3)
+    expect(storedBytes(hostRoot)).toBe(8 * MIB)
+    restoreBoundary('rename')
+    const fits = await startTransfer(store, roots.c, 'c', 6, 4 * MIB)
+    // One copy is evicted now; the other and c's partial are what remains.
+    expect(view(store)).toMatchObject({ entries: 4 * MIB, held: 0, active: 4 * MIB })
+    expect(storedBytes(roots.a) + storedBytes(roots.b)).toBe(4 * MIB)
+    expect(storedBytes(hostRoot)).toBe(8 * MIB)
+    await store.fail(fits.transfer.id, 'c')
+  })
+
+  it('RC-UNDO-RESTORED-UNINDEXED: startup leftovers restored by an undone refusal are measured once their parent passes again', async () => {
+    for (const caller of ['a', 'b'])
+      plantDownload(roots[caller], { bytes: Buffer.alloc(4 * MIB), meta: 'omit' })
+    // The check after each rename to a trash name fails once with EIO; the
+    // rename back succeeds, so each leftover is under its own name again.
+    const refused = new Set<string>()
+    const undone: string[] = []
+    boundaries.rename.mockImplementation(async (...args: unknown[]) => {
+      const [from, to] = [String(args[0]), String(args[1])]
+      const result = await Reflect.apply(nativeFs.rename, nativeFs, args)
+      if (path.basename(from).startsWith('.trash-')) undone.push(to)
+      else if (path.basename(to).startsWith('.trash-')) refused.add(path.dirname(to))
+      return result
+    })
+    boundaries.realpath.mockImplementation(async (...args: unknown[]) => {
+      if (refused.delete(String(args[0]))) throw eio()
+      return Reflect.apply(nativeFs.realpath, nativeFs, args)
+    })
+    const store = await storeWithBudget()
+    expect(undone).toHaveLength(2)
+    expect(view(store)).toMatchObject({ entries: 0, held: 8 * MIB, charged: 8 * MIB })
+    expect([...view(store).state.held.keys()].sort()).toEqual([...undone].sort())
+    expect(storedBytes(hostRoot)).toBe(8 * MIB)
+    // Each admission retries both removals, which are undone again.
+    await expectRefused(store)
+    expect(undone).toHaveLength(4)
+    await recoverAndWitness(store)
+  })
+
+  it('RC-WALK-SWAP: a directory replaced by a symlink while a leftover is measured is not walked', async () => {
+    const planted = plantDownload(roots.a, { bytes: Buffer.alloc(4 * MIB), meta: 'omit' })
+    syncFs.mkdirSync(path.join(planted.directory, 'nested'))
+    const victim = path.join(roots.b, 'ordinary-workspace-data')
+    syncFs.mkdirSync(victim)
+    const victimFile = path.join(victim, 'outside.bin')
+    syncFs.writeFileSync(victimFile, Buffer.alloc(8 * MIB, 29))
+    const swapped: string[] = []
+    const walked: string[] = []
+    boundaries.readdir.mockImplementation(async (...args: unknown[]) => {
+      const target = String(args[0])
+      walked.push(target)
+      const listing = await Reflect.apply(nativeFs.readdir, nativeFs, args)
+      // After the trash is listed, its child directory becomes a symlink.
+      if (path.basename(target).startsWith('.trash-') && swapped.length === 0) {
+        const nested = path.join(target, 'nested')
+        syncFs.rmdirSync(nested)
+        syncFs.symlinkSync(victim, nested)
+        swapped.push(nested)
+      }
+      return listing
+    })
+    failTrashRemoval()
+    const store = await storeWithBudget()
+    expect(swapped).toHaveLength(1)
+    expect(walked).not.toContain(swapped[0])
+    expect(walked).not.toContain(victim)
+    expect(view(store)).toMatchObject({ entries: 0, held: 4 * MIB, charged: 4 * MIB })
+    // 4 MiB held plus 4 MiB requested fit the 10 MiB budget.
+    const fits = await startTransfer(store, roots.c, 'c', 3, 4 * MIB)
+    expect(view(store)).toMatchObject({ held: 4 * MIB, active: 4 * MIB })
+    restoreBoundary('rm')
+    await store.fail(fits.transfer.id, 'c')
+    restoreBoundary('readdir')
+    await recoverAndWitness(store)
+    expect(syncFs.statSync(victimFile).size).toBe(8 * MIB)
+  })
+
+  it('RC-REFUSED-IN-PLACE-NOT-READ: a leftover whose parent check keeps failing is not walked to measure it', async () => {
+    plantDownload(roots.a, { bytes: Buffer.alloc(4 * MIB), meta: 'omit' })
+    const downloads = path.join(roots.a, '.gfs-downloads')
+    const checks: string[] = []
+    boundaries.realpath.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]) === downloads) {
+        checks.push(downloads)
+        throw eio()
+      }
+      return Reflect.apply(nativeFs.realpath, nativeFs, args)
+    })
+    const walked: string[] = []
+    boundaries.readdir.mockImplementation((...args: unknown[]) => {
+      if (path.basename(String(args[0])).startsWith('input-')) walked.push(String(args[0]))
+      return Reflect.apply(nativeFs.readdir, nativeFs, args)
+    })
+    const store = await storeWithBudget()
+    expect((await store.cleanupExpired()).removeFailed).toBe(1)
+    // Refused before the rename and again by the recheck, in both sweeps.
+    expect(checks.length).toBeGreaterThanOrEqual(4)
+    expect(walked).toEqual([])
+    expect(view(store)).toMatchObject({ entries: 0, held: 0 })
+    expect(storedBytes(hostRoot)).toBe(4 * MIB)
+    await recoverAndWitness(store)
+  })
 })

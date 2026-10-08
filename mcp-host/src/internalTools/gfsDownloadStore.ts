@@ -401,15 +401,19 @@ async function sha256FileHandle(handle: fs.FileHandle, assertActive?: () => void
 }
 
 /**
- * Regular files and their bytes under a directory, for the retirement log
- * only. Nothing is opened and no symlink is followed: entries are classified
- * by their own lstat type.
+ * Regular files and their bytes under a directory, for the retirement log and
+ * for charging a directory the store removes with no charge in hand. Nothing
+ * is opened and no symlink is followed, the root included: a path that is not
+ * a real directory when its turn comes, including one replaced by a symlink
+ * after it was listed, holds no bytes of its own, and files are classified by
+ * their own lstat type.
  */
 async function treeUsage(root: string): Promise<{ files: number; bytes: number }> {
   const usage = { files: 0, bytes: 0 }
   const pending = [root]
   while (pending.length > 0) {
     const directory = pending.pop()!
+    if (!(await fs.lstat(directory)).isDirectory()) continue
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
       const child = path.join(directory, entry.name)
       if (entry.isDirectory()) pending.push(child)
@@ -899,7 +903,12 @@ export class GfsDownloadStore {
       if (this.active.get(id) !== transfer) throw new GfsDownloadStoreError('download_busy')
       this.releaseActive(id)
       this.unpinId(id)
-      const result = await this.removeDirectory(transfer.directory, 'incomplete_removed')
+      // The reservation becomes the charge of whatever the removal leaves on disk.
+      const result = await this.removeDirectory(
+        transfer.directory,
+        'incomplete_removed',
+        transfer.sizeBytes
+      )
       if (result === 'failed' || result === 'trashed')
         throw new GfsDownloadStoreError('storage_write_failed')
     })
@@ -1358,6 +1367,21 @@ export class GfsDownloadStore {
   }
 
   /**
+   * Measures a directory a failed removal left under its own name. Its parent
+   * is checked again first: one still refused is not read, and the directory
+   * stays uncharged until a later removal finds the parent safe. The refusal
+   * was already logged by the removal.
+   */
+  private async sizeInPlace(directory: string): Promise<number | undefined> {
+    try {
+      await this.assertRemovable(directory)
+    } catch {
+      return undefined
+    }
+    return this.sizeStray(directory)
+  }
+
+  /**
    * A replaced `.gfs-downloads` is renamed to `.gfs-downloads.trash-<uuid>`
    * in its caller root; one a stopped removal left there still holds copies
    * of user files, so the sweep removes it like any other trash.
@@ -1552,6 +1576,11 @@ export class GfsDownloadStore {
     await verifyPrivateStoreDirectory(downloadsRoot)
   }
 
+  private isIndexedDirectory(directory: string): boolean {
+    for (const entry of this.entries.values()) if (entry.directory === directory) return true
+    return false
+  }
+
   private idsUnder(downloadsRoot: string): string[] {
     return [...this.entries.values()]
       .filter(entry => path.dirname(entry.directory) === downloadsRoot)
@@ -1740,9 +1769,11 @@ export class GfsDownloadStore {
    * its code and counted; the next sweep retries what is still listed.
    *
    * Retained bytes stay charged while they are on disk. The charge is
-   * `charge` when the caller gives one (an indexed entry's size), otherwise a
-   * held charge already on `directory` (a held duplicate or a trash directory
-   * an earlier removal left), otherwise the measured size of the trash. When
+   * `charge` when the caller gives one (an indexed entry's size, a failed
+   * transfer's reservation), otherwise a held charge already on `directory`
+   * (a held duplicate or a trash directory an earlier removal left), otherwise
+   * the measured size of the directory or its trash. A directory left under
+   * its own name and not indexed is held with that charge. When
    * the rename to the trash name succeeds but
    * the trash is not removed, the charge moves to the trash name as a held
    * charge, so the old name's absence never releases it; it is released only
@@ -1764,17 +1795,18 @@ export class GfsDownloadStore {
         { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error) },
         'GFS download store could not remove a download directory; the next sweep retries it'
       )
-      if (error instanceof KeptInPlaceError) {
-        // Still under its own name. With no charge in hand (a stray trash, an
-        // unindexed partial, a failed transfer) it is measured and held here;
-        // a caller's charge stays with its indexed entry.
-        if (carried === undefined) {
-          const kept = await this.sizeStray(directory)
+      if (!(error instanceof TrashLeftError)) {
+        // Still under its own name: the rename failed, the parent check
+        // refused before it, or a refusal after it was undone. An indexed
+        // entry keeps its own charge. Otherwise a charge in hand (a failed
+        // transfer's reservation, a held charge) stays on the directory; with
+        // none, the directory is measured if its parent passes the check now.
+        if (!this.isIndexedDirectory(directory)) {
+          const kept = carried ?? (await this.sizeInPlace(directory))
           if (kept !== undefined) this.held.set(directory, { sizeBytes: kept })
         }
         return 'failed'
       }
-      if (!(error instanceof TrashLeftError)) return 'failed'
       this.held.delete(directory)
       // No charge in hand: the bytes the rename moved are measured on the
       // trash name when it passed the parent check. One the check refused is
