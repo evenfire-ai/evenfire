@@ -175,6 +175,32 @@ describe('quit drain registration', () => {
     expect(app.quit).toHaveBeenCalledOnce()
   })
 
+  it('coalesces repeated before-quit events while preparation is pending', async () => {
+    const { app, emit } = createAppHarness()
+    const preparation = deferred()
+    const prepareForQuit = vi.fn(() => preparation.promise)
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      vi.fn()
+    )
+    const first = { preventDefault: vi.fn() }
+    const second = { preventDefault: vi.fn() }
+
+    emit('before-quit', first)
+    emit('before-quit', second)
+
+    expect(first.preventDefault).toHaveBeenCalledOnce()
+    expect(second.preventDefault).toHaveBeenCalledOnce()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
+
+    preparation.resolve()
+    await Promise.resolve()
+    await nextImmediate()
+
+    expect(app.quit).toHaveBeenCalledOnce()
+  })
+
   it('reopens quit preparation after a page cancels the resumed quit', async () => {
     const { app, emit } = createAppHarness()
     const prepareForQuit = vi.fn(async () => undefined)
