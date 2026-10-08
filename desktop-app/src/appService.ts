@@ -1924,74 +1924,83 @@ export class AppService {
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const envKey = getActiveEnvKey()
+      const userDataDirectory = this.getUserDataDirectory()
       const pendingLogout = await this.applyPendingExternalLogoutBeforeLogin(
-        this.getUserDataDirectory(),
+        userDataDirectory,
         envKey
       )
-      if (pendingLogout.present) {
-        let credentialPersisted = false
-        try {
-          await this.tokenStore.setSessionToken(result.token, envKey, {
-            requireKeytar: pendingLogout.replaceKeytarEntry,
-          })
-          credentialPersisted = true
+      let pendingCredentialPersisted = false
+      try {
+        const previousToken = this.sessionToken
+        const previousMe = this.me
+        const previousGeneration = this.sessionGeneration
+        const hadAuthenticatedScope = Boolean(previousToken && previousMe)
+        if (hadAuthenticatedScope) {
+          try {
+            await this.suspendDesktopGfsUploadsForAuthBoundary()
+          } catch (error) {
+            if (
+              this.sessionGeneration === previousGeneration &&
+              this.sessionToken === previousToken &&
+              this.me === previousMe
+            ) {
+              this.activateGfsAuthScope()
+            }
+            throw error
+          }
+          if (
+            this.sessionGeneration !== previousGeneration ||
+            this.sessionToken !== previousToken ||
+            this.me !== previousMe
+          ) {
+            throw new Error(
+              'stale_auth_epoch: authenticated scope changed during login replacement'
+            )
+          }
+        }
+        this.logoutInProgress = false
+        this.sessionGeneration += 1
+        this.sessionToken = result.token
+        this.me = result.me
+        this.updateEntityChangeSessionToken(result.token)
+        this.restartEntityChangeStreamForSessionReplacement()
+        await this.bindCurrentChatStore(result.me.id)
+        this.accessCatalog = null
+        this.teamDirectoryCache = null
+        this.workflowApprovalTeamById.clear()
+        this.workflowTeamByKey.clear()
+        this.rpcTokenManager.clear()
+        await this.tokenStore.setSessionToken(result.token, envKey, {
+          requireKeytar: pendingLogout.replaceKeytarEntry,
+        })
+        pendingCredentialPersisted = pendingLogout.present
+        if (pendingLogout.present) {
           const readBack = await this.tokenStore.getSessionToken(envKey)
           if (readBack !== result.token) {
             throw new Error('Fresh session token could not be verified after storage fallback')
           }
-          if (pendingLogout.retireMarker) {
-            clearPendingExternalLogout(this.getUserDataDirectory(), envKey)
+        }
+        this.activateGfsAuthScope()
+        if (pendingLogout.present && pendingLogout.retireMarker) {
+          clearPendingExternalLogout(userDataDirectory, envKey)
+        }
+        return { authenticated: true, me: result.me }
+      } catch (error) {
+        if (pendingLogout.present) {
+          try {
+            recordPendingExternalLogout(userDataDirectory, envKey)
+          } catch (markerError) {
+            this.reportDeferredLogoutFailureSafely(markerError)
           }
-        } catch (error) {
-          if (credentialPersisted) {
+          if (pendingCredentialPersisted) {
             await this.tokenStore
-              .clearSessionToken(envKey, { throwOnStorageError: true })
+              .clearSessionTokenStrictly(envKey)
               .catch(clearError => this.reportDeferredLogoutFailureSafely(clearError))
           }
           await this.failClosedForPendingLogout(error)
-          throw error
         }
+        throw error
       }
-      const previousToken = this.sessionToken
-      const previousMe = this.me
-      const previousGeneration = this.sessionGeneration
-      const hadAuthenticatedScope = Boolean(previousToken && previousMe)
-      if (hadAuthenticatedScope) {
-        try {
-          await this.suspendDesktopGfsUploadsForAuthBoundary()
-        } catch (error) {
-          if (
-            this.sessionGeneration === previousGeneration &&
-            this.sessionToken === previousToken &&
-            this.me === previousMe
-          ) {
-            this.activateGfsAuthScope()
-          }
-          throw error
-        }
-        if (
-          this.sessionGeneration !== previousGeneration ||
-          this.sessionToken !== previousToken ||
-          this.me !== previousMe
-        ) {
-          throw new Error('stale_auth_epoch: authenticated scope changed during login replacement')
-        }
-      }
-      this.logoutInProgress = false
-      this.sessionGeneration += 1
-      this.sessionToken = result.token
-      this.me = result.me
-      this.updateEntityChangeSessionToken(result.token)
-      this.restartEntityChangeStreamForSessionReplacement()
-      await this.bindCurrentChatStore(result.me.id)
-      this.accessCatalog = null
-      this.teamDirectoryCache = null
-      this.workflowApprovalTeamById.clear()
-      this.workflowTeamByKey.clear()
-      this.rpcTokenManager.clear()
-      if (!pendingLogout.present) await this.tokenStore.setSessionToken(result.token, envKey)
-      this.activateGfsAuthScope()
-      return { authenticated: true, me: result.me }
     } finally {
       releasePrewarm()
     }

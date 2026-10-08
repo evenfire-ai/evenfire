@@ -4,6 +4,7 @@ import fsSync from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { bindChatStoreForUser } from '../chatStoreBinding.js'
 
 let userDataDirectory = ''
 let activeEnvKey = ''
@@ -131,14 +132,11 @@ describe('AppService pending external logout', () => {
       .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
       .mockResolvedValue()
     const restore = vi.spyOn(internals(service), 'restoreSavedSessionOnce')
-    const clearToken = vi.spyOn(tokenStore, 'clearSessionToken')
+    const clearToken = vi.spyOn(tokenStore, 'clearSessionTokenStrictly')
 
     await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
 
-    expect(clearToken).toHaveBeenCalledWith(
-      activeEnvKey,
-      expect.objectContaining({ throwOnStorageError: true })
-    )
+    expect(clearToken).toHaveBeenCalledWith(activeEnvKey, expect.any(Object))
     expect(suspendUploads).toHaveBeenCalledOnce()
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
     expect(restore).not.toHaveBeenCalled()
@@ -227,7 +225,7 @@ describe('AppService pending external logout', () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
     internals(service).quitPreparationStarted = true
-    const clearToken = vi.spyOn(tokenStore, 'clearSessionToken')
+    const clearToken = vi.spyOn(tokenStore, 'clearSessionTokenStrictly')
     const restore = vi.spyOn(internals(service), 'restoreSavedSessionOnce')
 
     await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
@@ -411,6 +409,22 @@ describe('AppService pending external logout', () => {
     } finally {
       unlink.mockRestore()
     }
+  })
+
+  it('keeps the marker and removes the fresh credential when chat binding fails', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    vi.mocked(bindChatStoreForUser).mockRejectedValueOnce(new Error('chat binding failed'))
+
+    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
+      'chat binding failed'
+    )
+
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+    expect(internals(service).sessionToken).toBeNull()
+    expect(internals(service).me).toBeNull()
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
   })
 
   it('records a UI logout rejected by quit admission through the shared AppService path', async () => {
