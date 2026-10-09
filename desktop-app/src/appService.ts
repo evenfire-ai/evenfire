@@ -1325,10 +1325,7 @@ export class AppService {
     }
 
     const activeHop = this.activeTeamContextHop
-    if (activeHop && targetTeamId === activeHop.homeTeamId) {
-      if (this.quitPreparationStarted) {
-        return Promise.reject(new QuitAdmissionClosedError())
-      }
+    if (activeHop && targetTeamId === activeHop.homeTeamId && !this.quitPreparationStarted) {
       return this.enqueueHomeTeamOperation(activeHop, operation)
     }
 
@@ -1336,8 +1333,13 @@ export class AppService {
     // time. Queued same-team work remains a nonproducer until it proves it
     // needs a credential switch after reaching the head of the queue.
     const activeTeamId = String(this.me?.teamId || '').trim()
-    const earlyProducer = targetTeamId !== activeTeamId ? this.admitCredentialProducer() : null
-    if (targetTeamId !== activeTeamId && !earlyProducer) {
+    const homeTeamQueuedAfterQuitClosure =
+      Boolean(activeHop) && targetTeamId === activeHop.homeTeamId && this.quitPreparationStarted
+    const earlyProducer =
+      !homeTeamQueuedAfterQuitClosure && targetTeamId !== activeTeamId
+        ? this.admitCredentialProducer()
+        : null
+    if (targetTeamId !== activeTeamId && !earlyProducer && !homeTeamQueuedAfterQuitClosure) {
       return Promise.reject(new QuitAdmissionClosedError())
     }
 

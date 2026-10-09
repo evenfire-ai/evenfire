@@ -134,6 +134,8 @@ describe('AppService team-context quit lifecycle', () => {
     const hopStarted = deferred<void>()
     const homeOperation = deferred<void>()
     const homeStarted = deferred<void>()
+    const lateHomeOperation = deferred<void>()
+    const lateHomeStarted = deferred<void>()
     const { service, tokenStore } = createAuthenticatedService()
     const prepareTokenStore = vi.spyOn(tokenStore, 'prepareForQuit')
 
@@ -148,9 +150,24 @@ describe('AppService team-context quit lifecycle', () => {
       return token
     })
     const preparation = service.prepareForQuit()
-    const lateHomeRead = service.runWithTeamContext('team-home', async token => token)
+    const lateHomeRead = service.runWithTeamContext('team-home', async token => {
+      lateHomeStarted.resolve()
+      await lateHomeOperation.promise
+      return token
+    })
+    let lateHomeSettled = false
+    const lateHomeOutcome = lateHomeRead
+      .then(
+        value => ({ status: 'fulfilled' as const, value }),
+        error => ({ status: 'rejected' as const, error })
+      )
+      .then(outcome => {
+        lateHomeSettled = true
+        return outcome
+      })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(lateHomeSettled).toBe(false)
 
-    await expect(lateHomeRead).rejects.toThrow('Application is shutting down')
     expect(prepareTokenStore).not.toHaveBeenCalled()
     hopOperation.resolve('hop-complete')
     await homeStarted.promise
@@ -159,7 +176,13 @@ describe('AppService team-context quit lifecycle', () => {
     homeOperation.resolve()
     await expect(homeRead).resolves.toBe('team-home-token')
     await Promise.all([hop, preparation])
+    await lateHomeStarted.promise
     expect(prepareTokenStore).toHaveBeenCalledOnce()
+    lateHomeOperation.resolve()
+    await expect(lateHomeOutcome).resolves.toEqual({
+      status: 'fulfilled',
+      value: 'team-home-token',
+    })
 
     service.cancelQuitPreparation()
     const postHopHomeRead = service.runWithTeamContext('team-home', async token => token)
@@ -249,6 +272,55 @@ describe('AppService team-context quit lifecycle', () => {
     await expect(queuedHomeRead).resolves.toBe('team-home-token')
     expect(vi.mocked(service.authClient.switchTeam).mock.calls.map(([, teamId]) => teamId)).toEqual(
       ['team-a', 'team-home', 'team-home']
+    )
+  })
+
+  it('rejects a queued home hop after quit closes, then allows a retry after cancellation', async () => {
+    const hopOperation = deferred<void>()
+    const hopStarted = deferred<void>()
+    const { service } = createAuthenticatedService()
+    let failHomeRestore = true
+    vi.mocked(service.authClient.switchTeam).mockImplementation(async (_token, teamId) => {
+      if (teamId === 'team-home' && failHomeRestore) {
+        failHomeRestore = false
+        throw new Error('home restore failed')
+      }
+      return { token: `${teamId}-token`, team: { id: teamId, name: teamId } }
+    })
+
+    const hop = service.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      await hopOperation.promise
+      return 'team-a-complete'
+    })
+    await hopStarted.promise
+    const preparation = service.prepareForQuit()
+    const lateHomeRead = service.runWithTeamContext('team-home', async token => token)
+    let lateHomeSettled = false
+    const lateHomeOutcome = lateHomeRead
+      .then(
+        value => ({ status: 'fulfilled' as const, value }),
+        error => ({ status: 'rejected' as const, error })
+      )
+      .then(outcome => {
+        lateHomeSettled = true
+        return outcome
+      })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(lateHomeSettled).toBe(false)
+    hopOperation.resolve()
+
+    await expect(hop).rejects.toThrow('home restore failed')
+    const lateHomeResult = await lateHomeOutcome
+    expect(lateHomeResult.status).toBe('rejected')
+    if (lateHomeResult.status === 'rejected') {
+      expect(lateHomeResult.error).toMatchObject({ message: 'Application is shutting down' })
+    }
+    await preparation
+
+    service.cancelQuitPreparation()
+    await expect(service.runWithTeamContext('team-home', async token => token)).resolves.toBe(
+      'team-home-token'
     )
   })
 
