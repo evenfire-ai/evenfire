@@ -110,6 +110,7 @@ export function ConnectorDetailPage() {
   const spec = server?.spec ?? {}
   const auth =
     spec.auth && typeof spec.auth === 'object' ? (spec.auth as Record<string, unknown>) : {}
+  const authentication = connectorAuthenticationLabel(auth.type)
   const conditions = server?.status?.conditions ?? []
   const transport =
     spec.transport && typeof spec.transport === 'object'
@@ -276,10 +277,9 @@ export function ConnectorDetailPage() {
                 value={spec.enabled === false ? 'No' : 'Yes'}
               />
               <ConnectorReadOnlyField label="Transport" value={text(transport.type)} />
-              <ConnectorReadOnlyField
-                label="Authentication"
-                value={connectorAuthenticationLabel(auth.type)}
-              />
+              {authentication ? (
+                <ConnectorReadOnlyField label="Authentication" value={authentication} />
+              ) : null}
               <ConnectorReadOnlyField code label="Endpoint" value={text(transport.url)} wide />
             </div>
           </FormSection>
