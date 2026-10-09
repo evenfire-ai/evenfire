@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import {
@@ -19,7 +19,16 @@ import type { SingleTurnProvider } from '../../llm/types'
 import type { Task } from '../../queue/types'
 import { resolveVisualDeliveryLimits } from '../../visualInput/deliveryLimits'
 import { ScopedWorkspaceProvider } from '../../workspace/scopedWorkspace'
+import { deriveUserKeyFromSource } from '../../workspace/userKey'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
+
+// statfs reports the volume sized to its free space, so the disk's occupancy
+// never meets the store's free-space floor.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  const { freeSpaceSizedStatfs } = await import('../../__tests__/fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
+})
 
 const { clientFactory } = vi.hoisted(() => ({ clientFactory: vi.fn() }))
 // Double only GFSC's external transport and the model. The native registry,
@@ -80,7 +89,7 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
-it('keeps the exact workspace receipt through same-batch image suspension, SQLite cold resume and fresh CLI consent', async () => {
+it('keeps the exact workspace receipt through same-batch image suspension, SQLite cold resume and one turn-wide shell approval', async () => {
   root = await fs.mkdtemp(join(tmpdir(), 'gfs-batch-receipt-'))
   store = new GfsDownloadStore(root)
   await store.initialize()
@@ -201,7 +210,10 @@ it('keeps the exact workspace receipt through same-batch image suspension, SQLit
     responseCallback: vi.fn(async () => undefined),
   }
   const callerRoot = new ScopedWorkspaceProvider(root).forSource(task.sourceMessage).userRootPath
-  taskOwner = { id: task.id, caller: task.sourceMessage!.sender }
+  // The store keys the caller like its root: the channel-namespaced key, never the raw sender.
+  const storeCaller = deriveUserKeyFromSource(task.sourceMessage)
+  expect(basename(callerRoot)).toBe(storeCaller)
+  taskOwner = { id: task.id, caller: storeCaller }
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
   const onFail = vi.fn()
@@ -280,31 +292,25 @@ it('keeps the exact workspace receipt through same-batch image suspension, SQLit
   ).toMatchObject(expected)
   const cold = new TaskExecutor(task, { ...deps, conversationManager: coldManager })
   await cold.rehydrateWaitingApproval(sessionKey, coldConversation.pending_approval!)
+  // The shell approval covers the rest of the turn, so the follow-up shell
+  // that processes the retained copy runs without a second approval.
   await cold.resumeAfterApproval(false)
   expect(onFail).not.toHaveBeenCalled()
-  expect(cold.executorState).toBe('waiting_approval')
-  expect(cold.pendingApproval?.tool_call_id).toBe('process-retained')
-  expect(cold.pendingApproval?.authorization_scope).toBe('exact_invocation')
   expect(requests[1].find(message => message.tool_call_id === firstShell.id)?.content).toContain(
     'batch-approved'
   )
   expect(
     requests[1].flatMap(message => message.contentParts ?? []).some(part => part.type === 'image')
   ).toBe(false)
-  expect(contentRequests).toBe(1)
-  expect(releaseOwner).not.toHaveBeenCalled()
-
-  await cold.resumeAfterApproval(false)
-  expect(onFail).not.toHaveBeenCalled()
   expect(cold.executorState).toBe('completed')
   expect(onComplete).toHaveBeenCalledExactlyOnceWith(task)
-  expect(onApprovalNeeded).toHaveBeenCalledTimes(2)
+  expect(onApprovalNeeded).toHaveBeenCalledTimes(1)
   const output = requests[2].find(message => message.tool_call_id === 'process-retained')!.content
   // Shell output keeps the production safety envelope around the bounded proof.
   const proof = /\{"bytes":\d+,"sha256":"[0-9a-f]{64}"\}/.exec(output)?.[0]
   expect(proof).toBeDefined()
   expect(JSON.parse(proof!)).toEqual({ bytes: bytes.byteLength, sha256: digest })
   expect(contentRequests).toBe(1)
-  expect(releaseOwner).toHaveBeenCalledExactlyOnceWith(task.id, task.sourceMessage!.sender)
+  expect(releaseOwner).toHaveBeenCalledExactlyOnceWith(task.id, storeCaller)
   expect(JSON.stringify(requests)).not.toContain(bytes.toString('base64'))
 })

@@ -9,7 +9,12 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { E2E_DESKTOP_PASSWORD, loginAs as apiLoginAs, seedDesktopPasswordLogin } from './workflowUi'
+import {
+  E2E_DESKTOP_PASSWORD,
+  loginAs as apiLoginAs,
+  awaitPasswordPace,
+  seedDesktopPasswordLogin,
+} from './workflowUi'
 
 const E2E_EMAIL = process.env.E2E_DEV_LOGIN_EMAIL || 'test@clerum.io'
 
@@ -74,6 +79,7 @@ export const test = base.extend<Fixtures>({
     if (await emailInput.isVisible()) {
       await emailInput.fill(E2E_EMAIL)
       await passwordInput.fill(E2E_DESKTOP_PASSWORD)
+      await awaitPasswordPace()
       await page.click('button:has-text("Sign in")')
     }
 
@@ -150,6 +156,7 @@ export async function loginAs(page: Page, email: string): Promise<void> {
   if (await emailInput.isVisible()) {
     await emailInput.fill(email)
     await passwordInput.fill(E2E_DESKTOP_PASSWORD)
+    await awaitPasswordPace()
     await page.click('button:has-text("Sign in")')
   }
 
