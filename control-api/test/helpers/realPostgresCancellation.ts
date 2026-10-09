@@ -2,17 +2,29 @@ import { once } from 'node:events'
 import { type Socket, createConnection, createServer } from 'node:net'
 
 /** Observe a real COMMIT while discarding its reply on the owned local PG lane. */
-export async function createPostgresCommitReplyBlackhole(connectionString: string) {
-  return createPostgresProtocolBlackhole(connectionString, true)
+export async function createPostgresCommitReplyBlackhole(
+  connectionString: string,
+  dropCommitNumber = 1
+) {
+  return createPostgresProtocolBlackhole(connectionString, true, dropCommitNumber)
 }
 
 /** Hide replies and client disconnects without ending the real backend socket. */
 export async function createPostgresDisconnectBlackhole(connectionString: string) {
-  return createPostgresProtocolBlackhole(connectionString, false)
+  return createPostgresProtocolBlackhole(connectionString, false, 1)
 }
 
-async function createPostgresProtocolBlackhole(connectionString: string, dropCommitReply: boolean) {
+async function createPostgresProtocolBlackhole(
+  connectionString: string,
+  dropCommitReply: boolean,
+  dropCommitNumber: number
+) {
+  if (!Number.isSafeInteger(dropCommitNumber) || dropCommitNumber < 1) {
+    throw new Error('dropCommitNumber must be a positive integer')
+  }
   const target = new URL(connectionString)
+  const targetHost = target.searchParams.get('host') || target.hostname.replace(/^\[|\]$/g, '')
+  const targetPort = Number(target.searchParams.get('port') || target.port || 5432)
   const sslMode = target.searchParams.get('sslmode')
   if (sslMode && sslMode !== 'disable') {
     throw new Error('COMMIT reply observation requires the harness plaintext PostgreSQL connection')
@@ -24,14 +36,21 @@ async function createPostgresProtocolBlackhole(connectionString: string, dropCom
     commit = resolve
   })
   let armed = dropCommitReply
-  let dropping = false
+  let commitCount = 0
+  let droppingBackend: Socket | undefined
+  let droppedFrontend: Socket | undefined
+  let dropAllReplies = false
   let discardedReplyBytes = 0
   let discardedFrontendBytes = 0
   let suppressDisconnects = false
   let suppressedDisconnects = 0
   const server = createServer({ allowHalfOpen: true }, front => {
-    const host = target.hostname.replace(/^\[|\]$/g, '')
-    const back = createConnection({ host, port: Number(target.port || 5432), allowHalfOpen: true })
+    const back = targetHost.startsWith('/')
+      ? createConnection({
+          path: `${targetHost.replace(/\/$/, '')}/.s.PGSQL.${targetPort}`,
+          allowHalfOpen: true,
+        })
+      : createConnection({ host: targetHost, port: targetPort, allowHalfOpen: true })
     for (const socket of [front, back]) {
       sockets.add(socket)
       socket.once('close', () => sockets.delete(socket))
@@ -66,9 +85,11 @@ async function createPostgresProtocolBlackhole(connectionString: string, dropCom
         if (buffered[0] === 'Q'.charCodeAt(0)) {
           const sql = buffered.toString('utf8', 5, length)
           if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') commands.push(sql)
-          if (sql === 'COMMIT' && armed) {
+          if (sql === 'COMMIT') commitCount++
+          if (sql === 'COMMIT' && armed && commitCount === dropCommitNumber) {
             armed = false
-            dropping = true
+            droppingBackend = back
+            droppedFrontend = front
             commit()
           }
         }
@@ -77,7 +98,7 @@ async function createPostgresProtocolBlackhole(connectionString: string, dropCom
       back.write(chunk)
     })
     back.on('data', chunk => {
-      if (dropping) discardedReplyBytes += chunk.length
+      if (dropAllReplies || back === droppingBackend) discardedReplyBytes += chunk.length
       else front.write(chunk)
     })
   })
@@ -88,6 +109,8 @@ async function createPostgresProtocolBlackhole(connectionString: string, dropCom
   const proxied = new URL(connectionString)
   proxied.hostname = '127.0.0.1'
   proxied.port = String(address.port)
+  proxied.searchParams.delete('host')
+  proxied.searchParams.delete('port')
   return {
     connectionString: proxied.toString(),
     commitForwarded,
@@ -101,14 +124,23 @@ async function createPostgresProtocolBlackhole(connectionString: string, dropCom
     get suppressedDisconnects() {
       return suppressedDisconnects
     },
+    failClientAfterCommitForwarded: () => {
+      const front = droppedFrontend
+      if (!front) throw new Error('no targeted COMMIT reply is being withheld')
+      droppingBackend = undefined
+      droppedFrontend = undefined
+      front.destroy(new Error('simulated lost COMMIT acknowledgement'))
+    },
     dropRepliesAndDisconnects: () => {
       armed = false
-      dropping = true
+      dropAllReplies = true
       suppressDisconnects = true
     },
     allowReplies: () => {
-      dropping = false
+      dropAllReplies = false
       suppressDisconnects = false
+      droppingBackend = undefined
+      droppedFrontend = undefined
     },
     close: async () => {
       for (const socket of sockets) socket.destroy()

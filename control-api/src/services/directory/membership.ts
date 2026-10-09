@@ -220,9 +220,11 @@ export async function withMemberPasswordWorkLease<T>(
 /** Commit member credential mutations and durable-owner release as one outcome. */
 async function withPasswordWorkTransaction<T>(
   lease: PasswordWorkLease,
-  work: (db: DbTransactionClient) => Promise<T>
+  work: (db: DbTransactionClient) => Promise<T>,
+  options: { exposeUnknownCommitOutcome?: boolean } = {}
 ): Promise<T> {
   let commitAcknowledged = false
+  let commitOutcomeUnknown = false
   let hasOutcome = false
   let outcome!: T
   try {
@@ -239,9 +241,19 @@ async function withPasswordWorkTransaction<T>(
           commitAcknowledged = true
           lease.confirmReleaseWithinCommitted()
         },
+        onCommitOutcomeUnknown: () => {
+          commitOutcomeUnknown = true
+        },
       }
     )
   } catch (error) {
+    if (commitOutcomeUnknown && options.exposeUnknownCommitOutcome) {
+      passwordSetupLogger.warn(
+        { event: 'password_recovery_commit_outcome_unknown' },
+        'password recovery commit outcome is unknown'
+      )
+      throw new PasswordAdmissionError(503, 2, 'authority_failure', 'recovery_outcome_unknown')
+    }
     if (commitAcknowledged && hasOutcome) {
       passwordSetupLogger.warn(
         { event: 'password_post_commit_cleanup_failed' },
@@ -251,7 +263,17 @@ async function withPasswordWorkTransaction<T>(
     }
     throw error
   } finally {
-    if (!commitAcknowledged) await lease.release()
+    if (!commitAcknowledged) {
+      try {
+        await lease.release()
+      } catch (error) {
+        if (!commitOutcomeUnknown) throw error
+        passwordSetupLogger.warn(
+          { event: 'password_owner_release_after_unknown_commit_failed' },
+          'password owner release after unknown commit failed'
+        )
+      }
+    }
   }
 }
 
@@ -1317,71 +1339,75 @@ export async function setInvitationPasswordForEmail(
 
   const lease = passwordWorkLease ?? (await acquirePasswordSetupLease())
   try {
-    return await withPasswordWorkTransaction(lease, async db => {
-      const candidate = await getInvitationRecordById(db, trimmedInvitationId)
-      if (!candidate || candidate.purpose !== 'password_reset') {
-        return { error: 'not_found' as const }
-      }
-      if (candidate.email.toLowerCase() !== normalizedEmail) {
-        return { error: 'forbidden' as const }
-      }
+    return await withPasswordWorkTransaction(
+      lease,
+      async db => {
+        const candidate = await getInvitationRecordById(db, trimmedInvitationId)
+        if (!candidate || candidate.purpose !== 'password_reset') {
+          return { error: 'not_found' as const }
+        }
+        if (candidate.email.toLowerCase() !== normalizedEmail) {
+          return { error: 'forbidden' as const }
+        }
 
-      const user = await lockPasswordResetUser(db, normalizedEmail)
-      if (!user) return { error: 'not_found' as const }
-      if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-      if (expectedUserId && user.id !== expectedUserId.trim()) {
-        return { error: 'forbidden' as const }
-      }
-      const invitation = await getInvitationRecordById(db, trimmedInvitationId, true)
-      if (!invitation || invitation.purpose !== 'password_reset') {
-        return { error: 'not_found' as const }
-      }
-      if (invitation.email.toLowerCase() !== normalizedEmail) {
-        return { error: 'forbidden' as const }
-      }
-      if (invitation.status !== 'pending') return { error: 'not_pending' as const }
-      if (invitation.expires_at.getTime() <= Date.now()) return { error: 'expired' as const }
-      if (invitation.accepted_user_id && invitation.accepted_user_id !== user.id) {
-        return { error: 'forbidden' as const }
-      }
+        const user = await lockPasswordResetUser(db, normalizedEmail)
+        if (!user) return { error: 'not_found' as const }
+        if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
+        if (expectedUserId && user.id !== expectedUserId.trim()) {
+          return { error: 'forbidden' as const }
+        }
+        const invitation = await getInvitationRecordById(db, trimmedInvitationId, true)
+        if (!invitation || invitation.purpose !== 'password_reset') {
+          return { error: 'not_found' as const }
+        }
+        if (invitation.email.toLowerCase() !== normalizedEmail) {
+          return { error: 'forbidden' as const }
+        }
+        if (invitation.status !== 'pending') return { error: 'not_pending' as const }
+        if (invitation.expires_at.getTime() <= Date.now()) return { error: 'expired' as const }
+        if (invitation.accepted_user_id && invitation.accepted_user_id !== user.id) {
+          return { error: 'forbidden' as const }
+        }
 
-      const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-      const update = await db.query(
-        `UPDATE users
+        const passwordHash = await bcrypt.hash(trimmedPassword, 12)
+        const update = await db.query(
+          `UPDATE users
             SET password_hash = $2,
                 password_set_at = NOW(),
                 updated_at = NOW()
           WHERE id = $1
             AND lifecycle_state = 'active'
           RETURNING id`,
-        [user.id, passwordHash]
-      )
-      if (update.rows.length !== 1) return { error: 'user_retired' as const }
+          [user.id, passwordHash]
+        )
+        if (update.rows.length !== 1) return { error: 'user_retired' as const }
 
-      const redeemed = await db.query(
-        `UPDATE invitations
+        const redeemed = await db.query(
+          `UPDATE invitations
             SET status = 'accepted',
                 accepted_at = NOW(),
                 accepted_user_id = $2
           WHERE id = $1 AND status = 'pending'
           RETURNING id`,
-        [invitation.id, user.id]
-      )
-      if (redeemed.rows.length !== 1) return { error: 'not_pending' as const }
-      await revokeSiblingPasswordResets(db, normalizedEmail, invitation.id, user.id)
+          [invitation.id, user.id]
+        )
+        if (redeemed.rows.length !== 1) return { error: 'not_pending' as const }
+        await revokeSiblingPasswordResets(db, normalizedEmail, invitation.id, user.id)
 
-      const refreshed = await getInvitationRecordById(db, invitation.id)
-      if (!refreshed) return { error: 'not_found' as const }
-      const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-      const sessionContext = await getMemberSessionContext(db, user)
-      return {
-        data: {
-          passwordUpdated: true,
-          sessionContext,
-          ...invitationResponse(refreshed, { ...user, password_hash: passwordHash }, teams),
-        },
-      }
-    })
+        const refreshed = await getInvitationRecordById(db, invitation.id)
+        if (!refreshed) return { error: 'not_found' as const }
+        const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
+        const sessionContext = await getMemberSessionContext(db, user)
+        return {
+          data: {
+            passwordUpdated: true,
+            sessionContext,
+            ...invitationResponse(refreshed, { ...user, password_hash: passwordHash }, teams),
+          },
+        }
+      },
+      { exposeUnknownCommitOutcome: true }
+    )
   } catch (error) {
     if (error instanceof PasswordAdmissionError) throw error
     passwordSetupLogger.warn(

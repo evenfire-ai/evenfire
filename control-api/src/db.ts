@@ -6734,6 +6734,8 @@ export type DbTransactionOptions = {
   signal?: AbortSignal
   /** Called only after PostgreSQL acknowledges COMMIT. Must be synchronous and non-throwing. */
   onCommitAcknowledged?: () => void
+  /** Called when COMMIT was sent but PostgreSQL did not acknowledge its outcome. */
+  onCommitOutcomeUnknown?: () => void
 }
 
 export async function withTransaction<T>(
@@ -6891,6 +6893,9 @@ export async function withTransaction<T>(
     }
     // Once COMMIT was sent, a missing reply is an unknown durable outcome.
     // Cancellation does not establish rollback, no spend or no dispatch.
+    if (commitSent && !transactionFinished) {
+      options.onCommitOutcomeUnknown?.()
+    }
     signal?.throwIfAborted()
     throw error
   } finally {

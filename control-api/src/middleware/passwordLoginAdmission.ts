@@ -16,7 +16,7 @@ export function sendPasswordAdmissionError(error: unknown, res: Response): boole
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Retry-After', String(error.retryAfterSeconds))
   res.status(error.status).json({
-    error: error.status === 429 ? 'rate_limited' : 'authority_unavailable',
+    error: error.publicError,
     retryAfterSeconds: error.retryAfterSeconds,
   })
   return true
