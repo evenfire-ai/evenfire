@@ -73,6 +73,8 @@ plugin_workload_sdk_invocations	none
 plugin_workload_sdk_provider_attempts	none
 plugin_workload_sdk_quota_counters	none
 plugin_workload_sdk_spend_outcomes	none
+pr2_readiness_activations	none
+pr2_readiness_evidence	none
 profiles	none
 rate_limit_buckets	none
 registry_connection	none
