@@ -3,8 +3,10 @@ export const SHELL_SIGKILL_GRACE_MS = 5000
 
 /**
  * Interval at which a shell whose leader exited without a cause checks whether
- * its process group is gone. When the group is gone but stdout/stderr are still
- * held open by a process outside it, output capture stops and the call settles.
+ * its process group is gone. When two consecutive checks find the group gone and
+ * stdout/stderr are still held open by a process outside it, output capture stops
+ * and the call settles. One check is not enough: the last in-group writer's pipe
+ * EOF can still be in flight when its group disappears.
  */
 export const SHELL_STDIO_DRAIN_MS = 1000
 

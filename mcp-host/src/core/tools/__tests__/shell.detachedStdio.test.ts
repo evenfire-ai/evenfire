@@ -289,7 +289,7 @@ describe('ShellTool with stdio held by a process outside its group (#1028 P1)', 
   )
 
   it(
-    'P1-c: a command that exits 0 after starting an escaped holder settles about one drain interval after exit, not at the execution timeout',
+    'P1-c: a command that exits 0 after starting an escaped holder settles about two drain intervals after exit, not at the execution timeout',
     async () => {
       const { prefix, pidFile } = await escapedHolder()
       const tool = new ShellTool(workspacePath, NATURAL_EXIT_EXECUTION_TIMEOUT_MS, ['PATH'])
@@ -304,7 +304,7 @@ describe('ShellTool with stdio held by a process outside its group (#1028 P1)', 
       const result = await execution
       const elapsed = performance.now() - startedAt
 
-      expect(elapsed).toBeGreaterThanOrEqual(SHELL_STDIO_DRAIN_MS)
+      expect(elapsed).toBeGreaterThanOrEqual(2 * SHELL_STDIO_DRAIN_MS)
       expect(elapsed).toBeLessThan(NATURAL_EXIT_EXECUTION_TIMEOUT_MS / 3)
       expect(result.is_error).toBe(true)
       expect(result.content).toBe(`${notice('exited')}stdout:\nown-beforeREADY\nown-after`)
@@ -715,6 +715,80 @@ describe('ShellTool single finalizer races (#1028 P1, hermetic child)', () => {
       expect.objectContaining({ reason: 'timeout', processGroupTerminated: false }),
     ])
     expect(JSON.stringify(warn.mock.calls)).not.toContain('probe failed')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  /** Intercepts process.kill; every group probe confirms absence. */
+  function groupAlreadyGone() {
+    const signals: Array<{ pid: number; signal: unknown; at: number }> = []
+    vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
+      signals.push({ pid, signal, at: performance.now() })
+      if (signal === 0) throw groupGone()
+      return true
+    })
+    return signals
+  }
+
+  it('P1-i: a pipe EOF that arrives after the first absent group probe keeps the natural-exit result', async () => {
+    useFakeClock()
+    const child = hermeticChild()
+    vi.mocked(spawn).mockImplementationOnce(() => child as never)
+    const signals = groupAlreadyGone()
+    const startedAt = performance.now()
+    const execution = new ShellTool(workspacePath, 30_000, []).execute({
+      command: 'hermetic command',
+    })
+    child.stdout.emit('data', Buffer.from('early'))
+    child.exitCode = 0
+    child.emit('exit', 0, null)
+
+    await vi.advanceTimersByTimeAsync(SHELL_STDIO_DRAIN_MS)
+    // Witness: the drain poll already saw the group gone before the EOF.
+    expect(signals).toEqual([{ pid: -FAKE_PID, signal: 0, at: startedAt + SHELL_STDIO_DRAIN_MS }])
+    // The EOF misses the poll phase: anything that probe scheduled runs first.
+    await vi.advanceTimersByTimeAsync(1)
+    child.stdout.emit('data', Buffer.from('late'))
+    child.emit('close', 0)
+    await vi.advanceTimersByTimeAsync(SHELL_STDIO_DRAIN_MS)
+    const result = await execution
+
+    expect(result).toEqual({
+      content: 'stdout:\nearlylate',
+      duration_ms: expect.any(Number),
+      is_error: false,
+    })
+    expect(heldWarnings()).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('P1-j: a group gone on two consecutive probes without a pipe EOF reports the detached holder at the second probe', async () => {
+    useFakeClock()
+    const child = hermeticChild()
+    vi.mocked(spawn).mockImplementationOnce(() => child as never)
+    const signals = groupAlreadyGone()
+    const startedAt = performance.now()
+    let settledAt: number | undefined
+    const execution = new ShellTool(workspacePath, 30_000, []).execute({
+      command: 'hermetic command',
+    })
+    void execution.then(() => {
+      settledAt = performance.now()
+    })
+    child.stdout.emit('data', Buffer.from('natural output'))
+    child.exitCode = 0
+    child.emit('exit', 0, null)
+
+    await vi.advanceTimersByTimeAsync(2 * SHELL_STDIO_DRAIN_MS)
+    // The fake clock runs the setImmediate a probe schedules on the next tick.
+    await vi.advanceTimersByTimeAsync(1)
+    const result = await execution
+
+    // A publication at the first absent probe would record one drain interval + 1.
+    expect(settledAt).toBe(startedAt + 2 * SHELL_STDIO_DRAIN_MS + 1)
+    expect(signals.filter(entry => entry.signal === 0)).toHaveLength(2)
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe(`${notice('exited')}stdout:\nnatural output`)
+    expect(heldWarnings()).toEqual([expect.objectContaining({ reason: 'exited' })])
     expect(vi.getTimerCount()).toBe(0)
   })
 })

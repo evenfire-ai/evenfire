@@ -121,11 +121,19 @@
   },
   {
     "suite": "shell.detachedStdio.test.ts",
-    "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-c: a command that exits 0 after starting an escaped holder settles about one drain interval after exit, not at the execution timeout"
+    "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-c: a command that exits 0 after starting an escaped holder settles about two drain intervals after exit, not at the execution timeout"
   },
   {
     "suite": "shell.detachedStdio.test.ts",
     "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-g: an asynchronous start failure reports only the error code and publishes one result"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) P1-i: a pipe EOF that arrives after the first absent group probe keeps the natural-exit result"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) P1-j: a group gone on two consecutive probes without a pipe EOF reports the detached holder at the second probe"
   },
   {
     "suite": "shell.detachedStdio.test.ts",

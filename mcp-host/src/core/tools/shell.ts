@@ -545,8 +545,19 @@ export class ShellTool implements Tool {
       child.once('exit', () => {
         const processGroupId = child.pid
         if (killed || finalizing || !isValidProcessId(processGroupId)) return
+        let absentProbes = 0
         drainTimer = setInterval(() => {
-          if (finalizing || processGroupExists(processGroupId)) return
+          if (finalizing) return
+          if (processGroupExists(processGroupId)) {
+            absentProbes = 0
+            return
+          }
+          // The last in-group writer can exit before its pipe EOF reaches this
+          // process; under load that EOF can miss the poll phase below. Only a
+          // second consecutive absent probe without `close` means a process
+          // outside the group holds stdio.
+          absentProbes += 1
+          if (absentProbes < 2) return
           // A pipe EOF pending in this poll phase delivers `close` first.
           setImmediate(() => {
             if (!claimFinalization()) return
