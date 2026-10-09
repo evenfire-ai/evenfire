@@ -3,7 +3,7 @@
 import React, { useMemo, useState } from 'react'
 import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@components/ui'
 import type { CreateLlmModelInput } from '@lib/api'
-import { useGrokSubscriptionEnabled } from '@lib/hooks/useGrokSubscriptionEnabled'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import {
   GROK_SUBSCRIPTION_PROVIDER,
   LLM_PROVIDER_OPTIONS,
@@ -11,6 +11,7 @@ import {
   isOauthBrokerProvider,
   runtimeProviderOptions,
 } from '@lib/llm'
+import { SubscriptionCapabilityNotice } from '../SubscriptionCapabilityNotice'
 import type { LlmModelFormProps } from './types'
 
 // Returns a positive integer, or null when empty. Returns undefined when the
@@ -46,11 +47,14 @@ export function LlmModelForm({
   )
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [showErrors, setShowErrors] = useState(false)
-  const grokEnabled = useGrokSubscriptionEnabled()
+  const subscriptionCapabilities = useSubscriptionCapabilities()
+  const grokEnabled =
+    subscriptionCapabilities.capabilities?.providers['grok-subscription']?.enabled ?? false
   const savedProvider = initial?.provider ?? prefill?.provider
+  const grokAvailabilityKnown = subscriptionCapabilities.capabilities !== null
   const providerOptions = useMemo(
-    () => runtimeProviderOptions({ grokEnabled, saved: [savedProvider] }),
-    [grokEnabled, savedProvider]
+    () => runtimeProviderOptions({ grokEnabled, grokAvailabilityKnown, saved: [savedProvider] }),
+    [grokAvailabilityKnown, grokEnabled, savedProvider]
   )
 
   const providerIsKnown = isKnownProvider(provider)
@@ -83,6 +87,7 @@ export function LlmModelForm({
 
   return (
     <form className="cu-create-content cu-px-form" onSubmit={handleSubmit}>
+      <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
       <FormSection
         title="Model"
         description="Provider (runtime/platform id) and the exact model name callers request."

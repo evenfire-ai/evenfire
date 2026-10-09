@@ -196,7 +196,7 @@ test(
 )
 
 test(
-  'ephemeral opposite-transport collisions stop after eight attempts and release every pair',
+  'ephemeral opposite-transport collisions stop after twenty attempts and release every pair',
   { timeout: 5000 },
   async t => {
     const occupied = await occupiedDnsTransport(t, 'UDP')
@@ -227,7 +227,7 @@ test(
       ),
       { code: 'EADDRINUSE', port: occupiedPort }
     )
-    assert.equal(attempts.length, 8)
+    assert.equal(attempts.length, 20)
     for (const { udp, tcp } of attempts) {
       assert.equal(tcp.listening, false)
       assert.equal(tcp.address(), null)
@@ -651,3 +651,59 @@ test(
     await proxy.close()
   }
 )
+
+// A synthetic UDP listener makes the retry budget deterministic; TCP still
+// reserves real loopback ports. Each failed attempt gets a fresh listener.
+function collidingDnsListeners(collisions) {
+  const { EventEmitter } = require('node:events')
+  const bound = []
+  const listeners = []
+  const create = () => {
+    const udp = new EventEmitter()
+    udp.bind = port => {
+      bound.push(port)
+      setImmediate(() => {
+        if (bound.length <= collisions) {
+          udp.emit('error', Object.assign(new Error('bind EADDRINUSE'), { code: 'EADDRINUSE' }))
+        } else {
+          udp.emit('listening')
+        }
+      })
+    }
+    udp.close = callback => setImmediate(callback)
+    const pair = { udp, tcp: net.createServer() }
+    listeners.push(pair)
+    return pair
+  }
+  return { create, bound, listeners }
+}
+
+test('an ephemeral DNS port pair is reallocated when UDP finds the TCP port taken', async t => {
+  const fixture = collidingDnsListeners(2)
+  const pair = await listenDnsPair(fixture.create, 0, '127.0.0.1')
+  t.after(() => closeDnsListeners(pair))
+  const port = pair.tcp.address().port
+  assert.equal(fixture.bound.length, 3, 'two collisions, then a pair that binds')
+  assert.equal(pair.tcp.listening, true)
+  assert.equal(fixture.bound[2], port, 'UDP joins the port TCP chose')
+  assert.ok(fixture.listeners.slice(0, -1).every(({ tcp }) => !tcp.listening))
+})
+
+test('an explicit or exhausted DNS port pair rethrows EADDRINUSE and releases TCP', async () => {
+  const blocker = net.createServer()
+  blocker.listen(0, '127.0.0.1')
+  await once(blocker, 'listening')
+  const free = blocker.address().port
+  await new Promise(resolve => blocker.close(resolve))
+  const fixed = collidingDnsListeners(1)
+  await assert.rejects(listenDnsPair(fixed.create, free, '127.0.0.1'), { code: 'EADDRINUSE' })
+  assert.equal(fixed.bound.length, 1, 'an explicit port gets one attempt')
+  assert.ok(fixed.listeners.every(({ tcp }) => !tcp.listening))
+
+  const exhausted = collidingDnsListeners(Infinity)
+  await assert.rejects(listenDnsPair(exhausted.create, 0, '127.0.0.1'), {
+    code: 'EADDRINUSE',
+  })
+  assert.equal(exhausted.bound.length, 20, 'every ephemeral attempt was made')
+  assert.ok(exhausted.listeners.every(({ tcp }) => !tcp.listening))
+})

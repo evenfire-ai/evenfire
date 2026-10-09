@@ -4,6 +4,7 @@ const dgram = require('node:dgram')
 const http = require('node:http')
 const net = require('node:net')
 
+const EPHEMERAL_PAIR_ATTEMPTS = 20
 const MAX_HELD = 512
 const MAX_OBSERVATIONS = 16
 const MAX_QUERY_IDENTITIES = 1024
@@ -141,8 +142,8 @@ async function closeDnsListeners({ udp, tcp }) {
 async function listenDnsPair(createListeners, port, host) {
   // UDP and TCP have separate port allocations. Hold the TCP reservation
   // while binding UDP; only an ephemeral opposite-transport collision may
-  // choose another candidate, with at most eight fully cleaned-up attempts.
-  const attempts = port === 0 ? 8 : 1
+  // choose another candidate, within the existing cleaned-up attempt budget.
+  const attempts = port === 0 ? EPHEMERAL_PAIR_ATTEMPTS : 1
   for (let attempt = 0; attempt < attempts; attempt++) {
     const listeners = createListeners()
     const { udp, tcp } = listeners

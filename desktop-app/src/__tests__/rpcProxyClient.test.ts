@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { RpcProxyClient } from '../rpcProxyClient.js'
+import { ApiError } from '../httpClient.js'
+import { RpcProxyClient, SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
 
 // Mock the config module so the module-level url() helper uses a fixed base URL
 vi.mock('../config.js', () => ({
@@ -801,9 +802,16 @@ describe('RpcProxyClient.requestSandboxUiOauthAuthorizeUrl', () => {
         text: async () => '{"error":"recipe_not_found"}',
       })
     )
-    await expect(client.requestSandboxUiOauthAuthorizeUrl('t', 'ns', 'r', 'cid')).rejects.toThrow(
-      /authorize-url request failed \(404\)/
+    const error = await client.requestSandboxUiOauthAuthorizeUrl('t', 'ns', 'r', 'cid').then(
+      () => null,
+      (e: unknown) => e
     )
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({
+      message: 'sandbox-ui authorize-url request failed (404): {"error":"recipe_not_found"}',
+      status: 404,
+      bodyText: '{"error":"recipe_not_found"}',
+    })
   })
 
   it('throws when the JSON response is missing authorizeUrl', async () => {
@@ -834,6 +842,76 @@ describe('RpcProxyClient.requestSandboxUiOauthAuthorizeUrl', () => {
     const url = firstCall[0] as string
     expect(url).toContain('weird%2Fns')
     expect(url).toContain('odd%20name')
+  })
+})
+
+// `AbortSignal.timeout` runs on the runtime's own timers, which fake timers do
+// not drive. The sandbox-ui bound is shrunk to a few ms instead, keyed on its
+// exact value so the app-wide 60 s default is left untouched: a call still
+// using that default stays pending and the test fails on its assertion.
+function shrinkSandboxUiBound(toMs = 25) {
+  const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+  return vi
+    .spyOn(AbortSignal, 'timeout')
+    .mockImplementation(ms => realTimeout(ms === SANDBOX_UI_MINT_TIMEOUT_MS ? toMs : ms))
+}
+
+// An rpc-proxy that accepts the request and never answers: the call can only
+// settle if the client aborts it.
+function fetchThatOnlySettlesOnAbort() {
+  return vi.fn(
+    (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+  )
+}
+
+async function outcomeWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
+  const pending = Symbol('pending')
+  const outcome = await Promise.race([
+    promise.then(
+      () => 'resolved',
+      (error: unknown) => error
+    ),
+    new Promise(resolve => setTimeout(() => resolve(pending), ms)),
+  ])
+  return outcome === pending ? 'still pending' : outcome
+}
+
+describe('RpcProxyClient sandbox-ui calls against a hung rpc-proxy', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('bounds the sandbox-ui calls well under the app-wide request timeout', () => {
+    expect(SANDBOX_UI_MINT_TIMEOUT_MS).toBeGreaterThanOrEqual(15_000)
+    expect(SANDBOX_UI_MINT_TIMEOUT_MS).toBeLessThanOrEqual(20_000)
+  })
+
+  it('rejects a session mint once its bound elapses', async () => {
+    shrinkSandboxUiBound()
+    vi.stubGlobal('fetch', fetchThatOnlySettlesOnAbort())
+
+    const outcome = await outcomeWithin(
+      new RpcProxyClient().mintSandboxUiSession('t', 'sandbox-recipes', 'crm'),
+      1_000
+    )
+
+    expect(outcome).toMatchObject({ name: 'TimeoutError' })
+  })
+
+  it('rejects an authorize-url request once its bound elapses', async () => {
+    shrinkSandboxUiBound()
+    vi.stubGlobal('fetch', fetchThatOnlySettlesOnAbort())
+
+    const outcome = await outcomeWithin(
+      new RpcProxyClient().requestSandboxUiOauthAuthorizeUrl('t', 'sandbox-recipes', 'crm', 'cid'),
+      1_000
+    )
+
+    expect(outcome).toMatchObject({ name: 'TimeoutError' })
   })
 })
 
