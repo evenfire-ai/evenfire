@@ -125,7 +125,11 @@ export function isCreateFailureRecoveryOwned(owner: CreateFailureRecoveryOwner):
  * callbacks always reach the latest closures without recreating themselves.
  */
 export interface ChatListControllerHost {
-  switchToChat: (agentRef: string, chatId: string) => Promise<void>
+  switchToChat: (
+    agentRef: string,
+    chatId: string,
+    options?: { onCurrentError?: (error: unknown) => void }
+  ) => Promise<void>
   beginSelectionIntent: () => number
   getSelectionIntentRevision: () => number
   clearPendingSelection: (agentRef: string, preserveSpecificChatId?: string) => void
@@ -671,15 +675,16 @@ export function useChatListController({
           !suppressAutoSelection
         ) {
           currentHost.markAutoSelectedChat(latestServerSession.chatId)
-          const switchRequest = currentHost.switchToChat(agentRef, latestServerSession.chatId)
-          const switchSelectionRevision = currentHost.getSelectionIntentRevision()
-          void switchRequest.catch(error => {
-            if (currentHost.getSelectionIntentRevision() !== switchSelectionRevision) return
-            currentHost.pushToast(
-              `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
-              'error'
-            )
-          })
+          void currentHost
+            .switchToChat(agentRef, latestServerSession.chatId, {
+              onCurrentError: error => {
+                currentHost.pushToast(
+                  `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+                  'error'
+                )
+              },
+            })
+            .catch(() => undefined)
         }
 
         // Persist server freshness into the local index (spec §5.3): keeps the
