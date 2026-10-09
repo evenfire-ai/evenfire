@@ -1,6 +1,11 @@
 import { useMemo } from 'react'
 import { Button, DataTable, EmptyState, Pill, ReferenceTag, StatusBanner } from '@components/Common'
-import { scopeCaption, statusPresentation } from '@lib/connectorPresentation'
+import {
+  authenticationLabel,
+  connectorScopeLabel,
+  scopeCaption,
+  statusPresentation,
+} from '@lib/connectorPresentation'
 import { type ConnectorRow, deriveConnectorRows } from '@lib/connectorRows'
 import { formatMcpServerDisplayName } from '@lib/format'
 import { useNavigationContext } from '../contexts/NavigationContext'
@@ -32,6 +37,8 @@ function ConnectorRowView({
 }) {
   const { connector, contextRef, agentName } = row
   const presentation = statusPresentation(connector.status)
+  const authentication = authenticationLabel(connector)
+  const scope = connectorScopeLabel(connector)
   const caption = scopeCaption(connector)
   // The action IPC needs a hostRef to mint the token; the row is per
   // (connector, agent), so we act under the row's own agent.
@@ -76,7 +83,19 @@ function ConnectorRowView({
       </td>
 
       <td className="da-table__cell">
-        <Pill tone={presentation.tone} size="sm" title={caption ?? undefined}>
+        <Pill tone="neutral" size="sm" title={caption ?? undefined}>
+          {scope}
+        </Pill>
+      </td>
+
+      <td className="da-table__cell">
+        <Pill tone="neutral" size="sm">
+          {authentication}
+        </Pill>
+      </td>
+
+      <td className="da-table__cell">
+        <Pill tone={presentation.tone} size="sm">
           {presentation.label}
         </Pill>
       </td>
@@ -162,6 +181,12 @@ export function McpServersPage() {
                   </th>
                   <th className="da-table__col-header" scope="col">
                     Agent
+                  </th>
+                  <th className="da-table__col-header" scope="col">
+                    Scope
+                  </th>
+                  <th className="da-table__col-header" scope="col">
+                    Authentication
                   </th>
                   <th className="da-table__col-header" scope="col">
                     Status
