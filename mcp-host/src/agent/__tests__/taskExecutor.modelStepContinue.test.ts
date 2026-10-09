@@ -493,6 +493,23 @@ function checkpointEntries(handle: StoreHandle, checkpointId = 'checkpoint-b2') 
     .all(checkpointId) as Array<{ kind: string; tool_call_id: string | null }>
 }
 
+async function claimRetry(fixture: CheckpointFixture, taskId: string) {
+  const retryClaim = await fixture.checkpoints.claim({
+    sessionKey: SESSION_KEY,
+    checkpointId: fixture.fence.checkpointId,
+    version: header(fixture.handle).version,
+    hostInstanceId: `host-${taskId}`,
+    newTaskId: taskId,
+    leaseMs: LEASE_MS,
+  })
+  if (retryClaim.outcome !== 'claimed') {
+    throw new Error(`Retry claim failed: ${retryClaim.outcome}`)
+  }
+  fixture.taskBudget = retryClaim.snapshot.header.task_budget!
+  fixture.confirmedResults = retryClaim.snapshot.tools.confirmed
+  return retryClaim.fence
+}
+
 function gfsView(fields: Record<string, unknown> = {}) {
   return {
     ok: true,
@@ -1746,6 +1763,161 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
       (healthyRun.executor as unknown as { continuationLeaseStop: unknown }).continuationLeaseStop
     ).toBeTypeOf('function')
     await healthyRun.executor.deny()
+  })
+
+  it('11b3. W1 keeps a completed sibling through approval and a crash before approved dispatch', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    const events = new SimpleEventEmitter()
+    const executed = toolCallNames(events)
+    const calls: ToolCall[] = [
+      { id: 'completed-before-approval', name: 'system_info', arguments: {} },
+      { id: 'approved-crash', name: 'shell_exec', arguments: { command: 'printf approved' } },
+      { id: 'sibling-crash', name: 'system_info', arguments: {} },
+    ]
+    const firstProvider = provider(undefined, () => ({ calls }))
+    const first = await runContinuation(fixture, firstProvider, {
+      events,
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await first.executor.run()
+    expect(first.onApprovalNeeded).toHaveBeenCalledTimes(1)
+
+    const append = fixture.checkpoints.append.bind(fixture.checkpoints)
+    let releaseDispatch!: () => void
+    const interrupted = new Promise<void>(resolve => {
+      releaseDispatch = resolve
+    })
+    const writeReached = vi.fn()
+    vi.spyOn(fixture.checkpoints, 'append').mockImplementation(
+      async (sessionKey, fence, entries) => {
+        const written = await append(sessionKey, fence, entries)
+        if (
+          entries.some(
+            entry => entry.kind === 'tool_dispatch' && entry.toolCallId === 'approved-crash'
+          )
+        ) {
+          writeReached()
+          await interrupted
+        }
+        return written
+      }
+    )
+    const unfinished = first.executor.resumeAfterApproval(true)
+    await vi.waitFor(() => expect(writeReached).toHaveBeenCalledTimes(1))
+    expect(executed).toEqual(['system_info'])
+    expect(
+      checkpointEntries(fixture.handle).filter(
+        entry => entry.tool_call_id === 'completed-before-approval'
+      )
+    ).toEqual([
+      { kind: 'tool_dispatch', tool_call_id: 'completed-before-approval' },
+      { kind: 'tool_result', tool_call_id: 'completed-before-approval' },
+      { kind: 'message', tool_call_id: 'completed-before-approval' },
+    ])
+    expect(
+      checkpointEntries(fixture.handle).filter(entry => entry.kind === 'tool_dispatch')
+    ).toEqual([
+      { kind: 'tool_dispatch', tool_call_id: 'completed-before-approval' },
+      { kind: 'tool_dispatch', tool_call_id: 'approved-crash' },
+    ])
+
+    vi.mocked(fixture.checkpoints.append).mockRestore()
+    const retryFence = await expireAndReclaimFixture(fixture, 'task-crash-retry')
+    const retryProvider = provider(undefined, () => ({ content: 'retry reached provider' }))
+    const retry = await runContinuation(fixture, retryProvider, {
+      events,
+      taskId: 'task-crash-retry',
+      fence: retryFence,
+    })
+    await retry.executor.run()
+    expect(retryProvider.calls()).toBe(1)
+    expect(retryProvider.requests[0]!.filter(message => message.role === 'tool')).toEqual([
+      expect.objectContaining({ tool_call_id: 'completed-before-approval' }),
+      expect.objectContaining({
+        tool_call_id: 'approved-crash',
+        content: 'Tool outcome unknown; not re-executed',
+      }),
+      expect.objectContaining({ tool_call_id: 'sibling-crash', content: 'Not executed' }),
+    ])
+    expect(executed).toEqual(['system_info'])
+    expect(retry.onComplete).toHaveBeenCalledTimes(1)
+    expect(retry.onFail).not.toHaveBeenCalled()
+    releaseDispatch()
+    await unfinished
+  })
+
+  it('11b4. W3 keeps the first result when a second tool dispatch is interrupted', async () => {
+    const fixture = await claimedCheckpoint({})
+    const events = new SimpleEventEmitter()
+    const executed = toolCallNames(events)
+    const calls: ToolCall[] = [
+      { id: 'first-batch', name: 'system_info', arguments: {} },
+      { id: 'second-batch', name: 'system_info', arguments: {} },
+    ]
+    const append = fixture.checkpoints.append.bind(fixture.checkpoints)
+    let releaseDispatch!: () => void
+    const interrupted = new Promise<void>(resolve => {
+      releaseDispatch = resolve
+    })
+    const writeReached = vi.fn()
+    vi.spyOn(fixture.checkpoints, 'append').mockImplementation(
+      async (sessionKey, fence, entries) => {
+        const written = await append(sessionKey, fence, entries)
+        if (
+          entries.some(
+            entry => entry.kind === 'tool_dispatch' && entry.toolCallId === 'second-batch'
+          )
+        ) {
+          writeReached()
+          await interrupted
+        }
+        return written
+      }
+    )
+    const first = await runContinuation(
+      fixture,
+      provider(undefined, () => ({ calls })),
+      { events }
+    )
+    const unfinished = first.executor.run()
+    await vi.waitFor(() => expect(writeReached).toHaveBeenCalledTimes(1))
+    expect(executed).toEqual(['system_info'])
+    expect(
+      checkpointEntries(fixture.handle).filter(entry => entry.tool_call_id === 'first-batch')
+    ).toEqual([
+      { kind: 'tool_dispatch', tool_call_id: 'first-batch' },
+      { kind: 'tool_result', tool_call_id: 'first-batch' },
+      { kind: 'message', tool_call_id: 'first-batch' },
+    ])
+    vi.mocked(fixture.checkpoints.append).mockRestore()
+    const retryFence = await expireAndReclaimFixture(fixture, 'task-batch-retry')
+    const retryProvider = provider(undefined, () => ({ content: 'retry reached provider' }))
+    const retry = await runContinuation(fixture, retryProvider, {
+      events,
+      taskId: 'task-batch-retry',
+      fence: retryFence,
+    })
+    await retry.executor.run()
+    expect(retryProvider.calls()).toBe(1)
+    expect(retryProvider.requests[0]!.filter(message => message.role === 'tool')).toEqual([
+      expect.objectContaining({ tool_call_id: 'first-batch' }),
+      expect.objectContaining({
+        tool_call_id: 'second-batch',
+        content: 'Tool outcome unknown; not re-executed',
+      }),
+    ])
+    expect(executed).toEqual(['system_info'])
+    expect(retry.onComplete).toHaveBeenCalledTimes(1)
+    expect(retry.onFail).not.toHaveBeenCalled()
+    releaseDispatch()
+    await unfinished
   })
 
   it('11c. an approval holds the claim past its short lease until denial releases the session', async () => {

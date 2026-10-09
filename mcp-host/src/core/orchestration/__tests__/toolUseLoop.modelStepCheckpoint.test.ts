@@ -373,6 +373,41 @@ function twoIterationsThenOutage(error: Error): RespondResult[] {
 }
 
 describe('runToolUseLoop model-step checkpoint (#1043)', () => {
+  it('does not confirm an inline connect result that the approval path discards', async () => {
+    const { worker, recorder } = harness()
+    const connectTool = createMockTool('monday__list_boards')
+    connectTool.execute = vi.fn(async () => ({
+      content: 'MCP authorization required',
+      duration_ms: 1,
+      is_error: true,
+      metadata: { connect_required: { mcpServerName: 'monday' } },
+    }))
+    const reasoning = createMockReasoning([
+      {
+        type: 'tool_calls',
+        calls: [
+          { id: 'connect-call', name: 'monday__list_boards', arguments: {} },
+          { id: 'unstarted-call', name: 'monday__list_boards', arguments: {} },
+        ],
+      },
+    ])
+
+    const result = await runToolUseLoop(withRecorder(reasoning, [connectTool], recorder), [user])
+
+    expect(result).toMatchObject({
+      type: 'need_approval',
+      approval: { reason: 'connect_required' },
+    })
+    expect(connectTool.execute).toHaveBeenCalledTimes(1)
+    expect(
+      entries(worker)
+        .filter(row => row.tool_call_id === 'connect-call')
+        .map(row => row.kind)
+    ).toEqual(['tool_dispatch'])
+    expect(entries(worker).some(row => row.tool_call_id === 'unstarted-call')).toBe(false)
+    expect(header(worker)).toMatchObject({ status: 'abandoned' })
+  })
+
   it('1. a 503 provider_unavailable after confirmed tools leaves a resumable checkpoint', async () => {
     const { worker, store, recorder } = harness()
     const appendSpy = vi.spyOn(store, 'append')
@@ -383,11 +418,8 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
 
     expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
     expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
-    // Liveness witness: the recorder wrote every step. Seven transactions:
-    // each result shares the next write (addendum A2), so 3 dispatches, 3
-    // results and 5 messages need 2 tool-call syncs + 3 dispatches + 2
-    // post-batch syncs.
-    expect(appendSpy).toHaveBeenCalledTimes(7)
+    // Each result shares its own fenced append with its tool message.
+    expect(appendSpy).toHaveBeenCalledTimes(8)
     expect(header(worker)).toMatchObject({
       status: 'resumable',
       version: 2,
@@ -410,9 +442,9 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       ['message', null],
       ['tool_dispatch', 'tc_b'],
       ['tool_result', 'tc_b'],
+      ['message', 'tc_b'],
       ['tool_dispatch', 'tc_c'],
       ['tool_result', 'tc_c'],
-      ['message', 'tc_b'],
       ['message', 'tc_c'],
     ])
     const assistant = JSON.parse(rows[5].payload) as ChatMessage
@@ -420,7 +452,7 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       ['tc_b', { path: 'src/a.ts' }],
       ['tc_c', { path: 'src' }],
     ])
-    expect(JSON.parse(rows[9].payload)).toEqual({ name: 'list_dir', isError: false })
+    expect(JSON.parse(rows[10].payload)).toEqual({ name: 'list_dir', isError: false })
     const toolMessage = JSON.parse(rows[11].payload) as ChatMessage
     expect(toolMessage).toMatchObject({ role: 'tool', tool_call_id: 'tc_c' })
     expect(toolMessage.content).toContain('list_dir result')
