@@ -2267,8 +2267,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     const secretRow = page.locator('tr', { hasText: expectedSecretName })
     await expect(secretRow).toBeVisible({ timeout: 15_000 })
     await secretRow
-      .getByRole('button', { name: `Add connector secret ${expectedSecretName}` })
+      .getByRole('button', { name: `Actions for connector secret ${expectedSecretName}` })
       .click()
+    await page.getByRole('menuitem', { name: 'Add', exact: true }).click()
 
     await expect(page).toHaveURL(/\/secrets\/new\?/)
     await expect(page.getByRole('heading', { name: 'Create connector secret' })).toBeVisible()
