@@ -1335,11 +1335,12 @@ export class AppService {
     const activeTeamId = String(this.me?.teamId || '').trim()
     const homeTeamQueuedAfterQuitClosure =
       Boolean(activeHop) && targetTeamId === activeHop.homeTeamId && this.quitPreparationStarted
+    const admissionTeamId = activeHop?.homeTeamId ?? activeTeamId
     const earlyProducer =
-      !homeTeamQueuedAfterQuitClosure && targetTeamId !== activeTeamId
+      !homeTeamQueuedAfterQuitClosure && targetTeamId !== admissionTeamId
         ? this.admitCredentialProducer()
         : null
-    if (targetTeamId !== activeTeamId && !earlyProducer && !homeTeamQueuedAfterQuitClosure) {
+    if (targetTeamId !== admissionTeamId && !earlyProducer && !homeTeamQueuedAfterQuitClosure) {
       return Promise.reject(new QuitAdmissionClosedError())
     }
 

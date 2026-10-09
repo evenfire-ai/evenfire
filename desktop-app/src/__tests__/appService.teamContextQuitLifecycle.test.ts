@@ -324,6 +324,26 @@ describe('AppService team-context quit lifecycle', () => {
     )
   })
 
+  it('reserves a queued hop against the stable home team while another hop is active', async () => {
+    const hopOperation = deferred<void>()
+    const hopStarted = deferred<void>()
+    const { service } = createAuthenticatedService()
+
+    const firstHop = service.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      await hopOperation.promise
+      return 'first-hop-complete'
+    })
+    await hopStarted.promise
+    const queuedHop = service.runWithTeamContext('team-a', async token => token)
+    const preparation = service.prepareForQuit()
+    hopOperation.resolve()
+
+    await expect(firstHop).resolves.toBe('first-hop-complete')
+    await expect(queuedHop).resolves.toBe('team-a-token')
+    await preparation
+  })
+
   it('does not keep quit open for a same-team operation with no credential switch', async () => {
     const operation = deferred<string>()
     const operationStarted = deferred<void>()
