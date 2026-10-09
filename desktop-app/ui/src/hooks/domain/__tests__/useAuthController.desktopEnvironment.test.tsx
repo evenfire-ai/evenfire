@@ -1207,6 +1207,28 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('clears a pending setup confirmation when its configuration refresh fails', async () => {
+    const linkedEnvironment = {
+      appName: 'New tenant',
+      externalRestApiBaseUrl: 'https://new-api.example.test/api/v1',
+    }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linkedEnvironment)
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      linkedEnvironment.externalRestApiBaseUrl
+    )
+
+    mocks.getRuntimeConfigState.mockRejectedValueOnce(new Error('IPC unavailable'))
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+
+    await waitFor(() => expect(screen.getByTestId('pending-environment')).toHaveTextContent('none'))
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'Could not verify the desktop environment. Try opening it again.',
+      'error'
+    )
+  })
+
   it('rejects a REST API path when another path on the same host is saved', async () => {
     const linkedEnvironment = {
       appName: 'API v2 tenant',

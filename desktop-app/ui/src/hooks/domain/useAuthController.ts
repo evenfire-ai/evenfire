@@ -616,6 +616,7 @@ export function useAuthController({
       try {
         currentConfigState = await refreshRuntimeConfigState()
       } catch {
+        setPendingDesktopEnvironmentSetup(null)
         setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
         return
       }
