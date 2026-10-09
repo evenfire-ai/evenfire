@@ -45,6 +45,8 @@
 - Publish a plugin to the registry (efrk_ org key): how-to/publish-plugin-to-registry.md
 - Shared & global files (SFS team workspace + brokered GFS drive): how-to/shared-and-global-files.md
 - Minikube full stack: deploy/minikube.md
+- Evenfire on existing Amazon EKS (customer coding-agent how-to): deploy/aws-eks-agent-guide.md
+- EKS agent skill (on-demand): ../.agents/skills/evenfire-aws-eks/SKILL.md
 - Production checklist: deploy/production.md
 - WorkflowRecipes ops: deploy/workflow-recipes-guide.md
 

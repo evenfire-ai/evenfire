@@ -1,5 +1,10 @@
 # Evenfire repository instructions
 
+Customer self-host on an **existing Amazon EKS** cluster is not this file.
+Use `.agents/skills/evenfire-aws-eks/SKILL.md` and
+`docs/deploy/aws-eks-agent-guide.md`. Do not apply minikube overlays there
+and do not treat T0/T1/T2 as a customer install.
+
 ## Shared capability naming
 
 Name shared variables, functions, types, database fields, quota families,
