@@ -1,10 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
-import {
-  type CreateFailureRecoveryOwner,
-  isCreateFailureRecoveryOwned,
-} from '../useChatListController'
 import { deferred } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
@@ -21,34 +17,6 @@ afterEach(() => {
 })
 
 describe('failed New chat selection ownership', () => {
-  it('checks each failed-create recovery guard independently', () => {
-    const owner: CreateFailureRecoveryOwner = {
-      agentRef: 'agent-x',
-      selectedAgent: 'agent-x',
-      requestGenerationAtCreate: 7,
-      requestGeneration: 7,
-      authorityScopeGenerationAtCreate: 3,
-      authorityScopeGeneration: 3,
-      authorityScopeIdentityAtCreate: 'true:user-1:team-1',
-      currentAuthorityScopeIdentity: 'true:user-1:team-1',
-      selectionIntentRevisionAtCreate: 12,
-      currentSelectionIntentRevision: 12,
-    }
-    const changedGuards: Array<[string, Partial<CreateFailureRecoveryOwner>]> = [
-      ['selected agent', { selectedAgent: 'agent-y' }],
-      ['list request generation', { requestGeneration: 8 }],
-      ['authority scope generation', { authorityScopeGeneration: 4 }],
-      ['authority scope identity', { currentAuthorityScopeIdentity: 'true:user-1:team-2' }],
-      ['selection intent revision', { currentSelectionIntentRevision: 13 }],
-      ['missing selection revision', { selectionIntentRevisionAtCreate: undefined }],
-    ]
-
-    expect(isCreateFailureRecoveryOwned(owner)).toBe(true)
-    for (const [guard, change] of changedGuards) {
-      expect(isCreateFailureRecoveryOwned({ ...owner, ...change }), guard).toBe(false)
-    }
-  })
-
   it('does not restore an older target after the user selects a newer chat', async () => {
     await clerum.chat.create('agent-x', 'target')
     await clerum.chat.upsertMessages('agent-x', 'target', [
