@@ -43,6 +43,18 @@ function sanitizeString(input: unknown): string {
   return String(input || '').trim()
 }
 
+// The renderer names each sandbox-ui open so it can tell events of the view
+// that open mounted from those of a view it replaced (same appRef on a
+// relaunch). The id is echoed verbatim on IPC events, so bound it here.
+const SANDBOX_UI_LAUNCH_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/
+
+function parseSandboxUiLaunchId(input: unknown): string {
+  if (typeof input !== 'string' || !SANDBOX_UI_LAUNCH_ID_PATTERN.test(input)) {
+    throw new Error('launchId must be 1-64 characters of [A-Za-z0-9-]')
+  }
+  return input
+}
+
 function sanitizeChatAuthorityScope(input: unknown): ChatAuthorityScope {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('Invalid chat deletion authority scope')
@@ -2069,6 +2081,7 @@ export function registerIpcHandlers(service: AppService): void {
         defaultPath?: string
         routePath?: string
         bounds: unknown
+        launchId: unknown
       }
     ) => {
       assertTrustedSender(event)
@@ -2077,6 +2090,7 @@ export function registerIpcHandlers(service: AppService): void {
       if (!recipeNs || !recipeName) {
         throw new Error('recipeNs and recipeName are required')
       }
+      const launchId = parseSandboxUiLaunchId(payload?.launchId)
       const parentWindow = BrowserWindow.fromWebContents(event.sender)
       if (!parentWindow) {
         throw new Error('cannot resolve parent window from IPC sender')
@@ -2096,15 +2110,15 @@ export function registerIpcHandlers(service: AppService): void {
         parentWindow,
         onClosed: () => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:closed', { appRef })
+          parentWindow.webContents.send('sandboxUi:closed', { appRef, launchId })
         },
         onRefreshError: message => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:refreshError', { appRef, message })
+          parentWindow.webContents.send('sandboxUi:refreshError', { appRef, launchId, message })
         },
         onTitleChanged: title => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, title })
+          parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, launchId, title })
         },
       })
     }

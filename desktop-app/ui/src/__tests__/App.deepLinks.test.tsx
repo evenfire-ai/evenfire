@@ -109,7 +109,7 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     }) => void
     onEmbeddedAppMounted?: () => void
     onEmbeddedAppBack?: () => void
-    onEmbeddedAppRemoved?: () => void
+    onEmbeddedAppOpenFailed?: () => void
     onShortcutOpenResult?: (
       requestId: number,
       result: { status: 'mounted' } | { status: 'failed'; message: string }
@@ -575,7 +575,7 @@ describe('App deep-link orchestration', () => {
     expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
     expect(sidebarHarness.props?.collapsed).toBe(true)
 
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppRemoved?.())
+    act(() => sandboxUiPageHarness.props?.onEmbeddedAppOpenFailed?.())
     expect(sidebarHarness.props?.collapsed).toBe(true)
   })
 

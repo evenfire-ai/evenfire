@@ -277,7 +277,11 @@ describe('AppService sandbox UI lifecycle serialization', () => {
     await vi.waitFor(() => {
       expect(service.mintSandboxUiSession).toHaveBeenCalledOnce()
     })
-    expect(mockUnmountSandboxUiView).not.toHaveBeenCalled()
+    // The open tears down whatever view was live BEFORE its mint (so a failed
+    // mint never leaves the previous view behind); that is the only teardown so
+    // far — the queued close has not run while the open is still in flight.
+    expect(mockUnmountSandboxUiView).toHaveBeenCalledOnce()
+    expect(mockMountSandboxUiView).not.toHaveBeenCalled()
 
     resolveMint({
       setCookie:
@@ -286,8 +290,16 @@ describe('AppService sandbox UI lifecycle serialization', () => {
     await open
     await close
 
-    expect(mockCancelSandboxUiRefresh).toHaveBeenCalledOnce()
-    expect(mockUnmountSandboxUiView).toHaveBeenCalledOnce()
+    // The queued close runs strictly after the mount and refresh setup, so the
+    // final state is closed: its unmount is the last driver call.
+    expect(mockCancelSandboxUiRefresh).toHaveBeenCalledTimes(2)
+    expect(mockUnmountSandboxUiView).toHaveBeenCalledTimes(2)
+    const mountOrder = mockMountSandboxUiView.mock.invocationCallOrder[0]!
+    const refreshStartOrder = mockStartSandboxUiRefresh.mock.invocationCallOrder[0]!
+    const finalUnmountOrder = mockUnmountSandboxUiView.mock.invocationCallOrder[1]!
+    const finalCancelOrder = mockCancelSandboxUiRefresh.mock.invocationCallOrder[1]!
+    expect(finalUnmountOrder).toBeGreaterThan(mountOrder)
+    expect(finalCancelOrder).toBeGreaterThan(refreshStartOrder)
   })
 })
 

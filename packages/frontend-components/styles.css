@@ -267,6 +267,42 @@
 .eft-multi-select__option-description {
   margin-top: var(--cu-space-1);
 }
+.eft-multi-select__option--inline {
+  align-items: center;
+}
+.eft-multi-select__option--inline input {
+  margin-top: 0;
+}
+.eft-multi-select__option--inline > span {
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--cu-space-2);
+  justify-content: space-between;
+}
+.eft-multi-select__option--inline .eft-multi-select__option-label,
+.eft-multi-select__option--inline .eft-multi-select__option-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.eft-multi-select__option--inline .eft-multi-select__option-label {
+  flex: 1 1 50%;
+}
+.eft-multi-select__option--inline .eft-multi-select__option-description {
+  flex: 0 1 50%;
+  margin-top: 0;
+  text-align: right;
+}
+.eft-multi-select__option--inline:focus-within > span {
+  align-items: flex-start;
+}
+.eft-multi-select__option--inline:focus-within .eft-multi-select__option-label,
+.eft-multi-select__option--inline:focus-within .eft-multi-select__option-description {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
 
 @media (max-width: 40rem) {
   .eft-dialog-backdrop {

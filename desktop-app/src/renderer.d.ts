@@ -767,6 +767,9 @@ declare global {
           defaultPath?: string
           routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
+          // Echoed by main on `onClosed` / `onRefreshError` / `onTitleChanged`
+          // for the view this open mounts.
+          launchId: string
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
@@ -809,11 +812,13 @@ declare global {
           }) => void
         ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
-        onClosed: (callback: (args: { appRef: string }) => void) => () => void
+        onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => () => void
         onRefreshError: (
-          callback: (args: { appRef: string; message: string }) => void
+          callback: (args: { appRef: string; launchId: string; message: string }) => void
         ) => () => void
-        onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => () => void
+        onTitleChanged: (
+          callback: (args: { appRef: string; launchId: string; title: string }) => void
+        ) => () => void
       }
       pluginSdk: {
         onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void
