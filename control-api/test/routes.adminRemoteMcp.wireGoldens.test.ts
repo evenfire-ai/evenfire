@@ -301,6 +301,29 @@ describe('remote MCP wire goldens — POST / (install)', () => {
     expect(actual).toEqual(golden('install.dcrRedirectMismatch', actual))
   })
 
+  it('install.dcrRegistrationRejected: the AS refused the registration (HTTP 400) → 400', async () => {
+    const { db } = makeInMemoryDynamicClientsDb()
+    // The rejection body Vercel (https://api.vercel.com/login/oauth/register) returns,
+    // since it only accepts allow-listed redirect URIs for DCR, replayed against the
+    // Atlassian pilot's registration endpoint.
+    const { transport } = makeDcrTransport({
+      registrationEndpoint: ATLASSIAN_REGISTRATION,
+      responseJson: JSON.stringify({
+        error: 'invalid_redirect_uri',
+        error_description:
+          'The provided redirect URIs are not approved for use by this authorization server.',
+      }),
+      status: 400,
+    })
+    const actual = await install(
+      ATLASSIAN_V2_PILOT,
+      { serverName: 'atlassian', mode: 'dcr' },
+      { deps: { db, dcr: { transport, resolveDns: PUBLIC_IP } } }
+    )
+    expect(actual.status).toBe(400)
+    expect(actual).toEqual(golden('install.dcrRegistrationRejected', actual))
+  })
+
   it('install.cimdWithoutIssBinding: CIMD requested on an AS without RFC 9207 → 400', async () => {
     const actual = await install(PILOTS.notion, { serverName: 'notion', mode: 'cimd' })
     expect(actual.status).toBe(400)

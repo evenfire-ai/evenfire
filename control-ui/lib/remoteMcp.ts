@@ -11,10 +11,12 @@ import type {
   RemoteCallbackVariant,
   RemoteClientIdConflict,
   RemoteClientMode,
+  RemoteDcrRegistrationRejectedDetail,
   RemoteDcrRejectionKind,
   RemoteDetected,
   RemoteDiscoveryErrorKind,
   RemoteInstallMode,
+  RemoteProviderMessage,
   RemoteRegistrationMode,
   RemoteTransportProbe,
 } from './remoteMcp.types'
@@ -319,6 +321,97 @@ function describeDcrRejection(kind: RemoteDcrRejectionKind): string {
   }
 }
 
+// Advice for the RFC 7591 §3.2.2 codes whose cause we know. Others get none, rather
+// than advice that names the wrong part of the registration.
+const REGISTRATION_ERROR_ADVICE: Readonly<Record<string, string>> = {
+  invalid_redirect_uri:
+    "It only accepts redirect URIs it has approved: ask the provider to approve this platform's redirect URI.",
+  invalid_client_metadata:
+    'It refused the client details this platform registers with (such as the requested scopes, grant types or authentication method).',
+}
+
+// Provider text bounds. control-api applies the same ones (DCR_ERROR_DESCRIPTION_MAX
+// and PROVIDER_ERROR_CODE_RE in control-api/src/oauth/dcr.ts); they are re-applied
+// here because this is third-party text rendered to the operator.
+const PROVIDER_ERROR_CODE_RE = /^[A-Za-z0-9_.-]{1,64}$/
+const PROVIDER_DESCRIPTION_MAX = 300
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+// Provider text must not be able to close the quotation it is shown in.
+const DOUBLE_QUOTES_RE = /["“”„‟«»]/g
+const STACKED_MARKS_RE = /(\p{M}{3})\p{M}+/gu
+
+/**
+ * Third-party text bounded for display: lone surrogates and default-ignorable
+ * characters (bidi overrides, zero-width, fillers, variation selectors) are dropped,
+ * control characters become spaces, double quotes become single quotes, combining
+ * mark runs are capped, and the result is cut without splitting a surrogate pair.
+ */
+function boundedProviderText(value: unknown, max: number): string {
+  if (typeof value !== 'string') return ''
+  const text = value
+    .replace(LONE_SURROGATE_RE, '')
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(DOUBLE_QUOTES_RE, "'")
+    .replace(STACKED_MARKS_RE, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (text.length <= max) return text
+  let cut = text.slice(0, max - 1)
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1)
+  return `${cut.trimEnd()}…`
+}
+
+function hostOf(url: unknown): string {
+  if (typeof url !== 'string') return ''
+  try {
+    return new URL(url).host
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * The platform's copy for a rejected registration: it names the AS by host and never
+ * embeds the AS's own message, which {@link remoteInstallProviderMessage} returns
+ * separately for the wizard to render as attributed third-party text.
+ */
+function describeRegistrationRejected(
+  detail: Partial<RemoteDcrRegistrationRejectedDetail> | undefined
+): string {
+  const host = hostOf(detail?.url)
+  const status = typeof detail?.status === 'number' ? `HTTP ${detail.status}` : ''
+  const code =
+    typeof detail?.error === 'string' && PROVIDER_ERROR_CODE_RE.test(detail.error)
+      ? detail.error
+      : ''
+  const facts = [status, code].filter(Boolean).join(', ')
+  let copy = `The authorization server${host ? ` at ${host}` : ''} rejected client registration${
+    facts ? ` (${facts})` : ''
+  }.`
+  const advice = Object.hasOwn(REGISTRATION_ERROR_ADVICE, code)
+    ? REGISTRATION_ERROR_ADVICE[code]
+    : ''
+  if (advice) copy += ` ${advice}`
+  return copy
+}
+
+/**
+ * The authorization server's own message from a failed install, bounded for display,
+ * or `null` when the failure carries none. Only a `registration_rejected` DCR failure
+ * relays provider text today.
+ */
+export function remoteInstallProviderMessage(error: unknown): RemoteProviderMessage | null {
+  const { code, body } = asCodedError(error)
+  if (code !== 'dcr_registration_failed' || discoveryDetailKind(body) !== 'registration_rejected') {
+    return null
+  }
+  const detail = body?.detail as Partial<RemoteDcrRegistrationRejectedDetail>
+  const text = boundedProviderText(detail.errorDescription, PROVIDER_DESCRIPTION_MAX)
+  if (!text) return null
+  return { source: hostOf(detail.url) || 'the authorization server', text }
+}
+
 const DCR_REJECTION_KINDS: readonly string[] = [
   'redirect_uris_mismatch',
   'redirect_uris_missing',
@@ -375,6 +468,11 @@ export function mapRemoteInstallError(
       return "The authorization server assigned a client authentication method this platform cannot present, so this server can't be installed automatically."
     case 'dcr_registration_failed': {
       const kind = discoveryDetailKind(body)
+      if (kind === 'registration_rejected') {
+        return describeRegistrationRejected(
+          body?.detail as Partial<RemoteDcrRegistrationRejectedDetail>
+        )
+      }
       if (kind && DCR_REJECTION_KINDS.includes(kind)) {
         return describeDcrRejection(kind as RemoteDcrRejectionKind)
       }

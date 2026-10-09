@@ -1,5 +1,9 @@
 import type { ReactNode } from 'react'
-import type { RemoteAsEndpointHosts, RemoteGrantScope } from '../../lib/remoteMcp.types'
+import type {
+  RemoteAsEndpointHosts,
+  RemoteGrantScope,
+  RemoteProviderMessage,
+} from '../../lib/remoteMcp.types'
 
 export type AddRemoteServerWizardProps = {
   /** Rendered create-page header (icon, title, back). */
@@ -33,4 +37,10 @@ export type AsEndpointHostsSummaryProps = {
   hosts: RemoteAsEndpointHosts
   /** Explain why the hosts are shown (the configuration step; the confirm step omits it). */
   withExplanation?: boolean
+}
+
+/** A failed install: the platform's copy, plus any text the AS sent with it. */
+export type InstallFailure = {
+  message: string
+  provider: RemoteProviderMessage | null
 }

@@ -208,3 +208,96 @@ describe('oauth-callback passthrough — per-server remote route', () => {
     expect(spy).not.toHaveBeenCalled()
   })
 })
+
+describe('CIMD client metadata document passthrough', () => {
+  // The public URL a remote AS fetches, which is also our CIMD client_id. Must stay
+  // equal to control-api's CIMD_PUBLIC_PATH (control-api/src/oauth/cimdIdentity.ts).
+  const CIMD_URL = '/api/v1/.well-known/evenfire-mcp-client'
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  // Liveness witness for the negative cases: the route is registered and forwards,
+  // so their 404 comes from the rejection, not from a missing route.
+  async function expectCimdRouteLive(spy: ReturnType<typeof mockControlApi>) {
+    const res = await request(createApp()).get(CIMD_URL)
+    expect(res.status).toBe(200)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy).toHaveBeenCalledWith('/.well-known/evenfire-mcp-client', '')
+  }
+
+  function mockControlApi() {
+    return vi.spyOn(client, 'controlApiPassthroughGet').mockResolvedValue({
+      status: 200,
+      contentType: 'application/json; charset=utf-8',
+      body: '{"client_id":"https://api.example.com/api/v1/.well-known/evenfire-mcp-client"}',
+    })
+  }
+
+  it('is PUBLIC and relays the document (status, content-type, body) unchanged', async () => {
+    const spy = mockControlApi()
+
+    // No Authorization header: a remote AS fetches this anonymously.
+    const res = await request(createApp()).get(CIMD_URL)
+
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toContain('application/json')
+    expect(res.text).toBe(
+      '{"client_id":"https://api.example.com/api/v1/.well-known/evenfire-mcp-client"}'
+    )
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy).toHaveBeenCalledWith('/.well-known/evenfire-mcp-client', '')
+  })
+
+  it('never forwards a client-supplied query string', async () => {
+    const spy = mockControlApi()
+
+    await request(createApp()).get(`${CIMD_URL}?x=1&redirect=https://evil.example`)
+
+    expect(spy).toHaveBeenCalledWith('/.well-known/evenfire-mcp-client', '')
+  })
+
+  it('relays a control-api error status unchanged (e.g. 503 base URL unconfigured)', async () => {
+    vi.spyOn(client, 'controlApiPassthroughGet').mockResolvedValue({
+      status: 503,
+      contentType: 'application/json; charset=utf-8',
+      body: '{"error":"cimd_base_url_unconfigured"}',
+    })
+
+    const res = await request(createApp()).get(CIMD_URL)
+
+    expect(res.status).toBe(503)
+    expect(JSON.parse(res.text)).toEqual({ error: 'cimd_base_url_unconfigured' })
+  })
+
+  it.each(['post', 'put', 'delete', 'patch'] as const)(
+    'does not route %s (read-only document)',
+    async method => {
+      const spy = mockControlApi()
+      await expectCimdRouteLive(spy)
+
+      const res = await request(createApp())[method](CIMD_URL)
+
+      expect(res.status).toBe(404)
+      expect(spy).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  const rejected: Array<[string, string]> = [
+    ['extra segment', `${CIMD_URL}/extra`],
+    ['traversal after the document', `${CIMD_URL}/..%2F..%2Fadmin`],
+    ['other well-known document', '/api/v1/.well-known/openid-configuration'],
+    ['sibling name', `${CIMD_URL}-x`],
+  ]
+
+  it.each(rejected)('404s without contacting control-api: %s', async (_label, url) => {
+    const spy = mockControlApi()
+    await expectCimdRouteLive(spy)
+
+    const res = await rawGet(url)
+
+    expect(res.status).toBe(404)
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+})

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { CIMD_PUBLIC_PATH, CIMD_ROUTE_PATH } from '../src/oauth/cimdIdentity.js'
 import {
   boundedEnvBytesFromSource,
   staticExportedBytesFromSource,
@@ -424,6 +426,42 @@ describe('network/gateway intent (manifest-level)', () => {
     // ~1MB, far below the gfsc write cap (GFS_MAX_WRITE_BODY_BYTES = 25165824,
     // 24MiB) that the operator path already honors end to end.
     expect(funnelConf).toContain('client_max_body_size 25165824;')
+  })
+
+  it('exposes the CIMD client metadata document through the public me-path (cloudflared → external-rest-api → funnel → control-api)', () => {
+    // The document's public URL IS our CIMD client_id (SEP-991), built from the public
+    // gateway origin. A remote AS fetches it there, so every hop must forward exactly
+    // CIMD_PUBLIC_PATH: a missing hop 404s/403s it and every CIMD consent fails.
+    const funnelConf = docContaining(
+      yamlDocs(read(`${BASE}/profiles/configmaps.yaml`)),
+      'name: profile-control-funnel-nginx'
+    )
+    const block = locationBlock(funnelConf, `location = ${CIMD_PUBLIC_PATH} {`)
+    // Read-only and fixed: GET (and HEAD) only, and the upstream URI is the literal
+    // path, so no client-supplied query or suffix reaches control-api.
+    expect(block).toMatch(/limit_except GET \{\s*deny all;\s*\}/)
+    expect(block).toContain(`proxy_pass http://$control_api_origin${CIMD_PUBLIC_PATH};`)
+
+    const gatewayRoute = read('../../external-rest-api/src/routes/oauthCallback.ts')
+    expect(gatewayRoute).toContain(`const CIMD_PATH = '${CIMD_ROUTE_PATH}'`)
+    // The constant alone is not enough: the route must actually be registered.
+    expect(gatewayRoute).toMatch(/router\.get\(CIMD_PATH,/)
+  })
+
+  it('rolls the profile-control-funnel pods whenever its nginx ConfigMap changes', () => {
+    // The ConfigMap has no generated name suffix and is mounted with subPath, which
+    // never receives updates, so an edited nginx.conf only takes effect after a pod
+    // restart. The pod template therefore carries the config's hash: applying a
+    // changed config changes the template and triggers a rollout. If this fails after
+    // editing the funnel config, set the annotation to the expected value below.
+    const funnelConf = docContaining(
+      yamlDocs(read(`${BASE}/profiles/configmaps.yaml`)),
+      'name: profile-control-funnel-nginx'
+    )
+    const expected = createHash('sha256').update(funnelConf).digest('hex')
+    const deployment = read(`${BASE}/profiles/profile-control-funnel.yaml`)
+    const annotation = deployment.match(/evenfire\.ai\/nginx-config-sha256:\s*"?([0-9a-f]+)"?/)
+    expect(annotation?.[1], 'funnel pod template nginx-config-sha256 annotation').toBe(expected)
   })
 
   it('keeps the GFS v2 part cap chain below the gateway request cap', () => {

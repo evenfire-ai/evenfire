@@ -269,11 +269,12 @@ export async function controlApiStreamRequest(
 /**
  * PUBLIC passthrough GET to control-api. Unlike the other helpers this does NOT
  * parse JSON, attach a user session, or throw on a non-2xx status — it relays
- * control-api's response verbatim (status, content-type, body). Used by the OAuth
- * callback route, where the provider redirects the user's browser to a public,
- * state-authenticated control-api endpoint that returns an HTML page on success
- * or a JSON error otherwise. `rawQueryString` (leading '?') is appended as-is so
- * the signed `state` and `code` are never re-encoded.
+ * control-api's response verbatim (status, content-type, body). Used by the public
+ * routes in `routes/oauthCallback.ts`: the OAuth callbacks, where the provider
+ * redirects the user's browser to a state-authenticated control-api endpoint that
+ * returns an HTML page on success or a JSON error otherwise, and the CIMD client
+ * metadata document, forwarded with an empty query. `rawQueryString` (leading '?')
+ * is appended as-is so the signed `state` and `code` are never re-encoded.
  */
 export async function controlApiPassthroughGet(
   path: string,
