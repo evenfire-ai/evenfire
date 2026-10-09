@@ -1,0 +1,62 @@
+{
+  "commit": "74e0d81d9b70bbc0e123ed2bad89f08d3e13e99e",
+  "generatedAtMs": 1791492835922,
+  "crashed": {
+    "records": {
+      "d6caab69-3268-4cd5-bdeb-c38826cae94e": "completed",
+      "539bd553-e9c2-448e-b68e-fcbef6e5ebcb": "missing",
+      "41cedf16-faf5-43bf-bf41-d8c2b04829c8": "completed",
+      "ed73f60a-3b7f-42bb-8c58-32b3d8ece70b": "transferring"
+    },
+    "leases": {
+      "expired": "a5f9d9bd-07b8-4957-b6a1-8366d0b97ca9",
+      "live": "cfdd32f3-4afb-4436-9766-817fb5e3458e"
+    }
+  },
+  "restarted": {
+    "oldStoreAvailable": false,
+    "records": {
+      "d6caab69-3268-4cd5-bdeb-c38826cae94e": "quarantined",
+      "539bd553-e9c2-448e-b68e-fcbef6e5ebcb": "quarantined",
+      "41cedf16-faf5-43bf-bf41-d8c2b04829c8": "quarantined",
+      "ed73f60a-3b7f-42bb-8c58-32b3d8ece70b": "quarantined"
+    }
+  },
+  "modes": {
+    "crashed/.gfs-download-store": "700",
+    "crashed/.gfs-download-store/ledger-v1.json": "600",
+    "crashed/.gfs-download-store/writer-v2.sqlite": "600",
+    "crashed/.gfs-download-store/writer-v2.sqlite-journal": "600",
+    "crashed/.gfs-download-store/writer.lock": "600",
+    "crashed/users": "700",
+    "crashed/users/caller-dev-a": "700",
+    "crashed/users/caller-dev-a/.gfs-downloads": "700",
+    "crashed/users/caller-dev-a/.gfs-downloads/input-539bd553-e9c2-448e-b68e-fcbef6e5ebcb": "700",
+    "crashed/users/caller-dev-a/.gfs-downloads/input-539bd553-e9c2-448e-b68e-fcbef6e5ebcb/source": "600",
+    "crashed/users/caller-dev-a/.gfs-downloads/input-d6caab69-3268-4cd5-bdeb-c38826cae94e": "700",
+    "crashed/users/caller-dev-a/.gfs-downloads/input-d6caab69-3268-4cd5-bdeb-c38826cae94e/source": "600",
+    "crashed/users/caller-dev-a/.gfs-downloads/input-ed73f60a-3b7f-42bb-8c58-32b3d8ece70b": "700",
+    "crashed/users/caller-dev-a/.gfs-downloads/input-ed73f60a-3b7f-42bb-8c58-32b3d8ece70b/source.partial": "600",
+    "crashed/users/caller-dev-b": "700",
+    "crashed/users/caller-dev-b/.gfs-downloads": "700",
+    "crashed/users/caller-dev-b/.gfs-downloads/input-41cedf16-faf5-43bf-bf41-d8c2b04829c8": "700",
+    "crashed/users/caller-dev-b/.gfs-downloads/input-41cedf16-faf5-43bf-bf41-d8c2b04829c8/source": "600",
+    "restarted/.gfs-download-store": "700",
+    "restarted/.gfs-download-store/ledger-v1.json": "600",
+    "restarted/.gfs-download-store/writer-v2.sqlite": "600",
+    "restarted/.gfs-download-store/writer.lock": "600",
+    "restarted/users": "700",
+    "restarted/users/caller-dev-a": "700",
+    "restarted/users/caller-dev-a/.gfs-downloads": "700",
+    "restarted/users/caller-dev-a/.gfs-downloads/input-539bd553-e9c2-448e-b68e-fcbef6e5ebcb": "700",
+    "restarted/users/caller-dev-a/.gfs-downloads/input-539bd553-e9c2-448e-b68e-fcbef6e5ebcb/source": "600",
+    "restarted/users/caller-dev-a/.gfs-downloads/input-d6caab69-3268-4cd5-bdeb-c38826cae94e": "700",
+    "restarted/users/caller-dev-a/.gfs-downloads/input-d6caab69-3268-4cd5-bdeb-c38826cae94e/source": "600",
+    "restarted/users/caller-dev-a/.gfs-downloads/input-ed73f60a-3b7f-42bb-8c58-32b3d8ece70b": "700",
+    "restarted/users/caller-dev-a/.gfs-downloads/input-ed73f60a-3b7f-42bb-8c58-32b3d8ece70b/source.partial": "600",
+    "restarted/users/caller-dev-b": "700",
+    "restarted/users/caller-dev-b/.gfs-downloads": "700",
+    "restarted/users/caller-dev-b/.gfs-downloads/input-41cedf16-faf5-43bf-bf41-d8c2b04829c8": "700",
+    "restarted/users/caller-dev-b/.gfs-downloads/input-41cedf16-faf5-43bf-bf41-d8c2b04829c8/source": "600"
+  }
+}
