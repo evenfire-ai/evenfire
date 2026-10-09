@@ -720,6 +720,7 @@ export default function HostDetailsPage() {
       )
       setConnectorCatalogLoaded(true)
     } catch (e) {
+      connectorCatalogAttemptedRef.current = false
       setError(e instanceof Error ? e.message : 'Failed to load available connectors.')
     } finally {
       setConnectorCatalogLoading(false)
@@ -1676,7 +1677,8 @@ export default function HostDetailsPage() {
                         <td>
                           {connectorCatalogLoading ? (
                             <span className="cu-connector-badge">Loading…</span>
-                          ) : connectorAuthenticationByName[server] === '' ? null : (
+                          ) : !connectorCatalogLoaded ||
+                            connectorAuthenticationByName[server] === '' ? null : (
                             <span className="cu-connector-badge">
                               {connectorAuthenticationByName[server] ?? 'Unknown'}
                             </span>

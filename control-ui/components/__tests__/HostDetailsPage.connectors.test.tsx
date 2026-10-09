@@ -20,10 +20,11 @@ import { ToastProvider } from '../Toast'
 const replaceMock = vi.fn()
 const pushMock = vi.fn()
 let activeHostName = 'foo'
+let activeHostTab = 'connectors'
 
 vi.mock('next/navigation', () => ({
-  useParams: () => ({ name: activeHostName, tab: 'connectors' }),
-  usePathname: () => `/agents/${activeHostName}/connectors`,
+  useParams: () => ({ name: activeHostName, tab: activeHostTab }),
+  usePathname: () => `/agents/${activeHostName}/${activeHostTab}`,
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
   useSearchParams: () => new URLSearchParams(),
 }))
@@ -112,6 +113,7 @@ function renderPage() {
 afterEach(() => {
   cleanup()
   activeHostName = 'foo'
+  activeHostTab = 'connectors'
 })
 
 describe('HostDetailsPage connectors', () => {
@@ -145,6 +147,50 @@ describe('HostDetailsPage connectors', () => {
       })
     )
     expect(await screen.findByText('mcp-new')).toBeInTheDocument()
+  })
+
+  it('does not show Unknown authentication when the connector catalog fails to load', async () => {
+    vi.mocked(api.getMcpServers).mockRejectedValueOnce(new Error('Catalog unavailable'))
+
+    renderPage()
+
+    expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
+
+    const connectorRow = screen.getByText('mcp-existing').closest('tr')
+    const authenticationCell = connectorRow?.querySelector('td:nth-child(2)')
+    await waitFor(() => expect(authenticationCell?.textContent?.trim()).toBe(''))
+    expect(authenticationCell?.childElementCount).toBe(0)
+  })
+
+  it('retries the connector catalog when returning to the tab after a failed load', async () => {
+    vi.mocked(api.getMcpServers)
+      .mockRejectedValueOnce(new Error('Catalog unavailable'))
+      .mockResolvedValueOnce({
+        items: [
+          { metadata: { name: 'mcp-existing' }, spec: { auth: { type: 'oauth' } } },
+          { metadata: { name: 'mcp-new' }, spec: { auth: { type: 'bearer' } } },
+        ],
+      })
+
+    const { rerender } = renderPage()
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
+
+    activeHostTab = 'overview'
+    rerender(
+      <ToastProvider>
+        <HostDetailsPage />
+      </ToastProvider>
+    )
+    activeHostTab = 'connectors'
+    rerender(
+      <ToastProvider>
+        <HostDetailsPage />
+      </ToastProvider>
+    )
+
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('OAuth')).toBeInTheDocument()
   })
 
   // Re-homed from app/contexts/__tests__/ContextDetail.spec-preserve.test.tsx
