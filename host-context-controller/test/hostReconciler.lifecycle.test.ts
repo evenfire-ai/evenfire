@@ -1110,6 +1110,58 @@ describe('HostReconciler resource rollout bootstrap', () => {
     expect(fixture.templateChanges()).toBe(1)
   })
 
+  it.each([
+    ['Host', false],
+    ['Desktop', true],
+  ] as const)(
+    'does not reuse a routine renewal for a new %s resource rollout',
+    async (_kind, desktop) => {
+      const fixture = await runtime({ desktop })
+      const applied = fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]
+      vi.setSystemTime(
+        Date.parse(
+          fixture.secret().metadata!.annotations!['clerum.io/runtime-token-refresh-before']
+        ) + 1
+      )
+      await fixture.reconcile()
+      const renewed = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      expect(renewed).not.toBe(applied)
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+      expect(fixture.secret().metadata!.annotations![ROLLOUT]).toBe('false')
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        applied
+      )
+      expect(fixture.templateChanges()).toBe(0)
+      expect(issue).toHaveBeenCalledOnce()
+
+      // A routine renewal may be consumed after a container restart without an
+      // applied revision change. Its fresh record is not rollout preparation.
+      fixture.events.length = 0
+      const resources = desktop ? config.desktopResources : config.hostResources
+      resources.requests.cpu = '25m'
+      await fixture.reconcile()
+      const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      expect(issue).toHaveBeenCalledTimes(2)
+      expect(prepared).not.toBe(renewed)
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        prepared
+      )
+      expect(fixture.secret().metadata!.annotations![ROLLOUT]).toBe('true')
+
+      // The new preparation survives NotReady startup; it is not renewed on
+      // every reconcile, and is acknowledged only after convergence.
+      fixture.advance({ readyReplicas: 0, availableReplicas: 0, unavailableReplicas: 1 })
+      for (let pass = 0; pass < 3; pass++) await fixture.reconcile()
+      expect(issue).toHaveBeenCalledTimes(2)
+      expect(fixture.templateChanges()).toBe(1)
+      fixture.advance()
+      await fixture.reconcile()
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+      expect(issue).toHaveBeenCalledTimes(2)
+    }
+  )
+
   it('reuses an intrinsic renewal persisted before a failed resource replacement', async () => {
     const fixture = await runtime()
     vi.setSystemTime(

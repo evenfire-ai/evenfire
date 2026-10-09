@@ -2329,8 +2329,11 @@ export class HostReconciler {
           HostReconciler.bootstrapAppliedToDeployment(existing, deployment, existingRevision)
         const boundUid =
           existing?.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_DEPLOYMENT_UID_ANNOTATION]
+        // A routine renewal can be consumed by a container restart without
+        // changing the applied revision. Reuse only explicit rollout preparation.
         const usablePendingPreparation =
           bootstrapIsFresh &&
+          existing?.metadata?.annotations?.[RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION] === 'true' &&
           !bootstrapApplied &&
           (!boundUid || boundUid === deployment?.metadata?.uid)
         if (resourcesWillChange) {
