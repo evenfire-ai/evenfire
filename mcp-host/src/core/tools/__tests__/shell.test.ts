@@ -1,9 +1,19 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { spawn } from 'child_process'
+import { existsSync } from 'fs'
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../../llm/registryCore'
+import { logger } from '../../../logger'
+import { executeWithTimeout } from '../../orchestration/toolExecutionTimeout'
 import { ShellTool } from '../shell'
+
+// Real processes run; the spy only observes whether a process was started.
+vi.mock('child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 let workspacePath: string
 
@@ -235,51 +245,49 @@ describe('ShellTool', () => {
     expect(r2.content).not.toContain('first-run')
   })
 
-  // Skipped on CI: Ubuntu GH Actions runners (dash as /bin/sh) exhibit unreliable
-  // process-group kill propagation to `sleep` grandchildren even after SIGKILL grace.
-  // Production behavior is verified by manual minikube e2e + code review.
-  it.skipIf(process.env.CI)(
-    'kills grandchild processes (e.g. sleep in a semicolon chain) via process-group kill',
-    async () => {
-      // Spawn a long-sleeping grandchild and write its PID before waiting on it.
-      // Checking the PID directly avoids `pgrep` false positives from the probe
-      // command itself and from platform-specific process-list behavior.
-      const pidFile = join(workspacePath, 'grandchild.pid')
-      const tool = new ShellTool(workspacePath, 500, ['PATH'])
+  // Runs on CI like U6 below. It used to be skipped there because the tool
+  // resolved on leader close while a `sleep` grandchild could still be alive.
+  // Since 9b1c29e88 the close handler SIGKILLs the process group and resolves
+  // only after the group no longer exists (or reports
+  // process_group_termination_failed), so that skip reason no longer applies.
+  it('kills grandchild processes (e.g. sleep in a semicolon chain) via process-group kill', async () => {
+    // Spawn a long-sleeping grandchild and write its PID before waiting on it.
+    // Checking the PID directly avoids `pgrep` false positives from the probe
+    // command itself and from platform-specific process-list behavior.
+    const pidFile = join(workspacePath, 'grandchild.pid')
+    const tool = new ShellTool(workspacePath, 500, ['PATH'])
 
-      // Run the tool — timeout fires at 500ms.
-      const result = await tool.execute({
-        command: `echo start; sleep 60 & echo $! > ${pidFile}; wait`,
-      })
+    // Run the tool — timeout fires at 500ms.
+    const result = await tool.execute({
+      command: `echo start; sleep 60 & echo $! > ${pidFile}; wait`,
+    })
 
-      expect(result.is_error).toBe(true)
-      expect(result.content).toContain('start')
-      expect(result.content).toContain('timeout')
+    expect(result.is_error).toBe(true)
+    expect(result.content).toContain('start')
+    expect(result.content).toContain('timeout')
 
-      // After the tool resolves, give the kernel a moment to clean up.
-      // Then assert the captured `sleep` PID no longer exists.
-      const pid = Number((await readFile(pidFile, 'utf8')).trim())
-      expect(Number.isInteger(pid)).toBe(true)
-      expect(pid).toBeGreaterThan(0)
+    // After the tool resolves, give the kernel a moment to clean up.
+    // Then assert the captured `sleep` PID no longer exists.
+    const pid = Number((await readFile(pidFile, 'utf8')).trim())
+    expect(Number.isInteger(pid)).toBe(true)
+    expect(pid).toBeGreaterThan(0)
 
-      // Poll up to 8s for grandchild to be reaped. SIGTERM → SIGKILL grace is 5s,
-      // so the window must exceed that to cover slow runners where SIGTERM may
-      // not reach the grandchild immediately.
-      let grandchildAlive = true
-      for (let i = 0; i < 80; i++) {
-        await new Promise(r => setTimeout(r, 100))
-        try {
-          process.kill(pid, 0)
-        } catch {
-          grandchildAlive = false
-          break
-        }
+    // Poll up to 8s for grandchild to be reaped. SIGTERM → SIGKILL grace is 5s,
+    // so the window must exceed that to cover slow runners where SIGTERM may
+    // not reach the grandchild immediately.
+    let grandchildAlive = true
+    for (let i = 0; i < 80; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      try {
+        process.kill(pid, 0)
+      } catch {
+        grandchildAlive = false
+        break
       }
+    }
 
-      expect(grandchildAlive).toBe(false)
-    },
-    20_000
-  ) // generous test timeout — 500ms shell + up to 8s polling
+    expect(grandchildAlive).toBe(false)
+  }, 20_000) // generous test timeout — 500ms shell + up to 8s polling
 
   describe('dynamicEnvProvider — ConfigStore snapshot merge', () => {
     it('exposes ConfigStore values to the subprocess shell at spawn time', async () => {
@@ -448,5 +456,328 @@ describe('ShellTool', () => {
       expect(result.is_error).toBe(false)
       expect(result.content).toContain('kept')
     })
+  })
+
+  // PR #1005 pins the sha256 of the native tools[] baseline, which includes
+  // shell_exec. Decoupling the shell from the GFS download store (#1019) must
+  // not change the advertised name, description or schema. The two
+  // machine-specific paths are normalized so the pin is portable.
+  it('keeps the advertised shell_exec definition byte-identical to the pre-#1019 contract', () => {
+    const tool = new ShellTool(workspacePath, 5000, ['PATH'])
+    const description = tool
+      .description()
+      .replace(JSON.stringify(process.execPath), '<NODE_EXEC_PATH>')
+      .replace(JSON.stringify(require.resolve('exceljs')), '<EXCELJS_PATH>')
+    expect(tool.name()).toBe('shell_exec')
+    expect(description).toBe(
+      'Execute a shell command in the workspace directory. ' +
+        'Supports full shell syntax (pipes, redirects, &&, etc.). ' +
+        'Commands run with a timeout and restricted environment. ' +
+        'Node.js executable: <NODE_EXEC_PATH>. ' +
+        "Resolve installed Host libraries with require('node:module').createRequire(<EXCELJS_PATH>); load fast-csv through that resolver and use parseStream for streaming CSV parsing (exceljs.csv is not available). " +
+        'Verify any other executable or library before using it. ' +
+        'This tool requires approval before execution.'
+    )
+    expect(JSON.stringify(tool.parametersSchema())).toBe(
+      JSON.stringify({
+        type: 'object',
+        properties: {
+          command: {
+            type: 'string',
+            description:
+              "The shell command to execute (e.g., 'ls -la', 'echo hello | wc -c', 'git status')",
+          },
+        },
+        required: ['command'],
+      })
+    )
+  })
+})
+
+/** A Host-managed per-user root: `<host>/users/<caller>`. */
+async function managedCallerRoot(): Promise<{ host: string; callerRoot: string }> {
+  const host = await mkdtemp(join(tmpdir(), 'clerum-shell-managed-'))
+  const callerRoot = join(host, 'users', 'caller')
+  await mkdir(callerRoot, { recursive: true })
+  return { host, callerRoot }
+}
+
+async function waitForFile(file: string, timeoutMs = 5_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (existsSync(file)) {
+      const content = (await readFile(file, 'utf8')).trim()
+      if (content.length > 0) return content
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`Timed out waiting for ${file}`)
+}
+
+function processIsGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH'
+  }
+}
+
+describe('ShellTool without the GFS download store (#1019)', () => {
+  const hosts: string[] = []
+  beforeEach(() => {
+    vi.mocked(spawn).mockClear()
+  })
+  afterEach(async () => {
+    for (const host of hosts.splice(0)) await rm(host, { recursive: true, force: true })
+  })
+
+  it('U1: runs in the verified caller root with no store dependency', async () => {
+    const { host, callerRoot } = await managedCallerRoot()
+    hosts.push(host)
+    const tool = new ShellTool(callerRoot, 5_000, ['PATH'], () => ({}), undefined, true)
+
+    const result = await tool.execute({ command: 'printf ok' })
+
+    expect(result).toMatchObject({ is_error: false, content: 'stdout:\nok' })
+    expect(vi.mocked(spawn).mock.calls[0][2]).toMatchObject({ cwd: callerRoot })
+  })
+
+  it('U2: fails closed when the caller root is no longer canonical', async () => {
+    const { host, callerRoot } = await managedCallerRoot()
+    hosts.push(host)
+    const tool = new ShellTool(callerRoot, 5_000, ['PATH'], () => ({}), undefined, true)
+    // Witness: the same tool runs while the root is still canonical.
+    expect(await tool.execute({ command: 'printf canonical' })).toMatchObject({
+      is_error: false,
+      content: 'stdout:\ncanonical',
+    })
+    expect(spawn).toHaveBeenCalledTimes(1)
+
+    const moved = join(host, 'moved-caller')
+    await rename(callerRoot, moved)
+    await symlink(moved, callerRoot)
+    const result = await tool.execute({ command: 'printf escaped' })
+
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe(
+      'Managed shell unavailable: the verified caller workspace root is no longer canonical.'
+    )
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
+  describe('U6: process-group termination is unchanged', () => {
+    const background = (pidFile: string) =>
+      `sleep 30 & echo $! > ${JSON.stringify(pidFile)}; printf started;`
+
+    it('kills the whole group on timeout', async () => {
+      const pidFile = join(workspacePath, 'timeout.pid')
+      const tool = new ShellTool(workspacePath, 500, ['PATH'])
+      const result = await tool.execute({ command: `${background(pidFile)} wait` })
+
+      expect(result.is_error).toBe(true)
+      expect(result.content).toContain('[Command killed after 500ms timeout')
+      const grandchild = Number(await waitForFile(pidFile))
+      expect(grandchild).toBeGreaterThan(0)
+      expect(processIsGone(grandchild)).toBe(true)
+    })
+
+    it('kills the whole group on cancellation', async () => {
+      const pidFile = join(workspacePath, 'cancel.pid')
+      const controller = new AbortController()
+      const tool = new ShellTool(workspacePath, 30_000, ['PATH'])
+      // The pid file is written before `printf started`, so aborting as soon as
+      // it exists can race the stdout read. Abort only after the tool has
+      // streamed "started", which it retains before calling onOutput.
+      let streamed = ''
+      let markStarted!: () => void
+      const started = new Promise<void>(resolve => {
+        markStarted = resolve
+      })
+      const execution = tool.execute(
+        { command: `${background(pidFile)} wait` },
+        {
+          signal: controller.signal,
+          onOutput: chunk => {
+            streamed += chunk
+            if (streamed.includes('started')) markStarted()
+          },
+        }
+      )
+      await started
+      const grandchild = Number(await waitForFile(pidFile))
+      controller.abort(new Error('user cancelled'))
+      const result = await execution
+
+      expect(result.is_error).toBe(true)
+      expect(result.content).toContain('[Command cancelled — partial output above]')
+      expect(result.content).toContain('started')
+      expect(processIsGone(grandchild)).toBe(true)
+    })
+
+    it('kills the whole group when output exceeds the bound', async () => {
+      const pidFile = join(workspacePath, 'maxbuffer.pid')
+      const tool = new ShellTool(workspacePath, 30_000, ['PATH'])
+      const result = await tool.execute({ command: `${background(pidFile)} yes` })
+
+      expect(result.is_error).toBe(true)
+      expect(result.content).toContain('output_limit_exceeded')
+      const grandchild = Number(await waitForFile(pidFile))
+      expect(processIsGone(grandchild)).toBe(true)
+    })
+
+    it('does not spawn when cancellation precedes process start', async () => {
+      const tool = new ShellTool(workspacePath, 5_000, ['PATH'])
+      const reason = new Error('cancelled before start')
+      const controller = new AbortController()
+      controller.abort(reason)
+
+      await expect(
+        tool.execute({ command: 'printf late' }, { signal: controller.signal, onOutput: () => {} })
+      ).rejects.toBe(reason)
+      expect(spawn).not.toHaveBeenCalled()
+
+      // Witness: the same tool with a live signal does start the process.
+      const live = await tool.execute(
+        { command: 'printf live' },
+        { signal: new AbortController().signal, onOutput: () => {} }
+      )
+      expect(live).toMatchObject({ is_error: false, content: 'stdout:\nlive' })
+      expect(spawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('joins the outer cancellation boundary until the group has exited', async () => {
+      const pidFile = join(workspacePath, 'join.pid')
+      const tool = new ShellTool(workspacePath, 30_000, ['PATH'])
+      expect(tool.joinsAbortSettlement()).toBe(true)
+      const parent = new AbortController()
+      let settled = false
+      const execution = executeWithTimeout(
+        tool,
+        { command: `${background(pidFile)} wait` },
+        { onOutput: () => {} },
+        30_000,
+        parent.signal
+      ).finally(() => {
+        settled = true
+      })
+      const grandchild = Number(await waitForFile(pidFile))
+      parent.abort(new Error('outer cancellation'))
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(settled).toBe(false)
+
+      const result = await execution
+      expect(result.is_error).toBe(true)
+      expect(result.content).toContain('[Command cancelled — partial output above]')
+      expect(processIsGone(grandchild)).toBe(true)
+    })
+  })
+})
+
+describe('ShellTool start failures (#1020)', () => {
+  let loggerError: MockInstance<typeof logger.error>
+
+  beforeEach(() => {
+    vi.mocked(spawn).mockClear()
+    loggerError = vi.spyOn(logger, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    loggerError.mockRestore()
+  })
+
+  // Synthetic secret-looking value; the text on both sides of the NUL must
+  // never reach the result or the log.
+  const SECRET_HEAD = 'opaque-integration-secret-7f3a9c'
+  const SECRET_TAIL = 'tail-after-nul-41be'
+
+  it('U3: rejects a NUL env value before spawn and names only the variable key', async () => {
+    const tool = new ShellTool(workspacePath, 5_000, ['PATH'], () => ({
+      INTEGRATION_TOKEN: `${SECRET_HEAD}\0${SECRET_TAIL}`,
+    }))
+    const result = await tool.execute({ command: 'printf never-runs' })
+    expect(result).toMatchObject({
+      is_error: true,
+      content:
+        'Command failed to start: environment variable INTEGRATION_TOKEN contains a NUL character',
+    })
+    expect(result.duration_ms).toBeGreaterThanOrEqual(0)
+    for (const fragment of [SECRET_HEAD, SECRET_TAIL, SECRET_HEAD.slice(0, 8), '\\x00', '\0']) {
+      expect(result.content).not.toContain(fragment)
+    }
+    // Witness: the rejection was logged once with a fixed code and no value.
+    expect(loggerError).toHaveBeenCalledOnce()
+    expect(loggerError.mock.calls[0]![0]).toEqual({
+      component: 'ShellTool',
+      errorCode: 'ENV_VALUE_CONTAINS_NUL',
+    })
+    const logged = JSON.stringify(loggerError.mock.calls[0])
+    expect(logged).not.toContain(SECRET_HEAD.slice(0, 8))
+    expect(logged).not.toContain(SECRET_TAIL)
+    expect(spawn).not.toHaveBeenCalled()
+
+    // Witness: the same tool and key without the NUL does reach spawn.
+    const valid = new ShellTool(workspacePath, 5_000, ['PATH'], () => ({
+      INTEGRATION_TOKEN: SECRET_HEAD,
+    }))
+    const ok = await valid.execute({ command: 'printf runs' })
+    expect(ok).toMatchObject({ is_error: false, content: 'stdout:\nruns' })
+    expect(spawn).toHaveBeenCalledOnce()
+  })
+
+  it('U3b: reports only the error code of a synchronous spawn throw', async () => {
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      throw Object.assign(new Error(`spawn rejected argument ${SECRET_HEAD}`), { code: 'E2BIG' })
+    })
+    const tool = new ShellTool(workspacePath, 5_000, ['PATH'])
+    const result = await tool.execute({ command: 'printf never-runs' })
+    expect(result).toMatchObject({ is_error: true, content: 'Command failed to start: E2BIG' })
+    expect(result.content).not.toContain(SECRET_HEAD.slice(0, 8))
+    expect(result.content).not.toContain('spawn rejected')
+    // Witness: spawn was reached and threw.
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(vi.mocked(spawn).mock.results[0]!.type).toBe('throw')
+    expect(loggerError).toHaveBeenCalledOnce()
+    expect(loggerError.mock.calls[0]![0]).toEqual({ component: 'ShellTool', errorCode: 'E2BIG' })
+    const logged = JSON.stringify(loggerError.mock.calls[0])
+    expect(logged).not.toContain(SECRET_HEAD.slice(0, 8))
+    expect(logged).not.toContain('spawn rejected')
+  })
+
+  it('U3c: reports a fixed message for a synchronous spawn throw without a well-formed code', async () => {
+    vi.mocked(spawn)
+      .mockImplementationOnce(() => {
+        throw new Error(`spawn rejected argument ${SECRET_HEAD}`)
+      })
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error(`spawn rejected argument ${SECRET_HEAD}`), {
+          code: `bad ${SECRET_TAIL}`,
+        })
+      })
+    const tool = new ShellTool(workspacePath, 5_000, ['PATH'])
+    for (let call = 0; call < 2; call += 1) {
+      const result = await tool.execute({ command: 'printf never-runs' })
+      expect(result).toMatchObject({ is_error: true, content: 'Command failed to start' })
+    }
+    // Witness: both calls reached spawn, threw, and were logged without text.
+    expect(vi.mocked(spawn).mock.results.map(r => r.type)).toEqual(['throw', 'throw'])
+    expect(loggerError.mock.calls.map(call => call[0])).toEqual([
+      { component: 'ShellTool', errorCode: 'UNKNOWN' },
+      { component: 'ShellTool', errorCode: 'UNKNOWN' },
+    ])
+    expect(JSON.stringify(loggerError.mock.calls)).not.toContain(SECRET_TAIL)
+  })
+
+  it('U4: reports an asynchronous spawn failure (missing cwd) as a start failure', async () => {
+    const missing = join(workspacePath, 'removed-before-spawn')
+    const tool = new ShellTool(missing, 5_000, ['PATH'])
+    const result = await tool.execute({ command: 'printf never-runs' })
+    expect(result.is_error).toBe(true)
+    expect(result.content).toBe('Command failed to start: ENOENT')
+    expect(result.content).not.toContain(missing)
+    expect(result.content).not.toContain('never-runs')
+    // Witness: spawn returned a child; the failure arrived on its error event.
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(vi.mocked(spawn).mock.results[0]!.type).toBe('return')
   })
 })

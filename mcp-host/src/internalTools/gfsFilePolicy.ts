@@ -1,7 +1,17 @@
 const MIB = 1024 * 1024
 
-export const GFS_HOST_RETAINED_FILES = 64
 export const GFS_HOST_ACTIVE_DOWNLOADS = 2
+
+/**
+ * Retained-storage variables of the fixed quota model, removed in #1028 when
+ * the budget became a share of the workspace volume. A deployment that still
+ * sets one is warned about at store startup, never failed.
+ */
+export const REMOVED_GFS_STORAGE_VARIABLES = Object.freeze([
+  'MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES',
+  'MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES',
+  'MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES',
+] as const)
 
 export function configuredGfsInteger(
   name: string,
@@ -17,10 +27,6 @@ export function configuredGfsInteger(
   return value
 }
 
-function requiredGfsInteger(name: string, raw: string | undefined, fallback: number): number {
-  return configuredGfsInteger(name, raw, fallback, Number.MAX_SAFE_INTEGER)
-}
-
 /** Generic GFS transfer policy, independent of visual model delivery. */
 export const GFS_FILE_LIMITS = Object.freeze({
   maxFileBytes: configuredGfsInteger(
@@ -32,21 +38,18 @@ export const GFS_FILE_LIMITS = Object.freeze({
   inlineTextBytes: 8 * 1024,
   metadataBytes: 64 * 1024,
   errorBytes: 8 * 1024,
-  storageBytes: requiredGfsInteger(
-    'MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES',
-    process.env.MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES,
-    1024 * MIB
-  ),
-  callerStorageBytes: requiredGfsInteger(
-    'MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES',
-    process.env.MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES,
-    256 * MIB
-  ),
-  callerRetainedFiles: configuredGfsInteger(
-    'MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES',
-    process.env.MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES,
-    8,
-    GFS_HOST_RETAINED_FILES
+  /**
+   * Share of the volume holding the Host root that retained downloads may
+   * occupy: `floor(volumeTotalBytes * storagePercent / 100)`, measured with
+   * statfs at every admission. The default 70 plus the store's 15% free-space
+   * floor leaves 15% of the volume that the cache never fills, so on a volume
+   * with a 5% root reservation the budget, not the floor, is the cache's limit.
+   */
+  storagePercent: configuredGfsInteger(
+    'MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT',
+    process.env.MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT,
+    70,
+    100
   ),
   callerActiveDownloads: configuredGfsInteger(
     'MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY',
@@ -65,16 +68,3 @@ export const GFS_FILE_LIMITS = Object.freeze({
     60 *
     1000,
 })
-
-if (GFS_FILE_LIMITS.maxFileBytes > GFS_FILE_LIMITS.callerStorageBytes)
-  throw new Error('MCP_HOST_GFS_MAX_FILE_BYTES must fit within the caller retained-storage budget')
-
-if (GFS_FILE_LIMITS.callerStorageBytes > GFS_FILE_LIMITS.storageBytes)
-  throw new Error(
-    'MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES must not exceed the Host aggregate retained-storage budget'
-  )
-
-if (GFS_FILE_LIMITS.callerStorageBytes * 2 > GFS_FILE_LIMITS.storageBytes)
-  throw new Error(
-    'MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES must leave aggregate storage for another caller'
-  )
