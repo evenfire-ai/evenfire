@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
@@ -27,7 +27,7 @@ import { verifyUserSessionV2Token } from '../src/utils/auth/userSessionV2Token.j
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
-const describeRealPostgres = adminUrl ? describe : describe.skip
+const describeRealPostgres = adminUrl ? describe.sequential : describe.skip
 const runtimeRoles = [
   'control_api_runtime',
   'trace_maintenance_runtime',
@@ -244,6 +244,12 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
     } finally {
       await adminPool?.end()
     }
+  })
+
+  beforeEach(async () => {
+    // This suite owns one disposable database and serializes its cases. Reset
+    // only the shared admission pace after the prior case has fully settled.
+    await databasePool.query('DELETE FROM password_verification_pace')
   })
 
   it.each(['normal password change', 'password reset'] as const)(
