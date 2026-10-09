@@ -399,6 +399,50 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('explains an authentication transition when desktop setup is temporarily blocked', async () => {
+    mocks.completeDesktopSetup.mockRejectedValue(
+      wrapLikeElectronIpc('auth:completeDesktopSetup', new Error('auth_transition_in_progress'))
+    )
+    render(<Probe />)
+
+    await waitFor(() => expect(desktopSetupTokenListener).toBeTypeOf('function'))
+    await act(async () => {
+      desktopSetupTokenListener?.({
+        email: 'user@example.test',
+        authorizationToken: 'synthetic-setup-token',
+      })
+    })
+
+    await waitFor(() =>
+      expect(mocks.setStatus).toHaveBeenCalledWith(
+        'Finish the current authentication action, then try desktop setup again.',
+        'error'
+      )
+    )
+  })
+
+  it('explains when the desktop session changes during setup', async () => {
+    mocks.completeDesktopSetup.mockRejectedValue(
+      wrapLikeElectronIpc('auth:completeDesktopSetup', new Error('stale_session_generation'))
+    )
+    render(<Probe />)
+
+    await waitFor(() => expect(desktopSetupTokenListener).toBeTypeOf('function'))
+    await act(async () => {
+      desktopSetupTokenListener?.({
+        email: 'user@example.test',
+        authorizationToken: 'synthetic-setup-token',
+      })
+    })
+
+    await waitFor(() =>
+      expect(mocks.setStatus).toHaveBeenCalledWith(
+        'The desktop session changed while setup was in progress. Try desktop setup again.',
+        'error'
+      )
+    )
+  })
+
   it('switches to a saved environment matching its REST endpoint', async () => {
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))

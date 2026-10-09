@@ -45,6 +45,12 @@ function isUnauthorizedError(error: unknown) {
 
 function getDesktopSetupErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
+  if (message.includes('auth_transition_in_progress')) {
+    return 'Finish the current authentication action, then try desktop setup again.'
+  }
+  if (message.includes('stale_session_generation')) {
+    return 'The desktop session changed while setup was in progress. Try desktop setup again.'
+  }
   if (message.includes('desktop_setup_requires_signout')) {
     return 'Sign out before setting up another desktop environment.'
   }
