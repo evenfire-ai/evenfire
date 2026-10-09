@@ -263,6 +263,27 @@ describe('GFS download store provenance: planted copies', () => {
     expect(exists(planted.sourcePath)).toBe(true)
   })
 
+  it("P7b: an expired adopted entry in the caller's own directory answers download_missing, not download_expired", async () => {
+    const bytes = Buffer.alloc(18, 0x46)
+    // metaFor expires the plant one hour after now; the published copy lives a day.
+    const planted = plantComplete(rootA, A, 22, bytes)
+    const info = vi.spyOn(logger, 'info')
+    const restarted = await openStore()
+    adoptedLogged(info, 1)
+    const own = await completedCopy(restarted, rootA, A, 23, 16, {
+      expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+    })
+
+    vi.setSystemTime(new Date(Date.now() + 2 * 60 * 60_000))
+
+    // The adopted entry is still indexed: the provenance guard, not openEntryContent, decides.
+    expect((await restarted.debugInventory()).byCaller.get(A)).toEqual({ files: 2, bytes: 34 })
+    await expectNotServed(restarted, planted.id, A)
+    // Witness: the same read path serves the caller's own published copy at the same instant.
+    await expect(restarted.readManagedFile(own.receipt.path, A)).resolves.toEqual(own.bytes)
+    expect(exists(planted.sourcePath)).toBe(true)
+  })
+
   it('P8: a meta identity that differs from its directory grants nothing to either caller', async () => {
     const bytes = Buffer.alloc(12, 0x45)
     const planted = plantComplete(rootB, C, 14, bytes)

@@ -365,6 +365,10 @@
   },
   {
     "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P7b: an expired adopted entry in the caller's own directory answers download_missing, not download_expired"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
     "fullName": "GFS download store provenance: planted copies T-S3: a planted directory with a published id is removed and the published copy is untouched"
   },
   {
