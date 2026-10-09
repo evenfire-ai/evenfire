@@ -171,7 +171,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     }
 
     await expect(
-      state.installAuthenticatedLogin({ token: 'new-session-token', me: user })
+      state.installAuthenticatedLogin({ token: 'fixture-new-session-token', me: user })
     ).rejects.toThrow('Electron safeStorage is unavailable for session-token fallback')
 
     expect(state.sessionToken).toBeNull()

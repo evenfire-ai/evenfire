@@ -426,7 +426,7 @@ describe('AppService pending external logout', () => {
     vi.spyOn(authClient, 'getMe').mockResolvedValue(loginResult.me)
     await fs.writeFile(
       path.join(userDataDirectory, `session-token-${activeEnvKey}.json`),
-      JSON.stringify({ token: 'stale-plaintext-session-token' })
+      JSON.stringify({ token: 'fixture-stale-plaintext-session-token' })
     )
     await fs.writeFile(path.join(userDataDirectory, `session-token-${activeEnvKey}.enc`), 'corrupt')
 
@@ -438,7 +438,7 @@ describe('AppService pending external logout', () => {
     })
     expect(authClient.getMe).not.toHaveBeenCalled()
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(
-      'stale-plaintext-session-token'
+      'fixture-stale-plaintext-session-token'
     )
   })
 
