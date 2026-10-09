@@ -6,6 +6,51 @@ type AuthContext = {
   sessionToken: string
 }
 
+type ResetPasswordDomainError =
+  | 'not_found'
+  | 'forbidden'
+  | 'not_pending'
+  | 'expired'
+  | 'invalid_invitation'
+  | 'invalid_password'
+
+function controlApiErrorCode(error: ControlApiError): string | null {
+  if (
+    error.body !== null &&
+    typeof error.body === 'object' &&
+    'error' in error.body &&
+    typeof error.body.error === 'string'
+  ) {
+    return error.body.error
+  }
+  return null
+}
+
+function resetPasswordDomainError(error: ControlApiError): ResetPasswordDomainError | null {
+  const code = controlApiErrorCode(error)
+  if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
+  if (error.status === 400 && code === 'invalid_invitation') return 'invalid_invitation'
+  if (error.status === 403 && code === 'forbidden') return 'forbidden'
+  if (error.status === 404 && code === 'not_found') return 'not_found'
+  if (
+    error.status === 409 &&
+    (code === 'invitation_not_pending' || code === 'invitation_not_ready')
+  ) {
+    return 'not_pending'
+  }
+  if (error.status === 410 && code === 'expired') return 'expired'
+  return null
+}
+
+function unknownRecoveryOutcome(): ControlApiError {
+  return new ControlApiError(
+    'Password recovery outcome is unknown',
+    503,
+    { error: 'recovery_outcome_unknown' },
+    { 'retry-after': '2' }
+  )
+}
+
 export type InvitationPreview = {
   id: string
   teamId: string | null
@@ -185,21 +230,11 @@ export async function setupInvitationPasswordWithToken(
     return { data }
   } catch (error) {
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
-    if (
-      error instanceof ControlApiError &&
-      error.status === 400 &&
-      error.body &&
-      typeof error.body === 'object' &&
-      'error' in error.body &&
-      error.body.error === 'invalid_invitation'
-    ) {
-      return { error: 'invalid_invitation' }
+    if (error instanceof ControlApiError) {
+      const domainError = resetPasswordDomainError(error)
+      if (domainError) return { error: domainError }
+      if (error.status < 500) return { error: 'invalid_invitation' }
     }
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('(404)')) return { error: 'not_found' }
-    if (message.includes('(403)')) return { error: 'forbidden' }
-    if (message.includes('(409)')) return { error: 'not_pending' }
-    if (message.includes('(410)')) return { error: 'expired' }
-    return { error: 'invalid_password' }
+    throw unknownRecoveryOutcome()
   }
 }
