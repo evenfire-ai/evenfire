@@ -198,8 +198,15 @@ user points the installed app at whatever instance they want — your hosted
 service, a teammate's, or local `make`-forwarded services — from the app's own
 **Environment** screen: name it, paste the External REST API URL, Save. The RPC
 proxy address follows from that environment; there is no second URL to enter.
-Environments can also be pre-seeded for a fleet through Profile UI's
-`evenfire://desktop-environment` deep link or a `CLERUM_DESKTOP_CONFIG_PATH`
+When Profile-to-Desktop handoff is enabled, Profile UI's
+`evenfire://desktop-environment` link selects one exact saved REST URL or asks
+the user before adding it; an already-active exact REST endpoint is retained
+before duplicate saved matches are rejected. The REST API supplies the RPC
+proxy URL. This producer is disabled by default. Release operators enable the
+`PROFILE_DESKTOP_HANDOFF_ENABLED` image-build variable only after releasing the
+updated Desktop client and retiring older supported clients. While the gate is
+off, users can copy the REST URL from Profile UI Settings and add it in Desktop.
+Fleets can also pre-seed environments with a `CLERUM_DESKTOP_CONFIG_PATH`
 config file. Adding and switching environments, the invitation setup path, and
 how a packaged app surfaces a **required** update are covered in
 [Desktop setup & updates](../how-to/desktop-setup-and-updates.md).

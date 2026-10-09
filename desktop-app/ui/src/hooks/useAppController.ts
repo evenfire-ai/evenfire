@@ -182,11 +182,17 @@ export function useAppController() {
   const onSessionNeedsLoad = useCallback(async (options?: { preserveNav?: boolean }) => {
     return loadSessionRef.current(options)
   }, [])
+  const logoutForEnvironmentMismatchRef = useRef<() => Promise<number | null>>(async () => null)
+  const logoutForEnvironmentMismatch = useCallback(
+    () => logoutForEnvironmentMismatchRef.current(),
+    []
+  )
 
   // ─── Auth ───
   const auth = useAuthController({
     setStatus: fullSetStatus,
     onSessionNeedsLoad,
+    logoutForEnvironmentMismatch,
   })
 
   // ─── First-run onboarding ───
@@ -893,7 +899,13 @@ export function useAppController() {
   loadSessionRef.current = loadSession
 
   // ─── Cross-domain: handleLogout ───
-  const handleLogout = useCallback(async () => {
+  const logoutAndGetSessionGeneration = useCallback(async (): Promise<number | null> => {
+    let logoutGeneration: number | null = null
+    const reflectSignedOutState = () => {
+      auth.setIsAuthenticated(false)
+      auth.setMe(null)
+      auth.setPassword('')
+    }
     try {
       auth.setBusy(true)
       await chat.stopAllActivityStreams()
@@ -912,22 +924,45 @@ export function useAppController() {
       queryClient.clear()
       activeAuthenticatedSessionIdentityRef.current = null
       authenticatedSessionIdentityRef.current = null
-      await window.clerum.auth.logout()
+      const logoutResult = await window.clerum.auth.logout()
+      logoutGeneration = logoutResult.sessionGeneration
+      reflectSignedOutState()
       chat.resetChat()
       notif.resetNotifications()
       fullSetStatus('Logged out.', 'success')
-      await loadSession()
+      try {
+        await loadSession()
+      } catch (error) {
+        reflectSignedOutState()
+        fullSetStatus(
+          `Signed out, but could not refresh the desktop session: ${error instanceof Error ? error.message : String(error)}`,
+          'warn'
+        )
+      }
+      return logoutGeneration
     } catch (error) {
+      if (logoutGeneration !== null) {
+        reflectSignedOutState()
+        fullSetStatus(
+          `Signed out, but could not refresh the desktop session: ${error instanceof Error ? error.message : String(error)}`,
+          'warn'
+        )
+        return logoutGeneration
+      }
       fullSetStatus(
         `Logout failed: ${error instanceof Error ? error.message : String(error)}`,
         'error'
       )
+      return null
     } finally {
       auth.setBusy(false)
     }
   }, [
     agentsData.reset,
     auth.setBusy,
+    auth.setIsAuthenticated,
+    auth.setMe,
+    auth.setPassword,
     chat.resetChat,
     chat.stopAllActivityStreams,
     connectorsData.reset,
@@ -940,6 +975,10 @@ export function useAppController() {
     resetWorkflowsData,
     teamsData.reset,
   ])
+  const handleLogout = useCallback(async (): Promise<void> => {
+    await logoutAndGetSessionGeneration()
+  }, [logoutAndGetSessionGeneration])
+  logoutForEnvironmentMismatchRef.current = logoutAndGetSessionGeneration
 
   // ─── Cross-domain: handleOpenAgentWorkspace ───
   const openAgentWorkspace = useCallback(
@@ -1433,6 +1472,7 @@ export function useAppController() {
     desktopReleaseStatus: auth.desktopReleaseStatus,
     desktopEnvironmentSetupComplete: auth.desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup: auth.pendingDesktopEnvironmentSetup,
+    pendingDesktopEnvironmentSwitchConfirmation: auth.pendingDesktopEnvironmentSwitchConfirmation,
     backendSwitchHint: auth.backendSwitchHint,
     showRuntimeConfigSelector: auth.showRuntimeConfigSelector,
     dependencyHealth: auth.dependencyHealth,
@@ -1457,6 +1497,10 @@ export function useAppController() {
     handleClearRuntimeConfigSelection: auth.handleClearRuntimeConfigSelection,
     handleCancelDesktopEnvironmentSetup: auth.handleCancelDesktopEnvironmentSetup,
     handleConfirmDesktopEnvironmentSetup: auth.handleConfirmDesktopEnvironmentSetup,
+    handleCancelDesktopEnvironmentSwitchConfirmation:
+      auth.handleCancelDesktopEnvironmentSwitchConfirmation,
+    handleConfirmDesktopEnvironmentSwitchConfirmation:
+      auth.handleConfirmDesktopEnvironmentSwitchConfirmation,
     handleOpenDesktopRelease: auth.handleOpenDesktopRelease,
     setDesktopEnvironmentSetupComplete: auth.setDesktopEnvironmentSetupComplete,
     handleLogout,

@@ -12,10 +12,12 @@ type RpcCache = {
 
 export class RpcTokenManager {
   private cache: RpcCache | null = null
+  private cacheGeneration = 0
 
   constructor(private readonly authClient: AuthClient) {}
 
   clear(): void {
+    this.cacheGeneration += 1
     this.cache = null
   }
 
@@ -57,18 +59,21 @@ export class RpcTokenManager {
       }
     }
 
+    const generation = this.cacheGeneration
     const issued = await this.authClient.issueRpcToken(
       sessionToken,
       requiredScopes,
       requestedHostRefs
     )
-    this.cache = {
-      token: issued.token,
-      accessScope: issued.accessScope,
-      teamId: issued.teamId,
-      scopes: issued.scopes,
-      hostRefs: issued.hostRefs,
-      expiresAtMs: Date.now() + issued.expiresInSeconds * 1000,
+    if (generation === this.cacheGeneration) {
+      this.cache = {
+        token: issued.token,
+        accessScope: issued.accessScope,
+        teamId: issued.teamId,
+        scopes: issued.scopes,
+        hostRefs: issued.hostRefs,
+        expiresAtMs: Date.now() + issued.expiresInSeconds * 1000,
+      }
     }
     return issued
   }

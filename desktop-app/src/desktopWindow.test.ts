@@ -41,9 +41,12 @@ vi.mock('electron', () => ({
 }))
 
 const mockPostDesktopSession = vi.fn()
+const mockRpcProxyEndpointProvider = vi.fn()
 vi.mock('./rpcProxyClient.js', () => ({
   RpcProxyClient: class {
-    constructor() {}
+    constructor(getRpcProxyBaseUrl: () => string) {
+      mockRpcProxyEndpointProvider(getRpcProxyBaseUrl)
+    }
     postDesktopSession = mockPostDesktopSession
   },
 }))
@@ -83,6 +86,9 @@ describe('desktopWindow', () => {
       rpcProxyUrl: 'http://localhost:8094',
     })
 
+    expect(mockRpcProxyEndpointProvider).toHaveBeenCalledOnce()
+    const endpointProvider = mockRpcProxyEndpointProvider.mock.calls[0]?.[0]
+    expect(endpointProvider?.()).toBe('http://localhost:8094')
     expect(mockPostDesktopSession).toHaveBeenCalledWith('test-jwt', 'chatllm')
     expect(mockFromPartition).toHaveBeenCalledWith('persist:desktop-chatllm')
     expect(mockSetCookie).toHaveBeenCalledWith(

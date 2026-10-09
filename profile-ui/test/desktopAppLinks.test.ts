@@ -8,28 +8,66 @@ import {
   navigateToDesktopApp,
 } from '../lib/desktopAppLinks'
 
-test('buildDesktopEnvironmentLink defaults the tenant name to Evenfire', () => {
-  const link = buildDesktopEnvironmentLink({
-    externalRestApiBaseUrl: 'https://api.example.com',
-    rpcProxyBaseUrl: '',
-    appName: '',
-  })
+function withDesktopHandoffEnabled<T>(run: () => T): T {
+  const original = process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
+  try {
+    process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = 'true'
+    return run()
+  } finally {
+    if (original === undefined) delete process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
+    else process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = original
+  }
+}
 
-  assert.ok(link)
-  const parsedLink = new URL(link)
-  assert.equal(parsedLink.searchParams.get('tenantName'), 'Evenfire')
-})
-
-test('buildDesktopEnvironmentLink omits an empty RPC proxy URL', () => {
-  const link = buildDesktopEnvironmentLink({
+test('buildDesktopEnvironmentLink is disabled unless the rollout flag is enabled', () => {
+  const original = process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
+  const environment = {
     externalRestApiBaseUrl: 'https://api.example.com',
     rpcProxyBaseUrl: '',
     appName: 'Example tenant',
-  })
+  }
 
-  assert.ok(link)
-  const parsedLink = new URL(link)
-  assert.equal(parsedLink.searchParams.get('rpcProxyBaseUrl'), null)
+  try {
+    delete process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
+    assert.equal(buildDesktopEnvironmentLink(environment), null)
+
+    process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = 'false'
+    assert.equal(buildDesktopEnvironmentLink(environment), null)
+
+    process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = 'true'
+    assert.ok(buildDesktopEnvironmentLink(environment))
+  } finally {
+    if (original === undefined) delete process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
+    else process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED = original
+  }
+})
+
+test('buildDesktopEnvironmentLink defaults the tenant name to Evenfire', () => {
+  withDesktopHandoffEnabled(() => {
+    const link = buildDesktopEnvironmentLink({
+      externalRestApiBaseUrl: 'https://api.example.com',
+      rpcProxyBaseUrl: '',
+      appName: '',
+    })
+
+    assert.ok(link)
+    const parsedLink = new URL(link)
+    assert.equal(parsedLink.searchParams.get('tenantName'), 'Evenfire')
+  })
+})
+
+test('buildDesktopEnvironmentLink does not include the RPC proxy URL', () => {
+  withDesktopHandoffEnabled(() => {
+    const link = buildDesktopEnvironmentLink({
+      externalRestApiBaseUrl: 'https://api.example.com',
+      rpcProxyBaseUrl: 'https://rpc.example.com',
+      appName: 'Example tenant',
+    })
+
+    assert.ok(link)
+    const parsedLink = new URL(link)
+    assert.equal(parsedLink.searchParams.get('rpcProxyBaseUrl'), null)
+  })
 })
 
 test('navigateToDesktopApp assigns the protocol URL to the browser location', () => {

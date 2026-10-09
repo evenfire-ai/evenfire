@@ -46,9 +46,13 @@ vi.mock('next/link', () => ({
 beforeEach(() => {
   api.getDesktopEnvironment.mockReset()
   api.getDesktopEnvironment.mockResolvedValue(desktopEnvironment)
+  vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'true')
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllEnvs()
+})
 
 describe('Profile Portal home desktop app link', () => {
   it('keeps the welcome, portal prompt, and account summary in three cards', () => {
@@ -61,6 +65,18 @@ describe('Profile Portal home desktop app link', () => {
       screen.getByRole('heading', { name: 'Welcome, Josue' }).closest('.cu-home-welcome-card')
     ).not.toBeNull()
     expect(screen.getByText('Profile Portal', { selector: 'strong' })).toBeInTheDocument()
+  })
+
+  it('does not discover or link a Desktop environment while handoffs are disabled', () => {
+    vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'false')
+
+    render(<Page />)
+
+    expect(api.getDesktopEnvironment).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Automatic Desktop setup is not enabled yet.'
+    )
+    expect(screen.queryByRole('link', { name: 'Open Desktop App' })).not.toBeInTheDocument()
   })
 
   it('shows a loading status while desktop setup availability is checked', () => {
@@ -149,7 +165,7 @@ describe('Profile Portal home desktop app link', () => {
     expect(handoffCopy).toHaveTextContent('Open Desktop App instead.')
     expect(href.searchParams.get('externalRestApiBaseUrl')).toBe(environment.externalRestApiBaseUrl)
     expect(href.searchParams.get('tenantName')).toBe(environment.appName)
-    expect(href.searchParams.get('rpcProxyBaseUrl')).toBe(environment.rpcProxyBaseUrl)
+    expect(href.searchParams.get('rpcProxyBaseUrl')).toBeNull()
   })
 
   it('builds the desktop app link from the production discovery response', () => {
@@ -164,6 +180,6 @@ describe('Profile Portal home desktop app link', () => {
       environment.externalRestApiBaseUrl
     )
     expect(parsedLink.searchParams.get('tenantName')).toBe(environment.appName)
-    expect(parsedLink.searchParams.get('rpcProxyBaseUrl')).toBe(environment.rpcProxyBaseUrl)
+    expect(parsedLink.searchParams.get('rpcProxyBaseUrl')).toBeNull()
   })
 })

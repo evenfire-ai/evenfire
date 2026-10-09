@@ -1,9 +1,15 @@
 import {
   canonicalizeDesktopRestEndpoint,
   desktopRestEndpointOrigin,
+  sameDesktopRestEndpoint,
 } from '../../../../src/desktopEnvironmentUrl'
-import type { DesktopRuntimeConfig, DesktopRuntimeConfigState } from '../../../../src/types'
-import type { SetStatusFn } from './types'
+import type {
+  DesktopRuntimeConfig,
+  DesktopRuntimeConfigHandoffSelection,
+  DesktopRuntimeConfigOption,
+  DesktopRuntimeConfigState,
+} from '../../../../src/types'
+import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
 
 const LOCALHOST_OPTION_ID = '__localhost__'
 
@@ -16,51 +22,48 @@ type DesktopEnvironmentHandoffState = {
 
 type DesktopEnvironmentSetupPayload = {
   externalRestApiBaseUrl: string
-  rpcProxyBaseUrl?: string
   appName?: string
 }
 
 type DesktopEnvironmentSetupHandlerOptions = {
   getAuthState: () => DesktopEnvironmentHandoffState
+  getSessionGeneration: () => Promise<number>
   refreshRuntimeConfigState: () => Promise<DesktopRuntimeConfigState>
-  handleSelectRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState | null>
+  handleSelectRuntimeConfig: (
+    optionId: string,
+    expectedSessionGeneration: number
+  ) => Promise<DesktopRuntimeConfigHandoffSelection | null>
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
+  requestEnvironmentSwitchConfirmation: (
+    details: DesktopEnvironmentSwitchConfirmation
+  ) => Promise<boolean>
+  logoutForEnvironmentMismatch: () => Promise<number | null>
   setPendingDesktopEnvironmentSetup: (config: DesktopRuntimeConfig | null) => void
   setStatus: SetStatusFn
 }
 
-function environmentOrigin(value: string): string {
-  const url = new URL(value.trim())
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('Only http(s) desktop environment URLs are supported')
-  }
-  return url.origin
-}
-
-function sameDesktopEnvironment(
-  left: Pick<DesktopRuntimeConfig, 'externalRestApiBaseUrl' | 'rpcProxyBaseUrl'>,
-  right: Pick<DesktopRuntimeConfig, 'externalRestApiBaseUrl' | 'rpcProxyBaseUrl'>
-): boolean {
-  try {
-    return (
-      desktopRestEndpointOrigin(left.externalRestApiBaseUrl) ===
-        desktopRestEndpointOrigin(right.externalRestApiBaseUrl) &&
-      (left.rpcProxyBaseUrl?.trim() ? environmentOrigin(left.rpcProxyBaseUrl) : '') ===
-        (right.rpcProxyBaseUrl?.trim() ? environmentOrigin(right.rpcProxyBaseUrl) : '')
-    )
-  } catch {
-    return false
-  }
-}
-
-function savedEnvironmentsForRestOrigin(
+function savedEnvironmentsForRestEndpoint(
   options: DesktopRuntimeConfigState['options'],
-  restOrigin: string
+  externalRestApiBaseUrl: string
 ) {
   return options.filter(option => {
     if (option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID) return false
+    return sameDesktopRestEndpoint(option.externalRestApiBaseUrl, externalRestApiBaseUrl)
+  })
+}
+
+function savedEnvironmentsWithDifferentEndpointOnSameOrigin(
+  options: DesktopRuntimeConfigState['options'],
+  externalRestApiBaseUrl: string
+) {
+  const restOrigin = desktopRestEndpointOrigin(externalRestApiBaseUrl)
+  return options.filter(option => {
+    if (option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID) return false
     try {
-      return desktopRestEndpointOrigin(option.externalRestApiBaseUrl) === restOrigin
+      return (
+        desktopRestEndpointOrigin(option.externalRestApiBaseUrl) === restOrigin &&
+        !sameDesktopRestEndpoint(option.externalRestApiBaseUrl, externalRestApiBaseUrl)
+      )
     } catch {
       return false
     }
@@ -71,12 +74,13 @@ function isLocalhostOption(option: DesktopRuntimeConfigState['options'][number])
   return option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID
 }
 
-export function getDesktopEnvironmentRestOriginMatches(
+function getDesktopEnvironmentRestMatches(
   configState: DesktopRuntimeConfigState,
   externalRestApiBaseUrl: string
 ) {
   const restOrigin = desktopRestEndpointOrigin(externalRestApiBaseUrl)
   return {
+    active: isActiveRestEndpointMatch(configState, externalRestApiBaseUrl),
     localhost: configState.options.find(option => {
       if (!isLocalhostOption(option)) return false
       try {
@@ -85,38 +89,33 @@ export function getDesktopEnvironmentRestOriginMatches(
         return false
       }
     }),
-    saved: savedEnvironmentsForRestOrigin(configState.options, restOrigin),
+    saved: savedEnvironmentsForRestEndpoint(configState.options, externalRestApiBaseUrl),
+    sameOriginDifferentEndpoint: savedEnvironmentsWithDifferentEndpointOnSameOrigin(
+      configState.options,
+      externalRestApiBaseUrl
+    ),
   }
 }
 
-type SavedEnvironmentDecision =
-  | { kind: 'select'; option: DesktopRuntimeConfigState['options'][number] }
+type DesktopEnvironmentRestMatchDecision =
+  | { kind: 'localhost'; option: DesktopRuntimeConfigOption }
+  | { kind: 'active' }
+  | { kind: 'ambiguous' }
+  | { kind: 'saved'; option: DesktopRuntimeConfigOption }
+  | { kind: 'path-conflict' }
   | { kind: 'setup' }
-  | { kind: 'reject'; reason: 'ambiguous' | 'rpc-conflict' }
 
-function decideSavedEnvironment(
-  sameRestOrigin: DesktopRuntimeConfigState['options'],
-  linkedConfig: DesktopRuntimeConfig
-): SavedEnvironmentDecision {
-  const linkedRpcOrigin = linkedConfig.rpcProxyBaseUrl?.trim()
-    ? environmentOrigin(linkedConfig.rpcProxyBaseUrl)
-    : ''
-
-  if (!linkedRpcOrigin) {
-    if (sameRestOrigin.length > 1) return { kind: 'reject', reason: 'ambiguous' }
-    if (sameRestOrigin.length === 1) return { kind: 'select', option: sameRestOrigin[0]! }
-    return { kind: 'setup' }
-  }
-
-  const exactMatch = sameRestOrigin.find(option => {
-    try {
-      return environmentOrigin(option.rpcProxyBaseUrl) === linkedRpcOrigin
-    } catch {
-      return false
-    }
-  })
-  if (exactMatch) return { kind: 'select', option: exactMatch }
-  if (sameRestOrigin.length) return { kind: 'reject', reason: 'rpc-conflict' }
+export function resolveDesktopEnvironmentRestMatch(
+  configState: DesktopRuntimeConfigState,
+  externalRestApiBaseUrl: string
+): DesktopEnvironmentRestMatchDecision {
+  const matches = getDesktopEnvironmentRestMatches(configState, externalRestApiBaseUrl)
+  if (matches.localhost) return { kind: 'localhost', option: matches.localhost }
+  if (matches.active) return { kind: 'active' }
+  if (matches.saved.length > 1) return { kind: 'ambiguous' }
+  const [savedOption] = matches.saved
+  if (savedOption) return { kind: 'saved', option: savedOption }
+  if (matches.sameOriginDifferentEndpoint.length > 0) return { kind: 'path-conflict' }
   return { kind: 'setup' }
 }
 
@@ -124,33 +123,80 @@ function isAuthenticationOperationInProgress(state: DesktopEnvironmentHandoffSta
   return state.booting || state.busy || state.authTransitioning
 }
 
+function reportAuthenticationStateChanged(
+  state: DesktopEnvironmentHandoffState,
+  setStatus: SetStatusFn,
+  setPendingDesktopEnvironmentSetup: (config: DesktopRuntimeConfig | null) => void
+): void {
+  setPendingDesktopEnvironmentSetup(null)
+  if (isAuthenticationOperationInProgress(state)) {
+    setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
+    return
+  }
+  setStatus('The desktop session changed while processing this link. Open it again.', 'info')
+}
+
+function isActiveRestEndpointMatch(
+  configState: DesktopRuntimeConfigState,
+  externalRestApiBaseUrl: string
+): boolean {
+  return Boolean(
+    configState.configured &&
+    configState.currentConfig &&
+    sameDesktopRestEndpoint(
+      configState.currentConfig.externalRestApiBaseUrl,
+      externalRestApiBaseUrl
+    )
+  )
+}
+
+function rejectSameOriginPathConflict(setStatus: SetStatusFn): void {
+  setStatus(
+    'Desktop setup link rejected because this REST host is already saved with a different API endpoint.',
+    'error'
+  )
+}
+
 export function createDesktopEnvironmentSetupHandler({
   getAuthState,
+  getSessionGeneration,
   refreshRuntimeConfigState,
   handleSelectRuntimeConfig,
   onSessionNeedsLoad,
+  requestEnvironmentSwitchConfirmation,
+  logoutForEnvironmentMismatch,
   setPendingDesktopEnvironmentSetup,
   setStatus,
 }: DesktopEnvironmentSetupHandlerOptions) {
   let linkInProgress = false
+  const ownsSessionGeneration = async (expectedSessionGeneration: number): Promise<boolean> => {
+    try {
+      if ((await getSessionGeneration()) === expectedSessionGeneration) return true
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus('The desktop session changed while processing this link. Open it again.', 'info')
+      return false
+    } catch {
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
+      return false
+    }
+  }
 
   const processLink = async ({
     externalRestApiBaseUrl,
-    rpcProxyBaseUrl,
     appName,
   }: DesktopEnvironmentSetupPayload) => {
     const normalizedExternalRestApiBaseUrl = externalRestApiBaseUrl.trim()
     if (!normalizedExternalRestApiBaseUrl) return
     const linkedConfig: DesktopRuntimeConfig = {
       externalRestApiBaseUrl: normalizedExternalRestApiBaseUrl,
-      rpcProxyBaseUrl: rpcProxyBaseUrl?.trim() || '',
+      rpcProxyBaseUrl: '',
       appName: appName?.trim() || 'Evenfire',
     }
     try {
       linkedConfig.externalRestApiBaseUrl = canonicalizeDesktopRestEndpoint(
         linkedConfig.externalRestApiBaseUrl
       )
-      if (linkedConfig.rpcProxyBaseUrl) environmentOrigin(linkedConfig.rpcProxyBaseUrl)
     } catch (error) {
       setStatus(
         `Desktop setup link rejected: ${error instanceof Error ? error.message : String(error)}`,
@@ -159,27 +205,40 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
-    let configState: DesktopRuntimeConfigState
+    let sessionGeneration: number
     try {
-      configState = await refreshRuntimeConfigState()
+      sessionGeneration = await getSessionGeneration()
     } catch {
-      setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
+      setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
       return
     }
 
     if (isAuthenticationOperationInProgress(getAuthState())) {
-      setStatus(
-        'Finish the current authentication action before opening another desktop environment.',
-        'info'
-      )
+      setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
       return
     }
 
-    const restOriginMatches = getDesktopEnvironmentRestOriginMatches(
+    let configState: DesktopRuntimeConfigState
+    try {
+      configState = await refreshRuntimeConfigState()
+    } catch {
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
+      return
+    }
+
+    if (!(await ownsSessionGeneration(sessionGeneration))) return
+    let authState = getAuthState()
+    if (isAuthenticationOperationInProgress(authState)) {
+      reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
+      return
+    }
+
+    let restMatch = resolveDesktopEnvironmentRestMatch(
       configState,
       linkedConfig.externalRestApiBaseUrl
     )
-    if (restOriginMatches.localhost) {
+    if (restMatch.kind === 'localhost') {
       setPendingDesktopEnvironmentSetup(null)
       setStatus(
         'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
@@ -187,30 +246,155 @@ export function createDesktopEnvironmentSetupHandler({
       )
       return
     }
-
-    const savedDecision = decideSavedEnvironment(restOriginMatches.saved, linkedConfig)
-    const activeEnvironmentMatches = Boolean(
-      configState.configured &&
-      configState.currentConfig &&
-      (sameDesktopEnvironment(configState.currentConfig, linkedConfig) ||
-        (savedDecision.kind === 'select' && savedDecision.option.id === configState.activeOptionId))
-    )
-    if (activeEnvironmentMatches) {
+    authState = getAuthState()
+    let activeRestEndpointMatches = restMatch.kind === 'active'
+    if (restMatch.kind === 'path-conflict') {
       setPendingDesktopEnvironmentSetup(null)
-      setStatus(`Opening ${linkedConfig.appName} in Evenfire Desktop.`, 'success')
+      rejectSameOriginPathConflict(setStatus)
       return
     }
 
-    if (getAuthState().isAuthenticated) {
+    if (restMatch.kind === 'ambiguous') {
       setPendingDesktopEnvironmentSetup(null)
-      setStatus('Sign out before opening another desktop environment.', 'info')
+      setStatus(
+        'Desktop setup link rejected because multiple saved environments use this REST API.',
+        'error'
+      )
       return
     }
 
-    if (savedDecision.kind === 'select') {
+    if (authState.isAuthenticated && !activeRestEndpointMatches) {
+      const switchConfirmed = await requestEnvironmentSwitchConfirmation({
+        activeEnvironmentName: configState.currentConfig?.appName?.trim() || 'Current environment',
+        activeExternalRestApiBaseUrl: configState.currentConfig?.externalRestApiBaseUrl || '',
+        targetEnvironmentName: linkedConfig.appName || 'Evenfire',
+        targetExternalRestApiBaseUrl: linkedConfig.externalRestApiBaseUrl,
+      })
+      if (!switchConfirmed) return
+      if (!(await ownsSessionGeneration(sessionGeneration))) return
+
+      authState = getAuthState()
+      if (isAuthenticationOperationInProgress(authState) || !authState.isAuthenticated) {
+        reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
+        return
+      }
+
       setPendingDesktopEnvironmentSetup(null)
-      const selectedState = await handleSelectRuntimeConfig(savedDecision.option.id)
-      if (!selectedState) return
+      let logoutGeneration: number | null
+      try {
+        logoutGeneration = await logoutForEnvironmentMismatch()
+      } catch (error) {
+        setStatus(
+          `Could not sign out before switching desktop environments: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+        return
+      }
+      if (logoutGeneration === null) {
+        authState = getAuthState()
+        if (authState.isAuthenticated && !isAuthenticationOperationInProgress(authState)) {
+          try {
+            await onSessionNeedsLoad({ preserveNav: true })
+          } catch (error) {
+            setStatus(
+              `Could not reload the current desktop session: ${error instanceof Error ? error.message : String(error)}`,
+              'error'
+            )
+            return
+          }
+        }
+        return
+      }
+      sessionGeneration = logoutGeneration
+      if (!(await ownsSessionGeneration(sessionGeneration))) return
+
+      authState = getAuthState()
+      if (isAuthenticationOperationInProgress(authState)) {
+        reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
+        return
+      }
+      if (authState.isAuthenticated) {
+        try {
+          await onSessionNeedsLoad({ preserveNav: true })
+        } catch {
+          if (!(await ownsSessionGeneration(sessionGeneration))) return
+          setStatus(
+            'Could not verify your sign-in state before switching desktop environments.',
+            'error'
+          )
+          return
+        }
+        if (!(await ownsSessionGeneration(sessionGeneration))) return
+        authState = getAuthState()
+        if (authState.isAuthenticated) {
+          reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
+          return
+        }
+      }
+      try {
+        configState = await refreshRuntimeConfigState()
+      } catch {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
+        return
+      }
+      if (!(await ownsSessionGeneration(sessionGeneration))) return
+      authState = getAuthState()
+      if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
+        reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
+        return
+      }
+      restMatch = resolveDesktopEnvironmentRestMatch(
+        configState,
+        linkedConfig.externalRestApiBaseUrl
+      )
+      if (restMatch.kind === 'localhost') {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
+          'error'
+        )
+        return
+      }
+      activeRestEndpointMatches = restMatch.kind === 'active'
+      if (restMatch.kind === 'path-conflict') {
+        setPendingDesktopEnvironmentSetup(null)
+        rejectSameOriginPathConflict(setStatus)
+        return
+      }
+      if (restMatch.kind === 'ambiguous') {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop setup link rejected because multiple saved environments use this REST API.',
+          'error'
+        )
+        return
+      }
+    }
+
+    if (authState.isAuthenticated) {
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus('This link points to the active Evenfire Desktop environment.', 'success')
+      return
+    }
+
+    if (activeRestEndpointMatches) {
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus('This link points to the active Evenfire Desktop environment.', 'success')
+      return
+    }
+
+    if (restMatch.kind === 'saved') {
+      const savedOption = restMatch.option
+      setPendingDesktopEnvironmentSetup(null)
+      const selection = await handleSelectRuntimeConfig(savedOption.id, sessionGeneration)
+      if (!selection) return
+      if (!(await ownsSessionGeneration(selection.sessionGeneration))) return
+      authState = getAuthState()
+      if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
+        reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
+        return
+      }
       try {
         await onSessionNeedsLoad({ preserveNav: true })
       } catch (error) {
@@ -222,19 +406,13 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
-    if (savedDecision.kind === 'reject') {
-      setPendingDesktopEnvironmentSetup(null)
-      setStatus(
-        savedDecision.reason === 'ambiguous'
-          ? 'Desktop setup link rejected because multiple saved environments use this REST host.'
-          : 'Desktop setup link rejected because its RPC proxy does not match the saved environment.',
-        'error'
-      )
+    // The backend supplies the RPC endpoint after the user confirms this REST API.
+    if (!(await ownsSessionGeneration(sessionGeneration))) return
+    authState = getAuthState()
+    if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
+      reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
       return
     }
-
-    // The RPC URL in an external link is untrusted. Desktop discovers it from
-    // the selected REST endpoint after confirmation.
     setPendingDesktopEnvironmentSetup({ ...linkedConfig, rpcProxyBaseUrl: '' })
   }
 
@@ -244,10 +422,8 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
     if (isAuthenticationOperationInProgress(getAuthState())) {
-      setStatus(
-        'Finish the current authentication action before opening another desktop environment.',
-        'info'
-      )
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
       return
     }
 

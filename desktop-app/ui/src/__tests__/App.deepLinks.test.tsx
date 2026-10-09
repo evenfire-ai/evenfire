@@ -48,6 +48,8 @@ const confirmDialogHarness = vi.hoisted(() => ({
   props: null as null | {
     title: string
     body?: ReactNode
+    cancelLabel?: string
+    confirmLabel?: string
     onCancel: () => void
     onConfirm: () => void
   },
@@ -380,10 +382,11 @@ describe('App deep-link orchestration', () => {
   const getSandboxUiLocation = vi.fn().mockResolvedValue(null)
 
   it('prompts to add an environment when a Profile Portal handoff has no saved match', () => {
+    const linkProvidedName = 'Tenant from profile link '.repeat(5)
     currentController = makeController({
       initialExperienceLoading: false,
       pendingDesktopEnvironmentSetup: {
-        appName: 'Example tenant',
+        appName: linkProvidedName,
         externalRestApiBaseUrl: 'https://api.example.test',
         rpcProxyBaseUrl: 'https://rpc.example.test',
       },
@@ -394,9 +397,46 @@ describe('App deep-link orchestration', () => {
     expect(confirmDialogHarness.props?.title).toBe('Add desktop environment?')
     const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
     expect(dialogBody).toContain(
-      'Review the service URLs for <strong>Example tenant</strong>. Continue only if you trust them.'
+      'Review this External REST API host. Continue only if you trust it.'
     )
-    expect(dialogBody).toContain('https://rpc.example.test')
+    expect(dialogBody).toContain('<strong>api.example.test</strong>')
+    expect(dialogBody).toContain('Profile link label (unverified):')
+    expect(dialogBody).toContain(`${linkProvidedName.slice(0, 63)}…`)
+    expect(dialogBody).not.toContain(linkProvidedName.slice(64))
+    expect(dialogBody).toContain('https://api.example.test')
+    expect(dialogBody).not.toContain('https://rpc.example.test')
+  })
+
+  it('wires environment switch confirmation actions to the controller', () => {
+    const cancelSwitch = vi.fn()
+    const confirmSwitch = vi.fn()
+    const linkProvidedName = 'Tenant from profile link '.repeat(5)
+    currentController = makeController({
+      initialExperienceLoading: false,
+      pendingDesktopEnvironmentSwitchConfirmation: {
+        activeEnvironmentName: 'Current environment',
+        activeExternalRestApiBaseUrl: 'https://current-api.example.test/api/v1',
+        targetEnvironmentName: linkProvidedName,
+        targetExternalRestApiBaseUrl: 'https://target-api.example.test/api/v1',
+      },
+      handleCancelDesktopEnvironmentSwitchConfirmation: cancelSwitch,
+      handleConfirmDesktopEnvironmentSwitchConfirmation: confirmSwitch,
+    } as Partial<AppController>)
+
+    render(<App />)
+
+    expect(confirmDialogHarness.props?.title).toBe('Switch desktop environment?')
+    expect(confirmDialogHarness.props?.confirmLabel).toBe('Sign out and switch')
+    const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
+    expect(dialogBody).toContain('<strong>current-api.example.test</strong>')
+    expect(dialogBody).toContain('<strong>target-api.example.test</strong>')
+    expect(dialogBody).toContain('Profile link label (unverified):')
+    expect(dialogBody).toContain(`${linkProvidedName.slice(0, 63)}…`)
+    expect(dialogBody).not.toContain(linkProvidedName.slice(64))
+    act(() => confirmDialogHarness.props?.onCancel())
+    expect(cancelSwitch).toHaveBeenCalledOnce()
+    act(() => confirmDialogHarness.props?.onConfirm())
+    expect(confirmSwitch).toHaveBeenCalledOnce()
   })
 
   beforeEach(() => {
