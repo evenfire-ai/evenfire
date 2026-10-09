@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { AuthProvider, useAuth } from '../AuthContext'
@@ -17,12 +17,19 @@ vi.mock('@lib/profileAccess', () => ({ resetProfileAccessCache: vi.fn() }))
 
 function AuthProbe() {
   const { authState, checkAuth } = useAuth()
+  const [checkResult, setCheckResult] = useState('not-checked')
   return (
     <div>
       <div data-testid="auth-state">
         {authState.isLoggedIn ? `signed-in:${authState.me?.email}` : 'signed-out'}
       </div>
-      <button type="button" onClick={() => void checkAuth()}>
+      <div data-testid="auth-check-result">{checkResult}</div>
+      <button
+        type="button"
+        onClick={() => {
+          void checkAuth().then(result => setCheckResult(result.status))
+        }}
+      >
         Check recovered session
       </button>
     </div>
@@ -56,6 +63,31 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('AuthProvider verified recovery session', () => {
+  it('returns an observable retryable result when session hydration is temporarily unavailable', async () => {
+    apiMocks.getMe
+      .mockResolvedValueOnce(member)
+      .mockRejectedValueOnce(new Error('temporary /me outage'))
+      .mockResolvedValueOnce(member)
+
+    render(
+      <AuthProvider>
+        <AuthProbe />
+      </AuthProvider>
+    )
+
+    await waitFor(() => expect(screen.getByTestId('auth-state')).toHaveTextContent('signed-in:'))
+    fireEvent.click(screen.getByRole('button', { name: 'Check recovered session' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('auth-check-result')).toHaveTextContent('unavailable')
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check recovered session' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('auth-check-result')).toHaveTextContent('authenticated')
+    )
+    expect(screen.getByTestId('auth-state')).toHaveTextContent('signed-in:member@example.test')
+  })
+
   it('ignores an older anonymous auth check after recovery establishes a session', async () => {
     const initialAnonymousCheck = deferred<typeof member>()
     apiMocks.getMe.mockReturnValueOnce(initialAnonymousCheck.promise).mockResolvedValueOnce(member)

@@ -20,7 +20,7 @@ import {
 import { resetProfileAccessCache } from '@lib/profileAccess'
 import type { PasswordLoginResponse } from '@/app/types/api'
 import type { Me } from '@/app/types/profile'
-import type { AuthContextValue, AuthState } from './types'
+import type { AuthCheckResult, AuthContextValue, AuthState } from './types'
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
 
@@ -56,21 +56,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     me: null,
   })
 
-  const checkAuth = useCallback(async () => {
+  const checkAuth = useCallback(async (): Promise<AuthCheckResult> => {
     const sequence = ++authCheckSequenceRef.current
     try {
       const me = await getMe({ silentUnauthorized: true })
-      if (sequence !== authCheckSequenceRef.current) return
+      if (sequence !== authCheckSequenceRef.current) return { status: 'superseded' }
       sessionExpiredHandledRef.current = false
       setAuthState({ isLoggedIn: true, isLoading: false, me })
+      return { status: 'authenticated', me }
     } catch (error) {
-      if (sequence !== authCheckSequenceRef.current) return
+      if (sequence !== authCheckSequenceRef.current) return { status: 'superseded' }
       if (isSilentApiError(error)) {
         setAuthState({ isLoggedIn: false, isLoading: false, me: null })
-        return
+        return { status: 'unauthenticated' }
       }
       clearToken()
       setAuthState({ isLoggedIn: false, isLoading: false, me: null })
+      return { status: 'unavailable' }
     }
   }, [])
 

@@ -50,7 +50,10 @@ function fillPassword() {
 
 beforeEach(() => {
   mocks.acceptInvitation.mockReset()
-  mocks.checkAuth.mockReset().mockResolvedValue(undefined)
+  mocks.checkAuth.mockReset().mockResolvedValue({
+    status: 'authenticated',
+    me: { id: 'user-1', email: 'member@example.invalid' },
+  })
   mocks.routerReplace.mockReset()
   mocks.setupInvitationPasswordWithToken.mockReset().mockResolvedValue({
     ...passwordReset,
@@ -86,6 +89,65 @@ describe('InvitationClient verified password recovery', () => {
       'reset-1',
       'new-synthetic-password'
     )
+  })
+
+  it('keeps a committed reset retryable when session hydration fails, without resubmitting it', async () => {
+    mocks.checkAuth
+      .mockReset()
+      .mockResolvedValueOnce({ status: 'unavailable' })
+      .mockResolvedValueOnce({
+        status: 'authenticated',
+        me: { id: 'user-1', email: 'member@example.invalid' },
+      })
+    render(
+      <InvitationClient
+        invitationToken="verified-reset-proof"
+        initialInvitation={passwordReset}
+        initialError=""
+      />
+    )
+
+    fillPassword()
+    fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+
+    expect(
+      await screen.findByText(
+        'Your password was updated, but we could not verify your account session. Try again.'
+      )
+    ).toBeTruthy()
+    expect(mocks.routerReplace).not.toHaveBeenCalled()
+    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry account session check' }))
+
+    await waitFor(() => expect(mocks.routerReplace).toHaveBeenCalledWith(PROFILE_ROUTES.home))
+    expect(mocks.checkAuth).toHaveBeenCalledTimes(2)
+    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
+  })
+
+  it('does not navigate when hydrated identity differs from the recovered member', async () => {
+    mocks.checkAuth.mockResolvedValueOnce({
+      status: 'authenticated',
+      me: { id: 'different-user', email: 'other@example.invalid' },
+    })
+    render(
+      <InvitationClient
+        invitationToken="verified-reset-proof"
+        initialInvitation={passwordReset}
+        initialError=""
+      />
+    )
+
+    fillPassword()
+    fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+
+    expect(
+      await screen.findByText(
+        'Your password was updated, but the signed-in account does not match this recovery link.'
+      )
+    ).toBeTruthy()
+    expect(mocks.routerReplace).not.toHaveBeenCalled()
+    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
   })
 
   it('keeps member invitation password setup on its existing page flow', async () => {

@@ -86,6 +86,8 @@ export function InvitationClient({
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [submitting, setSubmitting] = useState<'accept' | 'password' | null>(null)
+  const [recoveryCommitted, setRecoveryCommitted] = useState(false)
+  const [sessionCheckInFlight, setSessionCheckInFlight] = useState(false)
   const actionInFlightRef = useRef(false)
 
   useEffect(() => {
@@ -193,8 +195,47 @@ export function InvitationClient({
     void handleAccept()
   }
 
+  async function verifyRecoveredSession(expectedUserId: string) {
+    setSessionCheckInFlight(true)
+    setError('')
+    try {
+      const result = await checkAuth()
+      if (result.status === 'authenticated') {
+        if (result.me.id === expectedUserId) {
+          router.replace(PROFILE_ROUTES.home)
+          return
+        }
+        setError(
+          'Your password was updated, but the signed-in account does not match this recovery link.'
+        )
+        return
+      }
+      setError(
+        'Your password was updated, but we could not verify your account session. Try again.'
+      )
+    } catch {
+      setError(
+        'Your password was updated, but we could not verify your account session. Try again.'
+      )
+    } finally {
+      setSessionCheckInFlight(false)
+    }
+  }
+
+  async function retryRecoveredSession() {
+    if (!recoveryCommitted || !invitation?.userId || sessionCheckInFlight || busy) return
+    await verifyRecoveredSession(invitation.userId)
+  }
+
   async function handlePasswordSubmit() {
-    if (!invitation || busy || actionInFlightRef.current) return
+    if (
+      !invitation ||
+      busy ||
+      actionInFlightRef.current ||
+      (isPasswordReset && recoveryCommitted)
+    ) {
+      return
+    }
     setError('')
     if (password.length < 8 || password.length > 256) {
       setError('Password must be between 8 and 256 characters.')
@@ -214,8 +255,17 @@ export function InvitationClient({
         password
       )
       if (isPasswordReset) {
-        await checkAuth()
-        router.replace(PROFILE_ROUTES.home)
+        setRecoveryCommitted(true)
+        setStatus('Your password has been updated.')
+        setPassword('')
+        setConfirmPassword('')
+        if (!invitation.userId || response.userId !== invitation.userId) {
+          setError(
+            'Your password was updated, but the signed-in account does not match this recovery link.'
+          )
+          return
+        }
+        await verifyRecoveredSession(invitation.userId)
         return
       }
       applyInvitationUpdate({
@@ -269,7 +319,11 @@ export function InvitationClient({
           </p>
         </div>
 
-        {error ? <div className="message message--error">{error}</div> : null}
+        {error ? (
+          <div className="message message--error" role="alert" aria-live="assertive">
+            {error}
+          </div>
+        ) : null}
 
         {invitation ? (
           <div className="invite-card">
@@ -306,7 +360,20 @@ export function InvitationClient({
           </div>
         ) : null}
 
-        {!invitation ? null : (isPasswordReset && invitation.status === 'pending') ||
+        {!invitation ? null : isPasswordReset && recoveryCommitted ? (
+          <div className="stack">
+            <Button
+              type="button"
+              disabled={busy || sessionCheckInFlight || !invitation.userId}
+              onClick={() => void retryRecoveredSession()}
+            >
+              {sessionCheckInFlight ? 'Checking account session...' : 'Retry account session check'}
+            </Button>
+            <a className="cu-btn" href={profileLoginHref}>
+              Sign in instead
+            </a>
+          </div>
+        ) : (isPasswordReset && invitation.status === 'pending') ||
           (invitation.status === 'accepted' && invitation.passwordPending) ? (
           <div className="stack">
             <div className="form-card">
