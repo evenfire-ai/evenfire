@@ -463,13 +463,19 @@ export type AccessCatalog = {
   contextIds: string[]
   agentNames: string[]
   /**
-   * Optional scoped MCP map keyed by agent/host ref.
-   * Not currently returned by external-rest-api in all environments.
+   * Optional scoped MCP map keyed by agent/host ref. A key is present only when
+   * the user or team catalog returned an `mcpServers` array for that agent; a
+   * present key is authoritative, so `[]` means the agent has no connectors.
+   * An absent key (or absent map) means the mapping is unknown — an older API
+   * build or an enrichment failure — and consumers may fall back to the
+   * workspace-wide preview.
    */
   agentMcpServers?: Record<string, AccessCatalogMcpServerEntry[]>
   /**
-   * Optional scoped MCP map keyed by context id.
-   * Not currently returned by external-rest-api in all environments.
+   * Optional scoped MCP map keyed by context ref: the union over the agents with
+   * a known mapping that reported that context. Same semantics as
+   * `agentMcpServers` — a present `[]` is authoritative, an absent key is
+   * unknown.
    */
   contextMcpServers?: Record<string, AccessCatalogMcpServerEntry[]>
   /**
