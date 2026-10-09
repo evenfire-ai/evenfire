@@ -5,6 +5,7 @@ import type {
   ApprovalDecisionTarget,
 } from '@hooks/domain/approvalDecision'
 import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
+import type { ApprovalInputPreview } from '@/uiTypes'
 import { ProgressStepper } from '../ProgressStepper'
 
 interface Props {
@@ -32,6 +33,7 @@ interface Props {
     reason?: string
     mcpServerName?: string
     alwaysApproveAllowed?: false
+    inputPreview?: ApprovalInputPreview
   }
 }
 
@@ -80,7 +82,11 @@ export function InFlightAssistantPlaceholder({
     <section className="chat-group assistant" data-task-id={taskId}>
       <div className="chat-bubble assistant chat-message--in-flight">
         <ProgressStepper
-          progress={progress}
+          progress={
+            si && !progress.suspendedInfo
+              ? { ...progress, status: 'suspended', suspendedInfo: si }
+              : progress
+          }
           hostRef={agentRef}
           onApprove={
             si

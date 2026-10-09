@@ -436,6 +436,14 @@ async function parseApprovalDecisionResponse(response: Response): Promise<Approv
   }
 }
 
+// A sandbox-ui open/close runs on a single lifecycle queue, so a hung mint
+// blocks every queued close behind it; and the refresh re-mints only 30 s
+// before the cookie expires. The app-wide default (60 s) would be too loose
+// for both.
+// The embed's OAuth authorize-url call shares it: a hung one would leave the
+// embed's click without any answer for a minute.
+export const SANDBOX_UI_MINT_TIMEOUT_MS = 15_000
+
 function url(path: string): string {
   return `${config.rpcProxyBaseUrl.replace(/\/+$/, '')}${path}`
 }
@@ -447,16 +455,22 @@ function url(path: string): string {
  *   409       → app is updating; try again
  *   500 / 502 → generic open failure
  */
-export class SandboxUiSessionError extends Error {
-  readonly status: number
-  readonly body: string
+export class SandboxUiSessionError extends ApiError {
+  // An ApiError so `AppService.shouldRefreshRpcToken` sees a 401 or a
+  // missing-scope 403 and re-mints with a fresh RPC token. Such a 401 comes
+  // from the short-lived RPC token, never from the user's session: it must
+  // not be read as a reason to sign the user out.
   constructor(status: number, body: string) {
     super(
-      `sandbox-ui session mint failed (${status}): ${boundedErrorExcerpt(body) || '<empty body>'}`
+      `sandbox-ui session mint failed (${status}): ${boundedErrorExcerpt(body) || '<empty body>'}`,
+      status,
+      body
     )
-    this.status = status
-    this.body = body
     this.name = 'SandboxUiSessionError'
+  }
+
+  get body(): string {
+    return this.bodyText
   }
 }
 
@@ -682,6 +696,7 @@ export class RpcProxyClient {
       {
         method: 'POST',
         headers: { authorization: `Bearer ${rpcAccessToken}` },
+        signal: withTimeout(undefined, SANDBOX_UI_MINT_TIMEOUT_MS),
       }
     )
     if (response.status !== 204) {
@@ -722,12 +737,17 @@ export class RpcProxyClient {
           'content-type': 'application/json',
         },
         body: JSON.stringify({ oauthClientId, background }),
+        signal: withTimeout(undefined, SANDBOX_UI_MINT_TIMEOUT_MS),
       }
     )
     if (!response.ok) {
       const body = await response.text()
-      throw new Error(
-        `sandbox-ui authorize-url request failed (${response.status}): ${boundedErrorExcerpt(body) || '<empty>'}`
+      // An ApiError so `AppService.shouldRefreshRpcToken` can retry a 401 or a
+      // missing-scope 403 with a fresh RPC token.
+      throw new ApiError(
+        `sandbox-ui authorize-url request failed (${response.status}): ${boundedErrorExcerpt(body) || '<empty>'}`,
+        response.status,
+        body
       )
     }
     const json = (await response.json()) as { authorizeUrl?: unknown }

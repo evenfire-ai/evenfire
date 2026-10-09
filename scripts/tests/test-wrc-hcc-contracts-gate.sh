@@ -357,4 +357,37 @@ else
   fail "Makefile does not expose the WRC-HCC runtime gate with explicit profile ownership"
 fi
 
+# BSD mktemp (macOS) substitutes the X run only at the END of the template. A
+# suffix after it (`...XXXXXX.log`) yields one fixed literal name, so a leftover
+# file or a concurrent run makes the next call fail with "File exists" and the
+# T2 Health gate dies with PROFILE_UNHEALTHY. Run every template the gate uses
+# twice: both calls must succeed and return different names.
+MKTEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wrc-hcc-mktemp-contract.XXXXXX")" || exit 1
+trap 'rm -rf "$READER_FIXTURE" "$MKTEMP_DIR"' EXIT
+mktemp_templates="$(grep -oE 'mktemp "[^"]+"' "$GATE" | sed -E 's/^mktemp //')"
+mktemp_template_count="$(printf '%s\n' "$mktemp_templates" | grep -c .)"
+mktemp_ok=1
+if [ "$mktemp_template_count" -lt 6 ]; then
+  mktemp_ok=0
+  echo "  found only ${mktemp_template_count} mktemp templates in the gate, expected at least 6"
+fi
+while IFS= read -r template; do
+  [ -n "$template" ] || continue
+  expanded="$(TMPDIR="$MKTEMP_DIR" eval "printf '%s' $template")"
+  first="$(mktemp "$expanded" 2>/dev/null)" || first=""
+  second="$(mktemp "$expanded" 2>/dev/null)" || second=""
+  if [ -z "$first" ] || [ -z "$second" ] || [ "$first" = "$second" ]; then
+    mktemp_ok=0
+    echo "  mktemp template is not unique on this platform: ${template}"
+  fi
+  rm -f "$first" "$second"
+done <<EOF
+$mktemp_templates
+EOF
+if [ "$mktemp_ok" = 1 ] && ! grep -qE 'mktemp "[^"]*XXXXXX[^"]+"' "$GATE"; then
+  pass "WRC-HCC contracts gate mktemp templates end in the X run and stay unique across calls"
+else
+  fail "WRC-HCC contracts gate uses a mktemp template with a suffix after the X run"
+fi
+
 exit "$FAIL"

@@ -449,16 +449,16 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
     'an "Always approve" allowlist entry does not waive the forced create/enable gate (%j)',
     options => {
       const conv = makeConversation({ auto_approved_tools: new Set(['cron_manage']) })
-      const controller = new ApprovalController(
-        conv,
-        new UnifiedApprovalGateController(
-          makeMockRegistry({ cron_manage: { requiresApproval: true } }),
-          waivingConfig,
-          undefined,
-          options
-        ),
-        { honorDenials: options.cronManageGateOnly !== true }
+      const gate = new UnifiedApprovalGateController(
+        makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+        waivingConfig,
+        undefined,
+        options
       )
+      const controller = new ApprovalController(conv, gate, {
+        honorDenials: options.cronManageGateOnly !== true,
+        forcedApprovalGate: gate,
+      })
 
       for (const action of ['create', 'enable']) {
         const result = controller.beforeTool('cron_manage', { action }, 'tc-new')
@@ -467,8 +467,8 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
       }
       // Reads still follow the allowlist.
       expect(controller.beforeTool('cron_manage', { action: 'list' }, 'tc-list')).toBe('proceed')
-
-      // The one-shot grant for the exact call the user just approved still runs.
+      // The approved forced call runs directly on resume, so even a matching
+      // one-shot never lets the gate proceed for another forced call.
       conv.pending_approval = {
         request_id: 'req-1',
         tool_name: 'cron_manage',
@@ -477,9 +477,9 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
         description: STATELESS_CRON_APPROVAL_PROMPT,
         context_snapshot: [],
       }
-      expect(controller.beforeTool('cron_manage', { action: 'create' }, 'tc-approved')).toBe(
-        'proceed'
-      )
+      expect(
+        (controller.beforeTool('cron_manage', { action: 'create' }, 'tc-approved') as any).type
+      ).toBe('suspend')
     }
   )
 
@@ -491,7 +491,9 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
       undefined,
       { statelessLifecycle: true }
     )
-    const controller = new ApprovalController(conv, new NudgeController(gate))
+    const controller = new ApprovalController(conv, new NudgeController(gate), {
+      forcedApprovalGate: gate,
+    })
 
     expect((controller.beforeTool('cron_manage', { action: 'create' }, 'tc-1') as any).type).toBe(
       'suspend'

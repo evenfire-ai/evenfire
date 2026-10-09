@@ -4,6 +4,7 @@ import type {
   ConversationSessionSummary,
 } from '../core/conversation/conversationStore'
 import { type Conversation, ConversationState } from '../core/types'
+import { projectApprovalInputPreview } from '../progress/approvalInputPreview'
 import { getDisplayName } from '../progress/intentExtraction'
 import {
   decodeSessionsCursor,
@@ -55,6 +56,18 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
       'pendingApproval' in session
         ? session.pendingApproval
         : (session as Conversation).pending_approval
+    // Summaries intentionally omit raw parameters. Pending sessions are pinned
+    // in the cache (including cold-start rehydration); derive the preview only
+    // from that same live task and request, without widening the summary DTO.
+    const liveSession =
+      'key' in session ? getConversationManager().getSessionByKey(session.key) : session
+    const previewApproval =
+      activeTaskId &&
+      liveSession?.activeTaskId === activeTaskId &&
+      liveSession.pending_approval?.request_id === approval?.request_id &&
+      liveSession.pending_approval?.tool_name === approval?.tool_name
+        ? liveSession.pending_approval
+        : undefined
     const pendingApproval =
       session.state === ConversationState.AwaitingApproval && approval
         ? {
@@ -68,6 +81,15 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
             ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
             ...(approval.alwaysApproveAllowed === false
               ? { alwaysApproveAllowed: false as const }
+              : {}),
+            ...(approval.reason !== 'connect_required' && previewApproval
+              ? {
+                  inputPreview: projectApprovalInputPreview(
+                    previewApproval.tool_name,
+                    previewApproval.parameters,
+                    redactTitle
+                  ),
+                }
               : {}),
           }
         : undefined

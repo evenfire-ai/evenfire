@@ -3,13 +3,14 @@
  *
  * A denial blocks one exact tool name in one conversation until the user who
  * denied it approves that tool again. It survives a restart (persisted on
- * `sessions.denied_tools` as `[{ tool, userId }]`, migration 016).
+ * `sessions.denied_tools` as `[{ tool, userId }]`, migration 017).
  *
  * Every rule lives here, used by both decision lanes (ApprovalController and
  * the guardrail `ask` lane in toolUseLoopToolBatch) and both persistence ends
  * (sqliteConversationStore writes, reconstruct reads):
  *   - recordDenial: the latest denier wins, and the deny also revokes an
- *     earlier "Always approve" for that tool.
+ *     earlier "Always approve" and this task's session-scoped approval for
+ *     that tool.
  *   - liftDenial: only the recorded denier lifts it. An unknown denier (legacy
  *     row) lets any approver lift it; a missing approver id never lifts a
  *     known denier's denial.
@@ -35,13 +36,14 @@ export function hasActiveDenials(conversation: WithDenials): boolean {
 }
 
 export function recordDenial(
-  conversation: Pick<Conversation, 'denials' | 'auto_approved_tools'>,
+  conversation: Pick<Conversation, 'denials' | 'auto_approved_tools' | 'task_approved_tools'>,
   toolName: string,
   userId?: string
 ): void {
   conversation.denials ??= new Map()
   conversation.denials.set(toolName, userId || null)
   conversation.auto_approved_tools.delete(toolName)
+  conversation.task_approved_tools?.delete(toolName)
 }
 
 export type LiftOutcome = 'not_denied' | 'lifted' | 'kept_for_denier'

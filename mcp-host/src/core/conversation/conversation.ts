@@ -3,6 +3,7 @@ import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
+import { SESSION_SCOPED_APPROVAL_TOOLS } from '../extensions/approvalController'
 import {
   ChatMessage,
   ContextBreakdown,
@@ -268,6 +269,9 @@ export class ConversationManager {
     conversation.activeTaskId = taskId
     conversation.traceContext = traceContext
     conversation.updated_at = new Date()
+
+    // A new user message starts a new task: plain session-scoped approvals end here.
+    conversation.task_approved_tools?.clear()
 
     // Materialize the auto-title (spec 15) in RAM before persisting so the
     // dual-store projection and the durable COALESCE write agree. `??=` keeps
@@ -542,11 +546,15 @@ export class ConversationManager {
    * Transitions: AwaitingApproval → Processing
    *
    * Approving one tool does not allowlist other tools, an MCP server, or the
-   * rest of the turn. When alwaysApprove=true, only that tool's exact name is
-   * stored for later turns, unless the card does not allow it (a forced gate or
-   * a denial re-ask). Approving this tool lifts its denial only when the
-   * approver is the user who denied it (or the denier is unknown); another
-   * user's approval runs this call once and keeps the denial (denialPolicy).
+   * rest of the turn. Only an ordinary card (authorization_scope 'turn_tools')
+   * may store a grant: alwaysApprove stores that tool's exact name for later
+   * turns, and a plain approval of a SESSION_SCOPED_APPROVAL_TOOLS tool lasts
+   * for the current task. Exact-invocation and legacy unknown scopes (forced
+   * gates, denial re-asks, guardrail and live-tool cards) authorize only the
+   * frozen call being resumed. Approving this tool lifts its denial only when
+   * the approver is the user who denied it (or the denier is unknown); another
+   * user's approval runs this call once, keeps the denial and grants nothing
+   * (denialPolicy).
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
@@ -565,22 +573,29 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
+      const approval = conversation.pending_approval
       const lifted = liftDenial(conversation, toolName, userId)
-      // alwaysApprove stores only the exact tool name (for future turns).
-      if (alwaysApprove) {
-        if (lifted === 'kept_for_denier') {
+      const grantable =
+        approval.authorization_scope === 'turn_tools' && approval.alwaysApproveAllowed !== false
+      if (lifted === 'kept_for_denier') {
+        if (alwaysApprove) {
           logger.info(
             { event: 'always_approve_ignored', toolName, reason: 'denied_by_another_user' },
             'Always approve ignored: another user denied this tool'
           )
-        } else if (conversation.pending_approval.alwaysApproveAllowed === false) {
-          logger.info(
-            { event: 'always_approve_ignored', toolName, reason: 'not_waivable' },
-            'Always approve ignored: this card cannot be allowlisted'
-          )
-        } else {
-          conversation.auto_approved_tools.add(toolName)
         }
+      } else if (!grantable) {
+        if (alwaysApprove) {
+          logger.info(
+            { event: 'always_approve_ignored', toolName, reason: 'exact_invocation' },
+            'Always approve ignored: this card authorizes only its own call'
+          )
+        }
+      } else if (alwaysApprove) {
+        conversation.auto_approved_tools.add(toolName)
+      } else if (SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
+        // A plain approval of a session-scoped tool lasts for the current task.
+        ;(conversation.task_approved_tools ??= new Set()).add(toolName)
       }
     }
 

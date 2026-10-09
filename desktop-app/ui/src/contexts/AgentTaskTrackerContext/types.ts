@@ -1,4 +1,10 @@
-import type { ComposerImageAttachment, ComposerReferenceAttachment, ProgressStep } from '@/uiTypes'
+import type {
+  ApprovalInputPreview,
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+  ProgressStep,
+  ReadyComposerFileAttachment,
+} from '@/uiTypes'
 import type { ChatMessageAttachment } from '../../../../src/types'
 
 /**
@@ -44,6 +50,7 @@ export interface TaskPendingApproval {
   // `false` when the host refuses to allowlist this call ("Always approve" is
   // hidden). Absent means allowed.
   alwaysApproveAllowed?: false
+  inputPreview?: ApprovalInputPreview
 }
 
 /**
@@ -131,6 +138,7 @@ export interface TrackerCallbacks {
 export interface ResendPayload {
   content: string
   attachments: ComposerImageAttachment[]
+  files: ReadyComposerFileAttachment[]
   references: ComposerReferenceAttachment[]
 }
 

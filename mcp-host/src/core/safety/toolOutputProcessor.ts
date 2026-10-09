@@ -1,5 +1,5 @@
-import { ToolOutputProcessor, Safety } from "../interfaces";
-import { ToolOutput, ValidationResult } from "../types";
+import { Safety, ToolOutputProcessor } from '../interfaces'
+import { ToolOutput, ValidationResult } from '../types'
 
 /**
  * Default ToolOutputProcessor that delegates to Safety.
@@ -10,16 +10,20 @@ import { ToolOutput, ValidationResult } from "../types";
 export class DefaultToolOutputProcessor implements ToolOutputProcessor {
   constructor(private readonly safety: Safety) {}
 
-  beforeExecution(
-    toolName: string,
-    params: Record<string, unknown>,
-  ): ValidationResult {
-    return this.safety.validateToolParams(toolName, params);
+  beforeExecution(toolName: string, params: Record<string, unknown>): ValidationResult {
+    return this.safety.validateToolParams(toolName, params)
   }
 
   afterExecution(toolName: string, output: ToolOutput): string {
     // Safety sandwich: sanitize -> wrap
-    const sanitized = this.safety.sanitizeOutput(toolName, output.content);
-    return this.safety.wrapForLlm(toolName, sanitized.content, sanitized.was_modified);
+    const sanitized = this.safety.sanitizeOutput(toolName, output.content)
+    return this.safety.wrapForLlm(toolName, sanitized.content, sanitized.was_modified)
+  }
+
+  previewForLlm(toolName: string, content: string): string {
+    if (!this.safety.previewOutputForLlm) {
+      throw new Error('measureResult requires a pure Safety.previewOutputForLlm implementation')
+    }
+    return this.safety.previewOutputForLlm(toolName, content)
   }
 }

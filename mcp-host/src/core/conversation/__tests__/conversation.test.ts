@@ -1,8 +1,29 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { type SessionKey, serializeSessionKey } from '../../../session/types'
 import { ConversationError } from '../../errors'
+import { UnifiedApprovalGateController } from '../../extensions/mcpApprovalGateController'
+import type { ToolRegistry } from '../../interfaces'
 import { ConversationState, PendingApproval } from '../../types'
 import { ConversationManager } from '../conversation'
+
+/** Ordinary-consent fixtures come from the real producer, including scope. */
+function ordinaryApproval(fixture: PendingApproval): PendingApproval {
+  const registry: ToolRegistry = { get: () => null, register: () => {}, listDefinitions: () => [] }
+  const gate = new UnifiedApprovalGateController(registry, {
+    defaultPolicy: 'channel_users',
+    channels: {},
+    tools: { [fixture.tool_name]: true },
+  })
+  const result = gate.beforeTool(fixture.tool_name, fixture.parameters)
+  if (typeof result !== 'object') throw new Error('Ordinary approval producer did not suspend')
+  return {
+    ...result.approval,
+    request_id: fixture.request_id,
+    tool_call_id: fixture.tool_call_id,
+    description: fixture.description,
+    context_snapshot: fixture.context_snapshot,
+  }
+}
 
 describe('ConversationManager — state machine', () => {
   let manager: ConversationManager
@@ -222,14 +243,17 @@ describe('ConversationManager — approval transitions', () => {
     const conv = await manager.getOrCreate('user-1')
     await manager.startTurn(conv, 'Insert data', 'test-task')
 
-    await manager.suspendForApproval(conv, {
-      request_id: 'req-1',
-      tool_name: 'mongodb-server__insert_many',
-      parameters: { collection: 'test' },
-      description: 'MongoDB insert',
-      tool_call_id: 'tc_1',
-      context_snapshot: [],
-    })
+    await manager.suspendForApproval(
+      conv,
+      ordinaryApproval({
+        request_id: 'req-1',
+        tool_name: 'mongodb-server__insert_many',
+        parameters: { collection: 'test' },
+        description: 'MongoDB insert',
+        tool_call_id: 'tc_1',
+        context_snapshot: [],
+      })
+    )
 
     // Approve without alwaysApprove — must not allowlist the server or the tool
     await manager.approve(conv, false)
@@ -241,14 +265,17 @@ describe('ConversationManager — approval transitions', () => {
     const conv = await manager.getOrCreate('user-2')
     await manager.startTurn(conv, 'List tables', 'test-task')
 
-    await manager.suspendForApproval(conv, {
-      request_id: 'req-2',
-      tool_name: 'airtable-server__list_tables',
-      parameters: {},
-      description: 'Airtable list',
-      tool_call_id: 'tc_2',
-      context_snapshot: [],
-    })
+    await manager.suspendForApproval(
+      conv,
+      ordinaryApproval({
+        request_id: 'req-2',
+        tool_name: 'airtable-server__list_tables',
+        parameters: {},
+        description: 'Airtable list',
+        tool_call_id: 'tc_2',
+        context_snapshot: [],
+      })
+    )
 
     await manager.approve(conv, true)
     expect(conv.auto_approved_tools.has('airtable-server')).toBe(false)
@@ -257,16 +284,20 @@ describe('ConversationManager — approval transitions', () => {
 
   it('should NOT add server prefix for non-MCP tools (no __ separator)', async () => {
     const conv = await manager.getOrCreate('user-3')
-    await manager.startTurn(conv, 'Run shell', 'test-task')
+    await manager.startTurn(conv, 'Trigger a workflow', 'test-task')
 
-    await manager.suspendForApproval(conv, {
-      request_id: 'req-3',
-      tool_name: 'shell_exec',
-      parameters: { command: 'ls' },
-      description: 'Shell command',
-      tool_call_id: 'tc_3',
-      context_snapshot: [],
-    })
+    // workflow_trigger is a non-MCP tool outside SESSION_SCOPED_APPROVAL_TOOLS.
+    await manager.suspendForApproval(
+      conv,
+      ordinaryApproval({
+        request_id: 'req-3',
+        tool_name: 'workflow_trigger',
+        parameters: { recipe: 'report' },
+        description: 'Workflow trigger',
+        tool_call_id: 'tc_3',
+        context_snapshot: [],
+      })
+    )
 
     // A plain approval must not allowlist '*' or the exact tool name
     await manager.approve(conv, false)
@@ -334,6 +365,7 @@ describe('ConversationManager — approval transitions', () => {
       description: 'Shell command',
       tool_call_id: 'tc_deny_stick_3',
       context_snapshot: [],
+      authorization_scope: 'turn_tools',
     })
     await manager.approve(conv, true, 'user-a')
     expect(conv.denials?.has('shell_exec')).toBe(false)
@@ -492,14 +524,17 @@ describe('ConversationManager — wildcard is not written and is cleared on star
     const conv = await manager.getOrCreate('user-wc-1')
     await manager.startTurn(conv, 'Do something', 'test-task')
 
-    await manager.suspendForApproval(conv, {
-      request_id: 'req-wc-1',
-      tool_name: 'shell_exec',
-      parameters: { command: 'echo hi' },
-      description: 'Shell',
-      tool_call_id: 'tc_wc_1',
-      context_snapshot: [],
-    })
+    await manager.suspendForApproval(
+      conv,
+      ordinaryApproval({
+        request_id: 'req-wc-1',
+        tool_name: 'workflow_trigger',
+        parameters: { recipe: 'report' },
+        description: 'Workflow trigger',
+        tool_call_id: 'tc_wc_1',
+        context_snapshot: [],
+      })
+    )
 
     await manager.approve(conv, false)
     expect(conv.auto_approved_tools.has('*')).toBe(false)
@@ -510,14 +545,17 @@ describe('ConversationManager — wildcard is not written and is cleared on star
 
     // Turn 1: approve an MCP tool
     await manager.startTurn(conv, 'Use database', 'test-task')
-    await manager.suspendForApproval(conv, {
-      request_id: 'req-wc-3',
-      tool_name: 'mongodb-server__find',
-      parameters: { collection: 'test' },
-      description: 'MongoDB find',
-      tool_call_id: 'tc_wc_3',
-      context_snapshot: [],
-    })
+    await manager.suspendForApproval(
+      conv,
+      ordinaryApproval({
+        request_id: 'req-wc-3',
+        tool_name: 'mongodb-server__find',
+        parameters: { collection: 'test' },
+        description: 'MongoDB find',
+        tool_call_id: 'tc_wc_3',
+        context_snapshot: [],
+      })
+    )
     await manager.approve(conv, false)
 
     expect(conv.auto_approved_tools.has('*')).toBe(false)
@@ -529,6 +567,76 @@ describe('ConversationManager — wildcard is not written and is cleared on star
 
     expect(conv.auto_approved_tools.has('*')).toBe(false)
     expect(conv.auto_approved_tools.has('mongodb-server')).toBe(false)
+  })
+})
+
+describe('ConversationManager — session-scoped tool approvals', () => {
+  let manager: ConversationManager
+
+  beforeEach(() => {
+    manager = new ConversationManager()
+  })
+
+  function sessionToolApproval(toolName: string, requestId: string): PendingApproval {
+    return ordinaryApproval({
+      request_id: requestId,
+      tool_name: toolName,
+      parameters: {},
+      description: toolName,
+      tool_call_id: `tc_${requestId}`,
+      context_snapshot: [],
+    })
+  }
+
+  it.each(['shell_exec', 'http_request', 'cron_manage'] as const)(
+    'a plain approve() of %s stores the tool for the current task only, without a wildcard',
+    async toolName => {
+      const conv = await manager.getOrCreate(`user-session-plain-${toolName}`)
+      await manager.startTurn(conv, 'Run a session tool', 'test-task')
+      await manager.suspendForApproval(conv, sessionToolApproval(toolName, `req-${toolName}`))
+
+      await manager.approve(conv, false)
+
+      expect(conv.state).toBe(ConversationState.Processing)
+      expect(conv.task_approved_tools).toEqual(new Set([toolName]))
+      expect(conv.auto_approved_tools).toEqual(new Set())
+    }
+  )
+
+  it.each(['shell_exec', 'http_request', 'cron_manage'] as const)(
+    'an "always" approve() of %s stores the tool for later tasks, without a wildcard',
+    async toolName => {
+      const conv = await manager.getOrCreate(`user-session-always-${toolName}`)
+      await manager.startTurn(conv, 'Run a session tool', 'test-task')
+      await manager.suspendForApproval(conv, sessionToolApproval(toolName, `req-${toolName}`))
+
+      await manager.approve(conv, true)
+
+      expect(conv.state).toBe(ConversationState.Processing)
+      expect(conv.auto_approved_tools).toEqual(new Set([toolName]))
+      expect(conv.task_approved_tools).toBeUndefined()
+    }
+  )
+
+  it('startTurn clears plain session-scoped approvals and keeps "always" ones', async () => {
+    const conv = await manager.getOrCreate('user-session-turns')
+    await manager.startTurn(conv, 'First message', 'test-task')
+    await manager.suspendForApproval(conv, sessionToolApproval('mongodb-server__find', 'req-m'))
+    await manager.approve(conv, false)
+    await manager.suspendForApproval(conv, sessionToolApproval('shell_exec', 'req-s'))
+    await manager.approve(conv, false)
+    await manager.suspendForApproval(conv, sessionToolApproval('http_request', 'req-h'))
+    await manager.approve(conv, true)
+
+    // The MCP approval ran that call only; the session approvals store their names.
+    expect(conv.auto_approved_tools).toEqual(new Set(['http_request']))
+    expect(conv.task_approved_tools).toEqual(new Set(['shell_exec']))
+
+    await manager.completeTurn(conv, 'Done')
+    await manager.startTurn(conv, 'Second message', 'test-task')
+
+    expect(conv.auto_approved_tools).toEqual(new Set(['http_request']))
+    expect(conv.task_approved_tools).toEqual(new Set())
   })
 })
 

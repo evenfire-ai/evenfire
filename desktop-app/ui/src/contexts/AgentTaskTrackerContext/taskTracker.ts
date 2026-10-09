@@ -1,3 +1,4 @@
+import { readApprovalInputPreview } from '@hooks/domain/trackerToProgress'
 import { classifyTier } from '@hooks/useTaskTier'
 import { buildResponseFileAttachments } from '@lib/chatMessageAttachments'
 import {
@@ -603,6 +604,9 @@ export class TaskTracker implements AgentTaskTracker {
                 reason: sd.reason,
                 mcpServerName: sd.mcpServerName,
                 ...(sd.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false } : {}),
+                inputPreview: readApprovalInputPreview(
+                  (sd as { inputPreview?: unknown }).inputPreview
+                ),
               }
             : undefined
         })

@@ -1664,7 +1664,12 @@ Denials apply to calls made in that conversation only. A workflow triggered from
 | LLM calls tools from `airtable-server` + `mongodb-server` | One card per call                     |
 | Same tool after **Always approve**                        | Later calls of that exact name proceed |
 | Same tool after **Deny**                                 | Asks again until that tool is approved |
+| `shell_exec` called 5 times, then `http_request`          | 2 (one per tool, for the rest of the task) |
 | `workflow_trigger` / `cron_manage` create, enable, trigger while a denial is active | Asks on every call                    |
+
+`shell_exec`, `http_request` and `cron_manage` (`SESSION_SCOPED_APPROVAL_TOOLS` in `approvalController.ts`) are approved per tool. A plain approval of one of them covers that tool for the rest of the current task, including every later iteration and the resume after another tool's approval card; the next user message starts a new task and asks again. **Always approve** covers it in later tasks while the conversation stays in memory. A Host restart or cold resume asks again.
+
+Every pending approval carries a durable `authorization_scope`. An ordinary card is `turn_tools` and may store the grants above; it grants nothing turn-wide. Forced cards (stateless `cron_manage` `create`/`enable`), denial re-asks, guardrail `ask` cards and live-tool cards are `exact_invocation`: approving runs only that call and stores nothing, also after a Host restart. Rows written before the column existed are treated as `exact_invocation`.
 
 **Channel commands:**
 

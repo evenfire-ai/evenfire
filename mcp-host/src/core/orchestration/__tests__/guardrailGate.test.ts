@@ -5,11 +5,12 @@
  * `config.guardrails` is unset the gate is inert (covered by the existing
  * tool-loop suite).
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Decision, ToolLaneGuardrail } from '../../guardrails'
 import type { AgentEventEmitter, Safety, Tool, ToolRegistry } from '../../interfaces'
 import type { Conversation, ToolCall, ToolDefinition, ToolOutput } from '../../types'
 import type { LoopConfig } from '../loopConfig'
+import { admitToolCall } from '../toolCallPolicy'
 import { executeToolCalls } from '../toolUseLoopToolBatch'
 
 class StubTool implements Tool {
@@ -194,6 +195,86 @@ describe('guardrail gate in executeToolCalls', () => {
     expect(toolResults[0].is_error).toBe(false)
   })
 
+  it('finalizeResult fences the transformed result, after transformResult', async () => {
+    const tool = new StubTool('do_thing')
+    const finalized: string[] = []
+    const fenced = Object.assign(tool, {
+      finalizeResult: (result: { content: string }) => {
+        finalized.push(result.content)
+        return { ...result, content: `[fenced:${result.content}]` }
+      },
+    })
+    const guardrail: ToolLaneGuardrail = {
+      async decide(_id, input) {
+        return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'host_rule' }
+      },
+      async transformResult(_id, _input, result) {
+        return { content: `[redacted:${result.content}]`, isError: result.isError }
+      },
+    }
+    const config = { ...makeConfig(fenced, guardrail), measureToolMessage: () => 1 }
+    const { toolResults } = await executeToolCalls([call], config, 0)
+    expect(tool.calls).toHaveLength(1)
+    expect(finalized).toEqual(['[redacted:ok]'])
+    expect(toolResults[0].content).toBe('[fenced:[redacted:ok]]')
+  })
+
+  // Post-result hooks redact error text too (a thrown upstream message can
+  // carry a secret) and observe failed calls, so every error result the
+  // execution boundary produces must pass through transformResult.
+  it.each([
+    {
+      path: 'a thrown tool error',
+      tools: (): Record<string, Tool> => {
+        const throwing = new StubTool('do_thing')
+        throwing.execute = async params => {
+          throwing.calls.push(params)
+          throw new Error('upstream said SECRET-TOKEN-123')
+        }
+        return { do_thing: throwing }
+      },
+      raw: 'Tool execution failed: upstream said SECRET-TOKEN-123',
+    },
+    {
+      // Admission accepts the call; the execution boundary re-validates the
+      // effective parameters and refuses them.
+      path: 'an execution-boundary validation failure',
+      tools: (): Record<string, Tool> => {
+        const strict = new StubTool('do_thing')
+        let validations = 0
+        Object.assign(strict, {
+          validateParams: () =>
+            ++validations === 1
+              ? { is_valid: true, errors: [] }
+              : { is_valid: false, errors: ['bad SECRET-TOKEN-123'] },
+        })
+        return { do_thing: strict }
+      },
+      raw: 'Parameter validation failed: bad SECRET-TOKEN-123',
+    },
+    {
+      path: 'a missing tool',
+      tools: (): Record<string, Tool> => ({}),
+      raw: 'Tool not found: do_thing',
+    },
+  ])('PostToolUse transformResult also sees $path', async ({ tools, raw }) => {
+    const seen: Array<{ content: string; isError: boolean }> = []
+    const guardrail: ToolLaneGuardrail = {
+      async decide(_id, input) {
+        return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'host_rule' }
+      },
+      async transformResult(_id, _input, result) {
+        seen.push(result)
+        return { content: '[redacted]', isError: result.isError }
+      },
+    }
+    const config = makeConfig(new StubTool('unused'), guardrail)
+    config.toolRegistry = registry(tools())
+    const { toolResults } = await executeToolCalls([call], config, 0)
+    expect(seen).toEqual([{ content: raw, isError: true }])
+    expect(toolResults[0]).toMatchObject({ content: '[redacted]', is_error: true })
+  })
+
   it('ask + matching one-shot approval → proceeds and clears pending', async () => {
     const tool = new StubTool('do_thing')
     const conversation: Partial<Conversation> = {
@@ -211,5 +292,137 @@ describe('guardrail gate in executeToolCalls', () => {
     expect(pendingApproval).toBeUndefined()
     expect(tool.calls).toHaveLength(1)
     expect(config.conversation.pending_approval).toBeUndefined()
+  })
+})
+
+describe('exact guardrail ask one-shot binding', () => {
+  const original: ToolCall = { id: 'exact-1', name: 'do_thing', arguments: { command: 'original' } }
+
+  it.each([
+    { ...original, id: 'exact-2' },
+    { ...original, arguments: { command: 'replaced' } },
+  ])('does not consume an exact ask for a changed invocation: %j', async changed => {
+    const tool = new StubTool('do_thing')
+    const admission = await admitToolCall(
+      changed,
+      makeConfig(tool, fixedGuardrail('ask'), {
+        pending_approval: {
+          authorization_scope: 'exact_invocation',
+          request_id: 'pending-exact',
+          tool_name: original.name,
+          parameters: original.arguments,
+          description: 'Exact ask',
+          tool_call_id: original.id,
+          context_snapshot: [],
+        },
+      }),
+      0
+    )
+
+    expect(admission.kind).toBe('suspend')
+    expect(tool.calls).toHaveLength(0)
+  })
+
+  it('requires new exact consent when the current guardrail transforms approved parameters', async () => {
+    const tool = new StubTool('do_thing')
+    const effectiveInput = { command: 'transformed' }
+    const config = makeConfig(
+      tool,
+      {
+        async decide() {
+          return {
+            decision: 'ask',
+            reasonCode: 'updated_input',
+            effectiveInput,
+            source: 'host_rule',
+          }
+        },
+      },
+      {
+        pending_approval: {
+          authorization_scope: 'exact_invocation',
+          request_id: 'pending-exact',
+          tool_name: original.name,
+          parameters: original.arguments,
+          description: 'Exact ask',
+          tool_call_id: original.id,
+          context_snapshot: [],
+        },
+      }
+    )
+
+    const admission = await admitToolCall(original, config, 0)
+
+    expect(admission).toMatchObject({
+      kind: 'suspend',
+      approval: { parameters: effectiveInput, authorization_scope: 'exact_invocation' },
+    })
+    expect(config.conversation.pending_approval?.request_id).toBe('pending-exact')
+    expect(tool.calls).toHaveLength(0)
+  })
+
+  it('reports transformed consent parameters consistently in the batch approval event', async () => {
+    const tool = new StubTool('do_thing')
+    const effectiveInput = { command: 'transformed' }
+    const config = makeConfig(tool, {
+      async decide() {
+        return { decision: 'ask', reasonCode: 'updated_input', effectiveInput, source: 'host_rule' }
+      },
+    })
+    const emit = vi.fn()
+    config.events = { ...noopEvents, emit }
+    const result = await executeToolCalls([original], config, 0)
+
+    expect(result.pendingApproval?.parameters).toEqual(effectiveInput)
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'tool:approval_needed',
+        data: expect.objectContaining({ parameters: effectiveInput }),
+      })
+    )
+    expect(tool.calls).toHaveLength(0)
+  })
+
+  it('consumes only an exact invocation match', async () => {
+    const tool = new StubTool('do_thing')
+    const admission = await admitToolCall(
+      original,
+      makeConfig(tool, fixedGuardrail('ask'), {
+        pending_approval: {
+          authorization_scope: 'exact_invocation',
+          request_id: 'pending-exact',
+          tool_name: original.name,
+          parameters: original.arguments,
+          description: 'Exact ask',
+          tool_call_id: original.id,
+          context_snapshot: [],
+        },
+      }),
+      0
+    )
+
+    expect(admission.kind).toBe('execute')
+    expect(tool.calls).toHaveLength(0)
+  })
+
+  it('does not reuse a turn-tools approval for a different call of the same name', async () => {
+    const tool = new StubTool('do_thing')
+    const admission = await admitToolCall(
+      { id: 'turn-2', name: 'do_thing', arguments: { command: 'different' } },
+      makeConfig(tool, fixedGuardrail('ask'), {
+        pending_approval: {
+          authorization_scope: 'turn_tools',
+          request_id: 'pending-turn',
+          tool_name: original.name,
+          parameters: original.arguments,
+          description: 'Turn ask',
+          tool_call_id: original.id,
+          context_snapshot: [],
+        },
+      }),
+      0
+    )
+
+    expect(admission.kind).toBe('suspend')
   })
 })

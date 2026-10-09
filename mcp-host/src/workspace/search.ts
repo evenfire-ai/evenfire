@@ -12,6 +12,7 @@
  */
 import * as fs from 'fs/promises'
 import * as path from 'path'
+import { isProtectedRealPath, isProtectedWorkspacePath } from './protectedPaths'
 import { SearchConfig, SearchResult } from './types'
 
 const RECENCY_BOOST_FILES = /^daily\//
@@ -43,6 +44,7 @@ async function collectMarkdownFiles(
     if (dir === base && excludeTopLevel?.has(entry.name)) continue
     const full = path.join(dir, entry.name)
     const rel = path.relative(base, full)
+    if (isProtectedWorkspacePath(rel)) continue
     if (entry.isDirectory()) {
       const sub = await collectMarkdownFiles(full, base, excludeTopLevel)
       files.push(...sub)
@@ -74,6 +76,13 @@ export async function searchWorkspace(
 
   for (const relPath of mdFiles) {
     const absPath = path.join(workspacePath, relPath)
+    try {
+      const realPath = await fs.realpath(absPath)
+      const realRoot = await fs.realpath(workspacePath)
+      if (isProtectedRealPath(realPath, realRoot)) continue
+    } catch {
+      continue
+    }
     let fileContent: string
     try {
       fileContent = await fs.readFile(absPath, 'utf-8')

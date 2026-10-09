@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApprovalConfig } from '../../core/extensions/approvalTypes'
+import { UnifiedApprovalGateController } from '../../core/extensions/mcpApprovalGateController'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
+import { ShellTool } from '../../core/tools/shell'
 import { ConversationState } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { progressReporterRegistry } from '../../progress/sseProgressReporter'
@@ -13,6 +15,7 @@ import { AgentStateMachine } from '../stateMachine'
 vi.mock('../../config', () => ({
   config: {
     devMode: true,
+    contextMaxTokens: 100_000,
     enableApproval: true,
     enableNudge: false,
     nudgeMaxIterations: 3,
@@ -238,10 +241,19 @@ describe('AgentStateMachine -- approval handling', () => {
   })
 
   it('should add tool to auto_approved_tools when alwaysApprove=true (6.auto)', async () => {
+    const shell = new ShellTool('/tmp', 5000, ['PATH'])
+    const gate = new UnifiedApprovalGateController({
+      get: name => (name === shell.name() ? shell : null),
+      register: () => {},
+      listDefinitions: () => [],
+    })
+    const decision = gate.beforeTool('shell_exec', { command: 'ls' })
+    if (typeof decision !== 'object') throw new Error('Ordinary shell producer did not suspend')
     ;(runToolUseLoop as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({
         type: 'need_approval',
         approval: {
+          ...decision.approval,
           request_id: 'req-1',
           tool_name: 'shell_exec',
           parameters: { command: 'ls' },

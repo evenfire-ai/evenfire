@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
+import { reconstructPendingApproval } from '../../../core/conversation/persistence/reconstruct'
 import { runMigrations } from '../../migrate'
 import { applyPragmas } from '../../pragmas'
 import { prepareStatements } from '../../statements'
 import { createDispatcher, dispatch } from '../dispatcher'
-import type { MessageRow, PersistedSession, ReapedSession, SessionRow } from '../protocol'
+import type {
+  MessageRow,
+  PendingApprovalRow,
+  PersistedSession,
+  ReapedSession,
+  SessionRow,
+} from '../protocol'
 
 describe('dbWorker dispatcher', () => {
   let db: Database.Database
@@ -746,6 +753,55 @@ describe('dbWorker dispatcher', () => {
       expect(sessionRow().denied_tools ?? null).toBeNull()
     })
   })
+  it.each([undefined, null, 'exact_invocation', 'turn_tools'] as const)(
+    'round-trips an optional authorization scope through the real dispatcher: %s',
+    async scope => {
+      const deps = createDispatcher(db)
+      const session = {
+        ...makeSession('conv-scope', 'conv-scope:rpc:agent:scope'),
+        state: 'awaiting_approval',
+        active_task_id: '11111111-1111-4111-8111-111111111111',
+      }
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+      const row: PendingApprovalRow = {
+        request_id: 'req-scope',
+        session_id: session.id,
+        task_id: session.active_task_id,
+        tool_name: 'shell_exec',
+        tool_call_id: 'tc-scope',
+        parameters: '{"command":"printf scoped"}',
+        description: 'Scope round trip',
+        context_snapshot: '[]',
+        completed_results: null,
+        intent_summary: null,
+        source_message: null,
+        registered_at: 0,
+        expires_at: 9999999999,
+        trace_context: null,
+        reason: null,
+        mcp_server_name: null,
+        task_budget: JSON.stringify({
+          elapsedActiveMs: 0,
+          iterationsUsed: 0,
+          durationMs: 30_000,
+          maxIterations: 10,
+        }),
+        ...(scope === undefined ? {} : { authorization_scope: scope }),
+      }
+      await dispatch({ kind: 'insert_pending_approval', payload: row }, deps)
+      const loaded = (await dispatch(
+        { kind: 'load_active_session', sessionKey: session.session_key },
+        deps
+      )) as PersistedSession
+
+      expect(loaded.pending_approval?.authorization_scope).toBe(scope ?? null)
+      expect(reconstructPendingApproval(loaded.pending_approval!).authorization_scope).toBe(
+        scope ?? undefined
+      )
+      expect(loaded.pending_approval?.parameters).toBe(row.parameters)
+      expect(loaded.pending_approval?.tool_call_id).toBe(row.tool_call_id)
+    }
+  )
 
   it('projects the connect_required discriminator on the cold DB paths (page + summary)', async () => {
     const deps = createDispatcher(db)

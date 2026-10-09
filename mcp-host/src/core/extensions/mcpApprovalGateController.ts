@@ -74,6 +74,7 @@ export function buildConnectRequiredApproval(
   return {
     request_id: randomUUID(),
     tool_name: call.name,
+    authorization_scope: 'exact_invocation',
     tool_kind: 'mcp_server_tool',
     // The authoritative server name is the marker's mcpServerName (set from the
     // manager's sourceRef), mirroring the HITL gate's createSuspension
@@ -151,7 +152,7 @@ export class UnifiedApprovalGateController implements LoopController {
     // proceeds without a gate, so LIST/GET/DELETE/DISABLE/TRIGGER and all
     // non-cron_manage work run unblocked.
     if (this.options?.cronManageGateOnly === true) {
-      return this.cronManageForcedApproval(toolName, params) ?? 'proceed'
+      return this.forcedApproval(toolName, params) ?? 'proceed'
     }
 
     const registryWithNative = this.toolRegistry as NativeAwareRegistry
@@ -176,7 +177,7 @@ export class UnifiedApprovalGateController implements LoopController {
     // `approval.tools["cron_manage"]: false` cannot waive it. Default-forbid
     // hosts expose cron_manage for cleanup/observability, but the tool reports
     // requiresApproval=false and rejects CREATE/ENABLE server-side.
-    const cronForced = this.cronManageForcedApproval(toolName, params)
+    const cronForced = this.forcedApproval(toolName, params)
     if (cronForced) {
       return cronForced
     }
@@ -210,11 +211,6 @@ export class UnifiedApprovalGateController implements LoopController {
     return this.delegate.refreshTools(currentTools)
   }
 
-  /** The cron×stateless gate is not waivable by an exact-name allowlist either. */
-  isForcedApproval(toolName: string, params: Record<string, unknown>): boolean {
-    return this.cronManageForcedApproval(toolName, params) !== null
-  }
-
   /**
    * Cron×stateless forced-approval gate (step 1.5). Returns a suspension only
    * when stateless cron management is explicitly allowed and the registered
@@ -222,8 +218,13 @@ export class UnifiedApprovalGateController implements LoopController {
    * cron-sourced `cronManageGateOnly` path so both apply the same criterion.
    * NOT waivable by the per-tool CRD override — it is checked before that
    * override on both paths.
+   *
+   * Public so ApprovalController can consult it before any stored approval:
+   * every forced call asks, and no `'*'`, per-task, "always" or server-prefix
+   * approval covers it. The suspension is `exact_invocation`, so approving it
+   * authorizes only that frozen call.
    */
-  private cronManageForcedApproval(
+  forcedApproval(
     toolName: string,
     params: Record<string, unknown>
   ): { type: 'suspend'; approval: PendingApproval } | null {
@@ -237,9 +238,21 @@ export class UnifiedApprovalGateController implements LoopController {
 
       const action = typeof params.action === 'string' ? params.action : ''
       if (STATELESS_CRON_GATED_ACTIONS.has(action)) {
-        const forced = this.createSuspension(toolName, params, STATELESS_CRON_APPROVAL_PROMPT, tool)
-        // Approving this card runs the call once; it never allowlists cron_manage.
-        return { ...forced, approval: { ...forced.approval, alwaysApproveAllowed: false } }
+        const suspension = this.createSuspension(
+          toolName,
+          params,
+          STATELESS_CRON_APPROVAL_PROMPT,
+          tool
+        )
+        return {
+          ...suspension,
+          // Approving this card runs the call once; it never allowlists cron_manage.
+          approval: {
+            ...suspension.approval,
+            authorization_scope: 'exact_invocation',
+            alwaysApproveAllowed: false,
+          },
+        }
       }
     }
     return null
@@ -258,6 +271,7 @@ export class UnifiedApprovalGateController implements LoopController {
     const approval: PendingApproval = {
       request_id: randomUUID(),
       tool_name: toolName,
+      authorization_scope: 'turn_tools',
       tool_kind: traceDescriptor.kind,
       tool_source_ref: traceDescriptor.sourceRef,
       parameters: params,

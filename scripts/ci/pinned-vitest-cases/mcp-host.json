@@ -1,0 +1,1586 @@
+[
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local visual_host_share keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local visual_gate keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local stream_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local stream_queue_wait keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local body_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "grok subscription HTTP admission and failover local demotion_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local visual_host_share keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local visual_gate keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local stream_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local stream_queue_wait keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local body_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "subscriptionAdmission.integration.test.ts",
+    "fullName": "codex subscription HTTP admission and failover local demotion_queue_full keeps the next turn on primary without redeem or failover"
+  },
+  {
+    "suite": "grokLlmProxyClient.test.ts",
+    "fullName": "GrokLlmProxyClient keeps wire unknown_machine_code separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "grokLlmProxyClient.test.ts",
+    "fullName": "GrokLlmProxyClient keeps wire reason_only separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "grokLlmProxyClient.test.ts",
+    "fullName": "GrokLlmProxyClient keeps wire malformed_json separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "codexLlmProxyClient.test.ts",
+    "fullName": "CodexLlmProxyClient keeps wire unknown_machine_code separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "codexLlmProxyClient.test.ts",
+    "fullName": "CodexLlmProxyClient keeps wire reason_only separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "codexLlmProxyClient.test.ts",
+    "fullName": "CodexLlmProxyClient keeps wire malformed_json separate from trusted local refusal provenance"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X1-shell: a store left by the pre-#1028 image does not stop an approved shell (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X1-delivery: a store left by the pre-#1028 image is ignored and GFS delivery stays advertised (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "U5-TE: TaskExecutor runs a managed shell with a timeout above the former lease ceiling (#1021) exactly one hour"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "U5-TE: TaskExecutor runs a managed shell with a timeout above the former lease ceiling (#1021) one millisecond over one hour"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X3-TE: a shell dispatch inside TaskExecutor makes zero GFS download store calls (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X2b: a store at workspace_unavailable still answers admitted inline reads, accessible and resolve"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X1-shell-live: a store with a non-expired legacy lease left by the pre-#1028 image does not stop an approved shell (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X1-delivery-live: a store with a non-expired legacy lease left by the pre-#1028 image is ignored and GFS delivery stays advertised (#1019)"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X6: an approved shell runs while the store is unavailable never initialized"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X6: an approved shell runs while the store is unavailable store closed"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X6: an approved shell runs while the store is unavailable initialize rejected with workspace_unavailable"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-a: a timeout with an escaped stdout/stderr holder settles through executeWithTimeout within the cleanup budget"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-c: a command that exits 0 after starting an escaped holder settles about two drain intervals after exit, not at the execution timeout"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool with stdio held by a process outside its group (#1028 P1) P1-g: an asynchronous start failure reports only the error code and publishes one result"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) P1-i: a pipe EOF that arrives after the first absent group probe keeps the natural-exit result"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) P1-j: a group gone on two consecutive probes without a pipe EOF reports the detached holder at the second probe"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) R1-H1: a close delivered 5900ms after SIGTERM with a group probe that never confirms absence settles within the cleanup budget and reports process_group_termination_failed"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) R1-H1: a natural exit whose group never disappears and whose stdio never closes is bounded by the execution timeout plus the cleanup budget"
+  },
+  {
+    "suite": "shell.detachedStdio.test.ts",
+    "fullName": "ShellTool single finalizer races (#1028 P1, hermetic child) R1-H1: a natural exit whose group probe always fails with EPERM is bounded by the execution timeout plus the cleanup budget"
+  },
+  {
+    "suite": "config.toolProgressInterval.test.ts",
+    "fullName": "CLERUM_TOOL_PROGRESS_INTERVAL_MS (#1028 P2) P2-b: malformed and sub-second values stop startup with the exact message and do not echo the value"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "applies persistent shell approval while the GFS download store is unavailable: store closed"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "applies persistent shell approval while the GFS download store is unavailable: store never initialized"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "runs shell without a new approval when shell_exec is persistently approved"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "one shell approval covers the rest of the turn: two shell calls, one approval"
+  },
+  {
+    "suite": "taskExecutor.gfsPreparation.test.ts",
+    "fullName": "TaskExecutor prepares admitted GFS files before its first model call asks for each configured clerum__gfs_download despite turn and persistent approval"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: publication F1: publish writes meta.json before source and every visible source has a meta.json"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: publication F4: an EIO while writing meta.json fails that publish only and the next admission succeeds"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: reuse F6: reuse deletes a directory whose content no longer matches and returns undefined"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: quotas and eviction F10: when eviction cannot make room nothing is deleted"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: sweep F16: the sweep removes incomplete directories of every shape and keeps complete ones"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap a failed initialize is logged with its code and the next cycle makes the store available"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap stop joins the cycle in flight and closes the store"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V1: malformed JSON is incomplete'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V2: meta one byte over the size limit…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V3: meta exactly at the size limit is…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V4: wrong schemaVersion is incomplete'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V5: meta id that differs from its dir…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V6: expiresAt before createdAt is inc…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V7: meta exactly at the retention bou…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V8: meta past the retention bound by …'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V9: createdAt exactly one minute ahea…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V10: createdAt more than one minute a…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation 'V12: sizeBytes different from the sou…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation V11: sizeBytes above maxFileBytes is incomplete"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation V13: an adopted entry with non-private modes is counted but never served"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation V14: a published copy with non-private modes is not reused or read"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: meta.json validation V15: an admission past the retention window is refused"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q1: retained bytes exactly at the volume budget are admitted and one byte more is refused"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q2: there is no retained-file limit: one caller keeps 65 copies and only bytes refuse"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q3: Host bytes exactly at the budget are admitted and one byte more is refused"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q5: free space exactly at the threshold is admitted and one byte less is refused"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q6: a statfs failure refuses that admission loudly and the next one succeeds"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q7: a zero-byte file publishes, reads, reuses and has an empty prefix"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q9: Host eviction takes adopted copies before any published copy"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q10: an admission evicts adopted copies in any caller's directory before its own published copies"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q11: published copies are evicted least recently used first"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: quota and capacity Q12: when pins fill the Host protected cap admission fails with the quota code and succeeds after release"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: expiry E1: reuse matches until one millisecond before the copy has one hour left"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: expiry E2: a managed read succeeds until one millisecond before expiry"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: expiry E3: the sweep removes a copy exactly at its expiry"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C1: two concurrent downloads of one source by one caller both publish and reuse returns one of them"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C2: two callers downloading one source each reuse their own copy"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C3: a sweep during an active transfer leaves its partial file alone"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C4: a sweep requested during publication runs after it and keeps the copy"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C5: close requested during publication waits for it"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C5b: close waits for a sweep accepted while it was already waiting"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C5c: close still returns at its deadline when an accepted sweep never finishes"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C7: fail() after a partial write removes the directory and releases the reservation"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: in-process concurrency C8: fail() after publish is refused and the copy stays readable"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: integrity 'I2: truncated source on reuse'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: integrity 'I4: source replaced by a directory on…'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: integrity 'I3: truncated source on managed read'"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: integrity 'I5: source replaced by a directory on…'"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies T-S1: a planted entry in the caller's directory is never reused"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies T-S2: a planted entry is never read through the managed path"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P7b: an expired adopted entry in the caller's own directory answers download_missing, not download_expired"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies T-S3: a planted directory with a published id is removed and the published copy is untouched"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies T-S4: a planted entry is inventoried under the directory that contains it and evicted first"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies T-R1: a restart keeps the copy for accounting and cleanup but does not reuse it"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P7: a planted entry with the caller's own identity is neither reused nor read"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P8: a meta identity that differs from its directory grants nothing to either caller"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P9: duplicate ids without a published entry are all removed"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P10: a planted directory with an active id is removed and the transfer still publishes"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P11: symlink as input directory"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P11: symlink as meta.json"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P11: symlink as source"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P15: a .gfs-downloads that is a file is removed and the caller can still download"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P16: a symlinked caller directory is neither listed nor accepted as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P17: a hardlinked published source is not reused and is downloaded again"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code caller_mismatch to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code download_busy to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code download_expired to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code download_missing to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code host_quota_exceeded to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code publication_cancelled to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code storage_write_failed to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code workspace_unavailable to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code caller_mismatch to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code download_busy to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code download_expired to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code download_missing to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code host_quota_exceeded to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code publication_cancelled to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code storage_write_failed to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code workspace_unavailable to the model"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P18: a caller directory replaced by a symlink after publish is not followed by the expiry sweep"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P18: a caller directory replaced by a symlink after publish is not followed by the failed reuse"
+  },
+  {
+    "suite": "gfsDownloadStoreProvenance.test.ts",
+    "fullName": "GFS download store provenance: planted copies P19: a caller directory replaced by a symlink before publish is refused and nothing is written outside"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U1: readManagedFile answers another caller's copy exactly like a nonexistent one, without opening it"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U1: readManagedFilePrefix answers another caller's copy exactly like a nonexistent one, without opening it"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U2: an expired copy of another caller is still answered as nonexistent, not as expired"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U3: publish and fail answer another caller's transfer exactly like an unknown id"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: path swapped between check and use K1: a removal whose parent is swapped after the check renames back and touches nothing outside"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: path swapped between check and use K2: a publication whose caller directory is swapped after the check writes nothing outside"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: path swapped between check and use K3: a read whose caller directory is swapped after the check serves nothing from outside"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R2: dev user directories of every state are removed at startup and do not count against quota"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R3: a failed retirement is logged, the store is available and the next sweep retires it"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R4: after startup the volume has no store directory and only valid input directories"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R5: a retired directory left by a failed removal is removed by the next sweep and is protected meanwhile"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R6: a retired directory left by an earlier start is removed at startup and is protected meanwhile"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R7: restarting with copies left by this design keeps them for accounting and does not reuse them"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R8: after a restart the same file downloads again under a new id that is reused and served"
+  },
+  {
+    "suite": "protectedWorkspacePaths.test.ts",
+    "fullName": "protected workspace paths blocks a retired pre-#1028 store tree and leaves a lookalike name readable"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap a cleanup that throws is logged and the next cycle sweeps again"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: publication F4b: a temporary meta.json that cannot be removed after a failed publish is logged, not swallowed"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: reuse F7b: another caller's reuse lookup never hashes or removes a copy it does not own"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: quotas and eviction F10b: a quota denial carries only its code, never another caller's id, path, name or usage"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: sweep F20b: a caller's unreadable download directory is counted and logged, and the store stays available"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: managed reads F23b: a kubelet fsGroup expansion is restored to the private modes after the content is re-hashed"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: managed reads F23c: an fsGroup-expanded source whose content changed is not restored or served"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: expiry E2b: a managed prefix read succeeds until one millisecond before expiry"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: path swapped between check and use K2b: a caller directory swapped between the meta.json rename and the source rename publishes nothing"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S08: an infeasible eviction plan deletes nothing even when some copies are evictable"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S11: publish refuses a digest that does not match the partial bytes"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S13: publish refuses a partial file larger than the admitted size"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S24: publish refuses a transfer whose expiry passed during the download"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S22: a caller root that is an alias of another caller directory is refused"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S10: a source.partial swapped after meta.json is renamed is not published"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: adversarial review kill tests ADV-S12: a source.partial swapped after hashing is refused before meta.json is written"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller identity (ADV-1) two channels with the same sender never see each other’s copy"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller identity (ADV-1) refuses an identity that is not the caller root’s key"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller root shape (F9) refuses the Host root as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller root shape (F9) refuses the users directory as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller root shape (F9) refuses a directory inside a caller root as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: caller root shape (F9) refuses a directory outside users as a caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) reuse that cannot open a pinned copy keeps it for the task that holds it"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) reuse still removes a copy whose bytes no longer match its receipt"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) a sweep that cannot lstat a published copy keeps it and counts sweep_failed"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) a startup sweep that cannot open meta.json keeps the copy for the next start"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) an admission that cannot verify .gfs-downloads fails and keeps every copy"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) readManagedFile logs a non-ENOENT failure of the owner’s copy and still answers download_missing"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: transient I/O is not corruption (F1/ADV-3) readManagedFilePrefix logs a non-ENOENT failure of the owner’s copy and still answers download_missing"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a replaced .gfs-downloads stranded by a failed rm is protected and swept"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) an eviction whose removal fails keeps the copy published and charged"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a refused removal whose undo also fails reports the refusal, not the undo"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a removal of a directory that never existed is not counted as removed"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S17: createTransfer refuses an expiry at or before its creation instant"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S18: close() does not wait for pinned copies, only for active transfers"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S28: a managed read refreshes recency, so the unread copy is evicted first"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S31: a removal is proven by ENOENT, not by rm returning"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S01: a descriptor with the published inode number on another device is not served"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: expiry, close, recency and removal proof S09: publication syncs the download directory after the source rename"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart: retirement edge cases S14: only `.gfs-download-store.retired-<uuid>` names are removed"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart: retirement edge cases S15: a `.gfs-download-store` that is a file is retired without following it"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart: retirement edge cases S15: a `.gfs-download-store` that is a symlink is retired without following it"
+  },
+  {
+    "suite": "gfsStorePrivateFiles.test.ts",
+    "fullName": "openPrivateStoreObject S02: refuses a symlink at the open itself, with ELOOP"
+  },
+  {
+    "suite": "gfsStorePrivateFiles.test.ts",
+    "fullName": "openPrivateStoreObject S03: refuses an opened inode whose name moved to another inode"
+  },
+  {
+    "suite": "gfsExecutionCapability.test.ts",
+    "fullName": "gfsStoreCallerIdentity keys the store by the channel-namespaced caller-root key, never the raw sender"
+  },
+  {
+    "suite": "gfsExecutionCapability.test.ts",
+    "fullName": "gfsStoreCallerIdentity gives a task without a source message the system key of its caller root"
+  },
+  {
+    "suite": "gfsDownloadStoreNonBlocking.test.ts",
+    "fullName": "GFS download store: a FIFO in the store tree never blocks Host bootstrap settles with a meta.json FIFO and removes its directory"
+  },
+  {
+    "suite": "gfsDownloadStoreNonBlocking.test.ts",
+    "fullName": "GFS download store: a FIFO in the store tree never blocks a runtime sweep settles with a meta.json FIFO and removes its directory"
+  },
+  {
+    "suite": "gfsDownloadStoreNonBlocking.test.ts",
+    "fullName": "GFS download store: a FIFO in the store tree never blocks managed reads of a published copy whose source became a FIFO refuse without blocking"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: a FIFO never blocks publication a download directory swapped for a FIFO before its sync fails the publication at once"
+  },
+  {
+    "suite": "gfsContentDownload.test.ts",
+    "fullName": "governed GFS content download fails at once when source.partial is replaced by a FIFO before the download opens it"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged duplicates of another caller’s ids whose removal fails stay charged against the Host budget"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: a failed duplicate removal stays charged a duplicate of a published copy whose removal fails stays charged"
+  },
+  {
+    "suite": "gfsDownloadStoreNonBlocking.test.ts",
+    "fullName": "GFS download store: a FIFO in the store tree never blocks a meta.json FIFO with a writer attached is judged by its type, not read"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-1: the default 70% budget admits exactly up to floor(total * 70 / 100) bytes"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-2: percent '1' of a 1000n-byte volume admits 10 bytes and refuses one more"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-2: percent '100' of a 10n-byte volume admits 10 bytes and refuses one more"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-3: a volume resized between two admissions is used by the second, without restart"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-4: a large volume is sized in bigint without rounding"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: no per-caller storage or file-count limit BUD-6: one caller fills the whole budget with 18 files of 16 MiB and another caller evicts its least recently used copy"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: no per-caller storage or file-count limit BUD-7: another caller's admission never evicts a pinned copy and takes an adopted one first"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: no per-caller storage or file-count limit BUD-8: the quota denial is identical whoever holds the pinned bytes"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9: MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES still set is warned about once, by name and never by value"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9: MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES still set is warned about once, by name and never by value"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9: MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES still set is warned about once, by name and never by value"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9b: every removed variable set at once gives one warning each"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-9c: removed variables set to 1 byte and 1 file do not limit retained storage"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: removed variables BUD-10: with no removed variable set nothing is warned and the store initializes"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy accepts a storage percent of 1"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy accepts a storage percent of 85"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy accepts a storage percent of 100"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"0\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"101\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"85.5\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy refuses storage percent \"-1\" at startup"
+  },
+  {
+    "suite": "gfsFilePolicy.test.ts",
+    "fullName": "GFS file policy removed retained-storage variables no longer shape the policy"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) SOL-R2-HELD-meta-open: a duplicate whose meta.json cannot be opened keeps its charge"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) SOL-R2-HELD-caller-list: a duplicate whose .gfs-downloads cannot be listed keeps its charge"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried charge is dropped once lstat reports the directory gone"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried charge whose lstat fails with anything but ENOENT or ENOTDIR is kept"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) SOL-R3-HELD-ENOTDIR: a carried charge below a caller root that became a file is dropped"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried path that is no longer a directory is dropped while its parent cannot be listed"
+  },
+  {
+    "suite": "gfsDownloadStoreHeldCharges.test.ts",
+    "fullName": "GFS download store: held duplicate charges survive transient failures (R2-F2) a carried directory that is now indexed is charged once, not twice"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) SOL-R3-PINS: one caller pins up to its cap, exactly, and another caller is still admitted beside it"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a refused caller gets the same error object as a Host-wide refusal"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) the new reservation itself counts, pinned or not"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a caller's open reservation counts when it pins a reused copy"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) unpinned copies are not protected: one caller still fills the whole budget"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) pinning a reused copy counts it once, and only when it is not already protected"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a file larger than the cap is refused before any eviction"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: sweep F17: the sweep removes expired complete downloads, pinned or not"
+  },
+  {
+    "suite": "gfsDownloadStore.test.ts",
+    "fullName": "GFS download store: pins, lifecycle and errors F24: releaseReceiptOwner accepts an unknown owner and another caller owner id without removing any copy"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U4: an owner id another caller pins is not refused, and releasing it twice is a no-op"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-1: a full disk refuses as disk_full while a full budget still refuses as host_quota_exceeded"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-3: 'one byte above the file limit' is refused as limit_exceeded without a space metric"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-3: 'a negative size' is refused as limit_exceeded without a space metric"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-3: 'a fractional size' is refused as limit_exceeded without a space metric"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) SOL-R4-ORDER: a caller at its cap is refused before eviction, so a full budget keeps the other caller copies"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: retention pins never outlive expiresAt (Addendum 10) the sweep removes a pinned copy once it is past its expiry"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: retention pins never outlive expiresAt (Addendum 10) an expired pinned copy stops counting toward its caller cap without releasing the owner"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: retention pins never outlive expiresAt (Addendum 10) eviction reclaims an expired pinned copy the admission sweep could not inspect, and keeps unexpired pins"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: re-pinning an already protected copy (R4-F1) reuses a copy the caller already protects without measuring the volume"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: pins are per caller and per process (F24/U4 ported) releasing an owner id unpins only the releasing caller; the same id under another caller keeps counting"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: pins are per caller and per process (F24/U4 ported) a second store on the same root holds no pins"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code disk_full to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code limit_exceeded to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code disk_full to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code limit_exceeded to the model"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the disk_full envelope with its guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the host_quota_exceeded envelope with its guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the disk_full envelope with the cache guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the host_quota_exceeded envelope with the disk guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the disk_full envelope with an untrusted second line to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the host_quota_exceeded envelope with its guidance and a third line to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the store limit_exceeded envelope to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the store limit_exceeded envelope with the cache guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation keeps every guided space envelope within the fixed error bound"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts tells the model the workspace disk is full and to offer a cleanup of the caller workspace only"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts keeps the two space guidances distinct from each other"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts names no caller, foreign path or count in either space guidance"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts adds each space guidance once for several refusals and none for other codes"
+  },
+  {
+    "suite": "gfsDownloadStoreAdversarial.test.ts",
+    "fullName": "GFS download store adversarial round: trash, eviction and undo (ADV-2/F2/F3/F8) a sweep keeps an incomplete entry charged, under its trash name, until its removal succeeds"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a zero block size' twice refuses as volume_unmeasurable with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a zero block count' twice refuses as volume_unmeasurable with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: share of the workspace volume BUD-5: statfs reporting 'a negative block count' twice refuses as volume_unmeasurable with free_space"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-2: statfs reporting a negative available-block count twice refuses as volume_unmeasurable, not disk_full or host_quota_exceeded"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-4: one statfs reading with 'a zero block size' is measured again and a valid second reading admits"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-4: one statfs reading with 'a zero block count' is measured again and a valid second reading admits"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-4: one statfs reading with 'a negative block count' is measured again and a valid second reading admits"
+  },
+  {
+    "suite": "gfsDownloadStoreBudget.test.ts",
+    "fullName": "GFS download store budget: a full disk and a full cache are distinct refusals DSK-4: one statfs reading with 'a negative available-block count' is measured again and a valid second reading admits"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: retention pins never outlive expiresAt (Addendum 10) an expired copy still on disk is not reused"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: expired copies never make the disk full (M1) an admission refused as disk_full only because of an expired pinned copy is admitted, and the expired directory is gone"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: expired copies never make the disk full (M1) a disk truly full after the sweep refuses as disk_full and leaves live cached copies intact"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) SOL-R5-TRASH-CHARGE: an expired pinned copy and an unpinned one whose trash cannot be removed keep their charge until cleanup succeeds"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: reuse that crosses expiry while hashing (R5-F2) SOL-R5-REUSE-CROSS-EXPIRY: a copy that enters its last hour while it is hashed is a cache miss and gets no pin"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces store code volume_unmeasurable to the model"
+  },
+  {
+    "suite": "gfsManagedImage.test.ts",
+    "fullName": "GFS download store errors at the tool boundary surfaces download admission code volume_unmeasurable to the model"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the bare volume_unmeasurable envelope to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the volume_unmeasurable envelope with the cache guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the volume_unmeasurable envelope with the disk guidance to its fixed category"
+  },
+  {
+    "suite": "gfsFilePreparation.test.ts",
+    "fullName": "GFS file preparation maps the volume_unmeasurable envelope with an untrusted second line to its fixed category"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts tells the model the download cache is full and that the user can only finish or cancel their own tasks, with no offer to delete copies"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts renders an unmeasurable volume without any guidance line"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-UNDO-FAIL: post-rename verification and undo failures retain the renamed bytes"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-FAILED-TRANSFER-partial: failed transfer trash keeps its former reservation charged"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-FAILED-TRANSFER-post-source-rename: failed transfer trash keeps its former reservation charged"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-NO-DOUBLE-CHARGE: repeated trash failures charge exactly once and admission at the remainder works"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-TRASH-ABSENCE-file: definitive absence releases a held trash charge despite a failed listing"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-TRASH-ABSENCE-missing: definitive absence releases a held trash charge despite a failed listing"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-TRASH-ABSENCE-parent-file: definitive absence releases a held trash charge despite a failed listing"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-TRASH-UNKNOWN: failed listing and EIO probing retain trash charges until cleanup recovers"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-SERIAL-SWEEPS: concurrent admission and cleanup queue behind the pre-check sweep and preserve live pins and active transfers"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-REUSE-UNPINNED-false: crossing the one-hour reuse margin after the hash is a miss with and without a new retention owner"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-REUSE-UNPINNED-true: crossing the one-hour reuse margin after the hash is a miss with and without a new retention owner"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-RESTART-TRASH: trash that survives startup cleanup remains charged after reopening the store"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-FAIL-BEFORE-RENAME: a failed transfer still in its original incomplete directory retains its charge"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-SECOND-CHECK-false: the post-reclaim measurement retries invalid readings and retains the correct error"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-SECOND-CHECK-true: the post-reclaim measurement retries invalid readings and retains the correct error"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-REUSE-false: a new retention owner shares the invalid-statfs retry and category"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-REUSE-true: a new retention owner shares the invalid-statfs retry and category"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-EIO-false: a rejected statfs propagates without treating it as an invalid reading"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-VOLUME-EIO-true: a rejected statfs propagates without treating it as an invalid reading"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-FAIL-PARENT-REFUSED: a failed transfer whose parent check refuses before the rename keeps its reservation charged"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-SYMLINK-ROOT: a .gfs-downloads symlink that cannot be removed is never walked into"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-REFUSED-TRASH-NOT-READ: a trash left in a refused parent with no charge in hand is not measured"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-ROOT-REFUSAL-CODE: a replaced .gfs-downloads whose undo fails reports the refusal and keeps its copies charged on the trash"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-INDEXED-KEPT: an evicted entry whose rename fails stays indexed and is charged once"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-UNDO-RESTORED-UNINDEXED: startup leftovers restored by an undone refusal are measured once their parent passes again"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-WALK-SWAP: a directory replaced by a symlink while a leftover is measured is not walked"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-REFUSED-IN-PLACE-NOT-READ: a leftover whose parent check keeps failing is not walked to measure it"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) OPUS-R6-RESTART: after a Host restart a trash directory whose removal keeps failing is sized and charged again"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) DS-R6-FAIL-PARTIAL: a failed transfer whose trash cannot be removed stays charged with the bytes it wrote"
+  },
+  {
+    "suite": "safety.test.ts",
+    "fullName": "BasicSafety U7: rejects a shell_exec command containing a NUL character (#1020)"
+  },
+  {
+    "suite": "shell.test.ts",
+    "fullName": "ShellTool start failures (#1020) U3: rejects a NUL env value before spawn and names only the variable key"
+  },
+  {
+    "suite": "shell.test.ts",
+    "fullName": "ShellTool start failures (#1020) U3b: reports only the error code of a synchronous spawn throw"
+  },
+  {
+    "suite": "shell.test.ts",
+    "fullName": "ShellTool start failures (#1020) U3c: reports a fixed message for a synchronous spawn throw without a well-formed code"
+  },
+  {
+    "suite": "toolUseLoop.shellNul.test.ts",
+    "fullName": "shell_exec NUL commands through the tool loop (#1020) X5: BasicSafety rejects a NUL command before approval, the same command without NUL reaches approval"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) reserves the 6s cleanup the shell declares"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) U11: accepts CLERUM_TOOL_TIMEOUT at 2^31-1 minus the shell cleanup and rejects one more"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) U11: accepts CLERUM_SHELL_TIMEOUT at 2^31-1 minus the shell cleanup and rejects one more"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) accepts 'CLERUM_AGENT_MAX_TASK_DURATION' at the full timer range 2^31-1 and rejects one more"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) accepts 'CLERUM_AGENT_MAX_TOOL_CALLS' at the full timer range 2^31-1 and rejects one more"
+  },
+  {
+    "suite": "config.executionLimits.test.ts",
+    "fullName": "tool timeouts bounded to the executable timer range (#1021) U11: the accepted maximum runs a shell call and one more is refused by the timer guard"
+  },
+  {
+    "suite": "taskExecutor.gfsPreparation.test.ts",
+    "fullName": "TaskExecutor prepares admitted GFS files before its first model call maps the real tool output for a disk_full store refusal to its preparation code"
+  },
+  {
+    "suite": "taskExecutor.gfsPreparation.test.ts",
+    "fullName": "TaskExecutor prepares admitted GFS files before its first model call maps the real tool output for a host_quota_exceeded store refusal to its preparation code"
+  },
+  {
+    "suite": "taskExecutor.gfsPreparation.test.ts",
+    "fullName": "TaskExecutor prepares admitted GFS files before its first model call maps the real tool output for a volume_unmeasurable store refusal to its preparation code"
+  },
+  {
+    "suite": "taskExecutor.gfsExecutionSafety.test.ts",
+    "fullName": "X3-TE-channel: an approved channel shell dispatch with GFS delivery on makes zero GFS download store calls (#1019)"
+  },
+  {
+    "suite": "turnContext.test.ts",
+    "fullName": "prepared GFS receipts projects only metadata inside the original fence and tells the model to use the prepared copy"
+  },
+  {
+    "suite": "gfsDownloadStoreDiskPressure.test.ts",
+    "fullName": "GFS download store: disk pressure evicts unpinned copies DP-1: a full disk under budget evicts the least recently used unpinned copies of another caller instead of refusing as disk_full"
+  },
+  {
+    "suite": "gfsDownloadStoreDiskPressure.test.ts",
+    "fullName": "GFS download store: disk pressure evicts unpinned copies DP-2: pinned copies are never evicted for a physical deficit, and the admission refuses as disk_full without deleting anything"
+  },
+  {
+    "suite": "gfsDownloadStoreDiskPressure.test.ts",
+    "fullName": "GFS download store: disk pressure evicts unpinned copies DP-3: a deficit larger than every unpinned copy refuses as disk_full and evicts nothing"
+  },
+  {
+    "suite": "gfsDownloadStoreDiskPressure.test.ts",
+    "fullName": "GFS download store: eviction metric EVM-1: a budget eviction increments expired_removed and removes the evicted directory"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a store directory made unwritable is still removed RCV-1: expired copies in input directories chmod 0500 are removed by the sweep, release their charge, and another caller is admitted"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a non-regular meta.json RCV-2: a Unix socket planted as meta.json makes the directory incomplete, and the sweep removes it"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a non-regular meta.json RCV-2b: at initialize, a socket meta.json is removed as incomplete"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: close() and initialize() RCV-3: close() requested while initialize() is sweeping waits for that sweep"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: close() and initialize() RCV-4: a second close() while the first is draining resolves only when the first does"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: close() and initialize() RCV-5: a managed read whose digest check finishes after close() does not remove the copy"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: removed variables across initialize() retries RCV-6: a removed variable is warned about once although initialize() runs twice"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: killed with an expired and a live processing lease"
+  },
+  {
+    "suite": "gfsDownloadStoreRestart.test.ts",
+    "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: restarted by the dev Host, every record quarantined (#1019)"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U1b: readManagedFile refuses an adopted copy recorded for the same caller from the index, before touching its directory"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U1b: readManagedFilePrefix refuses an adopted copy recorded for the same caller from the index, before touching its directory"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: free-space floor value FSF-1: the floor is 15% of the volume, and never less than 16 MiB"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: free-space floor value FSF-1b: a restore aims for the floor plus 5% of the volume"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: admission keeps the free-space floor FSF-2: an admission is refused as disk_full while every copy is pinned, and admitted after evicting released copies"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-3: below the floor, cleanupExpired evicts the adopted copy and then the least recently used ones up to the floor plus 5%, and keeps pinned copies and active transfers"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-4: above the floor, cleanupExpired evicts nothing while it still removes an expired copy"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-5: a deficit larger than every unpinned copy is restored partially, and the evictions are kept"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-6: when statfs rejects, cleanupExpired keeps its sweep result, evicts nothing and logs the failure"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-6: when two invalid readings, cleanupExpired keeps its sweep result, evicts nothing and logs the failure"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-7: a restore continues past the floor and stops once the floor plus 5% is free"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: startup restores the free-space floor FSF-8: a store initialized on a volume below the floor evicts adopted copies before it is available"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) HOST-CAP: two callers each under their own cap are refused once their sum would exceed three quarters of the budget, and admitted after a release"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a store directory made unwritable is still removed RCV-1c: an adopted copy whose .gfs-downloads parent is chmod 0500 is evicted after the owner rwx is restored on the parent, and its charge is released"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a store directory made unwritable is still removed RCV-1d: a symlink swapped in for the .gfs-downloads parent after a refused rename is not followed, and the removal is refused"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-EXPIRED-KEPT: an expired entry whose removal fails in the sweep stays indexed and charged"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: reuse that crosses expiry while hashing (R5-F2) REUSE-MARGIN: a copy with 59 minutes left is a cache miss and gets no pin, while a copy with 61 minutes left is reused and pinned"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap the default cycle runs cleanup every five minutes"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap stop resolves when the cycle in flight never settles: it waits stopTimeoutMs, warns and closes the store"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) TWO-CALLERS-HOST-CAP: two callers that together protect three quarters of the budget refuse a third caller with the Host-wide scope"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain shell_exec approval covers its later calls in the same task and a new task asks again"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain http_request approval covers its later calls in the same task and a new task asks again"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain cron_manage approval covers its later calls in the same task and a new task asks again"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "an \"always\" shell_exec approval covers its calls in later tasks"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "an \"always\" http_request approval covers its calls in later tasks"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "an \"always\" cron_manage approval covers its calls in later tasks"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain shell_exec approval covers 31 later shell calls of the same task"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain shell_exec approval still covers shell after a clerum__gfs_download card in the same task"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "after a shell_exec approval, cron_manage and http_request still suspend for their own approval"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "on a stateless host every cron_manage create asks, and an approved create card runs only that call"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "asks again for a plain shell_exec approval when a cold resume rebuilds the conversation mid-task"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "asks again for an \"always\" shell_exec approval after a cold resume rebuilds the conversation"
+  },
+  {
+    "suite": "authorizationScope.test.ts",
+    "fullName": "approval authorization scope scopes turn-wide consent for shell_exec to the tool itself, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of shell_exec stores the tool for the current task only, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of shell_exec stores the tool for later tasks, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of http_request stores the tool for the current task only, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of http_request stores the tool for later tasks, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of cron_manage stores the tool for the current task only, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of cron_manage stores the tool for later tasks, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals startTurn clears plain session-scoped approvals and keeps \"always\" ones"
+  },
+  {
+    "suite": "approvalController.test.ts",
+    "fullName": "ApprovalController should bypass every tool outside the session-scoped set when wildcard '*' is in auto_approved_tools"
+  },
+  {
+    "suite": "approvalController.test.ts",
+    "fullName": "ApprovalController does not let wildcard '*' cover shell_exec, http_request or cron_manage"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals an MCP turn-wide approval adds '*' that does not cover shell_exec"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps MCP behaviour: '*' covers other MCP tools in the turn and the server prefix persists"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals shell_exec approval after an MCP '*' covers shell_exec without revoking '*'"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps workflow_trigger turn-wide: '*' covers other gated tools this turn, and a new turn asks again"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps workflow_trigger \"always\" approval across turns through its tool name"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval after a plain cron_manage list approval in the task, create still suspends with exact scope"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval after an \"always\" cron_manage approval, enable still suspends in a later task"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval after an MCP approval adds '*', create still suspends with exact scope"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval approving a forced create card stores no approval, so the next create asks again"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval on a non-stateless host a plain cron_manage approval covers create for the rest of the task"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval keeps the cron-sourced gate-only path: create suspends and every other call proceeds"
+  }
+]

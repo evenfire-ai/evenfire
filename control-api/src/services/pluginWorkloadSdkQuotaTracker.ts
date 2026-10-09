@@ -13,7 +13,7 @@ import {
 // override still wins (decision §3.1) — it is a per-recipe fairness knob, NOT
 // the platform DoS ceiling, so it is intentionally NOT clamped to the default.
 // A raised override stays bounded by the grant-independent request bucket
-// (CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN, default 600/min) + pre-auth
+// (CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN, default 6000/min) + pre-auth
 // limits (pluginWorkloadSdkRateLimits.ts / plugin-workload-sdk.routes.ts),
 // which are the actual anti-DoS backstop.
 //

@@ -4,6 +4,7 @@ import {
   isRetryableLlmError,
   shouldRecoverWorkflowTriggerTextResponse,
 } from './toolUseLoopIntentRecovery'
+import { loopInjectedUserMessage } from './toolUseLoopMessages'
 import { buildWorkflowToolSuccessFallbackResponse } from './toolUseLoopWorkflowFallbacks'
 
 interface LoopErrorRecoveryInput {
@@ -59,12 +60,11 @@ export function handleLoopErrorRecovery(input: LoopErrorRecoveryInput): LoopErro
         type: 'continue',
         messages: [
           ...messages,
-          {
-            role: 'user',
-            content: recoverWorkflowTriggerAfterToolResults
+          loopInjectedUserMessage(
+            recoverWorkflowTriggerAfterToolResults
               ? 'The previous tool result listed workflows but did not trigger the requested workflow. The user asked to run a named workflow recipe. Use workflow_trigger for that recipe and authenticated target when it is available, or use workflow tools to prove it is not available. Do not only summarize workflow_list.'
-              : 'The previous assistant turn after the tool result was empty. Reply to the user using only the tool results above. Do not infer results that were not returned.',
-          },
+              : 'The previous assistant turn after the tool result was empty. Reply to the user using only the tool results above. Do not infer results that were not returned.'
+          ),
         ],
         emptyResponseAfterToolResultsRecovered: true,
         workflowTriggerTextResponseRecovered: recoverWorkflowTriggerAfterToolResults || undefined,
@@ -81,11 +81,9 @@ export function handleLoopErrorRecovery(input: LoopErrorRecoveryInput): LoopErro
         type: 'continue',
         messages: [
           ...messages,
-          {
-            role: 'user',
-            content:
-              'The previous assistant turn was empty. Continue the user request now. Use the available tools when needed, and do not invent workflow names, workflow results, approvals, runs, or artifacts.',
-          },
+          loopInjectedUserMessage(
+            'The previous assistant turn was empty. Continue the user request now. Use the available tools when needed, and do not invent workflow names, workflow results, approvals, runs, or artifacts.'
+          ),
         ],
         emptyInitialResponseRecovered: true,
       }

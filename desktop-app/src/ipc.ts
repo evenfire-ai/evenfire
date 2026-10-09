@@ -32,6 +32,7 @@ import {
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
   HostActivityStreamEvent,
+  HostMessageAttachment,
   HostMessageRequest,
   HostStatusStreamEvent,
   TaskProgressStreamEvent,
@@ -40,6 +41,18 @@ import {
 
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()
+}
+
+// The renderer names each sandbox-ui open so it can tell events of the view
+// that open mounted from those of a view it replaced (same appRef on a
+// relaunch). The id is echoed verbatim on IPC events, so bound it here.
+const SANDBOX_UI_LAUNCH_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/
+
+function parseSandboxUiLaunchId(input: unknown): string {
+  if (typeof input !== 'string' || !SANDBOX_UI_LAUNCH_ID_PATTERN.test(input)) {
+    throw new Error('launchId must be 1-64 characters of [A-Za-z0-9-]')
+  }
+  return input
 }
 
 function sanitizeChatAuthorityScope(input: unknown): ChatAuthorityScope {
@@ -209,6 +222,54 @@ function isSelectionRevision(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Checks the shape of every `kind:'file'` attachment (#678). mcp-host enforces
+ * the size limits and recomputes the size and the digest; an image entry keeps
+ * the contract it always had and is not inspected here.
+ */
+function parseHostMessageAttachments(attachments: unknown): HostMessageAttachment[] {
+  if (!Array.isArray(attachments)) {
+    throw new Error('Invalid host message request: attachments')
+  }
+  attachments.forEach((entry, index) => {
+    if (!isPlainObject(entry) || entry.kind !== 'file') return
+    const digest = entry.digest
+    const problem =
+      typeof entry.id !== 'string' || !entry.id.trim()
+        ? 'id'
+        : typeof entry.filename !== 'string' || !entry.filename
+          ? 'filename'
+          : typeof entry.mimeType !== 'string'
+            ? 'mimeType'
+            : typeof entry.detectedMediaType !== 'string'
+              ? 'detectedMediaType'
+              : entry.encoding !== 'base64'
+                ? 'encoding'
+                : typeof entry.dataBase64 !== 'string'
+                  ? 'dataBase64'
+                  : !Number.isSafeInteger(entry.sizeBytes) || (entry.sizeBytes as number) < 0
+                    ? 'sizeBytes'
+                    : !isPlainObject(digest) ||
+                        digest.algorithm !== 'sha256' ||
+                        typeof digest.hex !== 'string' ||
+                        !SHA256_HEX.test(digest.hex)
+                      ? 'digest'
+                      : null
+    if (problem) {
+      throw new Error(
+        `Invalid host message request: COMPOSER_FILE_ATTACHMENT_INVALID attachments[${index}].${problem}`
+      )
+    }
+  })
+  return attachments as HostMessageAttachment[]
+}
+
 function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   const parsed = raw as HostMessageRequest
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -225,6 +286,9 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
     !isSelectionRevision(parsed.modelSelectionRevision)
   ) {
     throw new Error('Invalid host message request: modelSelectionRevision')
+  }
+  if (parsed.attachments != null) {
+    parsed.attachments = parseHostMessageAttachments(parsed.attachments)
   }
   if (parsed.fileReferences !== undefined) {
     // Checks shape only; mcp-host enforces the count limit and resolves each reference.
@@ -1982,6 +2046,7 @@ export function registerIpcHandlers(service: AppService): void {
         defaultPath?: string
         routePath?: string
         bounds: unknown
+        launchId: unknown
       }
     ) => {
       assertTrustedSender(event)
@@ -1990,6 +2055,7 @@ export function registerIpcHandlers(service: AppService): void {
       if (!recipeNs || !recipeName) {
         throw new Error('recipeNs and recipeName are required')
       }
+      const launchId = parseSandboxUiLaunchId(payload?.launchId)
       const parentWindow = BrowserWindow.fromWebContents(event.sender)
       if (!parentWindow) {
         throw new Error('cannot resolve parent window from IPC sender')
@@ -2009,15 +2075,15 @@ export function registerIpcHandlers(service: AppService): void {
         parentWindow,
         onClosed: () => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:closed', { appRef })
+          parentWindow.webContents.send('sandboxUi:closed', { appRef, launchId })
         },
         onRefreshError: message => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:refreshError', { appRef, message })
+          parentWindow.webContents.send('sandboxUi:refreshError', { appRef, launchId, message })
         },
         onTitleChanged: title => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, title })
+          parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, launchId, title })
         },
       })
     }

@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCanvas } from '@napi-rs/canvas'
+import * as fs from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { hashCanonicalCodexRequest } from '@clerum/llm-provider-attempt-contract'
 import { LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import type { NativeToolConfig } from '../core/interfaces'
 import { appendToolResults } from '../core/orchestration/toolUseLoopMessages'
 import { NativeToolRegistry } from '../core/tools/nativeToolRegistry'
 import type { Attachment, ChatMessage, ToolResult } from '../core/types'
+import { realPngOfDecodedBytesBase64 } from '../llm/__tests__/codexImageFixtures'
 import { ClaudeProvider } from '../llm/claude'
 import { CodexSubscriptionProvider } from '../llm/codexSubscription'
 import type { ImageInputResolver } from '../llm/imageInput'
@@ -14,11 +19,20 @@ import type { LlmProvider } from '../llm/registryCore'
 import type { SingleTurnProvider } from '../llm/types'
 import { VisualInputBudget } from '../visualInput/policy'
 import { projectGfsApproval } from '../visualInput/suspension'
+import { GfsDownloadStore } from './gfsDownloadStore'
 
 const { sdkCreate, clientFactory } = vi.hoisted(() => ({
   sdkCreate: vi.fn(),
   clientFactory: vi.fn(),
 }))
+
+// statfs reports the volume sized to its free space, so the disk's occupancy
+// never meets the store's free-space floor.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  const { freeSpaceSizedStatfs } = await import('../__tests__/fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
+})
 
 // Only external transport boundaries are replaced. Production client, tool,
 // native adapter, message construction and provider serialization all execute.
@@ -46,6 +60,37 @@ const config: NativeToolConfig = {
   envAllowlist: [],
   memoryMaxSize: 1048576,
 }
+const stores: GfsDownloadStore[] = []
+const temporaryRoots: string[] = []
+
+function codexFixture() {
+  const authorize = vi.fn(async (input: { request: unknown; requestHash: string }) => {
+    const canonical = hashCanonicalCodexRequest(input.request)
+    if (!canonical.ok) throw new Error(`invalid unit wire request: ${canonical.code}`)
+    expect(input.requestHash).toBe(canonical.value.requestHash)
+    return {
+      providerAttemptId: 'unit-attempt',
+      requestHash: input.requestHash,
+      executionTicket: 'unit-only-execution-ticket',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    }
+  })
+  const stream = vi.fn(async (_input: { request: unknown; requestHash: string }) => ({
+    text: 'seen',
+    toolCalls: [],
+    outcome: 'success' as const,
+  }))
+  const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
+    authorizer: { authorize },
+    proxy: { stream },
+    attemptContext: () => ({ policyRevision: 1, policyHash: 'b'.repeat(64), hostRef: 'chatllm' }),
+  } as never)
+  return {
+    authorize,
+    stream,
+    llm: { provider, model: 'gpt-5.6-luna', name: 'codex-subscription' as const },
+  }
+}
 
 async function setup(
   bytes: Buffer,
@@ -53,6 +98,7 @@ async function setup(
     name?: string
     catalogState?: CatalogState
     llm?: { provider: SingleTurnProvider; model: string; name: LlmProvider }
+    managed?: boolean
   } = {}
 ) {
   const { createGfscClient } = await vi.importActual<typeof import('./gfsClient')>('./gfsClient')
@@ -145,7 +191,47 @@ async function setup(
     undefined,
     imageInputResolver
   )
-  const tool = new NativeToolRegistry(config, 'gfs-image-integration').get('clerum__gfs_read')!
+  let managed:
+    | {
+        store: GfsDownloadStore
+        deliveryAvailable: boolean
+        callerIdentity: string
+        callerWorkspacePath: string
+        retentionOwnerId: string
+      }
+    | undefined
+  if (options.managed) {
+    const root = await fs.mkdtemp(join(tmpdir(), 'gfs-image-wire-'))
+    temporaryRoots.push(root)
+    const callerWorkspacePath = join(root, 'users', 'unit-caller')
+    await fs.mkdir(callerWorkspacePath, { recursive: true, mode: 0o700 })
+    const store = new GfsDownloadStore(root)
+    await store.initialize()
+    stores.push(store)
+    managed = {
+      store,
+      deliveryAvailable: true,
+      callerWorkspacePath,
+      callerIdentity: 'unit-caller',
+      retentionOwnerId: 'gfs-image-integration-task',
+    }
+  }
+  const tool = new NativeToolRegistry(
+    config,
+    'gfs-image-integration',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    options.llm?.name,
+    managed
+  ).get('clerum__gfs_read')!
   const output = await tool.execute(
     { drive: 'main', resourceId: rid },
     {
@@ -185,14 +271,109 @@ async function setup(
   }
 }
 
-afterEach(() => {
+afterEach(async () => {
+  for (const store of stores.splice(0)) {
+    await store
+      .releaseReceiptOwner('gfs-image-integration-task', 'unit-caller')
+      .catch(() => undefined)
+    await store.close()
+  }
+  for (const root of temporaryRoots.splice(0)) await fs.rm(root, { recursive: true, force: true })
   vi.unstubAllGlobals()
   vi.clearAllMocks()
 })
 
 describe('GFS bytes to actual provider request', () => {
+  it('preserves a native-decoded managed PNG beyond 3 MiB in the actual canonical Codex wire', async () => {
+    const transport = codexFixture()
+    const bytes = Buffer.from(realPngOfDecodedBytesBase64(3 * 1024 * 1024 + 1), 'base64')
+    const subject = await setup(bytes, {
+      managed: true,
+      llm: transport.llm,
+      catalogState: 'codex-present',
+    })
+    const receipt = JSON.parse(subject.output.content)
+    expect(receipt).toMatchObject({
+      delivery: 'workspace_file',
+      sizeBytes: bytes.byteLength,
+      visualDelivery: 'included',
+      usage: { visualDelivery: 'included' },
+    })
+    expect(receipt.path).toMatch(/^\.gfs-downloads\//)
+    const original = structuredClone(subject.messages)
+    await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
+    const authorized = transport.authorize.mock.calls[0]![0]
+    const wire = authorized.request as {
+      messages: Array<{ contentParts?: Array<{ type: string; data?: string }> }>
+    }
+    expect(
+      wire.messages
+        .flatMap(message => message.contentParts ?? [])
+        .find(part => part.type === 'image')?.data
+    ).toBe(bytes.toString('base64'))
+    expect(transport.stream.mock.calls[0]![0]).toMatchObject({
+      request: authorized.request,
+      requestHash: authorized.requestHash,
+    })
+    expect(subject.messages).toEqual(original)
+    subject.budget.close()
+  })
+  it.each(['openai', 'claude'] as const)(
+    'delivers a native-decoded managed PNG beyond 3 MiB through the official %s instance',
+    async type => {
+      const create = vi.fn(async (_request: unknown) => ({
+        content: [{ type: 'text', text: 'seen' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }))
+      const targetModel = type === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-6'
+      const provider =
+        type === 'openai'
+          ? new OpenAIProvider(
+              {
+                baseURL: 'https://api.openai.com/v1',
+                chat: { completions: { create: sdkCreate } },
+              } as never,
+              targetModel
+            )
+          : new ClaudeProvider(
+              { baseURL: 'https://api.anthropic.com', messages: { create } } as never,
+              targetModel
+            )
+      const bytes = Buffer.from(realPngOfDecodedBytesBase64(3 * 1024 * 1024 + 1), 'base64')
+      const subject = await setup(bytes, {
+        managed: true,
+        llm: { provider, model: targetModel, name: type },
+      })
+      expect(JSON.parse(subject.output.content)).toMatchObject({
+        delivery: 'workspace_file',
+        sizeBytes: bytes.byteLength,
+        visualDelivery: 'included',
+        usage: { visualDelivery: 'included' },
+      })
+      const original = structuredClone(subject.messages)
+      await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
+      const request = type === 'openai' ? sdkCreate.mock.calls[0]![0] : create.mock.calls[0]![0]
+      const content = (request as { messages: Array<{ content: unknown }> }).messages.flatMap(
+        message => (Array.isArray(message.content) ? message.content : [])
+      )
+      if (type === 'openai') {
+        expect(content.find(part => part.type === 'image_url')?.image_url.url).toBe(
+          `data:image/png;base64,${bytes.toString('base64')}`
+        )
+      } else {
+        expect(content.find(part => part.type === 'image')?.source).toEqual({
+          type: 'base64',
+          media_type: 'image/png',
+          data: bytes.toString('base64'),
+        })
+      }
+      expect(subject.messages).toEqual(original)
+      subject.budget.close()
+    }
+  )
   it.each(['image/png', 'image/jpeg'] as const)(
-    'delivers %s directly to a documented OpenAI model',
+    'delivers %s through the verified official OpenAI instance and catalog vision evidence',
     async mime => {
       const model = 'gpt-4.1'
       // Only the SDK HTTP boundary is doubled; no credential or catalog service.
@@ -229,7 +410,7 @@ describe('GFS bytes to actual provider request', () => {
     }
   )
 
-  it('delivers GFS pixels to a catalog-supported OpenAI model absent from the old allowlist', async () => {
+  it('supports an official OpenAI instance with catalog-supported vision beyond the old model allowlist', async () => {
     const client = {
       baseURL: 'https://api.openai.com/v1',
       chat: { completions: { create: sdkCreate } },
@@ -268,20 +449,27 @@ describe('GFS bytes to actual provider request', () => {
   })
 
   it('withholds an admitted GFS image if catalog support is revoked before dispatch', async () => {
-    const subject = await setup(createCanvas(2, 2).toBuffer('image/png'))
+    const transport = codexFixture()
+    const subject = await setup(createCanvas(2, 2).toBuffer('image/png'), {
+      llm: transport.llm,
+      catalogState: 'codex-present',
+    })
     expect(JSON.parse(subject.output.content).delivery).toBe('image_input')
-    subject.setCatalogState('unsupported')
+    subject.setCatalogState('missing')
 
     await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
 
     expect(
       subject.messages.some(message => message.contentParts?.some(part => part.type === 'image'))
     ).toBe(true)
-    expect(JSON.stringify(sdkCreate.mock.calls[0][0])).not.toContain('image_url')
-    const sentTool = sdkCreate.mock.calls[0][0].messages.find(
+    const sentRequest = transport.authorize.mock.calls[0]![0].request as {
+      messages: Array<{ role: string; content: string }>
+    }
+    expect(JSON.stringify(sentRequest)).not.toContain('"type":"image"')
+    const sentTool = sentRequest.messages.find(
       (message: { role: string }) => message.role === 'tool'
     )
-    expect(JSON.parse(sentTool.content)).toMatchObject({
+    expect(JSON.parse(sentTool!.content)).toMatchObject({
       delivery: 'reference_only',
       reason: 'model_image_input_unavailable',
     })
@@ -289,32 +477,19 @@ describe('GFS bytes to actual provider request', () => {
   })
 
   it('delivers a GFS image through Codex V2 for a present catalog row', async () => {
-    const authorize = vi.fn(
-      async (_input: {
-        request: { messages: Array<{ contentParts?: Array<{ type: string }> }> }
-      }) => ({
-        providerAttemptId: 'attempt-1',
-        requestHash: 'a'.repeat(64),
-        executionTicket: 'ticket-123456',
-        expiresAt: '2099-01-01T00:00:00.000Z',
-      })
-    )
-    const stream = vi.fn(async () => ({ text: 'seen', toolCalls: [], outcome: 'success' as const }))
-    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
-      authorizer: { authorize },
-      proxy: { stream },
-      attemptContext: () => ({ policyRevision: 1, policyHash: 'b'.repeat(64), hostRef: 'chatllm' }),
-    } as never)
+    const { authorize, stream, llm } = codexFixture()
     const bytes = createCanvas(2, 2).toBuffer('image/png')
     const subject = await setup(bytes, {
       catalogState: 'codex-present',
-      llm: { provider, model: 'gpt-5.6-luna', name: 'codex-subscription' },
+      llm,
     })
 
     expect(JSON.parse(subject.output.content).delivery).toBe('image_input')
     await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
 
-    const authorized = authorize.mock.calls[0][0].request
+    const authorized = authorize.mock.calls[0]![0].request as {
+      messages: Array<{ contentParts?: Array<{ type: string }> }>
+    }
     const image = authorized.messages
       .flatMap((message: { contentParts?: Array<{ type: string }> }) => message.contentParts ?? [])
       .find((part: { type: string }) => part.type === 'image')
@@ -333,7 +508,7 @@ describe('GFS bytes to actual provider request', () => {
     ['image/png', true],
     ['image/jpeg', true],
   ] as const)(
-    'delivers %s through Claude with cache=%s without OpenRouter',
+    'delivers %s through the verified official Claude instance, cache=%s',
     async (mime, cache) => {
       const targetModel = 'claude-sonnet-4-6'
       // Credential-free SDK boundary double. The production provider serializer,
@@ -343,7 +518,7 @@ describe('GFS bytes to actual provider request', () => {
         stop_reason: 'end_turn',
         usage: { input_tokens: 10, output_tokens: 2 },
       }))
-      const client = { messages: { create } }
+      const client = { baseURL: 'https://api.anthropic.com', messages: { create } }
       const canvas = createCanvas(8, 8)
       canvas.getContext('2d').fillRect(1, 1, 4, 4)
       const bytes =
@@ -392,7 +567,8 @@ describe('GFS bytes to actual provider request', () => {
     'requires a new authorized read after suspension when the resource is %s',
     async state => {
       const original = createCanvas(2, 2).toBuffer('image/png')
-      const subject = await setup(original)
+      const transport = codexFixture()
+      const subject = await setup(original, { llm: transport.llm, catalogState: 'codex-present' })
       const restored = projectGfsApproval({
         request_id: 'approval',
         tool_name: 'shell_exec',
@@ -498,7 +674,11 @@ describe('GFS bytes to actual provider request', () => {
     subject.budget.close()
   })
   it('keeps the destination gate after shaping removes optional image provenance fields', async () => {
-    const subject = await setup(createCanvas(1, 1).toBuffer('image/png'))
+    const transport = codexFixture()
+    const subject = await setup(createCanvas(1, 1).toBuffer('image/png'), {
+      llm: transport.llm,
+      catalogState: 'codex-present',
+    })
     const shaped = subject.messages.map(message => ({
       ...message,
       contentParts: message.contentParts?.map(part =>
@@ -536,12 +716,15 @@ describe('GFS bytes to actual provider request', () => {
       '"type":"image"'
     )
     expect(sdkCreate).not.toHaveBeenCalled()
-    await subject.adapter.completeWithTools({ messages: shaped, tools: [] })
-    expect(sdkCreate).toHaveBeenCalledTimes(1)
+    // The source-binding Codex transport cannot accept pixels whose source was removed.
+    await expect(
+      subject.adapter.completeWithTools({ messages: shaped, tools: [] })
+    ).rejects.toBeDefined()
+    expect(transport.stream).not.toHaveBeenCalled()
     subject.budget.close()
   })
   it.each(['image/png', 'image/jpeg'] as const)(
-    'delivers unchanged %s bytes as a visual part',
+    'preserves unchanged %s bytes through the validated Codex wire',
     async mime => {
       const canvas = createCanvas(8, 8)
       const context = canvas.getContext('2d')
@@ -549,7 +732,12 @@ describe('GFS bytes to actual provider request', () => {
       context.fillRect(0, 0, 8, 8)
       const bytes =
         mime === 'image/png' ? canvas.toBuffer('image/png') : canvas.toBuffer('image/jpeg')
-      const subject = await setup(bytes, { name: 'incorrect-extension.txt' })
+      const transport = codexFixture()
+      const subject = await setup(bytes, {
+        name: 'incorrect-extension.txt',
+        llm: transport.llm,
+        catalogState: 'codex-present',
+      })
       expect(subject.output.is_error).toBe(false)
       expect(subject.output.attachments?.[0].visualSource).toMatchObject({
         gfsUri: uri,
@@ -557,14 +745,20 @@ describe('GFS bytes to actual provider request', () => {
       })
       expect(subject.collected).toEqual([])
       await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
-      const request = sdkCreate.mock.calls[0][0]
+      const request = transport.authorize.mock.calls[0]![0].request as {
+        messages: Array<{
+          role: string
+          content: string
+          contentParts?: Array<{ type: string; data?: string }>
+        }>
+      }
       const imagePart = request.messages
-        .flatMap((m: { content: unknown }) => (Array.isArray(m.content) ? m.content : []))
-        .find((p: { type?: string }) => p.type === 'image_url')
-      expect(imagePart.image_url.url).toBe(`data:${mime};base64,${bytes.toString('base64')}`)
+        .flatMap(m => m.contentParts ?? [])
+        .find(part => part.type === 'image')
+      expect(imagePart!.data).toBe(bytes.toString('base64'))
       const toolMessage = request.messages.find((m: { role: string }) => m.role === 'tool')
-      expect(typeof toolMessage.content).toBe('string')
-      expect(toolMessage.content).not.toContain(bytes.toString('base64'))
+      expect(typeof toolMessage!.content).toBe('string')
+      expect(toolMessage!.content).not.toContain(bytes.toString('base64'))
       expect(subject.metadataFetch).not.toHaveBeenCalled()
       expect(subject.gfsFetch).toHaveBeenCalledTimes(2)
       subject.budget.close()
@@ -620,7 +814,11 @@ describe('GFS bytes to actual provider request', () => {
   )
 
   it('rechecks the actual destination instead of forwarding images to an unknown fallback', async () => {
-    const subject = await setup(createCanvas(1, 1).toBuffer('image/png'))
+    const transport = codexFixture()
+    const subject = await setup(createCanvas(1, 1).toBuffer('image/png'), {
+      llm: transport.llm,
+      catalogState: 'codex-present',
+    })
     const completeSingleTurnWithTools = vi.fn().mockResolvedValue({
       content: 'degraded',
       tool_calls: [],

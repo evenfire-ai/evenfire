@@ -2,6 +2,7 @@
 import type { Safety } from '../core/interfaces.js'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle.js'
 import type { TransitionEvent } from '../lifecycle/types.js'
+import { projectApprovalInputPreview } from './approvalInputPreview'
 import type {
   LlmInProgressEvent,
   OutputPreview,
@@ -167,6 +168,8 @@ export class SseProgressReporter implements ProgressReporter {
       reason?: 'approval_required' | 'connect_required'
       mcpServerName?: string
       alwaysApproveAllowed?: false
+      toolName?: string
+      parameters?: Record<string, unknown>
     }
   ): void {
     if (this.completed) return
@@ -176,6 +179,15 @@ export class SseProgressReporter implements ProgressReporter {
       if (options?.mcpServerName) data.mcpServerName = options.mcpServerName
     }
     if (options?.alwaysApproveAllowed === false) data.alwaysApproveAllowed = false
+    if (reason === 'approval_required' && options?.toolName && options.parameters) {
+      const toolName = options.toolName
+      const preview = projectApprovalInputPreview(
+        toolName,
+        options.parameters,
+        text => this.safety.sanitizeOutput(toolName, text).content
+      )
+      if (preview) data.inputPreview = preview
+    }
     const event: ProgressEvent = { type: 'suspended', data }
     // P1: store the exact redacted payload we publish live so late/re-connected
     // subscribers can replay it (see subscribe). displayName is already the

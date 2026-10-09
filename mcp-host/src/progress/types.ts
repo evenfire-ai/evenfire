@@ -92,6 +92,12 @@ export interface LlmInProgressEvent {
   elapsedMs: number
 }
 
+export interface ApprovalInputPreview {
+  text: string
+  /** Also true when redaction changes the command; never claim an exact full copy. */
+  truncated: boolean
+}
+
 export interface SuspendedEvent {
   taskId: string
   requestId: string
@@ -109,6 +115,8 @@ export interface SuspendedEvent {
   /** false when the card must not offer "Always approve" (forced gate or
    *  denial re-ask). Omitted when allowed. */
   alwaysApproveAllowed?: false
+  /** Sanitized, bounded input for human review; never used to resume execution. */
+  inputPreview?: ApprovalInputPreview
 }
 
 /**

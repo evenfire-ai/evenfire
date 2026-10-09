@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import * as migration from '../015-session-model-selection-revision'
-import * as deniedTools from '../016-session-denied-tools'
 import { migrations } from '../index'
 
 function tableColumns(db: Database.Database, table: string): string[] {
@@ -23,10 +22,16 @@ function preMigrationDb(): Database.Database {
 }
 
 describe('migration 015 — sessions.model_selection_revision', () => {
-  it('is registered immediately before the denied-tools migration', () => {
+  it('preserves the ordered 014, 015, 016 append sequence', () => {
     const names = migrations.map(item => item.name)
     const index = names.indexOf(migration.name)
-    expect(names[index + 1]).toBe(deniedTools.name)
+    expect(index).toBeGreaterThan(0)
+    expect(names.filter(name => name === migration.name)).toHaveLength(1)
+    expect(names.slice(index - 1, index + 2)).toEqual([
+      '014-pending-approval-task-budget',
+      migration.name,
+      '016-pending-approval-authorization-scope',
+    ])
   })
 
   it('adds a NOT NULL revision that reads 0 for every pre-existing row', () => {

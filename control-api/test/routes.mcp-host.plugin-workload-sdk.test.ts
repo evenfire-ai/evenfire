@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import { rateLimitPool } from '../src/db.js'
 import { createMcpHostPluginWorkloadSdkRoutes } from '../src/routes/mcp-host/plugin-workload-sdk.routes.js'
 import * as codexConnection from '../src/services/codexSubscriptionConnection.js'
@@ -1453,7 +1454,10 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
     // second query so this test remains focused on ticket work protection.
     vi.mocked(rateLimitPool.query)
       .mockResolvedValueOnce({ rows: [{ count: 1 }], rowCount: 1 } as never)
-      .mockResolvedValueOnce({ rows: [{ count: 121 }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({
+        rows: [{ count: config.pluginSdkCredentialRlPerMin + 1 }],
+        rowCount: 1,
+      } as never)
     const res = await request(buildApp())
       .post('/mcp-host/plugin-workload-sdk/credential-ticket/introspect')
       .set('Authorization', `Bearer ${issueSdkToken()}`)

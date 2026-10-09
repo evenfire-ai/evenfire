@@ -1,16 +1,29 @@
 import type { PendingApproval, ToolResult } from '../core/types'
-import { gfsImageParts, gfsReference, projectGfsMessages } from './messageProjection'
+import {
+  gfsImageParts,
+  gfsReference,
+  projectGfsMessages,
+  projectGfsReceipt,
+} from './messageProjection'
 
 function projectResult(result: ToolResult): ToolResult {
   const removed = result.attachments?.filter(a => a.visualSource?.kind === 'gfs') ?? []
   if (!removed.length) return result
   const attachments = result.attachments?.filter(a => a.visualSource?.kind !== 'gfs')
-  const content = JSON.stringify({
+  const sources = removed.flatMap(a => (a.visualSource?.kind === 'gfs' ? [a.visualSource] : []))
+  const reason = 'new_gfs_read_required_after_suspension'
+  let content: string | undefined
+  for (const source of sources) {
+    // Use the same identity validation and receipt demotion as message history.
+    // A mismatched source must fail rather than silently relabel retained bytes.
+    content = projectGfsReceipt(result.content, source, reason) ?? content
+  }
+  // Legacy tool results without structured receipts retain their existing
+  // bounded references; only governed workspace receipts keep local usability.
+  content ??= JSON.stringify({
     delivery: 'reference_only',
-    reason: 'new_gfs_read_required_after_suspension',
-    resources: removed.flatMap(a =>
-      a.visualSource?.kind === 'gfs' ? [gfsReference(a.visualSource)] : []
-    ),
+    reason,
+    resources: sources.map(gfsReference),
   })
   return {
     tool_call_id: result.tool_call_id,
@@ -52,6 +65,7 @@ export function projectGfsApproval(approval: PendingApproval): PendingApproval {
     ...(approval.intent_summary ? { intent_summary: approval.intent_summary } : {}),
     ...(approval.traceContext !== undefined ? { traceContext: approval.traceContext } : {}),
     ...(approval.reason ? { reason: approval.reason } : {}),
+    ...(approval.authorization_scope ? { authorization_scope: approval.authorization_scope } : {}),
     ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
     ...(approval.reask ? { reask: approval.reask } : {}),
     ...(approval.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false as const } : {}),

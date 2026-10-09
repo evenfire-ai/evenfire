@@ -91,6 +91,8 @@ export interface MessageRow {
 export interface PendingApprovalRow {
   /** Nullable for approvals created before migration 014. */
   task_budget?: string | null
+  /** Omitted write fields persist as legacy NULL; known scopes are `turn_tools` or `exact_invocation`. */
+  authorization_scope?: string | null
   request_id: string
   session_id: string
   task_id: string

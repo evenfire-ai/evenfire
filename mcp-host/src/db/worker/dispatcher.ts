@@ -662,6 +662,9 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             ...row,
             source_message: sourceMessage,
             task_budget: row.task_budget ?? null,
+            // Legacy protocol payloads may omit this field. SQL NULL keeps
+            // that unknown consent scope exact when the approval rehydrates.
+            authorization_scope: row.authorization_scope ?? null,
           })
           if (op.markAwaitingApproval)
             db.prepare('UPDATE sessions SET state = ? WHERE id = ?').run(

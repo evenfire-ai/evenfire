@@ -13,6 +13,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
+import { classifyBytes } from '@clerum/gfs-interaction-policy'
+import { base64Length, composerNonImageShareBytes } from '@lib/composerFileAdmission'
+import { buildComposerFileReferences } from '@lib/composerFileReferences'
+import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
+import type { HostModelsResult } from '../../../../../src/types'
+import type {
+  ComposerGlobalFileReference,
+  ComposerImageAttachment,
+  ReadyComposerFileAttachment,
+} from '../../../uiTypes'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -45,25 +56,9 @@ async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
 }
 
-// Sending now persists the optimistic turn through the filesystem-backed
-// ChatStore before subscribing. Under the full parallel Desktop suite, that
-// disk work can exceed Testing Library's one-second default timeout.
-const CHAT_STORE_IO_TIMEOUT_MS = 10_000
-
-async function waitForProgressHandler(taskId: string) {
-  await waitFor(
-    () => expect(clerum.hasProgressHandler(taskId)).toBe(true),
-    CHAT_STORE_IO_TIMEOUT_MS
-  )
-}
-
-function waitForWithFakeTimers<T>(assertion: () => T | Promise<T>) {
-  return vi.waitFor(assertion, { timeout: CHAT_STORE_IO_TIMEOUT_MS })
-}
-
 /** Real ChatStore-backed effects can exceed Testing Library's 1s default on CI runners. */
-function waitFor<T>(callback: () => T | Promise<T>, timeout = ASYNC_WAIT_TIMEOUT_MS) {
-  return rtlWaitFor(callback, { timeout })
+function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof rtlWaitFor>[1]) {
+  return rtlWaitFor(callback, { timeout: ASYNC_WAIT_TIMEOUT_MS, ...options })
 }
 
 function deferred<T>() {
@@ -74,6 +69,39 @@ function deferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+// A send writes the user turn to the real ChatStore (disk I/O) before it wires
+// the progress subscription. On a loaded CI runner that write can take longer
+// than the 1000 ms waitFor default (#958), so the wiring waits get this bound.
+const WIRING_TIMEOUT_MS = 10_000
+// Captured at module load, before any test installs fake timers.
+const realSetTimeout = globalThis.setTimeout
+
+async function waitForProgressHandler(taskId: string) {
+  await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true), {
+    timeout: WIRING_TIMEOUT_MS,
+  })
+}
+
+/**
+ * Fake-timer variant. `vi.waitFor` advances the fake clock by its interval on
+ * every check, which would move it toward the watchdog and connection timeouts
+ * the test advances to explicitly. This polls in real time and only runs the
+ * timers that are already due, so the fake clock does not move.
+ */
+async function waitForProgressHandlerUnderFakeTimers(taskId: string) {
+  const intervalMs = 50
+  for (let waitedMs = 0; waitedMs < WIRING_TIMEOUT_MS; waitedMs += intervalMs) {
+    await vi.advanceTimersByTimeAsync(0)
+    if (clerum.hasProgressHandler(taskId)) return
+    await new Promise(resolve => realSetTimeout(resolve, intervalMs))
+  }
+  expect(clerum.hasProgressHandler(taskId)).toBe(true)
+}
+
+function waitForWithFakeTimers<T>(assertion: () => T | Promise<T>) {
+  return vi.waitFor(assertion, { timeout: WIRING_TIMEOUT_MS })
 }
 
 describe('useAgentChatController — characterization (D.0)', () => {
@@ -331,8 +359,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       let sendResolved = false
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
+      const sendPromise = result.current.handleSendAgentMessage('hola').then(() => {
         sendResolved = true
       })
 
@@ -348,7 +375,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(sendResolved).toBe(true)
       // The user message is upserted before the POST and the assistant reply is
@@ -374,9 +403,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
       expect(result.current.activeChatId).toBeNull()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('first message')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('first message')
       await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -384,7 +411,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(clerum.chat.create).toHaveBeenCalled()
       const createOrder = clerum.chat.create.mock.invocationCallOrder[0]!
@@ -417,9 +446,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       // First send — leave it in flight (no terminal emitted yet).
-      const firstSend = act(async () => {
-        await result.current.handleSendAgentMessage('m1')
-      })
+      const firstSend = result.current.handleSendAgentMessage('m1')
       await waitForProgressHandler('task-abc')
 
       // Second send while first is in flight — should be silently rejected.
@@ -435,7 +462,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await firstSend
+      await act(async () => {
+        await firstSend
+      })
     })
 
     it('4.5 surfaces a failed terminal as an error assistant message', async () => {
@@ -443,9 +472,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result, spies } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('hola')
       await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -457,7 +484,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       // The failure toast follows the store write of the error reply.
       await waitFor(() =>
@@ -519,9 +548,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('hola')
       await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -529,7 +556,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'cancelled', reason: 'user_cancelled' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(clerum.rpc.getTaskResult).not.toHaveBeenCalled()
       const progress = result.current.progressByAgentMessage['agent-x']
@@ -605,7 +634,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // send persists the user turn to the real ChatStore first, which is disk
       // I/O that fake timers do not advance: poll for the subscription instead.
       await act(async () => {
-        await waitForWithFakeTimers(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+        await waitForProgressHandlerUnderFakeTimers('task-abc')
       })
 
       await act(async () => {
@@ -681,7 +710,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // The user turn is persisted to the real ChatStore (disk I/O fake timers do
       // not advance) before the subscription is wired: poll for it.
       await act(async () => {
-        await waitForWithFakeTimers(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+        await waitForProgressHandlerUnderFakeTimers('task-abc')
       })
 
       await act(async () => {
@@ -1147,7 +1176,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasActivityHandler('agent-x')).toBe(true))
+      await waitFor(() => expect(clerum.hasActivityHandler('agent-x')).toBe(true), {
+        timeout: WIRING_TIMEOUT_MS,
+      })
 
       // Read via the production-consumed selected-agent slice (`activityByMessageId`)
       // instead of the removed cross-agent `activityByAgentMessage` map (B18 dead
@@ -1810,9 +1841,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('persist me')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('persist me')
       await waitForProgressHandler('task-ga')
       await act(async () => {
         clerum.emitTaskProgress('task-ga', { type: 'open', taskId: 'task-ga', hostRef: 'agent-x' })
@@ -1821,7 +1850,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-ga', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       // The user message was persisted (a chat was auto-created and the typed
       // input written to it) — the input is durable across reload.
@@ -1858,9 +1889,7 @@ describe('interrupted generated-file contract', () => {
     })
     const { result } = renderController()
     await settleMount()
-    const send = act(async () => {
-      await result.current.handleSendAgentMessage('Create a report')
-    })
+    const send = result.current.handleSendAgentMessage('Create a report')
     await waitForProgressHandler('task-file')
     await act(async () => {
       clerum.emitTaskProgress('task-file', {
@@ -1872,7 +1901,9 @@ describe('interrupted generated-file contract', () => {
         },
       })
     })
-    await send
+    await act(async () => {
+      await send
+    })
     const saved = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]
     expect(saved).toEqual([
       expect.objectContaining({
@@ -1881,5 +1912,365 @@ describe('interrupted generated-file contract', () => {
         attachments: [expect.objectContaining({ type: 'response_file', label: 'report.md' })],
       }),
     ])
+  })
+})
+
+/**
+ * #678 — the send-time blockers for documents. Files enter through the public
+ * restore action (the path a retried send uses), which skips the picker's
+ * admission, so each blocker is reached exactly as the controller sees it at
+ * send time. Every refusal is paired, in the same test, with a twin one step
+ * inside the limit that reaches the Host once.
+ */
+describe('sendAgentMessage — per-message limits for documents (#678)', () => {
+  const MIB = 1024 * 1024
+  const TEXT_SHARE_BLOCKER =
+    'The message text and attachment details take more than 6.0 MiB once encoded. Shorten the message or remove an attachment.'
+  const FILE_QUOTA_BLOCKER =
+    'The attached files take more than 16.0 MiB once encoded. Remove a file.'
+  const REQUEST_BODY_BLOCKER =
+    'The attachments and text take more than 24.0 MiB once encoded. Remove an attachment or shorten the message.'
+  const COUNT_BLOCKER = 'A message can carry at most 20 attachments.'
+
+  const catalog: HostModelsResult = {
+    provider: 'zai',
+    hostDefault: 'glm-5.3-flash',
+    sessionModel: null,
+    degraded: false,
+    modelSelectionRevision: 0,
+    models: [{ name: 'glm-5.3-flash', imageInput: { state: 'supported', reason: 'supported' } }],
+  }
+  const modelTransport = {
+    getHostModels: vi.fn(async () => catalog),
+    setHostModel: vi.fn(),
+  }
+
+  afterEach(() => {
+    resetHostModelSelectionStore()
+  })
+
+  /** A read and hashed text document of `sizeBytes`, as `readComposerFile` returns it. */
+  function readyTextFile(
+    id: string,
+    filename: string,
+    sizeBytes: number
+  ): ReadyComposerFileAttachment {
+    return {
+      id,
+      type: 'file',
+      filename,
+      sizeBytes,
+      declaredMediaType: 'text/plain',
+      status: 'ready',
+      classification: classifyBytes({
+        // Built with this environment's Uint8Array, as readComposerFile does:
+        // TextEncoder and Buffer return one from another realm under jsdom.
+        bytes: new Uint8Array(Buffer.from('plain text')),
+        totalByteLength: sizeBytes,
+        declaredMediaType: 'text/plain',
+        filename,
+      }),
+      dataBase64: 'Y'.repeat(base64Length(sizeBytes)),
+      digestHex: 'ab'.repeat(32),
+    }
+  }
+
+  async function mountedWithFiles(files: ReadyComposerFileAttachment[]) {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    act(() => rendered.result.current.handleRestoreComposerFiles(files))
+    return rendered
+  }
+
+  function sentAttachmentIds(): unknown[] {
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      attachments?: Array<{ id: unknown }>
+    }
+    expect(request).toBeDefined()
+    return (request.attachments ?? []).map(attachment => attachment.id)
+  }
+
+  function expectBlocked(rendered: ReturnType<typeof renderController>, blocker: string) {
+    expect(rendered.result.current.agentError).toBe(blocker)
+    expect(rendered.spies.pushToast).toHaveBeenCalledWith(blocker, 'error')
+    expect(clerum.chat.create).not.toHaveBeenCalled()
+    expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+  }
+
+  it('refuses text that overflows the 6 MiB share beside an 11 MiB file, and sends one byte less', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([big])
+    // Envelope (4096) + the fields rpc-proxy adds (2048) + the text as a JSON
+    // string (+2 quotes) + the agent twice as a JSON string (2 × 9) + the file's
+    // JSON name and fixed fields; the file's base64 is credited to the file quota.
+    const fullShareText = 6 * MIB - 4096 - 2048 - 2 - 18 - JSON.stringify('big.txt').length - 640
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullShareText + 1))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullShareText))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-big'])
+  })
+
+  it('refuses files one byte past the 16 MiB quota, and sends the pair that fills it exactly', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([
+      big,
+      readyTextFile('file-over', 'tail.txt', 1_048_576),
+    ])
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read both')
+    })
+    expectBlocked(rendered, FILE_QUOTA_BLOCKER)
+
+    act(() =>
+      rendered.result.current.handleRestoreComposerFiles([
+        big,
+        readyTextFile('file-fits', 'tail.txt', 1_048_575),
+      ])
+    )
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read both')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-big', 'file-fits'])
+  })
+
+  it('refuses images and files that together pass the 24 MiB body, and sends without one file', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([
+      big,
+      readyTextFile('file-tail', 'tail.txt', 1_048_575),
+    ])
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', null)
+    })
+    const image: ComposerImageAttachment = {
+      id: 'image-8mib',
+      name: 'scan.png',
+      mimeType: 'image/png',
+      dataBase64: 'A'.repeat(8 * MIB),
+      sizeBytes: 6 * MIB,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+    // Precondition: the files sit exactly on their quota and the text is short,
+    // so only the whole-body limit can refuse this send.
+    expect(base64Length(11 * MIB) + base64Length(1_048_575)).toBe(16 * MIB)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('describe')
+    })
+    expectBlocked(rendered, REQUEST_BODY_BLOCKER)
+
+    act(() => rendered.result.current.handleRestoreComposerFiles([big]))
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('describe')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(expect.arrayContaining(['file-big', 'image-8mib']))
+  })
+
+  it('refuses Codex images and text that pass the 24 MiB body without any file, and sends the text that fills it', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    const codexCatalog: HostModelsResult = {
+      provider: 'codex-subscription',
+      hostDefault: 'gpt-5.5',
+      // A broker-backed provider has no silent default: the session names its model.
+      sessionModel: 'gpt-5.5',
+      degraded: false,
+      modelSelectionRevision: 0,
+      models: [{ name: 'gpt-5.5', imageInput: { state: 'supported', reason: 'supported' } }],
+    }
+    await act(async () => {
+      await loadHostModels(
+        { getHostModels: vi.fn(async () => codexCatalog), setHostModel: vi.fn() },
+        'agent-x',
+        null
+      )
+    })
+    // Four bytes under the 16 MiB decoded quota Codex admits, as canonical
+    // base64 without padding.
+    const decodedBytes = 16 * MIB - 4
+    const imageBase64Length = base64Length(decodedBytes)
+    expect(imageBase64Length % 4).toBe(0)
+    const image: ComposerImageAttachment = {
+      id: 'image-codex',
+      name: 'scan.png',
+      mimeType: 'image/png',
+      dataBase64: 'A'.repeat(imageBase64Length),
+      sizeBytes: decodedBytes,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(0)
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
+    // Envelope (4096) + the fields rpc-proxy adds (2048) + the text as a JSON
+    // string (+2 quotes) + the agent twice as a JSON string (2 × 9) + the
+    // image's JSON name and fixed fields + the image's base64.
+    const fullBodyText =
+      24 * MIB - 4096 - 2048 - 2 - 18 - JSON.stringify('scan.png').length - 640 - imageBase64Length
+    // Precondition: the text share stays far inside its 6 MiB, so only the
+    // whole-body limit can refuse this send.
+    expect(fullBodyText + 1).toBeLessThan(3 * MIB)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullBodyText + 1))
+    })
+    expectBlocked(rendered, REQUEST_BODY_BLOCKER)
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullBodyText))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['image-codex'])
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
+    expect(request.content).toHaveLength(fullBodyText)
+  })
+
+  it('refuses a twenty-first attachment and sends twenty', async () => {
+    const files = Array.from({ length: 21 }, (_, index) =>
+      readyTextFile(`file-${index}`, `part-${index}.txt`, 10)
+    )
+    const rendered = await mountedWithFiles(files)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read all')
+    })
+    expectBlocked(rendered, COUNT_BLOCKER)
+
+    act(() => rendered.result.current.handleRestoreComposerFiles(files.slice(0, 20)))
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read all')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toHaveLength(20)
+  })
+
+  const utf8Bytes = (value: string) => new TextEncoder().encode(value).length
+
+  /** Four Global Files references whose names take three UTF-8 bytes per character. */
+  function wideNameReferences(): ComposerGlobalFileReference[] {
+    return Array.from({ length: 4 }, (_, index) => {
+      const resourceId = String(index).repeat(32)
+      return {
+        id: `global-file:main:${resourceId}`,
+        type: 'global_file' as const,
+        resourceId,
+        drive: 'main',
+        gfsUri: `gfs://main/${resourceId}`,
+        label: `${'文'.repeat(251)}.txt`,
+        version: 1,
+        bytes: 2048,
+      }
+    })
+  }
+
+  it('counts the serialized references and the agent in the 6 MiB share, and sends the draft that fills it', async () => {
+    const references = wideNameReferences()
+    const rendered = await mountedWithFiles([readyTextFile('file-doc', 'doc.txt', 1024)])
+    act(() => rendered.result.current.handleAddComposerReferenceAttachments(references))
+    const jsonBytes = (value: unknown) => utf8Bytes(JSON.stringify(value))
+    const contentBytes = (draft: string) =>
+      jsonBytes(buildComposerRequestContent(draft, references))
+    // Everything the share holds besides the draft, each part as the request
+    // body carries it: envelope, fields rpc-proxy adds, the text with its
+    // references section, the serialized references, the agent twice and the
+    // file details.
+    const referencesBytes = jsonBytes(buildComposerFileReferences(references))
+    const fixedBytes =
+      4096 +
+      2048 +
+      (contentBytes('x') - 1) +
+      referencesBytes +
+      2 * jsonBytes('agent-x') +
+      jsonBytes('doc.txt') +
+      640
+    const boundary = 6 * MIB - fixedBytes
+    // The text grows one byte per draft character: the arithmetic above holds.
+    expect(contentBytes('x'.repeat(boundary))).toBe(contentBytes('x') - 1 + boundary)
+    // Leaving the references out would let the blocked draft below through.
+    expect(referencesBytes).toBeGreaterThan(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(boundary + 1))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(1)
+    expect(rendered.result.current.composerReferenceAttachments).toHaveLength(4)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(boundary))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      content: string
+      fileReferences: Parameters<typeof composerNonImageShareBytes>[0]['fileReferences']
+      attachments: Array<Record<string, unknown>>
+    }
+    // The request carries the text and references the boundary was computed from.
+    expect(request.content).toBe(buildComposerRequestContent('x'.repeat(boundary), references))
+    expect(request.fileReferences).toEqual(buildComposerFileReferences(references))
+    // The estimate bounds what is posted: the request as serialized without the
+    // base64 the file quota credits, plus 1 KiB for the fields rpc-proxy adds.
+    const postedShareBytes = utf8Bytes(
+      JSON.stringify({
+        ...request,
+        attachments: request.attachments.map(attachment => ({ ...attachment, dataBase64: '' })),
+      })
+    )
+    expect(
+      composerNonImageShareBytes({
+        content: request.content,
+        fileReferences: request.fileReferences,
+        hostRef: 'agent-x',
+        files: [{ filename: 'doc.txt' }],
+        images: [],
+      })
+    ).toBeGreaterThanOrEqual(postedShareBytes + 1024)
+  })
+
+  it('counts the JSON escaping of the text in the share, and sends fewer escaped characters', async () => {
+    const rendered = await mountedWithFiles([readyTextFile('file-doc', 'doc.txt', 1024)])
+    // A newline is one byte typed and two once escaped in the JSON body.
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage(`a${'\n'.repeat(3.5 * MIB)}b`)
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage(`a${'\n'.repeat(2 * MIB)}b`)
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-doc'])
+  })
+
+  it('checks the share on a send without attachments, and sends shorter text', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    // A double quote is one byte typed and two once escaped in the JSON body.
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('"'.repeat(Math.floor(3.2 * MIB)))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('"'.repeat(Math.floor(2.9 * MIB)))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
+    expect(request.content).toHaveLength(Math.floor(2.9 * MIB))
   })
 })
