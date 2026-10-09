@@ -84,10 +84,6 @@ describe('AppService runtime config discovery ownership', () => {
       }
       openDesktop: (hostRef: string) => Promise<void>
       gfsScopeIdentity: { environmentKey: string } | null
-      rpcTokenManager: {
-        getOrIssue: ReturnType<typeof vi.fn>
-        clear: ReturnType<typeof vi.fn>
-      }
     }
     app.authClient = {
       getDesktopEnvironment,
@@ -97,6 +93,15 @@ describe('AppService runtime config discovery ownership', () => {
         .mockResolvedValueOnce(testLoginResult('session-token-b', me)),
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
+    const { AuthClient } = await import('../authClient.js')
+    vi.spyOn(AuthClient.prototype, 'issueRpcToken').mockResolvedValue({
+      token: 'desktop-rpc-token',
+      accessScope: 'team',
+      teamId: 'team-a',
+      scopes: ['desktop:view'],
+      hostRefs: ['chatllm'],
+      expiresInSeconds: 60,
+    })
     app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
 
     await service.googleLogin('google-token-a')
@@ -125,10 +130,6 @@ describe('AppService runtime config discovery ownership', () => {
 
     const openDesktopWindow = vi.fn().mockResolvedValue(undefined)
     vi.doMock('../desktopWindow.js', () => ({ openDesktopWindow }))
-    app.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'desktop-rpc-token' }),
-      clear: vi.fn(),
-    }
     await app.openDesktop('chatllm')
     expect(openDesktopWindow).toHaveBeenCalledWith(
       expect.objectContaining({
