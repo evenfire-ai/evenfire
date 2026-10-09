@@ -12223,6 +12223,130 @@ describe('WorkflowRecipeReconciler', () => {
     )
   })
 
+  describe('triggered-run runtime scope handed to the inner workflow reconcile', () => {
+    // The inner reconciler judges snippet Secret ownership against the 7th
+    // reconcile() argument (runtimeScopeRecipeName). These tests pin that WRC hands
+    // it the VERIFIED parent for a run-scoped child CR, and the child name when the
+    // DB run does not bind the exact parent/child pair.
+    function stubInnerWorkflowReconcile() {
+      const workflowReconcile = vi.fn().mockResolvedValue({
+        phase: 'deploying',
+        message: 'Workflow infrastructure created',
+        workflowPhase: 'initializing',
+      })
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcile: typeof workflowReconcile
+            validateWorkflowSpec: () => undefined
+          }
+        }
+      ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+      return workflowReconcile
+    }
+
+    function triggeredSnippetChild(workloads?: WorkloadDef[]): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: 'child-run',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-child',
+          annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+          labels: {
+            'clerum.io/parent-recipe': 'parent-recipe',
+            'clerum.io/workflow-run-id': 'run-child',
+          },
+          ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+        },
+        spec: {
+          ...(workloads ? { workloads } : {}),
+          steps: [
+            {
+              id: 'triage',
+              run: {
+                ...snippetRun(),
+                capabilities: {
+                  secrets: [
+                    { alias: 'github_token', secretRef: { name: 'github-token', key: 'token' } },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+        status: { phase: 'candidate' },
+      })
+    }
+
+    it('passes the verified parent recipe as the runtime scope for a triggered child CR', async () => {
+      const workflowReconcile = stubInnerWorkflowReconcile()
+
+      await reconciler.reconcile(triggeredSnippetChild())
+
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      const [recipeName, , , , , , runtimeScopeRecipeName, workflowRunId] =
+        workflowReconcile.mock.calls[0]
+      expect(recipeName).toBe('child-run')
+      expect(runtimeScopeRecipeName).toBe('parent-recipe')
+      expect(workflowRunId).toBe('run-child')
+    })
+
+    it('falls back to the child name as runtime scope when the DB run does not bind the child', async () => {
+      mockVerifyWorkflowRunProvenance.mockResolvedValue('invalid')
+      const workflowReconcile = stubInnerWorkflowReconcile()
+
+      await reconciler.reconcile(triggeredSnippetChild())
+
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(workflowReconcile.mock.calls[0][0]).toBe('child-run')
+      expect(workflowReconcile.mock.calls[0][6]).toBe('child-run')
+    })
+
+    it('pins current behaviour: workload envSecret ownership on a child CR is judged against the child name', async () => {
+      // Out of scope for the snippet-secret fix (spec §3.1.1): the workload
+      // envSecret gate (readReferencedSecrets → classifySecretAccess with
+      // recipe.metadata.name) still keys on the CR name. A parent-owned Secret is
+      // therefore denied for the child workload. Changing this is a separate decision.
+      const workflowReconcile = stubInnerWorkflowReconcile()
+      mockCoreApi.readNamespacedSecret.mockImplementation((args: { name: string }) =>
+        args.name === 'parent-creds'
+          ? Promise.resolve({
+              metadata: {
+                resourceVersion: '1',
+                labels: { 'clerum.io/owner-recipe': 'parent-recipe' },
+              },
+              data: { token: 'eA==' },
+            })
+          : Promise.resolve({ metadata: { resourceVersion: '1' } })
+      )
+
+      const result = await reconciler.reconcile(
+        triggeredSnippetChild([
+          {
+            id: 'helper',
+            type: 'deployment',
+            image: 'helper:test',
+            port: 8080,
+            envSecret: { name: 'parent-creds', keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+          },
+        ])
+      )
+
+      const denied = (result.secretOwnershipConditions ?? []).find(
+        condition => condition.type === 'EnvSecretOwnershipDenied'
+      )
+      expect(denied?.status).toBe('True')
+      expect(denied?.message).toBe(
+        'workload "helper": Secret(s) "parent-creds" not owned by recipe "child-run" — ' +
+          'label clerum.io/shared=true or clerum.io/owner-recipe=child-run to grant access'
+      )
+      expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      // The denied workload does not stop the workflow pass itself.
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(workflowReconcile.mock.calls[0][6]).toBe('parent-recipe')
+    })
+  })
+
   it('requeues a Pending DB binding before creating or rotating workflow runtime resources', async () => {
     mockVerifyWorkflowRunProvenance.mockResolvedValue('pending')
     const ensureCoordinatorRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
