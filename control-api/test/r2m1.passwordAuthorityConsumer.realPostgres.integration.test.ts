@@ -257,4 +257,52 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     expect(retried.status).toBe(200)
     expect(String(retried.headers['set-cookie'])).toContain('profile_session=')
   })
+
+  it('maps authenticated password-change authority outcomes and permits a later retry', async () => {
+    const member = await memberWithPassword()
+    const sourceIp = nextSourceIp()
+    const owner = await passwordOwner()
+    let busy: Awaited<ReturnType<typeof memberPasswordRequest>>
+    try {
+      busy = await memberPasswordRequest(member.token, sourceIp)
+    } finally {
+      await owner.release()
+    }
+    expect(busy.status).toBe(429)
+    expect(busy.body).toEqual({ error: 'rate_limited', retryAfterSeconds: 8 })
+    expect(busy.headers['retry-after']).toBe('8')
+    expect(JSON.stringify(busy.body)).not.toMatch(/verification_busy|Control API|external\/users/i)
+    expect(
+      (await db.pool.query('SELECT password_hash FROM users WHERE id = $1', [member.userId]))
+        .rows[0].password_hash
+    ).toBe(member.passwordHash)
+    const retry = await memberPasswordRequest(member.token, sourceIp)
+    expect(retry.status).toBe(200)
+    expect(
+      await bcrypt.compare(
+        replacementPassword,
+        (await db.pool.query('SELECT password_hash FROM users WHERE id = $1', [member.userId]))
+          .rows[0].password_hash
+      )
+    ).toBe(true)
+
+    const unavailableMember = await memberWithPassword()
+    const unavailableSourceIp = nextSourceIp()
+    const unavailable = await withPasswordAuthorityUnavailable(() =>
+      memberPasswordRequest(unavailableMember.token, unavailableSourceIp)
+    )
+    expect(unavailable.status).toBe(503)
+    expect(unavailable.body).toEqual({ error: 'authority_unavailable', retryAfterSeconds: 2 })
+    expect(unavailable.headers['retry-after']).toBe('2')
+    expect(JSON.stringify(unavailable.body)).not.toMatch(
+      /authority_failure|Control API|external\/users|relation/i
+    )
+    expect(
+      (
+        await db.pool.query('SELECT password_hash FROM users WHERE id = $1', [
+          unavailableMember.userId,
+        ])
+      ).rows[0].password_hash
+    ).toBe(unavailableMember.passwordHash)
+  })
 })
