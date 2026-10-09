@@ -1,4 +1,4 @@
-# CodeQL `js/missing-rate-limiting` — control-api disposition
+# CodeQL `js/missing-rate-limiting` — control-api and External REST disposition
 
 This document records audited dispositions for [CodeQL](https://codeql.github.com/)
 `js/missing-rate-limiting` findings. It supports Security-tab dismissals
@@ -37,13 +37,13 @@ Tier defaults (requests/minute, per verified admin session identity unless noted
 
 ## PR #428 / F4 scope (fixed in branch)
 
-| Alert                                                                    | Location               | Resolution                                                        |
-| ------------------------------------------------------------------------ | ---------------------- | ----------------------------------------------------------------- |
-| [#81](https://github.com/evenfire-ai/evenfire/security/code-scanning/81) | `grants.routes.ts:173` | Fixed: cookie bucket + dual limiter + auth middleware             |
-| [#82](https://github.com/evenfire-ai/evenfire/security/code-scanning/82) | `grants.routes.ts:197` | Fixed: same                                                       |
-| [#83](https://github.com/evenfire-ai/evenfire/security/code-scanning/83) | `grants.routes.ts:236` | Fixed: same                                                       |
-| [#63](https://github.com/evenfire-ai/evenfire/security/code-scanning/63) | `outputs.ts:35`        | Fixed: `adminOutputsReadRateLimits()` PG + edge backstop (30/min) |
-| [#1157](https://github.com/evenfire-ai/evenfire/security/code-scanning/1157) | `llmProviderAttempts.routes.ts` | Fixed: `express-rate-limit` + PG **before** `requireMcpHostJwt` |
+| Alert                                                                        | Location                        | Resolution                                                        |
+| ---------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------- |
+| [#81](https://github.com/evenfire-ai/evenfire/security/code-scanning/81)     | `grants.routes.ts:173`          | Fixed: cookie bucket + dual limiter + auth middleware             |
+| [#82](https://github.com/evenfire-ai/evenfire/security/code-scanning/82)     | `grants.routes.ts:197`          | Fixed: same                                                       |
+| [#83](https://github.com/evenfire-ai/evenfire/security/code-scanning/83)     | `grants.routes.ts:236`          | Fixed: same                                                       |
+| [#63](https://github.com/evenfire-ai/evenfire/security/code-scanning/63)     | `outputs.ts:35`                 | Fixed: `adminOutputsReadRateLimits()` PG + edge backstop (30/min) |
+| [#1157](https://github.com/evenfire-ai/evenfire/security/code-scanning/1157) | `llmProviderAttempts.routes.ts` | Fixed: `express-rate-limit` + PG **before** `requireMcpHostJwt`   |
 
 Edge backstop keys: a **verified admin session identity hash** for signed
 Control UI sessions/bearers and a **source-IP fallback** for credentials that
@@ -55,14 +55,14 @@ session's quota.
 
 Additional tiers shipped in PR #428:
 
-| Tier                   | Limit | Config anchor                   |
-| ---------------------- | ----- | ------------------------------- |
-| Admin workflow read    | 60    | `workflowAdminReadRateLimits`   |
-| Admin outputs read     | 30    | `adminOutputsReadRateLimits`    |
-| Admin workflow trigger | 10    | `adminWorkflowTriggerRateLimit` |
-| Admin Codex read / write | 30 / 20 | `adminCodexReadRateLimits` / `adminCodexWriteRateLimits` |
-| Codex OAuth callback     | 20       | `codexOAuthCallbackRateLimits` (IP) |
-| mcp-host attempt authorize | 60     | `llmProviderAttemptAuthorizeRateLimits` (edge before JWT) |
+| Tier                       | Limit   | Config anchor                                             |
+| -------------------------- | ------- | --------------------------------------------------------- |
+| Admin workflow read        | 60      | `workflowAdminReadRateLimits`                             |
+| Admin outputs read         | 30      | `adminOutputsReadRateLimits`                              |
+| Admin workflow trigger     | 10      | `adminWorkflowTriggerRateLimit`                           |
+| Admin Codex read / write   | 30 / 20 | `adminCodexReadRateLimits` / `adminCodexWriteRateLimits`  |
+| Codex OAuth callback       | 20      | `codexOAuthCallbackRateLimits` (IP)                       |
+| mcp-host attempt authorize | 60      | `llmProviderAttemptAuthorizeRateLimits` (edge before JWT) |
 
 ## Out-of-scope dispositions (Layer 3)
 
@@ -70,14 +70,25 @@ Follow-up implementation tracked separately (`fix/codeql-control-api-rate-limit-
 
 ### False positive — PG limiter or non-route sink present
 
-| Alert                                                                      | Location                 | Evidence                                                                 |
-| -------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------ |
-| [#57](https://github.com/evenfire-ai/evenfire/security/code-scanning/57)   | `app.ts:131`             | Middleware mount only; per-route limiters apply downstream               |
-| [#58](https://github.com/evenfire-ai/evenfire/security/code-scanning/58)   | `app.ts:219`             | 404 guard for unknown `/gfs/*`; no expensive work                        |
-| [#60](https://github.com/evenfire-ai/evenfire/security/code-scanning/60)   | `auth.ts:572`            | Handler under `publicAdminTokenRateLimit()` (`adminPublicTokenRlPerMin`) |
-| [#171](https://github.com/evenfire-ai/evenfire/security/code-scanning/171) | `registry.ts:24`         | `rateLimitMiddleware` 30/min at `:28-35`                                 |
-| [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826) | `registryConnect.ts:321` | `rateLimitMiddleware` 3/min at `:329-336`                                |
-| [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803) | `gfs/grants.ts:849`      | Internal DB helper, not an HTTP route handler                            |
+| Alert                                                                        | Location                 | Evidence                                                                 |
+| ---------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------ |
+| [#57](https://github.com/evenfire-ai/evenfire/security/code-scanning/57)     | `app.ts:131`             | Middleware mount only; per-route limiters apply downstream               |
+| [#58](https://github.com/evenfire-ai/evenfire/security/code-scanning/58)     | `app.ts:219`             | 404 guard for unknown `/gfs/*`; no expensive work                        |
+| [#60](https://github.com/evenfire-ai/evenfire/security/code-scanning/60)     | `auth.ts:572`            | Handler under `publicAdminTokenRateLimit()` (`adminPublicTokenRlPerMin`) |
+| [#171](https://github.com/evenfire-ai/evenfire/security/code-scanning/171)   | `registry.ts:24`         | `rateLimitMiddleware` 30/min at `:28-35`                                 |
+| [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826)   | `registryConnect.ts:321` | `rateLimitMiddleware` 3/min at `:329-336`                                |
+| [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803)   | `gfs/grants.ts:849`      | Internal DB helper, not an HTTP route handler                            |
+| [#1767](https://github.com/evenfire-ai/evenfire/security/code-scanning/1767) | `app.ts:73`              | False positive — invitation error-response middleware; evidence below    |
+
+Alert #1767 is attached to the invitation error-response middleware mount, which maps upstream
+failures to bounded public responses. External REST token lookup is limited to 30 requests/minute
+per trusted `req.ip`; password setup and acceptance are limited to 10/minute. The Control API
+applies external-client source limits to invitation routes and server-side 30/minute and 10/minute
+admission buckets to token lookup and password-token setup, with its documented process-memory
+fallback. Cost-12 password work remains behind the shared durable owner. CodeQL's authorization
+dataflow points through error presentation and does not model this custom and cross-service limiter
+chain. `external-rest-api/test/routes.invitations.test.ts` asserts the 429 and `Retry-After`
+contract; `external-rest-api/test/middleware.rateLimit.test.ts` verifies trusted-source bucketing.
 
 ### Won't fix (accepted) — real gap, follow-up backstop PR
 

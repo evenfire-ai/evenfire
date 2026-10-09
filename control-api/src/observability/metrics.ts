@@ -663,3 +663,17 @@ export const llmAllowlistConfigMapWriteFailuresTotal = getOrCreateCounter({
   help: 'Count of failed clerum-llm-allowed-models ConfigMap writes, labelled by phase.',
   labelNames: ['phase'] as const as Array<'phase'>, // mutation | boot | sync
 })
+
+export type PasswordAdmissionDenialReason =
+  | 'source_rate'
+  | 'identifier_attempts'
+  | 'identifier_cooldown'
+  | 'global_pace'
+  | 'verification_busy'
+  | 'authority_failure'
+
+export const passwordAdmissionDenialsTotal = getOrCreateCounter({
+  name: 'password_admission_denials_total',
+  help: 'Password admission denials by bounded internal reason; never labelled by identity.',
+  labelNames: ['reason'] as const as Array<'reason'>,
+})

@@ -1,7 +1,10 @@
-import { Router } from 'express'
+import { type Request, Router } from 'express'
 import { randomBytes } from 'node:crypto'
 import { config } from '../../config.js'
-import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
+import {
+  createExternalClientRateLimiters,
+  externalClientIpRateLimitKey,
+} from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -24,13 +27,8 @@ import {
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 
-function invitationLookupIpKey(req: {
-  ip?: string
-  socket?: { remoteAddress?: string }
-}): string | null {
-  const ip = req.ip ?? req.socket?.remoteAddress ?? null
-  if (!ip) return null
-  return `invite-token-ip:${String(ip).slice(0, 128)}`
+function invitationAdmissionKey(req: Request, operation: 'preview' | 'password-token'): string {
+  return `invite-token:${operation}:${externalClientIpRateLimitKey(req)}`
 }
 
 export function createExternalInvitationsRouter(): Router {
@@ -46,7 +44,7 @@ export function createExternalInvitationsRouter(): Router {
     rateLimitMiddleware({
       bucketType: 'external_invitation_lookup',
       maxPerMinute: 30,
-      getBucketKey: req => invitationLookupIpKey(req),
+      getBucketKey: req => invitationAdmissionKey(req, 'preview'),
       onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
@@ -80,7 +78,7 @@ export function createExternalInvitationsRouter(): Router {
     rateLimitMiddleware({
       bucketType: 'external_invitation_password_token',
       maxPerMinute: 10,
-      getBucketKey: req => invitationLookupIpKey(req),
+      getBucketKey: req => invitationAdmissionKey(req, 'password-token'),
       onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
@@ -102,13 +100,25 @@ export function createExternalInvitationsRouter(): Router {
           if (memberRegistrationErrorResponse(error)) throw error
           return res.status(400).json({ error: 'invalid_invitation' })
         }
-        if (validation.invitationUuid !== invitationId) {
+        // The trusted Member Registration flow binds invitationUuid to the
+        // invitation token. The UI submits the distinct database row ID.
+        // Resolve the trusted token first, then bind the supplied row ID to
+        // that exact invitation before mutating credentials.
+        const invitation = await getInvitationByToken(validation.invitationUuid)
+        if (!invitation || invitation.id !== invitationId) {
           return res.status(403).json({ error: 'forbidden' })
+        }
+        if (
+          invitation.email.toLowerCase() !== validation.email.toLowerCase() ||
+          invitation.purpose !== 'password_reset' ||
+          invitation.status !== 'pending'
+        ) {
+          return res.status(409).json({ error: 'invitation_not_pending' })
         }
 
         const result = await setInvitationPasswordForEmail(
           validation.email,
-          validation.invitationUuid,
+          invitation.id,
           password
         )
         if ('error' in result) {
@@ -118,9 +128,6 @@ export function createExternalInvitationsRouter(): Router {
           if (result.error === 'forbidden') {
             return res.status(403).json({ error: 'forbidden' })
           }
-          if (result.error === 'not_accepted') {
-            return res.status(409).json({ error: 'invitation_not_accepted' })
-          }
           if (result.error === 'not_pending') {
             return res.status(409).json({ error: 'invitation_not_pending' })
           }
@@ -128,7 +135,7 @@ export function createExternalInvitationsRouter(): Router {
             return res.status(410).json({ error: 'expired' })
           }
           if (result.error === 'user_retired') {
-            return res.status(401).json({ error: 'Unauthorized' })
+            return res.status(401).json({ error: 'user_retired' })
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
@@ -137,28 +144,25 @@ export function createExternalInvitationsRouter(): Router {
         if (!userId) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
-        const authGeneration = Number(result.data.authGeneration)
+        const session = result.data.sessionContext
         if (
-          result.data.lifecycleState !== 'active' ||
-          !Number.isSafeInteger(authGeneration) ||
-          authGeneration < 1
+          !session ||
+          session.userId !== userId ||
+          !Number.isSafeInteger(session.authGeneration) ||
+          session.authGeneration < 1
         ) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
 
-        const sessionToken = signExternalSessionToken({
-          userId,
-          email: result.data.email,
-          teamId: result.data.teamId || null,
-          role: result.data.role,
-          authGeneration,
-        })
+        const sessionToken = signExternalSessionToken(session)
+        const { sessionContext: _sessionContext, ...response } = result.data
 
         return res.status(200).json({
-          ...result.data,
+          ...response,
           token: sessionToken,
         })
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }
@@ -199,12 +203,13 @@ export function createExternalInvitationsRouter(): Router {
             return res.status(410).json({ error: 'expired' })
           }
           if (result.error === 'user_retired') {
-            return res.status(401).json({ error: 'Unauthorized' })
+            return res.status(401).json({ error: 'user_retired' })
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
         return res.status(200).json(result.data)
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }

@@ -2,6 +2,10 @@ import bcrypt from 'bcryptjs'
 import { type DbTransactionClient, pool, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
+  type PasswordAdmissionDenialReason,
+  passwordAdmissionDenialsTotal,
+} from '../../observability/metrics.js'
+import {
   type PasswordIdentifierState,
   admitPasswordIdentifier,
   finishPasswordState,
@@ -17,13 +21,23 @@ const logger = rootLogger.child({ module: 'password-admission' })
 export class PasswordAdmissionError extends Error {
   constructor(
     readonly status: 429 | 503,
-    readonly retryAfterSeconds: number
+    readonly retryAfterSeconds: number,
+    readonly reason: PasswordAdmissionDenialReason,
+    readonly publicError:
+      | 'rate_limited'
+      | 'authority_unavailable'
+      | 'recovery_outcome_unknown' = status === 429 ? 'rate_limited' : 'authority_unavailable'
   ) {
     super(status === 429 ? 'rate_limited' : 'authority_unavailable')
+    passwordAdmissionDenialsTotal.inc({ reason })
   }
 }
-function denied(retryMs: number): never {
-  throw new PasswordAdmissionError(429, Math.min(900, Math.max(1, Math.ceil(retryMs / 1000))))
+function denied(retryMs: number, reason: PasswordAdmissionDenialReason): never {
+  throw new PasswordAdmissionError(
+    429,
+    Math.min(900, Math.max(1, Math.ceil(retryMs / 1000))),
+    reason
+  )
 }
 export type PasswordUser = {
   id: string
@@ -106,16 +120,20 @@ export async function capturePasswordEvaluation(
     const now = await databaseNow(db)
     const decision = admitPasswordIdentifier(stateOf(row), now, chargeAttempt)
     // A denied request never writes: it cannot move the rolling denial horizon.
-    if (decision.retryMs) return { retryMs: decision.retryMs, row, principal }
+    if (decision.retryMs) {
+      const reason: PasswordAdmissionDenialReason =
+        Number(row.locked_until_ms) > now ? 'identifier_cooldown' : 'identifier_attempts'
+      return { retryMs: decision.retryMs, reason, row, principal }
+    }
     const expiresAt = now + policy.evaluationMs
     await db.query(
       'UPDATE password_identifier_state SET attempts = $2, failures = $3, locked_until_ms = $4, retained_until_ms = greatest(retained_until_ms, $5) WHERE identifier_key = $1',
       [key, decision.state.attempts, decision.state.failures, decision.state.lockedUntil, expiresAt]
     )
-    return { retryMs: 0, row, expiresAt, principal }
+    return { retryMs: 0, reason: null, row, expiresAt, principal }
   })
   if (!snapshot) return null
-  if (snapshot.retryMs) denied(snapshot.retryMs)
+  if (snapshot.retryMs) denied(snapshot.retryMs, snapshot.reason ?? 'identifier_attempts')
   // No transaction or row lock survives into bcrypt.
   let user = snapshot.principal
   if (userId === undefined) {
@@ -149,7 +167,7 @@ export async function reservePasswordPace(): Promise<void> {
     const remaining = await pool.query(
       `SELECT greatest(1, ceil(extract(epoch FROM next_permit - clock_timestamp()) * 1000)) AS retry_ms FROM password_verification_pace WHERE singleton`
     )
-    denied(Number(remaining.rows[0]?.retry_ms ?? policy.paceMs))
+    denied(Number(remaining.rows[0]?.retry_ms ?? policy.paceMs), 'global_pace')
   }
 }
 
@@ -207,11 +225,11 @@ export async function verifyMemberPassword(
     if (!capture) return null
     await reservePasswordPace()
     // The pace permit is deliberately not refunded on a busy lease.
-    if (busy) denied(policy.paceMs)
+    if (busy) denied(policy.paceMs, 'verification_busy')
     busy = true
     try {
       const lease = await acquirePasswordWork()
-      if (!lease) denied(policy.paceMs)
+      if (!lease) denied(policy.paceMs, 'verification_busy')
       const user = capture.user
       let authenticated = false
       try {
@@ -249,7 +267,7 @@ export async function verifyMemberPassword(
     if (error instanceof PasswordAdmissionError) throw error
     // Do not log SQL, identifiers, hashes, submitted credentials or backend messages.
     logger.warn({ event: 'password_authority_unavailable' }, 'password authority unavailable')
-    throw new PasswordAdmissionError(503, 2)
+    throw new PasswordAdmissionError(503, 2, 'authority_failure')
   }
 }
 

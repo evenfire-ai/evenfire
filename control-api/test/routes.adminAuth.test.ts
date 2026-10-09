@@ -4,12 +4,14 @@ import request from 'supertest'
 import { config } from '../src/config.js'
 import { rootLogger } from '../src/observability/logger.js'
 import { createAdminAuthRouter } from '../src/routes/admin/auth.js'
+import { PasswordAdmissionError } from '../src/services/auth/passwordCredentialVerification.js'
 
 const directorySvc = vi.hoisted(() => ({
   provisionAdminDesktopWorkspace: vi.fn(),
   acceptInvitationById: vi.fn(),
   getPendingMemberInvitationForEmail: vi.fn(),
   setInvitationPasswordForUser: vi.fn(),
+  withMemberPasswordWorkLease: vi.fn(),
 }))
 // auth.ts imports provisionAdminDesktopWorkspace from the directory barrel; mock the barrel here.
 vi.mock('../src/services/directory/index.js', () => directorySvc)
@@ -53,6 +55,7 @@ const uiAuth = vi.hoisted(() => ({
 }))
 
 const rateLimit = vi.hoisted(() => ({
+  clearRateLimitHeaders: vi.fn(),
   rateLimitMiddleware: vi.fn(() => (_req: any, _res: any, next: any) => next()),
 }))
 
@@ -76,6 +79,14 @@ describe('routes/adminAuth', () => {
     Object.values(controlAdminInvitationRegistrationSvc).forEach(fn => fn.mockReset())
     Object.values(uiAuth).forEach(fn => fn.mockReset())
     Object.values(rateLimit).forEach(fn => fn.mockClear())
+    directorySvc.withMemberPasswordWorkLease.mockImplementation(
+      async (work: (lease: unknown) => Promise<unknown>) =>
+        work({
+          release: async () => undefined,
+          releaseWithin: async () => undefined,
+          confirmReleaseWithinCommitted: () => undefined,
+        })
+    )
     adminSvc.isValidAdminEmail.mockReturnValue(true)
     adminSvc.isValidAdminUsername.mockReturnValue(true)
     config.desktopGfsOperatorLinkingEnabled = false
@@ -560,5 +571,33 @@ describe('routes/adminAuth', () => {
     expect(payload).not.toHaveProperty('email')
     expect(JSON.stringify(payload)).not.toContain('invitee@example.test')
     errorLog.mockRestore()
+  })
+
+  it('denies bundled desktop completion before consuming the admin invitation when password work is busy', async () => {
+    controlAdminInvitationRegistrationSvc.validateControlAdminInvitationToken.mockResolvedValue({
+      email: 'invitee@example.test',
+      invitationUuid: '11111111-1111-4111-8111-111111111111',
+    })
+    directorySvc.getPendingMemberInvitationForEmail.mockResolvedValue({ id: 'desk-invite' })
+    directorySvc.withMemberPasswordWorkLease.mockRejectedValue(
+      new PasswordAdmissionError(429, 8, 'verification_busy')
+    )
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminAuthRouter())
+
+    const res = await request(app).post('/admin/auth/control-admin-invitations/complete').send({
+      token: 'example.jwt.value',
+      email: 'invitee@example.test',
+      username: 'new-admin',
+      password: 'example-password',
+    })
+
+    expect(res.status).toBe(429)
+    expect(res.headers['retry-after']).toBe('8')
+    expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: 8 })
+    expect(adminSvc.completeControlAdminInvitation).not.toHaveBeenCalled()
+    expect(directorySvc.acceptInvitationById).not.toHaveBeenCalled()
   })
 })

@@ -16,7 +16,7 @@ export function sendPasswordAdmissionError(error: unknown, res: Response): boole
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Retry-After', String(error.retryAfterSeconds))
   res.status(error.status).json({
-    error: error.status === 429 ? 'rate_limited' : 'authority_unavailable',
+    error: error.publicError,
     retryAfterSeconds: error.retryAfterSeconds,
   })
   return true
@@ -51,7 +51,7 @@ export const passwordLoginSourceAdmission = rateLimitMiddleware({
   },
   onLimited: (_req, res, retryAfterSeconds) => {
     sendPasswordAdmissionError(
-      new PasswordAdmissionError(429, Math.min(60, retryAfterSeconds)),
+      new PasswordAdmissionError(429, Math.min(60, retryAfterSeconds), 'source_rate'),
       res
     )
   },

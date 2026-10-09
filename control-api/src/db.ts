@@ -6730,7 +6730,27 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
-export type DbTransactionOptions = { signal?: AbortSignal }
+export type DbTransactionOptions = {
+  signal?: AbortSignal
+  /** Called only after PostgreSQL acknowledges COMMIT. Must be synchronous and non-throwing. */
+  onCommitAcknowledged?: () => void
+  /** Called when COMMIT was sent but PostgreSQL did not acknowledge its outcome. */
+  onCommitOutcomeUnknown?: () => void
+}
+
+const UNKNOWN_COMMIT_OUTCOME_SQLSTATES = new Set(['08007', '40003'])
+
+function isDefinitivePostgresCommitErrorResponse(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const response = error as { name?: unknown; code?: unknown; severity?: unknown }
+  return (
+    response.name === 'error' &&
+    typeof response.code === 'string' &&
+    /^[0-9A-Z]{5}$/.test(response.code) &&
+    typeof response.severity === 'string' &&
+    !UNKNOWN_COMMIT_OUTCOME_SQLSTATES.has(response.code)
+  )
+}
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
@@ -6870,6 +6890,7 @@ export async function withTransaction<T>(
     commitSent = true
     await client.query('COMMIT')
     transactionFinished = true
+    options.onCommitAcknowledged?.()
     // An acknowledged COMMIT is the outcome, even if the signal aborted
     // meanwhile: the finally still evicts the session instead of restoring it.
     return result
@@ -6884,8 +6905,13 @@ export async function withTransaction<T>(
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
     }
-    // Once COMMIT was sent, a missing reply is an unknown durable outcome.
-    // Cancellation does not establish rollback, no spend or no dispatch.
+    // Most PostgreSQL ErrorResponses prove COMMIT failed, but SQLSTATE 08007
+    // (transaction_resolution_unknown) and 40003 (statement_completion_unknown)
+    // explicitly leave the durable outcome uncertain. Lost transport and malformed
+    // responses are uncertain as well.
+    if (commitSent && !transactionFinished && !isDefinitivePostgresCommitErrorResponse(error)) {
+      options.onCommitOutcomeUnknown?.()
+    }
     signal?.throwIfAborted()
     throw error
   } finally {

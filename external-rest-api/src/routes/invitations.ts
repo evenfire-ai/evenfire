@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response, Router } from 'express'
 import { verifyToken } from '../authToken.js'
+import { ControlApiError } from '../controlApiClient.js'
 import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
@@ -9,6 +10,7 @@ import {
   getInvitationByToken,
   listPendingInvitations,
   setupInvitationPassword,
+  setupInvitationPasswordWithToken,
 } from '../services/invitationsService.js'
 import { setProfileSessionCookie } from '../sessionCookie.js'
 
@@ -46,14 +48,25 @@ function sendAcceptInvitationError(
 
 function sendInvitationPasswordError(
   res: Response,
-  error: 'not_found' | 'forbidden' | 'not_accepted' | 'not_pending' | 'expired' | 'invalid_password'
+  error:
+    | 'not_found'
+    | 'forbidden'
+    | 'not_accepted'
+    | 'not_pending'
+    | 'expired'
+    | 'invalid_invitation'
+    | 'invalid_password'
 ): void {
+  if (error === 'invalid_invitation') {
+    res.status(400).json({ error: 'invalid_invitation' })
+    return
+  }
   if (error === 'not_found') {
     res.status(404).json({ error: 'Invitation not found' })
     return
   }
   if (error === 'forbidden') {
-    res.status(403).json({ error: 'Invitation email does not match authenticated user' })
+    res.status(403).json({ error: 'Invitation is invalid or unavailable' })
     return
   }
   if (error === 'not_accepted') {
@@ -121,6 +134,17 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
   }
 }
 
+function isInvalidInvitationProof(error: unknown): boolean {
+  return (
+    error instanceof ControlApiError &&
+    error.status === 400 &&
+    error.body !== null &&
+    typeof error.body === 'object' &&
+    'error' in error.body &&
+    error.body.error === 'invalid_invitation'
+  )
+}
+
 export function createInvitationsRouter(): Router {
   const router = Router()
 
@@ -132,7 +156,16 @@ export function createInvitationsRouter(): Router {
         return
       }
 
-      const invitation = await getInvitationByToken(token)
+      let invitation: Awaited<ReturnType<typeof getInvitationByToken>>
+      try {
+        invitation = await getInvitationByToken(token)
+      } catch (error) {
+        if (isInvalidInvitationProof(error)) {
+          res.status(400).json({ error: 'invalid_invitation' })
+          return
+        }
+        throw error
+      }
       if (!invitation) {
         res.status(404).json({ error: 'Invitation not found' })
         return
@@ -152,6 +185,44 @@ export function createInvitationsRouter(): Router {
         return
       }
 
+      const token = String(req.body?.token || '').trim()
+      const email = String(req.body?.email || '')
+        .trim()
+        .toLowerCase()
+      if (token && email) {
+        let preview: Awaited<ReturnType<typeof getInvitationByToken>>
+        try {
+          preview = await getInvitationByToken(token)
+        } catch (error) {
+          if (isInvalidInvitationProof(error)) {
+            res.status(400).json({ error: 'invalid_invitation' })
+            return
+          }
+          throw error
+        }
+        if (preview?.purpose === 'password_reset') {
+          const result = await setupInvitationPasswordWithToken(
+            token,
+            email,
+            invitationId,
+            password
+          )
+          if (result.error) {
+            sendInvitationPasswordError(res, result.error)
+            return
+          }
+          const sessionToken = result.data?.token
+          if (!result.data || !sessionToken) {
+            res.status(502).json({ error: 'Failed to restore account session' })
+            return
+          }
+          const { token: _sessionToken, ...body } = result.data
+          setProfileSessionCookie(req, res, sessionToken)
+          res.status(200).json(body)
+          return
+        }
+      }
+
       const authResult = await invitationPasswordAuthFromRequest(req)
       if ('status' in authResult) {
         res.status(authResult.status).json(authResult.body)
@@ -166,6 +237,7 @@ export function createInvitationsRouter(): Router {
       setProfileSessionCookie(req, res, authResult.auth.sessionToken)
       res.status(200).json(result.data)
     } catch (error) {
+      if (sendPasswordAuthorityError(error, res)) return
       next(error)
     }
   })

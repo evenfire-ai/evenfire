@@ -1,6 +1,12 @@
 import type { PasswordLoginResponse } from '@/app/types/api'
 import type { Me } from '@/app/types/profile'
 
+export type AuthCheckResult =
+  | { status: 'authenticated'; me: Me }
+  | { status: 'unauthenticated' }
+  | { status: 'unavailable' }
+  | { status: 'superseded' }
+
 export type AuthState = {
   isLoggedIn: boolean
   isLoading: boolean
@@ -11,5 +17,5 @@ export type AuthContextValue = {
   authState: AuthState
   login: (email: string, password: string) => Promise<PasswordLoginResponse>
   logout: () => void
-  checkAuth: () => Promise<void>
+  checkAuth: () => Promise<AuthCheckResult>
 }

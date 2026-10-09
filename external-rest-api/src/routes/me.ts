@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import { ControlApiError } from '../controlApiClient.js'
+import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import {
   type AuthedRequest,
   extractAuthToken,
@@ -16,6 +18,7 @@ import {
   updatePassword,
   updateProfile,
 } from '../services/meService.js'
+import { PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE } from './mePasswordErrors.js'
 
 const teamDirectoryRateLimit = createRateLimiter({
   windowMs: 60_000,
@@ -148,6 +151,19 @@ export function createMeRouter(): Router {
         return
       }
       if (message.includes('(409)')) {
+        const upstreamError =
+          error instanceof ControlApiError &&
+          error.body &&
+          typeof error.body === 'object' &&
+          'error' in error.body
+            ? error.body.error
+            : undefined
+        if (upstreamError === 'credential_changed') {
+          res
+            .status(PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE.status)
+            .json(PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE.body)
+          return
+        }
         res.status(409).json({ error: 'Password is not set' })
         return
       }
@@ -155,6 +171,7 @@ export function createMeRouter(): Router {
         res.status(400).json({ error: 'Password must be between 8 and 256 characters' })
         return
       }
+      if (sendPasswordAuthorityError(error, res)) return
       next(error)
     }
   })

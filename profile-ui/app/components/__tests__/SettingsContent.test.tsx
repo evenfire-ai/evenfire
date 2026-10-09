@@ -152,3 +152,45 @@ describe('Settings desktop setup handoff', () => {
     expect(mocks.navigateToDesktopApp).toHaveBeenCalledWith(desktopHref)
   })
 })
+
+describe('Settings password update recovery messaging', () => {
+  it('shows actionable guidance from the External REST credential-change response', async () => {
+    const publicMessage =
+      'Your password changed during this request. Sign in again with your new password.'
+    const publicResponse = { status: 409, body: { error: publicMessage } }
+    const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    mocks.updatePassword.mockImplementation(actualApi.updatePassword)
+    const upstreamFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(publicResponse.body), {
+        status: publicResponse.status,
+        statusText: 'Conflict',
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+
+    try {
+      render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+      const openButton = await screen.findByRole('button', { name: 'Update password' })
+      fireEvent.click(openButton)
+
+      const dialog = await screen.findByRole('dialog', { name: 'Update password' })
+      fireEvent.change(within(dialog).getByLabelText('Current password'), {
+        target: { value: 'Synthetic-current-password' },
+      })
+      fireEvent.change(within(dialog).getByLabelText('New password'), {
+        target: { value: 'Synthetic-next-password' },
+      })
+      fireEvent.change(within(dialog).getByLabelText('Confirm new password'), {
+        target: { value: 'Synthetic-next-password' },
+      })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Update password' }))
+
+      expect(await within(dialog).findByText(`409 Conflict - ${publicMessage}`)).toBeInTheDocument()
+      expect(mocks.logout).not.toHaveBeenCalled()
+      expect(mocks.routerReplace).not.toHaveBeenCalled()
+      expect(mocks.showToast).not.toHaveBeenCalled()
+    } finally {
+      upstreamFetch.mockRestore()
+    }
+  })
+})
