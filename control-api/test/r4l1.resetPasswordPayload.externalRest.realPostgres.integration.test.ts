@@ -311,6 +311,7 @@ realProducer('R4-L1 reset password payload through the public route and real pro
         await admin.query(`DROP DATABASE IF EXISTS "${producerDatabase}"`)
       }
     } finally {
+      await admin?.end()
       Object.assign(controlConfig, {
         memberRegistrationMode: originalControlConfig.memberRegistrationMode,
         memberRegistrationServiceBaseUrl: originalControlConfig.memberRegistrationServiceBaseUrl,
@@ -334,7 +335,6 @@ realProducer('R4-L1 reset password payload through the public route and real pro
       } else {
         process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY = originalExternalJwtKey
       }
-      await admin?.end()
     }
   })
 
