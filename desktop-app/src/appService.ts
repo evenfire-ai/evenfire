@@ -1334,7 +1334,7 @@ export class AppService {
     // needs a credential switch after reaching the head of the queue.
     const activeTeamId = String(this.me?.teamId || '').trim()
     const homeTeamQueuedAfterQuitClosure =
-      Boolean(activeHop) && targetTeamId === activeHop.homeTeamId && this.quitPreparationStarted
+      Boolean(activeHop) && targetTeamId === activeHop?.homeTeamId && this.quitPreparationStarted
     const admissionTeamId = activeHop?.homeTeamId ?? activeTeamId
     const earlyProducer =
       !homeTeamQueuedAfterQuitClosure && targetTeamId !== admissionTeamId
