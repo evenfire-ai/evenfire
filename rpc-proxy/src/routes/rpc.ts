@@ -1013,11 +1013,11 @@ export function createRpcRouter(): Router {
   //
   // The proxy adds no state to the protocol: mcp-host owns the checkpoint
   // state machine, the version comparison and the revalidation, so its
-  // 202/200/404/409/503 body answers the caller unchanged — including the
-  // lifecycle drain gate's 503 {code:'host_draining'}. The forwarded body is
-  // the parsed `{version}` re-serialized verbatim (mcp-host answers its own 400
-  // for a malformed value), and only host.headers carry the edge identity, so
-  // the client Authorization is never forwarded.
+  // 202/200/404/409 body answers the caller unchanged. A lifecycle drain
+  // fence or down Host enters the same wake-and-hold path as POST /messages.
+  // The forwarded body is the parsed `{version}` re-serialized verbatim;
+  // mcp-host answers its own 400 for a malformed value. Only host.headers
+  // carry the edge identity, so the client Authorization is never forwarded.
   router.post(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/model-step-checkpoints/:checkpointId/continue',
     requireRpcAuth,
@@ -1040,6 +1040,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid hostRef, agent, chatId, or checkpointId' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -1058,22 +1059,27 @@ export function createRpcRouter(): Router {
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${sanitizeHostRefForLog(hostRef)} method=continue-model-step agent=${logAgent} chatId=${logChatId} checkpointId=${logCheckpointId}`
         )
-        try {
-          const response = await fetch(
-            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/model-step-checkpoints/${encodeURIComponent(checkpointId)}/continue`,
-            {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', ...host.headers },
-              body: JSON.stringify(req.body),
-              // No client-side deadline on the first attempt, like the message
-              // write path: mcp-host may already have claimed the checkpoint,
-              // so its own 202/404/409/503 answer must reach the caller instead
-              // of a proxy-generated 504. A client that leaves before the
-              // response still releases the upstream call (mutatingCallSignal).
-              signal: mutatingCallSignal(undefined, res),
-            }
-          )
+        const upstreamUrl = `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/model-step-checkpoints/${encodeURIComponent(checkpointId)}/continue`
+        const forwardedBody = JSON.stringify(req.body)
+        const forwardContinuation = async (timeoutMs?: number) => {
+          const response = await fetch(upstreamUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...host.headers },
+            body: forwardedBody,
+            // No client-side deadline on the first attempt, like the message
+            // write path: mcp-host may already have claimed the checkpoint,
+            // so its own 202/404/409 answer must reach the caller instead
+            // of a proxy-generated 504. A client that leaves before the
+            // response still releases the upstream call (mutatingCallSignal).
+            signal: mutatingCallSignal(timeoutMs, res),
+          })
           const body = await readMutatingResponseBody(response)
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          return { response, body }
+        }
+        try {
+          const { response, body } = await forwardContinuation()
           sendUpstreamBody(
             res,
             response.status,
@@ -1086,6 +1092,30 @@ export function createRpcRouter(): Router {
               hostRef
             )} error=${describeErrorForLog(error)}`
           )
+          if (isWakeEligibleHostError(error)) {
+            await respondWithWakeAndHold({
+              res,
+              hostRef,
+              host,
+              claims: auth,
+              rpcAccessToken,
+              deadlineMs: wakeDeadlineMs,
+              // Re-presenting this checkpoint/version replays a live claim or
+              // completed result; it cannot admit a second continuation task.
+              retryUntilDeadline: true,
+              attemptUpstream: async timeoutMs => {
+                const { response, body } = await forwardContinuation(timeoutMs)
+                sendUpstreamBody(
+                  res,
+                  response.status,
+                  body,
+                  response.headers.get('content-type') || 'application/json'
+                )
+              },
+              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+            })
+            return
+          }
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {

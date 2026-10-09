@@ -120,8 +120,8 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
     expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
-  // One case per row of the contract's precedence table, plus the lifecycle
-  // drain fence, which this route relays instead of waking the Host.
+  // One case per row of the contract's status precedence table. The lifecycle
+  // drain fence enters wake-and-hold instead of being relayed.
   const RELAYED_CASES = [
     { name: 'claimed (202)', response: readVector('continue-response.claimed.json') },
     { name: 'reclaimed (202)', response: readVector('continue-response.reclaimed.json') },
@@ -132,10 +132,6 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
     {
       name: 'version-mismatch (409)',
       response: readVector('continue-response.version-mismatch.json'),
-    },
-    {
-      name: 'host_draining (503)',
-      response: { httpStatus: 503, body: { code: 'host_draining', retryAfterMs: 1000 } },
     },
   ]
 
@@ -254,8 +250,8 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
-  it('maps a host-down fetch failure to a sanitized 502', async () => {
-    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'))
+  it('maps a non-availability upstream failure to a sanitized 502', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('unexpected upstream failure'))
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const res = await request(makeApp())
@@ -265,6 +261,7 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
       .expect(502)
 
     expect(res.body).toEqual({ error: 'Upstream host unavailable' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('maps an upstream timeout to a sanitized 504 on the public route', async () => {
