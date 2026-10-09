@@ -626,13 +626,27 @@ export async function launchAndLogin(
       await expect(authenticatedShell).not.toBeVisible()
       await expect(signInButton).toBeVisible()
       await expect(signInButton).toBeEnabled()
+      // loginAs just spent a password attempt through the API; without the pace
+      // control-api answers this click with 429 and the form stays on screen.
+      await awaitPasswordPace()
       await humanUiClick(signInButton)
+      // The error alert expires after a few seconds, so keep its text once seen
+      // and stop polling: an error is terminal, not a pending login.
+      let loginError = ''
       await expect
         .poll(
           async () => {
             if (await authenticatedShell.isVisible().catch(() => false)) return 'authenticated'
             const errorToast = page.getByRole('alert').filter({ hasText: /login|password|failed/i })
-            if (await errorToast.isVisible().catch(() => false)) return 'error'
+            if (await errorToast.isVisible().catch(() => false)) {
+              loginError = (
+                await errorToast
+                  .first()
+                  .innerText()
+                  .catch(() => '')
+              ).trim()
+              return 'error'
+            }
             return 'pending'
           },
           {
@@ -641,7 +655,9 @@ export async function launchAndLogin(
             message: `waiting for Desktop password login to complete for ${email}`,
           }
         )
-        .toBe('authenticated')
+        .not.toBe('pending')
+      expect(loginError, `Desktop password login failed for ${email}`).toBe('')
+      await expect(authenticatedShell).toBeVisible()
     }
 
     await expect(authenticatedShell).toBeVisible({ timeout: 60_000 })
