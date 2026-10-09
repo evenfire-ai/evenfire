@@ -82,7 +82,12 @@ describe('AppService runtime config discovery ownership', () => {
         authorityScope: { environmentKey: string }
         sessionGeneration: number
       }
+      openDesktop: (hostRef: string) => Promise<void>
       gfsScopeIdentity: { environmentKey: string } | null
+      rpcTokenManager: {
+        getOrIssue: ReturnType<typeof vi.fn>
+        clear: ReturnType<typeof vi.fn>
+      }
     }
     app.authClient = {
       getDesktopEnvironment,
@@ -118,6 +123,20 @@ describe('AppService runtime config discovery ownership', () => {
     expect(service.getCachedUserId()).toBe('user-a')
     expect(app.gfsScopeIdentity?.environmentKey).toBe(restOnlyEnvKey)
 
+    const openDesktopWindow = vi.fn().mockResolvedValue(undefined)
+    vi.doMock('../desktopWindow.js', () => ({ openDesktopWindow }))
+    app.rpcTokenManager = {
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'desktop-rpc-token' }),
+      clear: vi.fn(),
+    }
+    await app.openDesktop('chatllm')
+    expect(openDesktopWindow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostRef: 'chatllm',
+        rpcProxyUrl: 'https://rpc-discovered.example.test',
+      })
+    )
+
     await service.logout()
 
     const rpcConfiguredEnvKey = runtimeConfig.getDesktopRuntimeConfigState().envKey
@@ -141,7 +160,7 @@ describe('AppService runtime config discovery ownership', () => {
     )
   })
 
-  it('defers discovery completed during saved-session restore until logout', async () => {
+  it('uses discovery completed during saved-session restore without changing durable identity', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     await runtimeConfig.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: restA,
@@ -159,6 +178,7 @@ describe('AppService runtime config discovery ownership', () => {
         discoveryStarted.resolve()
         return discovery.promise
       })
+      .mockRejectedValueOnce(new Error('later discovery must not be needed'))
     const getMeStarted = deferred<void>()
     const getMe = vi.fn(() => {
       getMeStarted.resolve()
@@ -172,6 +192,9 @@ describe('AppService runtime config discovery ownership', () => {
         health: ReturnType<typeof vi.fn>
       }
       resolveRuntimeConfigIfNeeded: () => Promise<void>
+      getEffectiveRpcProxyBaseUrl: () => string
+      getDependenciesHealth: () => Promise<unknown>
+      rpcClient: { health: ReturnType<typeof vi.fn> }
       gfsScopeIdentity: { environmentKey: string } | null
     }
     app.authClient = {
@@ -179,6 +202,7 @@ describe('AppService runtime config discovery ownership', () => {
       getMe,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
+    app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
     service.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session-a')
     const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
 
@@ -209,6 +233,14 @@ describe('AppService runtime config discovery ownership', () => {
     )
     expect(app.gfsScopeIdentity?.environmentKey).toBe(restOnlyEnvKey)
     expect(service.getCachedUserId()).toBe('user-a')
+    expect(app.getEffectiveRpcProxyBaseUrl()).toBe('https://rpc-discovered.example.test')
+
+    await expect(app.getDependenciesHealth()).resolves.toMatchObject({
+      externalRestApi: { ok: true },
+      rpcProxy: { ok: true },
+    })
+    expect(app.rpcClient.health).toHaveBeenCalledOnce()
+    expect(getDesktopEnvironment).toHaveBeenCalledTimes(2)
 
     await service.logout()
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')

@@ -99,6 +99,13 @@ const electronMocks = vi.hoisted(() => {
   }
 })
 
+const authMocks = vi.hoisted(() => ({
+  getDesktopEnvironment: vi.fn(),
+  getMe: vi.fn(),
+  googleLogin: vi.fn(),
+  health: vi.fn(),
+}))
+
 vi.mock('electron', () => ({
   WebContentsView: electronMocks.FakeWebContentsView,
   BrowserWindow: { getAllWindows: () => [] },
@@ -121,6 +128,9 @@ vi.mock('electron', () => ({
 vi.mock('../config.js', () => ({
   getActiveEnvKey: () => 'test-env',
   getActiveLegacyEnvKeys: () => [],
+  hydrateDesktopRuntimeConfig: () => undefined,
+  isDesktopRuntimeConfigured: () => true,
+  saveDesktopRuntimeConfig: vi.fn(),
   getDesktopRuntimeConfigState: () => ({
     configured: true,
     isLocalhost: false,
@@ -162,8 +172,10 @@ vi.mock('../rpcTokenManager.js', () => ({
 
 vi.mock('../authClient.js', () => ({
   AuthClient: class {
-    health = vi.fn().mockResolvedValue({ status: 'ok' })
-    getMe = vi.fn()
+    health = authMocks.health
+    getMe = authMocks.getMe
+    googleLogin = authMocks.googleLogin
+    getDesktopEnvironment = authMocks.getDesktopEnvironment
   },
 }))
 
@@ -308,6 +320,12 @@ let userDataDir = ''
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  const { config } = await import('../config.js')
+  config.rpcProxyBaseUrl = 'https://rpc.example'
+  authMocks.health.mockResolvedValue({ status: 'ok' })
+  authMocks.getMe.mockResolvedValue(null)
+  authMocks.googleLogin.mockReset()
+  authMocks.getDesktopEnvironment.mockReset()
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   electronMocks.views.length = 0
   electronMocks.sessionObject.cookies.set.mockResolvedValue(undefined)
@@ -341,6 +359,54 @@ async function setupWithLiveFirstApp(onClosed: () => void = vi.fn()) {
   const firstView = electronMocks.views[0]
   return { service, parentWindow, firstWebContentsId: first!.webContentsId, firstView }
 }
+
+describe('AppService sandbox-ui effective RPC endpoint', () => {
+  it('uses a late discovery from the active session for mint, cookie, and navigation', async () => {
+    const { config } = await import('../config.js')
+    const discoveredRpcUrl = 'https://late-rpc.example.test'
+    config.rpcProxyBaseUrl = ''
+    authMocks.getDesktopEnvironment
+      .mockRejectedValueOnce(new Error('initial discovery unavailable'))
+      .mockResolvedValueOnce({
+        externalRestApiBaseUrl: 'http://rest',
+        rpcProxyBaseUrl: discoveredRpcUrl,
+        appName: 'Discovered environment',
+      })
+    authMocks.googleLogin.mockResolvedValue({
+      token: 'fake-session-token',
+      me: {
+        id: 'user-a',
+        email: 'user-a@example.test',
+        name: 'User A',
+        picture: null,
+        teamId: 'team-a',
+        teamName: 'Team A',
+        role: 'member',
+      },
+    })
+    const service = new AppService()
+    await service.googleLogin('google-id-token')
+    await service.getDependenciesHealth()
+    expect(config.rpcProxyBaseUrl).toBe('')
+
+    const parentWindow = new FakeParentWindow()
+
+    await service.openSandboxUi(openArgs('effective-app', parentWindow))
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${discoveredRpcUrl}/api/v1/sandbox-ui/sandbox-recipes/effective-app/session`,
+      expect.objectContaining({ method: 'POST' })
+    )
+    expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: `${discoveredRpcUrl}/api/v1/sandbox-ui/sandbox-recipes/effective-app/`,
+      })
+    )
+    expect(electronMocks.views.at(-1)?.webContents.currentUrl).toBe(
+      `${discoveredRpcUrl}/api/v1/sandbox-ui/sandbox-recipes/effective-app/view/`
+    )
+  })
+})
 
 describe('AppService sandbox-ui open replaces the live view whatever its outcome', () => {
   it('a reopen whose mint rejects leaves no view, no refresh loop and no pin behind', async () => {

@@ -1716,7 +1716,7 @@ export class AppService {
       // single-flight slot can be cleared unconditionally after it settles.
       this.restoreSavedSessionInFlight = null
       this.restoreSavedSessionReservationStarted = false
-      if (!this.sessionToken && !this.me && this.interactiveLoginAttempts === 0) {
+      if (this.interactiveLoginAttempts === 0) {
         await this.withNativeAuthEnvironmentCommit(async () => {
           await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
         })
@@ -5582,7 +5582,7 @@ export class AppService {
     await openDesktopWindow({
       hostRef: targetHostRef,
       jwt: rpc.token,
-      rpcProxyUrl: config.rpcProxyBaseUrl,
+      rpcProxyUrl: this.getEffectiveRpcProxyBaseUrl(),
       onClose: onWindowClosed,
     })
   }
@@ -5965,7 +5965,7 @@ export class AppService {
       recipeNs,
       recipeName,
       setCookie,
-      rpcProxyUrl: config.rpcProxyBaseUrl,
+      rpcProxyUrl: this.getEffectiveRpcProxyBaseUrl(),
       defaultPath: args.defaultPath,
       routePath: args.routePath,
       parentWindow: args.parentWindow,
