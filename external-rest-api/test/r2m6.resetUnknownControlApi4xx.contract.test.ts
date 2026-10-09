@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { generateKeyPairSync } from 'node:crypto'
 import type { Server } from 'node:http'
 import { config as externalConfig } from '../src/config.js'
 import {
@@ -9,28 +8,26 @@ import {
   setupInvitationPasswordWithToken,
 } from '../src/services/invitationsService.js'
 
+const controlApiProducerConfig = vi.hoisted(() => ({
+  internalServiceTokens: {} as Record<string, string>,
+}))
+
+// Keep the Control API producer middleware real while controlling only its
+// allowlist input; this consumer contract test does not boot Control API config.
+vi.mock('../../control-api/src/config.js', () => ({ config: controlApiProducerConfig }))
+
 describe('reset consumer handling of unexpected Control API 4xx responses', () => {
   const controlServiceToken = `synthetic-control-service-${'x'.repeat(24)}`
   let server: Server
   let previousBaseUrl: string
   let previousServiceToken: string
-  let controlConfig: (typeof import('../../control-api/src/config.js'))['config']
-  let previousInternalServiceTokens: Record<string, string>
 
   beforeAll(async () => {
     previousBaseUrl = externalConfig.controlApiBaseUrl
     previousServiceToken = externalConfig.controlApiServiceToken
-    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
-    const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
-    vi.stubEnv('CONTROL_API_RPC_JWT_PRIVATE_KEY', privateKeyPem)
-    vi.stubEnv('CONTROL_API_SESSION_JWT_PRIVATE_KEY', privateKeyPem)
-    vi.stubEnv('CONTROL_API_ADMIN_JWT_PRIVATE_KEY', privateKeyPem)
     vi.resetModules()
-    controlConfig = (await import('../../control-api/src/config.js')).config
     const { requireInternalToken } =
       await import('../../control-api/src/middleware/internalServiceAuth.js')
-    previousInternalServiceTokens = controlConfig.internalServiceTokens
-    controlConfig.internalServiceTokens = {}
 
     const controlApp = express()
     controlApp.use(express.json())
@@ -48,13 +45,11 @@ describe('reset consumer handling of unexpected Control API 4xx responses', () =
   afterAll(async () => {
     externalConfig.controlApiBaseUrl = previousBaseUrl
     externalConfig.controlApiServiceToken = previousServiceToken
-    controlConfig.internalServiceTokens = previousInternalServiceTokens
     if (server) {
       await new Promise<void>((resolve, reject) =>
         server.close(error => (error ? reject(error) : resolve()))
       )
     }
-    vi.unstubAllEnvs()
   })
 
   it('treats a real internal-service 401 as a sanitized authority outage', async () => {
