@@ -14,6 +14,27 @@ type ResetPasswordDomainError =
   | 'invalid_invitation'
   | 'invalid_password'
 
+function invitationPasswordDomainError(
+  error: ControlApiError
+):
+  | 'not_found'
+  | 'forbidden'
+  | 'not_accepted'
+  | 'not_pending'
+  | 'expired'
+  | 'invalid_password'
+  | null {
+  const code = controlApiErrorCode(error)
+  if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
+  if (error.status === 401 && code === 'user_retired') return 'not_found'
+  if (error.status === 403 && code === 'forbidden') return 'forbidden'
+  if (error.status === 404 && code === 'not_found') return 'not_found'
+  if (error.status === 409 && code === 'invitation_not_accepted') return 'not_accepted'
+  if (error.status === 409 && code === 'invitation_not_pending') return 'not_pending'
+  if (error.status === 410 && code === 'expired') return 'expired'
+  return null
+}
+
 function controlApiErrorCode(error: ControlApiError): string | null {
   if (
     error.body !== null &&
@@ -30,6 +51,7 @@ function resetPasswordDomainError(error: ControlApiError): ResetPasswordDomainEr
   const code = controlApiErrorCode(error)
   if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
   if (error.status === 400 && code === 'invalid_invitation') return 'invalid_invitation'
+  if (error.status === 401 && code === 'user_retired') return 'invalid_invitation'
   if (error.status === 403 && code === 'forbidden') return 'forbidden'
   if (error.status === 404 && code === 'not_found') return 'not_found'
   if (
@@ -47,6 +69,15 @@ function unknownRecoveryOutcome(): ControlApiError {
     'Password recovery outcome is unknown',
     503,
     { error: 'recovery_outcome_unknown' },
+    { 'retry-after': '2' }
+  )
+}
+
+function passwordAuthorityUnavailable(): ControlApiError {
+  return new ControlApiError(
+    'Password recovery authority unavailable',
+    503,
+    { error: 'authority_unavailable' },
     { 'retry-after': '2' }
   )
 }
@@ -146,9 +177,15 @@ export async function createDesktopAuthorization(
     return { data }
   } catch (error) {
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('(404)')) return { error: 'not_found' }
-    return { error: 'invalid_password' }
+    if (error instanceof ControlApiError) {
+      if (error.status === 404 && controlApiErrorCode(error) === 'not_found') {
+        return { error: 'not_found' }
+      }
+      if (error.status === 401 && controlApiErrorCode(error) === 'invalid_password') {
+        return { error: 'invalid_password' }
+      }
+    }
+    throw passwordAuthorityUnavailable()
   }
 }
 
@@ -196,12 +233,11 @@ export async function setupInvitationPassword(
     return { data }
   } catch (error) {
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('(404)')) return { error: 'not_found' }
-    if (message.includes('(403)')) return { error: 'forbidden' }
-    if (message.includes('(409)')) return { error: 'not_accepted' }
-    if (message.includes('(410)')) return { error: 'expired' }
-    return { error: 'invalid_password' }
+    if (error instanceof ControlApiError) {
+      const domainError = invitationPasswordDomainError(error)
+      if (domainError) return { error: domainError }
+    }
+    throw passwordAuthorityUnavailable()
   }
 }
 
@@ -233,7 +269,7 @@ export async function setupInvitationPasswordWithToken(
     if (error instanceof ControlApiError) {
       const domainError = resetPasswordDomainError(error)
       if (domainError) return { error: domainError }
-      if (error.status < 500) return { error: 'invalid_invitation' }
+      if (error.status < 500) throw passwordAuthorityUnavailable()
     }
     throw unknownRecoveryOutcome()
   }

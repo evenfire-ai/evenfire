@@ -135,7 +135,7 @@ export function createExternalInvitationsRouter(): Router {
             return res.status(410).json({ error: 'expired' })
           }
           if (result.error === 'user_retired') {
-            return res.status(401).json({ error: 'Unauthorized' })
+            return res.status(401).json({ error: 'user_retired' })
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
@@ -203,7 +203,7 @@ export function createExternalInvitationsRouter(): Router {
             return res.status(410).json({ error: 'expired' })
           }
           if (result.error === 'user_retired') {
-            return res.status(401).json({ error: 'Unauthorized' })
+            return res.status(401).json({ error: 'user_retired' })
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
