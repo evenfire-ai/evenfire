@@ -780,6 +780,210 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
   })
 
+  describe('snippet secret ownership on a triggered run (run-scoped child CR)', () => {
+    // A triggered run reconciles the run-scoped child CR `<parent>-<runid8>`, while
+    // WRC resolves the verified parent recipe as the runtime scope. Snippet Secret
+    // ownership must be judged against that parent scope, never the child name.
+    const childRecipeName = 'pr-review-abcd1234'
+    const parentScopeRecipeName = 'pr-review'
+    const triggeredRunId = 'run-id'
+    const scopeDenialMessage =
+      'snippet secret "github-token" is not accessible to recipe "pr-review" — ' +
+      'it requires clerum.io/shared=true or clerum.io/owner-recipe=pr-review'
+
+    function snippetSecretSpec(secretName = 'github-token') {
+      return {
+        steps: [
+          {
+            id: 'triage',
+            run: {
+              type: 'snippet' as const,
+              language: 'typescript' as const,
+              code: 'return { ok: true }',
+              capabilities: {
+                secrets: [{ alias: 'github_token', secretRef: { name: secretName, key: 'token' } }],
+              },
+            },
+          },
+        ],
+      }
+    }
+
+    function reconcileTriggeredChild(
+      spec = snippetSecretSpec(),
+      currentStatus?: { resourceInstances?: Record<string, string> }
+    ) {
+      // Settle the output gates so a pass that clears the preflight reaches runtime
+      // pod creation. The two names differ in scope ON PURPOSE: the output claim and
+      // its anchor pod belong to the PARENT scope (`pr-review-workflow-output-anchor`),
+      // while the prepare pod is RUN-scoped (`pr-review-abcd1234-workflow-output-prepare`).
+      // Without these, the pass stops at "Created workflow output anchor pod" and
+      // the snippet-runner pod is never created.
+      crashRecoveryMocks.getPodPhase.mockImplementation(async (_api, name: string) => {
+        if (name === `${parentScopeRecipeName}-workflow-output-anchor`) return 'Running'
+        if (name === `${childRecipeName}-workflow-output-prepare`) return 'Succeeded'
+        return undefined
+      })
+      return new WorkflowReconciler(deps).reconcile(
+        childRecipeName,
+        'uid-pr-review-child',
+        sandboxNamespace,
+        spec,
+        currentStatus,
+        undefined,
+        parentScopeRecipeName,
+        triggeredRunId
+      )
+    }
+
+    function createdPodNames(): string[] {
+      return mockCoreApi.createNamespacedPod.mock.calls.map(call => call[0].body.metadata.name)
+    }
+
+    it('creates the snippet runner when the Secret is owned by the parent scope recipe', async () => {
+      mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
+        metadata: { labels: { 'clerum.io/owner-recipe': parentScopeRecipeName } },
+        data: { token: 'cmVkYWN0ZWQ=' },
+      })
+
+      const result = await reconcileTriggeredChild()
+
+      expect(result.phase).not.toBe('failed')
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(mockCoreApi.readNamespacedSecret).toHaveBeenCalledWith({
+        name: 'github-token',
+        namespace: sandboxNamespace,
+      })
+      expect(createdPodNames()).toContain(`${childRecipeName}-snippet-runner`)
+      const runnerPod = mockCoreApi.createNamespacedPod.mock.calls
+        .map(call => call[0].body)
+        .find(body => body.metadata.name === `${childRecipeName}-snippet-runner`)
+      expect(runnerPod).toBeDefined()
+      const projectedSecretRefs = runnerPod.spec.containers.flatMap(
+        (container: { env?: Array<{ valueFrom?: { secretKeyRef?: unknown } }> }) =>
+          (container.env ?? []).flatMap(env =>
+            env.valueFrom?.secretKeyRef ? [env.valueFrom.secretKeyRef] : []
+          )
+      )
+      expect(projectedSecretRefs).toEqual([{ name: 'github-token', key: 'token' }])
+    })
+
+    it('fails before pod creation when the Secret is owned by another recipe, naming the parent scope', async () => {
+      mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
+        metadata: { labels: { 'clerum.io/owner-recipe': 'other-recipe' } },
+        data: { token: 'cmVkYWN0ZWQ=' },
+      })
+
+      const result = await reconcileTriggeredChild()
+
+      expect(result).toMatchObject({
+        phase: 'failed',
+        workflowPhase: 'failed',
+        message: scopeDenialMessage,
+      })
+      expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+    })
+
+    it('fails before pod creation when the Secret is owned by the run-scoped child name', async () => {
+      mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
+        metadata: { labels: { 'clerum.io/owner-recipe': childRecipeName } },
+        data: { token: 'cmVkYWN0ZWQ=' },
+      })
+
+      const result = await reconcileTriggeredChild()
+
+      expect(result).toMatchObject({
+        phase: 'failed',
+        workflowPhase: 'failed',
+        message: scopeDenialMessage,
+      })
+      expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+    })
+
+    it('fails closed when the Secret carries both owner-recipe=<parent> and shared=true', async () => {
+      mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
+        metadata: {
+          labels: {
+            'clerum.io/owner-recipe': parentScopeRecipeName,
+            'clerum.io/shared': 'true',
+          },
+        },
+        data: { token: 'cmVkYWN0ZWQ=' },
+      })
+
+      const result = await reconcileTriggeredChild()
+
+      expect(result).toMatchObject({
+        phase: 'failed',
+        workflowPhase: 'failed',
+        message: scopeDenialMessage,
+      })
+      expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+    })
+
+    it('fails closed when the Secret carries no ownership label', async () => {
+      mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
+        metadata: { labels: {} },
+        data: { token: 'cmVkYWN0ZWQ=' },
+      })
+
+      const result = await reconcileTriggeredChild()
+
+      expect(result).toMatchObject({
+        phase: 'failed',
+        workflowPhase: 'failed',
+        message: scopeDenialMessage,
+      })
+      expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+    })
+
+    it('keeps shared=true Secrets accessible to the triggered run', async () => {
+      mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
+        metadata: { labels: { 'clerum.io/shared': 'true' } },
+        data: { token: 'cmVkYWN0ZWQ=' },
+      })
+
+      const result = await reconcileTriggeredChild()
+
+      expect(result.phase).not.toBe('failed')
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(createdPodNames()).toContain(`${childRecipeName}-snippet-runner`)
+    })
+
+    it('judges an inherited resource-instance Secret against the parent scope', async () => {
+      // The child inherits the parent's status.resourceInstances, so the snippet
+      // resource id resolves to the PARENT's instance Secret, owned by the parent.
+      mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
+        metadata: { labels: { 'clerum.io/owner-recipe': parentScopeRecipeName } },
+        data: { token: 'cmVkYWN0ZWQ=' },
+      })
+
+      const result = await reconcileTriggeredChild(
+        {
+          ...snippetSecretSpec('gh-auth'),
+          resources: [{ id: 'gh-auth', type: 'secret' as const, data: { token: 'redacted' } }],
+        },
+        { resourceInstances: { 'gh-auth': 'pr-review-gh-auth-d07f008b65ec' } }
+      )
+
+      expect(result.phase).not.toBe('failed')
+      expect(mockCoreApi.readNamespacedSecret).toHaveBeenCalledWith({
+        name: 'pr-review-gh-auth-d07f008b65ec',
+        namespace: sandboxNamespace,
+      })
+      expect(createdPodNames()).toContain(`${childRecipeName}-snippet-runner`)
+    })
+
+    it('still fails closed (throws) when Secret ownership cannot be read', async () => {
+      mockCoreApi.readNamespacedSecret.mockRejectedValueOnce({ code: 503 })
+
+      await expect(reconcileTriggeredChild()).rejects.toThrow(
+        'snippet secret "github-token" ownership could not be verified in namespace "sandbox-recipes"'
+      )
+      expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+    })
+  })
+
   it('skips artifact HTTP cleanup when neither artifact-reader nor mcp-host Service exists', async () => {
     mockCoreApi.readNamespacedService.mockRejectedValue({ code: 404 })
     const reconciler = new WorkflowReconciler(deps)
