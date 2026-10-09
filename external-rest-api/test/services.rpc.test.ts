@@ -84,11 +84,33 @@ describe('rpcService.issueRpcAccessToken', () => {
     expect(requestBody).toEqual({ scopes, hostRefs })
   })
 
+  it('E1: accepts the canonical mint list for padded and duplicate requested refs', async () => {
+    const hostRefs = [' host-b ', 'host-a', 'host-b']
+    const revokedHostRefs = ['host-a', 'host-b']
+    clientMock.controlApiRequest.mockRejectedValueOnce(
+      new ControlApiError('Host access denied', 403, {
+        error: 'host_access_denied',
+        code: 'host_access_revoked',
+        revokedHostRefs,
+      })
+    )
+
+    expect(await issueRpcAccessToken('session', ['host:message:invoke'], hostRefs)).toEqual({
+      error: 'host_access_denied',
+      code: 'host_access_revoked',
+      revokedHostRefs,
+    })
+  })
+
   it.each([
     { name: 'missing list', fields: {} },
     { name: 'empty list', fields: { revokedHostRefs: [] } },
     { name: 'non-string element', fields: { revokedHostRefs: ['host-a', 42] } },
     { name: 'empty-string element', fields: { revokedHostRefs: ['host-a', ''] } },
+    { name: 'padded element', fields: { revokedHostRefs: [' host-a '] } },
+    { name: 'wildcard element', fields: { revokedHostRefs: ['host-a', '*'] } },
+    { name: 'duplicate element', fields: { revokedHostRefs: ['host-a', 'host-a'] } },
+    { name: 'unrequested element', fields: { revokedHostRefs: ['host-a', 'host-b'] } },
   ])('E2: drops revocation extras for $name', async ({ fields }) => {
     const sessionToken = randomUUID()
     const validBody = {
@@ -120,6 +142,20 @@ describe('rpcService.issueRpcAccessToken', () => {
       expect(options.body.sessionToken === sessionToken).toBe(true)
       expect(options.body.hostRefs).toEqual(['host-a'])
     }
+  })
+
+  it('E2: drops an unsorted revocation list for two requested Hosts', async () => {
+    clientMock.controlApiRequest.mockRejectedValueOnce(
+      new ControlApiError('Host access denied', 403, {
+        error: 'host_access_denied',
+        code: 'host_access_revoked',
+        revokedHostRefs: ['host-b', 'host-a'],
+      })
+    )
+
+    expect(
+      await issueRpcAccessToken('session', ['host:message:invoke'], ['host-a', 'host-b'])
+    ).toEqual({ error: 'host_access_denied' })
   })
 
   it.each([
