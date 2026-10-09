@@ -31,3 +31,24 @@ export function connectorContextAssignmentError(
     ? undefined
     : CONTEXT_OAUTH_SCOPE_ERROR
 }
+
+export const SHARED_GRANT_REQUIRES_AGENT_ERROR =
+  'A shared OAuth identity needs at least one agent. Select the agents that will share it, or choose Per user.'
+
+/**
+ * Grant-scope check for a new install into the selected agents' Contexts. A
+ * shared (per-context) grant is consented by members of its Context, so it needs
+ * at least one agent — a generated private scope has no member to consent — and
+ * every selected agent must share that one Context.
+ */
+export function sharedGrantScopeError(
+  grantScope: string,
+  selectedContextRefs: readonly string[]
+): string | undefined {
+  if (grantScope !== 'context') return undefined
+  if (selectedContextRefs.length === 0) return SHARED_GRANT_REQUIRES_AGENT_ERROR
+  return connectorContextAssignmentError(
+    { contextRef: selectedContextRefs[0], oauth: { grantScope } },
+    selectedContextRefs
+  )
+}

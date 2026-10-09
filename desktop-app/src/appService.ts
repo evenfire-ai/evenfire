@@ -3567,18 +3567,13 @@ export class AppService {
     // without sprinkling `|| name`. Filled total over
     // `agentNames` below so a lookup is never undefined.
     const agentDisplayByName: Record<string, string> = {}
-    const upsertScopedServers = (
-      target: Record<string, Array<{ name: string }>>,
-      key: string,
-      names: string[]
-    ) => {
-      const existing = target[key] ?? []
-      const mergedNames = AppService.dedupe([
-        ...existing.map(entry => String(entry?.name || '').trim()),
-        ...names,
-      ])
-      target[key] = mergedNames.map(name => ({ name }))
-    }
+    // Agents (and the contexts they reported) whose wire entry carried an
+    // `mcpServers` array — including `[]`. Only these get a scoped key, so an
+    // explicit empty list is authoritative (zero connectors) while an older
+    // response that omits the field stays unknown and keeps the preview
+    // fallback.
+    const knownMcpAgents = new Set<string>()
+    const knownMcpAgentsByContext = new Map<string, Set<string>>()
     const collectAgents = (
       agents?: Array<{
         name: string
@@ -3623,16 +3618,18 @@ export class AppService {
         ) {
           agentProviderByName[agentName] = providerCandidate
         }
+        const explicitMcpServers = Array.isArray(a.mcpServers)
         const existing = mcpServersByAgent[agentName] ?? []
-        const incoming = Array.isArray(a.mcpServers)
-          ? a.mcpServers.map(s => String(s?.name || '').trim()).filter(Boolean)
+        const incoming = explicitMcpServers
+          ? (a.mcpServers ?? []).map(s => String(s?.name || '').trim()).filter(Boolean)
           : []
-        const merged = AppService.dedupe([...existing, ...incoming])
-        mcpServersByAgent[agentName] = merged
-        if (!merged.length) continue
-        upsertScopedServers(agentMcpServers, agentName, merged)
+        mcpServersByAgent[agentName] = AppService.dedupe([...existing, ...incoming])
+        if (!explicitMcpServers) continue
+        knownMcpAgents.add(agentName)
         if (contextRef) {
-          upsertScopedServers(contextMcpServers, contextRef, merged)
+          const contextAgents = knownMcpAgentsByContext.get(contextRef) ?? new Set<string>()
+          contextAgents.add(agentName)
+          knownMcpAgentsByContext.set(contextRef, contextAgents)
         }
       }
     }
@@ -3667,8 +3664,21 @@ export class AppService {
       }
     }
 
-    const hasAgentScopedMcp = Object.keys(agentMcpServers).length > 0
-    const hasContextScopedMcp = Object.keys(contextMcpServers).length > 0
+    // Emitted after both responses so the user/team merge is final: a known
+    // agent maps to its merged list (possibly []), and a context to the union
+    // over the known agents that reported it.
+    for (const agentName of knownMcpAgents) {
+      agentMcpServers[agentName] = (mcpServersByAgent[agentName] ?? []).map(name => ({ name }))
+    }
+    for (const [contextRef, contextAgents] of knownMcpAgentsByContext) {
+      const serverNames = AppService.dedupe(
+        [...contextAgents].flatMap(agentName => mcpServersByAgent[agentName] ?? [])
+      )
+      contextMcpServers[contextRef] = serverNames.map(name => ({ name }))
+    }
+
+    const hasAgentScopedMcp = knownMcpAgents.size > 0
+    const hasContextScopedMcp = knownMcpAgentsByContext.size > 0
 
     this.accessCatalog = {
       userId: me.id,

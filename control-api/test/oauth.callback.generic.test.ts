@@ -10,6 +10,7 @@ import {
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import { signOAuthState } from '../src/oauth/state.js'
+import { admitContexts } from './fixtures/mcpConsentAdmission.js'
 
 /**
  * S3.2 / DEC-28 + DEC-17 — the GENERIC auth-code exchange goes through the
@@ -117,7 +118,7 @@ function baseDeps(overrides: Partial<CallbackDeps>): CallbackDeps {
       query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
     } as unknown as CallbackDeps['db'],
     recipeReader: { read: vi.fn(async () => null) },
-    userContextsReader: vi.fn(async () => ({ contextIds: ['ctx-A'] })),
+    consentAdmission: admitContexts(['ctx-A']),
     fetchFn: (async () => {
       throw new Error('generic lane must NOT use fetchFn (DEC-17)')
     }) as unknown as typeof fetch,

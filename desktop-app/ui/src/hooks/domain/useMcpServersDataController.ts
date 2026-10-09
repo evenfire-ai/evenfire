@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AccessCatalog } from '../../../../src/types'
+import { isQueryOlderThan } from '../../lib/queryClient'
 import type { ContextMcpServerDetail, ScopedMcpServer } from '../../uiTypes'
 import { hasOwnKey, normalizeGlobalMcpServerList } from './helpers'
 import { getMcpServerDerivedData } from './mcpServerDerivedData'
@@ -97,6 +98,14 @@ export function useMcpServersDataController(params: UseMcpServersDataControllerP
       // Query state already records the error for consumers.
     }
   }, [queryClient, refreshPreviewForCatalog])
+
+  // Cache-age read for `useAutoRefresh` (#991), at call time like the
+  // connectors controller's: an in-flight catalog fetch counts as fresh, and
+  // after `reset` (no data) the catalog reports stale.
+  const isStale = useCallback(
+    (maxAgeMs: number) => isQueryOlderThan(queryClient, desktopQueryKeys.accessCatalog, maxAgeMs),
+    [queryClient]
+  )
 
   const reset = useCallback(() => {
     queryClient.removeQueries({ queryKey: desktopQueryKeys.accessCatalog })
@@ -278,6 +287,7 @@ export function useMcpServersDataController(params: UseMcpServersDataControllerP
       selectedContextMcpServersUnscoped,
       globalMcpServersHydrated,
       globalMcpServersError,
+      isStale,
       refresh,
       refreshWithCatalog,
       reset,
@@ -292,6 +302,7 @@ export function useMcpServersDataController(params: UseMcpServersDataControllerP
       globalMcpServersError,
       globalMcpServersHydrated,
       globalMcpServers,
+      isStale,
       mcpServerMappingUnavailableMessage,
       previewQuery.fetchStatus,
       refresh,

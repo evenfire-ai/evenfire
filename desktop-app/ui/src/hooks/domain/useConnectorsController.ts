@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { RpcAgentConnectors, RpcConnector } from '../../../../src/types'
 import { connectorRowKey, isActionableConnector, isSharedConnector } from '../../lib/connectorRows'
 import { formatMcpServerDisplayName } from '../../lib/format'
+import { isQueryOlderThan } from '../../lib/queryClient'
 import { desktopQueryKeys } from './queryKeys'
 
 // Re-exported from their new home in `lib/` so existing importers (the pages)
@@ -50,9 +51,11 @@ export function useConnectorsController() {
   // Mirrors the sibling data-controllers (useMcpServersDataController /
   // useContextsDataController): the query is app-coordinated, never
   // self-enabling. `useAppController` owns the initial load (post-auth
-  // bootstrap) and the identity teardown (`reset` on logout / team-switch),
-  // so a nav to the panel only READS cache and a team-switch cannot leak the
-  // previous identity's OAuth authorization state (the key is identity-unscoped).
+  // bootstrap) and the identity teardown (`reset` on logout / team-switch), so
+  // a team-switch cannot leak the previous identity's OAuth authorization state
+  // (the key is identity-unscoped). A surface that shows the catalog keeps it
+  // current with `useAutoRefresh` (#991) over `refresh` + `isStale`, never
+  // through the query enabling itself.
   const query = useQuery({
     queryKey: desktopQueryKeys.connectors,
     queryFn: () => window.clerum.rpc.listConnectors(),
@@ -74,6 +77,16 @@ export function useConnectorsController() {
       // Query state already records the error for consumers.
     }
   }, [queryClient])
+
+  // Reads the cache state at call time (not a render snapshot) so the
+  // scheduler's poll and focus listeners never act on a stale closure. A fetch
+  // already in flight (e.g. the post-auth bootstrap) counts as fresh, so it is
+  // not duplicated. After `reset` the query is gone (`dataUpdatedAt` 0), so the
+  // next check reports stale and the new identity is fetched.
+  const isStale = useCallback(
+    (maxAgeMs: number) => isQueryOlderThan(queryClient, desktopQueryKeys.connectors, maxAgeMs),
+    [queryClient]
+  )
 
   const reset = useCallback(() => {
     queryClient.removeQueries({ queryKey: desktopQueryKeys.connectors })
@@ -152,6 +165,7 @@ export function useConnectorsController() {
       agents,
       pendingKey,
       refresh,
+      isStale,
       reset,
       authorize,
       disconnect,
@@ -161,6 +175,7 @@ export function useConnectorsController() {
       agents,
       authorize,
       disconnect,
+      isStale,
       pendingKey,
       query.error,
       query.fetchStatus,

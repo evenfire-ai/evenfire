@@ -21,7 +21,7 @@ import {
   resolveServerOAuthSubject,
 } from '../../oauth/mcpServerOAuthSpec.js'
 import { isValidInstallNonce, isValidRemoteServerNameSegment } from '../../oauth/remoteCallback.js'
-import { getUserContexts } from '../../services/directory/index.js'
+import { authorizeMcpOAuthConsent } from '../../services/access/mcpOauthAdmission.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 
 /**
@@ -125,9 +125,10 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
           recipeReader,
           secretReader,
           mcpServerReader,
-          // Shared-identity mcp bootstrap requires the consenting user to be a
-          // member of the server's Context (defence in depth).
-          userContextsReader: getUserContexts,
+          // Every mcp consent re-checks the authorize-URL mint's admission
+          // (defence in depth): agent exposure for per-user servers, owner-Context
+          // membership for shared ones (PR #1004).
+          consentAdmission: (userId, server) => authorizeMcpOAuthConsent(gateway, userId, server),
           fetchFn: (input, init) => fetch(input, init),
           stateSecret: config.oauthStateHmacSecret,
           encryptionKey,

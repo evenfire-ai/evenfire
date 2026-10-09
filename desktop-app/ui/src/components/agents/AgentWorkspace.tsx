@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { RefObject } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
@@ -9,7 +9,7 @@ import { DataTable, EmptyState, IconButton, MenuItem, StatusBanner } from '@comp
 import { PageBreadcrumb } from '@components/PageBreadcrumb'
 import type { PageBreadcrumbItem } from '@components/PageBreadcrumb/types'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
-import { IconAgents } from '@components/SidebarNav/icons'
+import { IconAgents, IconRefresh } from '@components/SidebarNav/icons'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import {
   type ConnectorActionInput,
@@ -19,6 +19,7 @@ import {
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
+import { useAutoRefresh } from '@hooks/useAutoRefresh'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { deriveConnectorRows } from '@lib/connectorRows'
 import { deriveScopedMembers } from '@lib/scopedMembers'
@@ -49,13 +50,19 @@ function AgentHero({
   agentName,
   subtitle,
   subtitleTone = 'body',
+  actions,
 }: {
   agentName: string | null
   subtitle: string
   subtitleTone?: 'body' | 'eyebrow'
+  actions?: ReactNode
 }) {
   return (
-    <div className="agent-details-hero agent-details-hero--flush">
+    <div
+      className={`agent-details-hero agent-details-hero--flush${
+        actions ? ' agent-details-hero--with-actions' : ''
+      }`}
+    >
       <span className="agent-details-avatar" aria-hidden="true">
         <IconAgents />
       </span>
@@ -69,6 +76,7 @@ function AgentHero({
           {subtitle}
         </span>
       </div>
+      {actions ? <div className="agent-details-hero__actions">{actions}</div> : null}
     </div>
   )
 }
@@ -97,10 +105,16 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     loading: teamsLoading,
     error: teamsError,
   } = useTeamsDataController()
-  const { agentContextByName, agentDisplayByName, selectedAgentMcpServers } =
-    useMcpServersDataController({
-      selectedAgent,
-    })
+  const connectorsPanelOpen = mode !== 'chat' && selectedAgentRoute === 'mcp-servers'
+  const {
+    agentContextByName,
+    agentDisplayByName,
+    selectedAgentMcpServers,
+    refresh: refreshMcpServerMapping,
+    isStale: mcpServerMappingStale,
+  } = useMcpServersDataController({
+    selectedAgent,
+  })
   const { sessionStateByChatId, activeChatId } = useChatListContext()
   const activeSessionState = activeChatId ? sessionStateByChatId[activeChatId] : undefined
   const { hostRuntimeStatus } = useMcpRuntimeContext()
@@ -113,9 +127,34 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     agents: connectorAgents,
     pendingKey: connectorPendingKey,
     actionError: connectorActionError,
+    refresh: refreshConnectors,
+    isStale: connectorsStale,
     authorize: authorizeConnector,
     disconnect: disconnectConnector,
   } = useConnectorsController()
+  const [connectorsRefreshing, setConnectorsRefreshing] = useState(false)
+
+  // One scheduler for the panel (#991), enabled only while it is visible: chat
+  // mode mounts this workspace too and must not poll. The panel's rows come from
+  // the agent→server mapping (access catalog) and its buttons from the grants
+  // (connectors), so every run reloads BOTH — a connector attached or detached
+  // mid-session must show or drop its row and its Authorize button together.
+  const { refreshNow: refreshConnectorsPanel } = useAutoRefresh({
+    enabled: connectorsPanelOpen,
+    refresh: () => Promise.all([refreshConnectors(), refreshMcpServerMapping()]),
+    isStale: maxAgeMs => connectorsStale(maxAgeMs) || mcpServerMappingStale(maxAgeMs),
+  })
+
+  // The manual Refresh joins a run already in flight (poll or focus) instead
+  // of stacking a second request.
+  const handleRefreshConnectors = useCallback(async () => {
+    setConnectorsRefreshing(true)
+    try {
+      await refreshConnectorsPanel()
+    } finally {
+      setConnectorsRefreshing(false)
+    }
+  }, [refreshConnectorsPanel])
 
   const [chatScrollNavVisible, setChatScrollNavVisible] = useState(true)
   const [scrollToBottomChatId, setScrollToBottomChatId] = useState<string | null>(null)
@@ -498,7 +537,26 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
         >
           {!isChatMode && selectedAgentRoute === 'mcp-servers' && (
             <section className="agent-mcp-panel" aria-label="Agent connectors">
-              <AgentHero agentName={selectedAgentDisplay} subtitle={routeSubtitle} />
+              <AgentHero
+                agentName={selectedAgentDisplay}
+                subtitle={routeSubtitle}
+                actions={
+                  <IconButton
+                    className="connectors-refresh"
+                    disabled={connectorsRefreshing}
+                    label="Refresh connectors"
+                    loading={connectorsRefreshing}
+                    onClick={() => {
+                      void handleRefreshConnectors()
+                    }}
+                    size="sm"
+                    title="Refresh connectors"
+                    variant="ghost"
+                  >
+                    <IconRefresh />
+                  </IconButton>
+                }
+              />
 
               {/* Parity with McpServersPage: the controller never rejects and
                   records any write failure in `actionError`, so both mounts of

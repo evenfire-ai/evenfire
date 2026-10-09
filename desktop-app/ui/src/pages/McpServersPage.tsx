@@ -1,5 +1,14 @@
 import { useMemo } from 'react'
-import { Button, DataTable, EmptyState, Pill, ReferenceTag, StatusBanner } from '@components/Common'
+import {
+  Button,
+  DataTable,
+  EmptyState,
+  IconButton,
+  Pill,
+  ReferenceTag,
+  StatusBanner,
+} from '@components/Common'
+import { IconRefresh } from '@components/SidebarNav/icons'
 import { scopeCaption, statusPresentation } from '@lib/connectorPresentation'
 import { type ConnectorRow, deriveConnectorRows } from '@lib/connectorRows'
 import { formatMcpServerDisplayName } from '@lib/format'
@@ -10,6 +19,7 @@ import {
   isActionableConnector,
   useConnectorsController,
 } from '../hooks/domain/useConnectorsController'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { clickableRowProps } from '../lib/clickableRowProps'
 
 function ConnectorRowView({
@@ -122,8 +132,22 @@ function ConnectorRowView({
 }
 
 export function McpServersPage() {
-  const { loading, error, actionError, agents, pendingKey, authorize, disconnect } =
-    useConnectorsController()
+  const {
+    loading,
+    error,
+    actionError,
+    agents,
+    pendingKey,
+    refresh,
+    isStale,
+    authorize,
+    disconnect,
+  } = useConnectorsController()
+  // #991: opening this screen, regaining focus, and a start-anchored poll keep
+  // the catalog current, so connectors added or removed by an admin mid-session
+  // appear without a restart. The Refresh button goes through the same
+  // scheduler so it joins a run already in flight instead of stacking one.
+  const { refreshNow } = useAutoRefresh({ enabled: true, refresh, isStale })
   const { agentDisplayByName } = useAgentsDataController()
   const { handleOpenAgentWorkspace } = useNavigationContext()
 
@@ -133,7 +157,23 @@ export function McpServersPage() {
   return (
     <section className="page">
       <div className="page-header">
-        <h2>Connectors</h2>
+        <div className="mcp-servers-page-title">
+          <h2>Connectors</h2>
+          <IconButton
+            className="connectors-refresh"
+            disabled={loading}
+            label="Refresh connectors"
+            loading={loading}
+            onClick={() => {
+              void refreshNow()
+            }}
+            size="sm"
+            title="Refresh connectors"
+            variant="ghost"
+          >
+            <IconRefresh />
+          </IconButton>
+        </div>
         <p className="muted">
           Review the connectors available across your agents, authorize the ones that require setup,
           and disconnect the ones you no longer want.

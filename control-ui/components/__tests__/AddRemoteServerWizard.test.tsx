@@ -4,7 +4,6 @@ import * as api from '../../lib/api'
 import * as clipboard from '../../lib/clipboard'
 import * as remoteMcp from '../../lib/remoteMcp'
 import type { DiscoverRemoteResponse, RemoteTransportProbe } from '../../lib/remoteMcp.types'
-import { buildContextResource } from '../../test/fixtures/contextResource'
 import {
   TRANSPORT_INCONCLUSIVE_TIMEOUT,
   VERCEL_TRANSPORT_DEAD,
@@ -34,17 +33,22 @@ vi.mock('../../lib/remoteMcp', async importOriginal => ({
   installRemoteServer: vi.fn(),
 }))
 
-// Keep isSilentApiError etc.; only getContexts is stubbed. The fixture import is
-// done inside the factory because vi.mock is hoisted above top-level imports.
-vi.mock('../../lib/api', async importOriginal => {
-  const { buildContextResource } = await import('../../test/fixtures/contextResource')
-  return {
-    ...(await importOriginal<typeof import('../../lib/api')>()),
-    getContexts: vi.fn().mockResolvedValue({
-      items: [buildContextResource({ metadata: { name: 'research', resourceVersion: 'rv1' } })],
-    }),
-  }
-})
+// The operator picks agents; each agent's private Context comes from its Host.
+const HOSTS = {
+  items: [
+    { metadata: { name: 'research-agent' }, spec: { contextRef: 'research', host: 'Research' } },
+    { metadata: { name: 'ops-agent' }, spec: { contextRef: 'ops', host: 'Ops' } },
+  ],
+}
+
+// Keep isSilentApiError etc.; stub only the agent and Context reads/writes.
+vi.mock('../../lib/api', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../lib/api')>()),
+  apiSend: vi.fn(),
+  getContext: vi.fn(),
+  getHosts: vi.fn(),
+  updateContext: vi.fn(),
+}))
 
 // The wizard copies through this helper; the test asserts what it is handed.
 vi.mock('../../lib/clipboard', () => ({ copyTextToClipboard: vi.fn(async () => true) }))
@@ -52,7 +56,21 @@ vi.mock('../../lib/clipboard', () => ({ copyTextToClipboard: vi.fn(async () => t
 const discoverMock = vi.mocked(remoteMcp.discoverRemoteServer)
 const copyMock = vi.mocked(clipboard.copyTextToClipboard)
 const installMock = vi.mocked(remoteMcp.installRemoteServer)
-const getContextsMock = vi.mocked(api.getContexts)
+const getHostsMock = vi.mocked(api.getHosts)
+const getContextMock = vi.mocked(api.getContext)
+const updateContextMock = vi.mocked(api.updateContext)
+const apiSendMock = vi.mocked(api.apiSend)
+
+function restoreApiDefaults() {
+  getHostsMock.mockResolvedValue(HOSTS)
+  getContextMock.mockImplementation(async name => ({
+    metadata: { name, resourceVersion: `rv-${name}` },
+    spec: { contextId: name, mcpServers: [] },
+  }))
+  updateContextMock.mockResolvedValue({} as never)
+  apiSendMock.mockResolvedValue({} as never)
+}
+restoreApiDefaults()
 
 /**
  * A captured control-api discover body (goldens from the real router), optionally with
@@ -68,10 +86,8 @@ function discovered(
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  // vi.clearAllMocks resets the default resolved value, so restore it.
-  getContextsMock.mockResolvedValue({
-    items: [buildContextResource({ metadata: { name: 'research', resourceVersion: 'rv1' } })],
-  })
+  // vi.clearAllMocks resets the default resolved values, so restore them.
+  restoreApiDefaults()
   // mockClear keeps queued *Once values; reset so an unused one cannot leak into the
   // next test, then restore the default successful copy.
   copyMock.mockReset()
@@ -93,16 +109,25 @@ function renderWizard(props?: Partial<Parameters<typeof AddRemoteServerWizard>[0
   return { ...utils, onInstalled, onCancel }
 }
 
-async function fillIdentity(baseUrl = 'https://mcp.notion.com/mcp', name = 'notion-remote') {
-  // Wait until the context select is populated from getContexts (option present).
-  await screen.findByRole('option', { name: 'research' })
+async function selectAgents(...labels: string[]) {
+  // Agents load from getHosts; the picker is enabled once its placeholder shows.
+  await screen.findByText('Select agents...')
+  fireEvent.click(screen.getByRole('button', { name: /which agents can use this connector/i }))
+  for (const label of labels) {
+    fireEvent.click(screen.getByRole('option', { name: label }))
+  }
+}
+
+async function fillIdentity(
+  baseUrl = 'https://mcp.notion.com/mcp',
+  name = 'notion-remote',
+  agents: string[] = ['Research']
+) {
   fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/mcp'), {
     target: { value: baseUrl },
   })
   fireEvent.change(screen.getByPlaceholderText('example-remote'), { target: { value: name } })
-  fireEvent.change(screen.getByRole('combobox', { name: /context/i }), {
-    target: { value: 'research' },
-  })
+  await selectAgents(...agents)
 }
 
 function clickDetect() {
@@ -147,7 +172,7 @@ describe('AddRemoteServerWizard', () => {
 
   it('keeps Detect disabled and shows an error for a malformed base URL (no detect round-trip)', async () => {
     renderWizard()
-    // Valid name + context, but a non-https URL — the base URL gate must block detect.
+    // Valid name + agent, but a non-https URL — the base URL gate must block detect.
     await fillIdentity('http://mcp.notion.com/mcp')
 
     const detect = screen.getByRole('button', { name: 'Detect' })
@@ -492,5 +517,201 @@ describe('AddRemoteServerWizard', () => {
     expect(
       screen.queryByRole('region', { name: 'Authorization server hosts' })
     ).not.toBeInTheDocument()
+  })
+
+  // #990: the wizard selects agents, like Create connector; the Context is derived.
+  describe('agent access (#990)', () => {
+    async function detectLinear(agents: string[]) {
+      discoverMock.mockResolvedValue(discovered(LINEAR_DISCOVER))
+      installMock.mockResolvedValue(LINEAR_INSTALLED)
+      const utils = renderWizard()
+      await fillIdentity('https://mcp.linear.app/mcp', 'linear', agents)
+      clickDetect()
+      await screen.findByText('https://mcp.linear.app/authorize')
+      return utils
+    }
+
+    it('no longer asks for a raw Context', async () => {
+      renderWizard()
+      await screen.findByText('Select agents...')
+      expect(screen.queryByRole('combobox', { name: /context/i })).not.toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /which agents can use this connector/i })
+      ).toBeInTheDocument()
+    })
+
+    it("installs into the first agent's Context and gives the other agents access", async () => {
+      const { onInstalled } = await detectLinear(['Research', 'Ops'])
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+      const summary = await screen.findByRole('region', { name: 'Install summary' })
+      expect(summary).toHaveTextContent('Research, Ops')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Install remote server' }))
+      await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
+      expect(installMock).toHaveBeenCalledWith(expect.objectContaining({ contextRef: 'research' }))
+      expect(updateContextMock).toHaveBeenCalledTimes(1)
+      expect(updateContextMock).toHaveBeenCalledWith(
+        'ops',
+        expect.objectContaining({ spec: expect.objectContaining({ mcpServers: ['linear'] }) })
+      )
+    })
+
+    it('with no agents, installs into a new private scope and creates it only once', async () => {
+      installMock.mockRejectedValueOnce(apiErrorFrom(CALLBACK_UNCONFIGURED_FAILURE))
+      const { onInstalled } = await detectLinear([])
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      const install = await screen.findByRole('button', { name: 'Install remote server' })
+
+      fireEvent.click(install) // fails
+      await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(install).toBeEnabled())
+      fireEvent.click(install) // retry succeeds
+      await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
+
+      const contextCreates = apiSendMock.mock.calls.filter(
+        ([method, path]) => method === 'POST' && path === '/api/v1/admin/contexts'
+      )
+      expect(contextCreates).toHaveLength(1)
+      const privateName = (contextCreates[0][2] as { metadata: { name: string } }).metadata.name
+      expect(privateName).toMatch(/^linear-[0-9]{5}$/)
+      expect(installMock.mock.calls.map(([body]) => body.contextRef)).toEqual([
+        privateName,
+        privateName,
+      ])
+      expect(updateContextMock).not.toHaveBeenCalled()
+    })
+
+    it('blocks a shared (per-context) grant across agents in different scopes', async () => {
+      await detectLinear(['Research', 'Ops'])
+      fireEvent.change(screen.getByRole('combobox', { name: /grant scope/i }), {
+        target: { value: 'context' },
+      })
+      expect(screen.getByText(/shared OAuth identity/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
+      expect(installMock).not.toHaveBeenCalled()
+    })
+
+    function chooseGrantScope(value: 'user' | 'context') {
+      fireEvent.change(screen.getByRole('combobox', { name: /grant scope/i }), {
+        target: { value },
+      })
+    }
+
+    function contextCreates() {
+      return apiSendMock.mock.calls.filter(
+        ([method, path]) => method === 'POST' && path === '/api/v1/admin/contexts'
+      )
+    }
+
+    it('blocks a shared grant with no agents: no private scope, no install', async () => {
+      await detectLinear([])
+      chooseGrantScope('context')
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'A shared OAuth identity needs at least one agent. Select the agents that will share it, or choose Per user.'
+      )
+      const continueButton = screen.getByRole('button', { name: 'Continue' })
+      expect(continueButton).toBeDisabled()
+      fireEvent.click(continueButton)
+      expect(
+        screen.queryByRole('button', { name: 'Install remote server' })
+      ).not.toBeInTheDocument()
+      expect(contextCreates()).toHaveLength(0)
+      expect(installMock).not.toHaveBeenCalled()
+    })
+
+    it('installs a shared grant for one agent into its Context', async () => {
+      const { onInstalled } = await detectLinear(['Research'])
+      chooseGrantScope('context')
+      expect(screen.queryByText(/shared OAuth identity/i)).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+      await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
+      expect(installMock).toHaveBeenCalledWith(
+        expect.objectContaining({ contextRef: 'research', grantScope: 'context' })
+      )
+      expect(contextCreates()).toHaveLength(0)
+    })
+
+    it('installs a shared grant for two agents that share one Context', async () => {
+      getHostsMock.mockResolvedValue({
+        items: [
+          ...HOSTS.items,
+          {
+            metadata: { name: 'research-helper' },
+            spec: { contextRef: 'research', host: 'Research helper' },
+          },
+        ],
+      })
+      const { onInstalled } = await detectLinear(['Research', 'Research helper'])
+      chooseGrantScope('context')
+      expect(screen.queryByText(/shared OAuth identity/i)).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+      await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
+      expect(installMock).toHaveBeenCalledWith(
+        expect.objectContaining({ contextRef: 'research', grantScope: 'context' })
+      )
+      expect(updateContextMock).not.toHaveBeenCalled()
+    })
+
+    it('tells apart two agents with the same display name and installs into the chosen one', async () => {
+      getHostsMock.mockResolvedValue({
+        items: [
+          ...HOSTS.items,
+          {
+            metadata: { name: 'research-two' },
+            spec: { contextRef: 'research-2', host: 'Research' },
+          },
+        ],
+      })
+      discoverMock.mockResolvedValue(discovered(LINEAR_DISCOVER))
+      installMock.mockResolvedValue(LINEAR_INSTALLED)
+      const { onInstalled } = renderWizard()
+      fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/mcp'), {
+        target: { value: 'https://mcp.linear.app/mcp' },
+      })
+      fireEvent.change(screen.getByPlaceholderText('example-remote'), {
+        target: { value: 'linear' },
+      })
+      await screen.findByText('Select agents...')
+      fireEvent.click(screen.getByRole('button', { name: /which agents can use this connector/i }))
+
+      expect(screen.getByRole('option', { name: 'Research (research-agent)' })).toBeInTheDocument()
+      expect(screen.getByRole('option', { name: 'Research (research-two)' })).toBeInTheDocument()
+      expect(screen.queryByRole('option', { name: 'Research' })).not.toBeInTheDocument()
+
+      // The slug finds the agent even though it is not the display name.
+      fireEvent.change(screen.getByRole('textbox', { name: 'Search agents...' }), {
+        target: { value: 'two' },
+      })
+      expect(screen.getAllByRole('option')).toHaveLength(1)
+      fireEvent.click(screen.getByRole('option', { name: 'Research (research-two)' }))
+
+      clickDetect()
+      await screen.findByText('https://mcp.linear.app/authorize')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+      await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
+      expect(installMock).toHaveBeenCalledWith(
+        expect.objectContaining({ contextRef: 'research-2' })
+      )
+      expect(updateContextMock).not.toHaveBeenCalled()
+    })
+
+    it('reports agents it could not give access to, but keeps the installed connector', async () => {
+      updateContextMock.mockRejectedValueOnce(new Error('conflict'))
+      const { onInstalled } = await detectLinear(['Research', 'Ops'])
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+      expect(await screen.findByText(/couldn't give access to Ops/i)).toBeInTheDocument()
+      expect(onInstalled).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+      expect(onInstalled).toHaveBeenCalledTimes(1)
+    })
   })
 })
