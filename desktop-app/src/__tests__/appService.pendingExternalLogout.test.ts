@@ -86,6 +86,8 @@ beforeEach(async () => {
   markerStore = pendingLogout
   quitLifecycle = lifecycle
   activeEnvKey = config.getActiveEnvKey()
+  const { safeStorage } = await import('electron')
+  vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
 })
 
 afterEach(async () => {
@@ -486,7 +488,7 @@ describe('AppService pending external logout', () => {
     }
   })
 
-  it('rejects file fallback when the old active Keytar credential remains readable', async () => {
+  it('fails closed when Keytar replacement and safeStorage are unavailable', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
@@ -502,12 +504,15 @@ describe('AppService pending external logout', () => {
 
     try {
       await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
-        'Fresh session token could not be verified after storage fallback'
+        'Electron safeStorage is unavailable for session-token fallback'
       )
 
       expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
       expect(internals(service).sessionToken).toBeNull()
       await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('previous-session-token')
+      expect(await fs.readdir(userDataDirectory)).not.toContain(
+        `session-token-${activeEnvKey}.json`
+      )
     } finally {
       vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
       vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)

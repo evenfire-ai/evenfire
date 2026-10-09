@@ -61,6 +61,8 @@ beforeEach(async () => {
   TokenStoreClass = tokenStore.TokenStore
   markerStore = marker
   activeEnvKey = config.getActiveEnvKey()
+  const { safeStorage } = await import('electron')
+  vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
 })
 
 afterEach(async () => {
@@ -154,5 +156,29 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       intent: 'keytar-cleanup-pending',
       credentialSource: 'active-keytar',
     })
+  })
+
+  it('fails closed without Keytar or safeStorage and never writes a plaintext token', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const service = new AppServiceClass({
+      tokenStore: new TokenStoreClass(),
+      getUserDataDirectory: () => userDataDirectory,
+    })
+    const state = service as unknown as {
+      installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
+      sessionToken: string | null
+      me: typeof user | null
+    }
+
+    await expect(
+      state.installAuthenticatedLogin({ token: 'new-session-token', me: user })
+    ).rejects.toThrow('Electron safeStorage is unavailable for session-token fallback')
+
+    expect(state.sessionToken).toBeNull()
+    expect(state.me).toBeNull()
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'logout-pending',
+    })
+    expect(await readdir(userDataDirectory)).not.toContain(`session-token-${activeEnvKey}.json`)
   })
 })
