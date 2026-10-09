@@ -646,7 +646,15 @@ export function useChatListController({
           !suppressAutoSelection
         ) {
           currentHost.markAutoSelectedChat(latestServerSession.chatId)
-          void currentHost.switchToChat(agentRef, latestServerSession.chatId)
+          const switchRequest = currentHost.switchToChat(agentRef, latestServerSession.chatId)
+          const switchSelectionRevision = currentHost.getSelectionIntentRevision()
+          void switchRequest.catch(error => {
+            if (currentHost.getSelectionIntentRevision() !== switchSelectionRevision) return
+            currentHost.pushToast(
+              `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+              'error'
+            )
+          })
         }
 
         // Persist server freshness into the local index (spec §5.3): keeps the
@@ -1061,7 +1069,14 @@ export function useChatListController({
               : null
         if (restoreChatId) {
           const restore = host.current?.switchToChat(agentRef, restoreChatId)
-          void restore?.catch(() => undefined)
+          const restoreSelectionRevision = host.current?.getSelectionIntentRevision()
+          void restore?.catch(error => {
+            if (host.current?.getSelectionIntentRevision() !== restoreSelectionRevision) return
+            host.current?.pushToast(
+              `Could not restore conversation: ${error instanceof Error ? error.message : String(error)}`,
+              'error'
+            )
+          })
         }
       }
       throw error

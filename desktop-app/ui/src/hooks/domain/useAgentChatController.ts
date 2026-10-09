@@ -1181,13 +1181,19 @@ export function useAgentChatController({
       if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
       const selectionIntentRevision = beginSelectionIntent(true)
       clearPendingSelection(agentRef, chatId)
-      await switchToChatForIntent(agentRef, chatId, selectionIntentRevision)
+      try {
+        await switchToChatForIntent(agentRef, chatId, selectionIntentRevision)
+      } catch (error) {
+        settleChatMessagesLoading(selectionIntentRevision)
+        throw error
+      }
     },
     [
       beginSelectionIntent,
       clearPendingSelection,
       isChatDeleted,
       isHostAccessBlocked,
+      settleChatMessagesLoading,
       switchToChatForIntent,
     ]
   )
@@ -1512,7 +1518,14 @@ export function useAgentChatController({
         }
       }
       settleChatMessagesLoading(selectionIntentRevision)
-    })()
+    })().catch(error => {
+      if (cancelled || selectionIntentRevisionRef.current !== selectionIntentRevision) return
+      settleChatMessagesLoading(selectionIntentRevision)
+      pushToast(
+        `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+        'error'
+      )
+    })
 
     return () => {
       cancelled = true
@@ -1524,6 +1537,7 @@ export function useAgentChatController({
     navItem,
     selectedAgent,
     isHostAccessBlocked,
+    pushToast,
     settleChatMessagesLoading,
     switchToChatForIntent,
   ])
@@ -3916,7 +3930,12 @@ export function useAgentChatController({
         if (options.title) {
           upsertProvisionalEntry(chatId!, options.title, options.isRemote === true)
         }
-        void switchToChat(agentName, chatId!)
+        void switchToChat(agentName, chatId!).catch(error => {
+          pushToast(
+            `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+            'error'
+          )
+        })
         return
       }
       // A same-agent no-chat notification can record a pending none selection
@@ -3963,6 +3982,7 @@ export function useAgentChatController({
       clearPendingSelection,
       currentTeamId,
       writePendingSelection,
+      pushToast,
       upsertProvisionalEntry,
       selectedAgent,
       navItem,

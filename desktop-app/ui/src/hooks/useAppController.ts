@@ -1030,7 +1030,12 @@ export function useAppController() {
       ) {
         // D.4: switchToChat is now a single unified path (no isRemote) — the
         // server is the source of truth and hydrates server-only chats itself.
-        void chat.switchToChat(agentName, targetChatId)
+        void chat.switchToChat(agentName, targetChatId).catch(error => {
+          fullSetStatus(
+            `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+            'error'
+          )
+        })
         nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
         // Activate the chat tab (dedupes/focuses by chatId). We are already on
         // the chat route, so `navItem` stays `chat` — same-commit derivation, no
@@ -1073,13 +1078,19 @@ export function useAppController() {
       // effect replays into its `specific` branch instead of the reset branch;
       // both switches target the same chat and `switchToChat` coalesces them.
       if (options.keepNavItem && targetChatId && nav.selectedAgent === agentName) {
-        void chat.switchToChat(agentName, targetChatId)
+        void chat.switchToChat(agentName, targetChatId).catch(error => {
+          fullSetStatus(
+            `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+            'error'
+          )
+        })
       }
     },
     [
       chat.clearActiveChat,
       chat.setPendingChatSelection,
       chat.switchToChat,
+      fullSetStatus,
       nav.activateChatTab,
       nav.navItem,
       nav.selectedAgent,
@@ -1193,13 +1204,9 @@ export function useAppController() {
           nav.selectedAgent === targetAgent &&
           nav.navItem === DESKTOP_ROUTES.chat
         ) {
-          try {
-            await chat.switchToChat(targetAgent, targetChatId)
-            nav.activateChatTab(targetAgent, targetChatId)
-            return
-          } catch {
-            // Fall through to pending selection so the normal agent load path can retry.
-          }
+          await chat.switchToChat(targetAgent, targetChatId)
+          nav.activateChatTab(targetAgent, targetChatId)
+          return
         }
 
         chat.setPendingChatSelection(targetAgent, targetChatId || null)

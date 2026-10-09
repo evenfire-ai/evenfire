@@ -293,4 +293,104 @@ describe('useAppController — chat drawer keepNavItem', () => {
       unmount = null
     }
   })
+
+  it('reports a failed notification switch without starting an unobserved fallback', async () => {
+    const { clerum } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    await clerum.chat.create('agent-x', 'chat-1')
+    await clerum.chat.upsertMessages('agent-x', 'chat-1', [
+      { id: 'chat-1-message', role: 'user', content: 'first chat', timestamp: 1 },
+    ])
+    await clerum.chat.create('agent-x', 'chat-2')
+    const app = renderAppController()
+    unmount = app.unmount
+
+    try {
+      await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+      await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+      act(() => {
+        app.result.current.handleSelectChatAgent('agent-x', {
+          chatId: 'chat-1',
+          selectLatest: false,
+        })
+      })
+      await waitFor(() => {
+        expect(app.result.current.activeChatId).toBe('chat-1')
+        expect(app.result.current.chatMessagesLoading).toBe(false)
+      })
+
+      const callsBeforeOpen = clerum.chat.setLastActive.mock.calls.length
+      clerum.chat.setLastActive.mockRejectedValueOnce(new Error('chat store write failed'))
+      await act(async () => {
+        await app.result.current.handleOpenNotification({
+          id: 'n-failing-chat',
+          kind: 'approval_required',
+          agentName: 'agent-x',
+          chatId: 'chat-2',
+          teamId: 'team-1',
+          text: 'Open chat two',
+          timestamp: Date.now(),
+          read: false,
+          approval: { taskId: 't2', requestId: 'r2' },
+        } as Parameters<typeof app.result.current.handleOpenNotification>[0])
+      })
+      await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
+
+      expect({
+        switchAttempts: clerum.chat.setLastActive.mock.calls.length - callsBeforeOpen,
+        statusText: app.result.current.statusText,
+        statusTone: app.result.current.statusTone,
+        loading: app.result.current.chatMessagesLoading,
+      }).toEqual({
+        switchAttempts: 1,
+        statusText: expect.stringContaining('Could not open notification'),
+        statusTone: 'error',
+        loading: false,
+      })
+    } finally {
+      app.unmount()
+      unmount = null
+    }
+  })
+
+  it('reports a failed direct chat-tab switch', async () => {
+    const { clerum } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    await clerum.chat.create('agent-x', 'chat-1')
+    await clerum.chat.create('agent-x', 'chat-2')
+    const app = renderAppController()
+    unmount = app.unmount
+
+    try {
+      await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+      await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+      act(() => {
+        app.result.current.handleSelectChatAgent('agent-x', {
+          chatId: 'chat-1',
+          selectLatest: false,
+        })
+      })
+      await waitFor(() => {
+        expect(app.result.current.activeChatId).toBe('chat-1')
+        expect(app.result.current.chatMessagesLoading).toBe(false)
+      })
+
+      const callsBeforeSwitch = clerum.chat.setLastActive.mock.calls.length
+      clerum.chat.setLastActive.mockRejectedValueOnce(new Error('chat store write failed'))
+      act(() => {
+        app.result.current.handleSelectChatAgent('agent-x', {
+          chatId: 'chat-2',
+          selectLatest: false,
+        })
+      })
+
+      await waitFor(() => {
+        expect(app.result.current.statusText).toContain('Could not open conversation')
+        expect(app.result.current.statusTone).toBe('error')
+        expect(app.result.current.chatMessagesLoading).toBe(false)
+      })
+      expect(clerum.chat.setLastActive).toHaveBeenCalledTimes(callsBeforeSwitch + 1)
+    } finally {
+      app.unmount()
+      unmount = null
+    }
+  })
 })

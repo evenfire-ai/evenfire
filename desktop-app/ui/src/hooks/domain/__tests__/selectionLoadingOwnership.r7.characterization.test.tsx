@@ -167,6 +167,32 @@ describe('Round 7 selection loading ownership', () => {
       controller.unmount()
     }
   })
+
+  it('surfaces a rejected imperative pending-chat switch and settles its spinner', async () => {
+    const controller = renderController({ navItem: 'chat', loadMenuData: false })
+    const switchError = new Error('chat store write failed')
+
+    try {
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      await clerum.chat.create('agent-x', 'chat-imperative')
+      clerum.chat.setLastActive.mockRejectedValueOnce(switchError)
+
+      act(() => {
+        controller.result.current.setPendingChatSelection('agent-x', 'chat-imperative')
+      })
+
+      await waitFor(() => {
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+        expect(controller.spies.pushToast).toHaveBeenCalledWith(
+          'Could not open conversation: chat store write failed',
+          'error'
+        )
+      })
+      expect(controller.result.current.activeChatId).toBe('chat-imperative')
+    } finally {
+      controller.unmount()
+    }
+  })
   it('loads a newer specific chat when it supersedes a held implicit switch', async () => {
     await clerum.chat.create('agent-x', 'chat-b')
     await clerum.chat.upsertMessages('agent-x', 'chat-b', [
