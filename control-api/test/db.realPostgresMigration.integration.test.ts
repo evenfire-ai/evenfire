@@ -1992,6 +1992,66 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(stored.rows).toEqual([{ sequence_no: auditId, subject: 'host:1st:mcp-host/chatllm' }])
   })
 
+  it('adds workflow_schedules.concurrency_policy idempotently with a Forbid default', async () => {
+    const { initDb } = await import('../src/db.js')
+    const connector = { connect: () => dbPool.connect() }
+    const version = '0129_workflow_schedules_concurrency_policy'
+
+    await initDb(connector)
+    // Forget the record so initDb re-runs the body over the existing column.
+    await dbPool.query('DELETE FROM schema_migrations WHERE version = $1', [version])
+    await initDb(connector)
+
+    const recorded = await dbPool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM schema_migrations WHERE version = $1',
+      [version]
+    )
+    expect(recorded.rows[0]?.count).toBe('1')
+
+    const column = await dbPool.query<{
+      column_default: string | null
+      is_nullable: string
+      data_type: string
+    }>(
+      `SELECT column_default, is_nullable, data_type
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'workflow_schedules'
+          AND column_name = 'concurrency_policy'`
+    )
+    expect(column.rows).toEqual([
+      { column_default: "'Forbid'::text", is_nullable: 'NO', data_type: 'text' },
+    ])
+
+    const checks = await dbPool.query<{ conname: string }>(
+      `SELECT conname
+         FROM pg_constraint
+        WHERE conrelid = 'public.workflow_schedules'::regclass
+          AND conname = 'workflow_schedules_concurrency_policy_check'`
+    )
+    expect(checks.rows).toHaveLength(1)
+
+    const client = await dbPool.connect()
+    try {
+      await client.query('BEGIN')
+      const inserted = await client.query<{ concurrency_policy: string }>(
+        `INSERT INTO workflow_schedules (recipe_namespace, recipe_name, cron_expression, next_fire_at)
+         VALUES ('p3-forbid-ns', 'p3-forbid-recipe', '*/5 * * * *', now())
+         RETURNING concurrency_policy`
+      )
+      expect(inserted.rows[0]?.concurrency_policy).toBe('Forbid')
+      await expect(
+        client.query(
+          `UPDATE workflow_schedules SET concurrency_policy = 'Sometimes'
+            WHERE recipe_namespace = 'p3-forbid-ns' AND recipe_name = 'p3-forbid-recipe'`
+        )
+      ).rejects.toThrow(/workflow_schedules_concurrency_policy_check/)
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
+  })
+
   it('recognizes deployed entity-change aliases without replaying migration DDL', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const connector = { connect: () => dbPool.connect() }
