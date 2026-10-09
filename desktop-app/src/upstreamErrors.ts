@@ -73,8 +73,8 @@ export function hostAccessDenialMessage(status: number, body: string): string | 
 }
 
 /**
- * Confirms an authenticated RPC mint revocation only when its string list covers
- * every requested Host after the mint's trim/deduplication and invalid-ref rules.
+ * Confirms an authenticated RPC mint revocation only when its string list is
+ * exactly the mint's sorted, trimmed, deduplicated requested Host set.
  */
 export function rpcTokenMintRevocationMessage(
   status: number,
@@ -103,8 +103,9 @@ export function rpcTokenMintRevocationMessage(
     ) {
       return null
     }
-    const revokedRefs = new Set(record.revokedHostRefs)
-    return Array.from(requestedRefs).every(ref => revokedRefs.has(ref))
+    const canonicalRefs = Array.from(requestedRefs).sort()
+    return record.revokedHostRefs.length === canonicalRefs.length &&
+      record.revokedHostRefs.every((ref, index) => ref === canonicalRefs[index])
       ? HOST_ACCESS_REVOKED_MESSAGE
       : null
   } catch {

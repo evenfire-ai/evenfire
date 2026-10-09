@@ -335,6 +335,36 @@ describe('RPC token mint revocation coverage', () => {
       requested,
     },
     {
+      name: 'superset with an unrequested Host',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-a', 'host-b', 'host-c'] }),
+      requested,
+    },
+    {
+      name: 'duplicate returned Host',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-a', 'host-a', 'host-b'] }),
+      requested,
+    },
+    {
+      name: 'unsorted returned Hosts',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-b', 'host-a'] }),
+      requested,
+    },
+    {
+      name: 'padded extra returned Host',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-a', 'host-b', ' host-b '] }),
+      requested,
+    },
+    {
+      name: 'wildcard extra returned Host',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-a', 'host-b', '*'] }),
+      requested,
+    },
+    {
       name: 'absent code',
       status: 403,
       body: JSON.stringify({ error: 'host_access_denied', revokedHostRefs: requested }),
