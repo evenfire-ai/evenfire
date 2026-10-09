@@ -2264,7 +2264,6 @@ export class AppService {
             // Keep a cleanup marker until Keytar cleanup recovers. The encrypted
             // file becomes authoritative when the active Keytar write fails.
             retirePendingLogoutMarker = false
-            requireSafeStorage = true
             await this.tokenStore.setSafeStorageSessionToken(result.token, envKey)
             freshTokenUsesSafeStorageOnly = true
             credentialSource = 'safe-storage'
