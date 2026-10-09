@@ -9,6 +9,9 @@
  *   2. Drain matured rows from `workflow_schedules` (`enabled = true AND next_fire_at <= now()`),
  *      using `FOR UPDATE SKIP LOCKED` as defense-in-depth against manual re-entry.
  *   3. For each matured row:
+ *        0. Apply the policy gates in order: `allowed_actors`, then
+ *           `concurrency_policy` (see "Concurrency policy" below). A gated tick
+ *           advances `next_fire_at` without creating a run.
  *        a. Insert a workflow_runs row via workflowRunService.createRun()
  *           with actor_type='scheduled' and a deterministic idempotency_key
  *           so double-firing the same window is a no-op.
@@ -28,12 +31,42 @@
  *   The unique index `idx_wr_idempotency (recipe_namespace, recipe_name, idempotency_key)`
  *   converts a double-fire (same schedule, same window) into a silent ON CONFLICT DO NOTHING.
  *   The existing workflow_runs row is returned and the schedule still advances.
+ *
+ * Concurrency policy (`workflow_schedules.concurrency_policy`, mirrored by the
+ * WRC from `spec.triggers.schedule.concurrencyPolicy`; CRD default `Forbid`):
+ *   • Forbid: a matured tick is skipped while a LIVE non-terminal run of the
+ *     same recipe exists, whatever its trigger source. Live means
+ *       - `Pending` created less than FORBID_PENDING_ACTIVE_BOUND_SECONDS ago, or
+ *       - `Running` started less than
+ *         min(max_duration_seconds ?? cap, cap) + FORBID_RUNNING_GRACE_SECONDS
+ *         ago, with cap = FORBID_RUNNING_MAX_DURATION_CAP_SECONDS.
+ *     Nothing terminalises a `Pending` row whose child CR never got created,
+ *     and the WRC only reaps `Running` rows that carry max_duration_seconds, so
+ *     without these bounds one stuck row would block the schedule forever.
+ *     Past the bound the row no longer blocks (a liveness escape hatch: a stuck
+ *     but unreaped run can then overlap one new run).
+ *     The skip is recorded (result reason `concurrency_forbidden`, metric
+ *     label, info log with the blocking run id and age) and `next_fire_at`
+ *     advances to the first window after max(next_fire_at, now), so skipped
+ *     windows are dropped, never replayed as a burst. After
+ *     FORBID_SUSTAINED_SKIP_THRESHOLD consecutive skips of one schedule a warn
+ *     log and a counter fire once per streak (in-memory, see
+ *     `forbiddenSkipStreaks`). A NULL / unknown policy is treated as Forbid.
+ *   • Allow: no check; runs may overlap (the pre-existing behaviour).
+ *   • Replace: NOT implemented. It behaves exactly like Allow.
+ *   Consistency: the active-run check and the run INSERT execute on the same
+ *   client inside the batch transaction, while this session holds the
+ *   cluster-wide advisory lock and the schedule row is locked FOR UPDATE, so
+ *   two replicas cannot both pass the check for one schedule. Other trigger
+ *   paths (on-demand, autonomous) do not take this lock: a run they commit
+ *   after the check is not seen. Forbid gates scheduled fires only.
  */
 import { CronExpressionParser } from 'cron-parser'
 import type { DbClient } from '../db.js'
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import {
+  workflowScheduleWorkerConcurrencyForbiddenSustainedTotal,
   workflowScheduleWorkerDurationSeconds,
   workflowScheduleWorkerFiresTotal,
   workflowScheduleWorkerRunsTotal,
@@ -50,6 +83,67 @@ export interface ScheduleWorkerOptions {
 const DEFAULT_BATCH_SIZE = 50
 
 type TriggerAllowedActor = 'user' | 'autonomous' | 'scheduled'
+
+/** Mirrors `spec.triggers.schedule.concurrencyPolicy`; CHECK-constrained in the DB. */
+type ScheduleConcurrencyPolicy = 'Forbid' | 'Replace' | 'Allow'
+
+/**
+ * A `Pending` run blocks a Forbid schedule only while it is younger than this.
+ * The WRC claims Pending rows on NOTIFY and re-polls orphans every
+ * `WRC_RUN_POLL_MS` (30 s default, workflow-recipes/src/config.ts), reclaiming
+ * rows idle for 1 min (dbRunProcessor FIND_ORPHAN_RUNS). 15 min is ~30 poll
+ * cycles, far beyond a healthy claim, yet lets a five-minute schedule
+ * recover within three windows when createChildRecipe keeps failing and
+ * nothing ever moves the row out of Pending.
+ */
+export const FORBID_PENDING_ACTIVE_BOUND_SECONDS = 15 * 60
+
+/**
+ * Ceiling on a `Running` run's own max_duration_seconds, and the value used
+ * when it is NULL. Equals the WRC's hard limit on
+ * `spec.runRetention.maxRunDurationSeconds` (workflow-recipes/src/config.ts
+ * DEFAULT_WORKFLOW_MAX_RUN_DURATION_SECONDS, enforced in workflowLimits.ts;
+ * the env override can only lower it). The CRD default (604800) is above it,
+ * hence the clamp.
+ */
+export const FORBID_RUNNING_MAX_DURATION_CAP_SECONDS = 24 * 60 * 60
+
+/**
+ * Slack after a `Running` run's deadline before it stops blocking. The WRC
+ * reaper (checkStuckRuns) runs every WRC_RUN_POLL_MS and only fails runs owned
+ * by its own instance, so a run whose owner died must first be reclaimed by
+ * the 1-min orphan sweep. 5 min = 10 poll cycles covers that handover.
+ */
+export const FORBID_RUNNING_GRACE_SECONDS = 5 * 60
+
+/** Consecutive Forbid skips of one schedule before a warn log + counter fire. */
+export const FORBID_SUSTAINED_SKIP_THRESHOLD = 6
+
+/** A live non-terminal run (see the CHECK on `workflow_runs.phase`). */
+interface ActiveRecipeRun {
+  run_id: string
+  phase: 'Pending' | 'Running'
+  created_at: Date
+  started_at: Date | null
+}
+
+/**
+ * Consecutive Forbid skips per schedule_id, for the sustained-skip warning.
+ * In-memory and per replica by design: the count restarts when the advisory
+ * lock moves to another replica or the process restarts, so a warning can be
+ * delayed by up to FORBID_SUSTAINED_SKIP_THRESHOLD ticks after a failover,
+ * never duplicated. `expectedFireAt` is the next_fire_at this replica wrote
+ * with its last skip; if the row arrives with any other slot (another replica
+ * fired or skipped it, or the batch rolled back) the streak restarts at 1.
+ * Entries are deleted when the schedule fires, so the map is bounded by the
+ * number of schedules that are currently being skipped.
+ */
+const forbiddenSkipStreaks = new Map<string, { count: number; expectedFireAt: string }>()
+
+/** Test-only: forget every streak so cases do not leak into each other. */
+export function resetConcurrencyForbiddenStreaksForTests(): void {
+  forbiddenSkipStreaks.clear()
+}
 
 interface ScheduleRow {
   schedule_id: string
@@ -78,19 +172,29 @@ interface ScheduleRow {
    * the WRC schedule sync. NULL means the archive cron's global grace applies.
    */
   ttl_seconds_after_finished: number | null
+  /**
+   * Denormalized copy of `spec.triggers.schedule.concurrencyPolicy` written by
+   * the WRC schedule sync (column default 'Forbid'). NULL / unknown values are
+   * treated as 'Forbid', the CRD default.
+   */
+  concurrency_policy: ScheduleConcurrencyPolicy | null
 }
 
 export interface ScheduleFireResult {
   scheduleId: string
   runId: string | null
   fired: boolean
-  reason: 'ok' | 'error' | 'invalid_cron' | 'actor_not_allowed'
+  reason: 'ok' | 'error' | 'invalid_cron' | 'actor_not_allowed' | 'concurrency_forbidden'
+  /** Set when `reason === 'concurrency_forbidden'`: the run that blocked the tick. */
+  activeRunId?: string
   error?: string
 }
 
 export interface ScheduleWorkerSweepResult {
   fired: number
   actorNotAllowed: number
+  /** Ticks skipped because `concurrency_policy = 'Forbid'` and a live run existed. */
+  concurrencyForbidden: number
   skippedLock: boolean
   errors: number
 }
@@ -109,6 +213,7 @@ export async function processMaturedSchedules(
   const summary: ScheduleWorkerSweepResult = {
     fired: 0,
     actorNotAllowed: 0,
+    concurrencyForbidden: 0,
     skippedLock: false,
     errors: 0,
   }
@@ -139,6 +244,11 @@ export async function processMaturedSchedules(
         // so dashboards can surface silenced schedules.
         summary.actorNotAllowed += 1
         workflowScheduleWorkerFiresTotal.inc({ result: 'actor_not_allowed' }, 1)
+      } else if (r.reason === 'concurrency_forbidden') {
+        // Policy-driven skip — expected under `Forbid` while a run is live.
+        // Not an error; a distinct label keeps it visible on dashboards.
+        summary.concurrencyForbidden += 1
+        workflowScheduleWorkerFiresTotal.inc({ result: 'concurrency_forbidden' }, 1)
       } else {
         summary.errors += 1
         workflowScheduleWorkerFiresTotal.inc({ result: 'error' }, 1)
@@ -146,12 +256,21 @@ export async function processMaturedSchedules(
     }
 
     workflowScheduleWorkerRunsTotal.inc({ result: 'ok' }, 1)
-    if (summary.fired > 0 || summary.errors > 0) {
+    // Skip-only sweeps are logged too: a schedule silenced by a policy gate
+    // must not look like an idle worker.
+    if (
+      summary.fired > 0 ||
+      summary.errors > 0 ||
+      summary.actorNotAllowed > 0 ||
+      summary.concurrencyForbidden > 0
+    ) {
       rootLogger.info(
         {
           event: 'workflow_schedule_worker_run',
           fired: summary.fired,
           errors: summary.errors,
+          actorNotAllowed: summary.actorNotAllowed,
+          concurrencyForbidden: summary.concurrencyForbidden,
         },
         'schedule worker sweep complete'
       )
@@ -191,11 +310,13 @@ export async function processMaturedSchedules(
  * Drain and fire a single batch of matured schedules inside ONE transaction so
  * `FOR UPDATE SKIP LOCKED` actually holds row-level locks for the duration of
  * the batch (in autocommit mode the locks would be released immediately after
- * the SELECT, defeating the concurrency guard). `fireOneSchedule` never throws
- * — malformed cron expressions or insert errors surface as
- * `{fired:false, reason:'invalid_cron'|'error'}` — so committing at the end is
- * safe. A catastrophic DB error (lost connection, deadlock on COMMIT) triggers
- * a best-effort ROLLBACK before re-raising.
+ * the SELECT, defeating the concurrency guard). `fireOneSchedule` surfaces
+ * malformed cron expressions and insert errors as
+ * `{fired:false, reason:'invalid_cron'|'error'}`, so committing at the end is
+ * safe. The one exception is the concurrency-policy active-run lookup: its
+ * error propagates so the whole batch rolls back and no run is ever created
+ * without the check. A catastrophic DB error (lost connection, deadlock on
+ * COMMIT) also triggers a best-effort ROLLBACK before re-raising.
  */
 async function fireOneBatch(client: DbClient, batchSize: number): Promise<ScheduleFireResult[]> {
   await client.query('BEGIN')
@@ -203,7 +324,8 @@ async function fireOneBatch(client: DbClient, batchSize: number): Promise<Schedu
     const selected = await client.query(
       `SELECT schedule_id, recipe_namespace, recipe_name, team_id,
               cron_expression, timezone, next_fire_at, input_template,
-              allowed_actors, max_duration_seconds, ttl_seconds_after_finished
+              allowed_actors, max_duration_seconds, ttl_seconds_after_finished,
+              concurrency_policy
          FROM workflow_schedules
         WHERE enabled = TRUE
           AND next_fire_at <= now()
@@ -237,6 +359,7 @@ async function fireOneBatch(client: DbClient, batchSize: number): Promise<Schedu
 
 /**
  * Fire a single schedule: insert workflow_runs row + advance next_fire_at.
+ * Gate order: cron parse → allowed_actors → concurrency_policy → createRun.
  * Must run with the caller holding the row lock from the enclosing SELECT.
  */
 async function fireOneSchedule(client: DbClient, row: ScheduleRow): Promise<ScheduleFireResult> {
@@ -311,6 +434,17 @@ async function fireOneSchedule(client: DbClient, row: ScheduleRow): Promise<Sche
     }
   }
 
+  // concurrencyPolicy gate. Runs on the batch client inside the transaction
+  // that holds the advisory lock and the schedule row lock, so the check and
+  // the createRun() below are consistent across control-api replicas. Only
+  // Forbid checks; Allow and the unimplemented Replace fire unconditionally.
+  if (resolveConcurrencyPolicy(row.concurrency_policy) === 'Forbid') {
+    const activeRun = await findActiveRunForRecipe(client, row.recipe_namespace, row.recipe_name)
+    if (activeRun) {
+      return skipForbiddenTick(client, row, currentFire, activeRun)
+    }
+  }
+
   const idempotencyKey = `schedule/${row.schedule_id}/${currentFire.toISOString()}`
 
   try {
@@ -339,6 +473,7 @@ async function fireOneSchedule(client: DbClient, row: ScheduleRow): Promise<Sche
        WHERE schedule_id = $2`,
       [nextFire, row.schedule_id]
     )
+    forbiddenSkipStreaks.delete(row.schedule_id)
 
     return {
       scheduleId: row.schedule_id,
@@ -365,6 +500,115 @@ async function fireOneSchedule(client: DbClient, row: ScheduleRow): Promise<Sche
       reason: 'error',
       error: err instanceof Error ? err.message : String(err),
     }
+  }
+}
+
+function resolveConcurrencyPolicy(value: unknown): ScheduleConcurrencyPolicy {
+  return value === 'Allow' || value === 'Replace' ? value : 'Forbid'
+}
+
+/**
+ * Oldest LIVE non-terminal run of the recipe, or null. Scheduled and on-demand
+ * runs are both stamped with the recipe's own (namespace, name); the run-scoped
+ * child CR lives in `child_recipe_name`, so this matches every run of the
+ * recipe regardless of trigger source. "Live" applies the stale-run bounds
+ * documented in the header (Pending by age, Running by deadline + grace). A
+ * query error propagates so the batch rolls back and no run is created
+ * without the check (fail closed). Exported for the real-Postgres lane
+ * (`services.workflowScheduleForbid.realPostgres.integration.test.ts`).
+ */
+export async function findActiveRunForRecipe(
+  client: DbClient,
+  recipeNamespace: string,
+  recipeName: string
+): Promise<ActiveRecipeRun | null> {
+  const result = await client.query(
+    `SELECT run_id, phase, created_at, started_at
+       FROM workflow_runs
+      WHERE recipe_namespace = $1
+        AND recipe_name = $2
+        AND (
+              (phase = 'Pending'
+                AND created_at > now() - make_interval(secs => $3))
+           OR (phase = 'Running'
+                AND COALESCE(started_at, created_at) > now() - make_interval(secs => LEAST(COALESCE(max_duration_seconds, $4), $4) + $5))
+            )
+      ORDER BY created_at ASC
+      LIMIT 1`,
+    [
+      recipeNamespace,
+      recipeName,
+      FORBID_PENDING_ACTIVE_BOUND_SECONDS,
+      FORBID_RUNNING_MAX_DURATION_CAP_SECONDS,
+      FORBID_RUNNING_GRACE_SECONDS,
+    ]
+  )
+  return (result.rows[0] as ActiveRecipeRun | undefined) ?? null
+}
+
+/**
+ * Record a Forbid skip: advance to the first window after max(current slot,
+ * now) so a backlog accumulated while the run was live is dropped, never
+ * replayed; log the blocking run and its age; track the consecutive-skip
+ * streak and warn once when it reaches FORBID_SUSTAINED_SKIP_THRESHOLD.
+ */
+async function skipForbiddenTick(
+  client: DbClient,
+  row: ScheduleRow,
+  currentFire: Date,
+  activeRun: ActiveRecipeRun
+): Promise<ScheduleFireResult> {
+  const now = Date.now()
+  const skipNextFire = computeNextFire(
+    row.cron_expression,
+    row.timezone,
+    new Date(Math.max(currentFire.getTime(), now))
+  )
+  await client.query(
+    `UPDATE workflow_schedules
+       SET next_fire_at = $1,
+           updated_at   = now()
+     WHERE schedule_id = $2`,
+    [skipNextFire, row.schedule_id]
+  )
+
+  const previous = forbiddenSkipStreaks.get(row.schedule_id)
+  const consecutiveSkips =
+    previous && previous.expectedFireAt === currentFire.toISOString() ? previous.count + 1 : 1
+  forbiddenSkipStreaks.set(row.schedule_id, {
+    count: consecutiveSkips,
+    expectedFireAt: skipNextFire.toISOString(),
+  })
+
+  const activeSince = new Date(activeRun.started_at ?? activeRun.created_at)
+  const fields = {
+    scheduleId: row.schedule_id,
+    recipe: `${row.recipe_namespace}/${row.recipe_name}`,
+    skippedFireAt: currentFire.toISOString(),
+    nextFireAt: skipNextFire.toISOString(),
+    activeRunId: activeRun.run_id,
+    activeRunPhase: activeRun.phase,
+    activeRunAgeSeconds: Math.max(0, Math.floor((now - activeSince.getTime()) / 1000)),
+    consecutiveSkips,
+  }
+  rootLogger.info(
+    { event: 'workflow_schedule_worker_concurrency_forbidden', ...fields },
+    'schedule tick skipped: concurrencyPolicy Forbid and a run of this recipe is still active'
+  )
+  if (consecutiveSkips === FORBID_SUSTAINED_SKIP_THRESHOLD) {
+    workflowScheduleWorkerConcurrencyForbiddenSustainedTotal.inc(1)
+    rootLogger.warn(
+      { event: 'workflow_schedule_worker_concurrency_forbidden_sustained', ...fields },
+      'schedule has skipped consecutive ticks under concurrencyPolicy Forbid; check the blocking run'
+    )
+  }
+
+  return {
+    scheduleId: row.schedule_id,
+    runId: null,
+    fired: false,
+    reason: 'concurrency_forbidden',
+    activeRunId: activeRun.run_id,
   }
 }
 
