@@ -71,6 +71,7 @@ import {
   mergeCollectedAttachments,
 } from '../core/orchestration/toolUseLoopMessages'
 import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
+import { resolveBridgeCall } from '../core/orchestration/toolUseLoopToolBatch'
 import {
   type PreparedGfsFile,
   attachedFilesForTurnContext,
@@ -378,6 +379,8 @@ export class TaskExecutor {
   private readonly attachmentReadLedger = new AttachmentReadLedger()
   /** #1043 — resumable checkpoint left by this turn's failed loop, if any. */
   private modelStepCheckpointId: string | undefined
+  /** Last successful physical model completion for this task's transcript. */
+  private checkpointServedBy: { provider: string; model: string } | undefined
   private continuationVerdictEmitted = false
   private continuationCompletionFence: ModelStepCheckpointFence | undefined
   private continuationFenceLost = false
@@ -1039,14 +1042,22 @@ export class TaskExecutor {
       .filter(entry => entry.kind === 'message')
       .map(entry => JSON.parse(entry.payload) as RecordedCheckpointMessage)
     if (recordedMessages.length === 0) throw new Error('Model-step checkpoint has no messages')
-    const { registry, discoverableNatives } = await withAbort(
+    const { registry, discoverableNatives, bridge } = await withAbort(
       () => this.buildToolRegistry(),
       this.abortController.signal
     )
     const discoverable = new Set(discoverableNatives.map(tool => tool.name))
+    const catalog = bridge?.getDeferrableCatalogNames()
     for (const recorded of recordedMessages) {
       for (const call of recorded.tool_calls ?? []) {
-        if (!registry.get(call.name) && !discoverable.has(call.name)) {
+        // Match the execution path's canonical bridge resolution, including
+        // exact catalog membership. The envelope's own registration is not a
+        // grant for its destination.
+        const resolved = resolveBridgeCall(call, bridge, [], catalog)
+        if (
+          resolved === 'handled' ||
+          (!registry.get(resolved.name) && !discoverable.has(resolved.name))
+        ) {
           await this.blockModelStepContinuation('grant_revoked')
           return undefined
         }
@@ -2014,6 +2025,7 @@ export class TaskExecutor {
           ...this.executionBudget.snapshot(),
           attachmentReadLedger: this.attachmentReadLedger.snapshot(),
         }),
+      servedBy: () => this.checkpointServedBy,
       resumableTtlMs: support.resumableTtlMs,
       sourceAttachments: this.task.sourceMessage?.attachments,
       attachmentTtlMs: support.attachmentTtlMs,
@@ -2382,6 +2394,9 @@ export class TaskExecutor {
       primaryPair: { provider: primaryProvider, model: primaryModel },
       engine: support.engine,
       policy: support.policy,
+      onServed: pair => {
+        this.checkpointServedBy = pair
+      },
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
         // R5.7 — a SAME-provider fallback (other key) respects the session's

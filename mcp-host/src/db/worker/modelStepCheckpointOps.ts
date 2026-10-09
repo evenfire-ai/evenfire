@@ -167,6 +167,8 @@ export type ModelStepCheckpointOp =
       failedAt?: number
       expiresAt?: number
       blockedReason?: string
+      provider?: string
+      model?: string
       /**
        * Bytes of inline uploaded files and transcript images, written in the
        * same transaction and only with `to: 'resumable'`. Each byte carries
@@ -339,6 +341,7 @@ function statements(db: Database): Statements {
             THEN @now + COALESCE(expires_at - failed_at, 604800000)
             ELSE COALESCE(@expires_at, expires_at) END,
           blocked_reason = CASE WHEN @to = 'blocked' THEN @blocked_reason ELSE NULL END,
+          provider = COALESCE(@provider, provider), model = COALESCE(@model, model),
           task_budget = COALESCE(@task_budget, task_budget),
           claim_expires_at = CASE WHEN @to = 'claimed' THEN claim_expires_at ELSE NULL END
       WHERE checkpoint_id = @checkpoint_id AND claim_owner = @owner AND claim_generation = @generation
@@ -593,6 +596,8 @@ export function completeModelStepCheckpointWithMessage(
     failed_at: null,
     expires_at: null,
     blocked_reason: null,
+    provider: null,
+    model: null,
     // Completion keeps the budget the checkpoint already holds.
     task_budget: null,
   })
@@ -656,6 +661,14 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
     }
 
     case 'model_step_checkpoint_transition': {
+      if (
+        (op.provider === undefined) !== (op.model === undefined) ||
+        (op.provider !== undefined && (op.to !== 'resumable' || !op.provider || !op.model))
+      ) {
+        throw new Error(
+          'model-step checkpoint served pair requires a complete resumable transition'
+        )
+      }
       if (op.attachments !== undefined && op.to !== 'resumable') {
         throw new Error('model-step checkpoint attachments are written only with resumable')
       }
@@ -669,6 +682,8 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
             failed_at: op.failedAt ?? null,
             expires_at: op.expiresAt ?? null,
             blocked_reason: op.blockedReason ?? null,
+            provider: op.provider ?? null,
+            model: op.model ?? null,
             task_budget: op.taskBudget ?? null,
           }).changes
           if (changed === 1) {
