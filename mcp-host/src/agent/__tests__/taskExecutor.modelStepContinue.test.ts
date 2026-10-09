@@ -1637,8 +1637,14 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     })
     await first.executor.run()
     expect(header(fixture.handle)).toMatchObject({ status: 'claimed', version: 3 })
+    expect(
+      fixture.handle.worker.db.prepare('SELECT request_id FROM pending_approvals').all()
+    ).toHaveLength(1)
     await first.executor.resumeAfterApproval(true)
     expect(first.onFail).toHaveBeenCalledTimes(1)
+    expect(
+      fixture.handle.worker.db.prepare('SELECT request_id FROM pending_approvals').all()
+    ).toHaveLength(0)
     expect(header(fixture.handle)).toMatchObject({ status: 'resumable', version: 4 })
 
     const retryClaim = await fixture.checkpoints.claim({

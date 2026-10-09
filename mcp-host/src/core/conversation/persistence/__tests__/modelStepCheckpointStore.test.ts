@@ -194,6 +194,52 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     expect(claimedRows.n).toBe(1)
   })
 
+  it('3a. admission cleanup keeps an approval in another session with the same task id', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+    const { version } = await openResumable(checkpoints)
+    const claim = await checkpoints.claim({
+      sessionKey: SESSION_KEY,
+      checkpointId: 'cp-1',
+      version,
+      hostInstanceId: 'host-instance-a',
+      newTaskId: 'shared-task',
+      leaseMs: LEASE_MS,
+    })
+    expect(claim.outcome).toBe('claimed')
+    if (claim.outcome !== 'claimed') return
+
+    const otherKey = 'user-1043:rpc:agent:other'
+    const insertSession = worker.db.prepare(
+      `INSERT INTO sessions(id, session_key, source, started_at, state, active_task_id)
+       VALUES (?, ?, 'rpc', 0, 'processing', 'shared-task')`
+    )
+    insertSession.run('session-a', SESSION_KEY)
+    insertSession.run('session-b', otherKey)
+    const insertApproval = worker.db.prepare(
+      `INSERT INTO pending_approvals
+       (request_id, session_id, task_id, tool_name, tool_call_id, parameters,
+        description, context_snapshot, source_message, registered_at, expires_at)
+       VALUES (?, ?, 'shared-task', 'shell_exec', 'call', '{}', 'confirm', '[]', '{}', 0, 9999999999)`
+    )
+    insertApproval.run('request-a', 'session-a')
+    insertApproval.run('request-b', 'session-b')
+
+    expect(await checkpoints.abandonAdmission(SESSION_KEY, 'shared-task', claim.fence)).toEqual({
+      applied: true,
+      resetSession: true,
+    })
+    expect(
+      worker.db.prepare('SELECT request_id FROM pending_approvals ORDER BY request_id').all()
+    ).toEqual([{ request_id: 'request-b' }])
+    expect(
+      worker.db.prepare('SELECT state, active_task_id FROM sessions WHERE id = ?').get('session-b')
+    ).toEqual({ state: 'processing', active_task_id: 'shared-task' })
+    expect(
+      worker.db.prepare('SELECT state, active_task_id FROM sessions WHERE id = ?').get('session-a')
+    ).toEqual({ state: 'idle', active_task_id: null })
+  })
+
   it('3b. status comes first: a stale version on a resumable row is a mismatch with the current view', async () => {
     const worker = createInProcessWorker(tempDbPath())
     const { checkpoints } = storeOver(worker)
