@@ -150,6 +150,7 @@ export async function setupInvitationPassword(
     )
     return { data }
   } catch (error) {
+    if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
     const message = error instanceof Error ? error.message : ''
     if (message.includes('(404)')) return { error: 'not_found' }
     if (message.includes('(403)')) return { error: 'forbidden' }
