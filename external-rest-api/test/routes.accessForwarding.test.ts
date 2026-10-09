@@ -76,7 +76,11 @@ describe('routes/access forwarding', () => {
     return app
   }
 
-  async function preparePasswordApiError(response: { status: number; body: unknown }) {
+  async function preparePasswordApiError(response: {
+    status: number
+    body: unknown
+    headers?: Record<string, string>
+  }) {
     authTokenMock.verifyToken.mockReturnValue(claims)
     const actualService = await vi.importActual<typeof import('../src/services/meService.js')>(
       '../src/services/meService.js'
@@ -85,7 +89,7 @@ describe('routes/access forwarding', () => {
     return vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify(response.body), {
         status: response.status,
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...response.headers },
       })
     )
   }
@@ -198,6 +202,72 @@ describe('routes/access forwarding', () => {
         .expect(409)
         .expect({ error: 'Password is not set' })
       expect(upstreamFetch).toHaveBeenCalledTimes(1)
+    } finally {
+      upstreamFetch.mockRestore()
+    }
+  })
+
+  it('maps password-work contention to a sanitized 429 and permits a later retry', async () => {
+    const upstreamFetch = await preparePasswordApiError({
+      status: 429,
+      body: { error: 'verification_busy', internal: 'owner row details' },
+      headers: { 'retry-after': '13', 'x-ratelimit-remaining': '0' },
+    })
+    const app = appWith(createMeRouter)
+
+    try {
+      const denied = await request(app)
+        .put('/me/password')
+        .set('authorization', 'Bearer good-token')
+        .send({ currentPassword: 'synthetic-current', newPassword: 'synthetic-next-password' })
+        .expect(429)
+
+      expect(denied.body).toEqual({ error: 'rate_limited', retryAfterSeconds: 13 })
+      expect(denied.headers['retry-after']).toBe('13')
+      expect(denied.headers['x-ratelimit-remaining']).toBeUndefined()
+      expect(JSON.stringify(denied.body)).not.toContain('verification_busy')
+      expect(JSON.stringify(denied.body)).not.toContain('owner row')
+      expect(upstreamFetch).toHaveBeenCalledTimes(1)
+
+      upstreamFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ updated: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+      await request(app)
+        .put('/me/password')
+        .set('authorization', 'Bearer good-token')
+        .send({ currentPassword: 'synthetic-current', newPassword: 'synthetic-next-password' })
+        .expect(200)
+        .expect({ updated: true })
+      expect(upstreamFetch).toHaveBeenCalledTimes(2)
+    } finally {
+      upstreamFetch.mockRestore()
+    }
+  })
+
+  it('maps password authority outage to a sanitized bounded 503', async () => {
+    const upstreamFetch = await preparePasswordApiError({
+      status: 503,
+      body: { error: 'authority_failure', sql: 'private query text' },
+      headers: { 'retry-after': '1200', 'x-ratelimit-remaining': '0' },
+    })
+    const app = appWith(createMeRouter)
+
+    try {
+      const response = await request(app)
+        .put('/me/password')
+        .set('authorization', 'Bearer good-token')
+        .send({ currentPassword: 'synthetic-current', newPassword: 'synthetic-next-password' })
+        .expect(503)
+
+      expect(response.body).toEqual({ error: 'authority_unavailable', retryAfterSeconds: 900 })
+      expect(response.headers['retry-after']).toBe('900')
+      expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
+      expect(JSON.stringify(response.body)).not.toContain('authority_failure')
+      expect(JSON.stringify(response.body)).not.toContain('private query')
+      expect(upstreamFetch).toHaveBeenCalledOnce()
     } finally {
       upstreamFetch.mockRestore()
     }

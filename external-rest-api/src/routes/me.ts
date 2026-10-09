@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { ControlApiError } from '../controlApiClient.js'
+import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import {
   type AuthedRequest,
   extractAuthToken,
@@ -170,6 +171,7 @@ export function createMeRouter(): Router {
         res.status(400).json({ error: 'Password must be between 8 and 256 characters' })
         return
       }
+      if (sendPasswordAuthorityError(error, res)) return
       next(error)
     }
   })
