@@ -5,7 +5,17 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { applyAuthorizationRevisionDeleteCompatibility } from './migrations/authorizationRevisionDeleteCompatibilityMigration.js'
+import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
+import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
+import { applyUserAccessFoundationDefinerTempShadowHardening } from './migrations/userAccessFoundationDefinerTempShadowMigration.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  applyCatalogUtf8OrderingSchema,
+  applyComposableCatalogRevisionSchema,
+  applyUserAccessFoundationSchema,
+  backfillLegacyPasswordSecurityEpochs,
+} from './services/access/userAccessFoundationSchema.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
 import {
   applyPasswordAdmissionSchema,
@@ -21,6 +31,7 @@ import {
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
+import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
   applyEntityChangeCheckpointSchema,
   applyEntityChangeDefinerSearchPathSchema,
@@ -86,8 +97,13 @@ export type DbTransactionClient = DbClient & {
   readonly [dbTransactionClientBrand]: 'transaction'
 }
 
+export type DbTransactionOptions = {
+  signal?: AbortSignal
+  onDatabaseFailure?: (error: unknown) => unknown
+}
+
 type DbSessionClient = DbClient & {
-  release: () => void
+  release: (destroy?: boolean | Error) => void
 }
 
 type DbConnector = {
@@ -95,6 +111,7 @@ type DbConnector = {
 }
 
 const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
+const migrationLogger = rootLogger.child({ module: 'database-migration' })
 
 type DbMigration = {
   version: string
@@ -6349,6 +6366,91 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0128_password_work_ownership',
     apply: applyPasswordWorkOwnershipSchema,
   },
+  {
+    // Preserve the displaced Task 106 identity as a same-body receipt alias.
+    version: '0129_user_access_foundation',
+    legacyVersions: [
+      '0126_user_access_foundation',
+      '0125_user_access_foundation',
+      '0109_user_access_foundation',
+      '0107_user_access_foundation',
+      '0101_user_access_foundation',
+    ],
+    apply: applyUserAccessFoundationSchema,
+  },
+  {
+    version: '0130_invitation_delivery_commands',
+    legacyVersions: [
+      '0127_invitation_delivery_commands',
+      '0126_invitation_delivery_commands',
+      '010a_invitation_delivery_commands',
+      '0108_invitation_delivery_commands',
+      '0102_invitation_delivery_commands',
+    ],
+    apply: applyInvitationDeliveryCommandFoundation,
+  },
+  {
+    version: '0131_catalog_utf8_ordering',
+    legacyVersions: [
+      '0128_catalog_utf8_ordering',
+      '0127_catalog_utf8_ordering',
+      '010b_catalog_utf8_ordering',
+      '0109_catalog_utf8_ordering',
+      '0103_catalog_utf8_ordering',
+    ],
+    apply: applyCatalogUtf8OrderingSchema,
+  },
+  {
+    version: '0132_composable_catalog_revisions',
+    legacyVersions: [
+      '0129_composable_catalog_revisions',
+      '0128_composable_catalog_revisions',
+      '010c_composable_catalog_revisions',
+      '010a_composable_catalog_revisions',
+      '0104_composable_catalog_revisions',
+    ],
+    apply: applyComposableCatalogRevisionSchema,
+  },
+  {
+    // Fix-forward for databases that recorded the first composable-catalog
+    // body before the GFS resource-component mapping was completed.
+    version: '0133_gfs_catalog_revision_components',
+    legacyVersions: [
+      '012a_gfs_catalog_revision_components',
+      '0129_gfs_catalog_revision_components',
+      '010d_gfs_catalog_revision_components',
+      '010b_gfs_catalog_revision_components',
+      '0105_gfs_catalog_revision_components',
+    ],
+    apply: applyComposableCatalogRevisionSchema,
+  },
+  {
+    // The access-foundation bodies are immutable; harden their installed
+    // SECURITY DEFINER search paths without replaying those historical bodies.
+    version: '0134_user_access_foundation_definer_temp_shadow_hardening',
+    legacyVersions: [
+      '012b_user_access_foundation_definer_temp_shadow_hardening',
+      '012a_user_access_foundation_definer_temp_shadow_hardening',
+    ],
+    apply: applyUserAccessFoundationDefinerTempShadowHardening,
+  },
+  {
+    version: '0135_legacy_password_security_epoch_backfill',
+    legacyVersions: [
+      '0130_legacy_password_security_epoch_backfill',
+      '010e_legacy_password_security_epoch_backfill',
+      '010c_legacy_password_security_epoch_backfill',
+      '0106_legacy_password_security_epoch_backfill',
+    ],
+    apply: backfillLegacyPasswordSecurityEpochs,
+  },
+  {
+    // This narrow forward fix retains its late canonical receipt while the
+    // runner executes it atomically immediately after the access foundation.
+    version: '0143_authorization_revision_delete_compatibility',
+    legacyVersions: ['0138_authorization_revision_delete_compatibility'],
+    apply: applyAuthorizationRevisionDeleteCompatibility,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6662,11 +6764,12 @@ async function recordMigration(db: DbClient, version: string): Promise<void> {
   )
 }
 
-async function applyPendingMigrations(db: DbClient): Promise<void> {
+async function applyPendingLegacyMigrations(db: DbClient): Promise<Set<string>> {
   await ensureSchemaMigrationsTable(db)
   const appliedVersions = await loadAppliedMigrationVersions(db)
 
   for (const migration of CONTROL_API_MIGRATIONS) {
+    if (migration.version > '0106_oauth_grants_owner_generalization') break
     if (appliedVersions.has(migration.version)) continue
     if (migration.legacyVersions?.some(version => appliedVersions.has(version))) {
       await recordMigration(db, migration.version)
@@ -6677,30 +6780,41 @@ async function applyPendingMigrations(db: DbClient): Promise<void> {
     await recordMigration(db, migration.version)
     appliedVersions.add(migration.version)
   }
+  return appliedVersions
 }
 
 export async function initDb(db: DbConnector = pool): Promise<void> {
   const client = await db.connect()
   let locked = false
   let inTransaction = false
+  let destroySession = false
 
   try {
+    for (const sql of migrationSessionBoundsSql(false)) {
+      await client.query(sql)
+    }
     await client.query(`SELECT pg_advisory_lock(${INIT_DB_LOCK_KEY_SQL})`)
     locked = true
 
     await client.query('BEGIN')
     inTransaction = true
-
-    await applyPendingMigrations(client)
-
+    const appliedVersions = await applyPendingLegacyMigrations(client)
     await client.query('COMMIT')
     inTransaction = false
+
+    await applyPendingPr1Migrations({
+      db: client,
+      migrations: CONTROL_API_MIGRATIONS,
+      appliedVersions,
+      recordMigration,
+    })
   } catch (error) {
+    destroySession = true
     if (inTransaction) {
       try {
         await client.query('ROLLBACK')
       } catch (rollbackError) {
-        rootLogger.warn({ err: rollbackError }, 'Control API migration rollback failed')
+        migrationLogger.warn({ err: rollbackError }, 'Database migration rollback failed')
       }
     }
     throw error
@@ -6709,10 +6823,11 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query(`SELECT pg_advisory_unlock(${INIT_DB_LOCK_KEY_SQL})`)
       } catch (unlockError) {
-        rootLogger.warn({ err: unlockError }, 'Control API migration advisory unlock failed')
+        destroySession = true
+        migrationLogger.warn({ err: unlockError }, 'Database migration advisory unlock failed')
       }
     }
-    client.release()
+    client.release(destroySession)
   }
 }
 
@@ -6730,26 +6845,29 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
-export type DbTransactionOptions = { signal?: AbortSignal }
-
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
-  // Injectable only so the carrier's client lifecycle can be unit-tested against
-  // a fake Pool; production always uses the module-level core pool.
-  txPool: Pool = pool,
-  options: DbTransactionOptions = {}
+  txPoolOrOptions: Pool | DbTransactionOptions = pool,
+  explicitOptions: DbTransactionOptions = {}
 ): Promise<T> {
+  // Tests may inject a Pool to exercise client lifecycle behavior. Session
+  // persistence callers may provide a failure mapper so database errors retain
+  // typed provenance; cancellable callers use the same bounded pool with signal.
+  const isPool = typeof (txPoolOrOptions as Pool).connect === 'function'
+  const txPool = isPool ? (txPoolOrOptions as Pool) : pool
+  const options: DbTransactionOptions = isPool
+    ? explicitOptions
+    : (txPoolOrOptions as DbTransactionOptions)
   const signal = options.signal
+  const mapDatabaseFailure = (error: unknown): unknown =>
+    options.onDatabaseFailure ? options.onDatabaseFailure(error) : error
   signal?.throwIfAborted()
-  // The pool's existing finite connection timeout owns a pending borrow. An
-  // abort cannot release its caller until acquisition has settled, including
-  // disposal of a client delivered after the signal fired.
   let client: PoolClient & Pick<Client, 'end' | 'connection'>
   try {
     client = (await txPool.connect()) as typeof client
   } catch (error) {
     signal?.throwIfAborted()
-    throw error
+    throw mapDatabaseFailure(error)
   }
   let transactionStarted = false
   let commitSent = false
@@ -6757,16 +6875,10 @@ export async function withTransaction<T>(
   let originalIdleTimeout: string | undefined
   let releaseError: Error | boolean | undefined
 
-  // pg-pool detaches its own idle 'error' listener from a client while it is
-  // checked out, so an out-of-band backend error on the borrowed client (e.g.
-  // Postgres terminating the backend on idle_in_transaction_session_timeout,
-  // 25P03, while the transaction awaits an external POST with no query running)
-  // arrives with NO 'error' listener. Node's EventEmitter then THROWS in that
-  // tick — an async event outside any await stack, so no try/catch here or in a
-  // caller can catch it — and with no process-level handler it exits the process.
-  // The carrier owns the client for the whole checkout, so it holds the listener:
-  // capture the async error and fold it into releaseError so pg-pool DESTROYS the
-  // poisoned connection instead of returning it to the pool.
+  // pg-pool removes its idle 'error' listener while a client is checked out.
+  // Hold one for the transaction lifetime so out-of-band backend termination
+  // cannot become an uncaught EventEmitter error, and destroy the poisoned
+  // connection on release.
   let asyncClientError: Error | undefined
   const onClientError = (err: unknown): void => {
     asyncClientError ??= err instanceof Error ? err : new Error(String(err))
@@ -6778,14 +6890,8 @@ export async function withTransaction<T>(
     releaseError ??= reason
     if (termination) return
     termination = client.end().catch(error => {
-      releaseError = error instanceof Error ? error : true
+      releaseError ??= error instanceof Error ? error : true
     })
-    // pg Client.end() destroys an active query's socket, but an idle client
-    // waits for the peer's EOF. Explicit cancellation must also end a half-open
-    // idle checkout. Client.connection.stream is the pinned driver's typed
-    // transport; Duplex.destroy() is idempotent and its socket close drives the
-    // driver's connection end event awaited by Client.end(). Do not evict or
-    // finish the caller ahead of that event.
     client.connection.stream.destroy()
   }
   const onAbort = (): void => {
@@ -6794,11 +6900,31 @@ export async function withTransaction<T>(
   signal?.addEventListener('abort', onAbort, { once: true })
   if (signal?.aborted) onAbort()
 
+  const executeQuery = async (
+    text: string,
+    values?: unknown[],
+    checkSignalAfter = true
+  ): Promise<{ rows: unknown[]; rowCount: number | null }> => {
+    signal?.throwIfAborted()
+    try {
+      const result = await client.query(text, values)
+      if (checkSignalAfter) signal?.throwIfAborted()
+      return result
+    } catch (error) {
+      signal?.throwIfAborted()
+      throw mapDatabaseFailure(error)
+    }
+  }
+
+  const transactionClient: DbClient =
+    signal || options.onDatabaseFailure
+      ? Object.assign(Object.create(client) as DbClient, {
+          query: (text: string, values?: unknown[]) => executeQuery(text, values),
+        })
+      : (client as DbClient)
   try {
     signal?.throwIfAborted()
     if (signal) {
-      // Read normalized milliseconds from this backend, not from client startup
-      // options: a role/database default or a reused session can be different.
       const settings = await client.query<{
         statement_timeout_ms: string | null
         idle_timeout_ms: string | null
@@ -6806,14 +6932,10 @@ export async function withTransaction<T>(
         (SELECT setting FROM pg_settings WHERE name = 'statement_timeout') AS statement_timeout_ms,
         (SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout') AS idle_timeout_ms`)
       signal.throwIfAborted()
-      const setting = settings.rows[0]
-      const statementTimeout = setting?.statement_timeout_ms
-      const idleTimeout = setting?.idle_timeout_ms
+      const statementTimeout = settings.rows[0]?.statement_timeout_ms
+      const idleTimeout = settings.rows[0]?.idle_timeout_ms
       const statementMs = Number(statementTimeout)
       const idleMs = Number(idleTimeout)
-      // These are the existing createBoundedPgPoolForConnection startup bounds.
-      // An unbounded or invalid effective server setting cannot supply a finite
-      // remote cleanup backstop, so this cancellable transaction must fail loud.
       if (
         typeof statementTimeout !== 'string' ||
         !/^\d+$/.test(statementTimeout) ||
@@ -6827,11 +6949,6 @@ export async function withTransaction<T>(
         throw new Error('Invalid effective PostgreSQL cancellation timeout bounds')
       }
       if (idleMs === 0 || idleMs > statementMs) {
-        // This must be SESSION scope before BEGIN. AbortTransaction restores a
-        // SET LOCAL value before entering idle-in-transaction (aborted), which
-        // would remove the very backstop needed when a blackhole hides our FIN.
-        // Record the original before sending: a missing set_config reply is also
-        // uncertain, and that checkout must be ended rather than returned healthy.
         originalIdleTimeout = idleTimeout
         await client.query('SELECT set_config($1, $2, false)', [
           'idle_in_transaction_session_timeout',
@@ -6840,38 +6957,22 @@ export async function withTransaction<T>(
         signal.throwIfAborted()
       }
     }
-    await client.query('BEGIN')
+    await executeQuery('BEGIN', undefined, false)
     transactionStarted = true
+    signal?.throwIfAborted()
     if (signal) {
       signal.throwIfAborted()
-      // PostgreSQL 16 on the service's Linux runtime supports socket polling
-      // during queries. Its default (0) can leave a disconnected writer running
-      // until statement_timeout; this scoped setting detects our transport stop
-      // promptly. Unsupported servers fail this transaction instead of silently
-      // omitting cancellation. The existing statement_timeout stays in force.
       await client.query("SET LOCAL client_connection_check_interval = '100ms'")
     }
     // The brand is nominal-only (a declared unique symbol); the checked-out
     // client IS the transaction session, so this cast is the single blessed
     // point where the brand is minted (issue #375 M3).
     signal?.throwIfAborted()
-    const transaction = signal
-      ? ({
-          query: async (text: string, values?: unknown[]) => {
-            signal.throwIfAborted()
-            const result = await client.query(text, values)
-            signal.throwIfAborted()
-            return result
-          },
-        } as unknown as DbTransactionClient)
-      : (client as unknown as DbTransactionClient)
-    const result = await work(transaction)
+    const result = await work(transactionClient as unknown as DbTransactionClient)
     signal?.throwIfAborted()
     commitSent = true
-    await client.query('COMMIT')
+    await executeQuery('COMMIT', undefined, false)
     transactionFinished = true
-    // An acknowledged COMMIT is the outcome, even if the signal aborted
-    // meanwhile: the finally still evicts the session instead of restoring it.
     return result
   } catch (error) {
     if (commitSent || !transactionStarted) {
@@ -6881,18 +6982,14 @@ export async function withTransaction<T>(
         await client.query('ROLLBACK')
         transactionFinished = true
       } catch (rollbackError) {
-        releaseError = rollbackError instanceof Error ? rollbackError : true
+        if (!signal?.aborted) {
+          releaseError = rollbackError instanceof Error ? rollbackError : true
+        }
       }
     }
-    // Once COMMIT was sent, a missing reply is an unknown durable outcome.
-    // Cancellation does not establish rollback, no spend or no dispatch.
     signal?.throwIfAborted()
     throw error
   } finally {
-    // Work (including its own finally) and any rollback have already unwound.
-    // Only an acknowledged, healthy transaction may restore session state and
-    // return to the pool. Lost COMMIT/ROLLBACK replies leave the server backstop
-    // installed; local transport completion is not remote cleanup observation.
     if (
       originalIdleTimeout !== undefined &&
       transactionFinished &&
@@ -6906,8 +7003,6 @@ export async function withTransaction<T>(
           originalIdleTimeout,
         ])
       } catch (restoreError) {
-        // Do not replace the work outcome or relabel an acknowledged COMMIT as
-        // a rollback. A session that failed restoration is physically ended.
         releaseError = restoreError instanceof Error ? restoreError : true
       }
     }
@@ -6920,7 +7015,6 @@ export async function withTransaction<T>(
           : (releaseError ?? asyncClientError ?? true)
       )
     }
-    // Keep both listeners and the checkout until physical termination completes.
     if (termination) await termination
     signal?.removeEventListener('abort', onAbort)
     client.removeListener('error', onClientError)
@@ -6930,9 +7024,6 @@ export async function withTransaction<T>(
     // always reaches release() and pg-pool never recycles the bad connection.
     if (asyncClientError && !releaseError) {
       releaseError = asyncClientError
-    }
-    if (signal?.aborted) {
-      releaseError = signal.reason instanceof Error ? signal.reason : true
     }
     client.release(releaseError)
   }

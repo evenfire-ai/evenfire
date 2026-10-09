@@ -1,0 +1,6 @@
+name: evenfire/codeql-query-tests
+version: 0.0.1
+dependencies:
+  evenfire/codeql-queries: "*"
+  codeql/javascript-queries: 2.4.3
+extractor: javascript

@@ -1,0 +1,7 @@
+# relation<TAB>column<TAB>effective column privilege
+team_workflow_triggers	recipe_name	SELECT
+team_workflow_triggers	recipe_namespace	SELECT
+user_workflow_triggers	recipe_name	SELECT
+user_workflow_triggers	recipe_namespace	SELECT
+workflow_recipe_allowed_teams	recipe_name	SELECT
+workflow_recipe_allowed_teams	recipe_namespace	SELECT

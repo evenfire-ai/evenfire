@@ -1,7 +1,8 @@
 import jwt from 'jsonwebtoken'
-import { createPublicKey } from 'node:crypto'
+import { createPublicKey, randomUUID } from 'node:crypto'
 import { config } from '../../config.js'
 import { AuthClaims, TEAM_ROLES } from '../../profileTypes.js'
+import { legacyExternalSessionAuthGeneration } from '../../services/auth/legacyV1Generation.js'
 
 const ALLOWED_ROLES = new Set<AuthClaims['role']>(TEAM_ROLES)
 const sessionJwtPublicKey = createPublicKey(config.sessionJwtPrivateKey).export({
@@ -32,6 +33,7 @@ export function signExternalSessionToken(
       expiresIn: ttlSeconds,
       issuer: config.jwtIssuer,
       audience: config.jwtAudience,
+      jwtid: randomUUID(),
     }
   )
 }
@@ -53,8 +55,8 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       (teamId !== null && typeof teamId !== 'string') ||
       typeof payload?.role !== 'string' ||
       typeof payload?.exp !== 'number' ||
-      !Number.isSafeInteger(authGeneration) ||
-      Number(authGeneration) < 1
+      (authGeneration !== undefined &&
+        legacyExternalSessionAuthGeneration({ authGeneration }) === null)
     ) {
       return null
     }
@@ -67,8 +69,10 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       email: payload.email,
       teamId,
       role: payload.role as AuthClaims['role'],
-      authGeneration: Number(authGeneration),
+      ...(authGeneration === undefined ? {} : { authGeneration: Number(authGeneration) }),
       exp: payload.exp,
+      ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
+      ...(typeof payload.jti === 'string' ? { jti: payload.jti } : {}),
     }
   } catch {
     return null

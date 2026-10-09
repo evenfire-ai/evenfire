@@ -116,6 +116,11 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      # keytar is a native Desktop dependency. When its prebuild is unavailable,
+      # node-gyp requires libsecret development metadata on Linux.
+      - name: Install Desktop native build prerequisite
+        if: matrix.service == 'desktop-app' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libsecret-1-dev
       # profile-ui consumes the source-only shared frontend package through a file
       # link. Install the package's own React type dependencies before Next follows
       # that link to its real path; a consumer-only install cannot resolve them from
@@ -127,6 +132,13 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
+        run: npm ci
+
+      # Cross-service integration tests import RPC Proxy source directly, whose
+      # config now loads the shared JWT policy package from its own node_modules.
+      - name: Install RPC Proxy dependencies for Control API tests
+        if: matrix.service == 'control-api'
+        working-directory: rpc-proxy
         run: npm ci
 
       - name: Install External REST contract-test dependencies
@@ -326,6 +338,21 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # R61-B1 acceptance runs the exact migration producers that created the
+      # historical Task 106 receipts and the observed DEV receipt set. These
+      # immutable source pins make the RealPG test self-contained on clean CI.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 2370a399d4221350946462d41427fad8aee0087f
+          path: r61-b1-producers/historical-task106
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 0b26101eb247adcc44f70d39451f3e82c3225d47
+          path: r61-b1-producers/observed-dev
+          persist-credentials: false
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
@@ -344,6 +371,38 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      - name: Install historical Task 106 producer dependencies
+        working-directory: r61-b1-producers/historical-task106/packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build historical Task 106 producer dependency
+        working-directory: r61-b1-producers/historical-task106/packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install historical Task 106 Control API dependencies
+        working-directory: r61-b1-producers/historical-task106/control-api
+        run: npm ci
+
+      - name: Build historical Task 106 migration runner
+        working-directory: r61-b1-producers/historical-task106/control-api
+        run: npm run build
+
+      - name: Install observed DEV producer dependencies
+        working-directory: r61-b1-producers/observed-dev/packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build observed DEV producer dependency
+        working-directory: r61-b1-producers/observed-dev/packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install observed DEV Control API dependencies
+        working-directory: r61-b1-producers/observed-dev/control-api
+        run: npm ci
+
+      - name: Build observed DEV migration runner
+        working-directory: r61-b1-producers/observed-dev/control-api
+        run: npm run build
+
       - name: Install External REST contract-test dependencies
         working-directory: external-rest-api
         run: npm ci
@@ -353,6 +412,8 @@ jobs:
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
           CONTROL_API_REAL_PG_REQUIRED: '1'
+          TASK106_R61_B1_HISTORICAL_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/historical-task106
+          TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
           FORCE_COLOR: '0'
           NO_COLOR: '1'
         # The `realPostgres` filter matches every control-api
@@ -381,6 +442,50 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
+          # Critical suites must stay inside the real-Postgres filter. A rename or
+          # move that drops one from `*realPostgres*` would otherwise still pass
+          # the aggregate counts above.
+          for suite in \
+            accessCatalogCoordinator.realPostgres.integration \
+            accessCatalogFamilies.realPostgres.integration \
+            accessCatalogPerformance.realPostgres.integration \
+            accessCatalogShadow.realPostgres.integration \
+            accessDatabaseCancellation.realPostgres.integration \
+            catalogDistinctPagination.realPostgres.integration \
+            catalogProducers.realPostgres.integration \
+            catalogRevisionComponents.realPostgres.integration \
+            db.codexSubscriptionConnection.realPostgres.integration \
+            externalSessionSingleTouch.realPostgres.integration \
+            finalAuthorityLifecycle.realPostgres.integration \
+            gfsRevisionLockOrder.realPostgres.integration \
+            invitationAcceptedOnboarding.realPostgres.integration \
+            legacyPasswordEpochBackfill.realPostgres.integration \
+            legacySessionExchangeRace.realPostgres.integration \
+            migrationExecutionPolicy.realPostgres.integration \
+            migrationPreviousImageCompatibility.realPostgres.integration \
+            routes.externalTeamsFinalAuthority.realPostgres.integration \
+            routes.externalTeamsLegacyAdminRevocation.realPostgres.integration \
+            services.codexSubscriptionOAuth.realPostgres.integration \
+            services.codexSubscriptionCatalog.realPostgres.integration \
+            services.llmProviderAttemptAuthorization.realPostgres.integration \
+            services.llmProviderAttemptStore.realPostgres.integration \
+            services.llmProviderAttemptRedemption.realPostgres.integration \
+            userAccessRuntimeContract.realPostgres.integration \
+            userSessionDatabaseClock.realPostgres.integration \
+            pluginWorkloadSdkCodexDualLedger.realPostgres.integration \
+            pluginWorkloadSdkGrokDualLedger.realPostgres.integration \
+            services.grokSubscriptionConnection.realPostgres.integration \
+            services.grokProviderAttemptRedemption.realPostgres.integration \
+            services.grokProviderAttemptRedemption.refresh.realPostgres.integration \
+            services.codexSubscriptionLifecycle.realPostgres.integration \
+            db.llmProviderAttemptConnectionIntegrity.realPostgres.integration \
+            services.llmCatalogSync.realPostgres.integration
+          do
+            grep -Fq "$suite" "$normalized_log" || {
+              echo "real-Postgres control-api lane omitted critical suite ${suite}" >&2
+              exit 1
+            }
+          done
           # Pinned suites (Codex/Grok subscription, provider attempts, and the
           # external GFS rate-limit suites) must stay inside the real-Postgres
           # filter and run. The check reads the JSON report, not the console:

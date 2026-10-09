@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { PR1_ONLINE_INDEX_PLAN } from '../src/migrations/pr1OnlineIndexPlan.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -14,7 +15,33 @@ describe('runtime access migrations', () => {
     vi.resetModules()
     vi.clearAllMocks()
     mockConnect.mockResolvedValue({ query: clientQuery, release: clientRelease })
-    clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    const indexStates = new Map<
+      string,
+      {
+        table_name: string
+        indisunique: boolean
+        indisvalid: boolean
+        definition: string
+      }
+    >()
+    clientQuery.mockImplementation(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('FROM pg_class index_rel')) {
+        const state = indexStates.get(String(values?.[0]))
+        return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
+      }
+      if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
+        const entry = PR1_ONLINE_INDEX_PLAN.find(candidate => candidate.createSql === sql)
+        if (entry) {
+          indexStates.set(entry.name, {
+            table_name: entry.table,
+            indisunique: Boolean(entry.unique),
+            indisvalid: true,
+            definition: entry.createSql,
+          })
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
   })
 
   it('0069 grants only the required member-registration table access to Control API', async () => {

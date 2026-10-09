@@ -149,6 +149,21 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
     await expect(svc.invokeHostMessage('myhost', { content: 'hi' })).rejects.toBe(plain)
   })
 
+  it('surfaces Host-message admission 429 without token remint or resend', async () => {
+    const svc = makeService()
+    const limited = new ApiError(
+      '429 Too Many Requests',
+      429,
+      '{"error":"Too Many Requests","retryAfterSeconds":19}',
+      '19'
+    )
+    mockInvokeHostMessage.mockRejectedValue(limited)
+    await expect(svc.invokeHostMessage('myhost', { content: 'hi' })).rejects.toBe(limited)
+    expect(mockInvokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(mockRpcTokenManagerClear).not.toHaveBeenCalled()
+    expect(mockGetOrIssue).toHaveBeenCalledTimes(1)
+  })
+
   it('forwards an optional piggybacked model through the field allow-list (R2 Option A)', async () => {
     const svc = makeService()
     mockInvokeHostMessage.mockResolvedValue({ taskId: 't1', status: 'pending' })

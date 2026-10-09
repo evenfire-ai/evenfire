@@ -128,7 +128,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       const response = await login(email)
       expect({ status: response.status, body: response.body }).toEqual({
         status: 401,
-        body: { error: 'invalid_credentials' },
+        body: { error: 'Unauthorized' },
       })
     }
   )
@@ -150,7 +150,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     await holder.pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, userId])
     const response = await login('member@example.invalid', password)
     expect(response.status).toBe(401)
-    expect(response.body).toEqual({ error: 'invalid_credentials' })
+    expect(response.body).toEqual({ error: 'Unauthorized' })
     expect(compare).toHaveBeenCalledTimes(1)
     expect(compare.mock.calls[0][1]).not.toBe(hash)
     expect(bcrypt.getRounds(compare.mock.calls[0][1] as string)).toBe(12)
@@ -367,6 +367,13 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
           body: { error: 'invalid_credentials' },
         })
       }
+      const sourceCharges = await holder.pool.query(
+        `SELECT COALESCE(sum(count), 0)::int AS count
+           FROM rate_limit_buckets
+          WHERE bucket_key = $1`,
+        ['external_authentication_attempt:ip:192.0.2.123']
+      )
+      expect(sourceCharges.rows[0].count).toBe(3)
       const limited = await request(edge)
         .post('/api/v1/auth/password-login')
         .set('X-Forwarded-For', '192.0.2.124')
