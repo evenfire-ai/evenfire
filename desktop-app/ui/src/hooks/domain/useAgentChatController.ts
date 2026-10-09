@@ -1176,11 +1176,21 @@ export function useAgentChatController({
 
   const switchToChat = useCallback(
     async (agentRef: string, chatId: string) => {
+      // A rejected target does not take ownership of the visible view. Check
+      // these guards before advancing the history-selection revision so a
+      // blocked or deleted chat cannot cancel another chat's pending load.
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
       const selectionIntentRevision = beginSelectionIntent(true)
       clearPendingSelection(agentRef, chatId)
       await switchToChatForIntent(agentRef, chatId, selectionIntentRevision)
     },
-    [beginSelectionIntent, clearPendingSelection, switchToChatForIntent]
+    [
+      beginSelectionIntent,
+      clearPendingSelection,
+      isChatDeleted,
+      isHostAccessBlocked,
+      switchToChatForIntent,
+    ]
   )
 
   // §5d: chat CRUD (handleCreateChat / handleRename[ForAgent] / handleDelete[ForAgent])
@@ -3940,6 +3950,14 @@ export function useAgentChatController({
       const selectsSpecificChat = Boolean(
         chatId && !options.selectLatest && !options.suppressAutoSelect
       )
+      const preservesVisibleChat = Boolean(
+        !chatId &&
+        !options.selectLatest &&
+        selectedAgent === agentName &&
+        navItem === DESKTOP_ROUTES.chat &&
+        activeChatVisibilityRef.current.selectedAgent === agentName &&
+        activeChatVisibilityRef.current.activeChatId
+      )
       if (
         selectsSpecificChat &&
         !options.deferSwitch &&
@@ -3953,7 +3971,12 @@ export function useAgentChatController({
         void switchToChat(agentName, chatId!)
         return
       }
-      beginSelectionIntent(selectsSpecificChat)
+      // A same-agent no-chat notification can record a pending none selection
+      // while the chat route continues showing this conversation. The explicit
+      // clear path owns blanking the view; do not steal its history completion
+      // here. Route/agent changes and specific/latest selections still advance
+      // selection ownership before their effects run.
+      if (!preservesVisibleChat) beginSelectionIntent(selectsSpecificChat)
       if (options.selectLatest) {
         writePendingSelection(agentName, { mode: 'latest', chatId: null })
         return

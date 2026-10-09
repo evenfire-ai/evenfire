@@ -57,8 +57,11 @@ function holdLocalMessages(chatId: string) {
 }
 
 describe('Round 7 selection loading ownership', () => {
-  it('settles a held implicit switch when a newer no-chat intent arrives', async () => {
+  it('preserves visible chat history loading when a no-chat intent does not change the view', async () => {
     await clerum.chat.create('agent-x', 'chat-a')
+    await clerum.chat.upsertMessages('agent-x', 'chat-a', [
+      { id: 'chat-a-message', role: 'user', content: 'chat A history', timestamp: 1 },
+    ])
     clerum.chat.getIndex.mockImplementation(agentRef => clerum.readIndex(agentRef))
     const heldSwitch = holdLastActive('chat-a')
     const controller = renderController({ navItem: 'chat', loadMenuData: false })
@@ -73,20 +76,93 @@ describe('Round 7 selection loading ownership', () => {
       act(() => controller.result.current.setPendingChatSelection('agent-x', null))
 
       expect(controller.result.current.activeChatId).toBe('chat-a')
-      expect(controller.result.current.chatMessagesLoading).toBe(false)
       expect(controller.result.current.chatMessages).toEqual([])
+      const loadingWhileHeld = controller.result.current.chatMessagesLoading
 
       await act(async () => {
         heldSwitch.release.resolve()
         await heldSwitch.returned.promise
       })
-      expect(controller.result.current.activeChatId).toBe('chat-a')
-      expect(controller.result.current.chatMessagesLoading).toBe(false)
-      expect(controller.result.current.chatMessages).toEqual([])
+      await waitFor(() => expect(controller.result.current.chatMessagesLoading).toBe(false))
+      expect({
+        activeChatId: controller.result.current.activeChatId,
+        loadingWhileHeld,
+        messages: controller.result.current.chatMessages,
+        loadingAfter: controller.result.current.chatMessagesLoading,
+      }).toEqual({
+        activeChatId: 'chat-a',
+        loadingWhileHeld: true,
+        messages: expect.arrayContaining([expect.objectContaining({ id: 'chat-a-message' })]),
+        loadingAfter: false,
+      })
     } finally {
       heldSwitch.release.resolve()
       await act(async () => {
         await heldSwitch.returned.promise
+      })
+      controller.unmount()
+    }
+  })
+
+  it('keeps the requested chat selected while its local history is slow', async () => {
+    await clerum.chat.create('agent-x', 'chat-a')
+    await clerum.chat.upsertMessages('agent-x', 'chat-a', [
+      { id: 'chat-a-message', role: 'user', content: 'chat A history', timestamp: 1 },
+    ])
+    await clerum.chat.create('agent-x', 'chat-b')
+    await clerum.chat.upsertMessages('agent-x', 'chat-b', [
+      { id: 'chat-b-message', role: 'user', content: 'chat B history', timestamp: 2 },
+    ])
+    clerum.chat.getIndex.mockImplementation(agentRef => clerum.readIndex(agentRef))
+    const controller = renderController({ navItem: 'chat', loadMenuData: false })
+    const heldHistory = holdLocalMessages('chat-b')
+    let historyEntered = false
+    let switchPromise!: Promise<void>
+
+    try {
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      await act(async () => {
+        await controller.result.current.switchToChat('agent-x', 'chat-a')
+      })
+      await waitFor(() => {
+        expect(controller.result.current.activeChatId).toBe('chat-a')
+        expect(controller.result.current.chatMessages).toEqual(
+          expect.arrayContaining([expect.objectContaining({ id: 'chat-a-message' })])
+        )
+      })
+
+      act(() => {
+        switchPromise = controller.result.current.handleSelectChat('chat-b')
+      })
+      await act(async () => {
+        await heldHistory.entered.promise
+        historyEntered = true
+      })
+      expect({
+        activeChatId: controller.result.current.activeChatId,
+        messages: controller.result.current.chatMessages,
+        loading: controller.result.current.chatMessagesLoading,
+      }).toEqual({ activeChatId: 'chat-b', messages: [], loading: true })
+
+      await act(async () => {
+        heldHistory.release.resolve()
+        await heldHistory.returned.promise
+        await switchPromise
+      })
+      expect({
+        activeChatId: controller.result.current.activeChatId,
+        messages: controller.result.current.chatMessages,
+        loading: controller.result.current.chatMessagesLoading,
+      }).toEqual({
+        activeChatId: 'chat-b',
+        messages: expect.arrayContaining([expect.objectContaining({ id: 'chat-b-message' })]),
+        loading: false,
+      })
+    } finally {
+      heldHistory.release.resolve()
+      await act(async () => {
+        if (historyEntered) await heldHistory.returned.promise
+        await switchPromise?.catch(() => undefined)
       })
       controller.unmount()
     }
@@ -159,14 +235,17 @@ describe('Round 7 selection loading ownership', () => {
     }
   })
 
-  it('settles the current spinner when a newer chat switch is Host-blocked', async () => {
+  it('keeps a valid history load when a newer target is Host-blocked', async () => {
     await clerum.chat.create('agent-x', 'chat-a')
-    await clerum.chat.create('agent-x', 'chat-b')
+    await clerum.chat.upsertMessages('agent-x', 'chat-a', [
+      { id: 'chat-a-message', role: 'user', content: 'chat A history', timestamp: 1 },
+    ])
+    await clerum.chat.create('agent-y', 'chat-b')
     const heldSwitch = holdLastActive('chat-a')
     let hostBlocked = false
     const controller = renderController(
       {
-        isHostAccessBlocked: () => hostBlocked,
+        isHostAccessBlocked: agentRef => agentRef === 'agent-y' && hostBlocked,
         loadMenuData: false,
       },
       {}
@@ -185,19 +264,31 @@ describe('Round 7 selection loading ownership', () => {
 
       hostBlocked = true
       await act(async () => {
-        await controller.result.current.switchToChat('agent-x', 'chat-b')
+        await controller.result.current.switchToChat('agent-y', 'chat-b')
       })
       expect(controller.result.current.activeChatId).toBe('chat-a')
-      expect(controller.result.current.chatMessagesLoading).toBe(false)
+      const loadingWhileHeld = controller.result.current.chatMessagesLoading
 
       await act(async () => {
         heldSwitch.release.resolve()
         await switchPromise
       })
-      expect(controller.result.current.activeChatId).toBe('chat-a')
-      expect(controller.result.current.chatMessages).toEqual([])
-      expect(controller.result.current.chatMessagesLoading).toBe(false)
-      expect(clerum.chat.loadMessages).not.toHaveBeenCalled()
+      expect({
+        activeChatId: controller.result.current.activeChatId,
+        loadingWhileHeld,
+        messages: controller.result.current.chatMessages,
+        loadingAfter: controller.result.current.chatMessagesLoading,
+      }).toEqual({
+        activeChatId: 'chat-a',
+        loadingWhileHeld: true,
+        messages: expect.arrayContaining([expect.objectContaining({ id: 'chat-a-message' })]),
+        loadingAfter: false,
+      })
+      expect(
+        clerum.chat.loadMessages.mock.calls.some(
+          ([agentRef, chatId]) => agentRef === 'agent-y' && chatId === 'chat-b'
+        )
+      ).toBe(false)
     } finally {
       heldSwitch.release.resolve()
       await act(async () => {
@@ -207,8 +298,11 @@ describe('Round 7 selection loading ownership', () => {
     }
   })
 
-  it('settles the current spinner when a newer chat switch targets a deleted chat', async () => {
+  it('keeps a valid history load when a newer target has been deleted', async () => {
     await clerum.chat.create('agent-x', 'chat-a')
+    await clerum.chat.upsertMessages('agent-x', 'chat-a', [
+      { id: 'chat-a-message', role: 'user', content: 'chat A history', timestamp: 1 },
+    ])
     await clerum.chat.create('agent-x', 'chat-b')
     const heldSwitch = holdLastActive('chat-a')
     const controller = renderController({ loadMenuData: false })
@@ -230,15 +324,23 @@ describe('Round 7 selection loading ownership', () => {
         await controller.result.current.switchToChat('agent-x', 'chat-b')
       })
       expect(controller.result.current.activeChatId).toBe('chat-a')
-      expect(controller.result.current.chatMessagesLoading).toBe(false)
+      const loadingWhileHeld = controller.result.current.chatMessagesLoading
 
       await act(async () => {
         heldSwitch.release.resolve()
         await switchPromise
       })
-      expect(controller.result.current.activeChatId).toBe('chat-a')
-      expect(controller.result.current.chatMessages).toEqual([])
-      expect(controller.result.current.chatMessagesLoading).toBe(false)
+      expect({
+        activeChatId: controller.result.current.activeChatId,
+        loadingWhileHeld,
+        messages: controller.result.current.chatMessages,
+        loadingAfter: controller.result.current.chatMessagesLoading,
+      }).toEqual({
+        activeChatId: 'chat-a',
+        loadingWhileHeld: true,
+        messages: expect.arrayContaining([expect.objectContaining({ id: 'chat-a-message' })]),
+        loadingAfter: false,
+      })
       expect(
         clerum.chat.loadMessages.mock.calls.some(
           ([agentRef, chatId]) => agentRef === 'agent-x' && chatId === 'chat-b'
