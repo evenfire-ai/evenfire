@@ -371,6 +371,43 @@ describe('AppService pending external logout', () => {
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
   })
 
+  it('rewrites cleanup intent if canceled-quit marker unlink cannot be synced', async () => {
+    const reportFailure = vi.fn()
+    const { service } = createService(undefined, reportFailure)
+    const state = internals(service)
+    state.sessionToken = loginResult.token
+    state.me = loginResult.me
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
+    const originalFsync = fsSync.fsyncSync.bind(fsSync)
+    let failedDirectorySync = false
+    const fsync = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
+      if (!failedDirectorySync && fsSync.fstatSync(descriptor).isDirectory()) {
+        failedDirectorySync = true
+        throw Object.assign(new Error('directory sync failed'), { code: 'EIO' })
+      }
+      return originalFsync(descriptor)
+    })
+
+    try {
+      await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(false)
+
+      expect(failedDirectorySync).toBe(true)
+      expect(JSON.parse(await fs.readFile(markerPath(), 'utf8'))).toEqual({
+        version: 1,
+        intent: 'keytar-cleanup-pending',
+        credentialSource: 'safe-storage',
+      })
+      expect(state.sessionToken).toBe(loginResult.token)
+      expect(state.me).toEqual(loginResult.me)
+      expect(reportFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'directory sync failed' })
+      )
+    } finally {
+      fsync.mockRestore()
+    }
+  })
+
   it('does not restore a plaintext token after safeStorage cleanup succeeds', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
