@@ -61,6 +61,7 @@ export {
   listPendingInvitations,
   setInvitationPasswordForUser,
   setInvitationPasswordForEmail,
+  withMemberPasswordWorkLease,
   searchDirectory,
   softDeleteMember,
   startDraftInvitationCleanup,
@@ -70,6 +71,7 @@ export {
   updateProfile,
   updateUserPassword,
 } from './membership.js'
+export type { MemberPasswordWorkLease } from './membership.js'
 
 export {
   getTeamContexts,

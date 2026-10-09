@@ -11,7 +11,11 @@ import { createExternalInvitationsRouter } from '../src/routes/external/invitati
 import { passwordIdentifierKey } from '../src/services/auth/passwordAdmissionState.js'
 import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
 import { verifyUserPassword } from '../src/services/directory/login.js'
-import { createInvitationForTeams } from '../src/services/directory/membership.js'
+import {
+  createInvitationForTeams,
+  setInvitationPasswordForEmail,
+  updateUserPassword,
+} from '../src/services/directory/membership.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -42,8 +46,11 @@ vi.mock('../src/db.js', async importOriginal => {
     ...real,
     pool: proxy,
     rateLimitPool: proxy,
-    withTransaction: (fn: Parameters<typeof real.withTransaction>[0]) =>
-      real.withTransaction(fn, holder.pool),
+    withTransaction: (
+      fn: Parameters<typeof real.withTransaction>[0],
+      _txPool?: Parameters<typeof real.withTransaction>[1],
+      options?: Parameters<typeof real.withTransaction>[2]
+    ) => real.withTransaction(fn, holder.pool, options),
   }
 })
 vi.mock('../src/services/rateLimiterService.js', async importOriginal => {
@@ -59,6 +66,7 @@ vi.mock('../src/services/rateLimiterService.js', async importOriginal => {
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const realPg = adminUrl ? describe : describe.skip
 const password = 'Synthetic-BUG192-correct-password'
+const realBcryptCompare = bcrypt.compare.bind(bcrypt)
 realPg('BUG-192 observable password-login regressions on real PostgreSQL', () => {
   const database = `bug192_${randomBytes(6).toString('hex')}`
   let admin: Pool
@@ -395,6 +403,172 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       await lease?.release()
     }
   })
+  it('returns acknowledged password recovery after a post-commit client cleanup failure', async () => {
+    const invitation = await createInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email: 'member@example.invalid',
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    const sibling = await createInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email: 'member@example.invalid',
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    const connect = holder.pool.connect.bind(holder.pool)
+    const connectSpy = vi.spyOn(holder.pool, 'connect')
+    let recoveryUpdateCommitted = false
+    let cleanupFailed = false
+    connectSpy.mockImplementation((async () => {
+      const client = await connect()
+      const query = client.query.bind(client)
+      const release = client.release.bind(client)
+      let recoveryCredentialWritten = false
+      return new Proxy(client, {
+        get(target, property) {
+          if (property === 'query') {
+            return async (...args: unknown[]) => {
+              const statement =
+                typeof args[0] === 'string'
+                  ? args[0]
+                  : String((args[0] as { text?: string } | undefined)?.text || '')
+              const result = await (query as (...queryArgs: unknown[]) => Promise<unknown>)(...args)
+              if (/UPDATE users\s+SET password_hash/is.test(statement))
+                recoveryCredentialWritten = true
+              if (/^COMMIT\s*$/i.test(statement) && recoveryCredentialWritten)
+                recoveryUpdateCommitted = true
+              return result
+            }
+          }
+          if (property === 'release') {
+            return (error?: Error | boolean) => {
+              if (recoveryUpdateCommitted && !cleanupFailed) {
+                cleanupFailed = true
+                release(new Error('synthetic post-commit cleanup failure'))
+                throw new Error('synthetic post-commit cleanup failure')
+              }
+              return release(error)
+            }
+          }
+          const value = Reflect.get(target, property, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    }) as typeof holder.pool.connect)
+
+    let result: Awaited<ReturnType<typeof setInvitationPasswordForEmail>> | undefined
+    try {
+      result = await setInvitationPasswordForEmail(
+        'member@example.invalid',
+        invitation.id,
+        'Synthetic-BUG192-recovered-after-commit'
+      )
+    } finally {
+      connectSpy.mockRestore()
+    }
+    expect(cleanupFailed).toBe(true)
+    expect(recoveryUpdateCommitted).toBe(true)
+    expect(result).toBeDefined()
+    expect(result).toMatchObject({
+      data: { passwordUpdated: true, sessionContext: { userId } },
+    })
+    expect(
+      (
+        await holder.pool.query('SELECT id, status FROM invitations WHERE id = ANY($1::uuid[])', [
+          [invitation.id, sibling.id],
+        ])
+      ).rows
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: invitation.id, status: 'accepted' }),
+        expect.objectContaining({ id: sibling.id, status: 'revoked' }),
+      ])
+    )
+    expect(
+      (await holder.pool.query('SELECT count(*)::text AS count FROM password_verification_work'))
+        .rows[0].count
+    ).toBe('0')
+    await openPace()
+    const loginResponse = await login(
+      'member@example.invalid',
+      'Synthetic-BUG192-recovered-after-commit',
+      '192.0.2.111'
+    )
+    expect(loginResponse.status).toBe(200)
+  }, 30_000)
+  it('keeps authenticated password change inside the single durable bcrypt owner', async () => {
+    let releaseCompare!: () => void
+    let compareStarted!: () => void
+    const compareGate = new Promise<void>(resolve => {
+      releaseCompare = resolve
+    })
+    const compareEntered = new Promise<void>(resolve => {
+      compareStarted = resolve
+    })
+    let releaseHash!: () => void
+    let hashStarted!: () => void
+    const hashGate = new Promise<void>(resolve => {
+      releaseHash = resolve
+    })
+    const hashEntered = new Promise<void>(resolve => {
+      hashStarted = resolve
+    })
+    const realPasswordHash = bcrypt.hash.bind(bcrypt)
+    let compareCalls = 0
+    let hashCalls = 0
+    compare.mockImplementation(async (submitted, stored) => {
+      const matched = await realBcryptCompare(submitted, stored)
+      if (compareCalls++ === 0) {
+        compareStarted()
+        await compareGate
+      }
+      return matched
+    })
+    const hash = vi.spyOn(bcrypt, 'hash').mockImplementation(async (submitted, rounds) => {
+      const value = await realPasswordHash(submitted, rounds)
+      if (hashCalls++ === 0) {
+        hashStarted()
+        await hashGate
+      }
+      return value
+    })
+
+    const update = updateUserPassword(
+      userId,
+      'member@example.invalid',
+      password,
+      'Synthetic-BUG192-password-changed'
+    )
+    let comparePhaseLoginStatus = 0
+    let hashPhaseLoginStatus = 0
+    try {
+      await compareEntered
+      await openPace()
+      comparePhaseLoginStatus = (await login('member@example.invalid', password, '192.0.2.112'))
+        .status
+      releaseCompare()
+      await hashEntered
+      await openPace()
+      hashPhaseLoginStatus = (await login('member@example.invalid', password, '192.0.2.113')).status
+    } finally {
+      releaseCompare()
+      releaseHash()
+    }
+
+    expect(await update).toEqual({ updated: true })
+    expect(comparePhaseLoginStatus).toBe(429)
+    expect(hashPhaseLoginStatus).toBe(429)
+    expect(compare).toHaveBeenCalledTimes(1)
+    expect(hash).toHaveBeenCalledTimes(1)
+    await openPace()
+    expect(
+      (await login('member@example.invalid', 'Synthetic-BUG192-password-changed', '192.0.2.114'))
+        .status
+    ).toBe(200)
+  }, 30_000)
   it('keeps real and shadow cooldown status/body/retry metadata identical', async () => {
     // Backdate admitted attempts and completed failures using the DB clock,
     // then retain the real admission producer for the fifth transition.

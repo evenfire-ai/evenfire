@@ -25,6 +25,7 @@ import {
   setInvitationPasswordForEmail,
   setInvitationPasswordForUser,
   updateUserPassword,
+  withMemberPasswordWorkLease,
 } from '../src/services/directory/membership.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -46,8 +47,11 @@ vi.mock('../src/db.js', async importOriginal => {
     ...real,
     pool: proxy,
     rateLimitPool: proxy,
-    withTransaction: (fn: Parameters<typeof real.withTransaction>[0]) =>
-      real.withTransaction(fn, holder.pool),
+    withTransaction: (
+      fn: Parameters<typeof real.withTransaction>[0],
+      _txPool?: Parameters<typeof real.withTransaction>[1],
+      options?: Parameters<typeof real.withTransaction>[2]
+    ) => real.withTransaction(fn, holder.pool, options),
   }
 })
 vi.mock('../src/services/rateLimiterService.js', async importOriginal => {
@@ -239,7 +243,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     expect(await completePasswordEvaluation(success, true)).toBe(false)
     expect((await row()).failures).toEqual([])
   })
-  it('prevents a stale authenticated password change from overwriting verified recovery', async () => {
+  it('serializes authenticated password change and recovery through one durable owner', async () => {
     const invitation = await createSilentInvitationForTeams({
       inviteeName: 'Synthetic member',
       email,
@@ -273,13 +277,18 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       password,
       'Synthetic-BUG192-stale-password-change'
     )
-    await compareEntered
     const recoveryPassword = 'Synthetic-BUG192-recovered-password'
+    try {
+      await compareEntered
+      await expect(
+        setInvitationPasswordForEmail(email, invitation.id, recoveryPassword)
+      ).rejects.toMatchObject({ status: 429, reason: 'verification_busy' })
+    } finally {
+      releaseCompare()
+    }
+    await expect(stalePasswordChange).resolves.toEqual({ updated: true })
     const recovery = await setInvitationPasswordForEmail(email, invitation.id, recoveryPassword)
     expect(recovery).not.toHaveProperty('error')
-
-    releaseCompare()
-    await expect(stalePasswordChange).resolves.toEqual({ error: 'credential_changed' })
     await expect(
       verifyMemberPassword(email, recoveryPassword, { publicLogin: false, userId })
     ).resolves.toMatchObject({ id: userId })
@@ -356,6 +365,70 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
       holder.pool = previousPool
       await endPoolAndWaitForClients(singleConnectionPool)
     }
+  })
+  it('does not hash accepted invitation passwords outside the durable owner', async () => {
+    const invitation = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email,
+      purpose: 'member_invitation',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    const accepted = await acceptInvitationForEmail(email, invitation.token, invitation.id)
+    expect(accepted).toMatchObject({ data: { accepted: true, userId } })
+
+    const lease = await acquirePasswordWork()
+    expect(lease).not.toBeNull()
+    const hashSpy = vi.spyOn(bcrypt, 'hash')
+    try {
+      await expect(
+        setInvitationPasswordForUser(
+          userId,
+          email,
+          invitation.id,
+          'Synthetic-BUG192-invitation-password'
+        )
+      ).rejects.toMatchObject({ status: 429, reason: 'verification_busy' })
+      expect(hashSpy).not.toHaveBeenCalled()
+      const current = (
+        await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])
+      ).rows[0].password_hash
+      expect(current).toBe(hash)
+    } finally {
+      hashSpy.mockRestore()
+      await lease?.release()
+    }
+  })
+  it('reuses a reserved owner to complete accepted invitation password setup', async () => {
+    const invitation = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic member',
+      email,
+      purpose: 'member_invitation',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    const accepted = await acceptInvitationForEmail(email, invitation.token, invitation.id)
+    expect(accepted).toMatchObject({ data: { accepted: true, userId } })
+
+    const result = await withMemberPasswordWorkLease(lease =>
+      setInvitationPasswordForUser(
+        userId,
+        email,
+        invitation.id,
+        'Synthetic-BUG192-reserved-invitation-password',
+        lease
+      )
+    )
+
+    expect(result).not.toHaveProperty('error')
+    expect(
+      (await holder.pool.query('SELECT password_hash FROM users WHERE id = $1', [userId])).rows[0]
+        .password_hash
+    ).not.toBe(hash)
+    expect(
+      (await holder.pool.query('SELECT count(*)::text AS count FROM password_verification_work'))
+        .rows[0].count
+    ).toBe('0')
   })
   it('does not accept a pending password-reset link through generic invitation acceptance', async () => {
     const invitation = await createSilentInvitationForTeams({

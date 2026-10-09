@@ -8,6 +8,7 @@ import {
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
@@ -322,6 +323,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         }
         return res.status(200).json(result)
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }

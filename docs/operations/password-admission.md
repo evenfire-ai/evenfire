@@ -11,14 +11,16 @@ Anonymous password login retains the Spec 043 controls:
   with no queue and no pace refund.
 
 These anonymous-login limits protect account-wide guessing and pace public
-cost-12 password verification. The durable work owner also keeps verification and
-recovery hashing at global concurrency one. Recovery hashes bypass the anonymous
-1-per-7.5-second start pace, so that rate limit does not cover aggregate bcrypt
-starts across both lanes. Distributed sources can consume the public pace while
-staying below their individual source limits. Ordinary anonymous logins can
-consequently receive HTTP 429 during sustained pressure. This availability tradeoff
-is retained; the global starvation mechanism has not been removed, and monitoring
-alone does not mitigate it.
+cost-12 password verification. The durable work owner serializes all member-account
+bcrypt work: password verification, recovery hashing, accepted-invitation password
+setup, and authenticated password changes. Recovery and password-setting work bypass
+the anonymous 1-per-7.5-second start pace, so that rate limit does not cover aggregate
+bcrypt starts across these member-account flows. Control Admin credentials use a
+separate authentication subsystem outside this policy. Distributed sources can
+consume the public pace while staying below their individual source limits. Ordinary
+anonymous logins can consequently receive HTTP 429 during sustained pressure. This
+availability tradeoff is retained; the global starvation mechanism has not been
+removed, and monitoring alone does not mitigate it.
 
 ## Verified recovery
 
@@ -30,10 +32,11 @@ Only after that commit does Control API issue the normal signed session, which
 External REST stores in the profile session cookie.
 
 Recovery hashes use the existing durable `password_verification_work` singleton.
-This keeps bcrypt concurrency at one across service processes and fails closed when
-that owner is busy or database authority is unavailable. There is no recovery queue
-and no second bcrypt lane. A concurrent request may receive 429 while the owner is
-held; retry the verified recovery request after its sanitized `Retry-After` interval.
+Authenticated password changes and accepted-invitation password setup use that same
+owner. This keeps member-account bcrypt concurrency at one across service processes
+and fails closed when the owner is busy or database authority is unavailable. There
+is no recovery queue or second concurrent member-account bcrypt lane. A request may
+receive 429 while the owner is held; retry after its sanitized `Retry-After` interval.
 
 Password reset keeps the public identifier attempt timestamps. The existing
 credential-generation fence clears failure cooldown state, while any remaining

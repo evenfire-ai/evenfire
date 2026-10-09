@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs'
-import { type DbClient, pool, withTransaction } from '../../db.js'
+import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
 import { PASSWORD_ADMISSION_POLICY } from '../auth/passwordAdmissionState.js'
 import { PasswordAdmissionError } from '../auth/passwordCredentialVerification.js'
@@ -183,6 +183,75 @@ async function acquirePasswordSetupLease() {
   } catch (error) {
     if (error instanceof PasswordAdmissionError) throw error
     throw new PasswordAdmissionError(503, 2, 'authority_failure')
+  }
+}
+
+export type MemberPasswordWorkLease = NonNullable<Awaited<ReturnType<typeof acquirePasswordWork>>>
+
+type PasswordWorkLease = MemberPasswordWorkLease
+
+/** Reserve the member-password lane around a multi-step invitation completion. */
+export async function withMemberPasswordWorkLease<T>(
+  work: (lease: MemberPasswordWorkLease) => Promise<T>
+): Promise<T> {
+  const lease = await acquirePasswordSetupLease()
+  let outcome!: T
+  let workFailed = false
+  let workError: unknown
+  try {
+    outcome = await work(lease)
+  } catch (error) {
+    workFailed = true
+    workError = error
+  }
+  try {
+    await lease.release()
+  } catch {
+    passwordSetupLogger.warn(
+      { event: 'password_authority_unavailable' },
+      'password authority unavailable'
+    )
+    throw new PasswordAdmissionError(503, 2, 'authority_failure')
+  }
+  if (workFailed) throw workError
+  return outcome
+}
+
+/** Commit member credential mutations and durable-owner release as one outcome. */
+async function withPasswordWorkTransaction<T>(
+  lease: PasswordWorkLease,
+  work: (db: DbTransactionClient) => Promise<T>
+): Promise<T> {
+  let commitAcknowledged = false
+  let hasOutcome = false
+  let outcome!: T
+  try {
+    return await withTransaction(
+      async db => {
+        outcome = await work(db)
+        hasOutcome = true
+        await lease.releaseWithin(db)
+        return outcome
+      },
+      undefined,
+      {
+        onCommitAcknowledged: () => {
+          commitAcknowledged = true
+          lease.confirmReleaseWithinCommitted()
+        },
+      }
+    )
+  } catch (error) {
+    if (commitAcknowledged && hasOutcome) {
+      passwordSetupLogger.warn(
+        { event: 'password_post_commit_cleanup_failed' },
+        'password transaction committed; connection cleanup failed'
+      )
+      return outcome
+    }
+    throw error
+  } finally {
+    if (!commitAcknowledged) await lease.release()
   }
 }
 
@@ -1135,7 +1204,8 @@ export async function setInvitationPasswordForUser(
   userId: string,
   email: string,
   invitationId: string,
-  password: string
+  password: string,
+  passwordWorkLease?: PasswordWorkLease
 ) {
   const trimmedUserId = userId.trim()
   const normalizedEmail = email.trim().toLowerCase()
@@ -1149,74 +1219,91 @@ export async function setInvitationPasswordForUser(
   }
 
   const candidate = await getInvitationRecordById(pool, trimmedInvitationId)
-  if (candidate?.purpose === 'password_reset') {
-    if (candidate.email.toLowerCase() !== normalizedEmail) {
-      return { error: 'forbidden' as const }
-    }
+  if (!candidate) return { error: 'not_found' as const }
+  if (candidate.email.toLowerCase() !== normalizedEmail) {
+    return { error: 'forbidden' as const }
+  }
+  if (candidate.purpose === 'password_reset') {
     const result = await setInvitationPasswordForEmail(
       normalizedEmail,
       trimmedInvitationId,
       trimmedPassword,
-      trimmedUserId
+      trimmedUserId,
+      passwordWorkLease
     )
     if ('error' in result) return result
     const { sessionContext: _sessionContext, ...data } = result.data
     return { data }
   }
+  if (candidate.purpose !== 'member_invitation' && candidate.purpose !== 'admin_desktop_access') {
+    return { error: 'not_found' as const }
+  }
+  if (candidate.status !== 'accepted') return { error: 'not_accepted' as const }
 
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, trimmedInvitationId)
-    if (!invitation) return { error: 'not_found' as const }
-    if (invitation.email.toLowerCase() !== normalizedEmail) {
-      return { error: 'forbidden' as const }
-    }
-    if (
-      invitation.purpose !== 'member_invitation' &&
-      invitation.purpose !== 'admin_desktop_access'
-    ) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.status !== 'accepted') return { error: 'not_accepted' as const }
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-    if (user.id !== trimmedUserId) return { error: 'forbidden' as const }
-    const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-    const update = await db.query(
-      `UPDATE users
+  const lease = passwordWorkLease ?? (await acquirePasswordSetupLease())
+  try {
+    return await withPasswordWorkTransaction(lease, async db => {
+      const invitation = await getInvitationRecordById(db, trimmedInvitationId)
+      if (!invitation) return { error: 'not_found' as const }
+      if (invitation.email.toLowerCase() !== normalizedEmail) {
+        return { error: 'forbidden' as const }
+      }
+      if (
+        invitation.purpose !== 'member_invitation' &&
+        invitation.purpose !== 'admin_desktop_access'
+      ) {
+        return { error: 'not_found' as const }
+      }
+      if (invitation.status !== 'accepted') return { error: 'not_accepted' as const }
+      const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
+      if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
+      if (user.id !== trimmedUserId) return { error: 'forbidden' as const }
+      const passwordHash = await bcrypt.hash(trimmedPassword, 12)
+      const update = await db.query(
+        `UPDATE users
             SET password_hash = $2,
                 password_set_at = NOW(),
                 updated_at = NOW()
           WHERE id = $1
             AND lifecycle_state = 'active'
           RETURNING id`,
-      [user.id, passwordHash]
+        [user.id, passwordHash]
+      )
+      if (update.rows.length !== 1) return { error: 'user_retired' as const }
+
+      if (!invitation.accepted_user_id) {
+        await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
+          invitation.id,
+          user.id,
+        ])
+      }
+
+      const refreshed = await getInvitationRecordById(db, invitation.id)
+      if (!refreshed) return { error: 'not_found' as const }
+      const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
+      return {
+        data: {
+          passwordUpdated: true,
+          ...invitationResponse(refreshed, { ...user, password_hash: passwordHash }, teams),
+        },
+      }
+    })
+  } catch (error) {
+    if (error instanceof PasswordAdmissionError) throw error
+    passwordSetupLogger.warn(
+      { event: 'password_authority_unavailable' },
+      'password authority unavailable'
     )
-    if (update.rows.length !== 1) return { error: 'user_retired' as const }
-
-    if (!invitation.accepted_user_id) {
-      await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
-        invitation.id,
-        user.id,
-      ])
-    }
-
-    const refreshed = await getInvitationRecordById(db, invitation.id)
-    if (!refreshed) return { error: 'not_found' as const }
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    return {
-      data: {
-        passwordUpdated: true,
-        ...invitationResponse(refreshed, { ...user, password_hash: passwordHash }, teams),
-      },
-    }
-  })
+    throw new PasswordAdmissionError(503, 2, 'authority_failure')
+  }
 }
 
 export async function setInvitationPasswordForEmail(
   email: string,
   invitationId: string,
   password: string,
-  expectedUserId?: string
+  expectedUserId?: string,
+  passwordWorkLease?: PasswordWorkLease
 ) {
   const normalizedEmail = email.trim().toLowerCase()
   const trimmedInvitationId = invitationId.trim()
@@ -1228,11 +1315,9 @@ export async function setInvitationPasswordForEmail(
     return { error: 'invalid_password' as const }
   }
 
-  const lease = await acquirePasswordSetupLease()
-  let releaseStaged = false
-  let releasedWithCommit = false
+  const lease = passwordWorkLease ?? (await acquirePasswordSetupLease())
   try {
-    const result = await withTransaction(async db => {
+    return await withPasswordWorkTransaction(lease, async db => {
       const candidate = await getInvitationRecordById(db, trimmedInvitationId)
       if (!candidate || candidate.purpose !== 'password_reset') {
         return { error: 'not_found' as const }
@@ -1289,8 +1374,6 @@ export async function setInvitationPasswordForEmail(
       if (!refreshed) return { error: 'not_found' as const }
       const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
       const sessionContext = await getMemberSessionContext(db, user)
-      await lease.releaseWithin(db)
-      releaseStaged = true
       return {
         data: {
           passwordUpdated: true,
@@ -1299,8 +1382,6 @@ export async function setInvitationPasswordForEmail(
         },
       }
     })
-    if (releaseStaged) releasedWithCommit = true
-    return result
   } catch (error) {
     if (error instanceof PasswordAdmissionError) throw error
     passwordSetupLogger.warn(
@@ -1308,18 +1389,6 @@ export async function setInvitationPasswordForEmail(
       'password authority unavailable'
     )
     throw new PasswordAdmissionError(503, 2, 'authority_failure')
-  } finally {
-    if (!releasedWithCommit) {
-      try {
-        await lease.release()
-      } catch {
-        passwordSetupLogger.warn(
-          { event: 'password_authority_unavailable' },
-          'password authority unavailable'
-        )
-        throw new PasswordAdmissionError(503, 2, 'authority_failure')
-      }
-    }
   }
 }
 
@@ -2031,45 +2100,57 @@ export async function updateUserPassword(
     return { error: 'invalid_password' as const }
   }
 
-  const result = await pool.query(
-    `SELECT password_hash, password_auth_generation
-       FROM users
-      WHERE id = $1
-        AND email = $2
-      LIMIT 1`,
-    [normalizedUserId, normalizedEmail]
-  )
-  const user =
-    (result.rows[0] as
-      | { password_hash: string | null; password_auth_generation: string | number }
-      | undefined) || null
-  if (!user) {
-    return { error: 'not_found' as const }
-  }
-  if (!user.password_hash) {
-    return { error: 'password_not_set' as const }
-  }
-  const currentOk = await bcrypt.compare(currentPassword, user.password_hash)
-  if (!currentOk) {
-    return { error: 'invalid_current_password' as const }
-  }
+  const lease = await acquirePasswordSetupLease()
+  try {
+    return await withPasswordWorkTransaction(lease, async db => {
+      const result = await db.query(
+        `SELECT password_hash, password_auth_generation
+           FROM users
+          WHERE id = $1
+            AND email = $2
+          LIMIT 1`,
+        [normalizedUserId, normalizedEmail]
+      )
+      const user =
+        (result.rows[0] as
+          | { password_hash: string | null; password_auth_generation: string | number }
+          | undefined) || null
+      if (!user) {
+        return { error: 'not_found' as const }
+      }
+      if (!user.password_hash) {
+        return { error: 'password_not_set' as const }
+      }
+      const currentOk = await bcrypt.compare(currentPassword, user.password_hash)
+      if (!currentOk) {
+        return { error: 'invalid_current_password' as const }
+      }
 
-  const update = await pool.query(
-    `UPDATE users
-        SET password_hash = $3,
-            password_set_at = NOW(),
-            updated_at = NOW()
-      WHERE id = $1
-        AND password_auth_generation = $2
-        AND password_hash = $4
-      RETURNING id`,
-    [
-      normalizedUserId,
-      user.password_auth_generation,
-      await bcrypt.hash(nextPassword, 12),
-      user.password_hash,
-    ]
-  )
-  if (update.rows.length !== 1) return { error: 'credential_changed' as const }
-  return { updated: true as const }
+      const update = await db.query(
+        `UPDATE users
+            SET password_hash = $3,
+                password_set_at = NOW(),
+                updated_at = NOW()
+          WHERE id = $1
+            AND password_auth_generation = $2
+            AND password_hash = $4
+          RETURNING id`,
+        [
+          normalizedUserId,
+          user.password_auth_generation,
+          await bcrypt.hash(nextPassword, 12),
+          user.password_hash,
+        ]
+      )
+      if (update.rows.length !== 1) return { error: 'credential_changed' as const }
+      return { updated: true as const }
+    })
+  } catch (error) {
+    if (error instanceof PasswordAdmissionError) throw error
+    passwordSetupLogger.warn(
+      { event: 'password_authority_unavailable' },
+      'password authority unavailable'
+    )
+    throw new PasswordAdmissionError(503, 2, 'authority_failure')
+  }
 }

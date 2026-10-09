@@ -9,6 +9,7 @@ let ownerInstance: string | undefined
 export async function acquirePasswordWork(): Promise<{
   release: () => Promise<void>
   releaseWithin: (db: Pick<DbTransactionClient, 'query'>) => Promise<void>
+  confirmReleaseWithinCommitted: () => void
 } | null> {
   const owner = (ownerInstance ??= randomUUID())
   const operation = randomUUID()
@@ -35,12 +36,17 @@ export async function acquirePasswordWork(): Promise<{
     if (result.rows.length !== 1) throw new Error('password work ownership lost')
   }
   let released: Promise<void> | undefined
+  let releaseWithinCommitted = false
   return {
     // Password credential updates can release the durable owner in the same
     // transaction as their commit. If that transaction rolls back, callers
     // must fall back to release() so the persisted owner does not linger.
     releaseWithin: releaseOwned,
+    confirmReleaseWithinCommitted: () => {
+      releaseWithinCommitted = true
+    },
     release: () => {
+      if (releaseWithinCommitted) return Promise.resolve()
       released ??= withTransaction(async db => {
         await releaseOwned(db)
       })

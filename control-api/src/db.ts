@@ -6730,7 +6730,11 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
-export type DbTransactionOptions = { signal?: AbortSignal }
+export type DbTransactionOptions = {
+  signal?: AbortSignal
+  /** Called only after PostgreSQL acknowledges COMMIT. Must be synchronous and non-throwing. */
+  onCommitAcknowledged?: () => void
+}
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
@@ -6870,6 +6874,7 @@ export async function withTransaction<T>(
     commitSent = true
     await client.query('COMMIT')
     transactionFinished = true
+    options.onCommitAcknowledged?.()
     // An acknowledged COMMIT is the outcome, even if the signal aborted
     // meanwhile: the finally still evicts the session instead of restoring it.
     return result

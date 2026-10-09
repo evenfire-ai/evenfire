@@ -26,8 +26,11 @@ vi.mock('../src/db.js', async importOriginal => {
     ...real,
     pool: proxy,
     rateLimitPool: proxy,
-    withTransaction: (fn: Parameters<typeof real.withTransaction>[0]) =>
-      real.withTransaction(fn, holder.pool),
+    withTransaction: (
+      fn: Parameters<typeof real.withTransaction>[0],
+      _txPool?: Parameters<typeof real.withTransaction>[1],
+      options?: Parameters<typeof real.withTransaction>[2]
+    ) => real.withTransaction(fn, holder.pool, options),
   }
 })
 
