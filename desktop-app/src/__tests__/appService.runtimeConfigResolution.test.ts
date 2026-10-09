@@ -95,7 +95,7 @@ describe('AppService runtime config discovery ownership', () => {
     }
     const { AuthClient } = await import('../authClient.js')
     vi.spyOn(AuthClient.prototype, 'issueRpcToken').mockResolvedValue({
-      token: 'desktop-rpc-token',
+      token: 'fixture-rpc-token',
       accessScope: 'team',
       teamId: 'team-a',
       scopes: ['desktop:view'],
