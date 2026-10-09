@@ -45,6 +45,7 @@ const CONNECTORS: RpcConnectorsResult = {
           status: 'requires_setup',
         },
         { name: 'filesystem', authKind: 'static', status: 'no_oauth' },
+        { name: 'public-data', status: 'no_oauth' },
         {
           name: 'shared-drive',
           provider: 'google',
@@ -236,6 +237,15 @@ describe('McpServersPage — da-table layout + navigation', () => {
     const filesystem = rowBy(rows, 'filesystem', 'agent-zeta')
     expect(chipText(filesystem)).toBe('—')
     expect(buttonLabels(filesystem)).toEqual([])
+    expect(filesystem.querySelector('td:nth-child(4)')?.textContent?.trim()).toBe(
+      'Static credentials'
+    )
+
+    const publicData = rowBy(rows, 'public-data', 'agent-zeta')
+    const authenticationCell = publicData.querySelector('td:nth-child(4)')
+    expect(authenticationCell?.textContent?.trim()).toBe('')
+    expect(authenticationCell?.childElementCount).toBe(0)
+    expect(publicData.textContent).not.toContain('No authentication')
 
     // oauth-user scope pill surfaces the blast-radius caption as a tooltip.
     expect(monday.querySelector('.ui-pill')?.getAttribute('title')).toMatch(

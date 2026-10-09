@@ -1674,11 +1674,13 @@ export default function HostDetailsPage() {
                           <span className="cu-table__cell-name">{server}</span>
                         </td>
                         <td>
-                          <span className="cu-connector-badge">
-                            {connectorCatalogLoading
-                              ? 'Loading…'
-                              : (connectorAuthenticationByName[server] ?? 'Unknown')}
-                          </span>
+                          {connectorCatalogLoading ? (
+                            <span className="cu-connector-badge">Loading…</span>
+                          ) : connectorAuthenticationByName[server] === '' ? null : (
+                            <span className="cu-connector-badge">
+                              {connectorAuthenticationByName[server] ?? 'Unknown'}
+                            </span>
+                          )}
                         </td>
                         <td className="cu-table__cell-actions">
                           <div className="cu-table-actions">

@@ -5,6 +5,6 @@ export function connectorAuthenticationLabel(authType: unknown): string {
   if (typeof authType === 'string' && STATIC_AUTH_TYPES.has(authType)) {
     return 'Static credentials'
   }
-  if (authType == null || authType === 'none') return 'No authentication'
+  if (authType == null || authType === 'none') return ''
   return 'Other'
 }

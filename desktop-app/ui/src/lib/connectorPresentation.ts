@@ -28,7 +28,7 @@ export function authenticationLabel(connector: Pick<RpcConnector, 'authKind'>): 
   if (connector.authKind === 'oauth-user' || connector.authKind === 'oauth-context') {
     return 'OAuth'
   }
-  return connector.authKind === 'static' ? 'Static credentials' : 'No authentication'
+  return connector.authKind === 'static' ? 'Static credentials' : ''
 }
 
 export function connectorScopeLabel(connector: RpcConnector): string {

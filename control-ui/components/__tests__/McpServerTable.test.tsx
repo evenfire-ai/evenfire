@@ -20,6 +20,7 @@ function makeItem(overrides: {
   image?: string
   contextRef?: string
   description?: string
+  authType?: string | null
   transportType?: 'sse' | 'streamableHttp' | 'stdio'
   enabled?: boolean
   conditions?: McpServerCondition[] | undefined
@@ -31,6 +32,7 @@ function makeItem(overrides: {
       image: string
       contextRef: string
       description?: string
+      auth?: { type?: string | null } | null
       enabled?: boolean
       transport: { type: 'sse' | 'streamableHttp' | 'stdio'; url: string }
     }
@@ -44,6 +46,9 @@ function makeItem(overrides: {
       image: overrides.image ?? 'ghcr.io/example/mcp:1.0',
       contextRef: overrides.contextRef ?? 'context1',
       description: overrides.description,
+      ...(overrides.authType === undefined
+        ? {}
+        : { auth: overrides.authType === null ? null : { type: overrides.authType } }),
       enabled: overrides.enabled,
       transport: {
         type: overrides.transportType ?? 'streamableHttp',
@@ -237,6 +242,32 @@ describe('McpServerTable — marketplace-aligned rows', () => {
 })
 
 describe('McpServerTable — connector list', () => {
+  it('leaves authentication blank without a configured type and labels configured types', () => {
+    render(
+      <McpServerTable
+        items={[
+          makeItem({ name: 'public-connector' }),
+          makeItem({ name: 'none-connector', authType: 'none' }),
+          makeItem({ name: 'null-connector', authType: null }),
+          makeItem({ name: 'oauth-connector', authType: 'oauth' }),
+          makeItem({ name: 'static-connector', authType: 'bearer' }),
+        ]}
+      />
+    )
+
+    for (const name of ['public-connector', 'none-connector', 'null-connector']) {
+      const row = screen.getByText(name).closest('tr')
+      const authenticationCell = row?.querySelector('td:nth-child(3)')
+      expect(authenticationCell?.textContent?.trim()).toBe('')
+      expect(authenticationCell?.childElementCount).toBe(0)
+    }
+    expect(screen.getByText('oauth-connector').closest('tr')).toHaveTextContent('OAuth')
+    expect(screen.getByText('static-connector').closest('tr')).toHaveTextContent(
+      'Static credentials'
+    )
+    expect(screen.queryByText('No authentication')).toBeNull()
+  })
+
   it('renders ordinary rows without inline detail expansion', () => {
     const items = [makeItem({ name: 'airtable-server' })]
     render(<McpServerTable items={items} />)

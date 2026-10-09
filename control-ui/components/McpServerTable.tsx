@@ -89,7 +89,8 @@ function StatusBadge({ status }: { status?: McpServerStatus }) {
 }
 
 function AuthenticationBadge({ authType }: { authType: unknown }) {
-  return <span className="cu-connector-badge">{connectorAuthenticationLabel(authType)}</span>
+  const label = connectorAuthenticationLabel(authType)
+  return label ? <span className="cu-connector-badge">{label}</span> : null
 }
 
 export function McpServerTable({

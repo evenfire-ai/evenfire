@@ -301,8 +301,15 @@ describe('HostDetailsPage connectors', () => {
 
     cleanup()
     activeHostName = 'foo'
+    vi.mocked(api.getMcpServers).mockClear()
     renderPage()
     expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
+    await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
+    const connectorRow = screen.getByText('mcp-existing').closest('tr')
+    const authenticationCell = connectorRow?.querySelector('td:nth-child(2)')
+    expect(authenticationCell).not.toBeNull()
+    await waitFor(() => expect(authenticationCell?.textContent?.trim()).toBe(''))
+    expect(authenticationCell?.childElementCount).toBe(0)
     fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
     await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
     fireEvent.click(await screen.findByRole('checkbox', { name: 'mcp-new' }))

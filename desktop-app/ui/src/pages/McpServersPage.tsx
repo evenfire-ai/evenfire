@@ -89,9 +89,11 @@ function ConnectorRowView({
       </td>
 
       <td className="da-table__cell">
-        <Pill tone="neutral" size="sm">
-          {authentication}
-        </Pill>
+        {authentication ? (
+          <Pill tone="neutral" size="sm">
+            {authentication}
+          </Pill>
+        ) : null}
       </td>
 
       <td className="da-table__cell">
