@@ -1181,6 +1181,14 @@ spec:
 
 **Runtime behavior.** Scheduling is **Postgres-backed, not a Kubernetes CronJob**: WRC keeps a `workflow_schedules` row in sync and the advance loop lives in a control-api worker. `enabled = NOT suspend`, so suspending keeps the row rather than deleting it.
 
+**`concurrencyPolicy`** (and `spec.scheduling.concurrencyPolicy` on the legacy path, §3.14) applies to scheduled ticks only; on-demand and autonomous triggers are never gated by it.
+
+- `Forbid` (default): a tick is skipped while a run of the recipe is still live, whatever started it. Live means `Pending` for less than 15 minutes, or `Running` for less than `maxRunDurationSeconds` (capped at 24 hours, the controller maximum, and assumed when unset) plus a 5-minute grace. The schedule advances to its next future window; skipped windows are not replayed.
+- `Allow`: every tick fires, and runs may overlap.
+- `Replace`: accepted but **not implemented**. It currently behaves exactly like `Allow`.
+
+A run that never reaches a terminal phase stops blocking once it passes that bound, so a stuck run cannot silence a schedule forever. After the bound, one new scheduled run may overlap the stuck one. Set `spec.runRetention.maxRunDurationSeconds` so a stuck run is failed (and the schedule resumes) sooner than the 24-hour default. Every skip is logged as `workflow_schedule_worker_concurrency_forbidden` with the blocking run id and age. Six consecutive skips of one schedule also log `workflow_schedule_worker_concurrency_forbidden_sustained` (warn) and increment `wrc_schedule_worker_concurrency_forbidden_sustained_total`.
+
 ### 3.14 Scheduling (`spec.scheduling`) — legacy
 
 The predecessor of `spec.triggers.schedule` (§3.13), still accepted for backwards compatibility. The reconciler prefers `spec.triggers.schedule`. **Prefer `spec.triggers` in new recipes.**
