@@ -348,7 +348,11 @@ export function useAuthController({
       setRuntimeConfigSetupRpcProxyBaseUrl('')
       const selected = state.options.find(option => option.id === state.activeOptionId)
       setStatus(
-        selected ? `Environment saved: ${selected.label}.` : `Environment saved: ${name}.`,
+        expectedSessionGeneration !== undefined
+          ? 'Environment saved.'
+          : selected
+            ? `Environment saved: ${selected.label}.`
+            : `Environment saved: ${name}.`,
         'success',
         undefined,
         { global: false, toast: true }

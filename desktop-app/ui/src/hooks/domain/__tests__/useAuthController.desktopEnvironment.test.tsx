@@ -783,6 +783,31 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('uses fixed copy for the environment-saved toast after a linked setup', async () => {
+    const linkedEnvironment = {
+      appName: 'Unverified Tenant Name',
+      externalRestApiBaseUrl: 'https://new-api.example.test',
+    }
+    mocks.saveRuntimeConfig.mockImplementationOnce(async config => {
+      await runtimeConfigModule!.saveDesktopRuntimeConfig({ ...config, rpcProxyBaseUrl: '' })
+      return runtimeConfigModule!.getDesktopRuntimeConfigState()
+    })
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linkedEnvironment)
+
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+
+    expect(mocks.setStatus).toHaveBeenCalledWith('Environment saved.', 'success', undefined, {
+      global: false,
+      toast: true,
+    })
+    expect(mocks.setStatus.mock.calls).not.toContainEqual(
+      expect.arrayContaining([expect.stringContaining(linkedEnvironment.appName)])
+    )
+    expect(screen.getByTestId('setup-complete')).toHaveTextContent('no')
+  })
+
   it('clears linked setup confirmation when saving hits an auth transition', async () => {
     mocks.saveRuntimeConfig.mockRejectedValueOnce(
       wrapLikeElectronIpc('auth:saveRuntimeConfig', new Error('auth_transition_in_progress'))
