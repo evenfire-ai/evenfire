@@ -121,6 +121,19 @@ vi.mock('electron', () => ({
 vi.mock('../config.js', () => ({
   getActiveEnvKey: () => 'test-env',
   getActiveLegacyEnvKeys: () => [],
+  getDesktopRuntimeConfigState: () => ({
+    configured: true,
+    isLocalhost: false,
+    selectorVisible: false,
+    activeOptionId: null,
+    currentConfig: {
+      externalRestApiBaseUrl: 'http://rest',
+      rpcProxyBaseUrl: 'https://rpc.example',
+    },
+    envKey: 'test-env',
+    storagePath: '/tmp/runtime-config.json',
+    options: [],
+  }),
   config: {
     rpcProxyBaseUrl: 'https://rpc.example',
     externalRestApiBaseUrl: 'http://rest',

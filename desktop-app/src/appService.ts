@@ -892,7 +892,14 @@ export class AppService {
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
+  private restoreSavedSessionReservationStarted = false
   private runtimeConfigResolutionInFlight = new Map<string, { promise: Promise<void> }>()
+  private pendingRuntimeConfigDiscovery: {
+    profileId: string | null
+    externalRestApiBaseUrl: string
+    rpcProxyBaseUrl: string
+    appName: string
+  } | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private interactiveLoginAttempts = 0
@@ -1643,6 +1650,7 @@ export class AppService {
       return await this.restoreSavedSessionInFlight
     }
     const restore = (async () => {
+      this.restoreSavedSessionReservationStarted = false
       await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
       return this.restoreSavedSessionOnce(options)
     })()
@@ -1653,11 +1661,18 @@ export class AppService {
       // No newer restore can start while this promise is installed, so the
       // single-flight slot can be cleared unconditionally after it settles.
       this.restoreSavedSessionInFlight = null
+      this.restoreSavedSessionReservationStarted = false
+      if (!this.sessionToken && !this.me && this.interactiveLoginAttempts === 0) {
+        await this.withNativeAuthEnvironmentCommit(async () => {
+          await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
+        })
+      }
     }
   }
 
   private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
     const reservation = await this.withNativeAuthEnvironmentCommit(async () => {
+      this.restoreSavedSessionReservationStarted = true
       if (this.interactiveLoginAttempts > 0) return null
       hydrateDesktopRuntimeConfig()
       const environment = this.captureAuthEnvironmentBinding()
@@ -1738,9 +1753,9 @@ export class AppService {
       const session = await this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         this.sessionToken = token
-        const environmentKey = getActiveEnvKey()
+        const environmentKey = reservation.environment.environmentKey
         await bindChatStoreForUser(restoredMe.id, environmentKey, {
-          legacyEnvKeys: getActiveLegacyEnvKeys(),
+          legacyEnvKeys: reservation.legacyEnvKeys,
           teamId: restoredMe.teamId,
         })
         this.me = restoredMe
@@ -1754,7 +1769,17 @@ export class AppService {
         // Persisted uploads are never auto-resumed. The active owner/team/env can
         // list only its own scoped records and must explicitly resume one, at
         // which point the record is rebound to this newly activated auth epoch.
-        this.activateGfsAuthScope()
+        const restoredGfsIdentity: DesktopGfsUploadIdentity = {
+          ownerId: restoredMe.id,
+          teamId: restoredMe.teamId ? String(restoredMe.teamId).trim() : null,
+          environmentKey,
+          baseUrl: normalizeDesktopUploadBaseUrl(reservation.environment.restBaseUrl),
+        }
+        this.activateGfsAuthScope(restoredGfsIdentity)
+        await this.migrateLegacyDesktopGfsUploadScopes(
+          restoredGfsIdentity,
+          reservation.legacyEnvKeys
+        ).catch(() => undefined)
         // A successful restore publishes a new auth owner. Invalidate pending
         // setup and other work prepared against the signed-out generation only
         // after the restored session and its GFS scope are coherent.
@@ -1854,6 +1879,12 @@ export class AppService {
       this.rpcTokenManager.clear()
       await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
       this.activateGfsAuthScope()
+      if (this.gfsScopeIdentity) {
+        await this.migrateLegacyDesktopGfsUploadScopes(
+          this.gfsScopeIdentity,
+          getActiveLegacyEnvKeys()
+        ).catch(() => undefined)
+      }
       return { authenticated: true, me: result.me }
     } finally {
       releasePrewarm()
@@ -2128,6 +2159,9 @@ export class AppService {
       if (registered) {
         await this.withNativeAuthEnvironmentCommit(async () => {
           this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
+          if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
+            await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
+          }
         })
       }
     }
@@ -2320,6 +2354,9 @@ export class AppService {
       if (registered) {
         await this.withNativeAuthEnvironmentCommit(async () => {
           this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
+          if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
+            await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
+          }
         })
       }
     }
@@ -2466,62 +2503,65 @@ export class AppService {
     }
     await this.withNativeAuthEnvironmentCommit(async () => {
       this.assertAuthEnvironmentBinding(request.environmentBinding)
-      hydrateDesktopRuntimeConfig()
-      if (!isDesktopRuntimeConfigured() || config.rpcProxyBaseUrl?.trim()) return
-      const previousConfig = {
-        externalRestApiBaseUrl: config.externalRestApiBaseUrl,
-        rpcProxyBaseUrl: config.rpcProxyBaseUrl,
-        appName: config.appName,
-      }
-      const previousEnvKey = getActiveEnvKey()
-      const sessionToken = this.sessionToken
-      const sessionUser = this.me
-      await saveDesktopRuntimeConfig({
-        // Discovery is scoped to the configured REST endpoint; it may provide
-        // RPC details but must never switch or overwrite another REST profile.
+      await this.applyRuntimeConfigDiscovery({
+        profileId: request.environmentBinding.profileId,
         externalRestApiBaseUrl: request.externalRestApiBaseUrl,
         rpcProxyBaseUrl: discovered.rpcProxyBaseUrl,
         appName: discovered.appName || request.appName,
       })
-      const nextEnvKey = getActiveEnvKey()
-      if (
-        nextEnvKey !== previousEnvKey &&
-        sessionToken &&
-        sessionUser &&
-        this.sessionToken === sessionToken &&
-        this.me === sessionUser
-      ) {
-        try {
-          await this.tokenStore.setSessionToken(sessionToken, nextEnvKey)
-          await bindChatStoreForUser(sessionUser.id, nextEnvKey, {
-            legacyEnvKeys: [previousEnvKey],
-            teamId: this.chatStoreTeamId(),
-          })
-          await this.tokenStore.clearSessionToken(previousEnvKey, {
-            clearLegacyGlobalSlot: false,
-          })
-        } catch (migrationError) {
-          try {
-            await saveDesktopRuntimeConfig(previousConfig)
-            await this.tokenStore.setSessionToken(sessionToken, previousEnvKey)
-            await this.tokenStore.clearSessionToken(nextEnvKey, {
-              clearLegacyGlobalSlot: false,
-            })
-            await bindChatStoreForUser(sessionUser.id, previousEnvKey, {
-              legacyEnvKeys: [nextEnvKey],
-              teamId: this.chatStoreTeamId(),
-            })
-          } catch (rollbackError) {
-            throw new AggregateError(
-              [migrationError, rollbackError],
-              'RPC discovery session migration and rollback failed'
-            )
-          }
-          throw migrationError
-        }
-      }
-      if (nextEnvKey !== previousEnvKey) this.rpcTokenManager.clear()
     })
+  }
+
+  /** Caller must hold the native auth/environment commit owner. */
+  private async applyRuntimeConfigDiscovery(discovery: {
+    profileId: string | null
+    externalRestApiBaseUrl: string
+    rpcProxyBaseUrl: string
+    appName: string
+  }): Promise<void> {
+    this.pendingRuntimeConfigDiscovery = discovery
+    hydrateDesktopRuntimeConfig()
+    const currentBinding = this.captureAuthEnvironmentBinding()
+    if (
+      currentBinding.profileId !== discovery.profileId ||
+      !sameDesktopRestEndpoint(currentBinding.restBaseUrl, discovery.externalRestApiBaseUrl)
+    ) {
+      if (this.pendingRuntimeConfigDiscovery === discovery) {
+        this.pendingRuntimeConfigDiscovery = null
+      }
+      return
+    }
+    if (!isDesktopRuntimeConfigured() || config.rpcProxyBaseUrl?.trim()) {
+      if (this.pendingRuntimeConfigDiscovery === discovery) {
+        this.pendingRuntimeConfigDiscovery = null
+      }
+      return
+    }
+
+    const restoreHasReservedEnvironment =
+      this.restoreSavedSessionInFlight !== null && this.restoreSavedSessionReservationStarted
+    if (this.sessionToken || this.me || restoreHasReservedEnvironment) {
+      return
+    }
+
+    const previousEnvKey = getActiveEnvKey()
+    await saveDesktopRuntimeConfig({
+      // Discovery only enriches the selected profile. Commit it while signed
+      // out so the next auth boundary owns token and chat migration.
+      externalRestApiBaseUrl: discovery.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: discovery.rpcProxyBaseUrl,
+      appName: discovery.appName,
+    })
+    if (getActiveEnvKey() !== previousEnvKey) this.rpcTokenManager.clear()
+    if (this.pendingRuntimeConfigDiscovery === discovery) {
+      this.pendingRuntimeConfigDiscovery = null
+    }
+  }
+
+  /** Caller must hold the native auth/environment commit owner. */
+  private async commitPendingRuntimeConfigDiscoveryIfSafe(): Promise<void> {
+    const pending = this.pendingRuntimeConfigDiscovery
+    if (pending) await this.applyRuntimeConfigDiscovery(pending)
   }
 
   async getDesktopReleaseStatus(): Promise<DesktopReleaseStatus> {
@@ -2581,6 +2621,7 @@ export class AppService {
           throw error
         }
         this.clearAuthenticatedSessionState()
+        await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
         // Grants survive logout (they are keyed by userId), but every cached SDK
         // result must not: the next user of this machine gets nothing of this one's.
         tryGetPluginSdkRuntime()?.notifySessionChanged(false)
@@ -2824,6 +2865,49 @@ export class AppService {
     await this.enqueueDesktopGfsUploadState(async () => {
       const loaded = await this.loadDesktopGfsUploadState()
       await this.writeDesktopGfsUploadState(update(loaded.state))
+    })
+  }
+
+  private async migrateLegacyDesktopGfsUploadScopes(
+    identity: DesktopGfsUploadIdentity,
+    legacyEnvKeys: readonly string[]
+  ): Promise<void> {
+    const sourceEnvKeys = new Set(
+      legacyEnvKeys
+        .map(key => String(key || '').trim())
+        .filter(key => key && key !== identity.environmentKey)
+    )
+    if (!sourceEnvKeys.size) return
+
+    await this.enqueueDesktopGfsUploadState(async () => {
+      const loaded = await this.loadDesktopGfsUploadState()
+      const updatedAt = new Date().toISOString()
+      let changed = false
+      const records = loaded.state.records.map(record => {
+        if (
+          !sourceEnvKeys.has(record.scope.environmentKey) ||
+          record.scope.ownerId !== identity.ownerId ||
+          record.scope.teamId !== identity.teamId ||
+          record.scope.baseUrl !== identity.baseUrl ||
+          this.hasLiveDesktopGfsUpload(record)
+        ) {
+          return record
+        }
+        changed = true
+        return {
+          ...record,
+          scope: {
+            ...record.scope,
+            environmentKey: identity.environmentKey,
+            authEpoch: this.gfsAuthEpoch,
+          },
+          status: record.status === 'active' ? ('suspended_auth' as const) : record.status,
+          updatedAt,
+        }
+      })
+      if (changed || loaded.migrated) {
+        await this.writeDesktopGfsUploadState({ ...loaded.state, records })
+      }
     })
   }
 
