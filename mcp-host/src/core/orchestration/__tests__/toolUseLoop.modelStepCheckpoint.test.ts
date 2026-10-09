@@ -67,6 +67,7 @@ function harness(
     now?: () => number
     taskBudget?: () => string | null
     resumableTtlMs?: number
+    servedBy?: () => { provider: string; model: string } | undefined
   } = {}
 ) {
   const worker = createInProcessWorker(':memory:')
@@ -98,6 +99,7 @@ function harness(
     redact: text =>
       safety.sanitizeFreeformContent(text, { secretWarning: 'secret in checkpoint' }).content,
     taskBudget: overrides.taskBudget ?? (() => JSON.stringify({ iterationsUsed: 1 })),
+    servedBy: overrides.servedBy,
     resumableTtlMs: overrides.resumableTtlMs ?? 60_000,
     sourceAttachments: overrides.sourceAttachments ?? [
       {
@@ -422,6 +424,41 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     const toolMessage = JSON.parse(rows[11].payload) as ChatMessage
     expect(toolMessage).toMatchObject({ role: 'tool', tool_call_id: 'tc_c' })
     expect(toolMessage.content).toContain('list_dir result')
+  })
+
+  it('1a. pins the provider of the last confirmed tool batch across model calls', async () => {
+    let servedBy: { provider: string; model: string } | undefined
+    const { worker, recorder } = harness({ servedBy: () => servedBy })
+    const firstTool = createMockTool('read_file')
+    const secondTool = createMockTool('list_dir')
+    const firstExecute = firstTool.execute.bind(firstTool)
+    const secondExecute = secondTool.execute.bind(secondTool)
+    firstTool.execute = vi.fn(async (...args: Parameters<Tool['execute']>) => {
+      servedBy = { provider: 'provider-a', model: 'model-a' }
+      return firstExecute(...args)
+    })
+    secondTool.execute = vi.fn(async (...args: Parameters<Tool['execute']>) => {
+      servedBy = { provider: 'provider-b', model: 'model-b' }
+      return secondExecute(...args)
+    })
+
+    const reasoning = createMockReasoning(twoIterationsThenOutage(outage()))
+    const outcome = await runToolUseLoop(
+      withRecorder(reasoning, [firstTool, secondTool], recorder),
+      [user]
+    )
+
+    expect(outcome).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+    expect(firstTool.execute).toHaveBeenCalledTimes(2)
+    expect(secondTool.execute).toHaveBeenCalledTimes(1)
+    expect(
+      worker.db.prepare('SELECT status, provider, model FROM model_step_checkpoints').get()
+    ).toMatchObject({
+      status: 'resumable',
+      provider: 'provider-b',
+      model: 'model-b',
+    })
   })
 
   it('1b. a workflow tool in the last batch keeps the workflow fallback and abandons the checkpoint', async () => {
