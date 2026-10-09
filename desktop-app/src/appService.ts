@@ -107,6 +107,13 @@ const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
   'PROFILE_UI_BASE_URL must be an origin URL with a root pathname and no search parameters'
 
+type RuntimeConfigDiscovery = {
+  profileId: string | null
+  externalRestApiBaseUrl: string
+  rpcProxyBaseUrl: string
+  appName: string
+}
+
 function parseEntityChangeRetryAfterMs(
   value: string | undefined,
   nowMs = Date.now()
@@ -874,7 +881,7 @@ export interface AppServiceOptions {
 export class AppService {
   private readonly authClient = new AuthClient()
   private readonly memberRegistrationServiceClient = new MemberRegistrationServiceClient()
-  private readonly rpcClient = new RpcProxyClient()
+  private readonly rpcClient = new RpcProxyClient(() => this.getEffectiveRpcProxyBaseUrl())
   private readonly sharedFilesClient = new SharedFilesClient()
   private readonly gfsClient = new GfsClient({
     get baseUrl() {
@@ -894,12 +901,8 @@ export class AppService {
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private restoreSavedSessionReservationStarted = false
   private runtimeConfigResolutionInFlight = new Map<string, { promise: Promise<void> }>()
-  private pendingRuntimeConfigDiscovery: {
-    profileId: string | null
-    externalRestApiBaseUrl: string
-    rpcProxyBaseUrl: string
-    appName: string
-  } | null = null
+  private effectiveRuntimeRpcEndpoint: RuntimeConfigDiscovery | null = null
+  private pendingRuntimeConfigDiscovery: RuntimeConfigDiscovery | null = null
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private interactiveLoginAttempts = 0
@@ -1118,6 +1121,57 @@ export class AppService {
       !sameDesktopRestEndpoint(current.restBaseUrl, binding.restBaseUrl)
     ) {
       throw new Error('stale_runtime_environment')
+    }
+  }
+
+  private runtimeConfigDiscoveryMatchesCurrentBinding(discovery: RuntimeConfigDiscovery): boolean {
+    const currentBinding = this.captureAuthEnvironmentBinding()
+    return (
+      currentBinding.profileId === discovery.profileId &&
+      sameDesktopRestEndpoint(currentBinding.restBaseUrl, discovery.externalRestApiBaseUrl)
+    )
+  }
+
+  private getEffectiveRpcProxyBaseUrl(): string {
+    const effectiveEndpoint = this.effectiveRuntimeRpcEndpoint
+    if (effectiveEndpoint && this.runtimeConfigDiscoveryMatchesCurrentBinding(effectiveEndpoint)) {
+      return effectiveEndpoint.rpcProxyBaseUrl
+    }
+    return config.rpcProxyBaseUrl
+  }
+
+  /** Caller must hold the native auth/environment commit owner. */
+  private setEffectiveRuntimeRpcEndpoint(discovery: RuntimeConfigDiscovery): void {
+    const previousEndpoint = this.getEffectiveRpcProxyBaseUrl()
+    this.effectiveRuntimeRpcEndpoint = discovery
+    if (previousEndpoint !== discovery.rpcProxyBaseUrl) this.rpcTokenManager.clear()
+  }
+
+  /** Caller must hold the native auth/environment commit owner. */
+  private clearEffectiveRuntimeRpcEndpoint(): void {
+    const effectiveEndpoint = this.effectiveRuntimeRpcEndpoint
+    if (!effectiveEndpoint) return
+    this.effectiveRuntimeRpcEndpoint = null
+    if (effectiveEndpoint.rpcProxyBaseUrl !== config.rpcProxyBaseUrl) this.rpcTokenManager.clear()
+  }
+
+  /** Caller must hold the native auth/environment commit owner. */
+  private discardRuntimeConfigDiscoveryOutsideCurrentBinding(): void {
+    if (
+      this.pendingRuntimeConfigDiscovery &&
+      !this.runtimeConfigDiscoveryMatchesCurrentBinding(this.pendingRuntimeConfigDiscovery)
+    ) {
+      this.pendingRuntimeConfigDiscovery = null
+    }
+    if (
+      this.effectiveRuntimeRpcEndpoint &&
+      !this.runtimeConfigDiscoveryMatchesCurrentBinding(this.effectiveRuntimeRpcEndpoint)
+    ) {
+      this.clearEffectiveRuntimeRpcEndpoint()
+    }
+    if (config.rpcProxyBaseUrl?.trim()) {
+      this.pendingRuntimeConfigDiscovery = null
+      this.clearEffectiveRuntimeRpcEndpoint()
     }
   }
 
@@ -1991,11 +2045,13 @@ export class AppService {
       try {
         await operation()
         this.assertSessionGeneration(transitionGeneration)
+        this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
       } catch (error) {
         const environmentUnchanged =
           getActiveEnvKey() === oldEnvKey &&
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
         if (!environmentUnchanged) {
+          this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
           this.clearAuthenticatedSessionState()
           await this.tokenStore
             .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
@@ -2074,6 +2130,7 @@ export class AppService {
         const transitionGeneration = this.sessionGeneration
         await selectDesktopRuntimeConfigOption(optionId)
         this.assertSessionGeneration(transitionGeneration)
+        this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
         this.sessionGeneration += 1
       } else {
         await this.applyRuntimeEnvironmentChange(
@@ -2109,8 +2166,10 @@ export class AppService {
         nextEnvKey === getActiveEnvKey() &&
         normalizeDesktopUploadBaseUrl(next.externalRestApiBaseUrl) ===
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
-      if (sameUploadBoundary) await saveDesktopRuntimeConfig(next)
-      else await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
+      if (sameUploadBoundary) {
+        await saveDesktopRuntimeConfig(next)
+        this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
+      } else await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
     })
     await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
     return getDesktopRuntimeConfigState()
@@ -2455,6 +2514,21 @@ export class AppService {
     const request = await this.withNativeAuthEnvironmentCommit(async () => {
       hydrateDesktopRuntimeConfig()
       if (!isDesktopRuntimeConfigured() || config.rpcProxyBaseUrl?.trim()) return null
+      if (
+        this.pendingRuntimeConfigDiscovery &&
+        this.interactiveLoginAttempts > 0 &&
+        !this.sessionToken &&
+        !this.me
+      ) {
+        await this.applyRuntimeConfigDiscovery(this.pendingRuntimeConfigDiscovery)
+      }
+      if (config.rpcProxyBaseUrl?.trim()) return null
+      if (
+        this.effectiveRuntimeRpcEndpoint &&
+        this.runtimeConfigDiscoveryMatchesCurrentBinding(this.effectiveRuntimeRpcEndpoint)
+      ) {
+        return null
+      }
       return {
         externalRestApiBaseUrl: canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl),
         appName: config.appName,
@@ -2511,19 +2585,10 @@ export class AppService {
   }
 
   /** Caller must hold the native auth/environment commit owner. */
-  private async applyRuntimeConfigDiscovery(discovery: {
-    profileId: string | null
-    externalRestApiBaseUrl: string
-    rpcProxyBaseUrl: string
-    appName: string
-  }): Promise<void> {
+  private async applyRuntimeConfigDiscovery(discovery: RuntimeConfigDiscovery): Promise<void> {
     this.pendingRuntimeConfigDiscovery = discovery
     hydrateDesktopRuntimeConfig()
-    const currentBinding = this.captureAuthEnvironmentBinding()
-    if (
-      currentBinding.profileId !== discovery.profileId ||
-      !sameDesktopRestEndpoint(currentBinding.restBaseUrl, discovery.externalRestApiBaseUrl)
-    ) {
+    if (!this.runtimeConfigDiscoveryMatchesCurrentBinding(discovery)) {
       if (this.pendingRuntimeConfigDiscovery === discovery) {
         this.pendingRuntimeConfigDiscovery = null
       }
@@ -2533,12 +2598,17 @@ export class AppService {
       if (this.pendingRuntimeConfigDiscovery === discovery) {
         this.pendingRuntimeConfigDiscovery = null
       }
+      this.clearEffectiveRuntimeRpcEndpoint()
       return
     }
 
     const restoreHasReservedEnvironment =
       this.restoreSavedSessionInFlight !== null && this.restoreSavedSessionReservationStarted
-    if (this.sessionToken || this.me || restoreHasReservedEnvironment) {
+    if (this.sessionToken || this.me) {
+      this.setEffectiveRuntimeRpcEndpoint(discovery)
+      return
+    }
+    if (restoreHasReservedEnvironment && this.interactiveLoginAttempts === 0) {
       return
     }
 
@@ -2554,6 +2624,7 @@ export class AppService {
     if (this.pendingRuntimeConfigDiscovery === discovery) {
       this.pendingRuntimeConfigDiscovery = null
     }
+    this.clearEffectiveRuntimeRpcEndpoint()
   }
 
   /** Caller must hold the native auth/environment commit owner. */

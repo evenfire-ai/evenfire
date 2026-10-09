@@ -52,7 +52,7 @@ describe('AppService runtime config discovery ownership', () => {
     )
   })
 
-  it('defers late RPC discovery until logout and the next login boundary', async () => {
+  it('uses late RPC discovery for the active session without rebinding its durable identity', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     await runtimeConfig.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: restA,
@@ -76,6 +76,7 @@ describe('AppService runtime config discovery ownership', () => {
         health: ReturnType<typeof vi.fn>
       }
       rpcClient: { health: ReturnType<typeof vi.fn> }
+      getEffectiveRpcProxyBaseUrl: () => string
       getDependenciesHealth: () => Promise<unknown>
       getChatDeletionFenceAuthority: () => {
         authorityScope: { environmentKey: string }
@@ -103,9 +104,13 @@ describe('AppService runtime config discovery ownership', () => {
     )
 
     await app.getDependenciesHealth()
+    await app.getDependenciesHealth()
+    await app.getDependenciesHealth()
 
     expect(runtimeConfig.getDesktopRuntimeConfigState().envKey).toBe(restOnlyEnvKey)
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('')
+    expect(app.getEffectiveRpcProxyBaseUrl()).toBe('https://rpc-discovered.example.test')
+    expect(getDesktopEnvironment).toHaveBeenCalledTimes(2)
     expect(service.tokenStore.setSessionToken).toHaveBeenCalledTimes(1)
     expect(vi.mocked(bindChatStoreForUser)).toHaveBeenCalledTimes(activeBindingCount)
     expect(app.getChatDeletionFenceAuthority().authorityScope.environmentKey).toBe(restOnlyEnvKey)
@@ -208,6 +213,99 @@ describe('AppService runtime config discovery ownership', () => {
     await service.logout()
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')
     expect(app.gfsScopeIdentity).toBeNull()
+  })
+
+  it('commits a restore-pending discovery before an interactive login captures its binding', async () => {
+    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+    const restOnlyEnvKey = runtimeConfig.getDesktopRuntimeConfigState().envKey
+    const app = service as unknown as {
+      authClient: {
+        getDesktopEnvironment: ReturnType<typeof vi.fn>
+        googleLogin: ReturnType<typeof vi.fn>
+      }
+      restoreSavedSessionInFlight: Promise<unknown>
+      restoreSavedSessionReservationStarted: boolean
+      pendingRuntimeConfigDiscovery:
+        | (DesktopEnvironmentDiscovery & { profileId: string | null })
+        | null
+    }
+    app.restoreSavedSessionInFlight = Promise.resolve({ authenticated: false })
+    app.restoreSavedSessionReservationStarted = true
+    app.pendingRuntimeConfigDiscovery = {
+      profileId: runtimeConfig.getDesktopRuntimeConfigState().activeOptionId,
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+      appName: 'Environment A',
+    }
+    app.authClient = {
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
+        externalRestApiBaseUrl: restA,
+        rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+        appName: 'Environment A',
+      }),
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult('session-token-a', testSessionMe())),
+    }
+
+    await service.googleLogin('google-token-a')
+
+    const rpcAwareEnvKey = runtimeConfig.getDesktopRuntimeConfigState().envKey
+    expect(rpcAwareEnvKey).not.toBe(restOnlyEnvKey)
+    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')
+    expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
+      'session-token-a',
+      rpcAwareEnvKey
+    )
+  })
+
+  it('discards a stale effective endpoint when a different REST-only profile is selected', async () => {
+    const { service, runtimeConfig, restA, restB } = await createNativeCommitTestHarness()
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restB,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment B',
+    })
+    const optionA = runtimeConfig
+      .getDesktopRuntimeConfigState()
+      .options.find(option => option.externalRestApiBaseUrl === restA)
+    const optionB = runtimeConfig
+      .getDesktopRuntimeConfigState()
+      .options.find(option => option.externalRestApiBaseUrl === restB)
+    if (!optionA || !optionB) throw new Error('test runtime profiles were not created')
+    await runtimeConfig.selectDesktopRuntimeConfigOption(optionA.id)
+    const app = service as unknown as {
+      effectiveRuntimeRpcEndpoint:
+        | (DesktopEnvironmentDiscovery & { profileId: string | null })
+        | null
+      pendingRuntimeConfigDiscovery:
+        | (DesktopEnvironmentDiscovery & { profileId: string | null })
+        | null
+      getEffectiveRpcProxyBaseUrl: () => string
+    }
+    app.effectiveRuntimeRpcEndpoint = {
+      profileId: optionA.id,
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+      appName: 'Environment A',
+    }
+    app.pendingRuntimeConfigDiscovery = app.effectiveRuntimeRpcEndpoint
+
+    await service.selectRuntimeConfig(optionB.id)
+
+    expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restB)
+    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('')
+    expect(app.getEffectiveRpcProxyBaseUrl()).toBe('')
+    expect(app.effectiveRuntimeRpcEndpoint).toBeNull()
+    expect(app.pendingRuntimeConfigDiscovery).toBeNull()
   })
 
   it('shares a pending discovery for the same profile and REST endpoint', async () => {
