@@ -94,6 +94,31 @@ export type PendingChatSelection =
   | { mode: 'none'; chatId: null }
   | { mode: 'specific'; chatId: string; title?: string; isRemote?: boolean }
 
+export interface CreateFailureRecoveryOwner {
+  agentRef: string
+  selectedAgent: string | null
+  requestGenerationAtCreate: number
+  requestGeneration: number
+  authorityScopeGenerationAtCreate: number
+  authorityScopeGeneration: number
+  authorityScopeIdentityAtCreate: string
+  currentAuthorityScopeIdentity: string
+  selectionIntentRevisionAtCreate: number | undefined
+  currentSelectionIntentRevision: number | undefined
+}
+
+/** Each recovery boundary independently proves the failed create still owns the view. */
+export function isCreateFailureRecoveryOwned(owner: CreateFailureRecoveryOwner): boolean {
+  return (
+    owner.selectedAgent === owner.agentRef &&
+    owner.requestGeneration === owner.requestGenerationAtCreate &&
+    owner.authorityScopeGeneration === owner.authorityScopeGenerationAtCreate &&
+    owner.currentAuthorityScopeIdentity === owner.authorityScopeIdentityAtCreate &&
+    owner.selectionIntentRevisionAtCreate !== undefined &&
+    owner.currentSelectionIntentRevision === owner.selectionIntentRevisionAtCreate
+  )
+}
+
 /**
  * Parent-owned collaborators the CRUD flows need. The parent fills this ref each
  * render (after switchToChat & friends are defined) so the controller's stable
@@ -1054,12 +1079,18 @@ export function useChatListController({
       // its visible conversation only while this create still owns the same scope
       // and selection revision; a newer navigation must remain authoritative.
       if (
-        selectedAgentRef.current === agentRef &&
-        requestGenerationRef.current === requestGeneration &&
-        authorityScopeGenerationRef.current === authorityScopeGeneration &&
-        currentAuthorityScopeRef.current === authorityScopeAtCreate &&
-        selectionIntentRevision !== undefined &&
-        host.current?.getSelectionIntentRevision() === selectionIntentRevision
+        isCreateFailureRecoveryOwned({
+          agentRef,
+          selectedAgent: selectedAgentRef.current,
+          requestGenerationAtCreate: requestGeneration,
+          requestGeneration: requestGenerationRef.current,
+          authorityScopeGenerationAtCreate: authorityScopeGeneration,
+          authorityScopeGeneration: authorityScopeGenerationRef.current,
+          authorityScopeIdentityAtCreate: authorityScopeAtCreate,
+          currentAuthorityScopeIdentity: currentAuthorityScopeRef.current,
+          selectionIntentRevisionAtCreate: selectionIntentRevision,
+          currentSelectionIntentRevision: host.current?.getSelectionIntentRevision(),
+        })
       ) {
         const restoreChatId =
           pendingSelection?.mode === 'specific'
