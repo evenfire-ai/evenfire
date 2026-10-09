@@ -2,7 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express, { type Request as ExpressRequest } from 'express'
 import { execFileSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
@@ -195,6 +197,126 @@ verify_trace_maintenance_access_contract`,
   return queries
 }
 
+type WorkflowRecipesVerifierResult = { passed: true } | { passed: false; stderr: string }
+
+function runWorkflowRecipesRuntimeVerifier(
+  databaseConnectionString: string,
+  columnProfilePath?: string,
+  relationProfilePath?: string
+): WorkflowRecipesVerifierResult {
+  const script = readFileSync(
+    new URL('../../deploy/scripts/run-control-api-db-migration.sh', import.meta.url),
+    'utf8'
+  )
+  const start = script.indexOf('\nworkflow_recipes_access_contract_values() {')
+  const end = script.indexOf('\nverify_db_migration_state() {', start)
+  if (start < 0 || end < 0) throw new Error('Workflow Recipes deployment verifier is missing')
+
+  // Execute the exact production parser and verifier function. Only its database
+  // assertion adapter is replaced so each emitted production query runs against
+  // this test's real PostgreSQL database without entering Kubernetes operations.
+  const productionFunctions = script.slice(start, end)
+  try {
+    execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+WORKFLOW_RECIPES_ACCESS_PROFILES_FILE="$1"
+WORKFLOW_RECIPES_COLUMN_ACCESS_PROFILES_FILE="$2"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+assert_db_query_equals() {
+  local description="$1" expected="$2" sql="$3" actual
+  actual="$(psql "$CONTROL_API_REAL_PG_ADMIN_URL" -v ON_ERROR_STOP=1 -At -c "$sql")" \\
+    || die "\${description} (production verifier query failed)"
+  if [[ "$actual" != "$expected" ]]; then
+    die "\${description} (expected \${expected}, got '\${actual:-<empty>}')"
+  fi
+}
+${productionFunctions}
+verify_workflow_recipes_runtime_boundary`,
+        'workflow-recipes-production-verifier',
+        relationProfilePath ??
+          fileURLToPath(
+            new URL(
+              '../../deploy/scripts/workflow-recipes-runtime-access-profiles.tsv',
+              import.meta.url
+            )
+          ),
+        columnProfilePath ??
+          fileURLToPath(
+            new URL(
+              '../../deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv',
+              import.meta.url
+            )
+          ),
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 20_000,
+        env: { ...process.env, CONTROL_API_REAL_PG_ADMIN_URL: databaseConnectionString },
+      }
+    )
+    return { passed: true }
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException & {
+      status?: number | null
+      stderr?: Buffer | string
+    }
+    if (failure.code === 'ETIMEDOUT' || failure.status === null || failure.status === undefined) {
+      throw new Error('Workflow Recipes production verifier did not complete', { cause: error })
+    }
+    return {
+      passed: false,
+      stderr: Buffer.isBuffer(failure.stderr)
+        ? failure.stderr.toString('utf8')
+        : String(failure.stderr ?? ''),
+    }
+  }
+}
+
+function expectWorkflowRecipesVerifierRejects(
+  databaseConnectionString: string,
+  message: string,
+  columnProfilePath?: string,
+  relationProfilePath?: string
+): void {
+  const result = runWorkflowRecipesRuntimeVerifier(
+    databaseConnectionString,
+    columnProfilePath,
+    relationProfilePath
+  )
+  expect(result.passed).toBe(false)
+  if (!result.passed) expect(result.stderr).toContain(message)
+}
+
+const workflowRecipesCleanupRelations = [
+  'team_workflow_triggers',
+  'user_workflow_triggers',
+  'workflow_recipe_allowed_teams',
+] as const
+const workflowRecipesCleanupColumns = workflowRecipesCleanupRelations.flatMap(relation =>
+  (['recipe_namespace', 'recipe_name'] as const).map(column => ({ relation, column }))
+)
+const workflowRecipesColumnPrincipals = ['direct', 'inherited', 'public'] as const
+const workflowRecipesUnexpectedSelectFixtures = workflowRecipesCleanupRelations.flatMap(relation =>
+  workflowRecipesColumnPrincipals.map(principal => ({
+    relation,
+    column: relation === 'user_workflow_triggers' ? 'user_id' : 'team_id',
+    principal,
+  }))
+)
+const workflowRecipesUnexpectedPrivilegeFixtures = (
+  ['INSERT', 'UPDATE', 'REFERENCES'] as const
+).flatMap(privilege =>
+  workflowRecipesColumnPrincipals.map(principal => ({
+    relation: 'team_workflow_triggers',
+    column: 'team_id',
+    privilege,
+    principal,
+  }))
+)
+
 const deniedRuntimeColumnPrivileges = [
   { privilege: 'SELECT', relation: 'gfs_blob_manifests', column: 'blob_key' },
   { privilege: 'INSERT', relation: 'gfs_blob_manifests', column: 'blob_key' },
@@ -308,15 +430,366 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
   })
 
+  const workflowRecipesColumnVerifierMessage =
+    'workflow_recipes_runtime effective column privileges differ from the explicit access contract'
+
+  async function ensureMigratedSchema(): Promise<void> {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+  }
+
+  it('executes the production Workflow Recipes verifier on the clean migrated schema', async () => {
+    await ensureMigratedSchema()
+
+    const tableAccess = await dbPool.query<{ select_allowed: boolean; column_select: boolean }>(`
+      SELECT has_table_privilege(
+               'workflow_recipes_runtime', 'public.workflow_runs', 'SELECT'
+             ) AS select_allowed,
+             has_column_privilege(
+               'workflow_recipes_runtime', 'public.workflow_runs', 'run_id', 'SELECT'
+             ) AS column_select
+    `)
+    expect(tableAccess.rows).toEqual([{ select_allowed: true, column_select: true }])
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  }, 60_000)
+
+  it.each(workflowRecipesCleanupColumns)(
+    'rejects missing required SELECT on $relation column $column',
+    async ({ relation, column }) => {
+      await ensureMigratedSchema()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const revoke = `REVOKE SELECT (${columnName}) ON TABLE ${relationName} FROM workflow_recipes_runtime`
+      const grant = `GRANT SELECT (${columnName}) ON TABLE ${relationName} TO workflow_recipes_runtime`
+
+      await dbPool.query(revoke)
+      try {
+        const effective = await dbPool.query<{ allowed: boolean }>(
+          `SELECT has_column_privilege('workflow_recipes_runtime', $1, $2, 'SELECT') AS allowed`,
+          [relation, column]
+        )
+        expect(effective.rows).toEqual([{ allowed: false }])
+        expectWorkflowRecipesVerifierRejects(connectionString, workflowRecipesColumnVerifierMessage)
+      } finally {
+        await dbPool.query(grant)
+      }
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it.each(workflowRecipesUnexpectedSelectFixtures)(
+    'rejects effective $principal SELECT($column) on $relation',
+    async ({ relation, column, principal }) => {
+      await ensureMigratedSchema()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `wrc_column_acl_probe_${randomBytes(6).toString('hex')}`
+      const inherited = principal === 'inherited'
+      const grantee = principal === 'public' ? 'PUBLIC' : 'workflow_recipes_runtime'
+      let roleCreated = false
+      let privilegeGranted = false
+      let membershipGranted = false
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+          roleCreated = true
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT SELECT (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        privilegeGranted = true
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO workflow_recipes_runtime`)
+          membershipGranted = true
+        }
+
+        const effective = await dbPool.query<{
+          table_access: boolean
+          column_access: boolean
+        }>(
+          `SELECT has_table_privilege('workflow_recipes_runtime', $1, 'SELECT') AS table_access,
+                  has_column_privilege('workflow_recipes_runtime', $1, $2, 'SELECT') AS column_access`,
+          [relation, column]
+        )
+        expect(effective.rows).toEqual([{ table_access: false, column_access: true }])
+        expectWorkflowRecipesVerifierRejects(connectionString, workflowRecipesColumnVerifierMessage)
+      } finally {
+        if (membershipGranted) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM workflow_recipes_runtime`)
+        }
+        if (privilegeGranted) {
+          const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+          await dbPool.query(
+            `REVOKE SELECT (${columnName}) ON TABLE ${relationName} FROM ${grantTarget}`
+          )
+        }
+        if (roleCreated) await dbPool.query(`DROP ROLE ${quoteIdent(inheritedRole)}`)
+      }
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it.each(workflowRecipesUnexpectedPrivilegeFixtures)(
+    'rejects effective $principal column-level $privilege on $relation column $column',
+    async ({ relation, column, privilege, principal }) => {
+      await ensureMigratedSchema()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `wrc_column_acl_probe_${randomBytes(6).toString('hex')}`
+      const inherited = principal === 'inherited'
+      const grantee = principal === 'public' ? 'PUBLIC' : 'workflow_recipes_runtime'
+      let roleCreated = false
+      let privilegeGranted = false
+      let membershipGranted = false
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+          roleCreated = true
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT ${privilege} (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        privilegeGranted = true
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO workflow_recipes_runtime`)
+          membershipGranted = true
+        }
+
+        const effective = await dbPool.query<{ allowed: boolean }>(
+          `SELECT has_column_privilege('workflow_recipes_runtime', $1, $2, $3) AS allowed`,
+          [relation, column, privilege]
+        )
+        expect(effective.rows).toEqual([{ allowed: true }])
+        expectWorkflowRecipesVerifierRejects(connectionString, workflowRecipesColumnVerifierMessage)
+      } finally {
+        if (membershipGranted) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM workflow_recipes_runtime`)
+        }
+        if (privilegeGranted) {
+          const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+          await dbPool.query(
+            `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${grantTarget}`
+          )
+        }
+        if (roleCreated) await dbPool.query(`DROP ROLE ${quoteIdent(inheritedRole)}`)
+      }
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it.each(workflowRecipesColumnPrincipals)(
+    'rejects unexpected $principal whole-table access and retains approved table profiles',
+    async principal => {
+      await ensureMigratedSchema()
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+
+      const inheritedRole = `wrc_table_acl_probe_${randomBytes(6).toString('hex')}`
+      const inherited = principal === 'inherited'
+      const grantee = principal === 'public' ? 'PUBLIC' : 'workflow_recipes_runtime'
+      let roleCreated = false
+      let privilegeGranted = false
+      let membershipGranted = false
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+          roleCreated = true
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(`GRANT SELECT ON team_workflow_triggers TO ${grantTarget}`)
+        privilegeGranted = true
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO workflow_recipes_runtime`)
+          membershipGranted = true
+        }
+        expectWorkflowRecipesVerifierRejects(
+          connectionString,
+          'workflow_recipes_runtime relation privileges differ from the explicit access contract'
+        )
+      } finally {
+        if (membershipGranted) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM workflow_recipes_runtime`)
+        }
+        if (privilegeGranted) {
+          const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+          await dbPool.query(`REVOKE SELECT ON team_workflow_triggers FROM ${grantTarget}`)
+        }
+        if (roleCreated) await dbPool.query(`DROP ROLE ${quoteIdent(inheritedRole)}`)
+        await dbPool.query(
+          'GRANT SELECT (recipe_namespace, recipe_name) ON team_workflow_triggers TO workflow_recipes_runtime'
+        )
+      }
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it('rejects a newly created public relation absent from the explicit access inventory', async () => {
+    await ensureMigratedSchema()
+    const relation = `wrc_unclassified_probe_${randomBytes(6).toString('hex')}`
+    const relationName = quoteIdent(relation)
+    await dbPool.query(`CREATE TABLE ${relationName} (probe_id integer)`)
+    try {
+      expectWorkflowRecipesVerifierRejects(
+        connectionString,
+        'workflow_recipes_runtime relation privileges differ from the explicit access contract'
+      )
+    } finally {
+      await dbPool.query(`DROP TABLE ${relationName}`)
+    }
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  })
+
+  it('rejects access to a newly added column absent from the exception manifest', async () => {
+    await ensureMigratedSchema()
+    const column = `wrc_unclassified_probe_${randomBytes(6).toString('hex')}`
+    const columnName = quoteIdent(column)
+    await dbPool.query(`ALTER TABLE team_workflow_triggers ADD COLUMN ${columnName} text`)
+    try {
+      await dbPool.query(
+        `GRANT SELECT (${columnName}) ON team_workflow_triggers TO workflow_recipes_runtime`
+      )
+      try {
+        expectWorkflowRecipesVerifierRejects(connectionString, workflowRecipesColumnVerifierMessage)
+      } finally {
+        await dbPool.query(
+          `REVOKE SELECT (${columnName}) ON team_workflow_triggers FROM workflow_recipes_runtime`
+        )
+      }
+    } finally {
+      await dbPool.query(`ALTER TABLE team_workflow_triggers DROP COLUMN ${columnName}`)
+    }
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  })
+
+  it.each([
+    {
+      label: 'unknown relation',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nunknown_relation\tteam_id\tSELECT\n',
+      expected: workflowRecipesColumnVerifierMessage,
+    },
+    {
+      label: 'unknown column',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nteam_workflow_triggers\tunknown_column\tSELECT\n',
+      expected: workflowRecipesColumnVerifierMessage,
+    },
+    {
+      label: 'table-wide privilege exception',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nworkflow_runs\trun_id\tSELECT\n',
+      expected: workflowRecipesColumnVerifierMessage,
+    },
+    {
+      label: 'malformed privilege',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nteam_workflow_triggers\tteam_id\tALL\n',
+      expected: 'workflow-recipes column access profile file is malformed',
+    },
+    {
+      label: 'duplicate policy row',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nteam_workflow_triggers\trecipe_name\tSELECT\nteam_workflow_triggers\trecipe_name\tSELECT\n',
+      expected: 'workflow-recipes column access profile file is malformed',
+    },
+  ])('fails closed for $label in the column policy manifest', async ({ contents, expected }) => {
+    await ensureMigratedSchema()
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), 'workflow-recipes-column-policy-'))
+    const temporaryManifest = join(temporaryDirectory, 'column-access.tsv')
+    try {
+      writeFileSync(temporaryManifest, contents, 'utf8')
+      expectWorkflowRecipesVerifierRejects(connectionString, expected, temporaryManifest)
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true })
+    }
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  })
+
+  it.each(['INSERT', 'UPDATE', 'REFERENCES'] as const)(
+    'rejects an unapproved %s column exception even when PostgreSQL grants it',
+    async privilege => {
+      await ensureMigratedSchema()
+      const temporaryDirectory = mkdtempSync(join(tmpdir(), 'workflow-recipes-column-policy-'))
+      const temporaryManifest = join(temporaryDirectory, 'column-access.tsv')
+      const relationName = quoteIdent('team_workflow_triggers')
+      const columnName = quoteIdent('team_id')
+      const productionManifest = readFileSync(
+        new URL(
+          '../../deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv',
+          import.meta.url
+        ),
+        'utf8'
+      )
+
+      try {
+        writeFileSync(
+          temporaryManifest,
+          `${productionManifest}team_workflow_triggers\tteam_id\t${privilege}\n`,
+          'utf8'
+        )
+        await dbPool.query(
+          `GRANT ${privilege} (${columnName}) ON TABLE ${relationName} TO workflow_recipes_runtime`
+        )
+        expectWorkflowRecipesVerifierRejects(
+          connectionString,
+          'workflow-recipes column access profile file is malformed',
+          temporaryManifest
+        )
+      } finally {
+        await dbPool.query(
+          `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM workflow_recipes_runtime`
+        )
+        rmSync(temporaryDirectory, { recursive: true, force: true })
+      }
+
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it.each([
+    {
+      label: 'malformed relation profile',
+      contents: '# public relation<TAB>access profile\nnot-a-valid-profile\n',
+    },
+    {
+      label: 'duplicate relation profile',
+      contents:
+        '# public relation<TAB>access profile\nteam_workflow_triggers\tdelete\nteam_workflow_triggers\tnone\n',
+    },
+  ])('fails closed for $label declarations', async ({ contents }) => {
+    await ensureMigratedSchema()
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), 'workflow-recipes-relation-policy-'))
+    const temporaryManifest = join(temporaryDirectory, 'relation-access.tsv')
+    try {
+      writeFileSync(temporaryManifest, contents, 'utf8')
+      expectWorkflowRecipesVerifierRejects(
+        connectionString,
+        'workflow-recipes access profile file is malformed',
+        undefined,
+        temporaryManifest
+      )
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true })
+    }
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  })
+
   it('verifies the deployment access contract against migrated schema and rejects drift', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb({ connect: () => dbPool.connect() })
     const [relationQuery, sequenceQuery] = deploymentRuntimeAccessQueries()
+    const traceMaintenanceQueries = traceMaintenanceRuntimeAccessQueries()
     const violations = async (sql: string) =>
       Number((await dbPool.query({ text: sql, rowMode: 'array' })).rows[0][0])
 
     expect(await violations(relationQuery)).toBe(0)
     expect(await violations(sequenceQuery)).toBe(0)
+    for (const query of traceMaintenanceQueries) expect(await violations(query)).toBe(0)
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
     const privileges = await relationPrivileges(dbPool, 'control_api_runtime')
     for (const relation of ['password_identifier_state', 'password_verification_pace']) {
       expectPrivileges([...privileges[relation]], ['SELECT', 'INSERT', 'UPDATE', 'DELETE'])
