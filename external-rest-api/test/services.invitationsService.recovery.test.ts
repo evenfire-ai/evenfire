@@ -40,4 +40,22 @@ describe('setupInvitationPasswordWithToken', () => {
       )
     ).resolves.toEqual({ error: 'invalid_password' })
   })
+
+  it('keeps invalid-payload outside the allowlist when a password was supplied', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'invalid payload' }), { status: 400 })
+    )
+
+    await expect(
+      setupInvitationPasswordWithToken(
+        'synthetic-proof',
+        'member@example.invalid',
+        'synthetic-row-id',
+        'Synthetic-Valid-Password-123'
+      )
+    ).rejects.toMatchObject({
+      status: 503,
+      body: { error: 'authority_unavailable' },
+    })
+  })
 })

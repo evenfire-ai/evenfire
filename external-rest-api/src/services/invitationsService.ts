@@ -47,9 +47,17 @@ function controlApiErrorCode(error: ControlApiError): string | null {
   return null
 }
 
-function resetPasswordDomainError(error: ControlApiError): ResetPasswordDomainError | null {
+function resetPasswordDomainError(
+  error: ControlApiError,
+  password: string
+): ResetPasswordDomainError | null {
   const code = controlApiErrorCode(error)
   if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
+  // The public reset route has already required token, email, and invitation ID.
+  // The producer's exact payload error therefore identifies an empty password.
+  if (error.status === 400 && code === 'invalid payload' && password.length === 0) {
+    return 'invalid_password'
+  }
   if (error.status === 400 && code === 'invalid_invitation') return 'invalid_invitation'
   if (error.status === 401 && code === 'user_retired') return 'invalid_invitation'
   if (error.status === 403 && code === 'forbidden') return 'forbidden'
@@ -267,7 +275,7 @@ export async function setupInvitationPasswordWithToken(
   } catch (error) {
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
     if (error instanceof ControlApiError) {
-      const domainError = resetPasswordDomainError(error)
+      const domainError = resetPasswordDomainError(error, password)
       if (domainError) return { error: domainError }
       if (error.status < 500) throw passwordAuthorityUnavailable()
     }
