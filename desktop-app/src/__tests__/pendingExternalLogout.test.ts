@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import fsSync from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -22,6 +23,7 @@ function markerPath(envKey: string): string {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   if (userDataDirectory) await fs.rm(userDataDirectory, { recursive: true, force: true })
   userDataDirectory = ''
 })
@@ -93,6 +95,41 @@ describe('pending external logout intent', () => {
     expect(() => hasPendingExternalLogout(userDataDirectory, ENV_A)).toThrow(
       'Pending logout marker is not a regular file'
     )
+  })
+
+  it('reads the opened marker when its path is replaced', async () => {
+    userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-pending-logout-'))
+    const filePath = markerPath(ENV_A)
+    const replacementDirectory = path.join(userDataDirectory, 'replacement')
+    const replacementPath = path.join(replacementDirectory, path.basename(filePath))
+    await fs.mkdir(replacementDirectory)
+    recordPendingExternalLogout(userDataDirectory, ENV_A)
+    recordPendingKeytarCleanup(replacementDirectory, ENV_A, 'safe-storage')
+    const originalLstat = fsSync.lstatSync.bind(fsSync)
+    const originalOpen = fsSync.openSync.bind(fsSync)
+    let replaced = false
+
+    const replaceMarkerPath = () => {
+      if (replaced) return
+      fsSync.renameSync(replacementPath, filePath)
+      replaced = true
+    }
+
+    vi.spyOn(fsSync, 'lstatSync').mockImplementation((checkedPath, options) => {
+      const stat = originalLstat(checkedPath, options)
+      if (checkedPath === filePath) replaceMarkerPath()
+      return stat
+    })
+    vi.spyOn(fsSync, 'openSync').mockImplementation((openedPath, flags, mode) => {
+      const descriptor = originalOpen(openedPath, flags, mode)
+      if (openedPath === filePath) replaceMarkerPath()
+      return descriptor
+    })
+
+    expect(readPendingExternalLogoutIntent(userDataDirectory, ENV_A)).toEqual({
+      intent: 'logout-pending',
+    })
+    expect(replaced).toBe(true)
   })
 
   it('rejects invalid environment identities before constructing a marker path', async () => {

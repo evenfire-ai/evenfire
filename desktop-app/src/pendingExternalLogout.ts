@@ -43,13 +43,47 @@ function syncDirectory(directory: string): void {
 
 function readMarkerIntent(filePath: string): PendingExternalLogoutIntent | null {
   let contents: string
+  let descriptor: number | undefined
   try {
-    const stat = fs.lstatSync(filePath)
-    if (!stat.isFile()) throw new Error('Pending logout marker is not a regular file')
-    contents = fs.readFileSync(filePath, 'utf8')
+    const flags =
+      process.platform === 'win32'
+        ? fs.constants.O_RDONLY
+        : fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW
+    descriptor = fs.openSync(filePath, flags)
+    if (!fs.fstatSync(descriptor).isFile()) {
+      throw new Error('Pending logout marker is not a regular file')
+    }
+    contents = fs.readFileSync(descriptor, 'utf8')
+    if (process.platform === 'win32') {
+      try {
+        if (!fs.lstatSync(filePath).isFile()) {
+          throw new Error('Pending logout marker is not a regular file')
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') throw error
+      }
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return null
+    const code = (error as NodeJS.ErrnoException | undefined)?.code
+    if (code === 'ENOENT') {
+      if (process.platform === 'win32') {
+        try {
+          if (!fs.lstatSync(filePath).isFile()) {
+            throw new Error('Pending logout marker is not a regular file')
+          }
+        } catch (markerError) {
+          if ((markerError as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return null
+          throw markerError
+        }
+      }
+      return null
+    }
+    if (code === 'ELOOP') {
+      throw new Error('Pending logout marker is not a regular file')
+    }
     throw error
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor)
   }
 
   // Empty markers were only written by this unmerged PR. Preserve them as logout intent.
