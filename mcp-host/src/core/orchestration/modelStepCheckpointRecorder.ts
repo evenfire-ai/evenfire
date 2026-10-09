@@ -93,6 +93,8 @@ export interface ModelStepCheckpointRecorderOptions {
   redact: (text: string) => string
   /** Serialized `TaskExecutionBudget` snapshot, read at each state update. */
   taskBudget: () => string | null
+  /** Last successful model call in this task, captured by its own port wrapper. */
+  servedBy?: () => { provider: string; model: string } | undefined
   /** Lifetime of a `resumable` checkpoint from the failure. */
   resumableTtlMs: number
   /**
@@ -269,6 +271,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
           to: 'resumable',
           failedAt: now,
           expiresAt: now + this.opts.resumableTtlMs,
+          ...(this.opts.servedBy?.() ?? {}),
           ...(taskBudget === null ? {} : { taskBudget }),
           ...(bytes.length > 0 ? { attachments: bytes } : {}),
         })
