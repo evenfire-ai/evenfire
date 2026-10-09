@@ -23,6 +23,7 @@ if [[ "$relation_count" != "114" || "$duplicate_count" != "0" || "$invalid_count
   ! grep -qx $'password_verification_pace\tlegacy_dml' "$PROFILE_FILE" || \
   ! grep -qx $'password_verification_work\tinsert_delete' "$PROFILE_FILE" || \
   ! grep -Fq '$2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/' "$MIGRATION_SCRIPT" || \
+  ! grep -Fq 'has_any_column_privilege(' "$MIGRATION_SCRIPT" || \
   ! grep -Fq "('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle', 'insert_delete'))" "$MIGRATION_SCRIPT" || \
   ! grep -Fq "('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert', 'link_lifecycle'))" "$MIGRATION_SCRIPT" || \
   ! grep -Fq "('DELETE', expected.access_profile IN ('legacy_dml', 'insert_delete'))" "$MIGRATION_SCRIPT" || \
