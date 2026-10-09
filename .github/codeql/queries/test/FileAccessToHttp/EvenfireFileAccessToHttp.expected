@@ -1,0 +1,48 @@
+edges
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:18:34:18:52 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:26:13:26:31 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:30:8:30:26 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:35:32:35:50 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:44:43:44:61 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:45:13:45:31 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:50:40:50:58 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:18:24:18:54 | `Bearer ... ntial}` | mcp-host/src/runtime/pr2ReadinessReporter.ts:17:16:20:7 | {\\n      ...       } | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:18:34:18:52 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:18:24:18:54 | `Bearer ... ntial}` | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:30:8:30:26 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:30:8:30:46 | persist ... $/, "") | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:30:8:30:46 | persist ... $/, "") | mcp-host/src/runtime/pr2ReadinessReporter.ts:30:5:30:95 | `${pers ... idence` | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:35:32:35:50 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:35:13:35:52 | `${auth ... ntial}` | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:44:33:44:63 | `Bearer ... ntial}` | mcp-host/src/runtime/pr2ReadinessReporter.ts:44:16:44:65 | { autho ... ial}` } | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:44:43:44:61 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:44:33:44:63 | `Bearer ... ntial}` | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:50:9:50:25 | persistedEvidence | mcp-host/src/runtime/pr2ReadinessReporter.ts:53:32:53:48 | persistedEvidence | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:50:29:50:59 | JSON.pa ... ential) | mcp-host/src/runtime/pr2ReadinessReporter.ts:50:9:50:25 | persistedEvidence | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:50:40:50:58 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:50:29:50:59 | JSON.pa ... ential) | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:53:32:53:48 | persistedEvidence | mcp-host/src/runtime/pr2ReadinessReporter.ts:53:13:53:59 | `${auth ... point}` | provenance |  |
+nodes
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:7:2:25 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | semmle.label | fs.read ... f-8",\\n) |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:17:16:20:7 | {\\n      ...       } | semmle.label | {\\n      ...       } |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:18:24:18:54 | `Bearer ... ntial}` | semmle.label | `Bearer ... ntial}` |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:18:34:18:52 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:26:13:26:31 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:30:5:30:95 | `${pers ... idence` | semmle.label | `${pers ... idence` |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:30:8:30:26 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:30:8:30:46 | persist ... $/, "") | semmle.label | persist ... $/, "") |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:35:13:35:52 | `${auth ... ntial}` | semmle.label | `${auth ... ntial}` |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:35:32:35:50 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:44:16:44:65 | { autho ... ial}` } | semmle.label | { autho ... ial}` } |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:44:33:44:63 | `Bearer ... ntial}` | semmle.label | `Bearer ... ntial}` |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:44:43:44:61 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:45:13:45:31 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:50:9:50:25 | persistedEvidence | semmle.label | persistedEvidence |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:50:29:50:59 | JSON.pa ... ential) | semmle.label | JSON.pa ... ential) |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:50:40:50:58 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:53:13:53:59 | `${auth ... point}` | semmle.label | `${auth ... point}` |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:53:32:53:48 | persistedEvidence | semmle.label | persistedEvidence |
+subpaths
+#select
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:26:13:26:31 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:26:13:26:31 | persistedCredential | Outbound network request depends on $@. | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | file data |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:30:5:30:95 | `${pers ... idence` | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:30:5:30:95 | `${pers ... idence` | Outbound network request depends on $@. | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | file data |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:35:13:35:52 | `${auth ... ntial}` | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:35:13:35:52 | `${auth ... ntial}` | Outbound network request depends on $@. | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | file data |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:45:13:45:31 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:45:13:45:31 | persistedCredential | Outbound network request depends on $@. | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | file data |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:53:13:53:59 | `${auth ... point}` | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:53:13:53:59 | `${auth ... point}` | Outbound network request depends on $@. | mcp-host/src/runtime/pr2ReadinessReporter.ts:2:29:5:1 | fs.read ... f-8",\\n) | file data |

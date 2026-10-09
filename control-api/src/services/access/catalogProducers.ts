@@ -13,6 +13,7 @@ import {
   CATALOG_FAMILIES,
   type CatalogFamily,
   type CatalogKey,
+  type CatalogOperationalHydration,
   type CatalogProducer,
   type CatalogProducerPage,
   type CatalogRelationship,
@@ -40,23 +41,35 @@ import {
   validateHydrationKeys,
 } from './catalogProducerSupport.js'
 import type { OperationalSourceFamily } from './operationalAccessProjection.js'
-import { canonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  type OperationalResourceGraphResult,
+  loadOperationalResourceGraphs,
+  operationalResourceGraphKey,
+  selectOperationalPathGraph,
+} from './operationalAccessReader.js'
+import { type AccessResourceType, canonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  type RuntimeBehaviorPolicySnapshot,
+  assembleOperationalBehaviorDimensions,
+  budgetContextRefsForGraph,
+  loadRuntimeBehaviorPolicySnapshot,
+} from './runtimeBehaviorSource.js'
 import { listGfsProducerKeys } from './teamGfsTopK.js'
 
 const REQUIRED_SOURCES: Readonly<Record<CatalogFamily, readonly OperationalSourceFamily[]>> =
   Object.freeze({
     user: [],
     team: [],
-    host: ['host'],
-    context: ['context'],
-    mcp_server: ['host', 'context', 'mcp_server'],
-    workflow_recipe: ['workflow_recipe'],
+    host: ['host', 'context', 'mcp_server', 'shared_filesystem'],
+    context: ['context', 'mcp_server', 'shared_filesystem'],
+    mcp_server: ['host', 'context', 'mcp_server', 'shared_filesystem'],
+    workflow_recipe: ['workflow_recipe', 'context', 'mcp_server', 'shared_filesystem'],
     workflow_run: [],
     workflow_approval: [],
     notification: [],
     gfs_resource: [],
-    shared_filesystem: ['context', 'shared_filesystem'],
-    sandbox_app: ['workflow_recipe'],
+    shared_filesystem: ['context', 'mcp_server', 'shared_filesystem'],
+    sandbox_app: ['workflow_recipe', 'context', 'mcp_server', 'shared_filesystem'],
   })
 
 type JsonRecord = Record<string, unknown>
@@ -170,6 +183,7 @@ function commonCandidate(input: {
   filesystemScope?: string | null
   runtimeRef?: string | null
   approvalRef?: string | null
+  behaviorDimensions?: Parameters<typeof authorityCandidate>[0]['behaviorDimensions']
 }): AuthorityCandidate {
   const kind = kindOf(input.row)
   const teamId = kind === 'team' ? boundedString(input.row.team_id, 'path_team_id', 64) : undefined
@@ -186,6 +200,7 @@ function commonCandidate(input: {
     filesystemScope: input.filesystemScope,
     runtimeRef: input.runtimeRef,
     approvalRef: input.approvalRef,
+    behaviorDimensions: input.behaviorDimensions,
   })
 }
 
@@ -215,12 +230,7 @@ function capabilitiesForFamily(family: CatalogFamily): readonly AccessCapability
     case 'workflow_recipe':
       return ['workflow.read', 'workflow.trigger']
     case 'workflow_run':
-      return [
-        'workflow.read',
-        'workflow.run.manage',
-        'workflow.artifact.read',
-        'workflow.artifact.delete',
-      ]
+      return ['workflow.read', 'workflow.artifact.read', 'workflow.artifact.delete']
     case 'workflow_approval':
       return ['workflow.approval.decide']
     case 'notification':
@@ -237,22 +247,15 @@ function capabilitiesForFamily(family: CatalogFamily): readonly AccessCapability
 function simpleOperationalCandidates(input: {
   context: CatalogRequestContext
   family: 'host' | 'context' | 'workflow_recipe' | 'sandbox_app'
-  logicalId: string
   pathRows: readonly JsonRecord[]
-  relationshipRows: readonly JsonRecord[]
+  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+  policySnapshot: RuntimeBehaviorPolicySnapshot
 }): AuthorityCandidate[] {
-  const relevantRelationships = input.relationshipRows.filter(row => {
-    const sourceType = String(row.source_type ?? '')
-    const sourceId = String(row.source_id ?? '')
-    if (input.family === 'sandbox_app') {
-      return row.target_type === 'sandbox_app' && row.target_id === input.logicalId
-    }
-    if (input.family === 'workflow_recipe') return true
-    return sourceType === input.family && sourceId === input.logicalId
-  })
+  const selectedGraph = selectOperationalPathGraph({ graph: input.graph })
+  if (!selectedGraph) return []
   const runtimeRef = JSON.stringify(
-    relevantRelationships
-      .map(row => boundedString(row.relationship_instance_id, 'relationship_instance', 256))
+    selectedGraph.relationships
+      .map(relationship => relationship.relationshipInstanceId)
       .sort(compareCanonicalUtf8Text)
   )
   return input.pathRows.map(row =>
@@ -262,6 +265,13 @@ function simpleOperationalCandidates(input: {
       capabilities: capabilitiesForFamily(input.family),
       runtimeSensitive: true,
       runtimeRef,
+      behaviorDimensions: assembleOperationalBehaviorDimensions({
+        userId: input.context.principal.userId,
+        ...(row.team_id ? { teamId: String(row.team_id) } : {}),
+        graph: selectedGraph,
+        policySnapshot: input.policySnapshot,
+        runtimeRef,
+      }),
     })
   )
 }
@@ -270,37 +280,62 @@ function derivedCandidates(input: {
   context: CatalogRequestContext
   family: 'mcp_server' | 'shared_filesystem'
   pathRows: readonly JsonRecord[]
+  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+  policySnapshot: RuntimeBehaviorPolicySnapshot
 }): AuthorityCandidate[] {
-  return input.pathRows.map(row => {
-    const edgeInstance = boundedString(row.edge_instance, 'edge_instance', 256)
-    const sourceId = boundedString(row.source_id, 'path_source_id')
-    if (input.family === 'shared_filesystem') {
-      const edgeBehavior =
-        row.edge_behavior && typeof row.edge_behavior === 'object'
-          ? (row.edge_behavior as JsonRecord)
-          : {}
+  return input.pathRows
+    .map(row => {
+      const edgeInstance = boundedString(row.edge_instance, 'edge_instance', 256)
+      const sourceId = boundedString(row.source_id, 'path_source_id')
+      const hostId = nullableString(row.host_source_id)
+      const selectedGraph = selectOperationalPathGraph({
+        graph: input.graph,
+        contextId: sourceId,
+        ...(hostId ? { hostId } : {}),
+      })
+      if (!selectedGraph) return null
+      if (input.family === 'shared_filesystem') {
+        const edgeBehavior =
+          row.edge_behavior && typeof row.edge_behavior === 'object'
+            ? (row.edge_behavior as JsonRecord)
+            : {}
+        return commonCandidate({
+          context: input.context,
+          row,
+          capabilities: capabilitiesForFamily(input.family),
+          filesystemScope: JSON.stringify({
+            contextId: sourceId,
+            relationshipInstanceId: edgeInstance,
+            mountPath: boundedString(edgeBehavior.mountPath, 'filesystem_mount_path'),
+            readOnly: true,
+          }),
+          runtimeRef: edgeInstance,
+          behaviorDimensions: assembleOperationalBehaviorDimensions({
+            userId: input.context.principal.userId,
+            ...(row.team_id ? { teamId: String(row.team_id) } : {}),
+            graph: selectedGraph,
+            policySnapshot: input.policySnapshot,
+            runtimeRef: edgeInstance,
+          }),
+        })
+      }
+      const hostEdge = nullableString(row.host_edge_instance, 256)
       return commonCandidate({
         context: input.context,
         row,
         capabilities: capabilitiesForFamily(input.family),
-        filesystemScope: JSON.stringify({
-          contextId: sourceId,
-          relationshipInstanceId: edgeInstance,
-          mountPath: boundedString(edgeBehavior.mountPath, 'filesystem_mount_path'),
-          readOnly: true,
+        runtimeSensitive: true,
+        runtimeRef: hostEdge ? JSON.stringify([hostEdge, edgeInstance]) : edgeInstance,
+        behaviorDimensions: assembleOperationalBehaviorDimensions({
+          userId: input.context.principal.userId,
+          ...(row.team_id ? { teamId: String(row.team_id) } : {}),
+          graph: selectedGraph,
+          policySnapshot: input.policySnapshot,
+          runtimeRef: hostEdge ? JSON.stringify([hostEdge, edgeInstance]) : edgeInstance,
         }),
-        runtimeRef: edgeInstance,
       })
-    }
-    const hostEdge = nullableString(row.host_edge_instance, 256)
-    return commonCandidate({
-      context: input.context,
-      row,
-      capabilities: capabilitiesForFamily(input.family),
-      runtimeSensitive: true,
-      runtimeRef: hostEdge ? JSON.stringify([hostEdge, edgeInstance]) : edgeInstance,
     })
-  })
+    .filter((candidate): candidate is AuthorityCandidate => candidate !== null)
 }
 
 function databaseCandidates(input: {
@@ -396,12 +431,13 @@ function decodedHydrationBytes(rows: readonly unknown[]): number {
   }
 }
 
-function hydrateRows(input: {
+async function hydrateRows(input: {
   context: CatalogRequestContext
   family: CatalogFamily
   sourceRevision: string
   rows: readonly JsonRecord[]
-}): HydratedCatalogResource[] {
+  operationalHydration?: CatalogOperationalHydration
+}): Promise<HydratedCatalogResource[]> {
   input.context.budget.charge({
     kind: 'decodedBytes',
     amount: decodedHydrationBytes(input.rows),
@@ -414,11 +450,57 @@ function hydrateRows(input: {
   let rawRelationships = 0
   let reportedPathRows = 0
   let reportedRelationshipRows = 0
+  const operationalFamilies = new Set<CatalogFamily>([
+    'host',
+    'context',
+    'mcp_server',
+    'workflow_recipe',
+    'sandbox_app',
+    'shared_filesystem',
+  ])
+  const hasOperationalRows =
+    operationalFamilies.has(input.family) && input.rows.some(row => records(row.paths).length > 0)
+  const operationalGraphs = hasOperationalRows
+    ? (input.operationalHydration?.graphs ??
+      (await loadOperationalResourceGraphs({
+        db: input.context.db,
+        budget: input.context.budget,
+        environmentId: input.context.environmentId,
+        roots: input.rows
+          .filter(row => records(row.paths).length > 0)
+          .map(row => ({
+            resourceType: input.family as AccessResourceType,
+            logicalId: boundedString(row.logical_id, 'resource_logical_id'),
+          })),
+        sourceStates: input.context.sourceStates,
+      })))
+    : null
+  const contextRefs =
+    operationalGraphs && !input.operationalHydration
+      ? [...operationalGraphs.values()].flatMap(graph =>
+          graph.status === 'current' ? budgetContextRefsForGraph(graph) : []
+        )
+      : []
+  const policySnapshot = hasOperationalRows
+    ? (input.operationalHydration?.policySnapshot ??
+      (await loadRuntimeBehaviorPolicySnapshot({
+        db: input.context.db,
+        budget: input.context.budget,
+        contextRefs,
+      })))
+    : null
   for (const row of input.rows) {
     const logicalId = boundedString(row.logical_id, 'resource_logical_id')
     const pathRows = records(row.paths)
     if (pathRows.length === 0) continue
     const relationshipRows = records(row.relationships)
+    const graphResult =
+      operationalGraphs?.get(
+        operationalResourceGraphKey(input.family as AccessResourceType, logicalId)
+      ) ?? null
+    if (hasOperationalRows && (!graphResult || graphResult.status !== 'current')) {
+      throw new CatalogProducerContractError('operational_source_changed_before_hydration')
+    }
     rawPaths += pathRows.length
     rawRelationships += relationshipRows.length
     reportedPathRows = Math.max(
@@ -437,12 +519,18 @@ function hydrateRows(input: {
         ? simpleOperationalCandidates({
             context: input.context,
             family: input.family,
-            logicalId,
             pathRows,
-            relationshipRows,
+            graph: graphResult as Extract<OperationalResourceGraphResult, { status: 'current' }>,
+            policySnapshot: policySnapshot!,
           })
         : input.family === 'mcp_server' || input.family === 'shared_filesystem'
-          ? derivedCandidates({ context: input.context, family: input.family, pathRows })
+          ? derivedCandidates({
+              context: input.context,
+              family: input.family,
+              pathRows,
+              graph: graphResult as Extract<OperationalResourceGraphResult, { status: 'current' }>,
+              policySnapshot: policySnapshot!,
+            })
           : databaseCandidates({
               context: input.context,
               family: input.family,
@@ -467,11 +555,19 @@ function hydrateRows(input: {
         accessPaths: Object.freeze(paths),
         relationships: Object.freeze(relationships),
         authorizationResourceRevision: boundedString(
-          row.resource_revision ?? '1',
+          graphResult?.status === 'current'
+            ? revisionOfValues([
+                graphResult.resource.providerUid,
+                graphResult.resource.providerResourceVersion,
+              ])
+            : (row.resource_revision ?? '1'),
           'resource_revision',
           128
         ),
-        authorizationSourceRevision: input.sourceRevision,
+        authorizationSourceRevision:
+          graphResult?.status === 'current'
+            ? graphResult.sourceStateRevision
+            : input.sourceRevision,
         authorizationRelationshipsRevision:
           input.family === 'host' ||
           input.family === 'context' ||
@@ -479,7 +575,9 @@ function hydrateRows(input: {
           input.family === 'workflow_recipe' ||
           input.family === 'shared_filesystem' ||
           input.family === 'sandbox_app'
-            ? operationalRelationshipsRevision(relationshipRows)
+            ? graphResult?.status === 'current'
+              ? graphResult.relationshipsRevision
+              : operationalRelationshipsRevision(relationshipRows)
             : databaseRelationshipsRevision(relationships),
         validUntil,
       })
@@ -553,7 +651,8 @@ class SqlCatalogProducer implements CatalogProducer {
 
   async hydrateCanonicalKeys(
     context: CatalogRequestContext,
-    keys: readonly CatalogKey[]
+    keys: readonly CatalogKey[],
+    operationalHydration?: CatalogOperationalHydration
   ): Promise<readonly HydratedCatalogResource[]> {
     const logicalIds = validateHydrationKeys({ context, family: this.family, keys })
     if (logicalIds.length === 0) return Object.freeze([])
@@ -568,7 +667,7 @@ class SqlCatalogProducer implements CatalogProducer {
       hydrationValues({ context, family: this.family, logicalIds })
     )
     return Object.freeze(
-      hydrateRows({
+      await hydrateRows({
         context,
         family: this.family,
         sourceRevision:
@@ -576,6 +675,7 @@ class SqlCatalogProducer implements CatalogProducer {
             ? 'database-resource'
             : readiness.sourceRevision,
         rows: result.rows as JsonRecord[],
+        operationalHydration,
       })
     )
   }
@@ -584,6 +684,27 @@ class SqlCatalogProducer implements CatalogProducer {
 export const catalogProducers: ReadonlyMap<CatalogFamily, CatalogProducer> = new Map(
   CATALOG_FAMILIES.map(family => [family, new SqlCatalogProducer(family)])
 )
+
+/**
+ * Measured producer-call cost of one complete operational-family hydration.
+ *
+ * The values are deliberately held beside the canonical producer plan: the
+ * RealPG catalog-family harness measures this same plan, and shadow callers
+ * must not maintain an independent operational reserve rule.
+ */
+const OPERATIONAL_SHADOW_PRODUCER_CALL_RESERVE: Readonly<Partial<Record<CatalogFamily, number>>> =
+  Object.freeze({
+    host: 12,
+    context: 11,
+    mcp_server: 11,
+    workflow_recipe: 11,
+    sandbox_app: 11,
+    shared_filesystem: 11,
+  })
+
+export function catalogShadowProducerCallReserve(family: CatalogFamily): number {
+  return OPERATIONAL_SHADOW_PRODUCER_CALL_RESERVE[family] ?? 8
+}
 
 export function requireCatalogProducer(family: CatalogFamily): CatalogProducer {
   const producer = catalogProducers.get(family)

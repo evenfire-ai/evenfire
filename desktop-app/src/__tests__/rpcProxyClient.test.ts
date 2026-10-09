@@ -27,6 +27,29 @@ describe('RpcProxyClient.invokeHostMessage admission', () => {
   })
 })
 
+describe('RpcProxyClient Host stream admission', () => {
+  it('preserves 429 status and Retry-After as ApiError metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"error":"Too Many Requests"}', {
+        status: 429,
+        headers: { 'Retry-After': '23' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const client = new RpcProxyClient()
+      const rejection = await client
+        .openHostStatusStream('rpc-token', 'host-a', () => {}, new AbortController().signal)
+        .catch(error => error)
+      expect(rejection).toBeInstanceOf(ApiError)
+      expect(rejection).toMatchObject({ status: 429, retryAfter: '23' })
+      expect(fetchMock).toHaveBeenCalledOnce()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 // Mock the config module so the module-level url() helper uses a fixed base URL
 vi.mock('../config.js', () => ({
   config: {
@@ -44,6 +67,26 @@ describe('RpcProxyClient.listSessions', () => {
   beforeEach(() => {
     client = new RpcProxyClient()
     vi.restoreAllMocks()
+  })
+
+  it('surfaces W1 400 instead of treating it as absent session or available Host', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => 'Invalid hostRef',
+      })
+    )
+    await expect(client.listSessions('token', 'invalid_host')).rejects.toMatchObject({
+      status: 400,
+    })
+    await expect(
+      client.loadSessionMessages('token', 'invalid_host', 'agent', 'chat')
+    ).rejects.toMatchObject({ status: 400 })
+    await expect(
+      client.getContextBreakdown('token', 'invalid_host', 'agent', 'chat')
+    ).rejects.toMatchObject({ status: 400 })
   })
 
   it.each(['.', '..', 'host/name', 'host\\name', 'host\nforged', 'x'.repeat(501)])(
@@ -1072,6 +1115,16 @@ describe('RpcProxyClient.getHostModels', () => {
       vi.fn().mockResolvedValue({ ok: false, status: 501, text: async () => 'not implemented' })
     )
     await expect(client.getHostModels('t', 'h', 'c')).resolves.toBeNull()
+  })
+
+  it('does not treat W1 Host-ref 400 as an unavailable model-list feature', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 400, text: async () => 'Invalid hostRef' })
+    )
+    await expect(client.getHostModels('t', 'invalid_host', 'c')).rejects.toMatchObject({
+      status: 400,
+    })
   })
 
   it('throws on a genuine server error (500)', async () => {

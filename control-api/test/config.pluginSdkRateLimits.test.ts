@@ -110,10 +110,11 @@ function read(relativeFromThisFile: string): string {
 /** Fail-loud single-match extraction — a miss means the key is unregistered. */
 function extractOne(source: string, pattern: RegExp, label: string): string {
   const match = source.match(pattern)
-  if (!match || match[1] === undefined) {
+  const value = match?.[2] ?? match?.[1]
+  if (value === undefined) {
     throw new Error(`Could not extract ${label} with ${pattern} — register the key (plan D1)`)
   }
-  return match[1]
+  return value
 }
 
 describe('plugin SDK platform rate-limit config (issue #348)', () => {
@@ -173,7 +174,7 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     for (const { env, field } of EXPECTED) {
       const value = extractOne(
         source,
-        new RegExp(`${env}:\\s*"(\\d+)"`),
+        new RegExp(`${env}:\\s*(["'])(\\d+)\\1`),
         `${env} in deploy/base/control-plane/configmaps.yaml`
       )
       expect(Number(value), env).toBe(config[field])
@@ -187,7 +188,7 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     for (const { env, field } of EXPECTED) {
       const value = extractOne(
         source,
-        new RegExp(`${env}:\\s*"(\\d+)"`),
+        new RegExp(`${env}:\\s*(["'])(\\d+)\\1`),
         `${env} in deploy/overlays/minikube/configmaps/control-api-config.yaml`
       )
       expect(Number(value), env).toBe(config[field])

@@ -163,6 +163,194 @@ describe('operational access projection', () => {
     ).toThrowError(OperationalProjectionError)
   })
 
+  it('does not convert malformed or missing source configuration into known none', () => {
+    expect(() =>
+      projectOperationalObject({
+        environmentId: 'test:cluster',
+        plural: 'contexts',
+        namespace: 'contexts',
+        object: {
+          metadata: {
+            name: 'ctx-malformed',
+            namespace: 'contexts',
+            uid: 'uid-context-malformed',
+            resourceVersion: '1',
+          },
+          spec: { sharedFileSystems: 'not-an-array' },
+        },
+        behaviorFingerprintKey: 'test-key',
+        relationshipNamespaces: namespaces,
+      })
+    ).toThrowError(OperationalProjectionError)
+
+    expect(() =>
+      projectOperationalObject({
+        environmentId: 'test:cluster',
+        plural: 'contexts',
+        namespace: 'contexts',
+        object: {
+          metadata: {
+            name: 'ctx-missing-spec',
+            namespace: 'contexts',
+            uid: 'uid-context-missing-spec',
+            resourceVersion: '1',
+          },
+        },
+        behaviorFingerprintKey: 'test-key',
+        relationshipNamespaces: namespaces,
+      })
+    ).toThrowError(OperationalProjectionError)
+  })
+
+  it('binds Host approval and credential-reference policy content without secret bytes', () => {
+    const host = (approval: unknown, secretRef: string) =>
+      projectOperationalObject({
+        environmentId: 'test:cluster',
+        plural: 'hosts',
+        namespace: 'mcp-host',
+        object: {
+          metadata: {
+            name: 'host-policy',
+            namespace: 'mcp-host',
+            uid: 'uid-host-policy',
+            resourceVersion: '1',
+          },
+          spec: {
+            contextRef: 'ctx-a',
+            secretRef,
+            ...(approval === undefined ? {} : { approval }),
+          },
+        },
+        behaviorFingerprintKey: 'test-key',
+        relationshipNamespaces: namespaces,
+      }).resources[0]?.behaviorSources
+
+    const first = host(
+      { defaultPolicy: 'cli_only', channels: { telegram: { enabled: true } } },
+      'host-secret-a'
+    )
+    const changedApproval = host(
+      { defaultPolicy: 'designated_approvers', channels: { telegram: { enabled: true } } },
+      'host-secret-a'
+    )
+    const changedSecret = host(
+      { defaultPolicy: 'cli_only', channels: { telegram: { enabled: true } } },
+      'host-secret-b'
+    )
+
+    expect(first.approvalPolicyConfigured).toBe(true)
+    expect(first.approvalPolicy.fingerprint).not.toBe(changedApproval.approvalPolicy.fingerprint)
+    expect(first.credentialPolicy.fingerprint).not.toBe(changedSecret.credentialPolicy.fingerprint)
+    expect(first.credentialPolicy.fingerprint).not.toContain('host-secret-a')
+  })
+
+  it('binds a Host OAuth broker grant identity without exposing the grant key', () => {
+    const host = (connectionRef: string) =>
+      projectOperationalObject({
+        environmentId: 'test:cluster',
+        plural: 'hosts',
+        namespace: 'mcp-host',
+        object: {
+          metadata: {
+            name: 'host-broker',
+            namespace: 'mcp-host',
+            uid: 'uid-host-broker',
+            resourceVersion: '1',
+          },
+          spec: {
+            model: {
+              provider: 'codex-subscription',
+              name: 'gpt-test',
+              connectionRef,
+            },
+          },
+        },
+        behaviorFingerprintKey: 'test-key',
+        relationshipNamespaces: namespaces,
+      }).resources[0]?.behaviorSources
+
+    const first = host('grant-a')
+    const rotated = host('grant-b')
+
+    expect(first).toMatchObject({
+      credentialPolicy: { state: 'known', fingerprint: expect.any(String) },
+      credentialReferenceNames: [],
+    })
+    expect(rotated).toMatchObject({
+      credentialPolicy: { state: 'known', fingerprint: expect.any(String) },
+      credentialReferenceNames: [],
+    })
+    expect(first!.credentialPolicy.fingerprint).not.toBe(rotated!.credentialPolicy.fingerprint)
+    expect(first!.credentialReferenceFingerprints.join('')).not.toContain('grant-a')
+    expect(first!.credentialPolicy.fingerprint).not.toContain('grant-a')
+  })
+
+  it('binds a WorkflowRecipe OAuth broker grant from current annotations', () => {
+    const recipe = (connectionRef: string) =>
+      projectOperationalObject({
+        environmentId: 'test:cluster',
+        plural: 'workflowrecipes',
+        namespace: 'sandbox-recipes',
+        object: {
+          metadata: {
+            name: 'recipe-broker',
+            namespace: 'sandbox-recipes',
+            uid: 'uid-recipe-broker',
+            resourceVersion: '1',
+            annotations: {
+              'clerum.io/codex-connection-ref': connectionRef,
+              'clerum.io/subscription-connection-ref': connectionRef,
+            },
+          },
+          spec: {
+            agent: { provider: 'codex-subscription', model: 'gpt-test' },
+          },
+        },
+        behaviorFingerprintKey: 'test-key',
+        relationshipNamespaces: namespaces,
+      }).resources[0]!.behaviorSources
+
+    const first = recipe('grant-a')
+    const rotated = recipe('grant-b')
+
+    expect(first).toMatchObject({
+      credentialPolicy: { state: 'known', fingerprint: expect.any(String) },
+      credentialReferenceNames: [],
+    })
+    expect(rotated).toMatchObject({
+      credentialPolicy: { state: 'known', fingerprint: expect.any(String) },
+      credentialReferenceNames: [],
+    })
+    expect(first!.credentialPolicy.fingerprint).not.toBe(rotated!.credentialPolicy.fingerprint)
+    expect(first!.credentialReferenceFingerprints.join('')).not.toContain('grant-a')
+    expect(first!.credentialPolicy.fingerprint).not.toContain('grant-a')
+  })
+
+  it('represents an explicit no-auth MCP source as source-proven none', () => {
+    const projection = projectOperationalObject({
+      environmentId: 'test:cluster',
+      plural: 'mcpservers',
+      namespace: 'mcp-server',
+      object: {
+        metadata: {
+          name: 'no-auth',
+          namespace: 'mcp-server',
+          uid: 'uid-no-auth',
+          resourceVersion: '1',
+        },
+        spec: { auth: { type: 'none' } },
+      },
+      behaviorFingerprintKey: 'test-key',
+      relationshipNamespaces: namespaces,
+    })
+
+    expect(projection.resources[0]?.behaviorSources).toMatchObject({
+      credentialMode: 'none',
+      credentialPolicyConfigured: false,
+      credentialReferenceNames: [],
+    })
+  })
+
   it('derives sandbox app identity without exposing raw runtime policy', () => {
     const projection = projectOperationalObject({
       environmentId: 'test:cluster',

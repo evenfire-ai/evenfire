@@ -29,6 +29,10 @@ export interface Config {
   // Kubernetes namespace where rpc-proxy runs (for L2 egress NetworkPolicy generation)
   rpcProxyNamespace: string
 
+  // Protocol implemented by the Host image HCC reconciles. Production
+  // rollback sets legacy-headers before Proxy rollback.
+  hostRpcProxyEdgeProtocol: 'legacy-headers' | 'dedicated-header-v1'
+
   // Kubernetes namespace where per-Host channel-reader Deployments live
   channelsNamespace: string
 
@@ -580,6 +584,15 @@ export const config: Config = {
 
   // rpc-proxy namespace
   rpcProxyNamespace: getEnv('CONTEXT_MAPPER_RPC_PROXY_NAMESPACE', 'rpc-proxy')!,
+  hostRpcProxyEdgeProtocol: (() => {
+    const protocol = getEnv('CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL', 'legacy-headers')
+    if (protocol !== 'legacy-headers' && protocol !== 'dedicated-header-v1') {
+      throw new Error(
+        'CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL must be legacy-headers or dedicated-header-v1'
+      )
+    }
+    return protocol
+  })(),
 
   // Per-Host channel-reader Deployments namespace
   channelsNamespace: getEnv('CONTEXT_MAPPER_CHANNELS_NAMESPACE', 'channels')!,

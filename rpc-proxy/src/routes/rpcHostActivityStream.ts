@@ -1,12 +1,15 @@
 import { Router } from 'express'
 import { config } from '../config.js'
+import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
   extractAuthToken,
+  requireHostRpcPreflightScope,
   requireRpcAuth,
-  requireScope,
 } from '../middleware/auth.js'
 import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
+import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
+import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
 const activeStreamCountsByUser = new Map<string, number>()
@@ -44,11 +47,6 @@ function decrementCounter(map: Map<string, number>, key: string): void {
   else map.set(key, next)
 }
 
-function isWildcardOrInvalidHostRef(hostRef: string): boolean {
-  if (!hostRef.trim()) return true
-  return /[*%]/.test(hostRef)
-}
-
 function sanitizedStreamErrorMessage(): string {
   return 'Activity temporarily unavailable'
 }
@@ -80,28 +78,27 @@ export function createRpcHostActivityStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/activity/stream',
     requireRpcAuth,
-    requireScope('host:activity:read'),
+    requireHostRpcPreflightScope('host:activity:read'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef || isWildcardOrInvalidHostRef(hostRef)) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (Number(req.headers['content-length'] || 0) > 0) {
-          res
-            .status(400)
-            .json({ error: 'Activity stream is read-only and does not accept request bodies' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
 
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
+
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 

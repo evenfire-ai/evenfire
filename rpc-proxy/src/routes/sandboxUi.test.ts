@@ -74,6 +74,12 @@ const USER_SCOPED_CLAIMS = {
 }
 
 const fetchSpy = vi.fn()
+const legacyAdmissionMock = vi.hoisted(() => ({ admit: vi.fn() }))
+
+vi.mock('../services/controlApiRestService.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../services/controlApiRestService.js')>()),
+  admitLegacySessionCreation: legacyAdmissionMock.admit,
+}))
 
 function makeApp() {
   const app = express()
@@ -94,6 +100,7 @@ beforeEach(() => {
   authTokenMock.verifyRpcToken.mockReset()
   authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS })
   fetchSpy.mockReset()
+  legacyAdmissionMock.admit.mockReset().mockResolvedValue({ allowed: true })
   vi.stubGlobal('fetch', fetchSpy)
   _clearSandboxUiRegistryCache()
 })
@@ -102,10 +109,14 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-function jsonResponse(status: number, body: unknown): Response {
+function jsonResponse(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {}
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
   })
 }
 
@@ -150,6 +161,65 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/session', () => {
       .set('Authorization', 'Bearer t')
       .expect(403)
     expect(res.body.error).toBe('recipe_acl_denied')
+    expect(legacyAdmissionMock.admit).toHaveBeenCalledWith('t')
+  })
+
+  it('denies an exhausted subject before registry/readiness work', async () => {
+    legacyAdmissionMock.admit.mockResolvedValue({
+      allowed: false,
+      status: 429,
+      retryAfterSeconds: 9,
+      headers: {
+        'X-RateLimit-Limit': '60',
+        'X-RateLimit-Remaining': '0',
+        'X-RateLimit-Reset': '1800000000',
+      },
+    })
+
+    const res = await request(makeApp())
+      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/session')
+      .set('Authorization', 'Bearer t')
+      .expect(429)
+
+    expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 9 })
+    expect(res.headers['retry-after']).toBe('9')
+    expect(res.headers['x-ratelimit-limit']).toBe('60')
+    expect(legacyAdmissionMock.admit).toHaveBeenCalledWith('t')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on admission-store unavailability before registry work', async () => {
+    legacyAdmissionMock.admit.mockResolvedValue({
+      allowed: false,
+      status: 503,
+      retryAfterSeconds: 2,
+      headers: {},
+    })
+
+    const res = await request(makeApp())
+      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/session')
+      .set('Authorization', 'Bearer t')
+      .expect(503)
+
+    expect(res.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(res.headers['retry-after']).toBe('2')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed recipe path components before subject admission', async () => {
+    const app = makeApp()
+    const res = await request(app)
+      .post('/api/v1/sandbox-ui/sandbox-recipes/%2A/session')
+      .set('Authorization', 'Bearer t')
+      .expect(400)
+
+    expect(res.body).toEqual({ error: 'invalid_recipe_ref' })
+    await request(app)
+      .post('/api/v1/sandbox-ui/sandbox.recipes/r1/session')
+      .set('Authorization', 'Bearer t')
+      .expect(400)
+    expect(legacyAdmissionMock.admit).not.toHaveBeenCalled()
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('returns 409 when the registry says the recipe is not yet ready', async () => {
@@ -359,6 +429,33 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/oauth/authorize-url', () => {
     expect(res.body.error).toBe('control_api_invalid_response')
   })
 
+  it('forwards distributed admission denial headers from control-api', async () => {
+    fetchSpy.mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK)).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'rate_limited' }), {
+        status: 429,
+        headers: {
+          'content-type': 'application/json',
+          'retry-after': '30',
+          'x-ratelimit-limit': '10',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1234567890',
+        },
+      })
+    )
+
+    const res = await request(makeApp())
+      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/authorize-url')
+      .set('Authorization', 'Bearer t')
+      .send({ oauthClientId: 'sf' })
+      .expect(429)
+
+    expect(res.body).toEqual({ error: 'rate_limited' })
+    expect(res.headers['retry-after']).toBe('30')
+    expect(res.headers['x-ratelimit-limit']).toBe('10')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.headers['x-ratelimit-reset']).toBe('1234567890')
+  })
+
   it('returns 502 when control-api is unreachable', async () => {
     fetchSpy
       .mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK))
@@ -516,6 +613,33 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/oauth/token', () => {
     expect(res.body.error).toBe('refresh_failed')
   })
 
+  it('forwards canonical distributed-admission metadata on token-vend denial', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(
+        429,
+        { error: 'Too Many Requests', retryAfterSeconds: 30 },
+        {
+          'retry-after': '30',
+          'x-ratelimit-limit': '10',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1800000000',
+        }
+      )
+    )
+    const cookie = issueCookie()
+
+    const res = await request(makeApp())
+      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/token')
+      .set('Cookie', `${config.sandboxUiCookieName}=${cookie}`)
+      .send({ oauthClientId: 'sf' })
+      .expect(429)
+
+    expect(res.headers['retry-after']).toBe('30')
+    expect(res.headers['x-ratelimit-limit']).toBe('10')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.headers['x-ratelimit-reset']).toBe('1800000000')
+  })
+
   it('coerces 401/403 from control-api to 502 (service-token misconfig)', async () => {
     fetchSpy.mockResolvedValueOnce(jsonResponse(403, { error: 'invalid_service_token' }))
     const cookie = issueCookie()
@@ -629,6 +753,33 @@ describe('DELETE /api/v1/sandbox-ui/:ns/:name/oauth/grant', () => {
       .send({ oauthClientId: 'sf' })
       .expect(502)
     expect(res.body.error).toBe('control_api_unreachable')
+  })
+
+  it('forwards canonical distributed-admission metadata on disconnect denial', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(
+        429,
+        { error: 'Too Many Requests', retryAfterSeconds: 30 },
+        {
+          'retry-after': '30',
+          'x-ratelimit-limit': '10',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1800000000',
+        }
+      )
+    )
+    const cookie = issueCookie()
+
+    const res = await request(makeApp())
+      .delete('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/grant')
+      .set('Cookie', `${config.sandboxUiCookieName}=${cookie}`)
+      .send({ oauthClientId: 'sf' })
+      .expect(429)
+
+    expect(res.headers['retry-after']).toBe('30')
+    expect(res.headers['x-ratelimit-limit']).toBe('10')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.headers['x-ratelimit-reset']).toBe('1800000000')
   })
 })
 
@@ -851,6 +1002,92 @@ describe('ANY /api/v1/sandbox-ui/:ns/:name/view/*', () => {
     pending[0].res.status(200).end()
     pending[1].res.status(200).end()
     await Promise.all([firstPromise, secondPromise])
+  })
+
+  it('rewrites a concurrent proxy response for only its owning recipe', async () => {
+    const pending: Array<{
+      req: object
+      res: { status: (status: number) => { end: () => void } }
+    }> = []
+    httpProxyMock._proxy.web.mockImplementation((req: object, res) => {
+      pending.push({ req, res: res as { status: (status: number) => { end: () => void } } })
+    })
+    fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse(200, REGISTRY_OK)))
+
+    const firstRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/first')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-a'))
+    const secondRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r2/view/second')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r2', 'user-b'))
+    const firstPromise = firstRequest.then(() => undefined)
+    const secondPromise = secondRequest.then(() => undefined)
+
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    expect(pending).toHaveLength(2)
+
+    const firstProxyRes = {
+      statusCode: 302,
+      headers: { location: '/next' } as Record<string, string>,
+    }
+    httpProxyMock._proxy.emit('proxyRes', firstProxyRes, pending[0].req, {})
+
+    expect(firstProxyRes.headers.location).toBe('/api/v1/sandbox-ui/sandbox-recipes/r1/view/next')
+
+    pending[0].res.status(200).end()
+    pending[1].res.status(200).end()
+    await Promise.all([firstPromise, secondPromise])
+  })
+
+  it('makes an aborted response proxy hooks inert without detaching a sibling request', async () => {
+    const pending: Array<{
+      req: object
+      res: { status: (status: number) => { end: () => void } }
+    }> = []
+    httpProxyMock._proxy.web.mockImplementation((req: object, res) => {
+      pending.push({ req, res: res as { status: (status: number) => { end: () => void } } })
+    })
+
+    const abortedRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/aborted')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-a'))
+    const liveRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/live')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-b'))
+    const abortedPromise = abortedRequest.then(
+      () => undefined,
+      () => undefined
+    )
+    const livePromise = liveRequest.then(() => undefined)
+
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    expect(pending).toHaveLength(2)
+
+    abortedRequest.abort()
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+
+    const makeProxyReq = () => {
+      const headers: Record<string, string> = {}
+      return {
+        getHeaderNames: () => [],
+        removeHeader: (name: string) => delete headers[name.toLowerCase()],
+        setHeader: (name: string, value: string) => {
+          headers[name.toLowerCase()] = value
+        },
+        headers,
+      }
+    }
+    const abortedProxyReq = makeProxyReq()
+    const liveProxyReq = makeProxyReq()
+
+    httpProxyMock._proxy.emit('proxyReq', abortedProxyReq, pending[0].req, {})
+    httpProxyMock._proxy.emit('proxyReq', liveProxyReq, pending[1].req, {})
+
+    expect(abortedProxyReq.headers['x-clerum-user']).toBeUndefined()
+    expect(liveProxyReq.headers['x-clerum-user']).toBe('user-b')
+
+    pending[1].res.status(200).end()
+    await Promise.all([abortedPromise, livePromise])
   })
 })
 

@@ -121,12 +121,14 @@ jobs:
               - 'workflow-approval-request-reader/**'
             control-api:
               - 'control-api/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/jwt-key-policy/**'
               - 'packages/display-field/**'
               - 'packages/llm-provider-attempt-contract/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
             control-ui:
               - 'control-ui/**'
@@ -134,6 +136,7 @@ jobs:
               - 'packages/display-field/**'
               - 'packages/frontend-components/**'
               - 'packages/gfs-interaction-policy/**'
+              - 'packages/llm-providers/**'
               - 'scripts/qa-recorder/**'
             external-rest-api:
               - 'external-rest-api/**'
@@ -144,10 +147,13 @@ jobs:
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
             mcp-host:
               - 'mcp-host/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
               - 'packages/gfs-interaction-policy/**'
             mcp-proxy:
@@ -162,9 +168,11 @@ jobs:
               - 'packages/frontend-components/**'
             rpc-proxy:
               - 'rpc-proxy/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/jwt-key-policy/**'
             workflow-recipes:
               - 'workflow-recipes/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-sdk/**'
               - 'packages/workflow-recipe-capability-policy/**'
@@ -172,6 +180,7 @@ jobs:
               - 'packages/network-policy-core/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
@@ -394,6 +403,11 @@ jobs:
           MATRIX_DOCKERFILE: ${{ matrix.dockerfile }}
           MATRIX_ROOTED: ${{ matrix.rooted }}
         run: |
+          set -euo pipefail
+          service_version=unknown
+          if [ -f "$MATRIX_PATH/package.json" ]; then
+            service_version="$(node scripts/ci/resolve-package-version.cjs "$MATRIX_PATH/package.json")"
+          fi
           # Rooted services COPY from sibling directories (packages/*) so their
           # Docker build context must be the repo root and the Dockerfile path
           # is fully qualified.
@@ -404,6 +418,7 @@ jobs:
             echo "context=$MATRIX_PATH" >> "$GITHUB_OUTPUT"
             echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
           fi
+          echo "service-version=$service_version" >> "$GITHUB_OUTPUT"
 
       - name: Build and push by digest
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
@@ -425,6 +440,9 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            EVENFIRE_SOURCE_REVISION=${{ github.sha }}
+            EVENFIRE_SERVICE_VERSION=${{ steps.buildargs.outputs.service-version }}
           # Per-arch scope: each arch now builds in its own job/leg (see the
           # split above), so each needs its own gha cache scope. Before this
           # change, one job built both platforms in a single buildx

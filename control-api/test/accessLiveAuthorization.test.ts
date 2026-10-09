@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { config } from '../src/config.js'
 import type { DbClient } from '../src/db.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import {
@@ -14,7 +15,10 @@ import {
   type LiveAuthorizationInput,
   resolveLiveAuthorization,
 } from '../src/services/access/liveAuthorizationResolver.js'
-import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
+import {
+  canonicalEnvironmentId,
+  projectOperationalObject,
+} from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 
 vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
@@ -41,6 +45,28 @@ const session = Object.freeze({
   jti,
   sessionVersion: 1,
 })
+
+const hostBehaviorSources = projectOperationalObject({
+  environmentId,
+  plural: 'hosts',
+  namespace: 'mcp-host',
+  object: {
+    metadata: {
+      name: 'host-a',
+      namespace: 'mcp-host',
+      uid: 'uid-host-a',
+      resourceVersion: '91',
+      generation: 1,
+    },
+    spec: { enabled: true },
+  },
+  behaviorFingerprintKey: config.sessionJwtPrivateKey,
+  relationshipNamespaces: {
+    context: config.contextsNamespace,
+    mcpServer: config.mcpServersNamespace,
+    sharedFilesystem: config.sharedFileSystemsNamespace,
+  },
+}).resources[0]!.behaviorSources
 
 function behavior(overrides: Partial<AccessPathBehavior> = {}): AccessPathBehavior {
   return Object.freeze({
@@ -98,16 +124,14 @@ function fakeTransaction(options: FakeDbOptions = {}) {
     }
     if (text.includes('FROM operational_catalog_source_state')) {
       return {
-        rows: [
-          {
-            source_family: 'host',
-            generation: '7',
-            resource_version: '91',
-            status: 'current',
-            safe_error_code: null,
-          },
-        ],
-        rowCount: 1,
+        rows: ['host', 'context', 'mcp_server', 'shared_filesystem'].map(source_family => ({
+          source_family,
+          generation: '7',
+          resource_version: '91',
+          status: 'current',
+          safe_error_code: null,
+        })),
+        rowCount: 4,
       }
     }
     if (text.includes('FROM operational_resource_relationships relationship')) {
@@ -139,6 +163,7 @@ function fakeTransaction(options: FakeDbOptions = {}) {
             deleted_at: null,
             observed_generation: 1,
             content_bytes: 512,
+            behavior_sources: hostBehaviorSources,
           },
         ],
         rowCount: 1,
@@ -146,6 +171,19 @@ function fakeTransaction(options: FakeDbOptions = {}) {
     }
     if (text.includes('FROM operational_resource_relationships')) {
       return { rows: [], rowCount: 0 }
+    }
+    if (text.includes('FROM token_budgets')) return { rows: [], rowCount: 0 }
+    if (text.includes('FROM llm_allowed_models')) return { rows: [], rowCount: 0 }
+    if (text.includes('WITH candidates AS')) {
+      const rows = options.hostGrantRows ?? [
+        {
+          kind: 'direct',
+          grant_id: `user_agents:${userId}:host-a`,
+          team_id: null,
+          current_role: null,
+        },
+      ]
+      return { rows, rowCount: rows.length }
     }
     throw new Error(`Unexpected query: ${text.slice(0, 80)}`)
   })
@@ -260,7 +298,7 @@ describe('live user-access resolution', () => {
       transaction: db.transaction,
     })
 
-    expect(result.status).toBe('access_path_required')
+    expect(result.status, JSON.stringify(result)).toBe('access_path_required')
     if (result.status === 'access_path_required') {
       expect(result.safePathDescriptors).toEqual([
         expect.objectContaining({ kind: 'direct' }),
@@ -467,7 +505,7 @@ describe('live user-access resolution', () => {
       transaction: firstDb.transaction,
       gateway,
     })
-    expect(first.status).toBe('allowed')
+    expect(first.status, JSON.stringify(first)).toBe('allowed')
     if (first.status !== 'allowed') return
 
     gateway.getResourceExact.mockResolvedValue({

@@ -47,7 +47,11 @@ const edges = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
   requestHostWakeFromControlApi: vi.fn(),
 }))
+const admission = vi.hoisted(() => ({
+  admitLegacyHostRpcRequest: vi.fn(async (_req: unknown, _res: unknown, _hostRef: string) => true),
+}))
 vi.mock('../src/config.js', () => ({ config: fixture.config }))
+vi.mock('../src/services/hostRpcAdmission.js', () => admission)
 vi.mock('../src/services/mcpProxyService.js', async importOriginal => {
   const actual = await importOriginal<Record<string, unknown>>()
   return { ...actual, resolveHostConnectionForUser: edges.resolveHostConnectionForUser }
@@ -101,6 +105,7 @@ beforeEach(() => {
     },
   })
   edges.requestHostWakeFromControlApi.mockReset()
+  admission.admitLegacyHostRpcRequest.mockReset().mockResolvedValue(true)
 })
 afterEach(() => vi.unstubAllGlobals())
 
@@ -235,6 +240,7 @@ describe.each(['approve', 'deny'])('%s approval subject authentication', action 
       .send({ toolCallId: 'diagnostic-approval', userId: 'body-user', alwaysApprove: true })
       .expect(200)
     expect(edges.resolveHostConnectionForUser.mock.calls.length).toBe(1)
+    expect(admission.admitLegacyHostRpcRequest).toHaveBeenCalledOnce()
     const [userId, hostRef] = edges.resolveHostConnectionForUser.mock.calls[0]
     expect([userId, hostRef]).toEqual(['diagnostic-user', 'diagnostic-host'])
     expect(upstream.mock.calls.length).toBe(1)

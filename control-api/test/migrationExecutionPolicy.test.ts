@@ -5,11 +5,13 @@ import { MIGRATION_EXECUTION_POLICY } from '../src/migrations/migrationExecution
 import {
   DEV_POST_0106_MIGRATION_VERSIONS,
   PR1_MIGRATION_VERSIONS,
+  PR2_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
   PR1_ONLINE_INDEX_PLAN,
   canonicalOnlineIndexDefinition,
+  hasPostSchemaOnlineIndexes,
   preparePr1Migration,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
 
@@ -70,6 +72,9 @@ describe('D34 migration execution policy', () => {
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0119_dynamic_clients_table')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0120_dynamic_clients_runtime_access')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0121_oauth_install_identity')
   })
 
   it('freezes the owner-approved timeout and Job values', () => {
@@ -86,15 +91,22 @@ describe('D34 migration execution policy', () => {
     })
   })
 
-  it('classifies exactly 25 existing-table indexes and no fresh-table index', () => {
-    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
-    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
-    expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0129'))
-    ).toHaveLength(18)
-    expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0131'))
-    ).toHaveLength(7)
+  it('classifies exactly 26 existing-table indexes and no fresh-table index', () => {
+    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(26)
+    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(26)
+    const countByMigrationVersion = Object.fromEntries(
+      [...new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.migrationVersion))]
+        .sort()
+        .map(version => [
+          version,
+          PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion === version).length,
+        ])
+    )
+    expect(countByMigrationVersion).toEqual({
+      '0129_user_access_foundation': 18,
+      '0131_catalog_utf8_ordering': 7,
+      '0136_workflow_authority_bindings': 1,
+    })
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
     ).toBe(false)
@@ -143,7 +155,9 @@ describe('D34 migration execution policy', () => {
       )
     )
     const classified = [
-      ...PR1_ONLINE_INDEX_PLAN.map(index => index.name),
+      ...PR1_ONLINE_INDEX_PLAN.filter(
+        index => index.migrationVersion !== '0136_workflow_authority_bindings'
+      ).map(index => index.name),
       ...FRESH_TABLE_INDEXES,
     ].sort()
 
@@ -158,6 +172,7 @@ describe('D34 migration execution policy', () => {
         .replace(/\s*([(),])\s*/g, '$1')
         .trim()
     for (const index of PR1_ONLINE_INDEX_PLAN) {
+      if (index.migrationVersion === '0136_workflow_authority_bindings') continue
       expect(canonical(index.createSql), index.name).toBe(
         canonical(historicalDefinitions.get(index.name) ?? '')
       )
@@ -276,6 +291,10 @@ describe('D34 PR1 migration runner', () => {
         version,
         apply: vi.fn(async () => undefined),
       })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
     ]
 
     await applyPendingPr1Migrations({
@@ -291,15 +310,107 @@ describe('D34 PR1 migration runner', () => {
       expectedMigrationExecutionOrder([
         ...DEV_POST_0106_MIGRATION_VERSIONS,
         ...PR1_MIGRATION_VERSIONS,
+        ...PR2_MIGRATION_VERSIONS,
       ])
     )
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(
-      DEV_POST_0106_MIGRATION_VERSIONS.length + PR1_MIGRATION_VERSIONS.length
-    )
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(
-      DEV_POST_0106_MIGRATION_VERSIONS.length + PR1_MIGRATION_VERSIONS.length
-    )
+    const orderedVersions = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ]
+    const expectedTransactions =
+      orderedVersions.length + orderedVersions.filter(hasPostSchemaOnlineIndexes).length
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(expectedTransactions)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(expectedTransactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
+  })
+
+  it('runs after-schema online indexes outside the migration transaction before recording', async () => {
+    const events: string[] = []
+    const indexStates = new Map<string, Record<string, unknown>>()
+    let inTransaction = false
+    const db = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql === 'BEGIN') inTransaction = true
+        if (sql === 'COMMIT' || sql === 'ROLLBACK') inTransaction = false
+        if (sql.includes('FROM pg_class index_rel')) {
+          const state = indexStates.get(String(values?.[0]))
+          return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
+        }
+        if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
+          const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
+          if (entry) {
+            events.push(`create:${inTransaction}`)
+            indexStates.set(entry.name, {
+              table_name: entry.table,
+              indisunique: Boolean(entry.unique),
+              indisvalid: true,
+              definition: sql,
+            })
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      }),
+    }
+    const pendingVersion = '0136_workflow_authority_bindings'
+    const appliedVersions = new Set<string>([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
+    ])
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ].map(version => ({
+      version,
+      apply: vi.fn(async () => {
+        if (version === pendingVersion) events.push('apply')
+      }),
+    }))
+
+    await applyPendingPr1Migrations({
+      db,
+      migrations,
+      appliedVersions,
+      recordMigration: async (_db, version) => {
+        if (version === pendingVersion) events.push('record')
+      },
+    })
+
+    expect(events).toEqual(['apply', 'create:false', 'record'])
+  })
+
+  it('does not record an after-schema migration when its online index fails', async () => {
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('FROM pg_class index_rel')) return { rows: [], rowCount: 0 }
+      if (sql.startsWith('CREATE INDEX CONCURRENTLY')) throw new Error('online index failed')
+      return { rows: [], rowCount: 0 }
+    })
+    const pendingVersion = '0136_workflow_authority_bindings'
+    const appliedVersions = new Set<string>([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
+    ])
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ].map(version => ({ version, apply: vi.fn(async () => undefined) }))
+    const recordMigration = vi.fn(async () => undefined)
+
+    await expect(
+      applyPendingPr1Migrations({
+        db: { query },
+        migrations,
+        appliedVersions,
+        recordMigration,
+      })
+    ).rejects.toThrow('online index failed')
+
+    expect(recordMigration).not.toHaveBeenCalled()
+    expect(appliedVersions).not.toContain(pendingVersion)
   })
 
   it('stops after a failed version and rolls back only that version', async () => {
@@ -341,6 +452,7 @@ describe('D34 PR1 migration runner', () => {
         migrations: [
           ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           ...PR1_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
+          ...PR2_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           { version: '010d_unclassified', apply: vi.fn() },
         ],
         appliedVersions: new Set(),
@@ -388,6 +500,12 @@ describe('D34 PR1 migration runner', () => {
             applyOrder.push(version)
           }),
         })),
+        ...PR2_MIGRATION_VERSIONS.map(version => ({
+          version,
+          apply: vi.fn(async () => {
+            applyOrder.push(version)
+          }),
+        })),
       ],
       appliedVersions: new Set(),
       recordMigration: async (_db, version) => {
@@ -398,6 +516,7 @@ describe('D34 PR1 migration runner', () => {
     const expectedOrder = expectedMigrationExecutionOrder([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
     ])
     expect(applyOrder).toEqual(expectedOrder)
     expect(recorded).toEqual(expectedOrder)
@@ -417,6 +536,13 @@ describe('D34 PR1 migration runner', () => {
         }),
       })),
       ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          events.push(version)
+          transactionEvents.push(`${version}:apply:${activeTransaction}`)
+        }),
+      })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
         version,
         apply: vi.fn(async () => {
           events.push(version)
@@ -456,7 +582,7 @@ describe('D34 PR1 migration runner', () => {
     await applyPendingPr1Migrations({
       db,
       migrations,
-      appliedVersions: new Set(applied),
+      appliedVersions: new Set([...applied, ...PR2_MIGRATION_VERSIONS]),
       recordMigration: async (_db, version) => {
         events.push(`receipt:${version}`)
         transactionEvents.push(`${version}:receipt:${activeTransaction}`)
@@ -508,6 +634,12 @@ describe('D34 PR1 migration runner', () => {
           events.push(version)
         }),
       })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          events.push(version)
+        }),
+      })),
     ]
     const db = {
       query: vi.fn(async (sql: string, values?: unknown[]) => {
@@ -536,6 +668,7 @@ describe('D34 PR1 migration runner', () => {
     }
     const appliedVersions = new Set([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
       USER_ACCESS_FOUNDATION_VERSION,
       '0127_invitation_delivery_commands',
       ...PR1_MIGRATION_VERSIONS.filter(
@@ -588,11 +721,16 @@ describe('D34 PR1 migration runner', () => {
           version !== USER_ACCESS_FOUNDATION_VERSION &&
           version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
       ).map(version => ({ version, apply: vi.fn(async () => undefined) })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
       foundation,
       compatibility,
     ]
     const appliedVersions = new Set([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS.filter(version => version !== USER_ACCESS_FOUNDATION_VERSION),
       '0109_user_access_foundation',
     ])
@@ -634,6 +772,7 @@ describe('D34 PR1 migration runner', () => {
           version !== USER_ACCESS_FOUNDATION_VERSION &&
           version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
       ).map(version => ({ version, apply: vi.fn(async () => undefined) })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn(async () => undefined) })),
       foundation,
       compatibility,
     ]
@@ -644,6 +783,7 @@ describe('D34 PR1 migration runner', () => {
           version !== USER_ACCESS_FOUNDATION_VERSION &&
           version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
       ),
+      ...PR2_MIGRATION_VERSIONS,
       '0126_user_access_foundation',
       '0138_authorization_revision_delete_compatibility',
     ])
@@ -686,6 +826,10 @@ describe('D34 PR1 migration runner', () => {
               version === AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
                 ? ['0138_authorization_revision_delete_compatibility']
                 : undefined,
+            apply: vi.fn(async () => undefined),
+          })),
+          ...PR2_MIGRATION_VERSIONS.map(version => ({
+            version,
             apply: vi.fn(async () => undefined),
           })),
         ],

@@ -1,3 +1,5 @@
+import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER } from '@clerum/action-context-contracts'
+import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
@@ -63,8 +65,17 @@ export async function listAllowedServersForUser(
 export async function resolveServerConnectionForUser(
   userId: string,
   serverName: string,
-  rpcAccessToken: string
+  rpcAccessToken: string,
+  authorizedActionV2?: AuthorizedActionV2
 ): Promise<ResolvedServerConnection | null> {
+  if (authorizedActionV2) {
+    const destination = authorizedActionV2.checkpoint.destination
+    const expectedRef = `${config.mcpServerNamespace}/${serverName}`
+    if (!destination || destination.kind !== 'mcp_server' || destination.ref !== expectedRef) {
+      throw new Error('Invalid v2 MCP destination binding')
+    }
+    return { name: serverName, url: destination.url, headers: {} }
+  }
   const data = await getCachedUserAllowedServers(userId, rpcAccessToken)
   const server = data.servers.find(entry => entry.name === serverName)
   if (!server) return null
@@ -83,25 +94,51 @@ export async function resolveHostConnectionForUser(
     accessScope?: 'team' | 'user'
     teamId?: string | null
     requestId?: string
-    directRunBinding?: DirectRunBindingRequest
     messageResolution?: boolean
+    directRunBinding?: DirectRunBindingRequest
+    authorizedActionV2?: AuthorizedActionV2
   }
-): Promise<ResolvedServerConnection | HostAccessDenial> {
-  const host = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
-    directRunBinding: edgeContext?.directRunBinding,
-    messageResolution: edgeContext?.messageResolution,
-  })
+): Promise<ResolvedServerConnection | HostAccessDenial | null> {
+  const expectedRef = `${config.hostNamespace}/${hostRef}`
+  const authorizedActionV2 = edgeContext?.authorizedActionV2
+  const destination = authorizedActionV2?.checkpoint.destination
+  const host = authorizedActionV2
+    ? destination?.kind === 'host' && destination.ref === expectedRef
+      ? {
+          name: hostRef,
+          url: destination.url,
+          headers: {},
+          attributionBindingStatus: undefined,
+        }
+      : (() => {
+          throw new Error('Invalid v2 host destination binding')
+        })()
+    : await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
+        directRunBinding: edgeContext?.directRunBinding,
+        ...(edgeContext?.messageResolution ? { messageResolution: true } : {}),
+      })
   if (isHostAccessDenied(host)) return host
+  if (!host) return null
 
   const headers: Record<string, string> = {
     ...host.headers,
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': hostRef,
-    'x-clerum-edge-user-id': userId,
+    'x-service-token': 'rpc-proxy',
   }
-  if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
-  headers['x-clerum-edge-access-scope'] =
-    edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')
+  delete headers.authorization
+  if (authorizedActionV2) {
+    if (!config.mcpHostEdgeToken) {
+      throw new Error('RPC Proxy edge credential is unavailable for authorized V2 Host traffic')
+    }
+    headers[RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER] = config.mcpHostEdgeToken
+    headers['x-clerum-edge-action-context'] = authorizedActionV2.trustedEdgeHeader
+  } else {
+    headers['x-clerum-edge-user-id'] = userId
+    if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
+    headers['x-clerum-edge-access-scope'] =
+      edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')
+  }
   if (edgeContext?.requestId) headers['x-clerum-edge-request-id'] = edgeContext.requestId
 
   return {
@@ -120,7 +157,7 @@ export async function resolveArtifactReadHostConnectionForUser(
     teamId?: string | null
     requestId?: string
   }
-): Promise<ResolvedServerConnection | HostAccessDenial> {
+): Promise<ResolvedServerConnection | HostAccessDenial | null> {
   const host = await fetchArtifactReadHostConnectionFromControlApi(userId, hostRef, rpcAccessToken)
   if (isHostAccessDenied(host)) return host
 
@@ -129,7 +166,10 @@ export async function resolveArtifactReadHostConnectionForUser(
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': hostRef,
     'x-clerum-edge-user-id': userId,
+    'x-service-token': 'rpc-proxy',
   }
+  delete headers.authorization
+  // Spec 48 artifact reads remain legacy-only and carry no V2 authority.
   if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
   headers['x-clerum-edge-access-scope'] =
     edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')

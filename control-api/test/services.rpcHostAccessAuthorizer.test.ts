@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { K8sGateway } from '../src/k8s.js'
 import type { RpcAccessClaims } from '../src/profileTypes.js'
 import { authorizeRpcHostAccess } from '../src/services/access/rpcHostAccessAuthorizer.js'
+import { signRpcAccessToken, verifyRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 
 const CLAIMS: RpcAccessClaims = {
   sub: 'user-1',
@@ -48,6 +49,81 @@ function dependencies(
 }
 
 describe('authorizeRpcHostAccess', () => {
+  function issuedClaims(hostRefs: string[]): RpcAccessClaims {
+    const token = signRpcAccessToken({
+      sub: CLAIMS.sub,
+      typ: CLAIMS.typ,
+      teamId: CLAIMS.teamId,
+      role: CLAIMS.role,
+      scopes: CLAIMS.scopes,
+      hostRefs,
+      jti: `issued-${hostRefs.join('-') || 'empty'}`,
+    })
+    const verified = verifyRpcAccessToken(token)
+    if (!verified) throw new Error('Control API rejected its own signed RPC token')
+    return verified
+  }
+
+  it('intersects signed Host refs with live direct grants across grants and revocation', async () => {
+    const hosts = [
+      { metadata: { name: 'host-a' }, spec: { enabled: true } },
+      { metadata: { name: 'host-b' }, spec: { enabled: true } },
+    ]
+    const tokenA = issuedClaims(['host-a'])
+    const liveBoth = dependencies({ userAgents: ['host-a', 'host-b'], hosts })
+    await expect(
+      authorizeRpcHostAccess(liveBoth.gateway, tokenA, 'user-1', 'host-a', liveBoth.directory)
+    ).resolves.toMatchObject({ authorized: true })
+    await expect(
+      authorizeRpcHostAccess(liveBoth.gateway, tokenA, 'user-1', 'host-b', liveBoth.directory)
+    ).resolves.toEqual({ authorized: false, reason: 'host_claim_missing' })
+
+    const reminted = issuedClaims(['host-a', 'host-b'])
+    await expect(
+      authorizeRpcHostAccess(liveBoth.gateway, reminted, 'user-1', 'host-b', liveBoth.directory)
+    ).resolves.toMatchObject({ authorized: true })
+    const revokedB = dependencies({ userAgents: ['host-a'], hosts })
+    await expect(
+      authorizeRpcHostAccess(revokedB.gateway, reminted, 'user-1', 'host-b', revokedB.directory)
+    ).resolves.toEqual({ authorized: false, reason: 'directory_grant_missing' })
+    await expect(
+      authorizeRpcHostAccess(revokedB.gateway, reminted, 'user-1', 'host-a', revokedB.directory)
+    ).resolves.toMatchObject({ authorized: true })
+  })
+
+  it('applies the signed ceiling to team grants and rejects subject substitution', async () => {
+    const claims = issuedClaims(['host-a', 'host-b'])
+    const liveTeam = dependencies({
+      userAgents: [],
+      teamAgents: ['host-b'],
+      hosts: [{ metadata: { name: 'host-b' }, spec: { enabled: true } }],
+    })
+    await expect(
+      authorizeRpcHostAccess(liveTeam.gateway, claims, 'user-1', 'host-b', liveTeam.directory)
+    ).resolves.toMatchObject({ authorized: true })
+    await expect(
+      authorizeRpcHostAccess(
+        liveTeam.gateway,
+        claims,
+        'different-user',
+        'host-b',
+        liveTeam.directory
+      )
+    ).resolves.toEqual({ authorized: false, reason: 'subject_mismatch' })
+    expect(
+      verifyRpcAccessToken(
+        signRpcAccessToken({
+          sub: CLAIMS.sub,
+          typ: CLAIMS.typ,
+          teamId: CLAIMS.teamId,
+          role: CLAIMS.role,
+          scopes: CLAIMS.scopes,
+          hostRefs: [],
+          jti: 'issued-empty',
+        })
+      )
+    ).toBeNull()
+  })
   it('returns a typed subject mismatch before directory or Kubernetes access', async () => {
     const { gateway, directory } = dependencies()
     await expect(

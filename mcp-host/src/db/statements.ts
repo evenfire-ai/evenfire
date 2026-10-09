@@ -438,6 +438,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         authorization_scope = excluded.authorization_scope,
         context_snapshot = excluded.context_snapshot,
         completed_results = excluded.completed_results,
+        source_message = excluded.source_message,
         trace_context = excluded.trace_context,
         expires_at = excluded.expires_at
     `),

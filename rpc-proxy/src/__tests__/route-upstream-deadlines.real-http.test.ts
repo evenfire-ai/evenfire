@@ -51,8 +51,28 @@ const serviceMock = vi.hoisted(() => ({
   },
 }))
 const controlApiMock = vi.hoisted(() => ({
+  ControlApiHostAccessRejectedError: class extends Error {
+    constructor(
+      readonly status: number,
+      readonly denialCode: string | null = null
+    ) {
+      super(`Control API rejected host access (${status})`)
+      this.name = 'ControlApiHostAccessRejectedError'
+    }
+  },
+  ControlApiHostRpcAdmissionError: class extends Error {
+    constructor(
+      readonly status: 429 | 503,
+      readonly body: { error: string; retryAfterSeconds?: number },
+      readonly headers: Record<string, string>
+    ) {
+      super(`Control API Host-RPC admission returned ${status}`)
+      this.name = 'ControlApiHostRpcAdmissionError'
+    }
+  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
+  requestHostRpcAdmission: async () => undefined,
   requestHostWakeFromControlApi: vi.fn(),
 }))
 

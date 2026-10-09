@@ -6,9 +6,29 @@ import {
   MAX_TIMER_DELAY_MS,
   parseArtifactDownloadMaxBytes,
   parsePositiveIntMs,
+  parseRpcProxyMcpHostEdgeToken,
   parseSandboxUiAllowedPorts,
   parseWakeMaxHoldMs,
 } from '../config.js'
+
+describe('parseRpcProxyMcpHostEdgeToken', () => {
+  it('allows production startup without the dormant V2 credential', () => {
+    expect(parseRpcProxyMcpHostEdgeToken(undefined, true)).toBe('')
+  })
+
+  it('accepts a bounded configured credential', () => {
+    expect(parseRpcProxyMcpHostEdgeToken(' edge-token-value-32-bytes ', true)).toBe(
+      'edge-token-value-32-bytes'
+    )
+  })
+
+  it('rejects short or placeholder credentials', () => {
+    expect(() => parseRpcProxyMcpHostEdgeToken('short', false)).toThrow(/16 to 4096/)
+    expect(() => parseRpcProxyMcpHostEdgeToken('replace-with-edge-token', true)).toThrow(
+      /placeholder/
+    )
+  })
+})
 
 describe('parseSandboxUiAllowedPorts', () => {
   it('accepts a single port', () => {

@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadConfig } from './config'
 
+beforeEach(() => {
+  vi.stubEnv('GFS_CONTROL_API_SERVICE_TOKEN', 'test-gfs-controller-service-token')
+})
+
 describe('GFS_STORAGE_ROLE', () => {
   afterEach(() => {
     vi.unstubAllEnvs()
@@ -25,6 +29,17 @@ describe('GFS_STORAGE_ROLE', () => {
     vi.stubEnv('GFS_DEV_MODE', 'true')
     vi.stubEnv('GFS_STORAGE_ROLE', role)
     expect(() => loadConfig()).toThrow(/GFS_STORAGE_ROLE must be explicitly set/)
+  })
+})
+
+describe('GFS controller checkpoint identity', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('requires a dedicated service token even in development mode', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_STORAGE_ROLE', 'reader')
+    vi.stubEnv('GFS_CONTROL_API_SERVICE_TOKEN', '')
+    expect(() => loadConfig()).toThrow(/GFS_CONTROL_API_SERVICE_TOKEN/)
   })
 })
 
@@ -155,14 +170,11 @@ describe('GFS_UPLOAD_V2 strict disabled contract', () => {
     '1 ',
     '9007199254740992',
     '1073741825',
-  ])(
-    'rejects invalid runtime product limit %s',
-    raw => {
-      vi.stubEnv('GFS_DEV_MODE', 'true')
-      vi.stubEnv('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', raw)
-      expect(() => loadConfig()).toThrow(/GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES/)
-    }
-  )
+  ])('rejects invalid runtime product limit %s', raw => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES', raw)
+    expect(() => loadConfig()).toThrow(/GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES/)
+  })
 
   it('rejects a product limit above the configured protocol maximum', () => {
     vi.stubEnv('GFS_DEV_MODE', 'true')

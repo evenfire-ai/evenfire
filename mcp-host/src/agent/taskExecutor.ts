@@ -124,6 +124,14 @@ import {
   progressReporterRegistry,
 } from '../progress/sseProgressReporter.js'
 import type { Task, TaskError, TaskSource } from '../queue/types'
+import {
+  RuntimeActionAuthorityError,
+  type RuntimeActionCheckpoint,
+  withRuntimeActionAuthority,
+  withRuntimeActionAuthorityForContextManager,
+  withRuntimeActionAuthorityForLlmPort,
+  withRuntimeActionAuthorityForToolRegistry,
+} from '../runtime/actionAuthority'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
@@ -273,6 +281,8 @@ export interface TaskExecutorDeps {
    */
   failover?: ExecutorFailoverSupport
 
+  /** Live, service-authenticated checkpoint for v2 runtime effects. */
+  actionAuthorityCheckpoint?: RuntimeActionCheckpoint
   /**
    * Issue #654 — live-catalog image-input capability lookup, keyed by the
    * (provider, model) the adapter is about to send. Threaded to the primary
@@ -974,6 +984,14 @@ export class TaskExecutor {
    * Anything else → retryable ApiCallFailed with provider from the LLM.
    */
   private toTaskError(error: unknown): TaskError {
+    if (error instanceof RuntimeActionAuthorityError) {
+      return {
+        code: error.code,
+        message: error.code,
+        retryable: error.code === 'authority_unavailable',
+        provider: 'unknown',
+      }
+    }
     if (error instanceof TaskLimitError)
       return {
         code: error.code,
@@ -1537,7 +1555,7 @@ export class TaskExecutor {
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
-        return new LlmPortAdapter(
+        const fallbackPort = new LlmPortAdapter(
           provider,
           servedModel,
           provider.getProviderType(),
@@ -1553,6 +1571,11 @@ export class TaskExecutor {
           },
           this.deps.imageInput
         )
+        const authorityBinding = this.task.sourceMessage?.authorityV2
+        if (!authorityBinding) return fallbackPort
+        const checkpoint =
+          this.deps.actionAuthorityCheckpoint ?? (async () => 'unavailable' as const)
+        return withRuntimeActionAuthorityForLlmPort(fallbackPort, authorityBinding, checkpoint)
       },
     })
   }
@@ -1631,6 +1654,11 @@ export class TaskExecutor {
     await Promise.all(
       toolCounters.filter(counter => counter !== tokenCounter).map(counter => counter.warmup())
     )
+    const authorityBinding = this.task.sourceMessage?.authorityV2
+    const checkpoint = this.deps.actionAuthorityCheckpoint ?? (async () => 'unavailable' as const)
+    const actionRegistry = authorityBinding
+      ? withRuntimeActionAuthorityForToolRegistry(registry, authorityBinding, checkpoint)
+      : registry
 
     // T2.2 — when the prompt-cache flag is ON and we have the dependencies
     // wired (PromptCache + WorkspaceService), build the tiered
@@ -1651,11 +1679,14 @@ export class TaskExecutor {
       raw => this.deps.conversationManager.recordContextBreakdown(conversation, raw),
       this.contextMaxTokens()
     )
-    const parts = await this.maybeGetOrBuildParts(registry.listDefinitions())
+    const parts = await this.maybeGetOrBuildParts(actionRegistry.listDefinitions())
     const identity = parts ? undefined : await this.buildSystemIdentity(llmPort)
-    const reasoning = parts
+    const unguardedReasoning = parts
       ? reasoningFactory.createWithParts(parts)
       : reasoningFactory.create(identity)
+    const reasoning = authorityBinding
+      ? withRuntimeActionAuthority(unguardedReasoning, authorityBinding, checkpoint)
+      : unguardedReasoning
     // R9-14 / R21-1 — the text of the system prompt `reasoning` sends with a
     // request that presents `tools`, for the context manager to count. The
     // cache path sends the parts it built once, joined as `LlmPortAdapter`
@@ -1676,7 +1707,7 @@ export class TaskExecutor {
       systemPromptFor = tools => promptBuilder.buildSystemPrompt(tools, identity, metadata).content
     }
 
-    const contextManager = new PressureContextManager(
+    const unguardedContextManager = new PressureContextManager(
       this.contextMaxTokens(),
       this.deps.workspaceService,
       hookedLlmPort,
@@ -1714,10 +1745,17 @@ export class TaskExecutor {
         maxMessages: this.contractMaxMessages(),
       }
     )
+    const contextManager = authorityBinding
+      ? withRuntimeActionAuthorityForContextManager(
+          unguardedContextManager,
+          authorityBinding,
+          checkpoint
+        )
+      : unguardedContextManager
 
     const loopConfig = buildLoopConfig({
       reasoning,
-      toolRegistry: registry,
+      toolRegistry: actionRegistry,
       safety: new BasicSafety(this.deps.secretEntriesProvider),
       events: this.buildTrackingEventEmitter(),
       // P.5: conversation is always set by the time buildLoopConfig runs —
@@ -2008,15 +2046,14 @@ export class TaskExecutor {
     const t = this.task
     if (t.source === 'channel') {
       if (t.sourceMessage?.channelType === 'rpc') {
-        const teamId =
-          typeof t.sourceMessage.metadata?.teamId === 'string'
-            ? t.sourceMessage.metadata.teamId.trim()
-            : ''
+        const authority = t.sourceMessage.authorityV2
+        const rawTeamId = authority ? authority.effectiveTeamId : t.sourceMessage.metadata?.teamId
+        const teamId = typeof rawTeamId === 'string' ? rawTeamId.trim() : ''
         return {
           source_kind: 'desktop',
           traceContext: t.traceContext ?? null,
           team_id: teamId || null,
-          user_id: t.sourceMessage.sender ?? null,
+          user_id: authority?.userId ?? t.sourceMessage.sender ?? null,
           task_id: t.id,
         }
       }

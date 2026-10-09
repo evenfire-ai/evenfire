@@ -1,4 +1,8 @@
-import { createHash } from 'node:crypto'
+import {
+  decodeSessionsCursor,
+  encodeSessionsCursor,
+  sessionsCursorScope,
+} from '@clerum/action-context-contracts'
 import type { Conversation, Turn } from '../core/types'
 import { getDisplayName } from '../progress/intentExtraction'
 import type { ContextBreakdownWire, SessionTokensWire, TurnToolStepWire } from './types'
@@ -16,65 +20,7 @@ type SessionTokenSource = Pick<
   | 'cacheTokensReported'
 >
 
-export interface SessionsCursor {
-  version: 1
-  scope: string
-  updatedAt: string
-  key: string
-}
-
-function isCanonicalIsoTimestamp(value: string): boolean {
-  const milliseconds = Date.parse(value)
-  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value
-}
-
-export function sessionsCursorScope(userSub: string, agent?: string): string {
-  return createHash('sha256')
-    .update(JSON.stringify([userSub, agent ?? null]))
-    .digest('base64url')
-    .slice(0, 24)
-}
-
-export function decodeSessionsCursor(
-  cursor: string | undefined,
-  expectedScope?: string
-): SessionsCursor | null {
-  if (!cursor) return null
-  try {
-    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
-      version?: unknown
-      scope?: unknown
-      updatedAt?: unknown
-      key?: unknown
-    }
-    if (
-      parsed.version !== 1 ||
-      typeof parsed.scope !== 'string' ||
-      parsed.scope.length === 0 ||
-      (expectedScope !== undefined && parsed.scope !== expectedScope) ||
-      typeof parsed.updatedAt !== 'string' ||
-      typeof parsed.key !== 'string' ||
-      parsed.key.length === 0 ||
-      !isCanonicalIsoTimestamp(parsed.updatedAt)
-    ) {
-      return null
-    }
-    return {
-      version: 1,
-      scope: parsed.scope,
-      updatedAt: parsed.updatedAt,
-      key: parsed.key,
-    }
-  } catch {
-    return null
-  }
-}
-
-export function encodeSessionsCursor(updatedAt: string, key: string, scope = 'unscoped'): string {
-  return Buffer.from(JSON.stringify({ version: 1, scope, updatedAt, key }), 'utf8').toString(
-    'base64url'
-  )
-}
+export { decodeSessionsCursor, encodeSessionsCursor, sessionsCursorScope }
 
 export function paginateSessionSummaries<T extends { key: string; lastActivityAt: Date }>(
   entries: T[],

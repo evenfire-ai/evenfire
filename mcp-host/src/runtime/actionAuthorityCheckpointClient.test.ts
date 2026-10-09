@@ -1,0 +1,235 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
+import {
+  type AuthorityBindingV2,
+  canonicalResourceIdentity,
+  hashActionTarget,
+} from '@clerum/action-context-contracts'
+import type { McpHostRuntimeAuth } from '../workflow/userApprovalRequester'
+import {
+  McpHostActionAuthorityCheckpointError,
+  checkpointMcpHostActionAuthority,
+  mcpHostActionAuthorityCheckpointRequest,
+  runtimeActionCheckpointDecision,
+} from './actionAuthorityCheckpointClient'
+
+const runtimeAuth = vi.hoisted(() => ({ refreshWithRecovery: vi.fn() }))
+vi.mock('../workflow/userApprovalRequester', () => runtimeAuth)
+
+const resource = canonicalResourceIdentity({
+  environmentId: 'development:local',
+  type: 'host',
+  logicalId: 'mcp-host/chatllm',
+})
+const target = Object.freeze({ hostRef: 'mcp-host/chatllm' })
+const binding: AuthorityBindingV2 = Object.freeze({
+  version: 2,
+  userId: '10000000-0000-4000-8000-000000000001',
+  sid: '20000000-0000-4000-8000-000000000002',
+  sessionVersion: 1,
+  delegationJti: '30000000-0000-4000-8000-000000000003',
+  operationId: 'host.status.read',
+  resource,
+  target,
+  targetHash: hashActionTarget(target),
+  accessPathId: `ap1_${'a'.repeat(43)}`,
+  authorizationRevision: `ar1_${'b'.repeat(43)}`,
+  pathKind: 'direct',
+  effectiveTeamId: null,
+  behaviorBindingHash: `bh2_${'c'.repeat(43)}`,
+})
+
+function auth(): McpHostRuntimeAuth {
+  return {
+    accessToken: 'runtime-access-one',
+    refreshToken: 'runtime-refresh',
+    baseUrl: 'http://control-api.test:8090',
+    hostRef: 'chatllm',
+    recipeNamespace: 'mcp-host',
+    recipeName: 'standalone',
+  }
+}
+
+function allowed() {
+  const repositoryRoot = resolve(process.cwd(), '..')
+  const output = execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: mcpHostActionAuthorityCheckpointRequest(binding),
+        destination: {
+          kind: 'host',
+          ref: resource.logicalId,
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        },
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8' }
+  )
+  return JSON.parse(output)
+}
+
+describe('mcp-host action-authority checkpoint client', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('emits the strict mcp-host domain binding with the existing runtime bearer', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(allowed()), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    const credential = auth()
+
+    await expect(
+      checkpointMcpHostActionAuthority(binding, credential, fetchImpl)
+    ).resolves.toMatchObject({
+      status: 'allowed',
+      authorizationRevision: binding.authorizationRevision,
+      behaviorBindingHash: binding.behaviorBindingHash,
+    })
+
+    const [url, init] = fetchImpl.mock.calls[0]
+    expect(url).toBe('http://control-api.test:8090/api/v1/internal/action-authority/checkpoint')
+    expect(init.headers).toEqual({
+      authorization: 'Bearer runtime-access-one',
+      'content-type': 'application/json',
+    })
+    expect(JSON.parse(init.body)).toEqual(mcpHostActionAuthorityCheckpointRequest(binding))
+    expect(JSON.parse(init.body)).not.toHaveProperty('hostMessageAdmission')
+  })
+
+  it('refreshes the existing runtime credential once after 401 and retries with its new token', async () => {
+    const credential = auth()
+    runtimeAuth.refreshWithRecovery.mockImplementation(async () => {
+      credential.accessToken = 'runtime-access-two'
+    })
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{}', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(allowed()), { status: 200 }))
+
+    await checkpointMcpHostActionAuthority(binding, credential, fetchImpl)
+
+    expect(runtimeAuth.refreshWithRecovery).toHaveBeenCalledWith(credential)
+    expect(fetchImpl.mock.calls[0][1].headers.authorization).toBe('Bearer runtime-access-one')
+    expect(fetchImpl.mock.calls[1][1].headers.authorization).toBe('Bearer runtime-access-two')
+  })
+
+  it('fails closed when Control returns a malformed or status-mismatched envelope', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(allowed()), { status: 503 }))
+
+    await expect(checkpointMcpHostActionAuthority(binding, auth(), fetchImpl)).rejects.toEqual(
+      new McpHostActionAuthorityCheckpointError('authority_unavailable')
+    )
+  })
+
+  it.each([
+    [
+      'authorization revision',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        authorizationRevision: `ar1_${'d'.repeat(43)}`,
+      }),
+    ],
+    [
+      'behavior binding hash',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+      }),
+    ],
+    [
+      'principal attribution',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: { ...value.attribution, userId: '40000000-0000-4000-8000-000000000004' },
+      }),
+    ],
+    [
+      'session attribution',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: { ...value.attribution, sid: '40000000-0000-4000-8000-000000000004' },
+      }),
+    ],
+    [
+      'session version',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: { ...value.attribution, sessionVersion: 2 },
+      }),
+    ],
+    [
+      'path attribution',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: { ...value.attribution, accessPathId: `ap1_${'d'.repeat(43)}` },
+      }),
+    ],
+    [
+      'path kind',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: {
+          ...value.attribution,
+          pathKind: 'team',
+          effectiveTeamId: '40000000-0000-4000-8000-000000000004',
+        },
+      }),
+    ],
+    [
+      'destination',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        destination: {
+          kind: 'host',
+          ref: 'mcp-host/other-host',
+          url: 'http://other-host.mcp-host.svc.cluster.local:8080',
+        },
+      }),
+    ],
+    [
+      'expired validity',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        validUntil: '2000-01-01T00:00:00.000Z',
+      }),
+    ],
+  ] as const)(
+    'rejects a producer response with mismatched %s before the protected effect',
+    async (_label, mutate) => {
+      const response = mutate(allowed())
+      const fetchImpl = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+
+      await expect(checkpointMcpHostActionAuthority(binding, auth(), fetchImpl)).rejects.toEqual(
+        new McpHostActionAuthorityCheckpointError('authority_unavailable')
+      )
+    }
+  )
+})
+
+describe('runtimeActionCheckpointDecision', () => {
+  it.each([
+    ['allowed', 'allowed'],
+    ['denied', 'denied'],
+    ['not_found', 'denied'],
+    ['access_path_stale', 'denied'],
+    ['authority_unavailable', 'unavailable'],
+    ['invalid_binding', 'denied'],
+  ] as const)('maps %s to %s', (status, expected) => {
+    expect(runtimeActionCheckpointDecision({ status } as never)).toBe(expected)
+  })
+})

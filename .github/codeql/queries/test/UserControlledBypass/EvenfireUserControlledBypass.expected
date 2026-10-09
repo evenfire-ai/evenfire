@@ -1,147 +1,313 @@
 edges
-| control-api/src/routes/external/auth.ts:18:9:18:13 | email | control-api/src/routes/external/auth.ts:20:8:20:12 | email | provenance |  |
-| control-api/src/routes/external/auth.ts:18:17:18:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:18:17:18:52 | String( ... .trim() | provenance |  |
-| control-api/src/routes/external/auth.ts:18:17:18:52 | String( ... .trim() | control-api/src/routes/external/auth.ts:18:9:18:13 | email | provenance |  |
-| control-api/src/routes/external/auth.ts:18:24:18:31 | req.body | control-api/src/routes/external/auth.ts:18:17:18:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:19:9:19:16 | password | control-api/src/routes/external/auth.ts:20:18:20:25 | password | provenance |  |
-| control-api/src/routes/external/auth.ts:19:20:19:51 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:19:9:19:16 | password | provenance |  |
-| control-api/src/routes/external/auth.ts:19:27:19:34 | req.body | control-api/src/routes/external/auth.ts:19:20:19:51 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:26:9:26:13 | token | control-api/src/routes/external/auth.ts:27:8:27:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:26:9:26:13 | token | control-api/src/routes/external/auth.ts:27:17:27:21 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:26:17:26:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:26:17:26:52 | String( ... .trim() | provenance |  |
-| control-api/src/routes/external/auth.ts:26:17:26:52 | String( ... .trim() | control-api/src/routes/external/auth.ts:26:9:26:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:26:24:26:31 | req.body | control-api/src/routes/external/auth.ts:26:17:26:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:27:17:27:21 | token | control-api/src/routes/external/auth.ts:27:17:27:28 | token.length | provenance |  |
-| control-api/src/routes/external/auth.ts:27:17:27:21 | token | control-api/src/routes/external/auth.ts:27:17:27:28 | token.length | provenance |  |
-| control-api/src/routes/external/auth.ts:27:17:27:28 | token.length | control-api/src/routes/external/auth.ts:27:17:27:35 | token.length > 4096 | provenance | Config |
-| control-api/src/routes/external/auth.ts:36:9:36:13 | token | control-api/src/routes/external/auth.ts:37:8:37:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:36:17:36:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:36:9:36:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:36:24:36:31 | req.body | control-api/src/routes/external/auth.ts:36:17:36:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:50:11:50:15 | email | control-api/src/routes/external/auth.ts:52:10:52:14 | email | provenance |  |
-| control-api/src/routes/external/auth.ts:50:19:50:47 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:50:19:50:54 | String( ... .trim() | provenance |  |
-| control-api/src/routes/external/auth.ts:50:19:50:54 | String( ... .trim() | control-api/src/routes/external/auth.ts:50:11:50:15 | email | provenance |  |
-| control-api/src/routes/external/auth.ts:50:26:50:33 | req.body | control-api/src/routes/external/auth.ts:50:19:50:47 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:51:11:51:18 | password | control-api/src/routes/external/auth.ts:52:20:52:27 | password | provenance |  |
-| control-api/src/routes/external/auth.ts:51:22:51:53 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:51:11:51:18 | password | provenance |  |
-| control-api/src/routes/external/auth.ts:51:29:51:36 | req.body | control-api/src/routes/external/auth.ts:51:22:51:53 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:64:11:64:15 | token | control-api/src/routes/external/auth.ts:65:10:65:14 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:64:11:64:15 | token | control-api/src/routes/external/auth.ts:65:19:65:23 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:64:19:64:47 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:64:19:64:54 | String( ... .trim() | provenance |  |
-| control-api/src/routes/external/auth.ts:64:19:64:54 | String( ... .trim() | control-api/src/routes/external/auth.ts:64:11:64:15 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:64:26:64:33 | req.body | control-api/src/routes/external/auth.ts:64:19:64:47 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:65:19:65:23 | token | control-api/src/routes/external/auth.ts:65:19:65:30 | token.length | provenance |  |
-| control-api/src/routes/external/auth.ts:65:19:65:23 | token | control-api/src/routes/external/auth.ts:65:19:65:30 | token.length | provenance |  |
-| control-api/src/routes/external/auth.ts:65:19:65:30 | token.length | control-api/src/routes/external/auth.ts:65:19:65:37 | token.length > 4096 | provenance | Config |
-| control-api/src/routes/external/auth.ts:77:9:77:13 | token | control-api/src/routes/external/auth.ts:78:8:78:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:77:17:77:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:77:9:77:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:77:24:77:31 | req.body | control-api/src/routes/external/auth.ts:77:17:77:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:84:9:84:16 | password | control-api/src/routes/external/auth.ts:85:8:85:15 | password | provenance |  |
-| control-api/src/routes/external/auth.ts:84:20:84:51 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:84:9:84:16 | password | provenance |  |
-| control-api/src/routes/external/auth.ts:84:27:84:34 | req.body | control-api/src/routes/external/auth.ts:84:20:84:51 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:91:9:91:13 | token | control-api/src/routes/external/auth.ts:92:7:92:11 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:91:17:91:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:91:9:91:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:91:24:91:31 | req.body | control-api/src/routes/external/auth.ts:91:17:91:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:101:9:101:13 | token | control-api/src/routes/external/auth.ts:102:8:102:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:101:17:101:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:101:9:101:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:101:24:101:31 | req.body | control-api/src/routes/external/auth.ts:101:17:101:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:111:9:111:13 | token | control-api/src/routes/external/auth.ts:112:8:112:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:111:17:111:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:111:9:111:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:111:24:111:31 | req.body | control-api/src/routes/external/auth.ts:111:17:111:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:128:9:128:13 | token | control-api/src/routes/external/auth.ts:130:8:130:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:128:17:128:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:128:9:128:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:128:24:128:31 | req.body | control-api/src/routes/external/auth.ts:128:17:128:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:136:9:136:13 | token | control-api/src/routes/external/auth.ts:137:8:137:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:136:17:136:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:136:9:136:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:136:24:136:31 | req.body | control-api/src/routes/external/auth.ts:136:17:136:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:146:9:146:13 | token | control-api/src/routes/external/auth.ts:147:8:147:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:146:17:146:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:146:9:146:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:146:24:146:31 | req.body | control-api/src/routes/external/auth.ts:146:17:146:45 | String( ...  \|\| '') | provenance |  |
-| control-api/src/routes/external/auth.ts:153:9:153:13 | token | control-api/src/routes/external/auth.ts:154:8:154:12 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:153:17:153:45 | String( ...  \|\| '') | control-api/src/routes/external/auth.ts:153:9:153:13 | token | provenance |  |
-| control-api/src/routes/external/auth.ts:153:24:153:31 | req.body | control-api/src/routes/external/auth.ts:153:17:153:45 | String( ...  \|\| '') | provenance |  |
+| control-api/src/routes/external/auth.ts:21:9:21:13 | email | control-api/src/routes/external/auth.ts:23:8:23:12 | email | provenance |  |
+| control-api/src/routes/external/auth.ts:21:17:21:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:21:17:21:52 | String( ... .trim() | provenance |  |
+| control-api/src/routes/external/auth.ts:21:17:21:52 | String( ... .trim() | control-api/src/routes/external/auth.ts:21:9:21:13 | email | provenance |  |
+| control-api/src/routes/external/auth.ts:21:24:21:31 | req.body | control-api/src/routes/external/auth.ts:21:17:21:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:22:9:22:16 | password | control-api/src/routes/external/auth.ts:23:18:23:25 | password | provenance |  |
+| control-api/src/routes/external/auth.ts:22:20:22:51 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:22:9:22:16 | password | provenance |  |
+| control-api/src/routes/external/auth.ts:22:27:22:34 | req.body | control-api/src/routes/external/auth.ts:22:20:22:51 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:30:9:30:13 | token | control-api/src/routes/external/auth.ts:31:8:31:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:30:9:30:13 | token | control-api/src/routes/external/auth.ts:31:17:31:21 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:30:17:30:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:30:17:30:52 | String( ... .trim() | provenance |  |
+| control-api/src/routes/external/auth.ts:30:17:30:52 | String( ... .trim() | control-api/src/routes/external/auth.ts:30:9:30:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:30:24:30:31 | req.body | control-api/src/routes/external/auth.ts:30:17:30:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:31:17:31:21 | token | control-api/src/routes/external/auth.ts:31:17:31:28 | token.length | provenance |  |
+| control-api/src/routes/external/auth.ts:31:17:31:21 | token | control-api/src/routes/external/auth.ts:31:17:31:28 | token.length | provenance |  |
+| control-api/src/routes/external/auth.ts:31:17:31:28 | token.length | control-api/src/routes/external/auth.ts:31:17:31:35 | token.length > 4096 | provenance | Config |
+| control-api/src/routes/external/auth.ts:40:9:40:13 | token | control-api/src/routes/external/auth.ts:41:8:41:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:40:17:40:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:40:9:40:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:40:24:40:31 | req.body | control-api/src/routes/external/auth.ts:40:17:40:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:54:11:54:15 | email | control-api/src/routes/external/auth.ts:56:10:56:14 | email | provenance |  |
+| control-api/src/routes/external/auth.ts:54:19:54:47 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:54:19:54:54 | String( ... .trim() | provenance |  |
+| control-api/src/routes/external/auth.ts:54:19:54:54 | String( ... .trim() | control-api/src/routes/external/auth.ts:54:11:54:15 | email | provenance |  |
+| control-api/src/routes/external/auth.ts:54:26:54:33 | req.body | control-api/src/routes/external/auth.ts:54:19:54:47 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:55:11:55:18 | password | control-api/src/routes/external/auth.ts:56:20:56:27 | password | provenance |  |
+| control-api/src/routes/external/auth.ts:55:22:55:53 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:55:11:55:18 | password | provenance |  |
+| control-api/src/routes/external/auth.ts:55:29:55:36 | req.body | control-api/src/routes/external/auth.ts:55:22:55:53 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:68:11:68:15 | token | control-api/src/routes/external/auth.ts:69:10:69:14 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:68:11:68:15 | token | control-api/src/routes/external/auth.ts:69:19:69:23 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:68:19:68:47 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:68:19:68:54 | String( ... .trim() | provenance |  |
+| control-api/src/routes/external/auth.ts:68:19:68:54 | String( ... .trim() | control-api/src/routes/external/auth.ts:68:11:68:15 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:68:26:68:33 | req.body | control-api/src/routes/external/auth.ts:68:19:68:47 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:69:19:69:23 | token | control-api/src/routes/external/auth.ts:69:19:69:30 | token.length | provenance |  |
+| control-api/src/routes/external/auth.ts:69:19:69:23 | token | control-api/src/routes/external/auth.ts:69:19:69:30 | token.length | provenance |  |
+| control-api/src/routes/external/auth.ts:69:19:69:30 | token.length | control-api/src/routes/external/auth.ts:69:19:69:37 | token.length > 4096 | provenance | Config |
+| control-api/src/routes/external/auth.ts:81:9:81:13 | token | control-api/src/routes/external/auth.ts:82:8:82:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:81:17:81:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:81:9:81:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:81:24:81:31 | req.body | control-api/src/routes/external/auth.ts:81:17:81:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:88:9:88:16 | password | control-api/src/routes/external/auth.ts:89:8:89:15 | password | provenance |  |
+| control-api/src/routes/external/auth.ts:88:20:88:51 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:88:9:88:16 | password | provenance |  |
+| control-api/src/routes/external/auth.ts:88:27:88:34 | req.body | control-api/src/routes/external/auth.ts:88:20:88:51 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:95:9:95:13 | token | control-api/src/routes/external/auth.ts:96:7:96:11 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:95:17:95:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:95:9:95:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:95:24:95:31 | req.body | control-api/src/routes/external/auth.ts:95:17:95:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:105:9:105:13 | token | control-api/src/routes/external/auth.ts:106:8:106:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:105:17:105:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:105:9:105:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:105:24:105:31 | req.body | control-api/src/routes/external/auth.ts:105:17:105:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:115:9:115:13 | token | control-api/src/routes/external/auth.ts:116:8:116:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:115:17:115:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:115:9:115:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:115:24:115:31 | req.body | control-api/src/routes/external/auth.ts:115:17:115:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:132:9:132:13 | token | control-api/src/routes/external/auth.ts:134:8:134:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:132:17:132:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:132:9:132:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:132:24:132:31 | req.body | control-api/src/routes/external/auth.ts:132:17:132:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:140:9:140:13 | token | control-api/src/routes/external/auth.ts:141:8:141:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:140:17:140:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:140:9:140:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:140:24:140:31 | req.body | control-api/src/routes/external/auth.ts:140:17:140:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:150:9:150:13 | token | control-api/src/routes/external/auth.ts:151:8:151:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:150:17:150:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:150:9:150:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:150:24:150:31 | req.body | control-api/src/routes/external/auth.ts:150:17:150:45 | String( ...  \|\| "") | provenance |  |
+| control-api/src/routes/external/auth.ts:157:9:157:13 | token | control-api/src/routes/external/auth.ts:158:8:158:12 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:157:17:157:45 | String( ...  \|\| "") | control-api/src/routes/external/auth.ts:157:9:157:13 | token | provenance |  |
+| control-api/src/routes/external/auth.ts:157:24:157:31 | req.body | control-api/src/routes/external/auth.ts:157:17:157:45 | String( ...  \|\| "") | provenance |  |
+| mcp-host/src/server/routes.ts:9:9:9:15 | message | mcp-host/src/server/routes.ts:10:7:10:13 | message | provenance |  |
+| mcp-host/src/server/routes.ts:9:9:9:15 | message | mcp-host/src/server/routes.ts:18:30:18:36 | message | provenance |  |
+| mcp-host/src/server/routes.ts:9:9:9:15 | message | mcp-host/src/server/routes.ts:20:30:20:36 | message | provenance |  |
+| mcp-host/src/server/routes.ts:9:19:9:26 | req.body | mcp-host/src/server/routes.ts:9:9:9:15 | message | provenance |  |
+| mcp-host/src/server/routes.ts:10:7:10:13 | message | mcp-host/src/server/routes.ts:10:7:10:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:10:7:10:13 | message | mcp-host/src/server/routes.ts:10:7:10:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:10:7:10:25 | message.channelType | mcp-host/src/server/routes.ts:10:7:10:35 | message ... = "rpc" | provenance | Config |
+| mcp-host/src/server/routes.ts:18:30:18:36 | message | mcp-host/src/server/routes.ts:18:30:18:46 | message.messageId | provenance |  |
+| mcp-host/src/server/routes.ts:20:30:20:36 | message | mcp-host/src/server/routes.ts:20:30:20:46 | message.channelId | provenance |  |
+| mcp-host/src/server/routes.ts:36:9:36:15 | message | mcp-host/src/server/routes.ts:37:7:37:13 | message | provenance |  |
+| mcp-host/src/server/routes.ts:36:9:36:15 | message | mcp-host/src/server/routes.ts:45:30:45:36 | message | provenance |  |
+| mcp-host/src/server/routes.ts:36:9:36:15 | message | mcp-host/src/server/routes.ts:47:30:47:36 | message | provenance |  |
+| mcp-host/src/server/routes.ts:36:19:36:26 | req.body | mcp-host/src/server/routes.ts:36:9:36:15 | message | provenance |  |
+| mcp-host/src/server/routes.ts:37:7:37:13 | message | mcp-host/src/server/routes.ts:37:7:37:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:37:7:37:13 | message | mcp-host/src/server/routes.ts:37:7:37:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:37:7:37:25 | message.channelType | mcp-host/src/server/routes.ts:37:7:37:35 | message ... = "rpc" | provenance | Config |
+| mcp-host/src/server/routes.ts:45:30:45:36 | message | mcp-host/src/server/routes.ts:45:30:45:46 | message.messageId | provenance |  |
+| mcp-host/src/server/routes.ts:47:30:47:36 | message | mcp-host/src/server/routes.ts:47:30:47:46 | message.channelId | provenance |  |
+| mcp-host/src/server/routes.ts:61:9:61:15 | message | mcp-host/src/server/routes.ts:62:7:62:13 | message | provenance |  |
+| mcp-host/src/server/routes.ts:61:9:61:15 | message | mcp-host/src/server/routes.ts:70:30:70:36 | message | provenance |  |
+| mcp-host/src/server/routes.ts:61:9:61:15 | message | mcp-host/src/server/routes.ts:72:30:72:36 | message | provenance |  |
+| mcp-host/src/server/routes.ts:61:19:61:26 | req.body | mcp-host/src/server/routes.ts:61:9:61:15 | message | provenance |  |
+| mcp-host/src/server/routes.ts:62:7:62:13 | message | mcp-host/src/server/routes.ts:62:7:62:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:62:7:62:13 | message | mcp-host/src/server/routes.ts:62:7:62:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:62:7:62:25 | message.channelType | mcp-host/src/server/routes.ts:62:7:62:35 | message ... = "rpc" | provenance | Config |
+| mcp-host/src/server/routes.ts:70:30:70:36 | message | mcp-host/src/server/routes.ts:70:30:70:46 | message.messageId | provenance |  |
+| mcp-host/src/server/routes.ts:72:30:72:36 | message | mcp-host/src/server/routes.ts:72:30:72:46 | message.channelId | provenance |  |
+| mcp-host/src/server/routes.ts:86:9:86:15 | message | mcp-host/src/server/routes.ts:87:7:87:13 | message | provenance |  |
+| mcp-host/src/server/routes.ts:86:9:86:15 | message | mcp-host/src/server/routes.ts:97:30:97:36 | message | provenance |  |
+| mcp-host/src/server/routes.ts:86:19:86:26 | req.body | mcp-host/src/server/routes.ts:86:9:86:15 | message | provenance |  |
+| mcp-host/src/server/routes.ts:87:7:87:13 | message | mcp-host/src/server/routes.ts:87:7:87:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:87:7:87:13 | message | mcp-host/src/server/routes.ts:87:7:87:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:87:7:87:25 | message.channelType | mcp-host/src/server/routes.ts:87:7:87:35 | message ... = "rpc" | provenance | Config |
+| mcp-host/src/server/routes.ts:97:30:97:36 | message | mcp-host/src/server/routes.ts:97:30:97:46 | message.channelId | provenance |  |
+| mcp-host/src/server/routes.ts:111:9:111:15 | message | mcp-host/src/server/routes.ts:112:7:112:13 | message | provenance |  |
+| mcp-host/src/server/routes.ts:111:19:111:26 | req.body | mcp-host/src/server/routes.ts:111:9:111:15 | message | provenance |  |
+| mcp-host/src/server/routes.ts:112:7:112:13 | message | mcp-host/src/server/routes.ts:112:7:112:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:112:7:112:13 | message | mcp-host/src/server/routes.ts:112:7:112:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:112:7:112:25 | message.channelType | mcp-host/src/server/routes.ts:112:7:112:35 | message ... = "rpc" | provenance | Config |
+| mcp-host/src/server/routes.ts:128:9:128:15 | message | mcp-host/src/server/routes.ts:129:7:129:13 | message | provenance |  |
+| mcp-host/src/server/routes.ts:128:9:128:15 | message | mcp-host/src/server/routes.ts:134:51:134:57 | message | provenance |  |
+| mcp-host/src/server/routes.ts:128:9:128:15 | message | mcp-host/src/server/routes.ts:136:51:136:57 | message | provenance |  |
+| mcp-host/src/server/routes.ts:128:19:128:26 | req.body | mcp-host/src/server/routes.ts:128:9:128:15 | message | provenance |  |
+| mcp-host/src/server/routes.ts:129:7:129:13 | message | mcp-host/src/server/routes.ts:129:7:129:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:129:7:129:13 | message | mcp-host/src/server/routes.ts:129:7:129:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:129:7:129:25 | message.channelType | mcp-host/src/server/routes.ts:129:7:129:35 | message ... = "rpc" | provenance | Config |
+| mcp-host/src/server/routes.ts:134:51:134:57 | message | mcp-host/src/server/routes.ts:134:51:134:67 | message.messageId | provenance |  |
+| mcp-host/src/server/routes.ts:136:51:136:57 | message | mcp-host/src/server/routes.ts:136:51:136:67 | message.channelId | provenance |  |
+| mcp-host/src/server/routes.ts:149:9:149:15 | message | mcp-host/src/server/routes.ts:150:7:150:13 | message | provenance |  |
+| mcp-host/src/server/routes.ts:149:19:149:26 | req.body | mcp-host/src/server/routes.ts:149:9:149:15 | message | provenance |  |
+| mcp-host/src/server/routes.ts:150:7:150:13 | message | mcp-host/src/server/routes.ts:150:7:150:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:150:7:150:13 | message | mcp-host/src/server/routes.ts:150:7:150:25 | message.channelType | provenance |  |
+| mcp-host/src/server/routes.ts:150:7:150:25 | message.channelType | mcp-host/src/server/routes.ts:150:7:150:35 | message ... = "rpc" | provenance | Config |
+| rpc-proxy/src/routes/sandboxUi.ts:43:9:43:20 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:45:19:45:30 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:43:24:43:34 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:43:9:43:20 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:59:9:59:20 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:61:19:61:30 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:59:24:59:34 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:59:9:59:20 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:71:9:71:20 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:72:25:72:36 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:71:24:71:34 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:71:9:71:20 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:87:11:87:22 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:89:21:89:32 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:87:26:87:36 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:87:11:87:22 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:100:9:100:20 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:102:19:102:30 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:100:24:100:34 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:100:9:100:20 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:117:11:117:22 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:119:21:119:32 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:117:26:117:36 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:117:11:117:22 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:139:11:139:22 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:141:21:141:32 | legacyCookie | provenance |  |
+| rpc-proxy/src/routes/sandboxUi.ts:139:26:139:36 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:139:11:139:22 | legacyCookie | provenance |  |
 nodes
-| control-api/src/routes/external/auth.ts:18:9:18:13 | email | semmle.label | email |
-| control-api/src/routes/external/auth.ts:18:17:18:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:18:17:18:52 | String( ... .trim() | semmle.label | String( ... .trim() |
-| control-api/src/routes/external/auth.ts:18:24:18:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:19:9:19:16 | password | semmle.label | password |
-| control-api/src/routes/external/auth.ts:19:20:19:51 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:19:27:19:34 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:20:8:20:12 | email | semmle.label | email |
-| control-api/src/routes/external/auth.ts:20:18:20:25 | password | semmle.label | password |
-| control-api/src/routes/external/auth.ts:26:9:26:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:26:17:26:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:26:17:26:52 | String( ... .trim() | semmle.label | String( ... .trim() |
-| control-api/src/routes/external/auth.ts:26:24:26:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:27:8:27:12 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:27:17:27:21 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:27:17:27:28 | token.length | semmle.label | token.length |
-| control-api/src/routes/external/auth.ts:27:17:27:28 | token.length | semmle.label | token.length |
-| control-api/src/routes/external/auth.ts:27:17:27:35 | token.length > 4096 | semmle.label | token.length > 4096 |
-| control-api/src/routes/external/auth.ts:36:9:36:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:36:17:36:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:36:24:36:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:37:8:37:12 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:50:11:50:15 | email | semmle.label | email |
-| control-api/src/routes/external/auth.ts:50:19:50:47 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:50:19:50:54 | String( ... .trim() | semmle.label | String( ... .trim() |
-| control-api/src/routes/external/auth.ts:50:26:50:33 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:51:11:51:18 | password | semmle.label | password |
-| control-api/src/routes/external/auth.ts:51:22:51:53 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:51:29:51:36 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:52:10:52:14 | email | semmle.label | email |
-| control-api/src/routes/external/auth.ts:52:20:52:27 | password | semmle.label | password |
-| control-api/src/routes/external/auth.ts:64:11:64:15 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:64:19:64:47 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:64:19:64:54 | String( ... .trim() | semmle.label | String( ... .trim() |
-| control-api/src/routes/external/auth.ts:64:26:64:33 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:65:10:65:14 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:65:19:65:23 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:65:19:65:30 | token.length | semmle.label | token.length |
-| control-api/src/routes/external/auth.ts:65:19:65:30 | token.length | semmle.label | token.length |
-| control-api/src/routes/external/auth.ts:65:19:65:37 | token.length > 4096 | semmle.label | token.length > 4096 |
-| control-api/src/routes/external/auth.ts:77:9:77:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:77:17:77:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:77:24:77:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:78:8:78:12 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:84:9:84:16 | password | semmle.label | password |
-| control-api/src/routes/external/auth.ts:84:20:84:51 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:84:27:84:34 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:85:8:85:15 | password | semmle.label | password |
-| control-api/src/routes/external/auth.ts:91:9:91:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:91:17:91:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:91:24:91:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:92:7:92:11 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:101:9:101:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:101:17:101:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:101:24:101:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:102:8:102:12 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:111:9:111:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:111:17:111:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:111:24:111:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:112:8:112:12 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:128:9:128:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:128:17:128:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:128:24:128:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:130:8:130:12 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:136:9:136:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:136:17:136:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:136:24:136:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:137:8:137:12 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:146:9:146:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:146:17:146:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:146:24:146:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:147:8:147:12 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:153:9:153:13 | token | semmle.label | token |
-| control-api/src/routes/external/auth.ts:153:17:153:45 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
-| control-api/src/routes/external/auth.ts:153:24:153:31 | req.body | semmle.label | req.body |
-| control-api/src/routes/external/auth.ts:154:8:154:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:21:9:21:13 | email | semmle.label | email |
+| control-api/src/routes/external/auth.ts:21:17:21:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:21:17:21:52 | String( ... .trim() | semmle.label | String( ... .trim() |
+| control-api/src/routes/external/auth.ts:21:24:21:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:22:9:22:16 | password | semmle.label | password |
+| control-api/src/routes/external/auth.ts:22:20:22:51 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:22:27:22:34 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:23:8:23:12 | email | semmle.label | email |
+| control-api/src/routes/external/auth.ts:23:18:23:25 | password | semmle.label | password |
+| control-api/src/routes/external/auth.ts:30:9:30:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:30:17:30:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:30:17:30:52 | String( ... .trim() | semmle.label | String( ... .trim() |
+| control-api/src/routes/external/auth.ts:30:24:30:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:31:8:31:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:31:17:31:21 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:31:17:31:28 | token.length | semmle.label | token.length |
+| control-api/src/routes/external/auth.ts:31:17:31:28 | token.length | semmle.label | token.length |
+| control-api/src/routes/external/auth.ts:31:17:31:35 | token.length > 4096 | semmle.label | token.length > 4096 |
+| control-api/src/routes/external/auth.ts:40:9:40:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:40:17:40:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:40:24:40:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:41:8:41:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:54:11:54:15 | email | semmle.label | email |
+| control-api/src/routes/external/auth.ts:54:19:54:47 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:54:19:54:54 | String( ... .trim() | semmle.label | String( ... .trim() |
+| control-api/src/routes/external/auth.ts:54:26:54:33 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:55:11:55:18 | password | semmle.label | password |
+| control-api/src/routes/external/auth.ts:55:22:55:53 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:55:29:55:36 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:56:10:56:14 | email | semmle.label | email |
+| control-api/src/routes/external/auth.ts:56:20:56:27 | password | semmle.label | password |
+| control-api/src/routes/external/auth.ts:68:11:68:15 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:68:19:68:47 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:68:19:68:54 | String( ... .trim() | semmle.label | String( ... .trim() |
+| control-api/src/routes/external/auth.ts:68:26:68:33 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:69:10:69:14 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:69:19:69:23 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:69:19:69:30 | token.length | semmle.label | token.length |
+| control-api/src/routes/external/auth.ts:69:19:69:30 | token.length | semmle.label | token.length |
+| control-api/src/routes/external/auth.ts:69:19:69:37 | token.length > 4096 | semmle.label | token.length > 4096 |
+| control-api/src/routes/external/auth.ts:81:9:81:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:81:17:81:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:81:24:81:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:82:8:82:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:88:9:88:16 | password | semmle.label | password |
+| control-api/src/routes/external/auth.ts:88:20:88:51 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:88:27:88:34 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:89:8:89:15 | password | semmle.label | password |
+| control-api/src/routes/external/auth.ts:95:9:95:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:95:17:95:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:95:24:95:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:96:7:96:11 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:105:9:105:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:105:17:105:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:105:24:105:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:106:8:106:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:115:9:115:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:115:17:115:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:115:24:115:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:116:8:116:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:132:9:132:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:132:17:132:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:132:24:132:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:134:8:134:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:140:9:140:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:140:17:140:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:140:24:140:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:141:8:141:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:150:9:150:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:150:17:150:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:150:24:150:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:151:8:151:12 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:157:9:157:13 | token | semmle.label | token |
+| control-api/src/routes/external/auth.ts:157:17:157:45 | String( ...  \|\| "") | semmle.label | String( ...  \|\| "") |
+| control-api/src/routes/external/auth.ts:157:24:157:31 | req.body | semmle.label | req.body |
+| control-api/src/routes/external/auth.ts:158:8:158:12 | token | semmle.label | token |
+| mcp-host/src/server/routes.ts:9:9:9:15 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:9:19:9:26 | req.body | semmle.label | req.body |
+| mcp-host/src/server/routes.ts:10:7:10:13 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:10:7:10:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:10:7:10:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:10:7:10:35 | message ... = "rpc" | semmle.label | message ... = "rpc" |
+| mcp-host/src/server/routes.ts:18:30:18:36 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:18:30:18:46 | message.messageId | semmle.label | message.messageId |
+| mcp-host/src/server/routes.ts:20:30:20:36 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:20:30:20:46 | message.channelId | semmle.label | message.channelId |
+| mcp-host/src/server/routes.ts:36:9:36:15 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:36:19:36:26 | req.body | semmle.label | req.body |
+| mcp-host/src/server/routes.ts:37:7:37:13 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:37:7:37:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:37:7:37:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:37:7:37:35 | message ... = "rpc" | semmle.label | message ... = "rpc" |
+| mcp-host/src/server/routes.ts:45:30:45:36 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:45:30:45:46 | message.messageId | semmle.label | message.messageId |
+| mcp-host/src/server/routes.ts:47:30:47:36 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:47:30:47:46 | message.channelId | semmle.label | message.channelId |
+| mcp-host/src/server/routes.ts:61:9:61:15 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:61:19:61:26 | req.body | semmle.label | req.body |
+| mcp-host/src/server/routes.ts:62:7:62:13 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:62:7:62:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:62:7:62:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:62:7:62:35 | message ... = "rpc" | semmle.label | message ... = "rpc" |
+| mcp-host/src/server/routes.ts:70:30:70:36 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:70:30:70:46 | message.messageId | semmle.label | message.messageId |
+| mcp-host/src/server/routes.ts:72:30:72:36 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:72:30:72:46 | message.channelId | semmle.label | message.channelId |
+| mcp-host/src/server/routes.ts:86:9:86:15 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:86:19:86:26 | req.body | semmle.label | req.body |
+| mcp-host/src/server/routes.ts:87:7:87:13 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:87:7:87:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:87:7:87:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:87:7:87:35 | message ... = "rpc" | semmle.label | message ... = "rpc" |
+| mcp-host/src/server/routes.ts:97:30:97:36 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:97:30:97:46 | message.channelId | semmle.label | message.channelId |
+| mcp-host/src/server/routes.ts:111:9:111:15 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:111:19:111:26 | req.body | semmle.label | req.body |
+| mcp-host/src/server/routes.ts:112:7:112:13 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:112:7:112:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:112:7:112:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:112:7:112:35 | message ... = "rpc" | semmle.label | message ... = "rpc" |
+| mcp-host/src/server/routes.ts:128:9:128:15 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:128:19:128:26 | req.body | semmle.label | req.body |
+| mcp-host/src/server/routes.ts:129:7:129:13 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:129:7:129:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:129:7:129:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:129:7:129:35 | message ... = "rpc" | semmle.label | message ... = "rpc" |
+| mcp-host/src/server/routes.ts:134:51:134:57 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:134:51:134:67 | message.messageId | semmle.label | message.messageId |
+| mcp-host/src/server/routes.ts:136:51:136:57 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:136:51:136:67 | message.channelId | semmle.label | message.channelId |
+| mcp-host/src/server/routes.ts:149:9:149:15 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:149:19:149:26 | req.body | semmle.label | req.body |
+| mcp-host/src/server/routes.ts:150:7:150:13 | message | semmle.label | message |
+| mcp-host/src/server/routes.ts:150:7:150:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:150:7:150:25 | message.channelType | semmle.label | message.channelType |
+| mcp-host/src/server/routes.ts:150:7:150:35 | message ... = "rpc" | semmle.label | message ... = "rpc" |
+| rpc-proxy/src/routes/sandboxUi.ts:43:9:43:20 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:43:24:43:34 | req.cookies | semmle.label | req.cookies |
+| rpc-proxy/src/routes/sandboxUi.ts:45:19:45:30 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:59:9:59:20 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:59:24:59:34 | req.cookies | semmle.label | req.cookies |
+| rpc-proxy/src/routes/sandboxUi.ts:61:19:61:30 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:71:9:71:20 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:71:24:71:34 | req.cookies | semmle.label | req.cookies |
+| rpc-proxy/src/routes/sandboxUi.ts:72:25:72:36 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:87:11:87:22 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:87:26:87:36 | req.cookies | semmle.label | req.cookies |
+| rpc-proxy/src/routes/sandboxUi.ts:89:21:89:32 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:100:9:100:20 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:100:24:100:34 | req.cookies | semmle.label | req.cookies |
+| rpc-proxy/src/routes/sandboxUi.ts:102:19:102:30 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:117:11:117:22 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:117:26:117:36 | req.cookies | semmle.label | req.cookies |
+| rpc-proxy/src/routes/sandboxUi.ts:119:21:119:32 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:139:11:139:22 | legacyCookie | semmle.label | legacyCookie |
+| rpc-proxy/src/routes/sandboxUi.ts:139:26:139:36 | req.cookies | semmle.label | req.cookies |
+| rpc-proxy/src/routes/sandboxUi.ts:141:21:141:32 | legacyCookie | semmle.label | legacyCookie |
 subpaths
 #select
-| control-api/src/routes/external/auth.ts:78:8:78:12 | token | control-api/src/routes/external/auth.ts:77:24:77:31 | req.body | control-api/src/routes/external/auth.ts:78:8:78:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:79:3:79:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:77:24:77:31 | req.body | user-provided value |
-| control-api/src/routes/external/auth.ts:85:8:85:15 | password | control-api/src/routes/external/auth.ts:84:27:84:34 | req.body | control-api/src/routes/external/auth.ts:85:8:85:15 | password | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:86:3:86:68 | authent ... ssword) | action | control-api/src/routes/external/auth.ts:84:27:84:34 | req.body | user-provided value |
-| control-api/src/routes/external/auth.ts:92:7:92:11 | token | control-api/src/routes/external/auth.ts:91:24:91:31 | req.body | control-api/src/routes/external/auth.ts:92:7:92:11 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:93:5:93:42 | authent ... (token) | action | control-api/src/routes/external/auth.ts:91:24:91:31 | req.body | user-provided value |
-| control-api/src/routes/external/auth.ts:102:8:102:12 | token | control-api/src/routes/external/auth.ts:101:24:101:31 | req.body | control-api/src/routes/external/auth.ts:102:8:102:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:106:3:106:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:101:24:101:31 | req.body | user-provided value |
-| control-api/src/routes/external/auth.ts:112:8:112:12 | token | control-api/src/routes/external/auth.ts:111:24:111:31 | req.body | control-api/src/routes/external/auth.ts:112:8:112:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:115:3:115:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:111:24:111:31 | req.body | user-provided value |
-| control-api/src/routes/external/auth.ts:130:8:130:12 | token | control-api/src/routes/external/auth.ts:128:24:128:31 | req.body | control-api/src/routes/external/auth.ts:130:8:130:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:131:3:131:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:128:24:128:31 | req.body | user-provided value |
-| control-api/src/routes/external/auth.ts:147:8:147:12 | token | control-api/src/routes/external/auth.ts:146:24:146:31 | req.body | control-api/src/routes/external/auth.ts:147:8:147:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:148:3:148:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:146:24:146:31 | req.body | user-provided value |
+| control-api/src/routes/external/auth.ts:82:8:82:12 | token | control-api/src/routes/external/auth.ts:81:24:81:31 | req.body | control-api/src/routes/external/auth.ts:82:8:82:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:83:3:83:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:81:24:81:31 | req.body | user-provided value |
+| control-api/src/routes/external/auth.ts:89:8:89:15 | password | control-api/src/routes/external/auth.ts:88:27:88:34 | req.body | control-api/src/routes/external/auth.ts:89:8:89:15 | password | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:90:3:90:68 | authent ... ssword) | action | control-api/src/routes/external/auth.ts:88:27:88:34 | req.body | user-provided value |
+| control-api/src/routes/external/auth.ts:96:7:96:11 | token | control-api/src/routes/external/auth.ts:95:24:95:31 | req.body | control-api/src/routes/external/auth.ts:96:7:96:11 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:97:5:97:42 | authent ... (token) | action | control-api/src/routes/external/auth.ts:95:24:95:31 | req.body | user-provided value |
+| control-api/src/routes/external/auth.ts:106:8:106:12 | token | control-api/src/routes/external/auth.ts:105:24:105:31 | req.body | control-api/src/routes/external/auth.ts:106:8:106:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:110:3:110:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:105:24:105:31 | req.body | user-provided value |
+| control-api/src/routes/external/auth.ts:116:8:116:12 | token | control-api/src/routes/external/auth.ts:115:24:115:31 | req.body | control-api/src/routes/external/auth.ts:116:8:116:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:119:3:119:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:115:24:115:31 | req.body | user-provided value |
+| control-api/src/routes/external/auth.ts:134:8:134:12 | token | control-api/src/routes/external/auth.ts:132:24:132:31 | req.body | control-api/src/routes/external/auth.ts:134:8:134:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:135:3:135:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:132:24:132:31 | req.body | user-provided value |
+| control-api/src/routes/external/auth.ts:151:8:151:12 | token | control-api/src/routes/external/auth.ts:150:24:150:31 | req.body | control-api/src/routes/external/auth.ts:151:8:151:12 | token | This condition guards a sensitive $@, but a $@ controls it. | control-api/src/routes/external/auth.ts:152:3:152:40 | authent ... (token) | action | control-api/src/routes/external/auth.ts:150:24:150:31 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:37:7:37:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:36:19:36:26 | req.body | mcp-host/src/server/routes.ts:37:7:37:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:52:29:54:7 | authori ...       ) | action | mcp-host/src/server/routes.ts:36:19:36:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:37:7:37:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:36:19:36:26 | req.body | mcp-host/src/server/routes.ts:37:7:37:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:55:7:55:53 | authent ... sender) | action | mcp-host/src/server/routes.ts:36:19:36:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:62:7:62:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:61:19:61:26 | req.body | mcp-host/src/server/routes.ts:62:7:62:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:77:29:79:7 | authori ...       ) | action | mcp-host/src/server/routes.ts:61:19:61:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:62:7:62:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:61:19:61:26 | req.body | mcp-host/src/server/routes.ts:62:7:62:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:80:7:80:53 | authent ... sender) | action | mcp-host/src/server/routes.ts:61:19:61:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:87:7:87:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:86:19:86:26 | req.body | mcp-host/src/server/routes.ts:87:7:87:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:102:29:104:7 | authori ...       ) | action | mcp-host/src/server/routes.ts:86:19:86:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:87:7:87:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:86:19:86:26 | req.body | mcp-host/src/server/routes.ts:87:7:87:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:105:7:105:53 | authent ... sender) | action | mcp-host/src/server/routes.ts:86:19:86:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:112:7:112:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:111:19:111:26 | req.body | mcp-host/src/server/routes.ts:112:7:112:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:119:29:121:7 | authori ...       ) | action | mcp-host/src/server/routes.ts:111:19:111:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:112:7:112:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:111:19:111:26 | req.body | mcp-host/src/server/routes.ts:112:7:112:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:122:7:122:53 | authent ... sender) | action | mcp-host/src/server/routes.ts:111:19:111:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:129:7:129:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:128:19:128:26 | req.body | mcp-host/src/server/routes.ts:129:7:129:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:141:27:143:5 | authori ... ,\\n    ) | action | mcp-host/src/server/routes.ts:128:19:128:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:129:7:129:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:128:19:128:26 | req.body | mcp-host/src/server/routes.ts:129:7:129:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:144:5:144:51 | authent ... sender) | action | mcp-host/src/server/routes.ts:128:19:128:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:150:7:150:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:149:19:149:26 | req.body | mcp-host/src/server/routes.ts:150:7:150:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:158:29:160:7 | authori ...       ) | action | mcp-host/src/server/routes.ts:149:19:149:26 | req.body | user-provided value |
+| mcp-host/src/server/routes.ts:150:7:150:35 | message ... = "rpc" | mcp-host/src/server/routes.ts:149:19:149:26 | req.body | mcp-host/src/server/routes.ts:150:7:150:35 | message ... = "rpc" | This condition guards a sensitive $@, but a $@ controls it. | mcp-host/src/server/routes.ts:161:7:161:53 | authent ... sender) | action | mcp-host/src/server/routes.ts:149:19:149:26 | req.body | user-provided value |
+| rpc-proxy/src/routes/sandboxUi.ts:61:19:61:30 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:59:24:59:34 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:61:19:61:30 | legacyCookie | This condition guards a sensitive $@, but a $@ controls it. | rpc-proxy/src/routes/sandboxUi.ts:61:41:61:76 | verifyS ... Cookie) | action | rpc-proxy/src/routes/sandboxUi.ts:59:24:59:34 | req.cookies | user-provided value |
+| rpc-proxy/src/routes/sandboxUi.ts:72:25:72:36 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:71:24:71:34 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:72:25:72:36 | legacyCookie | This condition guards a sensitive $@, but a $@ controls it. | rpc-proxy/src/routes/sandboxUi.ts:74:7:74:42 | verifyS ... Cookie) | action | rpc-proxy/src/routes/sandboxUi.ts:71:24:71:34 | req.cookies | user-provided value |
+| rpc-proxy/src/routes/sandboxUi.ts:89:21:89:32 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:87:26:87:36 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:89:21:89:32 | legacyCookie | This condition guards a sensitive $@, but a $@ controls it. | rpc-proxy/src/routes/sandboxUi.ts:89:43:89:78 | verifyS ... Cookie) | action | rpc-proxy/src/routes/sandboxUi.ts:87:26:87:36 | req.cookies | user-provided value |
+| rpc-proxy/src/routes/sandboxUi.ts:102:19:102:30 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:100:24:100:34 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:102:19:102:30 | legacyCookie | This condition guards a sensitive $@, but a $@ controls it. | rpc-proxy/src/routes/sandboxUi.ts:102:41:102:76 | verifyS ... Cookie) | action | rpc-proxy/src/routes/sandboxUi.ts:100:24:100:34 | req.cookies | user-provided value |
+| rpc-proxy/src/routes/sandboxUi.ts:119:21:119:32 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:117:26:117:36 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:119:21:119:32 | legacyCookie | This condition guards a sensitive $@, but a $@ controls it. | rpc-proxy/src/routes/sandboxUi.ts:119:43:119:78 | verifyS ... Cookie) | action | rpc-proxy/src/routes/sandboxUi.ts:117:26:117:36 | req.cookies | user-provided value |
+| rpc-proxy/src/routes/sandboxUi.ts:141:21:141:32 | legacyCookie | rpc-proxy/src/routes/sandboxUi.ts:139:26:139:36 | req.cookies | rpc-proxy/src/routes/sandboxUi.ts:141:21:141:32 | legacyCookie | This condition guards a sensitive $@, but a $@ controls it. | rpc-proxy/src/routes/sandboxUi.ts:141:43:141:78 | verifyS ... Cookie) | action | rpc-proxy/src/routes/sandboxUi.ts:139:26:139:36 | req.cookies | user-provided value |

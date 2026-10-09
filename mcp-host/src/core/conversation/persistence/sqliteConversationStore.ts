@@ -558,6 +558,7 @@ export class SqliteConversationStore implements ConversationStore {
         conv.pending_approval ?? reconstructPendingApproval(row.approval as PendingApprovalRow)
       out.push({
         sessionKey,
+        channelType: row.ownership.channel_type,
         approval,
         taskId: row.approval.task_id,
         // One parse of the column, typed, in reconstructPendingApproval. The

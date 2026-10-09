@@ -10,8 +10,11 @@ import {
   HostFleetReconcileError,
   HostReconciler,
   OAUTH_USER_TOKEN_SCOPE,
+  RPC_PROXY_EDGE_PROTOCOL_LABEL,
+  RPC_PROXY_EDGE_PROTOCOL_V1,
   resolveRuntimeControlScopes,
   resolveWorkflowControlScopes,
+  rpcProxyProtocolCohortIsReady,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
 import { HostContextLogger } from '../src/logger'
@@ -37,6 +40,7 @@ vi.mock('../src/config', () => ({
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
+    hostRpcProxyEdgeProtocol: 'legacy-headers',
     channelsNamespace: 'channels',
     hostFullReconcileConcurrency: 2,
     channelReaderImage: 'clerum/channel-reader:test',
@@ -184,6 +188,85 @@ function createReconciler(
 }
 
 describe('HostReconciler', () => {
+  it('recognizes only a complete, current dedicated-header RPC Proxy cohort', () => {
+    const deployment = {
+      metadata: { generation: 4 },
+      spec: {
+        replicas: 2,
+        selector: { matchLabels: { app: 'rpc-proxy' } },
+        template: {
+          metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
+        },
+      },
+      status: { observedGeneration: 4, updatedReplicas: 2, readyReplicas: 2, availableReplicas: 2 },
+    } as unknown as k8s.V1Deployment
+    const pod = (overrides: Partial<k8s.V1Pod> = {}) =>
+      ({
+        metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
+        status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+        ...overrides,
+      }) as k8s.V1Pod
+    const ready = [pod(), pod()]
+
+    expect(rpcProxyProtocolCohortIsReady(deployment, ready)).toBe(true)
+    expect(
+      rpcProxyProtocolCohortIsReady(deployment, [ready[0]!, pod({ metadata: { labels: {} } })])
+    ).toBe(false)
+    expect(
+      rpcProxyProtocolCohortIsReady(deployment, [
+        ready[0]!,
+        pod({ metadata: { deletionTimestamp: new Date('2026-10-03T00:00:00.000Z') } }),
+      ])
+    ).toBe(false)
+    expect(
+      rpcProxyProtocolCohortIsReady(
+        { ...deployment, status: { ...deployment.status, observedGeneration: 3 } },
+        ready
+      )
+    ).toBe(false)
+    expect(
+      rpcProxyProtocolCohortIsReady(
+        {
+          ...deployment,
+          spec: {
+            ...deployment.spec,
+            replicas: 0,
+            selector: deployment.spec?.selector ?? { matchLabels: {} },
+            template: deployment.spec?.template ?? { metadata: {}, spec: { containers: [] } },
+          },
+        },
+        []
+      )
+    ).toBe(false)
+  })
+
+  it('fails closed before creating a strict Host Deployment for an old Proxy cohort', async () => {
+    const mutableConfig = (await import('../src/config')).config as unknown as {
+      hostRpcProxyEdgeProtocol?: string
+    }
+    const previousProtocol = mutableConfig.hostRpcProxyEdgeProtocol
+    mutableConfig.hostRpcProxyEdgeProtocol = RPC_PROXY_EDGE_PROTOCOL_V1
+    onTestFinished(() => {
+      mutableConfig.hostRpcProxyEdgeProtocol = previousProtocol
+    })
+
+    const { reconciler, appsApi, coreApi } = createReconciler()
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 }).mockResolvedValueOnce({
+      metadata: { generation: 1 },
+      spec: {
+        replicas: 2,
+        template: { metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: 'legacy-headers' } } },
+      },
+      status: { observedGeneration: 1, updatedReplicas: 2, readyReplicas: 2, availableReplicas: 2 },
+    })
+    coreApi.listNamespacedPod.mockResolvedValue({ items: [] })
+
+    await expect((reconciler as any).ensureDeployment(makeHost(), [], undefined)).rejects.toThrow(
+      'strict MCP Host rollout is blocked'
+    )
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
   it('keys GFS lifecycle evidence by namespace/name/uid and refuses a missing uid (#696)', () => {
     const helper = HostReconciler as unknown as {
       gfsLifecycleEvidenceKey(host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>): string | undefined

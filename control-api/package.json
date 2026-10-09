@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-api",
-  "version": "0.1.745",
+  "version": "0.1.747",
   "description": "Internal Clerum control plane REST API + UI for managing CRDs and secrets",
   "main": "dist/main.js",
   "engines": {
@@ -17,6 +17,7 @@
     "typecheck:jwt-contract": "tsc -p tsconfig.jwt-contract-tests.json --noEmit && tsc -p tsconfig.jwt-package-types.json --noEmit"
   },
   "dependencies": {
+    "@clerum/action-context-contracts": "file:../packages/action-context-contracts",
     "@clerum/display-field": "file:../packages/display-field",
     "@clerum/grok-provider-attempt-contract": "file:../packages/grok-provider-attempt-contract",
     "@clerum/image-policy": "file:../packages/image-policy",

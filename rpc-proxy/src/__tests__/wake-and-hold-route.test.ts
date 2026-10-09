@@ -46,8 +46,28 @@ const serviceMock = vi.hoisted(() => ({
 }))
 
 const controlApiMock = vi.hoisted(() => ({
+  ControlApiHostAccessRejectedError: class extends Error {
+    constructor(
+      readonly status: number,
+      readonly denialCode: string | null = null
+    ) {
+      super(`Control API rejected host access (${status})`)
+      this.name = 'ControlApiHostAccessRejectedError'
+    }
+  },
+  ControlApiHostRpcAdmissionError: class extends Error {
+    constructor(
+      readonly status: 429 | 503,
+      readonly body: { error: string; retryAfterSeconds?: number },
+      readonly headers: Record<string, string>
+    ) {
+      super(`Control API Host-RPC admission returned ${status}`)
+      this.name = 'ControlApiHostRpcAdmissionError'
+    }
+  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
+  requestHostRpcAdmission: async () => undefined,
   requestHostWakeFromControlApi: vi.fn(),
 }))
 
@@ -1144,16 +1164,23 @@ describe('a hostRef from the URL cannot forge rpc-proxy log lines', () => {
       line: '[RPC_PROXY] host health failed host=chatllm error=',
     },
   ])(
-    'strips CR and LF from the hostRef in the $site log line',
+    'rejects a CR/LF hostRef before the $site route reaches forwarding or logging',
     async ({ scopes, arrange, send, line }) => {
       authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS, scopes })
       arrange()
       const logs = captureWarnLines()
       try {
-        await send(makeApp())
+        const response = await send(makeApp())
 
-        // Witness: the route reached the log site and wrote exactly one line for it.
-        expect(logs.lines().filter(entry => entry.includes(line))).toHaveLength(1)
+        // The composed Host-RPC preflight rejects the malformed host identity
+        // before entering a route handler; forwarding and route logging must not run.
+        expect(response.status).toBe(400)
+        expect(response.body).toEqual({ error: 'Invalid hostRef' })
+        expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+        expect(serviceMock.forwardHostStatus).not.toHaveBeenCalled()
+        expect(serviceMock.forwardHostActivity).not.toHaveBeenCalled()
+        expect(serviceMock.forwardHostHealth).not.toHaveBeenCalled()
+        expect(logs.lines().filter(entry => entry.includes(line))).toHaveLength(0)
         expect(logs.lines().filter(entry => /[\r\n]/.test(entry))).toEqual([])
       } finally {
         logs.restore()

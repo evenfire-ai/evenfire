@@ -5,6 +5,8 @@ import { rateLimitBackendErrorsTotal } from '../src/observability/metrics.js'
 import {
   acquireRateLimitConcurrencyLease,
   checkAndIncrement,
+  checkAndIncrementStrict,
+  checkAndIncrementStrictWithQuery,
   cleanupExpiredBuckets,
   currentWindowStartMs,
   startRateLimiterCleanup,
@@ -172,6 +174,13 @@ describe('rateLimiterService', () => {
     ])
   })
 
+  it('rejects an invalid cost before entering the generic fail-open boundary', async () => {
+    await expect(checkAndIncrement('test:bucket:invalid-cost', 5, Date.now(), 0)).rejects.toThrow(
+      'rate limit cost must be positive'
+    )
+    expect(mockRateLimitPoolQuery).not.toHaveBeenCalled()
+  })
+
   it('holds replica-safe advisory slots until release and then admits the next request', async () => {
     const requirements = [{ bucketKey: 'gfs-upload:test-active', maxConcurrent: 2 }]
     const [first, second, denied] = await Promise.all([
@@ -281,6 +290,48 @@ describe('rateLimiterService', () => {
     expect(r.allowed).toBe(true)
     expect(r.count).toBe(0)
     expect(r.backendAvailable).toBe(false)
+  })
+
+  it('strict admission rejects DB errors and missing rows without changing generic fail-open', async () => {
+    mockRateLimitPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
+    await expect(checkAndIncrementStrict('strict:failed', 5)).rejects.toThrow('connection refused')
+
+    mockRateLimitPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await expect(checkAndIncrementStrict('strict:missing', 5)).rejects.toThrow(
+      'rate limit store returned no admission state'
+    )
+
+    await expect(
+      checkAndIncrementStrictWithQuery(async () => ({ rows: [] }), 'strict:missing-query', 5)
+    ).rejects.toThrow('rate limit store returned no admission state')
+  })
+
+  it('strict backend failures are measured and logged without bucket or error-message leakage', async () => {
+    const bucketKey = 'host-rpc-admission:private-subject-sentinel'
+    const privateMessage = 'private-db-message-sentinel'
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
+    const before = await errorCount()
+    const failure = Object.assign(new Error(privateMessage), { code: '08006' })
+    mockRateLimitPoolQuery.mockRejectedValueOnce(failure)
+
+    try {
+      await expect(checkAndIncrementStrict(bucketKey, 5)).rejects.toBe(failure)
+
+      expect((await errorCount()) - before).toBe(1)
+      expect(warn).toHaveBeenCalledTimes(1)
+      const fields = warn.mock.calls[0]?.[0]
+      expect(fields).toMatchObject({
+        event: 'rate_limit_db_error',
+        errorName: 'Error',
+        errorCode: '08006',
+        suppressed: 0,
+      })
+      expect(fields).not.toHaveProperty('err')
+      expect(JSON.stringify(fields)).not.toContain(bucketKey)
+      expect(JSON.stringify(fields)).not.toContain(privateMessage)
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('cleanupExpiredBuckets removes rows older than 5 minutes', async () => {

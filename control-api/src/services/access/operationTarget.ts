@@ -1,3 +1,8 @@
+import {
+  type CanonicalActionTarget,
+  canonicalActionTargetJson,
+  hashActionTarget,
+} from '@clerum/action-context-contracts'
 import type { TeamRole } from '../../profileTypes.js'
 import type { AccessCapability } from './capabilityRegistry.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
@@ -165,4 +170,12 @@ export function stableOperationTarget(target: ValidatedOperationTarget): string 
         )
       : null
   )
+}
+
+export function stableActionOperationTarget(target: CanonicalActionTarget): string {
+  return canonicalActionTargetJson(target)
+}
+
+export function actionOperationTargetHash(target: CanonicalActionTarget): string {
+  return hashActionTarget(target)
 }
