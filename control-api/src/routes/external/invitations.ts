@@ -1,7 +1,10 @@
 import { Router } from 'express'
 import { randomBytes } from 'node:crypto'
 import { config } from '../../config.js'
-import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
+import {
+  createExternalClientRateLimiters,
+  externalClientIpRateLimitKey,
+} from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -24,13 +27,8 @@ import {
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 
-function invitationLookupIpKey(req: {
-  ip?: string
-  socket?: { remoteAddress?: string }
-}): string | null {
-  const ip = req.ip ?? req.socket?.remoteAddress ?? null
-  if (!ip) return null
-  return `invite-token-ip:${String(ip).slice(0, 128)}`
+function invitationAdmissionKey(req: Request, operation: 'preview' | 'password-token'): string {
+  return `invite-token:${operation}:${externalClientIpRateLimitKey(req)}`
 }
 
 export function createExternalInvitationsRouter(): Router {
@@ -46,7 +44,7 @@ export function createExternalInvitationsRouter(): Router {
     rateLimitMiddleware({
       bucketType: 'external_invitation_lookup',
       maxPerMinute: 30,
-      getBucketKey: req => invitationLookupIpKey(req),
+      getBucketKey: req => invitationAdmissionKey(req, 'preview'),
       onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
@@ -80,7 +78,7 @@ export function createExternalInvitationsRouter(): Router {
     rateLimitMiddleware({
       bucketType: 'external_invitation_password_token',
       maxPerMinute: 10,
-      getBucketKey: req => invitationLookupIpKey(req),
+      getBucketKey: req => invitationAdmissionKey(req, 'password-token'),
       onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
