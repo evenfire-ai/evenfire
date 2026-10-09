@@ -83,6 +83,7 @@ export {
 
 export {
   AgentGrantPreconditionError,
+  getReachableAgentNames,
   getTeamAgents,
   getUserAgents,
   listTeamAgentsByTeam,

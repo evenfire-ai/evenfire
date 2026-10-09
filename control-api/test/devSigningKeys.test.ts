@@ -348,14 +348,14 @@ describe('devSigningKeys persistence contract', () => {
 
   it('publishes the derived verifying half next to the signing material', () => {
     const store = tempStore()
+    // Capture the creation mask before the store publishes the public file.
+    const expectedPublicMode = 0o644 & ~process.umask()
     const signing = loadOrGenerateDevJwtPrivateKey('rpc', store)
     loadOrGenerateDevJwtPrivateKey('rpc', store) // reuse must not republish different material
     const expected = createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString()
     const fd = openSync(join(store, 'rpc.public.pem'), 'r')
     try {
-      // Creation respects the caller's umask, including the harness's 077.
-      // Reading the mask is supported in Vitest workers; changing it is not.
-      expect(fstatSync(fd).mode & 0o777).toBe(0o644 & ~process.umask())
+      expect(fstatSync(fd).mode & 0o777).toBe(expectedPublicMode)
       expect(readFileSync(fd, 'utf8').trim()).toBe(expected.trim())
     } finally {
       closeSync(fd)

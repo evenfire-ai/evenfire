@@ -1,51 +1,78 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import { useChatStore } from '../useChatStore'
 
 describe('useChatStore remote request cache', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000)
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
   })
 
-  it('shares an in-flight session page and clears it at an identity boundary', async () => {
+  // Unit controls complement the real coordinator-boundary integration suite.
+  // They isolate each reset so another required reset cannot mask its no-op mutant.
+  it('R4 unit global reset refetches both hot Hosts', async () => {
     const listSessions = vi.fn(async () => ({ items: [] }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: { rpc: { listSessions } },
     })
     const { result } = renderHook(() => useChatStore())
-
-    await Promise.all([
-      result.current.listSessions('cache-test-host', { limit: 50 }),
-      result.current.listSessions('cache-test-host', { limit: 50 }),
-    ])
-    expect(listSessions).toHaveBeenCalledTimes(1)
+    const hosts = ['cache-test-host-a', 'cache-test-host-b']
+    const query = { limit: 50 }
+    const callsFor = (hostRef: string) =>
+      listSessions.mock.calls.filter(call => (call as unknown[])[0] === hostRef).length
+    const warm = hosts.map(host => result.current.listSessions(host, query))
+    await Promise.all(warm)
+    hosts.forEach((host, index) => {
+      expect(result.current.listSessions(host, query)).toBe(warm[index])
+      expect(callsFor(host)).toBe(1)
+    })
 
     result.current.clearCachedRemoteData()
-    await result.current.listSessions('cache-test-host', { limit: 50 })
-    expect(listSessions).toHaveBeenCalledTimes(2)
+    const fresh = hosts.map(host => result.current.listSessions(host, query))
+    await Promise.all(fresh)
+    hosts.forEach((host, index) => {
+      expect(fresh[index]).not.toBe(warm[index])
+      expect(callsFor(host)).toBe(2)
+    })
   })
 
-  it('does not reuse remote session cache entries across cache scopes', async () => {
+  it.each([
+    { boundary: 'environment', next: 'authenticated:env-b:user-a:team-a' },
+    { boundary: 'user', next: 'authenticated:env-a:user-b:team-a' },
+    { boundary: 'team', next: 'authenticated:env-a:user-a:team-b' },
+    { boundary: 'logout', next: 'signed-out' },
+  ])('R4 unit $boundary scope refetches both hot Hosts', async ({ next }) => {
     const listSessions = vi.fn(async () => ({ items: [] }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: { rpc: { listSessions } },
     })
     const { result } = renderHook(() => useChatStore())
+    const hosts = ['cache-test-host-a', 'cache-test-host-b']
+    const query = { limit: 50 }
+    const callsFor = (hostRef: string) =>
+      listSessions.mock.calls.filter(call => (call as unknown[])[0] === hostRef).length
+    result.current.setRemoteCacheScope('authenticated:env-a:user-a:team-a')
+    const warm = hosts.map(host => result.current.listSessions(host, query))
+    await Promise.all(warm)
+    hosts.forEach((host, index) => {
+      expect(result.current.listSessions(host, query)).toBe(warm[index])
+      expect(callsFor(host)).toBe(1)
+    })
 
-    result.current.setRemoteCacheScope('authenticated:team-a')
-    await result.current.listSessions('cache-test-host', { limit: 50 })
-    await result.current.listSessions('cache-test-host', { limit: 50 })
-
-    expect(listSessions).toHaveBeenCalledTimes(1)
-
-    result.current.setRemoteCacheScope('authenticated:team-b')
-    await result.current.listSessions('cache-test-host', { limit: 50 })
-
-    expect(listSessions).toHaveBeenCalledTimes(2)
+    result.current.setRemoteCacheScope(next)
+    const fresh = hosts.map(host => result.current.listSessions(host, query))
+    await Promise.all(fresh)
+    hosts.forEach((host, index) => {
+      expect(fresh[index]).not.toBe(warm[index])
+      expect(callsFor(host)).toBe(2)
+    })
   })
 
   // F4: holding a Host drops its cached catalog requests (every query) and

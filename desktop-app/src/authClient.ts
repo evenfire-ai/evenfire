@@ -26,7 +26,7 @@ import {
   WorkflowRunCompletedNotification,
   WorkflowRunsResult,
 } from './types.js'
-import { boundedErrorExcerpt } from './upstreamErrors.js'
+import { boundedErrorExcerpt, rpcTokenMintRevocationMessage } from './upstreamErrors.js'
 
 function url(path: string): string {
   return `${config.externalRestApiBaseUrl.replace(/\/+$/, '')}${path}`
@@ -760,6 +760,7 @@ export class AuthClient {
         scopes,
         hostRefs: hostRefs && hostRefs.length ? hostRefs : undefined,
       },
+      hostAccessDenial: (status, body) => rpcTokenMintRevocationMessage(status, body, hostRefs),
     })
   }
 }

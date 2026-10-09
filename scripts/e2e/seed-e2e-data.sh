@@ -304,7 +304,8 @@ DEFAULT_ALLOWED_CONTEXTS=(
   "gke_your-gcp-project_us-central1-a_example-dev"             # GKE dev
 )
 IFS=',' read -r -a EXTRA_ALLOWED <<<"${ALLOWED_CONTEXTS:-}"
-ALLOWED=("${DEFAULT_ALLOWED_CONTEXTS[@]}" "${EXTRA_ALLOWED[@]}")
+# Bash 3.2 treats an empty array as unset under nounset; append no words for it.
+ALLOWED=("${DEFAULT_ALLOWED_CONTEXTS[@]}" ${EXTRA_ALLOWED[@]+"${EXTRA_ALLOWED[@]}"})
 
 CONTEXT_OK=0
 for allowed in "${ALLOWED[@]}"; do

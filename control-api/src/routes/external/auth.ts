@@ -11,6 +11,7 @@ import {
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
 import {
+  getReachableAgentNames,
   getTeamAgents,
   getUserAgents,
   googleLoginData,
@@ -23,9 +24,11 @@ import {
 } from '../../utils/auth/externalSessionAuthToken.js'
 import { verifyGoogleIdToken } from '../../utils/auth/googleAuth.js'
 import {
+  RPC_TOKEN_REVOKED_CODE,
   SANDBOX_UI_RPC_HOST_REF,
   classifyRpcTokenDenial,
   issueRpcAccessToken,
+  mintRevokedHostRefs,
   normalizeRequestedHostRefs,
   normalizeRequestedScopes,
 } from '../../utils/auth/rpcAuthToken.js'
@@ -242,9 +245,25 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           for (const agentName of teamAgents.agentNames) grantedHostRefs.add(agentName)
         }
         if (agentHostRefs.some(hostRef => !grantedHostRefs.has(hostRef))) {
-          return res.status(403).json({
-            error: claims.teamId ? 'host_access_denied' : 'direct_host_access_required',
-          })
+          let revokedHostRefs: string[] | null = null
+          if (!agentHostRefs.some(hostRef => grantedHostRefs.has(hostRef))) {
+            const reachable = await getReachableAgentNames(claims.userId)
+            revokedHostRefs = mintRevokedHostRefs(agentHostRefs, new Set(reachable.agentNames))
+          }
+          req.log?.warn(
+            {
+              event: 'rpc_token_host_access_denied',
+              requestedCount: agentHostRefs.length,
+              revoked: revokedHostRefs !== null,
+            },
+            'rpc token mint denied host access'
+          )
+          const error = claims.teamId ? 'host_access_denied' : 'direct_host_access_required'
+          return res
+            .status(403)
+            .json(
+              revokedHostRefs ? { error, code: RPC_TOKEN_REVOKED_CODE, revokedHostRefs } : { error }
+            )
         }
       }
 

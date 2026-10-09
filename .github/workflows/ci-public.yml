@@ -669,7 +669,10 @@ jobs:
         run: bash scripts/tests/test-wrc-egress-degradation-gate.sh
 
       - name: Test Minikube mutation and WRC recovery admission (hermetic, cluster-free)
-        run: bash scripts/tests/test-minikube-mutation-boundary.sh
+        run: |
+          bash scripts/tests/test-minikube-mutation-boundary.sh
+          bash scripts/tests/test-minikube-registry-optin.sh
+          bash scripts/tests/test-minikube-registry-cleanup.sh
 
       - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
         run: bash scripts/tests/test-lint-networkpolicies.sh

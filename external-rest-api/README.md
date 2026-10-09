@@ -29,6 +29,14 @@
 - `POST /api/v1/invitations/accept` - accept invitation after profile-ui sign-in
 - `GET /api/v1/directory/search?q=...` - lookup directory users for channel mapping
 
+### RPC token mint denials
+
+`POST /api/v1/rpc/token` relays the mint's 403 as `{ error, code, revokedHostRefs }` only when Control API supplies the exact code `host_access_revoked` and `revokedHostRefs` is exactly the sorted, trimmed, deduplicated set of requested Host refs. Both extra fields are forwarded together; unknown fields are excluded. Missing, malformed or noncanonical revocation fields produce only `{ error }`. The relay never repairs a malformed list into a confirmed revocation. Non-403 and network errors keep their existing propagation.
+
+Control API emits this code only when all requested agent Hosts are denied and none is reachable through direct grants or any active team membership. The references are the sorted, deduplicated, trimmed requested agent-Host set. A mixed granted/reachable and denied request retains its original error-only body, so a healthy requested Host is never classified as revoked by a correct mint response.
+
+Malformed extras are dropped without a runtime signal. C1 covers the mint output, E1/E2 cover canonical relay validation, and cross-service guards G1/G2 cover propagation of the reserved field names. Deploy Control API before this relay, then release Desktop. Older server hops leave mint denials uncertain; a new Desktop validates coverage of every requested Host before confirming revocation.
+
 ## Roles
 
 - `admin`: invite and delete members

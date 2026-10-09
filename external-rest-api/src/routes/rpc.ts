@@ -16,7 +16,8 @@ export function createRpcRouter(): Router {
       if ('error' in result) {
         // Relay control-api's specific reason (e.g. desktop_requires_team) so the
         // desktop app can act on it instead of surfacing an opaque "no access".
-        res.status(403).json({ error: result.error })
+        const { error, code, revokedHostRefs } = result
+        res.status(403).json(code && revokedHostRefs ? { error, code, revokedHostRefs } : { error })
         return
       }
 

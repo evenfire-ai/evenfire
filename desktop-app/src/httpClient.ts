@@ -122,6 +122,11 @@ export async function requestJson<T>(
     /** Per-call deadline override (ms); defaults to config.requestTimeoutMs. */
     timeoutMs?: number
     retryTransientOnce?: boolean
+    /**
+     * Defaults to hostAccessDenialMessage. Only AuthClient.issueRpcToken overrides
+     * it to validate requested Host coverage; a null result stays generic.
+     */
+    hostAccessDenial?: (status: number, body: string) => string | null
   }
 ): Promise<T> {
   const headers: Record<string, string> = {
@@ -143,7 +148,8 @@ export async function requestJson<T>(
     const raw = await response.text()
     if (!response.ok) {
       const retryAfter = response.headers.get('retry-after')
-      const hostAccessMessage = hostAccessDenialMessage(response.status, raw)
+      const classifyHostAccess = options?.hostAccessDenial ?? hostAccessDenialMessage
+      const hostAccessMessage = classifyHostAccess(response.status, raw)
       if (hostAccessMessage) {
         throw new ApiError(hostAccessMessage, response.status, raw, retryAfter)
       }

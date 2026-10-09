@@ -70,7 +70,7 @@ it('resolves only after the detached process group is terminated', async () => {
     script,
     `const cp = require('child_process')\n` +
       `cp.spawn(process.execPath, ['-e', ${JSON.stringify(
-        `require('fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000)`
+        `const fs = require('fs'); const marker = ${JSON.stringify(marker)}; const pending = marker + '.tmp'; fs.writeFileSync(pending, String(process.pid)); fs.renameSync(pending, marker); setInterval(() => {}, 1000)`
       )}], { stdio: 'ignore' })\n` +
       `const timer = setInterval(() => {\n` +
       `  if (require('fs').existsSync(${JSON.stringify(marker)})) { clearInterval(timer); process.exit(0) }\n` +

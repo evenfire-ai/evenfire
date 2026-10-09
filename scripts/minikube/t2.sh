@@ -101,6 +101,8 @@ run_t0() {
     t2_run_outside_lease bash -c "$T2_T0_COMMAND"
   fi
   t2_run_outside_lease bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"
+  t2_run_outside_lease bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-registry-optin.sh"
+  t2_run_outside_lease bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-registry-cleanup.sh"
   t2_run_outside_lease bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-setup-handoff.sh"
   T2_T0_STATUS=PASS
   t2_evidence_write T0 PASS "syntax, ShellCheck when available, affected package test/build/typecheck, contract, and diff checks passed; duration=$((SECONDS - phase_started_seconds))s"
@@ -268,6 +270,11 @@ run_pre_gate() {
   # describe the current source fails here instead of at NP-08.
   T2_BOOTSTRAP_REQUIRED=false
   t2_marker_check || return 1
+  if [ "$T2_BOOTSTRAP_REQUIRED" = true ] || [ "$T2_MARKER_MATCHES_HEAD" != true ]; then
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    t2_fail HEAD_MARKER_MISMATCH 'pre-gate-sync did not publish a validated exact-head marker'
+    return 1
+  fi
   t2_evidence_write pre-gate-sync PASS \
     "duration=$((SECONDS - phase_started_seconds))s setupHandoffExpected=$setup_handoff_expected"
 }
