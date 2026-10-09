@@ -99,6 +99,7 @@ import { OnboardingPage } from '@pages/OnboardingPage'
 import { SandboxUiPage } from '@pages/SandboxUiPage'
 import type {
   SandboxUiConversationOrigin,
+  SandboxUiPageAction,
   SandboxUiShortcutOpenResult,
 } from '@pages/SandboxUiPage.types'
 import { SettingsPage } from '@pages/SettingsPage'
@@ -379,7 +380,7 @@ export function App() {
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
   const [sandboxActionRequest, setSandboxActionRequest] = React.useState<{
     id: number
-    action: 'refresh' | 'back-to-apps'
+    action: SandboxUiPageAction
   } | null>(null)
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
@@ -405,8 +406,14 @@ export function App() {
   // app tab changes, this ref tells the deactivation effect which OUTGOING tab
   // to persist the route onto. `null` = no embed is live (also the reconciled
   // state after an UNsolicited close — crash/quit/GC — so a later tab switch
-  // does not persist or re-close a dead embed).
+  // does not persist or re-close a dead embed). A FAILED open does not reset it:
+  // the tab keeps owning whatever main may still hold (see
+  // `handleSandboxUiOpenFailed`).
   const liveSandboxUiTabIdRef = React.useRef<string | null>(null)
+  // Id of the most recent open request (minted by SandboxUiPage, echoed by main
+  // on per-view events). A relaunch of the same app keeps the appRef, so title
+  // events are matched on this id, not on the appRef.
+  const currentSandboxUiLaunchIdRef = React.useRef<string | null>(null)
   // Monotonic generation bumped on EVERY transition of the active embed (the
   // deactivation effect and the deep-link handoff are the only emitters). Each
   // read-then-close continuation captures this at dispatch; anything reopened or
@@ -415,6 +422,11 @@ export function App() {
   // must abort — it must neither close the newer embed nor persist the newer
   // tab's route with a value read from a view that is already gone.
   const sandboxUiActivationGenRef = React.useRef(0)
+  // Tab the latest `launchSandboxUiApp` targeted. Activating an app tab hands the
+  // embed over (app→app) only when a launch is about to `open()` into it: a tab
+  // whose app App cannot resolve gets no launch, and leaving the outgoing view
+  // up would paint it inside that tab.
+  const launchTargetTabIdRef = React.useRef<string | null>(null)
   workspaceTabsRef.current = workspaceTabs
 
   const leaveSandboxForChat = React.useCallback(() => {
@@ -1291,18 +1303,19 @@ export function App() {
     })
   }, [vm.authenticatedPrincipalIdentity])
 
-  const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
+  const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp, launchId: string) => {
+    currentSandboxUiLaunchIdRef.current = launchId
     setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
     // Arm the store's embed-liveness ref on EVERY open, however it was launched
-    // (store launch, deep link, relaunch, or the in-page picker grid opening the
-    // embed directly without changing the active tab). The deactivation effect
-    // otherwise only arms it on an active-tab CHANGE, so an embed re-mounted
-    // WITHIN the still-active app tab — after a back-to-apps / unsolicited
-    // onClosed cleared the ref — would never be tracked and would leak (the
-    // native view paints over the next tab). Guard on `null` so this never
-    // clobbers the OUTGOING id the effect still needs on an app→app switch
-    // (ref stays the old tab; the effect reads it, then re-points to the new one).
+    // (store launch from the sidebar or the picker grid, deep link, or relaunch).
+    // The deactivation effect otherwise only arms it on an active-tab CHANGE, so
+    // an embed re-mounted WITHIN the still-active app tab — a strip relaunch
+    // after a back-to-apps / unsolicited onClosed cleared the ref — would never
+    // be tracked and would leak (the native view paints over the next tab).
+    // Guard on `null` so this never clobbers the OUTGOING id the effect still
+    // needs on an app→app switch (ref stays the old tab; the effect reads it,
+    // then re-points to the new one).
     if (liveSandboxUiTabIdRef.current === null) {
       const active = activeWorkspaceTab(workspaceTabsRef.current)
       if (active?.kind === 'app') liveSandboxUiTabIdRef.current = active.id
@@ -1327,8 +1340,12 @@ export function App() {
     setSidebarSettingsMenuOpen(false)
   }, [])
 
-  const handleSandboxUiRemoved = React.useCallback(() => {
-    liveSandboxUiTabIdRef.current = null
+  // A failed open (rejected by main, or failed before reaching it) clears only
+  // the React state. The active tab stays the embed's owner: a failure before
+  // the open IPC leaves the previous view live in main, and only an owner makes
+  // the deactivation effect `close()` it when the user leaves the tab. When main
+  // already tore the view down, that `close()` is a harmless no-op.
+  const handleSandboxUiOpenFailed = React.useCallback(() => {
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
@@ -1407,6 +1424,7 @@ export function App() {
       // Compute the id only on the open-new branch so the sequence counter
       // advances exactly as before: relaunch of an existing tab must not burn one.
       const newAppTabId = existingTabId ? null : nextChatTabId()
+      launchTargetTabIdRef.current = existingTabId ?? newAppTabId
       setWorkspaceTabs(state =>
         existingTabId
           ? selectWorkspaceTab(state, existingTabId)
@@ -1446,15 +1464,26 @@ export function App() {
   const activeSandboxUiTabId =
     !vm.appsPickerActive && vm.activeWorkspaceTab?.kind === 'app' ? vm.activeWorkspaceTab.id : null
   React.useEffect(() => {
+    const launchTargetTabId = launchTargetTabIdRef.current
+    launchTargetTabIdRef.current = null
     const outgoingTabId = liveSandboxUiTabIdRef.current
     if (outgoingTabId === activeSandboxUiTabId) return
-    liveSandboxUiTabIdRef.current = activeSandboxUiTabId
+    const replacedByAnotherApp =
+      activeSandboxUiTabId !== null && launchTargetTabId === activeSandboxUiTabId
+    // An app tab activated without a launch hosts no embed: it stays unowned
+    // until a relaunch arms it (`handleSandboxUiOpening`).
+    liveSandboxUiTabIdRef.current = replacedByAnotherApp ? activeSandboxUiTabId : null
     // This is the single point where the active embed transitions; bump the
     // generation so any older in-flight continuation knows it no longer owns
     // the active view.
     sandboxUiActivationGenRef.current += 1
     if (outgoingTabId === null) return
-    const replacedByAnotherApp = activeSandboxUiTabId !== null
+    // The Apps route stays mounted when the incoming app tab gets no launch:
+    // drop the page's launch state too, or it keeps the outgoing app's chrome
+    // over an empty slot. The close below stays the only solicited one.
+    if (activeSandboxUiTabId !== null && !replacedByAnotherApp) {
+      setSandboxActionRequest(previous => ({ id: (previous?.id ?? 0) + 1, action: 'release' }))
+    }
     if (!replacedByAnotherApp) {
       // Deactivating to a non-app surface (chat/files/settings via strip, sidebar
       // nav, or closing the tab): drop the embed's React state now so anything
@@ -1703,18 +1732,21 @@ export function App() {
 
   // Name the live app tab after the embed's `document.title` (mini-spec 06 §2).
   // Only the tab whose embed is live (`liveSandboxUiTabIdRef`) is renamed, and
-  // only when the reported `appRef` still matches it, so a late title event from
-  // a torn-down embed can't relabel whichever app is live now. The store ignores
-  // empty titles, so the tab keeps its `app.label` until a real title arrives.
+  // only when the event comes from the current launch, so a late title event
+  // from a torn-down embed (even one of the same app being relaunched) can't
+  // relabel whichever view is live now. The launchId alone is enough: main tags
+  // each event with the appRef/launchId pair of the open that created the view,
+  // and every open goes through `launchSandboxUiApp`, which activates a tab of
+  // that same app in the commit that publishes the launchId — so whenever the
+  // launchId is current, the live tab (if any) holds the event's app. The store
+  // ignores empty titles, so the tab keeps its `app.label` until a real title
+  // arrives.
   React.useEffect(() => {
-    const off = window.clerum.sandboxUi.onTitleChanged?.(({ appRef, title }) => {
+    const off = window.clerum.sandboxUi.onTitleChanged?.(({ launchId, title }) => {
+      if (launchId !== currentSandboxUiLaunchIdRef.current) return
       const tabId = liveSandboxUiTabIdRef.current
       if (!tabId) return
-      setWorkspaceTabs(state => {
-        const tab = state.tabs.find(candidate => candidate.id === tabId && candidate.kind === 'app')
-        if (!tab || tab.app?.appRef !== appRef) return state
-        return setAppTabTitle(state, tabId, title)
-      })
+      setWorkspaceTabs(state => setAppTabTitle(state, tabId, title))
     })
     return () => off?.()
   }, [setWorkspaceTabs])
@@ -2933,10 +2965,11 @@ export function App() {
                                     shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
                                     localSearchRequestId={sandboxLocalSearchRequestId}
                                     titlebarLeadingContainer={titlebarLeadingRoot}
+                                    onLaunchApp={handleOpenSandboxUiApp}
                                     onEmbeddedAppOpening={handleSandboxUiOpening}
                                     onEmbeddedAppMounted={handleSandboxUiMounted}
                                     onEmbeddedAppBack={handleSandboxUiClosed}
-                                    onEmbeddedAppRemoved={handleSandboxUiRemoved}
+                                    onEmbeddedAppOpenFailed={handleSandboxUiOpenFailed}
                                     onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
                                     onEmbedSlotTopChange={setChatDrawerEmbedTop}
                                     onEmbedSlotRightChange={setNotificationTrayLeft}
