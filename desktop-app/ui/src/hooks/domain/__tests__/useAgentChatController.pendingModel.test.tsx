@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { useAgentChatController } from '@hooks/domain/useAgentChatController'
+import { useToastController } from '@hooks/domain/useToastController'
 import { useChatStore } from '@hooks/useChatStore'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
@@ -128,6 +129,7 @@ function installClerumHarness() {
 
 function AgentChatHarness() {
   const hostAuthority = useHarnessHostAuthority()
+  const { pushToast } = useToastController()
   const vm = useAgentChatController({
     selectedAgent: 'trader',
     agentNames: ['trader'],
@@ -143,7 +145,7 @@ function AgentChatHarness() {
     isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
     getHostAuthorityEpoch: hostAuthority.getHostAuthorityEpoch,
     hostAuthorityRevision: hostAuthority.revision,
-    pushToast: vi.fn(),
+    pushToast,
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,
     canDeliverChatResponseNotification: vi.fn(() => false),

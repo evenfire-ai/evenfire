@@ -100,11 +100,19 @@ export type PendingChatSelection =
  * callbacks always reach the latest closures without recreating themselves.
  */
 export interface ChatListControllerHost {
-  switchToChat: (agentRef: string, chatId: string) => Promise<void>
+  switchToChat: (
+    agentRef: string,
+    chatId: string,
+    options?: { onCurrentError?: (error: unknown) => void }
+  ) => Promise<void>
+  beginSelectionIntent: () => number
+  getSelectionIntentRevision: () => number
+  clearPendingSelection: (agentRef: string, preserveSpecificChatId?: string) => void
   scrollChatToBottom: () => void
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
   getActiveChatId: () => string | null
+  getChatMessagesLoading: () => boolean
   getAutoSelectedChatId: () => string | null
   markAutoSelectedChat: (chatId: string | null) => void
   shouldAutoSelectLatest: () => boolean
@@ -499,7 +507,8 @@ export function useChatListController({
   const loadChatListOnce = useCallback(
     async (
       agentRef: string,
-      requestGeneration: number
+      requestGeneration: number,
+      selectionIntentRevisionAtRequest: number
     ): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
       const authorityScopeGeneration = authorityScopeGenerationRef.current
       const authorityScopeAtRequest = currentAuthorityScopeRef.current
@@ -637,10 +646,20 @@ export function useChatListController({
           activeChatId !== latestServerSession.chatId &&
           serverIsNewerThanSelection &&
           currentHost.shouldAutoSelectLatest() &&
+          currentHost.getSelectionIntentRevision() === selectionIntentRevisionAtRequest &&
           !suppressAutoSelection
         ) {
           currentHost.markAutoSelectedChat(latestServerSession.chatId)
-          void currentHost.switchToChat(agentRef, latestServerSession.chatId)
+          void currentHost
+            .switchToChat(agentRef, latestServerSession.chatId, {
+              onCurrentError: error => {
+                currentHost.pushToast(
+                  `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+                  'error'
+                )
+              },
+            })
+            .catch(() => undefined)
         }
 
         // Persist server freshness into the local index (spec §5.3): keeps the
@@ -669,6 +688,7 @@ export function useChatListController({
       getHostAuthorityEpoch,
       isHostAccessBlocked,
       onHostAccessRevoked,
+      host,
     ]
   )
 
@@ -810,8 +830,12 @@ export function useChatListController({
   ])
 
   const loadChatList = useCallback(
-    async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
+    async (
+      agentRef: string,
+      selectionIntentRevisionAtRequest: number
+    ): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
       const requestGeneration = ++requestGenerationRef.current
+      // Reuse the caller's request-start revision on retry; never capture a newer intent here.
       // One retry with a short backoff: during boot a concurrent team-switch /
       // access-catalog refresh can momentarily rebind the main-process chat
       // store, rejecting `getIndex` with "Not authenticated". Swallowing that
@@ -819,7 +843,11 @@ export function useChatListController({
       // is re-selected, so give the store one chance to settle.
       for (let attempt = 0; ; attempt++) {
         try {
-          return await loadChatListOnce(agentRef, requestGeneration)
+          return await loadChatListOnce(
+            agentRef,
+            requestGeneration,
+            selectionIntentRevisionAtRequest
+          )
         } catch (err) {
           if (attempt === 0) {
             await new Promise(resolve => setTimeout(resolve, 300))
@@ -989,9 +1017,20 @@ export function useChatListController({
     },
     []
   )
-  const clearPendingSelection = useCallback((agentName: string) => {
-    delete pendingChatSelectionByAgentRef.current[agentName]
-  }, [])
+  const clearPendingSelection = useCallback(
+    (agentName: string, preserveSpecificChatId?: string) => {
+      const pendingSelection = pendingChatSelectionByAgentRef.current[agentName]
+      // Keep a matching intent for the agent-selection effect when a direct
+      // switch and route change are committed in the same turn.
+      if (
+        pendingSelection?.mode === 'specific' &&
+        pendingSelection.chatId === preserveSpecificChatId
+      )
+        return
+      delete pendingChatSelectionByAgentRef.current[agentName]
+    },
+    []
+  )
   const isChatDeleted = useCallback(
     (agentRef: string, chatId: string) =>
       deletedChatIdsByAgentRef.current.get(agentRef)?.has(chatId) ?? false,
@@ -1003,21 +1042,60 @@ export function useChatListController({
   const handleCreateChat = useCallback(async () => {
     const agentRef = selectedAgentRef.current
     if (!agentRef) return
+    const pendingSelection = readPendingSelection(agentRef)
+    const activeChatIdAtCreate = host.current?.getActiveChatId() ?? null
+    const chatMessagesLoadingAtCreate = host.current?.getChatMessagesLoading() ?? false
+    const selectionIntentRevision = host.current?.beginSelectionIntent()
+    host.current?.clearPendingSelection(agentRef)
     const requestGeneration = requestGenerationRef.current
+    const authorityScopeAtCreate = currentAuthorityScopeRef.current
     const chatId = crypto.randomUUID()
-    const meta = await chatStore.createChat(agentRef, chatId)
-    chatStore.clearCachedRemoteData()
-    if (
-      selectedAgentRef.current !== agentRef ||
-      requestGenerationRef.current !== requestGeneration
-    ) {
-      return
+    let meta: ChatMetadata
+    try {
+      meta = await chatStore.createChat(agentRef, chatId)
+    } catch (error) {
+      // The failed New chat invalidated whichever selection was in flight. Restore
+      // its visible conversation only while this create still owns the same scope
+      // and selection revision; a newer navigation must remain authoritative.
+      if (
+        selectionIntentRevision !== undefined &&
+        requestGenerationRef.current === requestGeneration &&
+        currentAuthorityScopeRef.current === authorityScopeAtCreate &&
+        host.current?.getSelectionIntentRevision() === selectionIntentRevision
+      ) {
+        const restoreChatId =
+          pendingSelection?.mode === 'specific'
+            ? pendingSelection.chatId
+            : chatMessagesLoadingAtCreate
+              ? activeChatIdAtCreate
+              : null
+        if (restoreChatId) {
+          const restore = host.current?.switchToChat(agentRef, restoreChatId)
+          const restoreSelectionRevision = host.current?.getSelectionIntentRevision()
+          void restore?.catch(error => {
+            if (host.current?.getSelectionIntentRevision() !== restoreSelectionRevision) return
+            host.current?.pushToast(
+              `Could not restore conversation: ${error instanceof Error ? error.message : String(error)}`,
+              'error'
+            )
+          })
+        }
+      }
+      throw error
     }
+    chatStore.clearCachedRemoteData()
+    if (selectedAgentRef.current !== agentRef || requestGenerationRef.current !== requestGeneration)
+      return
     appendNewEntry(agentRef, meta)
+    if (
+      selectionIntentRevision !== undefined &&
+      host.current?.getSelectionIntentRevision() !== selectionIntentRevision
+    )
+      return
     host.current?.markAutoSelectedChat(null)
     await host.current?.switchToChat(agentRef, chatId)
     host.current?.scrollChatToBottom()
-  }, [chatStore, appendNewEntry, host])
+  }, [chatStore, appendNewEntry, host, readPendingSelection])
 
   /**
    * Optimistic LOCAL-only title update (spec 15 §2.5 / B19). Persists to the
@@ -1701,7 +1779,6 @@ export function useChatListController({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [latestChatSessions, isHostAccessBlocked, hostAuthorityRevision]
   )
-
   return {
     // State (public contract, re-exported unchanged by the parent).
     chatList: selectedAgent && isHostAccessBlocked(selectedAgent) ? [] : chatList,
