@@ -25,7 +25,7 @@ vi.mock('../chatStoreBinding.js', () => ({
   __setChatStoreBaseDirForTests: vi.fn(),
 }))
 vi.mock('../pluginSdkRuntime.js', () => ({
-  tryGetPluginSdkRuntime: () => ({ notifySessionChanged }),
+  tryGetPluginSdkRuntime: () => ({ notifySessionChanged, unpinAllSandboxUiSurfaces: vi.fn() }),
 }))
 
 let userDataDirectory = ''

@@ -1602,6 +1602,11 @@ export class AppService {
     this.rpcTokenManager.clear()
     unbindChatStore()
     this.invalidateSandboxUiSession()
+    try {
+      tryGetPluginSdkRuntime()?.notifySessionChanged(false)
+    } catch (error) {
+      this.reportDeferredLogoutFailureSafely(error)
+    }
   }
 
   /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
@@ -2774,13 +2779,6 @@ export class AppService {
       const legacyEnvKeys = getActiveLegacyEnvKeys()
       await this.suspendDesktopGfsUploadsForAuthBoundary()
       this.clearAuthenticatedSessionState()
-      // Grants survive logout (they are keyed by userId), but every cached SDK
-      // result must not: the next user of this machine gets nothing of this one's.
-      try {
-        tryGetPluginSdkRuntime()?.notifySessionChanged(false)
-      } catch (error) {
-        this.reportDeferredLogoutFailureSafely(error)
-      }
       const clearResult = options.strictTokenClear
         ? await this.tokenStore.clearSessionTokenStrictly(envKey, { legacyEnvKeys })
         : (await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys }), null)

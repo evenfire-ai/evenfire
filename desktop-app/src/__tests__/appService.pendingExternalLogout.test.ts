@@ -38,7 +38,7 @@ vi.mock('../chatStoreBinding.js', () => ({
 }))
 
 vi.mock('../pluginSdkRuntime.js', () => ({
-  tryGetPluginSdkRuntime: () => ({ notifySessionChanged }),
+  tryGetPluginSdkRuntime: () => ({ notifySessionChanged, unpinAllSandboxUiSurfaces: vi.fn() }),
 }))
 
 vi.mock('electron', () => ({
@@ -233,6 +233,7 @@ describe('AppService pending external logout', () => {
     expect(state.me).toBeNull()
     expect(suspendUploads).toHaveBeenCalledOnce()
     expect(reportFailure).toHaveBeenCalledOnce()
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
   })
 
   it('fails closed on login when the pending marker cannot be inspected', async () => {
