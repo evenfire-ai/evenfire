@@ -1,109 +1,225 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import {
-  desktopRestEndpointOrigin,
-  sameDesktopRestEndpoint,
-} from '../../../../../src/desktopEnvironmentUrl'
 import type {
   DesktopRuntimeConfigOption,
   DesktopRuntimeConfigState,
 } from '../../../../../src/types'
 import { resolveDesktopEnvironmentRestMatch } from '../desktopEnvironmentHandoff'
 
-const LINK_REST = 'https://api.example.test/api/v1'
-const REST_ENDPOINTS = [
-  LINK_REST,
-  `${LINK_REST}/`,
-  `${LINK_REST}?tenant=blue`,
-  'https://api.example.test/api/v2',
-  'https://other.example.test/api/v1',
-]
-
-const profilesArbitrary = fc
-  .array(
-    fc.record({
-      endpointIndex: fc.integer({ min: 0, max: REST_ENDPOINTS.length - 1 }),
-      localhost: fc.boolean(),
+const endpointArbitrary = fc
+  .tuple(
+    fc.constantFrom('api.example.test', 'api-alt.example.test'),
+    fc.array(fc.constantFrom('api', 'v1', 'v2', 'tenant', 'workspace'), {
+      minLength: 1,
+      maxLength: 3,
     }),
-    { maxLength: 8 }
+    fc.constantFrom('', '?tenant=blue', '?tenant=green')
   )
-  .map(profiles =>
-    profiles.map(
-      ({ endpointIndex, localhost }, index): DesktopRuntimeConfigOption => ({
-        id: `profile-${index}`,
-        label: `Profile ${index}`,
-        source: localhost ? 'localhost' : 'file',
-        configPath: null,
-        externalRestApiBaseUrl: REST_ENDPOINTS[endpointIndex]!,
-        rpcProxyBaseUrl: 'https://rpc.example.test',
-        appName: `Profile ${index}`,
-      })
-    )
-  )
+  .map(([host, path, query]) => `https://${host}/${path.join('/')}${query}`)
+
+const decoyKindArbitrary = fc.constantFrom('path', 'query', 'origin')
+
+function withTrailingSlash(endpoint: string): string {
+  const url = new URL(endpoint)
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/`
+  return url.toString()
+}
+
+function withSiblingPath(endpoint: string): string {
+  const url = new URL(endpoint)
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/sibling`
+  return url.toString()
+}
+
+function withDifferentQuery(endpoint: string): string {
+  const url = new URL(endpoint)
+  url.search = url.searchParams.get('tenant') === 'blue' ? '?tenant=green' : '?tenant=blue'
+  return url.toString()
+}
+
+function withDifferentOrigin(endpoint: string): string {
+  const url = new URL(endpoint)
+  url.hostname = url.hostname === 'api.example.test' ? 'other.example.test' : 'api.example.test'
+  return url.toString()
+}
+
+function option(
+  id: string,
+  externalRestApiBaseUrl: string,
+  source: DesktopRuntimeConfigOption['source'] = 'file'
+): DesktopRuntimeConfigOption {
+  return {
+    id,
+    label: id,
+    source,
+    configPath: null,
+    externalRestApiBaseUrl,
+    rpcProxyBaseUrl: 'https://rpc.example.test',
+    appName: id,
+  }
+}
 
 function configState(
   options: DesktopRuntimeConfigOption[],
-  activeExactMatch: boolean
+  input: { configured?: boolean; activeRestEndpoint?: string } = {}
 ): DesktopRuntimeConfigState {
   return {
-    configured: true,
+    configured: input.configured ?? true,
     isLocalhost: false,
     selectorVisible: true,
-    activeOptionId: activeExactMatch ? (options[0]?.id ?? null) : null,
-    currentConfig: {
-      externalRestApiBaseUrl: activeExactMatch ? LINK_REST : 'https://current.example.test/api/v1',
-      rpcProxyBaseUrl: 'https://current-rpc.example.test',
-    },
+    activeOptionId: null,
+    currentConfig: input.activeRestEndpoint
+      ? {
+          externalRestApiBaseUrl: input.activeRestEndpoint,
+          rpcProxyBaseUrl: 'https://current-rpc.example.test',
+        }
+      : undefined,
     envKey: 'current-000000000000',
     storagePath: '/profiles/current.json',
     options,
   }
 }
 
-describe('desktop REST handoff match precedence', () => {
-  it('always applies the documented precedence to generated saved-profile lists', () => {
+function expectSavedDecision(
+  decision: ReturnType<typeof resolveDesktopEnvironmentRestMatch>,
+  expectedId: string
+) {
+  expect(decision).toMatchObject({ kind: 'saved', option: { id: expectedId } })
+}
+
+describe('desktop REST handoff match properties', () => {
+  it('keeps a unique exact saved profile stable across option order and unrelated profiles', () => {
+    const generatedCases = endpointArbitrary.chain(link =>
+      fc.array(decoyKindArbitrary, { maxLength: 6 }).chain(kinds => {
+        const options = [option('exact-target', withTrailingSlash(link))]
+        kinds.forEach((kind, index) => {
+          const endpoint =
+            kind === 'path'
+              ? withSiblingPath(link)
+              : kind === 'query'
+                ? withDifferentQuery(link)
+                : withDifferentOrigin(link)
+          options.push(option(`decoy-${index}`, endpoint))
+        })
+        return fc
+          .shuffledSubarray(options, {
+            minLength: options.length,
+            maxLength: options.length,
+          })
+          .map(shuffled => ({ link, options, shuffled }))
+      })
+    )
+
     fc.assert(
-      fc.property(profilesArbitrary, fc.boolean(), (options, activeExactMatch) => {
-        const state = configState(options, activeExactMatch)
-        const linkOrigin = desktopRestEndpointOrigin(LINK_REST)
-        const localhost = options.find(
-          option =>
-            option.source === 'localhost' &&
-            desktopRestEndpointOrigin(option.externalRestApiBaseUrl) === linkOrigin
+      fc.property(generatedCases, ({ link, options, shuffled }) => {
+        const expected = resolveDesktopEnvironmentRestMatch(configState(options), link)
+        const reordered = resolveDesktopEnvironmentRestMatch(configState(shuffled), link)
+        const withUnrelated = resolveDesktopEnvironmentRestMatch(
+          configState([...shuffled, option('unrelated', withDifferentOrigin(link))]),
+          link
         )
-        const active =
-          state.configured &&
-          sameDesktopRestEndpoint(state.currentConfig!.externalRestApiBaseUrl, LINK_REST)
-        const saved = options.filter(
-          option =>
-            option.source !== 'localhost' &&
-            sameDesktopRestEndpoint(option.externalRestApiBaseUrl, LINK_REST)
-        )
-        const sameOriginDifferentEndpoint = options.some(
-          option =>
-            option.source !== 'localhost' &&
-            desktopRestEndpointOrigin(option.externalRestApiBaseUrl) === linkOrigin &&
-            !sameDesktopRestEndpoint(option.externalRestApiBaseUrl, LINK_REST)
-        )
-        const expectedKind = localhost
-          ? 'localhost'
-          : active
-            ? 'active'
-            : saved.length > 1
-              ? 'ambiguous'
-              : saved.length === 1
-                ? 'saved'
-                : sameOriginDifferentEndpoint
-                  ? 'path-conflict'
-                  : 'setup'
 
-        const decision = resolveDesktopEnvironmentRestMatch(state, LINK_REST)
-
-        expect(decision.kind).toBe(expectedKind)
-        if (decision.kind === 'localhost') expect(decision.option.id).toBe(localhost?.id)
-        if (decision.kind === 'saved') expect(decision.option.id).toBe(saved[0]?.id)
+        expectSavedDecision(expected, 'exact-target')
+        expect(reordered).toEqual(expected)
+        expect(withUnrelated).toEqual(expected)
       }),
       { numRuns: 20000 }
+    )
+  })
+
+  it('treats trailing slashes as equivalent while keeping query variants distinct', () => {
+    fc.assert(
+      fc.property(endpointArbitrary, link => {
+        const exact = resolveDesktopEnvironmentRestMatch(
+          configState([option('exact-target', link)]),
+          withTrailingSlash(link)
+        )
+        const queryConflict = resolveDesktopEnvironmentRestMatch(
+          configState([option('query-sibling', withDifferentQuery(link))]),
+          link
+        )
+        const pathConflict = resolveDesktopEnvironmentRestMatch(
+          configState([option('path-sibling', withSiblingPath(link))]),
+          link
+        )
+
+        expectSavedDecision(exact, 'exact-target')
+        expect(queryConflict.kind).toBe('path-conflict')
+        expect(pathConflict.kind).toBe('path-conflict')
+      }),
+      { numRuns: 5000 }
+    )
+  })
+
+  it('reports ambiguity when two profiles normalize to the linked endpoint', () => {
+    fc.assert(
+      fc.property(endpointArbitrary, link => {
+        const decision = resolveDesktopEnvironmentRestMatch(
+          configState([
+            option('exact-one', link),
+            option('exact-two', withTrailingSlash(link)),
+            option('unrelated', withDifferentOrigin(link)),
+          ]),
+          link
+        )
+
+        expect(decision.kind).toBe('ambiguous')
+      }),
+      { numRuns: 3000 }
+    )
+  })
+
+  it('gives a same-origin Localhost option precedence over saved exact matches', () => {
+    fc.assert(
+      fc.property(endpointArbitrary, fc.boolean(), (link, useReservedId) => {
+        const localhost = option(
+          useReservedId ? '__localhost__' : 'local-profile',
+          withSiblingPath(link),
+          useReservedId ? 'file' : 'localhost'
+        )
+        const decision = resolveDesktopEnvironmentRestMatch(
+          configState([option('exact-target', link), localhost]),
+          link
+        )
+
+        expect(decision).toMatchObject({ kind: 'localhost', option: { id: localhost.id } })
+      }),
+      { numRuns: 3000 }
+    )
+  })
+
+  it('prefers the configured active endpoint and ignores an unconfigured current URL', () => {
+    fc.assert(
+      fc.property(endpointArbitrary, link => {
+        const active = resolveDesktopEnvironmentRestMatch(
+          configState([option('exact-one', link), option('exact-two', withTrailingSlash(link))], {
+            activeRestEndpoint: withTrailingSlash(link),
+          }),
+          link
+        )
+        const unconfigured = resolveDesktopEnvironmentRestMatch(
+          configState([], { configured: false, activeRestEndpoint: link }),
+          link
+        )
+
+        expect(active.kind).toBe('active')
+        expect(unconfigured.kind).toBe('setup')
+      }),
+      { numRuns: 3000 }
+    )
+  })
+
+  it('returns setup when the only saved profiles use unrelated origins', () => {
+    fc.assert(
+      fc.property(endpointArbitrary, link => {
+        const decision = resolveDesktopEnvironmentRestMatch(
+          configState([option('unrelated', withDifferentOrigin(link))]),
+          link
+        )
+
+        expect(decision.kind).toBe('setup')
+      }),
+      { numRuns: 3000 }
     )
   })
 })
