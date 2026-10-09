@@ -351,6 +351,8 @@ describe('ModelStepContinuationService — status-first claim precedence (#1043)
   })
 
   it('answers 409 with the current view when a resumable version does not match', async () => {
+    // The store and the wire projection must observe the same test clock.
+    vi.spyOn(Date, 'now').mockReturnValue(NOW)
     const { handle, checkpoints, service } = createHarness()
     const { version } = await openResumable(checkpoints)
     const fixture = readVector('continue-response.version-mismatch.json')
