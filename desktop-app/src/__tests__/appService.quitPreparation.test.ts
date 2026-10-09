@@ -98,11 +98,12 @@ describe('AppService quit preparation', () => {
     const tokenClearStarted = deferred<void>()
     const tokenStore = new TokenStoreClass()
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
-    const clearSessionToken = vi
-      .spyOn(tokenStore, 'clearSessionToken')
+    const clearSessionTokenStrictly = vi
+      .spyOn(tokenStore, 'clearSessionTokenStrictly')
       .mockImplementation(async () => {
         tokenClearStarted.resolve()
         await pendingTokenClear.promise
+        return { keytarAvailable: true, keytarDisabled: false }
       })
     const service = createService(tokenStore)
 
@@ -119,12 +120,12 @@ describe('AppService quit preparation', () => {
       await vi.advanceTimersByTimeAsync(120_001)
       expect(preparationSettled).toBe(false)
       expect(prepareForQuit).not.toHaveBeenCalled()
-      expect(clearSessionToken).toHaveBeenCalledOnce()
+      expect(clearSessionTokenStrictly).toHaveBeenCalledOnce()
 
       pendingTokenClear.resolve()
       await Promise.all([logout, preparation])
       expect(preparationSettled).toBe(true)
-      expect(clearSessionToken.mock.invocationCallOrder[0]).toBeLessThan(
+      expect(clearSessionTokenStrictly.mock.invocationCallOrder[0]).toBeLessThan(
         prepareForQuit.mock.invocationCallOrder[0]
       )
     } finally {
@@ -139,9 +140,10 @@ describe('AppService quit preparation', () => {
     const producerStarted = deferred<void>()
     const tokenStore = new TokenStoreClass()
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
-    vi.spyOn(tokenStore, 'clearSessionToken').mockImplementation(async () => {
+    vi.spyOn(tokenStore, 'clearSessionTokenStrictly').mockImplementation(async () => {
       producerStarted.resolve()
       await producer.promise
+      return { keytarAvailable: true, keytarDisabled: false }
     })
     const service = createService(tokenStore)
     const logout = service.logout()
@@ -166,16 +168,18 @@ describe('AppService quit preparation', () => {
     let startedCount = 0
     const tokenStore = new TokenStoreClass()
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
-    vi.spyOn(tokenStore, 'clearSessionToken')
+    vi.spyOn(tokenStore, 'clearSessionTokenStrictly')
       .mockImplementationOnce(async () => {
         startedCount += 1
         if (startedCount === 2) producersStarted.resolve()
         await rejectedProducer.promise
+        return { keytarAvailable: true, keytarDisabled: false }
       })
       .mockImplementationOnce(async () => {
         startedCount += 1
         if (startedCount === 2) producersStarted.resolve()
         await pendingProducer.promise
+        return { keytarAvailable: true, keytarDisabled: false }
       })
     const service = createService(tokenStore)
 

@@ -561,6 +561,51 @@ describe('AppService pending external logout', () => {
     }
   })
 
+  it('keeps normal UI logout durable when regular token cleanup fails', async () => {
+    const reportFailure = vi.fn()
+    const { service, tokenStore } = createService(undefined, reportFailure)
+    const state = internals(service)
+    const staleToken = 'fixture-stale-regular-logout-token'
+    await tokenStore.setSessionToken(staleToken, activeEnvKey)
+    state.sessionToken = staleToken
+    state.me = loginResult.me
+    const keytar = await import('keytar')
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    let failActiveDelete = true
+    vi.mocked(keytar.deletePassword).mockImplementation(async (keychainService, account) => {
+      if (account === `session-token::${activeEnvKey}` && failActiveDelete) {
+        failActiveDelete = false
+        throw new Error('keychain temporarily locked')
+      }
+      return originalDelete(keychainService, account)
+    })
+
+    try {
+      await expect(service.logout()).resolves.toBeUndefined()
+
+      expect(state.sessionToken).toBeNull()
+      expect(state.me).toBeNull()
+      expect(notifySessionChanged).toHaveBeenCalledWith(false)
+      expect(reportFailure).toHaveBeenCalledWith(expect.any(Error))
+      expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+        intent: 'logout-pending',
+      })
+
+      const { service: restarted } = createService(new TokenStoreClass())
+      const restartedAuthClient = (
+        restarted as unknown as { authClient: { getMe: ReturnType<typeof vi.fn> } }
+      ).authClient
+      const getMe = vi.spyOn(restartedAuthClient, 'getMe')
+      await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
+
+      expect(getMe).not.toHaveBeenCalled()
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
+    } finally {
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
+  })
+
   it('does not let an admitted login retire a newer quit-time logout marker', async () => {
     markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'active-keytar')
     const { service, tokenStore } = createService()
@@ -1053,24 +1098,46 @@ describe('AppService pending external logout', () => {
     }
   })
 
-  it('finishes the in-memory logout when a non-storage step fails', async () => {
-    const { service } = createService()
+  it('keeps logout durable when GFS fencing fails before token cleanup', async () => {
+    const reportFailure = vi.fn()
+    const { service, tokenStore } = createService(undefined, reportFailure)
     const state = service as unknown as {
       sessionToken: string | null
       me: unknown
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
-    state.sessionToken = 'active-session-token'
+    const staleToken = 'fixture-stale-gfs-fence-token'
+    await tokenStore.setSessionToken(staleToken, activeEnvKey)
+    state.sessionToken = staleToken
     state.me = loginResult.me
+    const clearToken = vi.spyOn(tokenStore, 'clearSessionToken')
     vi.spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary').mockRejectedValue(
       new Error('Application is shutting down')
     )
 
     await expect(service.logout()).resolves.toBeUndefined()
 
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(clearToken).not.toHaveBeenCalled()
     expect(state.sessionToken).toBeNull()
     expect(state.me).toBeNull()
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    expect(reportFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Application is shutting down' })
+    )
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'logout-pending',
+    })
+
+    const { service: restarted } = createService(new TokenStoreClass())
+    const restartedAuthClient = (
+      restarted as unknown as { authClient: { getMe: ReturnType<typeof vi.fn> } }
+    ).authClient
+    const getMe = vi.spyOn(restartedAuthClient, 'getMe')
+    await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
+
+    expect(getMe).not.toHaveBeenCalled()
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
   })
 
   it('does not let environment B consume environment A logout intent', async () => {

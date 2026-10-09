@@ -273,7 +273,7 @@ type UploadScopeTestService = {
     googleLogin: ReturnType<typeof vi.fn>
   }
   tokenStore: {
-    clearSessionToken: ReturnType<typeof vi.fn>
+    clearSessionTokenStrictly: ReturnType<typeof vi.fn>
     setSessionToken: ReturnType<typeof vi.fn>
   }
   completePasswordLogin: (email: string, password: string) => ReturnType<AppService['googleLogin']>
@@ -320,7 +320,10 @@ function authenticatedUploadService(statePath: string): UploadScopeTestService {
     googleLogin: vi.fn(),
   }
   service.tokenStore = {
-    clearSessionToken: vi.fn().mockResolvedValue(undefined),
+    clearSessionTokenStrictly: vi.fn().mockResolvedValue({
+      keytarAvailable: true,
+      keytarDisabled: false,
+    }),
     setSessionToken: vi.fn().mockResolvedValue(undefined),
   }
   service.startDesktopGfsUpload = vi.fn()
@@ -882,7 +885,7 @@ describe('AppService GFS upload security scope', () => {
 
       await expect(settled).resolves.toContain('authentication fence')
       expect(service.sessionToken).toBeNull()
-      expect(service.tokenStore.clearSessionToken).toHaveBeenCalledTimes(1)
+      expect(service.tokenStore.clearSessionTokenStrictly).toHaveBeenCalledTimes(1)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

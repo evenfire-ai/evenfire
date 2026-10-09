@@ -2870,7 +2870,9 @@ export class AppService {
 
         try {
           const result = await this.logoutOnce({
-            strictTokenClear: marker !== null || markerInspectionFailed,
+            // A UI logout may resolve only after every credential source was
+            // removed or a durable logout-pending marker will block recovery.
+            strictTokenClear: true,
           })
           if (
             marker &&
@@ -2883,6 +2885,19 @@ export class AppService {
           // Once a logout marker is durable, a later Keytar cleanup failure is
           // recoverable on the next launch. Marker I/O failures also must not
           // leave the renderer over an authenticated main-process session.
+          // A normal logout has no marker yet, so persist its intent before
+          // reporting success after an earlier GFS or credential-clear failure.
+          // Otherwise the next launch could restore the credential that the
+          // renderer was told had been logged out.
+          if (marker?.intent.intent !== 'logout-pending' || markerInspectionFailed) {
+            try {
+              recordPendingExternalLogout(userDataDirectory, envKey)
+            } catch (markerError) {
+              this.reportDeferredLogoutFailureSafely(markerError)
+              await this.failClosedForPendingLogout(error)
+              throw markerError
+            }
+          }
           await this.failClosedForPendingLogout(error)
         }
       },
