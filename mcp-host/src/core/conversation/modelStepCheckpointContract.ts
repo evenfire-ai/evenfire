@@ -30,6 +30,7 @@ export type ModelStepCheckpointVisibleStatus =
 
 export const MODEL_STEP_BLOCKED_REASONS = [
   'principal_mismatch',
+  /** The checkpoint's Host CRD name differs; a new instance of the same Host is valid. */
   'host_mismatch',
   'grant_revoked',
   'model_unavailable',

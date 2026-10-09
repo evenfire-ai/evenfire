@@ -303,7 +303,7 @@ describe('ModelStepContinuationService — status-first claim precedence (#1043)
     expectKeysAsInVector(result.body, fixture.body, 'replayed body')
   })
 
-  it('re-claims a lapsed lease under a new task id and answers 202', async () => {
+  it('re-claims a lapsed lease on a new instance of the same Host CRD and answers 202', async () => {
     let now = NOW
     const { handle, checkpoints, service, enqueue, captured } = createHarness({
       now: () => now,
@@ -532,7 +532,7 @@ describe('ModelStepContinuationService — Host revalidation (#1043)', () => {
     expect(enqueue).not.toHaveBeenCalled()
   })
 
-  it('blocks a claim recorded for another runtime host, without enqueueing', async () => {
+  it('blocks a claim recorded for another Host CRD, without enqueueing', async () => {
     const { handle, checkpoints, service, enqueue } = createHarness({
       hostId: 'host-b',
       verdict: { kind: 'started' },

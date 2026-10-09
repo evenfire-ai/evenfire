@@ -43,7 +43,7 @@ export interface ModelStepCheckpointSupport {
   store: ModelStepCheckpointStore
   /** Owner identity of this Host process; a claim names it. */
   hostInstanceId: string
-  /** Runtime host name; recorded in the header and revalidated on continue. */
+  /** Host CRD name; stable across process/replica takeover and revalidated on continue. */
   hostId: string
   /** Lifetime of a resumable checkpoint from its failure. */
   resumableTtlMs: number

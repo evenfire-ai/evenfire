@@ -140,6 +140,8 @@ export class ModelStepContinuationService {
     }
 
     const { header, tools } = claim.snapshot
+    // host_id identifies the Host CRD, not the process that owns this claim.
+    // A replacement instance may continue the same Host's checkpoint.
     const mismatch =
       header.principal !== request.userId
         ? 'principal_mismatch'
