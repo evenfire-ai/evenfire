@@ -2,6 +2,7 @@ import type { ModelSelectionWriteOutcome, ModelStepTurnFence } from '../../db/wo
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
+import { SESSION_SCOPED_APPROVAL_TOOLS } from '../extensions/approvalController'
 import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
   ChatMessage,
@@ -287,6 +288,8 @@ export class ConversationManager {
 
     // Clear per-turn wildcard approval — each new message requires fresh approval
     conversation.auto_approved_tools.delete('*')
+    // A new user message starts a new task: plain session-scoped approvals end here.
+    conversation.task_approved_tools?.clear()
 
     // Materialize the auto-title (spec 15) in RAM before persisting so the
     // dual-store projection and the durable COALESCE write agree. `??=` keeps
@@ -767,6 +770,10 @@ export class ConversationManager {
    * plus the MCP server prefix for future turns. Exact-call and legacy unknown
    * scopes authorize only the frozen invocation being resumed.
    *
+   * SESSION_SCOPED_APPROVAL_TOOLS are the exception: turn-wide consent for one
+   * of them stores only that tool name, never '*' — in `task_approved_tools`
+   * for the current task, or in `auto_approved_tools` with alwaysApprove.
+   *
    * When alwaysApprove=true, also stores the individual tool name (backwards compat).
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
@@ -784,20 +791,28 @@ export class ConversationManager {
       const toolName = conversation.pending_approval.tool_name
       const turnWide = conversation.pending_approval.authorization_scope === 'turn_tools'
 
-      // Only proven turn-wide consent expands. Exact-call and legacy unknown
-      // scopes authorize just the frozen invocation being resumed.
-      if (turnWide) conversation.auto_approved_tools.add('*')
-      else conversation.auto_approved_tools.delete('*')
+      if (turnWide && SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
+        // Session-scoped consent covers this tool alone and neither grants nor
+        // revokes '*'. A plain approval lasts for the current task; "always"
+        // lasts for later tasks while the conversation is in memory.
+        if (alwaysApprove) conversation.auto_approved_tools.add(toolName)
+        else (conversation.task_approved_tools ??= new Set()).add(toolName)
+      } else {
+        // Only proven turn-wide consent expands. Exact-call and legacy unknown
+        // scopes authorize just the frozen invocation being resumed.
+        if (turnWide) conversation.auto_approved_tools.add('*')
+        else conversation.auto_approved_tools.delete('*')
 
-      // MCP tools: also auto-approve the entire server for future turns
-      if (turnWide && isMcpToolName(toolName)) {
-        const serverPrefix = toolName.split('__')[0]
-        conversation.auto_approved_tools.add(serverPrefix)
-      }
+        // MCP tools: also auto-approve the entire server for future turns
+        if (turnWide && isMcpToolName(toolName)) {
+          const serverPrefix = toolName.split('__')[0]
+          conversation.auto_approved_tools.add(serverPrefix)
+        }
 
-      // alwaysApprove also stores the individual tool name (for future turns)
-      if (turnWide && alwaysApprove) {
-        conversation.auto_approved_tools.add(toolName)
+        // alwaysApprove also stores the individual tool name (for future turns)
+        if (turnWide && alwaysApprove) {
+          conversation.auto_approved_tools.add(toolName)
+        }
       }
     }
 

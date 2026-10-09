@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../../internalTools/gfsReadTypes'
+import {
+  GFS_CACHE_FULL_GUIDANCE,
+  GFS_DISK_FULL_GUIDANCE,
+} from '../../../internalTools/gfsSpaceGuidance'
 import type { Attachment } from '../../types'
 import {
   ATTACHED_FILES_INSTRUCTION,
+  type GfsPreparationFailure,
   PREPARED_GFS_FILES_INSTRUCTION,
   type PreparedGfsFile,
   REFERENCED_FILES_INSTRUCTION,
@@ -79,6 +84,8 @@ describe('prepared GFS receipts', () => {
     })
     expect(block).toContain('prepared_gfs_file:')
     expect(block).toContain(PREPARED_GFS_FILES_INSTRUCTION)
+    // The approval gate decides shell_exec consent; the prompt states no shell rule.
+    expect(PREPARED_GFS_FILES_INSTRUCTION).not.toMatch(/approval for shell_exec/)
     expect(block).not.toContain(REFERENCED_FILES_INSTRUCTION)
     expect(block.split('\n').filter(line => line === '</turn-context>')).toHaveLength(1)
     const line = block.split('\n').find(line => line.startsWith('prepared_gfs_file:'))!
@@ -98,6 +105,113 @@ describe('prepared GFS receipts', () => {
     expect(block).toContain('status=unavailable code=approval_required')
     expect(block).not.toContain('receipt=')
     expect(block).not.toContain('.gfs-downloads/')
+  })
+
+  const unavailable = (code: GfsPreparationFailure, referenceId = file.referenceId) =>
+    buildTurnContextBlock({
+      date: new Date('2026-10-02T00:00:00Z'),
+      channel: { type: 'rpc', sender: 'caller-alice' },
+      preparedGfsFiles: [{ referenceId, status: 'unavailable', code }],
+    })
+
+  it('tells the model the workspace disk is full and to offer a cleanup of the caller workspace only', () => {
+    const block = unavailable('disk_full')
+    expect(block).toContain('status=unavailable code=disk_full')
+    expect(block).toContain(`For code=disk_full: ${GFS_DISK_FULL_GUIDANCE}`)
+    expect(GFS_DISK_FULL_GUIDANCE).toContain('workspace disk is full')
+    expect(GFS_DISK_FULL_GUIDANCE).toContain('Tell the user')
+    expect(GFS_DISK_FULL_GUIDANCE).toContain('du -sh -- * .[!.]* 2>/dev/null | sort -h')
+    expect(GFS_DISK_FULL_GUIDANCE).toContain('shell_exec command they approve')
+    expect(GFS_DISK_FULL_GUIDANCE).toContain(
+      "Never list, read or delete another user's directory or anything outside the workspace."
+    )
+    expect(block).not.toContain(GFS_CACHE_FULL_GUIDANCE)
+    expect(block.split('\n').filter(line => line.includes(GFS_DISK_FULL_GUIDANCE))).toHaveLength(1)
+  })
+
+  it('tells the model the download cache is full and that the user can only finish or cancel their own tasks, with no offer to delete copies', () => {
+    const block = unavailable('quota_exceeded')
+    expect(block).toContain('status=unavailable code=quota_exceeded')
+    expect(block).toContain(`For code=quota_exceeded: ${GFS_CACHE_FULL_GUIDANCE}`)
+    expect(GFS_CACHE_FULL_GUIDANCE).toBe(
+      "The Host's cache of downloaded files is full, so the file was not downloaded. " +
+        'Space frees as tasks finish and downloaded copies expire. Tell the user. ' +
+        'They can finish or cancel their own running tasks to free space sooner, then try again. ' +
+        "Never act on another user's tasks or files."
+    )
+    // The store already evicted every unprotected copy before refusing, so a
+    // manual deletion cannot admit the download (Addendum 12 item 4).
+    const guidanceLine = block
+      .split('\n')
+      .find(line => line.startsWith('For code=quota_exceeded: '))
+    expect(guidanceLine).toBeDefined()
+    expect(guidanceLine).not.toMatch(/delete|\.gfs-downloads|shell_exec/)
+    expect(block).not.toContain(GFS_DISK_FULL_GUIDANCE)
+    expect(block.split('\n').filter(line => line.includes(GFS_CACHE_FULL_GUIDANCE))).toHaveLength(1)
+  })
+
+  it('keeps the two space guidances distinct from each other', () => {
+    expect(GFS_DISK_FULL_GUIDANCE).not.toContain('cache')
+    expect(GFS_DISK_FULL_GUIDANCE).not.toContain('.gfs-downloads')
+    expect(GFS_CACHE_FULL_GUIDANCE).not.toContain('disk is full')
+    expect(GFS_CACHE_FULL_GUIDANCE).not.toContain('du -sh')
+  })
+
+  it('names no caller, foreign path or count in either space guidance', () => {
+    for (const guidance of [GFS_DISK_FULL_GUIDANCE, GFS_CACHE_FULL_GUIDANCE]) {
+      // The only digit is the stderr redirect of the suggested listing command.
+      expect(guidance.replace('2>/dev/null', '')).not.toMatch(/\d/)
+      expect(guidance).not.toMatch(/caller-|@|\/home|\/workspace|\/users\//i)
+      expect(guidance).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/)
+    }
+    const block = unavailable('disk_full') + unavailable('quota_exceeded')
+    // Witness: the sender is in the block, but never inside a guidance line.
+    expect(block).toContain('sender: caller-alice')
+    for (const line of block.split('\n').filter(line => line.startsWith('For code=')))
+      expect(line).not.toContain('caller-alice')
+  })
+
+  it('adds each space guidance once for several refusals and none for other codes', () => {
+    const block = buildTurnContextBlock({
+      date: new Date('2026-10-02T00:00:00Z'),
+      channel: { type: 'rpc' },
+      preparedGfsFiles: [
+        { referenceId: 'gfs:main:a@v1', status: 'unavailable', code: 'disk_full' },
+        { referenceId: 'gfs:main:b@v1', status: 'unavailable', code: 'disk_full' },
+        { referenceId: 'gfs:main:c@v1', status: 'unavailable', code: 'quota_exceeded' },
+      ],
+    })
+    expect(block.split('\n').filter(line => line.startsWith('For code=disk_full: '))).toHaveLength(
+      1
+    )
+    expect(
+      block.split('\n').filter(line => line.startsWith('For code=quota_exceeded: '))
+    ).toHaveLength(1)
+
+    const other = unavailable('approval_required')
+    // Witness: the unavailable line and the instruction were rendered.
+    expect(other).toContain('status=unavailable code=approval_required')
+    expect(other).toContain(PREPARED_GFS_FILES_INSTRUCTION)
+    expect(other).not.toContain('For code=')
+    expect(other).not.toContain(GFS_DISK_FULL_GUIDANCE)
+    expect(other).not.toContain(GFS_CACHE_FULL_GUIDANCE)
+  })
+
+  it('renders an unmeasurable volume without any guidance line', () => {
+    const block = buildTurnContextBlock({
+      date: new Date('2026-10-02T00:00:00Z'),
+      channel: { type: 'rpc' },
+      preparedGfsFiles: [
+        { referenceId: 'gfs:main:a@v1', status: 'unavailable', code: 'volume_unmeasurable' },
+        { referenceId: 'gfs:main:b@v1', status: 'unavailable', code: 'disk_full' },
+      ],
+    })
+    expect(block).toContain('status=unavailable code=volume_unmeasurable')
+    // Witness: the guidance path ran for the other refusal in the same block.
+    const guidance = block.split('\n').filter(line => line.startsWith('For code='))
+    expect(guidance).toEqual([`For code=disk_full: ${GFS_DISK_FULL_GUIDANCE}`])
+    expect(block).not.toContain('For code=volume_unmeasurable')
+    expect(block).not.toContain(GFS_CACHE_FULL_GUIDANCE)
   })
 })
 

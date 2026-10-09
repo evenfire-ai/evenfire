@@ -170,7 +170,12 @@ export async function downloadGfsContent(
       retentionOwnerId: options.retentionOwnerId,
     })
     const partialPath = path.join(options.callerWorkspacePath, transfer.partialPath)
-    destination = await fs.open(partialPath, constants.O_WRONLY | constants.O_NOFOLLOW)
+    // O_NONBLOCK: a source.partial replaced by a FIFO fails the open (ENXIO
+    // with no reader) instead of blocking the download.
+    destination = await fs.open(
+      partialPath,
+      constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    )
     const partialInfo = await destination.stat()
     if (
       !partialInfo.isFile() ||

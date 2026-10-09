@@ -125,7 +125,6 @@ import type {
 import type { ModelStepTurnFence } from '../db/worker/protocol'
 import { parseModelStepCheckpointLoopState } from '../db/worker/protocol'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
-import type { GfsProcessingLeaseProvider } from '../internalTools/gfsProcessingLease'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
@@ -155,8 +154,8 @@ import {
   resolveFileReferences,
 } from './fileReferenceResolver'
 import {
-  GFS_SYSTEM_CALLER_IDENTITY,
   gfsManagedWorkspaceExecution,
+  gfsStoreCallerIdentity,
   gfsWorkspaceExecutionEnabled,
 } from './gfsExecutionCapability'
 import { hasLargeAvailableGfsReferences, prepareGfsFiles } from './gfsFilePreparation'
@@ -234,8 +233,6 @@ export interface TaskExecutorDeps {
   gfsDownloadStore?: GfsDownloadStore
   /** Trusted caller workspace root, separate from memory-tool availability. */
   gfsCallerWorkspacePath?: string
-  /** Required fail-closed lease boundary for approved local processing. */
-  gfsProcessingLeaseProvider?: GfsProcessingLeaseProvider
   config: AgentConfig
   modelName: string
   /**
@@ -1622,24 +1619,29 @@ export class TaskExecutor {
   }
 
   /**
-   * A retention owner spans preparation, an approval suspension, and cold resume.
-   * Release happens only after this executor reaches a terminal state; inherited
-   * owners are deliberately left quarantined by the store when release is denied.
+   * A retention owner spans preparation and an approval suspension in this
+   * process; pins live in memory, so after a Host restart a cold resume finds
+   * no pin and its file may have expired or been evicted, and the model
+   * downloads it again. Release happens only after this executor reaches a
+   * terminal state. A failed release leaves the pin in place, so its files stay
+   * protected until the Host restarts or until each copy reaches its
+   * `expiresAt`, whichever comes first: expiry is absolute and a pin never
+   * protects an expired copy.
    */
   private settleGfsRetentionOwner(): Promise<void> {
     if (this.state === 'waiting_approval' && !this.abortController.signal.aborted)
       return Promise.resolve()
     if (this.gfsRetentionOwnerSettlement) return this.gfsRetentionOwnerSettlement
     this.gfsRetentionOwnerSettlement = (async () => {
-      const callerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
+      const callerIdentity = gfsStoreCallerIdentity(this.task.sourceMessage)
       const store = this.deps.gfsDownloadStore
-      if (!callerIdentity || !store?.isAvailable()) return
+      if (!store?.isAvailable()) return
       try {
         await store.releaseReceiptOwner(this.taskId, callerIdentity)
       } catch (error) {
         logger.error(
           { taskId: this.taskId, callerIdentity, err: error },
-          'GFS retention owner release failed; retained records remain protected'
+          'GFS retention owner release failed; retained records remain protected until restart or expiry'
         )
       }
     })()
@@ -2917,19 +2919,14 @@ export class TaskExecutor {
     // #1003 — native-tool presentation is host-wide and provider-independent:
     // it never depends on the MCP presentation resolved above.
     const nativeAuto = appConfig.nativeToolPresentation === 'auto'
-    const gfsCallerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
-    const gfsProcessingLeaseProvider =
-      this.deps.gfsProcessingLeaseProvider ??
-      (this.deps.gfsDownloadStore && gfsCallerIdentity
-        ? this.deps.gfsDownloadStore.processingLeaseProvider(gfsCallerIdentity)
-        : undefined)
+    // The store is keyed like the caller root, never by the raw sender.
+    const gfsCallerIdentity = gfsStoreCallerIdentity(this.task.sourceMessage)
     const gfsWorkspace = gfsManagedWorkspaceExecution({
       approvalEnabled: appConfig.enableApproval,
       source: this.task.source,
       callerIdentity: gfsCallerIdentity,
       store: this.deps.gfsDownloadStore,
       callerWorkspacePath: this.deps.gfsCallerWorkspacePath,
-      processingLeaseProvider: gfsProcessingLeaseProvider,
       approvalConfig: this.deps.approvalConfig,
       retentionOwnerId: this.taskId,
     })
@@ -2940,7 +2937,6 @@ export class TaskExecutor {
           callerIdentity: this.task.sourceMessage?.sender,
           store: gfsWorkspace.store,
           callerWorkspacePath: gfsWorkspace.callerWorkspacePath,
-          processingLeaseProvider: gfsWorkspace.processingLeaseProvider,
           approvalConfig: this.deps.approvalConfig,
           retentionOwnerId: this.taskId,
         })
@@ -3022,7 +3018,7 @@ export class TaskExecutor {
     const cronManageGateApplies =
       appConfig.enableApproval && this.task.source === 'cron' && appConfig.statelessLifecycle
     const approvalApplies = interactiveApprovalApplies || cronManageGateApplies
-    const baseController = approvalApplies
+    const approvalGate = approvalApplies
       ? new UnifiedApprovalGateController(
           compositeRegistry,
           this.deps.approvalConfig,
@@ -3036,19 +3032,22 @@ export class TaskExecutor {
             cronManageGateOnly: cronManageGateApplies,
           }
         )
-      : new DefaultLoopController()
-    const innerController = approvalApplies
+      : null
+    const innerController = approvalGate
       ? new ApprovalController(
           this.conversation!,
-          baseController,
+          approvalGate,
           gfsWorkspace &&
             appConfig.enableApproval &&
             this.task.source === 'channel' &&
             this.deps.approvalConfig?.tools?.shell_exec !== false
-            ? new Set(['shell_exec', 'clerum__gfs_download'])
-            : undefined
+            ? new Set(['clerum__gfs_download'])
+            : undefined,
+          // The same gate's forced approvals (stateless cron create/enable) run
+          // before any stored approval, so none of them can cover such a call.
+          approvalGate
         )
-      : baseController
+      : new DefaultLoopController()
 
     const mcpManager = this.deps.mcpManager
     // Exact native membership preserves every native/plugin capability.

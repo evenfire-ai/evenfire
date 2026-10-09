@@ -387,15 +387,16 @@ describe('ConversationManager — approval transitions', () => {
 
   it('should NOT add server prefix for non-MCP tools (no __ separator)', async () => {
     const conv = await manager.getOrCreate('user-3')
-    await manager.startTurn(conv, 'Run shell', 'test-task')
+    await manager.startTurn(conv, 'Trigger a workflow', 'test-task')
 
+    // workflow_trigger is a non-MCP tool outside SESSION_SCOPED_APPROVAL_TOOLS.
     await manager.suspendForApproval(
       conv,
       ordinaryApproval({
         request_id: 'req-3',
-        tool_name: 'shell_exec',
-        parameters: { command: 'ls' },
-        description: 'Shell command',
+        tool_name: 'workflow_trigger',
+        parameters: { recipe: 'report' },
+        description: 'Workflow trigger',
         tool_call_id: 'tc_3',
         context_snapshot: [],
       })
@@ -404,7 +405,8 @@ describe('ConversationManager — approval transitions', () => {
     // Non-MCP tool: approve adds wildcard "*" for "approve once, run all" within this turn
     await manager.approve(conv, false)
     expect(conv.auto_approved_tools.has('*')).toBe(true)
-    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false) // individual tool NOT added without alwaysApprove
+    expect(conv.auto_approved_tools.has('workflow_trigger')).toBe(false) // individual tool NOT added without alwaysApprove
+    expect(conv.auto_approved_tools).toEqual(new Set(['*'])) // no server prefix either
   })
 
   it('should transition AwaitingApproval → Idle on deny, clearing pending approval', async () => {
@@ -499,9 +501,9 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
       conv,
       ordinaryApproval({
         request_id: 'req-wc-1',
-        tool_name: 'shell_exec',
-        parameters: { command: 'echo hi' },
-        description: 'Shell',
+        tool_name: 'workflow_trigger',
+        parameters: { recipe: 'report' },
+        description: 'Workflow trigger',
         tool_call_id: 'tc_wc_1',
         context_snapshot: [],
       })
@@ -520,9 +522,9 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
       conv,
       ordinaryApproval({
         request_id: 'req-wc-2',
-        tool_name: 'shell_exec',
+        tool_name: 'workflow_trigger',
         parameters: {},
-        description: 'Shell',
+        description: 'Workflow trigger',
         tool_call_id: 'tc_wc_2',
         context_snapshot: [],
       })
@@ -567,6 +569,76 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     // Wildcard gone, but server-prefix persists across turns
     expect(conv.auto_approved_tools.has('*')).toBe(false)
     expect(conv.auto_approved_tools.has('mongodb-server')).toBe(true)
+  })
+})
+
+describe('ConversationManager — session-scoped tool approvals', () => {
+  let manager: ConversationManager
+
+  beforeEach(() => {
+    manager = new ConversationManager()
+  })
+
+  function sessionToolApproval(toolName: string, requestId: string): PendingApproval {
+    return ordinaryApproval({
+      request_id: requestId,
+      tool_name: toolName,
+      parameters: {},
+      description: toolName,
+      tool_call_id: `tc_${requestId}`,
+      context_snapshot: [],
+    })
+  }
+
+  it.each(['shell_exec', 'http_request', 'cron_manage'] as const)(
+    'a plain approve() of %s stores the tool for the current task only, without a wildcard',
+    async toolName => {
+      const conv = await manager.getOrCreate(`user-session-plain-${toolName}`)
+      await manager.startTurn(conv, 'Run a session tool', 'test-task')
+      await manager.suspendForApproval(conv, sessionToolApproval(toolName, `req-${toolName}`))
+
+      await manager.approve(conv, false)
+
+      expect(conv.state).toBe(ConversationState.Processing)
+      expect(conv.task_approved_tools).toEqual(new Set([toolName]))
+      expect(conv.auto_approved_tools).toEqual(new Set())
+    }
+  )
+
+  it.each(['shell_exec', 'http_request', 'cron_manage'] as const)(
+    'an "always" approve() of %s stores the tool for later tasks, without a wildcard',
+    async toolName => {
+      const conv = await manager.getOrCreate(`user-session-always-${toolName}`)
+      await manager.startTurn(conv, 'Run a session tool', 'test-task')
+      await manager.suspendForApproval(conv, sessionToolApproval(toolName, `req-${toolName}`))
+
+      await manager.approve(conv, true)
+
+      expect(conv.state).toBe(ConversationState.Processing)
+      expect(conv.auto_approved_tools).toEqual(new Set([toolName]))
+      expect(conv.task_approved_tools).toBeUndefined()
+    }
+  )
+
+  it('startTurn clears plain session-scoped approvals and keeps "always" ones', async () => {
+    const conv = await manager.getOrCreate('user-session-turns')
+    await manager.startTurn(conv, 'First message', 'test-task')
+    await manager.suspendForApproval(conv, sessionToolApproval('mongodb-server__find', 'req-m'))
+    await manager.approve(conv, false)
+    await manager.suspendForApproval(conv, sessionToolApproval('shell_exec', 'req-s'))
+    await manager.approve(conv, false)
+    await manager.suspendForApproval(conv, sessionToolApproval('http_request', 'req-h'))
+    await manager.approve(conv, true)
+
+    // The earlier MCP '*' is neither revoked nor duplicated by the session approvals.
+    expect(conv.auto_approved_tools).toEqual(new Set(['*', 'mongodb-server', 'http_request']))
+    expect(conv.task_approved_tools).toEqual(new Set(['shell_exec']))
+
+    await manager.completeTurn(conv, 'Done')
+    await manager.startTurn(conv, 'Second message', 'test-task')
+
+    expect(conv.auto_approved_tools).toEqual(new Set(['mongodb-server', 'http_request']))
+    expect(conv.task_approved_tools).toEqual(new Set())
   })
 })
 

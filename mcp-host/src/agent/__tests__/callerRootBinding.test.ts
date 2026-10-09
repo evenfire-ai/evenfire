@@ -70,10 +70,10 @@ describe('degraded GFS caller-root binding', () => {
   it('keeps ordinary text running while managed file/shell roots fail closed', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-degraded-binding-'))
     try {
-      fs.mkdirSync(path.join(root, '.gfs-download-store'), { recursive: true })
-      fs.writeFileSync(path.join(root, '.gfs-download-store', 'ledger-v1.json'), '{invalid')
+      // `users` as a file: the store starts, but no caller root can be bound.
       fs.writeFileSync(path.join(root, 'users'), 'not-a-directory', 'utf-8')
       const runtime = await bootstrapGfsRuntime(root)
+      expect(runtime.store.isAvailable()).toBe(true)
       const queue = new MessageQueue()
       const lifecycle = new TaskLifecycle()
       const agent = new AgentStateMachine(queue, lifecycle, { autoStart: false, taskDelay: 0 })
@@ -116,10 +116,10 @@ describe('degraded GFS caller-root binding', () => {
   it('keeps real incoming admission dispatching when the GFS caller root is degraded', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-degraded-admission-'))
     try {
-      fs.mkdirSync(path.join(root, '.gfs-download-store'), { recursive: true })
-      fs.writeFileSync(path.join(root, '.gfs-download-store', 'ledger-v1.json'), '{invalid')
+      // `users` as a file: the store starts, but no caller root can be bound.
       fs.writeFileSync(path.join(root, 'users'), 'not-a-directory', 'utf-8')
       const runtime = await bootstrapGfsRuntime(root)
+      expect(runtime.store.isAvailable()).toBe(true)
       const reference = buildGfsFileReference({
         drive: 'main',
         resourceId: 'a'.repeat(32),
@@ -135,6 +135,7 @@ describe('degraded GFS caller-root binding', () => {
         }),
       })
       if (!reference.ok) throw new Error(reference.message)
+      const bindingRoots: unknown[] = []
       const dispatch = vi.fn(() => ({
         success: true,
         taskId: 'task-1',
@@ -153,6 +154,7 @@ describe('degraded GFS caller-root binding', () => {
         fileReferenceGfs: () => ({ status: 'unsupported' }),
         gfsSurfaceRuntimeCapability: message => {
           const binding = resolveCallerRootBinding(runtime.workspaceProvider, message)
+          bindingRoots.push(binding.root)
           const workspaceFile = Boolean(runtime.store.isAvailable() && binding.root)
           return { workspaceFile, localExecutor: workspaceFile, visual: false }
         },
@@ -173,6 +175,9 @@ describe('degraded GFS caller-root binding', () => {
 
       expect(response).toMatchObject({ success: true, taskId: 'task-1' })
       expect(dispatch).toHaveBeenCalledTimes(1)
+      // Witness: admission asked for the caller root and the binding failed closed.
+      expect(bindingRoots.length).toBeGreaterThan(0)
+      expect(bindingRoots.every(bound => !bound)).toBe(true)
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }

@@ -21,21 +21,51 @@ import type { Conversation } from '../types'
 import { getMcpServerPrefix } from './mcpApprovalGateController'
 
 /**
+ * Native tools whose approval is scoped to the tool itself. A plain approval
+ * stores the name in `task_approved_tools`, so the tool runs without a new card
+ * for the rest of the current task, including after resumes; the next user
+ * message starts a new task and asks again. An "always" approval stores it in
+ * `auto_approved_tools`, which covers later tasks while the conversation stays
+ * in memory. Neither survives a cold resume. These approvals never add the
+ * turn-wide `'*'`, and a `'*'` granted by any other approval does not cover
+ * these tools: each one needs its own approval.
+ */
+export const SESSION_SCOPED_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
+  'shell_exec',
+  'http_request',
+  'cron_manage',
+])
+
+/**
+ * Source of approvals that no stored approval may cover (the cron×stateless
+ * create/enable gate). Implemented by UnifiedApprovalGateController.
+ */
+export interface ForcedApprovalGate {
+  forcedApproval(
+    toolName: string,
+    params: Record<string, unknown>
+  ): { type: 'suspend'; approval: PendingApproval } | null
+}
+
+/**
  * Decorator that checks auto_approved_tools before delegating to base controller.
  */
 export class ApprovalController implements LoopController {
   private readonly conversation: Conversation
   private readonly delegate: LoopController
   private readonly liveApprovalTools: ReadonlySet<string>
+  private readonly forcedApprovalGate: ForcedApprovalGate | undefined
 
   constructor(
     conversation: Conversation,
     delegate: LoopController,
-    liveApprovalTools?: ReadonlySet<string>
+    liveApprovalTools?: ReadonlySet<string>,
+    forcedApprovalGate?: ForcedApprovalGate
   ) {
     this.conversation = conversation
     this.delegate = delegate
     this.liveApprovalTools = liveApprovalTools ?? new Set<string>()
+    this.forcedApprovalGate = forcedApprovalGate
   }
 
   shouldAccept(content: string, iteration: number): boolean {
@@ -47,8 +77,12 @@ export class ApprovalController implements LoopController {
   }
 
   /**
+   * A forced approval (cron×stateless create/enable) is checked first and
+   * always suspends, before any stored approval is consulted.
+   *
    * Live-approval tools always consult the delegate. Other tools retain the
-   * auto_approved_tools and matching pending_approval one-shot behavior.
+   * auto_approved_tools and matching pending_approval one-shot behavior;
+   * `'*'` does not apply to SESSION_SCOPED_APPROVAL_TOOLS.
    *
    * Non-live one-shot approval: if the conversation has a pending_approval whose
    * tool_name matches, this means the user approved the tool for this
@@ -60,6 +94,12 @@ export class ApprovalController implements LoopController {
     toolName: string,
     params: Record<string, unknown>
   ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
+    // Forced approvals ask on every call: no '*', per-task, "always" or server
+    // prefix approval covers them, and their exact scope keeps an approved card
+    // from adding any of those.
+    const forced = this.forcedApprovalGate?.forcedApproval(toolName, params)
+    if (forced) return forced
+
     // The approved frozen call executes directly in resumeAfterApproval.
     // Every model-generated live call needs a new delegate decision; retained
     // snapshot data and persistent approvals cannot authorize another invocation.
@@ -76,13 +116,21 @@ export class ApprovalController implements LoopController {
         : decision
     }
 
-    // "Approve once, run all" — user approved any tool in this turn, auto-approve rest
-    if (this.conversation.auto_approved_tools.has('*')) {
+    // "Approve once, run all" — user approved any tool in this turn, auto-approve
+    // the rest, except session-scoped tools, which need their own approval.
+    if (
+      this.conversation.auto_approved_tools.has('*') &&
+      !SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)
+    ) {
       return 'proceed'
     }
 
-    // Check individual tool name
-    if (this.conversation.auto_approved_tools.has(toolName)) {
+    // Check individual tool name: "always" grants, then this task's plain
+    // session-scoped approvals.
+    if (
+      this.conversation.auto_approved_tools.has(toolName) ||
+      this.conversation.task_approved_tools?.has(toolName) === true
+    ) {
       return 'proceed'
     }
 
