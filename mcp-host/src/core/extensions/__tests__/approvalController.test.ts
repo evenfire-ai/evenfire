@@ -538,7 +538,7 @@ describe('ApprovalController', () => {
       expect(result).toEqual(expect.objectContaining({ type: 'suspend' }))
       const approval = (result as { approval: PendingApproval }).approval
       expect(approval.reask).toBe('denials_active')
-      expect(approval.alwaysApproveAllowed).toBe(false)
+      expect(approval.authorization_scope).toBe('exact_invocation')
       expect(approval.description).toContain('another tool was denied in this chat')
       expect(approval.description).not.toContain('"workflow_trigger" was denied')
     })
@@ -623,7 +623,7 @@ describe('ApprovalController', () => {
       expect(approval.request_id).toBe('req-denied')
       expect(approval.description).toBe('suspended')
       expect(approval.reask).toBe('denials_active')
-      expect(approval.alwaysApproveAllowed).toBe(false)
+      expect(approval.authorization_scope).toBe('exact_invocation')
     })
   })
 
@@ -637,7 +637,7 @@ describe('ApprovalController', () => {
       const approval = (result as { approval: PendingApproval }).approval
       expect(approval.description).toBe('suspended')
       expect(approval.reask).toBe('denied')
-      expect(approval.alwaysApproveAllowed).toBe(false)
+      expect(approval.authorization_scope).toBe('exact_invocation')
     })
 
     it('builds its own re-ask card when the gate would proceed', () => {
@@ -649,7 +649,7 @@ describe('ApprovalController', () => {
       const approval = (result as { approval: PendingApproval }).approval
       expect(approval.description).toBe('Tool "shell_exec" was denied and must be approved again')
       expect(approval.reask).toBe('denied')
-      expect(approval.alwaysApproveAllowed).toBe(false)
+      expect(approval.authorization_scope).toBe('exact_invocation')
     })
   })
 

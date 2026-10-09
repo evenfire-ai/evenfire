@@ -162,7 +162,7 @@ export interface PersistedSessionSummary {
   // suspension into a generic approval.
   pending_approval: Pick<
     PendingApprovalRow,
-    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name'
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'authorization_scope'
   > | null
 }
 
@@ -171,7 +171,7 @@ export interface PersistedSessionMessagePage {
   messages: MessageRow[]
   pending_approval: Pick<
     PendingApprovalRow,
-    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name'
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'authorization_scope'
   > | null
   total_turns: number
   first_turn_number: number | null

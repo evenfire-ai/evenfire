@@ -42,7 +42,7 @@ function guardrailSuspension(
       description: `Guardrail requires approval (${reasonCode})`,
       tool_call_id: call.id,
       context_snapshot: [],
-      ...(denied ? { reask: 'denied' as const, alwaysApproveAllowed: false as const } : {}),
+      ...(denied ? { reask: 'denied' as const } : {}),
     },
   }
 }

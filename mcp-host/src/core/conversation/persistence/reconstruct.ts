@@ -166,7 +166,7 @@ export function normalizeConnectReason(
   return raw === 'connect_required' ? 'connect_required' : undefined
 }
 
-function normalizeAuthorizationScope(
+export function normalizeAuthorizationScope(
   raw: string | null | undefined
 ): PendingApproval['authorization_scope'] {
   if (raw === null || raw === undefined) return undefined

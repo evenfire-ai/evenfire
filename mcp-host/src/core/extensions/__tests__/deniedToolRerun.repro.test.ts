@@ -334,7 +334,7 @@ describe('Lead Scout denial stickiness', () => {
       expect(again.approval.tool_name).toBe(FINDER)
       // The gate's own card is kept and marked as a denial re-ask.
       expect(again.approval.reask).toBe('denied')
-      expect(again.approval.alwaysApproveAllowed).toBe(false)
+      expect(again.approval.authorization_scope).toBe('exact_invocation')
     }
     expect(argsOf(finder)).toHaveLength(0)
   })

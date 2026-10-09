@@ -24,6 +24,7 @@ import {
   SessionMessagesQuery,
 } from './conversationStore'
 import { liftDenial, recordDenial } from './denialPolicy'
+import { mayStoreGrant } from './pendingApprovalView'
 import { userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
@@ -575,8 +576,7 @@ export class ConversationManager {
       const toolName = conversation.pending_approval.tool_name
       const approval = conversation.pending_approval
       const lifted = liftDenial(conversation, toolName, userId)
-      const grantable =
-        approval.authorization_scope === 'turn_tools' && approval.alwaysApproveAllowed !== false
+      const grantable = mayStoreGrant(approval)
       if (lifted === 'kept_for_denier') {
         if (alwaysApprove) {
           logger.info(

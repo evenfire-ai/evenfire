@@ -22,6 +22,7 @@ import {
 } from '../core/attachments/attachmentReadBudget'
 import { compactConversation } from '../core/conversation/compaction'
 import { ConversationManager } from '../core/conversation/conversation'
+import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
 import { deriveAutoTitle } from '../core/conversation/sessionTitle'
 import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
@@ -1430,7 +1431,7 @@ export class TaskExecutor {
             {
               reason: result.approval.reason ?? 'approval_required',
               mcpServerName: result.approval.mcpServerName,
-              alwaysApproveAllowed: result.approval.alwaysApproveAllowed,
+              alwaysApproveAllowed: pendingApprovalWireFields(result.approval).alwaysApproveAllowed,
               toolName: result.approval.tool_name,
               parameters: result.approval.parameters,
             }

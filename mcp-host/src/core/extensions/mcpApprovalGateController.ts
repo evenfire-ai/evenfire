@@ -220,9 +220,9 @@ export class UnifiedApprovalGateController implements LoopController {
    * override on both paths.
    *
    * Public so ApprovalController can consult it before any stored approval:
-   * every forced call asks, and no `'*'`, per-task, "always" or server-prefix
-   * approval covers it. The suspension is `exact_invocation`, so approving it
-   * authorizes only that frozen call.
+   * every forced call asks, and no per-task or "always" approval covers it.
+   * The suspension is `exact_invocation`, so approving it authorizes only that
+   * frozen call and stores nothing.
    */
   forcedApproval(
     toolName: string,
@@ -250,7 +250,6 @@ export class UnifiedApprovalGateController implements LoopController {
           approval: {
             ...suspension.approval,
             authorization_scope: 'exact_invocation',
-            alwaysApproveAllowed: false,
           },
         }
       }

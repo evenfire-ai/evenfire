@@ -215,7 +215,6 @@ export class ApprovalController implements LoopController {
         ...approval,
         reask,
         authorization_scope: 'exact_invocation',
-        alwaysApproveAllowed: false,
       },
     }
   }

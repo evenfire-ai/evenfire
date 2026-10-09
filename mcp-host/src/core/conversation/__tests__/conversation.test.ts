@@ -431,7 +431,7 @@ describe('ConversationManager — approval transitions', () => {
       description: 'forced',
       tool_call_id: 'tc-1',
       context_snapshot: [],
-      alwaysApproveAllowed: false,
+      authorization_scope: 'exact_invocation',
     })
 
     await manager.approve(conv, true, 'user-forced')

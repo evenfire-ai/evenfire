@@ -668,9 +668,13 @@ export interface PendingApproval {
   /** Set only by reconstruction of migration-marked legacy rows. */
   legacy_budget?: boolean
   /**
-   * Consent expansion. New ordinary approvals use `turn_tools`; high-risk
-   * exact-call paths use `exact_invocation`. Legacy NULL rows are treated as
-   * exact because their original expansion cannot be proven.
+   * Durable grant scope of this request (pending_approvals.authorization_scope).
+   * `turn_tools` (the name is historical) marks an ordinary card: approving it
+   * may store the tool's exact name (Always approve) or a per-task approval for
+   * a session-scoped tool, never anything turn-wide. `exact_invocation` (forced
+   * gates, denial re-asks, guardrail and live-tool cards) authorizes only the
+   * call it shows. Legacy NULL rows are treated as exact. Every view derives
+   * "Always approve" eligibility from this field (pendingApprovalView).
    */
   authorization_scope?: 'turn_tools' | 'exact_invocation'
   /** Internal atomic replacement instruction; not persisted in the snapshot. */
@@ -720,12 +724,6 @@ export interface PendingApproval {
    * persisted.
    */
   reask?: 'denied' | 'denials_active'
-  /**
-   * false when "Always approve" must not apply to this card (a forced gate or
-   * a denial re-ask): approve() then runs the call once without allowlisting
-   * it. Absent = allowed. Live only, not persisted.
-   */
-  alwaysApproveAllowed?: false
 }
 
 // ─── Loop Types ─────────────────────────────────────────────

@@ -738,6 +738,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               tool_name: pendingRow.tool_name,
               reason: pendingRow.reason,
               mcp_server_name: pendingRow.mcp_server_name,
+              authorization_scope: pendingRow.authorization_scope ?? null,
             }
           : null,
         total_turns: sessionRow.turn_count ?? 0,
@@ -792,6 +793,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           pending_tool_name: string | null
           pending_reason: string | null
           pending_mcp_server_name: string | null
+          pending_authorization_scope: string | null
         }
       >
       return rows.map(row => {
@@ -802,6 +804,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           pending_tool_name,
           pending_reason,
           pending_mcp_server_name,
+          pending_authorization_scope,
           ...session
         } = row
         return {
@@ -815,6 +818,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                   tool_name: pending_tool_name,
                   reason: pending_reason,
                   mcp_server_name: pending_mcp_server_name,
+                  authorization_scope: pending_authorization_scope,
                 }
               : null,
         } satisfies PersistedSessionSummary

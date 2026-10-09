@@ -438,7 +438,7 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
       expect((result as any).approval.tool_name).toBe('cron_manage')
       expect((result as any).approval.parameters).toEqual({ action })
       expect((result as any).approval.description).toBe(STATELESS_CRON_APPROVAL_PROMPT)
-      expect((result as any).approval.alwaysApproveAllowed).toBe(false)
+      expect((result as any).approval.authorization_scope).toBe('exact_invocation')
     }
   })
 

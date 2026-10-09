@@ -16,6 +16,7 @@ import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
+import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
 import { LlmErrorCode } from '../core/errors'
 // Phase 6 imports
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
@@ -989,16 +990,9 @@ export class AgentStateMachine extends EventEmitter {
           parameters: approval.parameters,
           description: approval.description,
           since: entry?.registeredAt?.toISOString() ?? new Date().toISOString(),
-          // U5 — thread the connect_required discriminator; omitted for generic
-          // approvals so the legacy shape is byte-identical (back-compat).
-          // mcpServerName rides ONLY connect_required, matching the SSE
-          // producer and the other polling projections (no stray field on a
-          // corrupt/legacy row whose reason normalized away).
-          ...(approval.reason ? { reason: approval.reason } : {}),
-          ...(approval.reason === 'connect_required' && approval.mcpServerName
-            ? { mcpServerName: approval.mcpServerName }
-            : {}),
-          ...(approval.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false } : {}),
+          // U5 connect discriminator and the grant eligibility, from the one
+          // projection every view uses (pendingApprovalView).
+          ...pendingApprovalWireFields(approval),
         })
       }
     }
@@ -1066,18 +1060,10 @@ export class AgentStateMachine extends EventEmitter {
       requestId: approval.request_id,
       userId,
       notification: notificationMsg,
-      // U5 — carry the connect_required discriminator down the polling chain
-      // (messageHandler → pendingTaskResults → handleTaskResult) so a REST poll
-      // reconstructs the connect suspension, matching the SSE `suspended` event.
-      // Omitted for generic approvals (back-compat).
-      ...(approval.reason ? { reason: approval.reason } : {}),
-      // mcpServerName rides ONLY the connect_required discriminator, matching
-      // the SSE producer (sseProgressReporter) — so corrupt/legacy rows can never emit
-      // a stray field without its reason.
-      ...(approval.reason === 'connect_required' && approval.mcpServerName
-        ? { mcpServerName: approval.mcpServerName }
-        : {}),
-      ...(approval.alwaysApproveAllowed === false ? { alwaysApproveAllowed: false } : {}),
+      // U5 — carry the connect discriminator and the grant eligibility down the
+      // polling chain (messageHandler → pendingTaskResults → handleTaskResult),
+      // from the same projection as the SSE `suspended` event.
+      ...pendingApprovalWireFields(approval),
     })
   }
 

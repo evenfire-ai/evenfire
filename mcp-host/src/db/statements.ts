@@ -314,6 +314,7 @@ export function prepareStatements(db: Database): PreparedStatements {
                pa.tool_name,
                pa.reason,
                pa.mcp_server_name,
+               pa.authorization_scope,
                ROW_NUMBER() OVER (
                  PARTITION BY pa.session_id
                  ORDER BY pa.registered_at ASC, pa.request_id ASC
@@ -327,7 +328,8 @@ export function prepareStatements(db: Database): PreparedStatements {
              pa.request_id AS pending_request_id,
              pa.tool_name AS pending_tool_name,
              pa.reason AS pending_reason,
-             pa.mcp_server_name AS pending_mcp_server_name
+             pa.mcp_server_name AS pending_mcp_server_name,
+             pa.authorization_scope AS pending_authorization_scope
         FROM scoped_sessions s
         LEFT JOIN ranked_approvals pa
           ON pa.session_id = s.id
