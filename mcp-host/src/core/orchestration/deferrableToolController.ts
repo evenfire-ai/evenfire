@@ -80,10 +80,6 @@ export class DeferrableToolController implements LoopController {
     return this.delegate.beforeTool(toolName, params, toolCallId)
   }
 
-  isForcedApproval(toolName: string, params: Record<string, unknown>): boolean {
-    return this.delegate.isForcedApproval?.(toolName, params) === true
-  }
-
   onExhaustion(iteration: number): string {
     return this.delegate.onExhaustion(iteration)
   }

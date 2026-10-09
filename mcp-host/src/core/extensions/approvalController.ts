@@ -6,7 +6,7 @@
  *
  * Approval decisions go through loopController.beforeTool() in toolUseLoop
  * (SPEC-UNIFIED §21). The one other decision point is the guardrail `ask`
- * lane in toolUseLoopToolBatch, which consumes only an exact one-shot grant.
+ * lane in toolCallPolicy, which consumes only an exact one-shot grant.
  * Both read denials through core/conversation/denialPolicy.
  *
  * The decorator chain:

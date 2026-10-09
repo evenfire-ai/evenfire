@@ -6,7 +6,7 @@
  * `sessions.denied_tools` as `[{ tool, userId }]`, migration 017).
  *
  * Every rule lives here, used by both decision lanes (ApprovalController and
- * the guardrail `ask` lane in toolUseLoopToolBatch) and both persistence ends
+ * the guardrail `ask` lane in toolCallPolicy) and both persistence ends
  * (sqliteConversationStore writes, reconstruct reads):
  *   - recordDenial: the latest denier wins, and the deny also revokes an
  *     earlier "Always approve" and this task's session-scoped approval for
