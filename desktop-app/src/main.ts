@@ -552,6 +552,7 @@ async function createWindow(): Promise<void> {
     markNotReady: () => {
       mainWindowRendererReady = false
     },
+    closeSandboxUi: () => appService.closeSandboxUi(),
   })
 
   wireWindowVisibility(window)
