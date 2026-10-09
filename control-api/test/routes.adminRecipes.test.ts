@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express, Response as ExpressResponse, NextFunction, Request } from 'express'
 import jwt from 'jsonwebtoken'
+import { spawnSync } from 'node:child_process'
 import http from 'node:http'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -243,6 +244,51 @@ describe.sequential('routes/admin/recipes', () => {
   afterAll(async () => {
     await closeTestServer(server)
   })
+
+  it('CodeQL 427 bounds malformed template scanning', async () => {
+    if (process.env.TEMPLATE_REDOS_CHILD !== '1') {
+      const child = spawnSync(
+        process.execPath,
+        [
+          'node_modules/vitest/vitest.mjs',
+          'run',
+          'test/routes.adminRecipes.test.ts',
+          '--pool=threads',
+          '--maxWorkers=1',
+          '-t',
+          'CodeQL 427 bounds malformed template scanning',
+        ],
+        {
+          env: { ...process.env, TEMPLATE_REDOS_CHILD: '1' },
+          encoding: 'utf8',
+          timeout: 15_000,
+          killSignal: 'SIGKILL',
+        }
+      )
+      expect(child.stdout).toContain('TEMPLATE_SCAN_STARTED')
+      expect(
+        child.error,
+        'recipe validation must finish within the generous CPU deadline'
+      ).toBeUndefined()
+      expect(child.status, child.stdout + child.stderr).toBe(0)
+      return
+    }
+    const value = '{{{{|'.repeat(200_000)
+    const largeApp = express()
+    largeApp.use(express.json({ limit: config.jsonBodyLimit }))
+    largeApp.use(createAdminRecipesRouter(gateway as never))
+    process.stdout.write('TEMPLATE_SCAN_STARTED\n')
+    const res = await request(largeApp)
+      .post('/admin/recipes/validate')
+      .send({
+        ...VALID_RECIPE,
+        spec: {
+          workloads: [{ ...VALID_RECIPE.spec.workloads[0], env: [{ name: 'NOTE', value }] }],
+        },
+      })
+      .expect(200)
+    expect(res.body.valid).toBe(true)
+  }, 20_000)
 
   // ── CRUD happy path ──────────────────────────────────────────────────────
 
