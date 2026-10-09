@@ -1,15 +1,7 @@
 // @vitest-environment jsdom
-import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { SandboxUiPage as SandboxUiPageBase } from '../SandboxUiPage'
-
-// The page portals its mounted-app actions into the title bar's leading slot.
-// In isolation there is no WindowTitleBar, so supply a container (document.body)
-// to exercise the real portal path and keep the actions queryable via `screen`.
-function SandboxUiPage(props: React.ComponentProps<typeof SandboxUiPageBase>) {
-  return <SandboxUiPageBase titlebarLeadingContainer={document.body} {...props} />
-}
+import { LaunchingSandboxUiPage as SandboxUiPage } from './__fixtures__/launchingSandboxUiPage'
 
 const sandboxUi = {
   listApps: vi.fn(),
