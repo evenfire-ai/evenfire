@@ -3912,13 +3912,11 @@ export function useAgentChatController({
       const selectsSpecificChat = Boolean(
         chatId && !options.selectLatest && !options.suppressAutoSelect
       )
-      const preservesVisibleChat = Boolean(
+      const preservesCurrentChatRoute = Boolean(
         !chatId &&
         !options.selectLatest &&
         selectedAgent === agentName &&
-        navItem === DESKTOP_ROUTES.chat &&
-        activeChatVisibilityRef.current.selectedAgent === agentName &&
-        activeChatVisibilityRef.current.activeChatId
+        navItem === DESKTOP_ROUTES.chat
       )
       if (
         selectsSpecificChat &&
@@ -3939,11 +3937,11 @@ export function useAgentChatController({
         return
       }
       // A same-agent no-chat notification can record a pending none selection
-      // while the chat route continues showing this conversation. The explicit
-      // clear path owns blanking the view; do not steal its history completion
-      // here. Route/agent changes and specific/latest selections still advance
-      // selection ownership before their effects run.
-      if (!preservesVisibleChat) beginSelectionIntent(selectsSpecificChat)
+      // while the chat route continues an implicit/latest or visible history
+      // load. The explicit clear path owns blanking the view; do not steal its
+      // history completion here. Route/agent changes and specific/latest
+      // selections still advance selection ownership before their effects run.
+      if (!preservesCurrentChatRoute) beginSelectionIntent(selectsSpecificChat)
       if (options.selectLatest) {
         writePendingSelection(agentName, { mode: 'latest', chatId: null })
         return
