@@ -258,15 +258,18 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
       teamAgents?: string[]
       contexts: Record<string, string[]>
       hosts: Record<string, string>
+      /** Wire `spec.contextId` per Context resource name; defaults to the name. */
+      contextIds?: Record<string, string>
     }) {
       const gateway = new MockGateway()
       for (const [name, contextRef] of Object.entries(opts.hosts)) {
         void gateway.createResource('hosts', { metadata: { name }, spec: { contextRef } }, HOSTS_NS)
       }
-      for (const [contextId, mcpServers] of Object.entries(opts.contexts)) {
+      for (const [name, mcpServers] of Object.entries(opts.contexts)) {
+        const contextId = opts.contextIds?.[name] ?? name
         void gateway.createResource(
           'contexts',
-          { metadata: { name: contextId }, spec: { contextId, mcpServers } },
+          { metadata: { name }, spec: { contextId, mcpServers } },
           SERVERS_NS
         )
       }
@@ -327,6 +330,38 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
       expect(result.kind).toBe('context_membership_denied')
       expect(fetchFn).not.toHaveBeenCalled()
       expect(db.query).not.toHaveBeenCalled()
+    })
+
+    // PR #1004 R2: the pending callback resolves the Host's contextRef to the
+    // Context RESOURCE — never through another resource's colliding wire id.
+    it("denies Host-A-only when B.contextId collides with A's name, WITHOUT exchange or persist", async () => {
+      const { admission } = world({
+        userAgents: ['agent-a'],
+        hosts: { 'agent-a': 'ctx-a' },
+        contexts: { 'ctx-a': ['other-server'], 'ctx-b': ['gdrive'] },
+        contextIds: { 'ctx-a': 'ctx-wire-a', 'ctx-b': 'ctx-a' },
+      })
+      const { deps, db, fetchFn } = buildDeps({
+        subject: gdriveSubject({ grantScope: 'user', contextRef: 'ctx-b' }),
+        consentAdmission: admission,
+      })
+      const result = await handleOAuthCallback(buildInput(), deps)
+      expect(result.kind).toBe('context_membership_denied')
+      expect(fetchFn).not.toHaveBeenCalled()
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it('admits a pending callback when the exposing resource name differs from its wire id', async () => {
+      const { admission } = world({
+        userAgents: ['agent-a'],
+        hosts: { 'agent-a': 'ctx-a' },
+        contexts: { 'ctx-a': ['gdrive'] },
+        contextIds: { 'ctx-a': 'ctx-wire-a' },
+      })
+      const { deps, db } = buildDeps({ subject: ownerSubject(), consentAdmission: admission })
+      const result = await handleOAuthCallback(buildInput(), deps)
+      expect(result.kind).toBe('ok')
+      expect(String(db.query.mock.calls[0][0])).toContain('INSERT INTO oauth_grants')
     })
 
     it('denies a private install until agent B is assigned the connector, then admits', async () => {

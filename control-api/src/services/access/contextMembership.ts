@@ -2,6 +2,7 @@ import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
 import { buildAgentDirectoryEntry } from '../directory/accessReconciliation.js'
 import { getTeamAgents, getUserAgents, getUserContexts, listTeams } from '../directory/index.js'
+import type { ContextRefInput } from './contextIdentity.js'
 
 export type ContextMembershipDirectory = {
   getUserContexts: typeof getUserContexts
@@ -29,6 +30,11 @@ const defaultDirectory: ContextMembershipDirectory = {
  * nor the signed OAuth state carries one, and an active team member can
  * already switch to that team and use its agents.
  *
+ * Each reference keeps its origin (`members`): a Host `contextRef` names a
+ * Context RESOURCE, while a legacy `user_contexts` id may be a wire-id alias
+ * (`contextIdentity.ts`). The same string from both sources is two entries.
+ * `contextIds` is the sorted, de-duplicated union of the raw strings.
+ *
  * Missing Hosts, and Hosts the connectors panel would not list (disabled,
  * terminating, or reported from another namespace — `buildAgentDirectoryEntry`,
  * the producer's own filter), contribute nothing. Directory/Kubernetes errors
@@ -38,7 +44,7 @@ export async function getUserMemberContexts(
   gateway: K8sGateway,
   userId: string,
   directory: ContextMembershipDirectory = defaultDirectory
-): Promise<{ userId: string; contextIds: string[] }> {
+): Promise<{ userId: string; members: ContextRefInput[]; contextIds: string[] }> {
   const [legacy, directAgents, teams] = await Promise.all([
     directory.getUserContexts(userId),
     directory.getUserAgents(userId),
@@ -55,7 +61,7 @@ export async function getUserMemberContexts(
     for (const agentName of grant.agentNames) agentNames.add(agentName)
   }
 
-  const contextIds = new Set(legacy.contextIds)
+  const hostRefs = new Set<string>()
   if (agentNames.size > 0) {
     const hosts = (await gateway.listResource('hosts', config.hostsNamespace)) as Array<{
       metadata?: { name?: string }
@@ -66,9 +72,15 @@ export async function getUserMemberContexts(
       if (!entry || !agentNames.has(entry.name)) continue
       const contextRef =
         typeof host.spec?.contextRef === 'string' ? host.spec.contextRef.trim() : ''
-      if (contextRef) contextIds.add(contextRef)
+      if (contextRef) hostRefs.add(contextRef)
     }
   }
 
-  return { userId, contextIds: [...contextIds].sort() }
+  const legacyRefs = new Set(legacy.contextIds.filter(Boolean))
+  const members: ContextRefInput[] = [
+    ...[...hostRefs].map(ref => ({ ref, origin: 'host' as const })),
+    ...[...legacyRefs].map(ref => ({ ref, origin: 'legacy' as const })),
+  ].sort((a, b) => a.ref.localeCompare(b.ref) || a.origin.localeCompare(b.origin))
+  const contextIds = [...new Set([...hostRefs, ...legacyRefs])].sort()
+  return { userId, members, contextIds }
 }

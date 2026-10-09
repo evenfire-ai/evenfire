@@ -158,4 +158,35 @@ describe('getUserMemberContexts (#989)', () => {
     )
     expect(result.contextIds).toEqual(['ctx-a', 'ctx-b'])
   })
+
+  // PR #1004 R2: a Host contextRef names a Context RESOURCE while a legacy
+  // user_contexts id may be a wire-id alias, so membership keeps each
+  // reference's origin for the identity resolver.
+  it('tags each reference with its origin and keeps the same string from both origins', async () => {
+    const gateway = new MockGateway()
+    seedHost(gateway, 'a', 'ctx-a')
+    seedHost(gateway, 'b', 'ctx-shared')
+    const result = await getUserMemberContexts(
+      gateway as never,
+      'user-1',
+      directory({
+        userContexts: ['ctx-shared', 'ctx-wire-legacy'],
+        userAgents: ['a', 'b'],
+        teams: ['t'],
+        teamAgents: { t: ['a'] },
+      })
+    )
+    expect(result.members).toEqual([
+      { ref: 'ctx-a', origin: 'host' },
+      { ref: 'ctx-shared', origin: 'host' },
+      { ref: 'ctx-shared', origin: 'legacy' },
+      { ref: 'ctx-wire-legacy', origin: 'legacy' },
+    ])
+    expect(result.contextIds).toEqual(['ctx-a', 'ctx-shared', 'ctx-wire-legacy'])
+  })
+
+  it('has no members for a user without grants', async () => {
+    const result = await getUserMemberContexts(new MockGateway() as never, 'user-1', directory())
+    expect(result.members).toEqual([])
+  })
 })

@@ -3,9 +3,22 @@ import type { DbClient } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
 import {
   isK8sResourceNotFound,
+  resolveConnectorsForAgents,
   resolveInvocableMcpServersForContexts,
   resolveMcpServersForAgents,
 } from '../src/services/access/mcpInvocable.js'
+
+// The producers log an unresolved Host contextRef through the module's pino
+// child logger (never console.*). The mock's child ignores its bindings, so
+// every module child shares these spies.
+const loggerMock = vi.hoisted(() => {
+  const noop = () => {}
+  const warn = vi.fn()
+  const error = vi.fn()
+  const child = () => ({ error, warn, info: noop, debug: noop, trace: noop, fatal: noop })
+  return { warn, error, rootLogger: { child, error, warn, info: noop, debug: noop } }
+})
+vi.mock('../src/observability/logger.js', () => ({ rootLogger: loggerMock.rootLogger }))
 
 type Resource = Record<string, unknown>
 
@@ -56,7 +69,13 @@ const okServer = (name: string, url?: string) => ({
   },
 })
 
-const ctx = (contextId: string, servers: string[]) => ({
+/**
+ * A Context CR. `name` is the resource name a Host `contextRef` names;
+ * `contextId` is the wire id (`spec.contextId`) the legacy rpc rail keys on.
+ * The CRD does not require them to match; by default they do.
+ */
+const ctx = (name: string, servers: string[], contextId: string = name) => ({
+  metadata: { name },
   spec: { contextId, mcpServers: servers },
 })
 
@@ -356,6 +375,89 @@ describe('resolveMcpServersForAgents', () => {
       agentNames: ['trader'],
     })
     expect(out).toEqual([])
+  })
+})
+
+// PR #1004 R2 — a Host `contextRef` names the Context RESOURCE
+// (`metadata.name`), as host-context-controller reads it. Both catalog
+// producers join by resource name only; another resource's colliding wire
+// `spec.contextId` never supplies an agent's catalog.
+describe('catalog producers resolve a Host contextRef by Context resource name', () => {
+  const opts = { mcpServersNamespace: 'mcp-server', hostsNamespace: 'mcp-host' }
+  const servers = [okServer('mcp-a'), okServer('mcp-b')]
+
+  async function both(g: ReturnType<typeof gateway>, agentNames: string[]) {
+    const agents = await resolveMcpServersForAgents(g, { ...opts, agentNames })
+    const connectors = await resolveConnectorsForAgents(
+      g,
+      { ...opts, agentNames, userId: CALLER },
+      NO_GRANTS_DB
+    )
+    return {
+      mcpServers: agents.map(a => a.mcpServers.map(s => s.name)),
+      connectors: connectors.map(a => a.connectors.map(c => c.name)),
+      contextRefs: agents.map(a => a.contextRef),
+    }
+  }
+
+  it('resolves a resource whose name differs from its wire id', async () => {
+    const g = gateway({
+      contexts: [ctx('ctx-a', ['mcp-a'], 'ctx-wire-a')],
+      mcpservers: servers,
+      hosts: [host('agent-a', 'ctx-a')],
+    })
+    const out = await both(g, ['agent-a'])
+    expect(out.mcpServers).toEqual([['mcp-a']])
+    expect(out.connectors).toEqual([['mcp-a']])
+    // The DTO keeps the raw Host value.
+    expect(out.contextRefs).toEqual(['ctx-a'])
+  })
+
+  it.each([
+    ['A listed first', true],
+    ['B listed first', false],
+  ])(
+    'never takes the catalog of a resource whose wire id collides with the ref (%s)',
+    async (_label, aFirst) => {
+      const a = ctx('ctx-a', ['mcp-a'], 'ctx-wire-a')
+      const b = ctx('ctx-b', ['mcp-b'], 'ctx-a')
+      const g = gateway({
+        contexts: aFirst ? [a, b] : [b, a],
+        mcpservers: servers,
+        hosts: [host('agent-a', 'ctx-a')],
+      })
+      const out = await both(g, ['agent-a'])
+      expect(out.mcpServers).toEqual([['mcp-a']])
+      expect(out.connectors).toEqual([['mcp-a']])
+    }
+  )
+
+  it("a Host ref matching only another resource's wire id yields an empty catalog and a warning", async () => {
+    loggerMock.warn.mockClear()
+    const g = gateway({
+      contexts: [ctx('ctx-b', ['mcp-b'], 'ctx-a')],
+      mcpservers: servers,
+      hosts: [host('agent-a', 'ctx-a')],
+    })
+    const out = await both(g, ['agent-a'])
+    expect(out.mcpServers).toEqual([[]])
+    expect(out.connectors).toEqual([[]])
+    expect(out.contextRefs).toEqual(['ctx-a'])
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ agentName: 'agent-a', contextRef: 'ctx-a', reason: 'missing' }),
+      expect.any(String)
+    )
+  })
+
+  it('lists Contexts once per producer call, whatever the number of agents', async () => {
+    const g = gateway({
+      contexts: [ctx('ctx-a', ['mcp-a']), ctx('ctx-b', ['mcp-b'])],
+      mcpservers: servers,
+      hosts: [host('agent-a', 'ctx-a'), host('agent-b', 'ctx-b'), host('agent-c', 'ctx-a')],
+    })
+    await resolveMcpServersForAgents(g, { ...opts, agentNames: ['agent-a', 'agent-b', 'agent-c'] })
+    const contextLists = g.listResource.mock.calls.filter(([plural]) => plural === 'contexts')
+    expect(contextLists).toEqual([['contexts', 'mcp-server']])
   })
 })
 

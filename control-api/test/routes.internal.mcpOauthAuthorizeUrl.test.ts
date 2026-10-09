@@ -195,6 +195,8 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
 
   it('context server: accepts a matching body contextId from a MEMBER and mints the URL', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
+    // The owner Context resource the server's contextRef names must exist.
+    seedContext(gateway, 'ctx-A', ['gdrive'])
     // Membership check (getUserContexts → user_contexts): user-2 is a member of ctx-A.
     mockPoolQuery.mockResolvedValue({ rows: [{ context_id: 'ctx-A' }], rowCount: 1 })
     const res = await post(app)
@@ -209,6 +211,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   // rejected at the MINT boundary — fail early, never sent to the provider.
   it('context server: a NON-member is rejected 403 at mint, with NO authorizeUrl', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
+    seedContext(gateway, 'ctx-A', ['gdrive'])
     // getUserContexts returns contexts that do NOT include ctx-A.
     mockPoolQuery.mockResolvedValue({
       rows: [{ context_id: 'ctx-other' }, { context_id: 'ctx-else' }],
@@ -295,6 +298,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     it('a user whose team is granted the agent mints the URL for a context-scope server', async () => {
       seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'team-ctx' })
       seedHost('team-agent', 'team-ctx')
+      seedContext(gateway, 'team-ctx', ['gdrive'])
       routeDb({ teams: ['team-1'], teamAgents: ['team-agent'] })
       const res = await post(app)
         .set('Authorization', 'Bearer dev-rpc-proxy-token')
@@ -344,6 +348,14 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
         'hosts',
         { metadata: { name }, spec: { contextRef } },
         config.hostsNamespace
+      )
+    }
+
+    function seedNamedContext(name: string, contextId: string, servers: string[]) {
+      void gateway.createResource(
+        'contexts',
+        { metadata: { name }, spec: { contextId, mcpServers: servers } },
+        MCP_NS
       )
     }
 
@@ -402,6 +414,37 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
         MCP_NS
       )
       expect((await mint('user-b')).status).toBe(200)
+    })
+
+    // R2 Context identity: a Host `contextRef` names the Context RESOURCE
+    // (`metadata.name`, as host-context-controller reads it), never another
+    // resource's wire `spec.contextId`.
+    it("Host A only: a Context B whose contextId collides with A's resource name is NOT used (403)", async () => {
+      seedHost('agent-a', 'ctx-a')
+      seedNamedContext('ctx-a', 'ctx-wire-a', ['other-server'])
+      seedNamedContext('ctx-b', 'ctx-a', ['gdrive'])
+      routeDb({ userAgents: ['agent-a'] })
+      const res = await mint('user-a')
+      expect(res.status).toBe(403)
+      expect(res.body.error).toBe('context_membership_denied')
+      expect(res.body.authorizeUrl).toBeUndefined()
+    })
+
+    it('Host A only: the collision is denied regardless of Context listing order (403)', async () => {
+      seedHost('agent-a', 'ctx-a')
+      seedNamedContext('ctx-b', 'ctx-a', ['gdrive'])
+      seedNamedContext('ctx-a', 'ctx-wire-a', ['other-server'])
+      routeDb({ userAgents: ['agent-a'] })
+      expect((await mint('user-a')).status).toBe(403)
+    })
+
+    it('Host A only: Context resource ctx-a with wire id ctx-wire-a exposing the server mints (200)', async () => {
+      seedHost('agent-a', 'ctx-a')
+      seedNamedContext('ctx-a', 'ctx-wire-a', ['gdrive'])
+      routeDb({ userAgents: ['agent-a'] })
+      const res = await mint('user-a')
+      expect(res.status).toBe(200)
+      expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
     })
 
     it('a shared server allowlisted by agent B but owned elsewhere is rejected 403', async () => {

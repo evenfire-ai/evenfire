@@ -7,8 +7,13 @@
  * rules, so they MUST call into this module. Spec §6.
  *
  * Rules:
- *   - A server is **allowed** if any Context CR whose `spec.contextId` is in
- *     the scoped context-ids lists it in `spec.mcpServers`.
+ *   - Catalog rail (`resolveMcpServersForAgents`, `resolveConnectorsForAgents`):
+ *     a server is **allowed** for an agent if the ONE Context resource its
+ *     Host's `contextRef` names (`metadata.name`, host-context-controller
+ *     parity — `contextIdentity.ts`) lists it in `spec.mcpServers`.
+ *   - rpc-proxy rail (`resolveInvocableMcpServersForContexts`, unchanged —
+ *     #1046): a server is **allowed** if any Context CR whose `spec.contextId`
+ *     is in the scoped context-ids lists it in `spec.mcpServers`.
  *   - A server is **invocable** if it's allowed AND:
  *       - `spec.enabled !== false`
  *       - `spec.auth.type` is on the allowlist — absent/`"none"`/`"oauth"`
@@ -32,11 +37,12 @@ import {
   resolveServerOAuth,
 } from '../../oauth/mcpServerOAuthSpec.js'
 import { oauthGrantExists } from '../../oauth/store.js'
-import { rootLogger } from '../../observability/logger.js'
+import { type Logger, rootLogger } from '../../observability/logger.js'
 import {
   type AgentDirectoryEntry,
   buildAgentDirectoryEntry,
 } from '../directory/accessReconciliation.js'
+import { allowedServerNames, loadContextResolution, refKey } from './contextIdentity.js'
 
 const log = rootLogger.child({ module: 'mcpInvocable' })
 const connectorsLog = rootLogger.child({ module: 'mcp-connectors' })
@@ -148,10 +154,14 @@ function asArray<T>(value: unknown): T[] {
 }
 
 /**
- * Resolve the set of allowed server names per context.
- * When `scopedContextIds` is provided, contexts NOT in scope are dropped.
- * When omitted, every context in the namespace is indexed — appropriate when
- * the caller authorizes by agent rather than by context.
+ * Resolve the set of allowed server names per context, keyed by the wire
+ * `spec.contextId`. When `scopedContextIds` is provided, contexts NOT in scope
+ * are dropped. When omitted, every context in the namespace is indexed.
+ *
+ * Only the legacy rpc-proxy rail (`resolveInvocableMcpServersForContexts`,
+ * #1046) keys Contexts this way. A Host or McpServer `contextRef` names the
+ * Context RESOURCE, so the catalog producers and consent admission resolve
+ * through `contextIdentity.ts` instead — never through this index.
  */
 export async function loadAllowedNamesByContext(
   gateway: K8sGateway,
@@ -171,6 +181,60 @@ export async function loadAllowedNamesByContext(
     byContext.set(ctxId, set)
   }
   return byContext
+}
+
+/**
+ * The allowlist of the ONE Context resource each visible Host's `contextRef`
+ * names, keyed by that raw `contextRef`. One Context list per call.
+ *
+ * Resolution is by resource name only (`contextIdentity.ts`), so a Context
+ * whose wire `spec.contextId` collides with the ref never supplies the
+ * catalog. An unresolved ref (missing, terminating, foreign, duplicate) is
+ * absent from the map — the agent is served an empty catalog — and logged
+ * per agent. A Context-read failure is reported through `onLoadError` and
+ * yields an empty map, so authorized directory DTOs survive the outage.
+ */
+async function loadHostContextAllowlists(
+  gateway: K8sGateway,
+  mcpServersNamespace: string,
+  visibleHosts: ReadonlyArray<{ host: HostCR; directoryEntry: AgentDirectoryEntry }>,
+  logger: Logger,
+  onLoadError: (err: unknown) => void
+): Promise<Map<string, Set<string>>> {
+  const refs = new Set<string>()
+  for (const { host } of visibleHosts) {
+    const contextRef = host.spec?.contextRef
+    if (contextRef) refs.add(contextRef)
+  }
+  const allowlists = new Map<string, Set<string>>()
+  if (refs.size === 0) return allowlists
+
+  let resolution: Awaited<ReturnType<typeof loadContextResolution>>
+  try {
+    resolution = await loadContextResolution(
+      gateway,
+      mcpServersNamespace,
+      [...refs].map(ref => ({ ref, origin: 'host' as const }))
+    )
+  } catch (err) {
+    onLoadError(err)
+    return allowlists
+  }
+
+  for (const { host, directoryEntry } of visibleHosts) {
+    const contextRef = host.spec?.contextRef
+    if (!contextRef) continue
+    const resolved = resolution.get(refKey({ ref: contextRef, origin: 'host' }))
+    if (resolved?.resource) {
+      allowlists.set(contextRef, allowedServerNames(resolved.resource))
+      continue
+    }
+    logger.warn(
+      { agentName: directoryEntry.name, contextRef, reason: resolved?.reason ?? 'missing' },
+      'Host contextRef did not resolve to a Context resource; agent served with an empty tool catalog'
+    )
+  }
+  return allowlists
 }
 
 /**
@@ -345,7 +409,8 @@ export async function resolveInvocableMcpServersForContexts(
 
 /**
  * For each agent name, return its Host's contextRef and the invocable MCP
- * server names exposed by that context.
+ * server names exposed by the Context resource that ref names
+ * (`loadHostContextAllowlists`).
  *
  * Authorization model: agent access IS the gate. The caller MUST only pass
  * `agentNames` the principal is authorized to use (e.g. from getUserAgents /
@@ -408,21 +473,12 @@ export async function resolveMcpServersForAgents(
     } => item !== null
   )
 
-  const scopedContextIds = new Set<string>()
-  for (const { host } of visibleHosts) {
-    const contextRef = host.spec?.contextRef
-    if (contextRef) scopedContextIds.add(contextRef)
-  }
-
-  let allowedByContext = new Map<string, Set<string>>()
-  if (scopedContextIds.size > 0) {
-    try {
-      allowedByContext = await loadAllowedNamesByContext(
-        gateway,
-        mcpServersNamespace,
-        scopedContextIds
-      )
-    } catch (err) {
+  const allowedByContext = await loadHostContextAllowlists(
+    gateway,
+    mcpServersNamespace,
+    visibleHosts,
+    log,
+    err => {
       // Preserve the authorized directory DTOs with an empty tool catalog —
       // loudly, so a Context-read outage is distinguishable from "no tools".
       log.error(
@@ -430,7 +486,7 @@ export async function resolveMcpServersForAgents(
         'context allowlist load failed; directory served with empty tool catalogs'
       )
     }
-  }
+  )
 
   return visibleHosts.map(({ host, directoryEntry }) => {
     const contextRef = host?.spec?.contextRef ?? null
@@ -581,21 +637,12 @@ export async function resolveConnectorsForAgents(
     (item): item is { host: HostCR; directoryEntry: AgentDirectoryEntry } => item !== null
   )
 
-  const scopedContextIds = new Set<string>()
-  for (const { host } of visibleHosts) {
-    const contextRef = host.spec?.contextRef
-    if (contextRef) scopedContextIds.add(contextRef)
-  }
-
-  let allowedByContext = new Map<string, Set<string>>()
-  if (scopedContextIds.size > 0) {
-    try {
-      allowedByContext = await loadAllowedNamesByContext(
-        gateway,
-        mcpServersNamespace,
-        scopedContextIds
-      )
-    } catch (err) {
+  const allowedByContext = await loadHostContextAllowlists(
+    gateway,
+    mcpServersNamespace,
+    visibleHosts,
+    connectorsLog,
+    err => {
       // Preserve the authorized directory DTOs with empty connector lists —
       // loudly, so a Context-read outage is distinguishable from "no tools".
       connectorsLog.error(
@@ -603,7 +650,7 @@ export async function resolveConnectorsForAgents(
         'context allowlist load failed; connectors served with empty lists'
       )
     }
-  }
+  )
 
   // Union of every allowlisted name across the visible agents' contexts, so the
   // authoritative grant-presence check runs ONCE per unique oauth server.

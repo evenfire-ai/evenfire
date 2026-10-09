@@ -28,12 +28,30 @@ function seedHost(gateway: MockGateway, name: string, contextRef: string): void 
   void gateway.createResource('hosts', { metadata: { name }, spec: { contextRef } }, HOSTS_NS)
 }
 
-function seedContext(gateway: MockGateway, contextId: string, mcpServers: string[]): void {
+/**
+ * A Context CR: `name` is the resource name (`metadata.name`) a Host/McpServer
+ * `contextRef` names; `contextId` is the wire id (`spec.contextId`), which the
+ * CRD does not require to equal the name. Defaults to the same string.
+ */
+function seedContext(
+  gateway: MockGateway,
+  name: string,
+  mcpServers: string[],
+  contextId: string = name
+): void {
   void gateway.createResource(
     'contexts',
-    { metadata: { name: contextId }, spec: { contextId, mcpServers } },
+    { metadata: { name }, spec: { contextId, mcpServers } },
     MCP_NS
   )
+}
+
+/** Mark a seeded Context as terminating (the mock's create drops deletionTimestamp). */
+async function markTerminating(gateway: MockGateway, name: string): Promise<void> {
+  const row = (await gateway.getResource('contexts', name, MCP_NS)) as {
+    metadata: { deletionTimestamp?: string }
+  }
+  row.metadata.deletionTimestamp = '2026-10-01T00:00:00Z'
 }
 
 function directory(
@@ -277,7 +295,14 @@ describe('authorizeMcpOAuthConsent — fail closed', () => {
   ])('a %s Host contributes nothing', async (_label, hostCr) => {
     const listResource = vi.fn(async (plural: string) => {
       if (plural === 'hosts') return [hostCr]
-      if (plural === 'contexts') return [{ spec: { contextId: 'ctx-b', mcpServers: ['gdrive'] } }]
+      if (plural === 'contexts') {
+        return [
+          {
+            metadata: { name: 'ctx-b', namespace: MCP_NS },
+            spec: { contextId: 'ctx-b', mcpServers: ['gdrive'] },
+          },
+        ]
+      }
       return []
     })
     const gateway = { listResource } as unknown as K8sGateway
@@ -319,5 +344,179 @@ describe('authorizeMcpOAuthConsent — fail closed', () => {
         directory({ userAgents: ['agent-b'] })
       )
     ).rejects.toThrow('apiserver down')
+  })
+})
+
+// PR #1004 R2 — Context identity. A Host / McpServer `contextRef` names the
+// Context RESOURCE (`metadata.name`), as host-context-controller reads it; only
+// a legacy user_contexts id may be an unambiguous wire-id alias. The reviewer's
+// matrix: the server name stays `gdrive` throughout.
+describe('authorizeMcpOAuthConsent — Context identity (PR #1004 R2)', () => {
+  const admit = (
+    gateway: MockGateway,
+    server: McpOAuthConsentServer,
+    dir: ContextMembershipDirectory
+  ) => authorizeMcpOAuthConsent(gateway as never, 'user-1', server, dir)
+
+  describe('per-user', () => {
+    it('admits owner exposure when the Context name equals its wire id', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'owner-agent', 'ctx-owner')
+      seedContext(gateway, 'ctx-owner', ['gdrive'])
+      await expect(
+        admit(gateway, perUser(), directory({ userAgents: ['owner-agent'] }))
+      ).resolves.toBe(true)
+    })
+
+    it('admits a Host ref naming resource ctx-a whose wire id is ctx-wire-a', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'agent-a', 'ctx-a')
+      seedContext(gateway, 'ctx-a', ['gdrive'], 'ctx-wire-a')
+      await expect(admit(gateway, perUser(), directory({ userAgents: ['agent-a'] }))).resolves.toBe(
+        true
+      )
+    })
+
+    it('admits a secondary reachable Context that legitimately exposes the server', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'agent-b', 'ctx-b')
+      seedContext(gateway, 'ctx-owner', ['gdrive'], 'wire-owner')
+      seedContext(gateway, 'ctx-b', ['gdrive'], 'wire-b')
+      await expect(admit(gateway, perUser(), directory({ userAgents: ['agent-b'] }))).resolves.toBe(
+        true
+      )
+    })
+
+    it.each([
+      ['A listed first', ['a', 'b']],
+      ['B listed first', ['b', 'a']],
+    ])(
+      "denies Host-A-only when B.contextId collides with A's resource name (%s)",
+      async (_label, order) => {
+        const gateway = new MockGateway()
+        seedHost(gateway, 'agent-a', 'ctx-a')
+        for (const which of order) {
+          if (which === 'a') seedContext(gateway, 'ctx-a', ['other-server'], 'ctx-wire-a')
+          else seedContext(gateway, 'ctx-b', ['gdrive'], 'ctx-a')
+        }
+        await expect(
+          admit(gateway, perUser('ctx-b'), directory({ userAgents: ['agent-a'] }))
+        ).resolves.toBe(false)
+      }
+    )
+
+    it('admits a legacy user_contexts row holding the unambiguous wire-id alias', async () => {
+      const gateway = new MockGateway()
+      seedContext(gateway, 'ctx-a', ['gdrive'], 'ctx-wire-a')
+      await expect(
+        admit(gateway, perUser(), directory({ userContexts: ['ctx-wire-a'] }))
+      ).resolves.toBe(true)
+    })
+
+    it('denies a legacy alias shared by two Contexts (ambiguous)', async () => {
+      const gateway = new MockGateway()
+      seedContext(gateway, 'ctx-a', ['gdrive'], 'wire')
+      seedContext(gateway, 'ctx-b', ['notion'], 'wire')
+      await expect(admit(gateway, perUser(), directory({ userContexts: ['wire'] }))).resolves.toBe(
+        false
+      )
+    })
+
+    it('denies a legacy ref naming one Context and aliasing another (collision)', async () => {
+      const gateway = new MockGateway()
+      seedContext(gateway, 'ctx-a', ['gdrive'], 'ctx-wire-a')
+      seedContext(gateway, 'ctx-b', ['gdrive'], 'ctx-a')
+      await expect(admit(gateway, perUser(), directory({ userContexts: ['ctx-a'] }))).resolves.toBe(
+        false
+      )
+    })
+
+    it('denies a Host ref to a terminating Context without hopping to an alias', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'agent-a', 'ctx-a')
+      seedContext(gateway, 'ctx-a', ['gdrive'], 'ctx-wire-a')
+      await markTerminating(gateway, 'ctx-a')
+      seedContext(gateway, 'ctx-b', ['gdrive'], 'ctx-a')
+      await expect(admit(gateway, perUser(), directory({ userAgents: ['agent-a'] }))).resolves.toBe(
+        false
+      )
+    })
+  })
+
+  describe('shared', () => {
+    it('admits a Host member of the owner resource whose wire id differs', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'owner-agent', 'ctx-owner')
+      seedContext(gateway, 'ctx-owner', ['gdrive'], 'wire-owner')
+      await expect(
+        admit(gateway, shared(), directory({ userAgents: ['owner-agent'] }))
+      ).resolves.toBe(true)
+    })
+
+    it('admits a legacy member holding the owner Context wire-id alias', async () => {
+      const gateway = new MockGateway()
+      seedContext(gateway, 'ctx-owner', ['gdrive'], 'wire-owner')
+      await expect(
+        admit(gateway, shared(), directory({ userContexts: ['wire-owner'] }))
+      ).resolves.toBe(true)
+    })
+
+    it('denies a member of a non-owner Context that allowlists the server', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'agent-b', 'ctx-b')
+      seedContext(gateway, 'ctx-owner', ['gdrive'])
+      seedContext(gateway, 'ctx-b', ['gdrive'])
+      await expect(admit(gateway, shared(), directory({ userAgents: ['agent-b'] }))).resolves.toBe(
+        false
+      )
+    })
+
+    it('denies a Host member whose resource name is the owner Context wire id', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'agent-a', 'ctx-a')
+      seedContext(gateway, 'ctx-a', [], 'ctx-wire-a')
+      seedContext(gateway, 'ctx-owner', ['gdrive'], 'ctx-a')
+      await expect(admit(gateway, shared(), directory({ userAgents: ['agent-a'] }))).resolves.toBe(
+        false
+      )
+    })
+
+    it('denies a legacy ref whose alias collides with another resource name', async () => {
+      const gateway = new MockGateway()
+      seedContext(gateway, 'ctx-a', [], 'ctx-wire-a')
+      seedContext(gateway, 'ctx-owner', ['gdrive'], 'ctx-a')
+      await expect(admit(gateway, shared(), directory({ userContexts: ['ctx-a'] }))).resolves.toBe(
+        false
+      )
+    })
+
+    it('denies when the owner Context resource is missing, even for a matching ref', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'owner-agent', 'ctx-owner')
+      await expect(
+        admit(
+          gateway,
+          shared(),
+          directory({ userAgents: ['owner-agent'], userContexts: ['ctx-owner'] })
+        )
+      ).resolves.toBe(false)
+    })
+
+    it('denies when the owner Context resource is terminating', async () => {
+      const gateway = new MockGateway()
+      seedHost(gateway, 'owner-agent', 'ctx-owner')
+      seedContext(gateway, 'ctx-owner', ['gdrive'])
+      await markTerminating(gateway, 'ctx-owner')
+      await expect(
+        admit(gateway, shared(), directory({ userAgents: ['owner-agent'] }))
+      ).resolves.toBe(false)
+    })
+
+    it('reads no Contexts when the user is a member of none', async () => {
+      const gateway = new MockGateway()
+      const listResource = vi.spyOn(gateway, 'listResource')
+      await expect(admit(gateway, shared(), directory())).resolves.toBe(false)
+      expect(listResource).not.toHaveBeenCalledWith('contexts', expect.anything())
+    })
   })
 })

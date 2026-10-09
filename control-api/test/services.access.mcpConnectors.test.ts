@@ -62,7 +62,13 @@ const host = (name: string, contextRef: string | null) => ({
   spec: contextRef ? { contextRef } : {},
 })
 
-const ctx = (contextId: string, servers: string[]) => ({
+/**
+ * A Context CR as the API lists it. `name` is the resource name a Host /
+ * McpServer `contextRef` names; `contextId` is the wire id, which the CRD does
+ * not require to match (defaults to the same string).
+ */
+const ctx = (name: string, servers: string[], contextId: string = name) => ({
+  metadata: { name, namespace: NS },
   spec: { contextId, mcpServers: servers },
 })
 
@@ -206,6 +212,12 @@ describe('resolveConnectorsForAgents ⇄ authorizeMcpOAuthConsent — agreement 
             )
           ),
           allowlists: fc.tuple(...CONTEXTS.map(() => fc.subarray(SERVERS))),
+          // Wire ids that may differ from the resource name, alias another
+          // resource's name (collision), or be shared (ambiguous).
+          contextIds: fc.tuple(
+            ...CONTEXTS.map(() => fc.constantFrom(...CONTEXTS, 'wire-0', 'wire-1'))
+          ),
+          legacyContexts: fc.subarray([...CONTEXTS, 'wire-0', 'wire-1']),
           servers: fc.tuple(
             ...SERVERS.map(() =>
               fc.record({
@@ -230,7 +242,9 @@ describe('resolveConnectorsForAgents ⇄ authorizeMcpOAuthConsent — agreement 
               ...(h.state === 'disabled' ? { enabled: false } : {}),
             },
           }))
-          const contexts = CONTEXTS.map((id, i) => ctx(id, world.allowlists[i]))
+          const contexts = CONTEXTS.map((name, i) =>
+            ctx(name, world.allowlists[i], world.contextIds[i])
+          )
           const mcpservers = world.servers.map((s, i) =>
             oauthServer(SERVERS[i], s.grantScope, s.owner)
           )
@@ -238,7 +252,10 @@ describe('resolveConnectorsForAgents ⇄ authorizeMcpOAuthConsent — agreement 
 
           // The user reaches agents directly and through one active team.
           const directory = {
-            getUserContexts: async (userId: string) => ({ userId, contextIds: [] }),
+            getUserContexts: async (userId: string) => ({
+              userId,
+              contextIds: world.legacyContexts,
+            }),
             getUserAgents: async (userId: string) => ({ userId, agentNames: world.directAgents }),
             listTeams: async (_userId: string, currentTeamId: string) => ({
               currentTeamId,
@@ -264,6 +281,45 @@ describe('resolveConnectorsForAgents ⇄ authorizeMcpOAuthConsent — agreement 
               expect(admitted, `${agent.name} offers ${connector.name}`).toBe(true)
             }
           }
+        }
+      ),
+      { numRuns: 200 }
+    )
+  })
+})
+
+// PR #1004 R2 — a Host `contextRef` names the Context RESOURCE. Whatever wire
+// ids the Contexts carry, an agent's connectors come only from the resource
+// whose `metadata.name` equals its Host's `contextRef`.
+describe('resolveConnectorsForAgents — Context identity property', () => {
+  const NAMES = ['ctx-0', 'ctx-1', 'ctx-2']
+  const SERVERS = ['srv-0', 'srv-1', 'srv-2', 'srv-3']
+
+  it('a Host ref never yields a connector from a resource whose name differs', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.tuple(
+          ...NAMES.map(() =>
+            fc.record({
+              contextId: fc.constantFrom(...NAMES, 'wire-0'),
+              servers: fc.subarray(SERVERS),
+            })
+          )
+        ),
+        fc.constantFrom(...NAMES, 'wire-0'),
+        fc.boolean(),
+        async (specs, hostRef, reversed) => {
+          grantExists.mockResolvedValue(false)
+          const contexts = NAMES.map((name, i) => ctx(name, specs[i].servers, specs[i].contextId))
+          const g = gateway({
+            hosts: [host('agent-a', hostRef)],
+            contexts: reversed ? [...contexts].reverse() : contexts,
+            mcpservers: SERVERS.map(name => noneServer(name)),
+          })
+          const [agent] = await connectorsFor(g, ['agent-a'])
+          const index = NAMES.indexOf(hostRef)
+          const expected = index === -1 ? [] : [...specs[index].servers].sort()
+          expect(agent.connectors.map(c => c.name)).toEqual(expected)
         }
       ),
       { numRuns: 200 }
