@@ -36,9 +36,11 @@ describe('pending external logout intent', () => {
     recordPendingExternalLogout(userDataDirectory, ENV_A)
 
     expect(hasPendingExternalLogout(userDataDirectory, ENV_A)).toBe(true)
-    expect(await fs.readFile(markerPath(ENV_A), 'utf8')).toBe(
-      JSON.stringify({ version: 1, intent: 'logout-pending' })
-    )
+    expect(JSON.parse(await fs.readFile(markerPath(ENV_A), 'utf8'))).toEqual({
+      version: 1,
+      revision: expect.any(String),
+      intent: 'logout-pending',
+    })
     expect((await fs.stat(markerPath(ENV_A))).mode & 0o777).toBe(0o600)
     expect(await fs.readdir(userDataDirectory)).toEqual([
       `pending-external-logout-${createHash('sha256').update(ENV_A).digest('hex')}`,

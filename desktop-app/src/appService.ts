@@ -36,10 +36,14 @@ import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import {
   type PendingExternalLogoutIntent,
-  clearPendingExternalLogout,
-  readPendingExternalLogoutIntent,
+  type PendingExternalLogoutMarker,
+  clearPendingExternalLogoutIfContentsUnchanged,
+  clearPendingExternalLogoutIfUnchanged,
+  readPendingExternalLogoutContentsRevision,
+  readPendingExternalLogoutMarker,
   recordPendingExternalLogout,
-  recordPendingKeytarCleanup,
+  recordPendingKeytarCleanupIfMissing,
+  recordPendingKeytarCleanupIfUnchanged,
 } from './pendingExternalLogout.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
@@ -889,7 +893,8 @@ type ActiveTeamContextHop = {
 
 type PendingLogoutLoginPlan = {
   intent: PendingExternalLogoutIntent | null
-  replaceKeytarEntry: boolean
+  marker: PendingExternalLogoutMarker | null
+  malformedMarkerContentsRevision: string | null
   writeKeytar: boolean
   requireSafeStorage: boolean
   retireMarker: boolean
@@ -900,10 +905,7 @@ type SavedSessionRestorePolicy = 'normal' | 'safe-storage-only' | 'keytar-active
 
 type SavedSessionRestorePlan = {
   policy: SavedSessionRestorePolicy
-  pendingCleanupIntent: Extract<
-    PendingExternalLogoutIntent,
-    { intent: 'keytar-cleanup-pending' }
-  > | null
+  pendingCleanupMarker: PendingExternalLogoutMarker | null
   retireMarkerAfterRestore: boolean
 }
 
@@ -1202,7 +1204,18 @@ export class AppService {
       this.rpcTokenManager.clear()
       this.profileUiBaseUrlCache = null
       this.accessCatalog = null
-      await this.tokenStore.setSessionToken(token, getActiveEnvKey())
+      const envKey = getActiveEnvKey()
+      const pendingMarker = readPendingExternalLogoutMarker(this.getUserDataDirectory(), envKey)
+      if (
+        pendingMarker?.intent.intent === 'keytar-cleanup-pending' &&
+        pendingMarker.intent.credentialSource === 'safe-storage'
+      ) {
+        // A safe-storage cleanup marker makes the encrypted file authoritative
+        // until Keytar cleanup is verified. Team switches must update that file.
+        await this.tokenStore.setSafeStorageSessionToken(token, envKey)
+      } else {
+        await this.tokenStore.setSessionToken(token, envKey)
+      }
       if (this.gfsTransientTeamHopDepth === 0) {
         this.updateEntityChangeSessionToken(token)
         this.restartEntityChangeStreamForSessionReplacement()
@@ -1749,20 +1762,22 @@ export class AppService {
   private async clearPendingExternalLogoutBeforeRestore(): Promise<SavedSessionRestorePlan | null> {
     const userDataDirectory = this.getUserDataDirectory()
     const envKey = getActiveEnvKey()
-    let intent: PendingExternalLogoutIntent | null
+    let marker: PendingExternalLogoutMarker | null
     try {
-      intent = readPendingExternalLogoutIntent(userDataDirectory, envKey)
+      marker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
     } catch (error) {
       await this.failClosedForPendingLogout(error)
       return null
     }
-    if (!intent) {
+    if (!marker) {
       return {
         policy: 'normal',
-        pendingCleanupIntent: null,
+        pendingCleanupMarker: null,
         retireMarkerAfterRestore: false,
       }
     }
+
+    const intent = marker.intent
 
     if (intent.intent === 'keytar-cleanup-pending') {
       const preserveActiveEnvKey = intent.credentialSource === 'active-keytar'
@@ -1784,12 +1799,20 @@ export class AppService {
         }
         return {
           policy: restorePolicy,
-          pendingCleanupIntent: intent,
+          pendingCleanupMarker: marker,
           retireMarkerAfterRestore: cleanupVerified,
         }
       } catch (error) {
         try {
-          recordPendingKeytarCleanup(userDataDirectory, envKey, intent.credentialSource)
+          const markerRewritten = recordPendingKeytarCleanupIfUnchanged(
+            userDataDirectory,
+            envKey,
+            marker,
+            intent.credentialSource
+          )
+          if (!markerRewritten) {
+            recordPendingKeytarCleanupIfMissing(userDataDirectory, envKey, intent.credentialSource)
+          }
         } catch (markerError) {
           this.reportDeferredLogoutFailureSafely(markerError)
         }
@@ -1797,7 +1820,7 @@ export class AppService {
           this.reportDeferredLogoutFailureSafely(error)
           return {
             policy: restorePolicy,
-            pendingCleanupIntent: intent,
+            pendingCleanupMarker: marker,
             retireMarkerAfterRestore: false,
           }
         }
@@ -1811,7 +1834,7 @@ export class AppService {
         this.logoutOnce({ strictTokenClear: true })
       )
       if (result.keytarAvailable || result.keytarDisabled) {
-        clearPendingExternalLogout(userDataDirectory, envKey)
+        clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker)
       }
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
@@ -1843,23 +1866,56 @@ export class AppService {
     userDataDirectory: string,
     envKey: string
   ): Promise<PendingLogoutLoginPlan> {
-    let intent: PendingExternalLogoutIntent | null
+    let marker: PendingExternalLogoutMarker | null
     try {
-      intent = readPendingExternalLogoutIntent(userDataDirectory, envKey)
-    } catch (error) {
-      await this.failClosedForPendingLogout(error)
-      throw error
+      marker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
+    } catch (markerError) {
+      let malformedMarkerContentsRevision: string | null
+      try {
+        malformedMarkerContentsRevision = readPendingExternalLogoutContentsRevision(
+          userDataDirectory,
+          envKey
+        )
+      } catch {
+        await this.failClosedForPendingLogout(markerError)
+        throw markerError
+      }
+      if (!malformedMarkerContentsRevision) {
+        await this.failClosedForPendingLogout(markerError)
+        throw markerError
+      }
+
+      // Startup stays fail-closed for an unreadable marker. An explicit login
+      // can recover only after strict cleanup and a verified secure write.
+      try {
+        const result = await this.logoutOnce({ strictTokenClear: true })
+        return {
+          intent: { intent: 'logout-pending' },
+          marker: null,
+          malformedMarkerContentsRevision,
+          writeKeytar: result.keytarAvailable === true,
+          requireSafeStorage: !result.keytarAvailable,
+          retireMarker: result.keytarAvailable || result.keytarDisabled,
+          credentialSource: result.keytarAvailable ? 'active-keytar' : 'safe-storage',
+        }
+      } catch (clearError) {
+        await this.failClosedForPendingLogout(clearError)
+        throw clearError
+      }
     }
-    if (!intent) {
+    if (!marker) {
       return {
         intent: null,
-        replaceKeytarEntry: false,
+        marker: null,
+        malformedMarkerContentsRevision: null,
         writeKeytar: false,
         requireSafeStorage: false,
         retireMarker: false,
         credentialSource: null,
       }
     }
+
+    const intent = marker.intent
 
     if (intent.intent === 'keytar-cleanup-pending') {
       const preserveActiveEnvKey = intent.credentialSource === 'active-keytar'
@@ -1871,7 +1927,8 @@ export class AppService {
         const cleanupVerified = result.keytarAvailable || result.keytarDisabled
         return {
           intent,
-          replaceKeytarEntry: false,
+          marker,
+          malformedMarkerContentsRevision: null,
           writeKeytar: result.keytarAvailable,
           requireSafeStorage: !result.keytarAvailable,
           retireMarker: cleanupVerified,
@@ -1884,7 +1941,8 @@ export class AppService {
         ) {
           return {
             intent,
-            replaceKeytarEntry: true,
+            marker,
+            malformedMarkerContentsRevision: null,
             writeKeytar: true,
             requireSafeStorage: false,
             retireMarker: true,
@@ -1898,7 +1956,8 @@ export class AppService {
           this.reportDeferredLogoutFailureSafely(error)
           return {
             intent,
-            replaceKeytarEntry: false,
+            marker,
+            malformedMarkerContentsRevision: null,
             writeKeytar: true,
             requireSafeStorage: false,
             retireMarker: false,
@@ -1909,7 +1968,8 @@ export class AppService {
           this.reportDeferredLogoutFailureSafely(error)
           return {
             intent,
-            replaceKeytarEntry: false,
+            marker,
+            malformedMarkerContentsRevision: null,
             writeKeytar: false,
             requireSafeStorage: true,
             retireMarker: false,
@@ -1928,9 +1988,10 @@ export class AppService {
       const result = await this.logoutOnce({ strictTokenClear: true })
       return {
         intent,
-        replaceKeytarEntry: false,
+        marker,
+        malformedMarkerContentsRevision: null,
         writeKeytar: result.keytarAvailable === true,
-        requireSafeStorage: !result.keytarAvailable,
+        requireSafeStorage: !result.keytarAvailable && !result.keytarDisabled,
         retireMarker: result.keytarAvailable || result.keytarDisabled,
         credentialSource: result.keytarAvailable || result.keytarDisabled ? null : 'safe-storage',
       }
@@ -1941,7 +2002,8 @@ export class AppService {
       ) {
         return {
           intent,
-          replaceKeytarEntry: true,
+          marker,
+          malformedMarkerContentsRevision: null,
           writeKeytar: true,
           requireSafeStorage: false,
           retireMarker: true,
@@ -1955,7 +2017,8 @@ export class AppService {
         this.reportDeferredLogoutFailureSafely(error)
         return {
           intent,
-          replaceKeytarEntry: false,
+          marker,
+          malformedMarkerContentsRevision: null,
           writeKeytar: true,
           requireSafeStorage: false,
           retireMarker: false,
@@ -1964,12 +2027,13 @@ export class AppService {
       }
       if (
         error instanceof SessionTokenStorageClearError &&
-        error.canUseFileFallbackWhileMarkerRemains()
+        error.canUseSecureFileFallbackWhileMarkerRemains()
       ) {
         this.reportDeferredLogoutFailureSafely(error)
         return {
           intent,
-          replaceKeytarEntry: false,
+          marker,
+          malformedMarkerContentsRevision: null,
           writeKeytar: false,
           requireSafeStorage: true,
           retireMarker: false,
@@ -1985,7 +2049,7 @@ export class AppService {
     options: { runLaunchMaintenance?: boolean } = {},
     restorePlan: SavedSessionRestorePlan = {
       policy: 'normal',
-      pendingCleanupIntent: null,
+      pendingCleanupMarker: null,
       retireMarkerAfterRestore: false,
     }
   ) {
@@ -2077,30 +2141,26 @@ export class AppService {
     restorePlan: SavedSessionRestorePlan,
     envKey: string
   ): void {
-    const intent = restorePlan.pendingCleanupIntent
-    if (!intent || !restorePlan.retireMarkerAfterRestore) return
+    const marker = restorePlan.pendingCleanupMarker
+    if (!marker || !restorePlan.retireMarkerAfterRestore) return
+    const intent = marker.intent
+    if (intent.intent !== 'keytar-cleanup-pending') return
 
     const userDataDirectory = this.getUserDataDirectory()
-    let currentIntent: PendingExternalLogoutIntent | null
     try {
-      currentIntent = readPendingExternalLogoutIntent(userDataDirectory, envKey)
-    } catch (error) {
-      this.reportDeferredLogoutFailureSafely(error)
-      return
-    }
-    if (
-      currentIntent?.intent !== 'keytar-cleanup-pending' ||
-      currentIntent.credentialSource !== intent.credentialSource
-    ) {
-      return
-    }
-
-    try {
-      clearPendingExternalLogout(userDataDirectory, envKey)
+      clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker)
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
       try {
-        recordPendingKeytarCleanup(userDataDirectory, envKey, intent.credentialSource)
+        const markerRewritten = recordPendingKeytarCleanupIfUnchanged(
+          userDataDirectory,
+          envKey,
+          marker,
+          intent.credentialSource
+        )
+        if (!markerRewritten) {
+          recordPendingKeytarCleanupIfMissing(userDataDirectory, envKey, intent.credentialSource)
+        }
       } catch (markerError) {
         this.reportDeferredLogoutFailureSafely(markerError)
       }
@@ -2114,14 +2174,15 @@ export class AppService {
   async applyPendingExternalLogoutIntent(): Promise<boolean> {
     const userDataDirectory = this.getUserDataDirectory()
     const envKey = getActiveEnvKey()
-    let intent: PendingExternalLogoutIntent | null
+    let marker: PendingExternalLogoutMarker | null
     try {
-      intent = readPendingExternalLogoutIntent(userDataDirectory, envKey)
+      marker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
     } catch (error) {
       await this.failClosedForPendingLogout(error)
       throw error
     }
-    if (!intent) return false
+    if (!marker) return false
+    const intent = marker.intent
 
     if (intent.intent === 'keytar-cleanup-pending') {
       const preserveActiveEnvKey = intent.credentialSource === 'active-keytar'
@@ -2133,11 +2194,19 @@ export class AppService {
           })
         )
         if (result.keytarAvailable || result.keytarDisabled) {
-          clearPendingExternalLogout(userDataDirectory, envKey)
+          clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker)
         }
       } catch (error) {
         try {
-          recordPendingKeytarCleanup(userDataDirectory, envKey, intent.credentialSource)
+          const markerRewritten = recordPendingKeytarCleanupIfUnchanged(
+            userDataDirectory,
+            envKey,
+            marker,
+            intent.credentialSource
+          )
+          if (!markerRewritten) {
+            recordPendingKeytarCleanupIfMissing(userDataDirectory, envKey, intent.credentialSource)
+          }
         } catch (markerError) {
           this.reportDeferredLogoutFailureSafely(markerError)
         }
@@ -2150,7 +2219,7 @@ export class AppService {
       this.logoutOnce({ strictTokenClear: true })
     )
     if (result.keytarAvailable || result.keytarDisabled) {
-      clearPendingExternalLogout(userDataDirectory, envKey)
+      clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker)
     }
     return true
   }
@@ -2212,6 +2281,7 @@ export class AppService {
       let requireSafeStorage = pendingLogout.requireSafeStorage
       let freshTokenUsesSafeStorageOnly = false
       let freshTokenUsesActiveKeytar = false
+      let freshTokenUsesDefaultStore = false
       let credentialSource = pendingLogout.credentialSource
       try {
         const previousToken = this.sessionToken
@@ -2270,14 +2340,16 @@ export class AppService {
             this.reportDeferredLogoutFailureSafely(keytarError)
           }
         } else if (pendingLogout.intent) {
-          if (!requireSafeStorage) {
-            throw new Error(
-              'No secure session-token store is available for pending logout recovery'
-            )
+          if (requireSafeStorage) {
+            await this.tokenStore.setSafeStorageSessionToken(result.token, envKey)
+            freshTokenUsesSafeStorageOnly = true
+            credentialSource = 'safe-storage'
+          } else {
+            // Isolated development storage has no Keytar by construction. Its
+            // strict clear completed before this fresh, ordinary test login.
+            await this.tokenStore.setSessionToken(result.token, envKey, {})
+            freshTokenUsesDefaultStore = true
           }
-          await this.tokenStore.setSafeStorageSessionToken(result.token, envKey)
-          freshTokenUsesSafeStorageOnly = true
-          credentialSource = 'safe-storage'
         } else {
           await this.tokenStore.setSessionToken(result.token, envKey, {})
         }
@@ -2287,16 +2359,39 @@ export class AppService {
             ? await this.tokenStore.getSafeStorageSessionToken(envKey)
             : freshTokenUsesActiveKeytar
               ? await this.tokenStore.getKeytarSessionToken(envKey)
-              : null
+              : freshTokenUsesDefaultStore
+                ? await this.tokenStore.getSessionToken(envKey)
+                : null
           if (readBack !== result.token) {
             throw new Error('Fresh session token could not be verified in its secure store')
           }
         }
         this.activateGfsAuthScope()
         if (pendingLogout.intent && retirePendingLogoutMarker) {
-          clearPendingExternalLogout(userDataDirectory, envKey)
+          const markerRetired = pendingLogout.marker
+            ? clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, pendingLogout.marker)
+            : pendingLogout.malformedMarkerContentsRevision
+              ? clearPendingExternalLogoutIfContentsUnchanged(
+                  userDataDirectory,
+                  envKey,
+                  pendingLogout.malformedMarkerContentsRevision
+                )
+              : false
+          if (!markerRetired) {
+            throw new Error('Pending logout intent changed while login was completing')
+          }
         } else if (pendingLogout.intent) {
-          recordPendingKeytarCleanup(userDataDirectory, envKey, credentialSource ?? 'safe-storage')
+          if (
+            !pendingLogout.marker ||
+            !recordPendingKeytarCleanupIfUnchanged(
+              userDataDirectory,
+              envKey,
+              pendingLogout.marker,
+              credentialSource ?? 'safe-storage'
+            )
+          ) {
+            throw new Error('Pending logout intent changed while login was completing')
+          }
         }
         return { authenticated: true, me: result.me }
       } catch (error) {
@@ -2753,13 +2848,42 @@ export class AppService {
     const envKey = getActiveEnvKey()
     return this.runCredentialProducer(
       async () => {
-        const intent = readPendingExternalLogoutIntent(this.getUserDataDirectory(), envKey)
-        if (intent?.intent === 'keytar-cleanup-pending') {
-          recordPendingExternalLogout(this.getUserDataDirectory(), envKey)
+        const userDataDirectory = this.getUserDataDirectory()
+        let marker: PendingExternalLogoutMarker | null = null
+        let markerInspectionFailed = false
+        try {
+          marker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
+        } catch (error) {
+          markerInspectionFailed = true
+          this.reportDeferredLogoutFailureSafely(error)
         }
-        const result = await this.logoutOnce({ strictTokenClear: intent !== null })
-        if (intent && (result.keytarAvailable || result.keytarDisabled)) {
-          clearPendingExternalLogout(this.getUserDataDirectory(), envKey)
+
+        if (marker?.intent.intent === 'keytar-cleanup-pending') {
+          try {
+            recordPendingExternalLogout(userDataDirectory, envKey)
+            marker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
+          } catch (error) {
+            markerInspectionFailed = true
+            this.reportDeferredLogoutFailureSafely(error)
+          }
+        }
+
+        try {
+          const result = await this.logoutOnce({
+            strictTokenClear: marker !== null || markerInspectionFailed,
+          })
+          if (
+            marker &&
+            (result.keytarAvailable || result.keytarDisabled) &&
+            !markerInspectionFailed
+          ) {
+            clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker)
+          }
+        } catch (error) {
+          // Once a logout marker is durable, a later Keytar cleanup failure is
+          // recoverable on the next launch. Marker I/O failures also must not
+          // leave the renderer over an authenticated main-process session.
+          await this.failClosedForPendingLogout(error)
         }
       },
       () => {

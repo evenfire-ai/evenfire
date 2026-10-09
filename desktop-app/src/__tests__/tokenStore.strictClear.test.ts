@@ -42,8 +42,11 @@ describe('TokenStore strict session clearing', () => {
     })
 
     await expect(
-      new TokenStore().clearSessionToken('env_a-000000000000', { throwOnStorageError: true })
-    ).resolves.toBeUndefined()
+      new TokenStore().clearSessionTokenStrictly('env_a-000000000000')
+    ).resolves.toMatchObject({
+      keytarAvailable: false,
+      keytarDisabled: false,
+    })
 
     await expect(access(activeToken)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(access(legacyToken)).rejects.toMatchObject({ code: 'ENOENT' })

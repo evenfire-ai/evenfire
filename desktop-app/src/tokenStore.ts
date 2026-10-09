@@ -83,7 +83,7 @@ export class SessionTokenStorageClearError extends AggregateError {
     )
   }
 
-  canUseFileFallbackWhileMarkerRemains(): boolean {
+  canUseSecureFileFallbackWhileMarkerRemains(): boolean {
     return this.failedKeytarAccounts.length > 0 && this.failedFileCount === 0
   }
 
@@ -494,7 +494,7 @@ export class TokenStore {
   async setSessionToken(
     token: string,
     envKey: string,
-    options: { requireKeytar?: boolean; requireSafeStorageFallback?: boolean } = {}
+    options: { requireKeytar?: boolean } = {}
   ): Promise<void> {
     return this.trackOperation(() => this.setSessionTokenOnce(token, envKey, options))
   }
@@ -517,7 +517,7 @@ export class TokenStore {
   private async setSessionTokenOnce(
     token: string,
     envKey: string,
-    options: { requireKeytar?: boolean; requireSafeStorageFallback?: boolean } = {}
+    options: { requireKeytar?: boolean } = {}
   ): Promise<void> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
@@ -544,17 +544,13 @@ export class TokenStore {
       return
     }
 
-    if (options.requireSafeStorageFallback) {
-      throw new Error('Electron safeStorage is unavailable for session-token fallback')
-    }
-
     const file = await this.plainFilePath(envKey)
     await writeTokenFileAtomic(file, JSON.stringify({ token }))
   }
 
   async clearSessionToken(
     envKey: string,
-    options: { legacyEnvKeys?: readonly string[]; throwOnStorageError?: boolean } = {}
+    options: { legacyEnvKeys?: readonly string[] } = {}
   ): Promise<void> {
     return this.trackOperation(async () => {
       await this.clearSessionTokenOnce(envKey, options)

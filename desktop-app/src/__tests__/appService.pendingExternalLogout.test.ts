@@ -111,12 +111,22 @@ function internals(service: InstanceType<typeof AppServiceClass>) {
   return service as unknown as {
     restoreSavedSessionOnce: (...args: unknown[]) => Promise<unknown>
     installAuthenticatedLoginOnce: (result: typeof loginResult) => Promise<unknown>
+    installAuthenticatedLogin: (result: typeof loginResult) => Promise<unknown>
+    commitSessionToken: (token: string, options?: { refreshMe?: boolean }) => Promise<void>
     runCredentialProducer: (operation: () => Promise<unknown>) => Promise<unknown>
     gfsDispatchBlocked: boolean
     quitPreparationStarted: boolean
     sessionToken: string | null
     me: unknown
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>(innerResolve => {
+    resolve = innerResolve
+  })
+  return { promise, resolve }
 }
 
 function markerPath(envKey = activeEnvKey): string {
@@ -393,7 +403,7 @@ describe('AppService pending external logout', () => {
       await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(false)
 
       expect(failedDirectorySync).toBe(true)
-      expect(JSON.parse(await fs.readFile(markerPath(), 'utf8'))).toEqual({
+      expect(JSON.parse(await fs.readFile(markerPath(), 'utf8'))).toMatchObject({
         version: 1,
         intent: 'keytar-cleanup-pending',
         credentialSource: 'safe-storage',
@@ -440,6 +450,168 @@ describe('AppService pending external logout', () => {
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(
       'fixture-stale-plaintext-session-token'
     )
+  })
+
+  it('removes stale active and legacy Keytar tokens before retiring a safeStorage marker', async () => {
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('fixture-stale-active-keytar-token', activeEnvKey)
+    keychain.set(keyOf('Evenfire', 'session-token'), 'fixture-stale-legacy-keytar-token')
+    await tokenStore.setSafeStorageSessionToken('fixture-safe-storage-session-token', activeEnvKey)
+    const authClient = (
+      service as unknown as {
+        authClient: { getMe: (token: string) => Promise<typeof loginResult.me> }
+      }
+    ).authClient
+    vi.spyOn(authClient, 'getMe').mockResolvedValue(loginResult.me)
+
+    await expect(service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+
+    expect(keychain.has(keyOf('Evenfire', `session-token::${activeEnvKey}`))).toBe(false)
+    expect(keychain.has(keyOf('Evenfire', 'session-token'))).toBe(false)
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+
+    const { service: restarted } = createService()
+    const restartedAuthClient = (
+      restarted as unknown as {
+        authClient: { getMe: (token: string) => Promise<typeof loginResult.me> }
+      }
+    ).authClient
+    vi.spyOn(restartedAuthClient, 'getMe').mockResolvedValue(loginResult.me)
+    await expect(restarted.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+    expect(internals(restarted).sessionToken).toBe('fixture-safe-storage-session-token')
+  })
+
+  it('recovers an explicit login from a malformed marker after secure persistence', async () => {
+    await fs.writeFile(markerPath(), '{not-json')
+    const { service } = createService()
+
+    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(internals(service).sessionToken).toBe(loginResult.token)
+    expect(await fs.readdir(userDataDirectory)).not.toContain(`session-token-${activeEnvKey}.json`)
+  })
+
+  it('does not read plaintext when the safeStorage-only source is absent', async () => {
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    const { tokenStore } = createService()
+    await fs.writeFile(
+      path.join(userDataDirectory, `session-token-${activeEnvKey}.json`),
+      JSON.stringify({ token: 'fixture-plaintext-token' })
+    )
+
+    await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBeNull()
+  })
+
+  it('allows the first isolated-development login after a strict marker cleanup', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const isolatedStore = new TokenStoreClass({ isolatedUserDataPath: userDataDirectory })
+    const { service } = createService(isolatedStore)
+
+    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(internals(service).sessionToken).toBe(loginResult.token)
+  })
+
+  it('keeps a logout marker and clears the runtime session when strict logout cleanup fails', async () => {
+    const reportFailure = vi.fn()
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
+    const { service, tokenStore } = createService(undefined, reportFailure)
+    await tokenStore.setSessionToken('fixture-stale-keytar-token', activeEnvKey)
+    const state = internals(service)
+    state.sessionToken = 'fixture-stale-keytar-token'
+    state.me = loginResult.me
+    const keytar = await import('keytar')
+    const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    vi.mocked(keytar.deletePassword).mockImplementation(async (_service, account) => {
+      if (account === `session-token::${activeEnvKey}`) {
+        throw new Error('keychain temporarily locked')
+      }
+      return originalDelete(_service, account)
+    })
+
+    try {
+      await expect(service.logout()).resolves.toBeUndefined()
+
+      expect(state.sessionToken).toBeNull()
+      expect(state.me).toBeNull()
+      expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+        intent: 'logout-pending',
+      })
+      expect(reportFailure).toHaveBeenCalledOnce()
+    } finally {
+      vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+    }
+  })
+
+  it('does not let an admitted login retire a newer quit-time logout marker', async () => {
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'active-keytar')
+    const { service, tokenStore } = createService()
+    const storageWriteStarted = deferred<void>()
+    const releaseStorageWrite = deferred<void>()
+    const setSessionToken = tokenStore.setSessionToken.bind(tokenStore)
+    vi.spyOn(tokenStore, 'setSessionToken').mockImplementation(async (...args) => {
+      storageWriteStarted.resolve()
+      await releaseStorageWrite.promise
+      return setSessionToken(...args)
+    })
+
+    const login = internals(service).installAuthenticatedLogin(loginResult)
+    await storageWriteStarted.promise
+    const draining = service.prepareForQuit()
+
+    await expect(service.logout()).rejects.toBeInstanceOf(QuitAdmissionClosedErrorClass)
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'logout-pending',
+    })
+
+    releaseStorageWrite.resolve()
+    await expect(login).rejects.toThrow('Pending logout intent changed while login was completing')
+    await draining
+
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'logout-pending',
+    })
+    expect(internals(service).sessionToken).toBeNull()
+  })
+
+  it('keeps safeStorage authoritative when a team switch persists a new session token', async () => {
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
+    const { service, tokenStore } = createService()
+    const state = internals(service)
+    state.sessionToken = 'fixture-old-safe-storage-token'
+    state.me = loginResult.me
+    await tokenStore.setSafeStorageSessionToken('fixture-old-safe-storage-token', activeEnvKey)
+
+    await state.commitSessionToken('fixture-switched-safe-storage-token')
+
+    await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBe(
+      'fixture-switched-safe-storage-token'
+    )
+    expect(keychain.has(keyOf('Evenfire', `session-token::${activeEnvKey}`))).toBe(false)
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'safe-storage',
+    })
   })
 
   it('clears the prior logout intent before persisting an explicit login', async () => {
@@ -881,7 +1053,7 @@ describe('AppService pending external logout', () => {
     }
   })
 
-  it('does not record a marker for an unrelated shutdown-shaped producer error', async () => {
+  it('finishes the in-memory logout when a non-storage step fails', async () => {
     const { service } = createService()
     const state = service as unknown as {
       sessionToken: string | null
@@ -894,11 +1066,11 @@ describe('AppService pending external logout', () => {
       new Error('Application is shutting down')
     )
 
-    await expect(service.logout()).rejects.toThrow('Application is shutting down')
+    await expect(service.logout()).resolves.toBeUndefined()
 
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
-    expect(state.sessionToken).toBe('active-session-token')
-    expect(state.me).toEqual(loginResult.me)
+    expect(state.sessionToken).toBeNull()
+    expect(state.me).toBeNull()
   })
 
   it('does not let environment B consume environment A logout intent', async () => {

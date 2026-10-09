@@ -42,9 +42,10 @@ describe('TokenStore without the Keytar module', () => {
       mode: 0o600,
     })
 
-    await expect(
-      new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
-    ).resolves.toBeUndefined()
+    await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).resolves.toMatchObject({
+      keytarAvailable: false,
+      keytarDisabled: false,
+    })
 
     await expect(fs.access(activeToken)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(fs.access(legacyToken)).rejects.toMatchObject({ code: 'ENOENT' })

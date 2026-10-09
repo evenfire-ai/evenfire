@@ -12,6 +12,19 @@ export type PendingExternalLogoutIntent =
       credentialSource: 'active-keytar' | 'safe-storage'
     }
 
+/**
+ * A durable view of a marker. New writes include a revision so a producer
+ * which started before a deferred logout cannot retire or downgrade that
+ * newer logout intent when it eventually finishes.
+ *
+ * Markers written by earlier builds do not have a revision. They remain
+ * readable and can be conditionally changed while they are unchanged.
+ */
+export type PendingExternalLogoutMarker = {
+  intent: PendingExternalLogoutIntent
+  revision: string | null
+}
+
 function markerPath(userDataDirectory: string, envKey: string): string {
   if (!path.isAbsolute(userDataDirectory)) {
     throw new Error('Pending logout intent requires an absolute userData path')
@@ -41,7 +54,7 @@ function syncDirectory(directory: string): void {
   }
 }
 
-function readMarkerIntent(filePath: string): PendingExternalLogoutIntent | null {
+function readMarkerContents(filePath: string): string | null {
   let contents: string
   let descriptor: number | undefined
   try {
@@ -86,8 +99,15 @@ function readMarkerIntent(filePath: string): PendingExternalLogoutIntent | null 
     if (descriptor !== undefined) fs.closeSync(descriptor)
   }
 
+  return contents
+}
+
+function readMarker(filePath: string): PendingExternalLogoutMarker | null {
+  const contents = readMarkerContents(filePath)
+  if (contents === null) return null
+
   // Empty markers were only written by this unmerged PR. Preserve them as logout intent.
-  if (contents === '') return { intent: 'logout-pending' }
+  if (contents === '') return { intent: { intent: 'logout-pending' }, revision: null }
 
   let parsed: unknown
   try {
@@ -102,11 +122,20 @@ function readMarkerIntent(filePath: string): PendingExternalLogoutIntent | null 
     version?: unknown
     intent?: unknown
     credentialSource?: unknown
+    revision?: unknown
   }
   if (record.version !== MARKER_VERSION) {
     throw new Error('Pending logout marker has an unsupported version')
   }
-  if (record.intent === 'logout-pending') return { intent: 'logout-pending' }
+  const revision =
+    record.revision === undefined
+      ? null
+      : typeof record.revision === 'string' && record.revision.length > 0
+        ? record.revision
+        : (() => {
+            throw new Error('Pending logout marker has an invalid revision')
+          })()
+  if (record.intent === 'logout-pending') return { intent: { intent: 'logout-pending' }, revision }
   if (
     record.intent !== 'keytar-cleanup-pending' ||
     (record.credentialSource !== 'active-keytar' && record.credentialSource !== 'safe-storage')
@@ -114,15 +143,19 @@ function readMarkerIntent(filePath: string): PendingExternalLogoutIntent | null 
     throw new Error('Pending logout marker has an unknown intent')
   }
   return {
-    intent: 'keytar-cleanup-pending',
-    credentialSource: record.credentialSource,
+    intent: {
+      intent: 'keytar-cleanup-pending',
+      credentialSource: record.credentialSource,
+    },
+    revision,
   }
 }
 
 function writeMarkerIntent(
   userDataDirectory: string,
   envKey: string,
-  intent: PendingExternalLogoutIntent
+  intent: PendingExternalLogoutIntent,
+  revision = randomUUID()
 ): void {
   const filePath = markerPath(userDataDirectory, envKey)
   fs.mkdirSync(userDataDirectory, { recursive: true })
@@ -137,7 +170,11 @@ function writeMarkerIntent(
   let descriptor: number | undefined
   try {
     descriptor = fs.openSync(temporaryPath, 'wx', 0o600)
-    fs.writeFileSync(descriptor, JSON.stringify({ version: MARKER_VERSION, ...intent }), 'utf8')
+    fs.writeFileSync(
+      descriptor,
+      JSON.stringify({ version: MARKER_VERSION, revision, ...intent }),
+      'utf8'
+    )
     fs.fsyncSync(descriptor)
   } catch (error) {
     if (descriptor !== undefined) fs.closeSync(descriptor)
@@ -167,7 +204,22 @@ export function readPendingExternalLogoutIntent(
   userDataDirectory: string,
   envKey: string
 ): PendingExternalLogoutIntent | null {
-  return readMarkerIntent(markerPath(userDataDirectory, envKey))
+  return readPendingExternalLogoutMarker(userDataDirectory, envKey)?.intent ?? null
+}
+
+export function readPendingExternalLogoutMarker(
+  userDataDirectory: string,
+  envKey: string
+): PendingExternalLogoutMarker | null {
+  return readMarker(markerPath(userDataDirectory, envKey))
+}
+
+export function readPendingExternalLogoutContentsRevision(
+  userDataDirectory: string,
+  envKey: string
+): string | null {
+  const contents = readMarkerContents(markerPath(userDataDirectory, envKey))
+  return contents === null ? null : createHash('sha256').update(contents).digest('hex')
 }
 
 export function hasPendingExternalLogout(userDataDirectory: string, envKey: string): boolean {
@@ -194,6 +246,85 @@ export function recordPendingKeytarCleanup(
     intent: 'keytar-cleanup-pending',
     credentialSource,
   })
+}
+
+function isCurrentMarker(
+  current: PendingExternalLogoutMarker | null,
+  expected: PendingExternalLogoutMarker
+): boolean {
+  if (!current || current.revision !== expected.revision) return false
+  if (current.intent.intent !== expected.intent.intent) return false
+  if (current.intent.intent === 'logout-pending' || expected.intent.intent === 'logout-pending') {
+    return current.intent.intent === expected.intent.intent
+  }
+  return current.intent.credentialSource === expected.intent.credentialSource
+}
+
+/**
+ * Retire a marker only when it is still the marker the caller originally
+ * observed. Synchronous marker I/O keeps this comparison and unlink together
+ * with respect to other work in the Electron main process.
+ */
+export function clearPendingExternalLogoutIfUnchanged(
+  userDataDirectory: string,
+  envKey: string,
+  expected: PendingExternalLogoutMarker
+): boolean {
+  if (!isCurrentMarker(readPendingExternalLogoutMarker(userDataDirectory, envKey), expected)) {
+    return false
+  }
+  clearPendingExternalLogout(userDataDirectory, envKey)
+  return true
+}
+
+/** Recreate cleanup intent only after a failed retirement removed the marker. */
+export function recordPendingKeytarCleanupIfMissing(
+  userDataDirectory: string,
+  envKey: string,
+  credentialSource: 'active-keytar' | 'safe-storage'
+): boolean {
+  if (readPendingExternalLogoutMarker(userDataDirectory, envKey) !== null) return false
+  writeMarkerIntent(userDataDirectory, envKey, {
+    intent: 'keytar-cleanup-pending',
+    credentialSource,
+  })
+  return true
+}
+
+/** Retire a malformed marker only if no newer marker replaced its bytes. */
+export function clearPendingExternalLogoutIfContentsUnchanged(
+  userDataDirectory: string,
+  envKey: string,
+  expectedContentsRevision: string
+): boolean {
+  if (
+    readPendingExternalLogoutContentsRevision(userDataDirectory, envKey) !==
+    expectedContentsRevision
+  ) {
+    return false
+  }
+  clearPendingExternalLogout(userDataDirectory, envKey)
+  return true
+}
+
+/**
+ * Convert the marker only when the producer still owns the observed marker.
+ * A newer logout-pending marker is intentionally never downgraded to cleanup.
+ */
+export function recordPendingKeytarCleanupIfUnchanged(
+  userDataDirectory: string,
+  envKey: string,
+  expected: PendingExternalLogoutMarker,
+  credentialSource: 'active-keytar' | 'safe-storage'
+): boolean {
+  if (!isCurrentMarker(readPendingExternalLogoutMarker(userDataDirectory, envKey), expected)) {
+    return false
+  }
+  writeMarkerIntent(userDataDirectory, envKey, {
+    intent: 'keytar-cleanup-pending',
+    credentialSource,
+  })
+  return true
 }
 
 export function clearPendingExternalLogout(userDataDirectory: string, envKey: string): void {

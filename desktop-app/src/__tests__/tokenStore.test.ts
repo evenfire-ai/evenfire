@@ -86,13 +86,13 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     const noKeytarFailure = new SessionTokenStorageClearError([], [], 0)
 
     expect(activeFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(true)
-    expect(activeFailure.canUseFileFallbackWhileMarkerRemains()).toBe(true)
+    expect(activeFailure.canUseSecureFileFallbackWhileMarkerRemains()).toBe(true)
     expect(otherAccountFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
     expect(additionalAccountFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
     expect(fileFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
-    expect(fileFailure.canUseFileFallbackWhileMarkerRemains()).toBe(false)
+    expect(fileFailure.canUseSecureFileFallbackWhileMarkerRemains()).toBe(false)
     expect(noKeytarFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
-    expect(noKeytarFailure.canUseFileFallbackWhileMarkerRemains()).toBe(false)
+    expect(noKeytarFailure.canUseSecureFileFallbackWhileMarkerRemains()).toBe(false)
   })
 
   it('rejects new operations after the TokenStore drain begins', async () => {
@@ -148,17 +148,18 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     keychain.set(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`), 'saved-token')
     vi.mocked(keytar.deletePassword).mockRejectedValueOnce(new Error('keychain unavailable'))
 
-    await expect(
-      new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
-    ).rejects.toMatchObject({ message: 'Failed to clear session token storage' })
+    await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).rejects.toMatchObject({
+      message: 'Failed to clear session token storage',
+    })
 
     expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe('saved-token')
   })
 
   it('allows a strict clear when keychain entries and fallback files are already absent', async () => {
-    await expect(
-      new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
-    ).resolves.toBeUndefined()
+    await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).resolves.toMatchObject({
+      keytarAvailable: true,
+      keytarDisabled: false,
+    })
   })
 
   it('reports strict fallback-file deletion failures while continuing cleanup', async () => {
@@ -177,9 +178,9 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     })
 
     try {
-      await expect(
-        new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
-      ).rejects.toMatchObject({ message: 'Failed to clear session token storage' })
+      await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).rejects.toMatchObject({
+        message: 'Failed to clear session token storage',
+      })
       expect(await fs.readFile(fallbackPath, 'utf8')).toContain('fixture-token')
       expect(keychain.has(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe(false)
       await expect(fs.access(otherFilePath)).rejects.toMatchObject({ code: 'ENOENT' })
@@ -199,9 +200,10 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
       mode: 0o600,
     })
 
-    await expect(
-      new TokenStore().clearSessionToken(ENV_A, { throwOnStorageError: true })
-    ).resolves.toBeUndefined()
+    await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).resolves.toMatchObject({
+      keytarAvailable: true,
+      keytarDisabled: false,
+    })
 
     await expect(fs.access(legacyEncryptedFile)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(fs.access(legacyPlainFile)).rejects.toMatchObject({ code: 'ENOENT' })

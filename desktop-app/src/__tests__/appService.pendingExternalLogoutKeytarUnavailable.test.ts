@@ -158,6 +158,21 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     })
   })
 
+  it('retains a cleanup marker when canceled-quit retry cannot access Keytar', async () => {
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
+    const service = new AppServiceClass({
+      tokenStore: new TokenStoreClass(),
+      getUserDataDirectory: () => userDataDirectory,
+    })
+
+    await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(false)
+
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'safe-storage',
+    })
+  })
+
   it('fails closed without Keytar or safeStorage and never writes a plaintext token', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const service = new AppServiceClass({
