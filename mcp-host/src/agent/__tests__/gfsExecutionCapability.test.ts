@@ -1,22 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import type { ApprovalConfig } from '../../core/extensions/approvalTypes'
 import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
-import type { GfsProcessingLeaseProvider } from '../../internalTools/gfsProcessingLease'
+import { deriveUserKeyFromSource } from '../../workspace/userKey'
 import {
+  GFS_SYSTEM_CALLER_IDENTITY,
   gfsManagedWorkspaceExecution,
+  gfsStoreCallerIdentity,
   gfsWorkspaceExecutionEnabled,
 } from '../gfsExecutionCapability'
 
 const approvalConfig: ApprovalConfig = {
   defaultPolicy: 'channel_users',
   channels: {},
-}
-const leases: GfsProcessingLeaseProvider = {
-  acquireProcessingLease: async () => ({
-    leaseId: 'lease-1',
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
-  }),
-  releaseProcessingLease: async () => undefined,
 }
 
 function input(overrides?: Partial<Parameters<typeof gfsWorkspaceExecutionEnabled>[0]>) {
@@ -26,7 +21,6 @@ function input(overrides?: Partial<Parameters<typeof gfsWorkspaceExecutionEnable
     callerIdentity: 'caller-1',
     store: { isAvailable: () => true } as GfsDownloadStore,
     callerWorkspacePath: '/workspace/users/caller-1',
-    processingLeaseProvider: leases,
     approvalConfig,
     retentionOwnerId: 'task-owner',
     ...overrides,
@@ -45,7 +39,7 @@ describe('gfsWorkspaceExecutionEnabled', () => {
     ).toBe(true)
   })
 
-  it('rejects delivery while the Host store is in recovery-required state', () => {
+  it('rejects delivery while the Host store is unavailable', () => {
     expect(
       gfsWorkspaceExecutionEnabled(
         input({
@@ -68,7 +62,6 @@ describe('gfsWorkspaceExecutionEnabled', () => {
     ['missing caller identity', { callerIdentity: undefined }],
     ['missing Host store', { store: undefined }],
     ['missing caller workspace', { callerWorkspacePath: undefined }],
-    ['missing processing lease provider', { processingLeaseProvider: undefined }],
     ['missing task retention owner', { retentionOwnerId: undefined }],
   ])('rejects %s', (_name, overrides) => {
     expect(gfsWorkspaceExecutionEnabled(input(overrides))).toBe(false)
@@ -84,22 +77,39 @@ describe('store-associated executable workspace', () => {
       'shell consent disabled',
       { approvalConfig: { ...approvalConfig, tools: { shell_exec: false } } },
     ],
-    ['missing caller root', { callerWorkspacePath: undefined }],
     ['missing delivery owner', { retentionOwnerId: undefined }],
-  ])('keeps processing lease protection for %s', (_name, overrides) => {
-    expect(gfsManagedWorkspaceExecution(input(overrides))?.processingLeaseProvider).toBe(leases)
+  ])('keeps the store-bound caller root for %s', (_name, overrides) => {
+    expect(gfsManagedWorkspaceExecution(input(overrides))).toMatchObject({
+      callerIdentity: 'caller-1',
+      callerWorkspacePath: '/workspace/users/caller-1',
+    })
   })
 
-  it('derives a store-bound provider when none was supplied instead of dropping protection', () => {
-    const store = {
-      isAvailable: () => false,
-      processingLeaseProvider: () => leases,
-    } as unknown as GfsDownloadStore
-    const managed = gfsManagedWorkspaceExecution(
-      input({ store, processingLeaseProvider: undefined })
-    )
-    expect(managed).toMatchObject({ processingLeaseProvider: leases, deliveryAvailable: false })
+  it('keeps the caller root and only disables delivery while the store is unavailable', () => {
+    const touched: string[] = []
+    // Every store member other than isAvailable() records its access: managed
+    // execution must not depend on any other store operation (#1019).
+    const store = new Proxy({} as GfsDownloadStore, {
+      get(_target, property) {
+        touched.push(String(property))
+        if (property === 'isAvailable') return () => false
+        return undefined
+      },
+    })
+    const managed = gfsManagedWorkspaceExecution(input({ store }))
+    expect(managed).toMatchObject({
+      callerIdentity: 'caller-1',
+      callerWorkspacePath: '/workspace/users/caller-1',
+      deliveryAvailable: false,
+    })
     expect(managed?.store).toBeUndefined()
+    // Witness: the availability probe ran; nothing else on the store was read.
+    expect(touched).toEqual(['isAvailable'])
+    expect(
+      gfsWorkspaceExecutionEnabled(
+        input({ store: managed?.store, callerWorkspacePath: managed?.callerWorkspacePath })
+      )
+    ).toBe(false)
   })
 
   it('uses the system admission identity while keeping absent caller roots unavailable', () => {
@@ -111,5 +121,22 @@ describe('store-associated executable workspace', () => {
     )
     expect(managed?.callerIdentity).toBe('_system')
     expect(managed?.callerWorkspacePath).toBeUndefined()
+  })
+})
+
+describe('gfsStoreCallerIdentity', () => {
+  it('keys the store by the channel-namespaced caller-root key, never the raw sender', () => {
+    const slack = { sender: 'same-sender', channelType: 'slack' as const }
+    const rpc = { sender: 'same-sender', channelType: 'rpc' as const }
+    expect(gfsStoreCallerIdentity(slack)).not.toBe(gfsStoreCallerIdentity(rpc))
+    expect(gfsStoreCallerIdentity(slack)).not.toBe('same-sender')
+    // Equal to the key that names the caller root `users/<key>`.
+    expect(gfsStoreCallerIdentity(slack)).toBe(deriveUserKeyFromSource(slack))
+    expect(gfsStoreCallerIdentity(rpc)).toBe(deriveUserKeyFromSource(rpc))
+  })
+
+  it('gives a task without a source message the system key of its caller root', () => {
+    expect(gfsStoreCallerIdentity(undefined)).toBe(GFS_SYSTEM_CALLER_IDENTITY)
+    expect(deriveUserKeyFromSource(undefined)).toBe(GFS_SYSTEM_CALLER_IDENTITY)
   })
 })

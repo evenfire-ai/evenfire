@@ -28,10 +28,27 @@ export async function executeSingleTool(
     | 'taskId'
     | 'visualInput'
     | 'abortSignal'
+    | 'measureToolMessage'
   >,
-  iteration?: number
+  iteration?: number,
+  transformResult?: (result: ToolResult) => Promise<ToolResult>
 ): Promise<ToolResult> {
   const { toolRegistry, toolOutputProcessor, events, toolTimeout } = config
+
+  // Post-result hooks see error results too and observe failed calls. A thrown
+  // upstream message can carry a secret, so the error text first goes through
+  // the tool-output sanitizer the success path applies (`toolOutputProcessor`
+  // delegates to `config.safety.sanitizeOutput`), unwrapped: error text keeps
+  // its plain shape for the model.
+  const errorResult = async (content: string): Promise<ToolResult> => {
+    const result: ToolResult = {
+      tool_call_id: call.id,
+      name: call.name,
+      content: config.safety.sanitizeOutput(call.name, content).content,
+      is_error: true,
+    }
+    return transformResult ? transformResult(result) : result
+  }
 
   const tool = toolRegistry.get(call.name)
   let validation = toolOutputProcessor.beforeExecution(call.name, call.arguments)
@@ -50,21 +67,27 @@ export async function executeSingleTool(
       },
       timestamp: new Date(),
     })
-    return {
-      tool_call_id: call.id,
-      name: call.name,
-      content: `Parameter validation failed: ${validation.errors.join(', ')}`,
-      is_error: true,
-    }
+    return errorResult(`Parameter validation failed: ${validation.errors.join(', ')}`)
   }
 
-  if (!tool) {
-    return {
-      tool_call_id: call.id,
-      name: call.name,
-      content: `Tool not found: ${call.name}`,
-      is_error: true,
+  if (!tool) return errorResult(`Tool not found: ${call.name}`)
+
+  const renderContent = (content: string): string => {
+    if (!tool.requiresSanitization()) return content
+    if (!toolOutputProcessor.previewForLlm) {
+      throw new Error('measureResult requires ToolOutputProcessor.previewForLlm')
     }
+    return toolOutputProcessor.previewForLlm(call.name, content)
+  }
+  const measureContent = (content: string): number => {
+    if (!config.measureToolMessage)
+      throw new Error('measureToolMessage is required for bounded native output')
+    return config.measureToolMessage({
+      role: 'tool',
+      name: call.name,
+      tool_call_id: call.id,
+      content,
+    })
   }
 
   events.emit({
@@ -77,11 +100,15 @@ export async function executeSingleTool(
   const executionContext: ExecutionContext = {
     onOutput: chunk => ringBuffer?.append(chunk),
     visualInput: config.visualInput,
+    measureResult: config.measureToolMessage
+      ? content => measureContent(renderContent(content))
+      : undefined,
   }
   let watcherId: NodeJS.Timeout | null = null
   const watcherStartedAt = Date.now()
 
   let wantsWatcher = false
+  let finalizingResult = false
   try {
     wantsWatcher =
       typeof tool.supportsProgressOutput === 'function' &&
@@ -173,11 +200,15 @@ export async function executeSingleTool(
     })
 
     // T1.5 — Spillover. If the sanitized output exceeds the configured byte
-    // threshold (and the tool isn't itself `clerum__spillover_read` or an
-    // error), persist the blob out-of-band and replace `content` with a
-    // rich JSON summary. The lateral `spillover_ref` field carries the URI
-    // (P0-002 Opción D) so the resume path can resolve in O(1) without
-    // re-parsing the LLM-bound JSON body.
+    // threshold (and is not an error), persist the blob out-of-band and
+    // replace `content` with a rich JSON summary. The lateral `spillover_ref`
+    // field carries the URI (P0-002 Opción D) so the resume path can resolve
+    // in O(1) without re-parsing the LLM-bound JSON body.
+    //
+    // A tool whose output is already bounded by its own contract declares
+    // `spilloverExempt()` (`clerum__spillover_read` reads back a blob that was
+    // spilled once; `clerum__attachment_read` returns the page the caller
+    // asked for) and is shipped inline whatever its size (#666, #678).
     //
     // `rawContent` keeps the original blob untouched so the progress reporter
     // (and the workflow read-only fallbacks) still see the real output.
@@ -187,7 +218,7 @@ export async function executeSingleTool(
       config.spilloverStorage &&
       config.taskId &&
       !output.is_error &&
-      call.name !== 'clerum__spillover_read'
+      tool.spilloverExempt?.() !== true
     ) {
       try {
         const summary = await config.spilloverStorage.maybePersist({
@@ -217,7 +248,7 @@ export async function executeSingleTool(
       }
     }
 
-    return {
+    let result: ToolResult = {
       tool_call_id: call.id,
       name: call.name,
       content: finalContent,
@@ -227,18 +258,31 @@ export async function executeSingleTool(
       rawContent: output.content,
       spillover_ref: spilloverRef,
     }
+    // Post-result hooks execute once. Measure after them; a preview never
+    // repeats a hook, tool execution, progress event or spillover write.
+    finalizingResult = true
+    if (transformResult) result = await transformResult(result)
+    if (config.measureToolMessage) {
+      result = { ...result, emittedMessageCost: measureContent(result.content) }
+    }
+    if (tool.finalizeResult) {
+      result = await tool.finalizeResult(result, { measureContent, renderContent })
+      const finalCost = measureContent(result.content)
+      if (result.emittedMessageCost !== finalCost) {
+        throw new Error('Final tool-message measurement does not match its budget debit')
+      }
+    }
+    return result
   } catch (err) {
+    // A result-policy/finalization failure must stop publication. Turning it
+    // into an ordinary tool error could make the model repeat completed work.
+    if (finalizingResult) throw err
     const errorMessage =
       err instanceof ToolError ? err.message : `Tool execution failed: ${(err as Error).message}`
 
     logger.error({ toolName: call.name, err }, 'Tool execution failed')
 
-    return {
-      tool_call_id: call.id,
-      name: call.name,
-      content: errorMessage,
-      is_error: true,
-    }
+    return await errorResult(errorMessage)
   } finally {
     if (watcherId) {
       clearInterval(watcherId)

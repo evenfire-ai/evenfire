@@ -3,6 +3,11 @@ import { createHash } from 'node:crypto'
 import { pool } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
+import {
+  passwordLoginSourceAdmission,
+  sendPasswordAdmissionError,
+  validatePasswordLogin,
+} from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
 import {
@@ -73,54 +78,49 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     }
   })
 
-  router.post('/external/auth/password-login', async (req, res, next) => {
-    try {
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const password = String(req.body?.password || '')
-      if (!email || !password) {
-        return res.status(400).json({ error: 'email and password are required' })
-      }
-
-      const login = await passwordLoginData({ email, password })
-      if (!login) {
-        return res.status(401).json({ error: 'Unauthorized' })
-      }
-      if ('error' in login) {
-        if (login.error === 'user_retired') {
-          return res.status(401).json({ error: 'Unauthorized' })
+  router.post(
+    '/external/auth/password-login',
+    validatePasswordLogin,
+    passwordLoginSourceAdmission,
+    async (req, res, next) => {
+      try {
+        const email = String(req.body?.email || '')
+          .trim()
+          .toLowerCase()
+        const password = String(req.body?.password || '')
+        if (!email || !password) {
+          return res.status(400).json({ error: 'email and password are required' })
         }
-        if (login.error === 'password_not_set') {
-          return res.status(409).json({ error: 'password_not_set' })
-        }
-        return res.status(403).json({ error: 'membership_not_found' })
-      }
 
-      const role = login.membership.role
-      const token = signExternalSessionToken({
-        userId: login.user.id,
-        email: login.user.email,
-        teamId: login.membership.team_id || null,
-        role,
-        authGeneration: login.authGeneration,
-      })
-      return res.status(200).json({
-        token,
-        me: {
-          id: login.user.id,
+        const login = await passwordLoginData({ email, password })
+        if (!login) return res.status(401).json({ error: 'invalid_credentials' })
+
+        const role = login.membership.role
+        const token = signExternalSessionToken({
+          userId: login.user.id,
           email: login.user.email,
-          name: login.user.name,
-          picture: login.user.picture,
           teamId: login.membership.team_id || null,
-          teamName: login.membership.team_name,
           role,
-        },
-      })
-    } catch (error) {
-      return next(error)
+          authGeneration: login.authGeneration,
+        })
+        return res.status(200).json({
+          token,
+          me: {
+            id: login.user.id,
+            email: login.user.email,
+            name: login.user.name,
+            picture: login.user.picture,
+            teamId: login.membership.team_id || null,
+            teamName: login.membership.team_name,
+            role,
+          },
+        })
+      } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
+        return next(error)
+      }
     }
-  })
+  )
 
   router.post(
     '/external/auth/password-reset/request',

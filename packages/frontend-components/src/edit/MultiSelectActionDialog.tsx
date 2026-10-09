@@ -24,6 +24,7 @@ export function MultiSelectActionDialog({
   pending = false,
   error,
   size = 'large',
+  optionLayout = 'stacked',
 }: MultiSelectActionDialogProps) {
   const searchId = useId()
   const [query, setQuery] = useState('')
@@ -102,7 +103,14 @@ export function MultiSelectActionDialog({
           <ul className="eft-multi-select__list">
             {visibleItems.map(item => (
               <li className="eft-multi-select__item" key={item.id}>
-                <label className="eft-multi-select__option">
+                <label
+                  className={
+                    optionLayout === 'inline'
+                      ? 'eft-multi-select__option eft-multi-select__option--inline'
+                      : 'eft-multi-select__option'
+                  }
+                  title={optionLayout === 'inline' ? item.title : undefined}
+                >
                   <input
                     checked={selected.has(item.id)}
                     disabled={pending || item.disabled}

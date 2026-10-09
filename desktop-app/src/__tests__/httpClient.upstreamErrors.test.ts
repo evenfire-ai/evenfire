@@ -260,8 +260,10 @@ describe('bounded upstream error excerpts at every remaining call site', () => {
     )
 
     expect(error).toBeInstanceOf(SandboxUiSessionError)
+    expect(error).toBeInstanceOf(ApiError)
     expect((error as SandboxUiSessionError).status).toBe(500)
     expect((error as SandboxUiSessionError).body).toBe(HUGE)
+    expect((error as SandboxUiSessionError).bodyText).toBe(HUGE)
   })
 })
 

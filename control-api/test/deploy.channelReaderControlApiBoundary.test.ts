@@ -128,7 +128,7 @@ describe('channel-reader -> control-api boundary manifests', () => {
     )
 
     expect(pollIntervalSeconds).toBe(2)
-    expect(approvalRequestsPerMinute).toBe(120)
+    expect(approvalRequestsPerMinute).toBe(600)
     expect(approvalRequestsPerMinute).toBeGreaterThanOrEqual((60 / pollIntervalSeconds) * 4)
   })
 

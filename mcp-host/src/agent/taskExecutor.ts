@@ -8,12 +8,18 @@
 import { randomUUID } from 'node:crypto'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
+import { BRIDGE_TOOL_NAMES } from '../capabilities/toolCatalogTools'
 import { config as appConfig } from '../config'
 import { bindTaskSignal, withAbort } from '../core/adapters/abortableLlmPort'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { maybeWrapHookedLlmPort } from '../core/adapters/hookedLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
+import {
+  AttachmentReadLedger,
+  mergeAttachmentReadLedgerSnapshots,
+  readAttachmentReadLedgerSnapshot,
+} from '../core/attachments/attachmentReadBudget'
 import { compactConversation } from '../core/conversation/compaction'
 import { ConversationManager } from '../core/conversation/conversation'
 import { deriveAutoTitle } from '../core/conversation/sessionTitle'
@@ -24,6 +30,7 @@ import {
   COMPACTION_PRESSURE_THRESHOLD,
   PressureContextManager,
   tierDecisionTokens,
+  toolMessageBudgetTokens,
 } from '../core/extensions/contextManager'
 import {
   UnifiedApprovalGateController,
@@ -37,9 +44,13 @@ import type { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
 import { buildLoopConfig } from '../core/orchestration/loopConfig'
 import type { LoopConfig } from '../core/orchestration/loopConfig'
 import { DefaultLoopController } from '../core/orchestration/loopConfig'
+import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
-import { resolveToolPresentation } from '../core/orchestration/toolPresentationPolicy'
+import {
+  resolveToolPresentation,
+  selectDeferredNatives,
+} from '../core/orchestration/toolPresentationPolicy'
 import {
   buildOutputPreview,
   executeSingleTool,
@@ -51,6 +62,7 @@ import {
   collectToolAttachments,
   mergeCollectedAttachments,
 } from '../core/orchestration/toolUseLoopMessages'
+import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
   type PreparedGfsFile,
   attachedFilesForTurnContext,
@@ -64,8 +76,8 @@ import {
   GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MCP_SERVER_SELECTION_TEXT,
   MEMORY_GUIDANCE_TEXT,
-  TOOL_DISCOVERY_TEXT,
   WORKFLOW_RECIPES_TEXT,
+  toolDiscoveryText,
 } from '../core/reasoning/promptBuilder'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
 import { BasicSafety } from '../core/safety/safety'
@@ -97,7 +109,6 @@ import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
-import type { GfsProcessingLeaseProvider } from '../internalTools/gfsProcessingLease'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
@@ -117,11 +128,12 @@ import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
+import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
 import { referencedFilesForTurnContext } from './fileReferenceResolver'
 import {
-  GFS_SYSTEM_CALLER_IDENTITY,
   gfsManagedWorkspaceExecution,
+  gfsStoreCallerIdentity,
   gfsWorkspaceExecutionEnabled,
 } from './gfsExecutionCapability'
 import { hasLargeAvailableGfsReferences, prepareGfsFiles } from './gfsFilePreparation'
@@ -186,8 +198,6 @@ export interface TaskExecutorDeps {
   gfsDownloadStore?: GfsDownloadStore
   /** Trusted caller workspace root, separate from memory-tool availability. */
   gfsCallerWorkspacePath?: string
-  /** Required fail-closed lease boundary for approved local processing. */
-  gfsProcessingLeaseProvider?: GfsProcessingLeaseProvider
   config: AgentConfig
   modelName: string
   /**
@@ -282,6 +292,8 @@ interface TaskToolRegistry {
   registry: ToolRegistry
   nativeRegistry: NativeToolRegistry
   loopController: LoopController
+  /** Natives hidden from `tools[]` by native `auto`; empty in `direct`. */
+  discoverableNatives: ToolDefinition[]
   bridge?: LoopConfig['bridge']
 }
 
@@ -308,6 +320,15 @@ export class TaskExecutor {
   private tokenCounter: TokenCounter | null = null
   /** #731 — the task's context window, resolved and logged once. */
   private contextWindow: number | null = null
+  /**
+   * C15/C16 — one turn-owned attachment read ledger per executor. An executor
+   * runs one task, and a task is one turn, so the ledger starts zeroed and is
+   * never reset. The native tool registry is memoized for the life of this
+   * executor, so the tool holds THIS instance by reference and the ledger
+   * mutates in place; `restore()` loads the persisted snapshot on an approval
+   * resume that continues the same turn.
+   */
+  private readonly attachmentReadLedger = new AttachmentReadLedger()
   /**
    * P2 token budgets (§5.2) — snapshot of the conversation's lifetime token
    * counters captured at task start, used as the per-task brake baseline.
@@ -632,6 +653,9 @@ export class TaskExecutor {
       }
 
       const savedApproval = this.conversation.pending_approval
+      // Restore before legacy renewal or missing-context recovery can re-pause
+      // this turn. Those branches must not stamp a fresh attachment budget.
+      if (savedApproval) this.restoreAttachmentReadLedger(savedApproval)
       mergeCollectedAttachments(this.completedAttachments, savedApproval?.attachments ?? [])
       collectToolAttachments(savedApproval?.completed_results ?? [], this.completedAttachments)
       this.executionBudget.start(this.abortController)
@@ -852,7 +876,10 @@ export class TaskExecutor {
         ...(approval.attachments || []),
         ...this.collectAttachments([...(approval.completed_results || []), toolResult]),
       ]
-      const result = await runToolUseLoop(loopConfig, messages)
+      // A15 U1 — the approved tool ended the turn: no further model call.
+      const result: LoopResult = toolResult.stopTurn
+        ? turnStopResult(loopConfig, 0, toolResult.stopTurn.message, [])
+        : await runToolUseLoop(loopConfig, messages)
 
       // Preserve attachments
       if (previousAttachments.length > 0) {
@@ -1040,24 +1067,29 @@ export class TaskExecutor {
   }
 
   /**
-   * A retention owner spans preparation, an approval suspension, and cold resume.
-   * Release happens only after this executor reaches a terminal state; inherited
-   * owners are deliberately left quarantined by the store when release is denied.
+   * A retention owner spans preparation and an approval suspension in this
+   * process; pins live in memory, so after a Host restart a cold resume finds
+   * no pin and its file may have expired or been evicted, and the model
+   * downloads it again. Release happens only after this executor reaches a
+   * terminal state. A failed release leaves the pin in place, so its files stay
+   * protected until the Host restarts or until each copy reaches its
+   * `expiresAt`, whichever comes first: expiry is absolute and a pin never
+   * protects an expired copy.
    */
   private settleGfsRetentionOwner(): Promise<void> {
     if (this.state === 'waiting_approval' && !this.abortController.signal.aborted)
       return Promise.resolve()
     if (this.gfsRetentionOwnerSettlement) return this.gfsRetentionOwnerSettlement
     this.gfsRetentionOwnerSettlement = (async () => {
-      const callerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
+      const callerIdentity = gfsStoreCallerIdentity(this.task.sourceMessage)
       const store = this.deps.gfsDownloadStore
-      if (!callerIdentity || !store?.isAvailable()) return
+      if (!store?.isAvailable()) return
       try {
         await store.releaseReceiptOwner(this.taskId, callerIdentity)
       } catch (error) {
         logger.error(
           { taskId: this.taskId, callerIdentity, err: error },
-          'GFS retention owner release failed; retained records remain protected'
+          'GFS retention owner release failed; retained records remain protected until restart or expiry'
         )
       }
     })()
@@ -1102,6 +1134,29 @@ export class TaskExecutor {
     }
     this.contextWindow = contextWindowTokens
     return contextWindowTokens
+  }
+
+  /**
+   * C15/C16 — restore the turn ledger from the approval's own snapshot. The
+   * persisted value is authoritative and independent of message history, so
+   * compaction and earlier turns cannot change it. A missing or invalid
+   * snapshot fails closed: compacted history cannot prove that nothing was
+   * spent. New approvals always carry even the valid zero snapshot.
+   */
+  private restoreAttachmentReadLedger(approval: PendingApproval): void {
+    const persisted = readAttachmentReadLedgerSnapshot(approval.task_budget?.attachmentReadLedger)
+    if (persisted) {
+      // Warm resume must never decrease what the live turn already recorded.
+      this.attachmentReadLedger.restore(
+        mergeAttachmentReadLedgerSnapshots(this.attachmentReadLedger.snapshot(), persisted)
+      )
+      return
+    }
+    logger.warn(
+      { component: 'TaskExecutor', taskId: this.taskId, reason: 'attachment_read_ledger_missing' },
+      'Approval has no usable attachment ledger; failing closed for the rest of the turn'
+    )
+    this.attachmentReadLedger.exhaust(this.contextMaxTokens())
   }
 
   /**
@@ -1265,7 +1320,11 @@ export class TaskExecutor {
     switch (result.type) {
       case 'response':
       case 'exhaustion': {
-        if (result.type === 'exhaustion' && result.reason !== 'task_budget')
+        if (
+          result.type === 'exhaustion' &&
+          result.reason !== 'task_budget' &&
+          result.reason !== 'turn_stop'
+        )
           throw new TaskLimitError(
             'TASK_ITERATION_LIMIT',
             `Task stopped before completion after ${this.executionBudget.maxIterations} iterations. Continuation requires a new budget.`
@@ -1315,7 +1374,15 @@ export class TaskExecutor {
       }
 
       case 'need_approval': {
-        result.approval.task_budget = this.executionBudget.pause()
+        // C15/C16 — every pause (first, legacy re-pause, connect re-pause)
+        // funnels through here, so the turn's attachment read ledger is stamped
+        // inside the existing `task_budget` JSON column. Compaction cannot
+        // lose it; no new column or migration is needed.
+        const attachmentReadLedger = this.attachmentReadLedger.snapshot()
+        result.approval.task_budget = {
+          ...this.executionBudget.pause(),
+          attachmentReadLedger,
+        }
         // #666 R4-M2 — persist the sanitized source message so a cold restart
         // rebuilds the file-reference pins and attachment metadata. The inline
         // bytes (dataBase64) never persist.
@@ -1554,7 +1621,16 @@ export class TaskExecutor {
       }
     }
 
-    const { registry, loopController, bridge } = await this.buildToolRegistry()
+    const { registry, loopController, bridge, discoverableNatives } = await this.buildToolRegistry()
+    const applicableToolCounters = registry
+      .listDefinitions()
+      .some(tool => tool.name === 'clerum__attachment_read')
+      ? (effectiveLlmPort.getToolTokenCounters?.() ?? [tokenCounter])
+      : [tokenCounter]
+    const toolCounters = [...new Set(applicableToolCounters)]
+    await Promise.all(
+      toolCounters.filter(counter => counter !== tokenCounter).map(counter => counter.warmup())
+    )
 
     // T2.2 — when the prompt-cache flag is ON and we have the dependencies
     // wired (PromptCache + WorkspaceService), build the tiered
@@ -1563,7 +1639,10 @@ export class TaskExecutor {
     // single-string identity built by `buildSystemIdentity`.
     const reasoningFactory = new DefaultReasoningFactory(
       hookedLlmPort,
-      undefined,
+      new DefaultPromptBuilder({
+        nativeToolPresentation: appConfig.nativeToolPresentation,
+        discoverableNatives,
+      }),
       metadata,
       // F1.4 — wire the send-time context-window-breakdown capture. The sink is
       // bound to the captured `conversation` local (not `this.conversation!`) so
@@ -1590,7 +1669,10 @@ export class TaskExecutor {
       const cachedPrompt = [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
       systemPromptFor = () => cachedPrompt
     } else {
-      const promptBuilder = new DefaultPromptBuilder()
+      const promptBuilder = new DefaultPromptBuilder({
+        nativeToolPresentation: appConfig.nativeToolPresentation,
+        discoverableNatives,
+      })
       systemPromptFor = tools => promptBuilder.buildSystemPrompt(tools, identity, metadata).content
     }
 
@@ -1673,8 +1755,17 @@ export class TaskExecutor {
     // oversized outputs and stamp `spillover_ref` on the result.
     loopConfig.spilloverStorage = this.deps.spilloverStorage
     loopConfig.taskId = this.taskId
+    // C15/C16 — the exact synchronous measurement the bounded native readers
+    // use for a result: the full tool message (framing + the larger applicable
+    // provider/BPE estimate), never a content-only shortcut.
+    // Page limits are enforced even when compaction is in tokenizer dry-run.
+    // Use the largest applicable synchronous estimate for every destination;
+    // emitted pages can survive a provider change in a later reasoning round.
+    loopConfig.measureToolMessage = message =>
+      Math.max(...toolCounters.map(counter => toolMessageBudgetTokens(message, counter, false)))
     // F3 (dynamic-tool-loading): context the `clerum__tool_call` bridge intercept
-    // needs in `executeToolCalls`. Undefined when no McpManager is wired.
+    // needs in `executeToolCalls`. Undefined when the registry registered no
+    // bridge tools (no MCP discovery with an McpManager, and native `direct`).
     loopConfig.bridge = bridge
     // P2 token budgets (§5.2): wire the per-task emergency brake when the P1
     // verdict carried a per-task cap AND we captured a start-of-task baseline.
@@ -1987,6 +2078,8 @@ export class TaskExecutor {
       tools.some(t => t.name === 'clerum__gfs_download'),
       tools.some(t => t.name.includes('__')),
       tools.some(t => t.name === 'clerum__tool_search'),
+      // #1003 — the discovery guidance text depends on the native presentation.
+      appConfig.nativeToolPresentation,
     ])
     // R2 — the system prompt embeds the model name, so a cache entry built for a
     // different (e.g. just-swapped) model is a miss: rebuild, but keep the frozen
@@ -2002,7 +2095,9 @@ export class TaskExecutor {
     const dailyLogSnapshot =
       cached?.dailyLogSnapshot ?? (await this.deps.workspaceService.snapshotDailyLogs(2))
     const identityFiles = await this.deps.workspaceService.readIdentityFiles()
-    const builder = new DefaultPromptBuilder()
+    const builder = new DefaultPromptBuilder({
+      nativeToolPresentation: appConfig.nativeToolPresentation,
+    })
     const hasMemoryTools = tools.some(t => t.name.startsWith('memory_'))
     const hasCapabilities = tools.some(t => t.name === 'clerum__get_capabilities')
     const hasDesktopTools = tools.some(
@@ -2040,7 +2135,9 @@ export class TaskExecutor {
       workflowGuidance: hasWorkflowTools ? WORKFLOW_RECIPES_TEXT : '',
       gfsWorkspaceGuidance: hasGfsDownloadTool ? GFS_WORKSPACE_FILE_GUIDANCE_TEXT : '',
       mcpServerGuidance: hasMcpTools ? MCP_SERVER_SELECTION_TEXT : '',
-      toolDiscoveryGuidance: hasToolDiscovery ? TOOL_DISCOVERY_TEXT : '',
+      toolDiscoveryGuidance: hasToolDiscovery
+        ? toolDiscoveryText(appConfig.nativeToolPresentation)
+        : '',
       memoryGuidance: hasMemoryTools ? MEMORY_GUIDANCE_TEXT : '',
     })
     this.deps.promptCache.set(sessionKey, {
@@ -2130,19 +2227,17 @@ export class TaskExecutor {
       appConfig,
       this.deps.failover?.policy.fallbacks
     )
-    const gfsCallerIdentity = this.task.sourceMessage?.sender ?? GFS_SYSTEM_CALLER_IDENTITY
-    const gfsProcessingLeaseProvider =
-      this.deps.gfsProcessingLeaseProvider ??
-      (this.deps.gfsDownloadStore && gfsCallerIdentity
-        ? this.deps.gfsDownloadStore.processingLeaseProvider(gfsCallerIdentity)
-        : undefined)
+    // #1003 — native-tool presentation is host-wide and provider-independent:
+    // it never depends on the MCP presentation resolved above.
+    const nativeAuto = appConfig.nativeToolPresentation === 'auto'
+    // The store is keyed like the caller root, never by the raw sender.
+    const gfsCallerIdentity = gfsStoreCallerIdentity(this.task.sourceMessage)
     const gfsWorkspace = gfsManagedWorkspaceExecution({
       approvalEnabled: appConfig.enableApproval,
       source: this.task.source,
       callerIdentity: gfsCallerIdentity,
       store: this.deps.gfsDownloadStore,
       callerWorkspacePath: this.deps.gfsCallerWorkspacePath,
-      processingLeaseProvider: gfsProcessingLeaseProvider,
       approvalConfig: this.deps.approvalConfig,
       retentionOwnerId: this.taskId,
     })
@@ -2153,18 +2248,12 @@ export class TaskExecutor {
           callerIdentity: this.task.sourceMessage?.sender,
           store: gfsWorkspace.store,
           callerWorkspacePath: gfsWorkspace.callerWorkspacePath,
-          processingLeaseProvider: gfsWorkspace.processingLeaseProvider,
           approvalConfig: this.deps.approvalConfig,
           retentionOwnerId: this.taskId,
         })
       : false
     const nativeRegistry = new NativeToolRegistry(
-      // The spillover threshold is a top-level setting; clerum__attachment_read
-      // states it in its description (#666).
-      {
-        ...appConfig.nativeTool,
-        toolSpilloverThresholdBytes: appConfig.toolSpilloverThresholdBytes,
-      },
+      appConfig.nativeTool,
       this.conversation!.id,
       this.deps.cronScheduler ?? undefined,
       this.task.sourceMessage,
@@ -2174,6 +2263,15 @@ export class TaskExecutor {
       {
         maxBytes: appConfig.attachmentMaxBytes,
         secretEntriesProvider: this.deps.secretEntriesProvider,
+        // Keep the ledger and bound pages for every model this task may serve.
+        ledger: this.attachmentReadLedger,
+        contextWindowTokens: attachmentContextWindow(
+          this.contextMaxTokens(),
+          this.deps.llmProvider.getProviderType(),
+          this.deps.failover?.policy.fallbacks ?? [],
+          this.deps.failover?.contextWindowForPair,
+          appConfig.contextMaxTokens
+        ),
       },
       this.deps.spilloverStorage,
       this.deps.sessionSearchService,
@@ -2181,7 +2279,9 @@ export class TaskExecutor {
       // (clerum__tool_search / clerum__tool_describe). Reuses the same manager
       // already threaded into the MCP tool registry below.
       this.deps.mcpManager ?? undefined,
-      presentation.bridgeEnabled,
+      // #1003 — MCP discovery and native discovery are separate decisions;
+      // either one registers the bridge tools.
+      { mcpDiscovery: presentation.bridgeEnabled, nativeDiscovery: nativeAuto },
       // §13 (stateless agents): the active provider's credential slot is the
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
@@ -2229,7 +2329,7 @@ export class TaskExecutor {
     const cronManageGateApplies =
       appConfig.enableApproval && this.task.source === 'cron' && appConfig.statelessLifecycle
     const approvalApplies = interactiveApprovalApplies || cronManageGateApplies
-    const baseController = approvalApplies
+    const approvalGate = approvalApplies
       ? new UnifiedApprovalGateController(
           compositeRegistry,
           this.deps.approvalConfig,
@@ -2243,28 +2343,77 @@ export class TaskExecutor {
             cronManageGateOnly: cronManageGateApplies,
           }
         )
-      : new DefaultLoopController()
-    const innerController = approvalApplies
+      : null
+    const innerController = approvalGate
       ? new ApprovalController(
           this.conversation!,
-          baseController,
+          approvalGate,
           gfsWorkspace &&
             appConfig.enableApproval &&
             this.task.source === 'channel' &&
             this.deps.approvalConfig?.tools?.shell_exec !== false
-            ? new Set(['shell_exec', 'clerum__gfs_download'])
-            : undefined
+            ? new Set(['clerum__gfs_download'])
+            : undefined,
+          // The same gate's forced approvals (stateless cron create/enable) run
+          // before any stored approval, so none of them can cover such a call.
+          approvalGate
         )
-      : baseController
+      : new DefaultLoopController()
 
     const mcpManager = this.deps.mcpManager
+    // Exact native membership preserves every native/plugin capability.
+    const nativeDefinitions = nativeRegistry.listDefinitions()
+    const nativeNames = new Set(nativeDefinitions.map(d => d.name))
+
+    // #1003 — native presentation wraps OUTSIDE the MCP decision on every
+    // return, so it can only remove natives from the list the MCP presentation
+    // produced. In `direct` it returns that list unchanged.
+    const withNativePresentation = (controller: LoopController): LoopController =>
+      new NativeToolPresentationController(controller, nativeDefinitions, {
+        mode: appConfig.nativeToolPresentation,
+        discoveryBytes: appConfig.nativeToolDiscoveryBytes,
+      })
+    // The natives that controller hides, for the prompt builder's guidance.
+    const deferredNatives = nativeAuto
+      ? selectDeferredNatives(nativeDefinitions, appConfig.nativeToolDiscoveryBytes)
+      : new Set<string>()
+    const discoverableNatives = nativeDefinitions.filter(d => deferredNatives.has(d.name))
+
+    // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
+    // deferrable catalog. It exists exactly when NativeToolRegistry registered
+    // the bridge tools (MCP discovery with an McpManager, or native `auto`), so
+    // it is derived from the registry rather than repeating that predicate.
+    // Codex direct with native `direct` observes presentation without
+    // installing discovery interception or registering bridge tools.
+    const bridge: LoopConfig['bridge'] = [...BRIDGE_TOOL_NAMES].every(name => nativeNames.has(name))
+      ? {
+          nativeNames,
+          getDeferrableCatalogNames: () =>
+            mcpManager
+              ? new Set(
+                  mcpManager
+                    .getAllTools()
+                    .map(t => t.name)
+                    .filter(name => !nativeNames.has(name))
+                )
+              : new Set<string>(),
+          nativeTargets: nativeAuto,
+        }
+      : undefined
+
     // Codex direct still observes the live catalog; observation must not enable discovery.
     if (!presentation.bridgeEnabled && presentation.codexMode === undefined) {
-      return { registry: compositeRegistry, nativeRegistry, loopController: innerController }
+      return {
+        registry: compositeRegistry,
+        nativeRegistry,
+        loopController: withNativePresentation(innerController),
+        discoverableNatives,
+        // Native `auto` only: MCP presentation is unchanged (no MCP decision on
+        // this path) but the bridge serves natives and keeps MCP tools callable.
+        bridge,
+      }
     }
 
-    // Exact native membership preserves every native/plugin capability.
-    const nativeNames = new Set(nativeRegistry.listDefinitions().map(d => d.name))
     // LOCKED #6: the latch lives on the session-scoped Conversation, NOT on the
     // per-task controller, so a server connecting/disconnecting BETWEEN turns
     // cannot flip `tools[]` and re-introduce cache invalidation. Ephemeral RAM
@@ -2287,24 +2436,13 @@ export class TaskExecutor {
       }
     )
 
-    // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
-    // deferrable catalog. Direct mode observes presentation without installing
-    // discovery interception or registering bridge tools.
-    const bridge: LoopConfig['bridge'] =
-      presentation.bridgeEnabled && mcpManager
-        ? {
-            nativeNames,
-            getDeferrableCatalogNames: () =>
-              new Set(
-                mcpManager
-                  .getAllTools()
-                  .map(t => t.name)
-                  .filter(name => !nativeNames.has(name))
-              ),
-          }
-        : undefined
-
-    return { registry: compositeRegistry, nativeRegistry, loopController, bridge }
+    return {
+      registry: compositeRegistry,
+      nativeRegistry,
+      loopController: withNativePresentation(loopController),
+      discoverableNatives,
+      bridge,
+    }
   }
 
   private async prepareChannelWorkflowCallerContext(): Promise<

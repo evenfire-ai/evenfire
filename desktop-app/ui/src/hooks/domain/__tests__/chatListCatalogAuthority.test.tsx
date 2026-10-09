@@ -404,3 +404,92 @@ describe('per-Host authority in the cross-agent list (R2-M5, R1-L11, R1-M10)', (
     expect(afterHold.map(chat => chat.id)).toEqual(['host-x-session'])
   })
 })
+
+describe('queued catalog updater against an authority hold', () => {
+  it('retains the previous catalog when the initial-page updater evaluates after the uncertain hold starts', async () => {
+    const pendingInitial = deferred<SessionsListResult>()
+    let held = false
+    let blockedChecks = 0
+    let armedAt: number | null = null
+    const isHostAccessBlocked = () => {
+      blockedChecks += 1
+      return held || (armedAt !== null && blockedChecks > armedAt + 1)
+    }
+    clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'cached-a', title: 'Cached chat' }]))
+    clerum.rpc.listSessions.mockImplementation(() => pendingInitial.promise)
+    const controller = renderController({
+      selectedAgent: 'agent-a',
+      agentNames: ['agent-a'],
+      loadMenuData: false,
+      isHostAccessBlocked,
+    })
+    await waitFor(() =>
+      expect(controller.result.current.chatList.map(chat => chat.id)).toContain('cached-a')
+    )
+    await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      const checksBeforeResolve = blockedChecks
+      armedAt = checksBeforeResolve
+      pendingInitial.resolve(serverSessions([{ agent: 'agent-a', chatId: 'agent-a-remote' }]))
+      await flushMicrotasks(() => blockedChecks > checksBeforeResolve)
+      held = true
+    })
+
+    held = false
+    armedAt = null
+    act(() => controller.rerender())
+    expect(controller.result.current.chatList.map(chat => chat.id)).toEqual(['cached-a'])
+  })
+
+  it('retains the previous catalog when a more-page updater evaluates after the uncertain hold starts', async () => {
+    const pendingMore = deferred<SessionsListResult>()
+    let held = false
+    let blockedChecks = 0
+    let armedAt: number | null = null
+    const isHostAccessBlocked = () => {
+      blockedChecks += 1
+      return held || (armedAt !== null && blockedChecks > armedAt + 1)
+    }
+    clerum.chat.getIndex.mockResolvedValue(localIndex([]))
+    clerum.rpc.listSessions.mockImplementation(
+      async (agentRef: string, _teamId: string | undefined, query: CatalogQuery) => {
+        if (query?.cursor) return pendingMore.promise
+        return serverSessions([{ agent: agentRef, chatId: 'agent-a-page-1' }], 'agent-a-cursor')
+      }
+    )
+    const controller = renderController({
+      selectedAgent: 'agent-a',
+      agentNames: ['agent-a'],
+      isHostAccessBlocked,
+    })
+    await waitFor(() =>
+      expect(controller.result.current.chatList.map(chat => chat.id)).toContain('agent-a-page-1')
+    )
+    await waitFor(() => expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(true))
+
+    let loadMore!: Promise<void>
+    await act(async () => {
+      loadMore = controller.result.current.loadMoreChatSessions()
+      await flushMicrotasks(() =>
+        clerum.rpc.listSessions.mock.calls.some(
+          call => (call[2] as CatalogQuery)?.cursor === 'agent-a-cursor'
+        )
+      )
+      const checksBeforeResolve = blockedChecks
+      armedAt = checksBeforeResolve
+      pendingMore.resolve(serverSessions([{ agent: 'agent-a', chatId: 'agent-a-page-2' }]))
+      // The post-await authority guard runs before this resolves, so the
+      // functional updater is already queued while the hold still reads as
+      // released. It changes before React evaluates the updater.
+      await flushMicrotasks(() => blockedChecks > checksBeforeResolve)
+      held = true
+      await loadMore
+    })
+
+    held = false
+    armedAt = null
+    act(() => controller.rerender())
+    expect(controller.result.current.chatList.map(chat => chat.id)).toEqual(['agent-a-page-1'])
+  })
+})

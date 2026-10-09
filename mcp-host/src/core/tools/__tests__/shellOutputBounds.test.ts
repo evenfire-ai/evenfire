@@ -2,7 +2,6 @@ import { afterEach, expect, it } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { GfsProcessingLeaseProvider } from '../../../internalTools/gfsProcessingLease'
 import type { ExecutionContext } from '../../interfaces'
 import { ShellTool } from '../shell'
 
@@ -63,111 +62,30 @@ it('resets HOME to the caller workspace after environment merging', async () => 
   }
 })
 
-it('does not spawn when processing lease acquisition fails', async () => {
-  const workspace = managedWorkspace('shell-lease-denied-')
-  const marker = path.join(workspace, 'started')
-  const leases: GfsProcessingLeaseProvider = {
-    acquireProcessingLease: async () => {
-      throw new Error('download expired')
-    },
-    releaseProcessingLease: async () => undefined,
-  }
-  const tool = new ShellTool(workspace, 5_000, ['PATH'], () => ({}), undefined, leases)
-
-  try {
-    const result = await tool.execute({ command: `touch ${JSON.stringify(marker)}` })
-    expect(result.is_error).toBe(true)
-    expect(result.content).toContain('download expired')
-    expect(fs.existsSync(marker)).toBe(false)
-  } finally {
-    expect(fs.existsSync(marker)).toBe(false)
-  }
-})
-
-it('releases the processing lease after command completion', async () => {
-  const workspace = managedWorkspace('shell-lease-release-')
-  const events: string[] = []
-  const leases: GfsProcessingLeaseProvider = {
-    acquireProcessingLease: async () => {
-      events.push('acquire')
-      return { leaseId: 'lease-1', expiresAt: new Date(Date.now() + 60_000).toISOString() }
-    },
-    releaseProcessingLease: async () => {
-      events.push('release')
-    },
-  }
-  const tool = new ShellTool(workspace, 5_000, ['PATH'], () => ({}), undefined, leases)
-
-  try {
-    const result = await tool.execute({ command: 'printf done' })
-    expect(result.is_error).toBe(false)
-    expect(events).toEqual(['acquire', 'release'])
-  } finally {
-    expect(events).toEqual(['acquire', 'release'])
-  }
-})
-
-it('does not report success when processing lease release fails', async () => {
-  const workspace = managedWorkspace('shell-lease-failed-release-')
-  const leases: GfsProcessingLeaseProvider = {
-    acquireProcessingLease: async () => ({
-      leaseId: 'lease-1',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    }),
-    releaseProcessingLease: async () => {
-      throw new Error('lease ledger locked')
-    },
-  }
-  const tool = new ShellTool(workspace, 5_000, ['PATH'], () => ({}), undefined, leases)
-
-  try {
-    const result = await tool.execute({ command: 'printf done' })
-    expect(result.is_error).toBe(true)
-    expect(result.content).toContain('processing_lease_release_failed')
-  } finally {
-    // Cleanup is centralized by managedHosts; keep the operation under try for
-    // symmetrical failure reporting without duplicating the result assertion.
-  }
-})
-
-it('releases the processing lease only after process-group termination', async () => {
-  const workspace = managedWorkspace('shell-group-lease-')
-  const marker = path.join(workspace, 'group-settled')
+it('resolves only after the detached process group is terminated', async () => {
+  const workspace = managedWorkspace('shell-group-settled-')
+  const marker = path.join(workspace, 'grandchild-pid')
   const script = path.join(workspace, 'spawn-group-child.js')
-  const releaseSawSettledMarker: boolean[] = []
-  // The leader must not exit while the descendant's ready marker is still
-  // open and empty: ShellTool then terminates the remaining process group.
   fs.writeFileSync(
     script,
     `const cp = require('child_process')\n` +
       `cp.spawn(process.execPath, ['-e', ${JSON.stringify(
-        `const fs = require('fs'); const marker = ${JSON.stringify(marker)}; const pending = marker + '.tmp'; fs.writeFileSync(pending, 'yes'); fs.renameSync(pending, marker); setInterval(() => {}, 1000)`
+        `const fs = require('fs'); const marker = ${JSON.stringify(marker)}; const pending = marker + '.tmp'; fs.writeFileSync(pending, String(process.pid)); fs.renameSync(pending, marker); setInterval(() => {}, 1000)`
       )}], { stdio: 'ignore' })\n` +
       `const timer = setInterval(() => {\n` +
       `  if (require('fs').existsSync(${JSON.stringify(marker)})) { clearInterval(timer); process.exit(0) }\n` +
       `}, 5)\n`,
     'utf8'
   )
-  const leases: GfsProcessingLeaseProvider = {
-    acquireProcessingLease: async () => ({
-      leaseId: 'lease-group',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    }),
-    releaseProcessingLease: async () => {
-      releaseSawSettledMarker.push(
-        fs.existsSync(marker) && fs.readFileSync(marker, 'utf8') === 'yes'
-      )
-    },
-  }
-  const tool = new ShellTool(workspace, 5_000, ['PATH'], () => ({}), undefined, leases)
+  const tool = new ShellTool(workspace, 5_000, ['PATH'], () => ({}), undefined, true)
 
-  try {
-    const result = await tool.execute({ command: `node ${JSON.stringify(script)}` })
-    expect(result.is_error).toBe(false)
-    expect(result.content).not.toContain('process_group_termination_failed')
-    expect(fs.readFileSync(marker, 'utf8')).toBe('yes')
-    expect(releaseSawSettledMarker).toEqual([true])
-  } finally {
-    expect(fs.existsSync(marker)).toBe(true)
-  }
+  const result = await tool.execute({ command: `node ${JSON.stringify(script)}` })
+  expect(result.is_error).toBe(false)
+  expect(result.content).not.toContain('process_group_termination_failed')
+  // Witness: the grandchild ran and recorded its pid before the leader exited.
+  const grandchildPid = Number(fs.readFileSync(marker, 'utf8'))
+  expect(Number.isSafeInteger(grandchildPid) && grandchildPid > 0).toBe(true)
+  // The leader exiting does not end the group; the tool resolves only after
+  // the long-lived grandchild has been killed.
+  expect(() => process.kill(grandchildPid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
 })

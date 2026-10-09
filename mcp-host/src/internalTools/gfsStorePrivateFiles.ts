@@ -22,6 +22,29 @@ export function isPrivateStoreStatTrusted(info: Stats, kind: 'file' | 'directory
   )
 }
 
+/**
+ * The object was opened and proved not to be the store's: wrong owner, mode,
+ * type or link count, or it changed while it was checked. Unlike an errno
+ * such as EMFILE or EIO, this is a definitive answer about the object.
+ */
+export class PrivateStoreUntrustedError extends Error {
+  constructor(message = 'Untrusted private-store inode') {
+    super(message)
+    this.name = 'PrivateStoreUntrustedError'
+  }
+}
+
+/**
+ * The opened inode is trusted, but the name now points at another inode. An
+ * atomic rename over the name between open and lstat produces exactly this.
+ */
+export class PrivateStoreNameMovedError extends PrivateStoreUntrustedError {
+  constructor() {
+    super('Private-store inode changed')
+    this.name = 'PrivateStoreNameMovedError'
+  }
+}
+
 /** Restore only the exact kubelet fsGroup expansion of a private, owned inode. */
 export async function openPrivateStoreObject(
   filename: string,
@@ -42,7 +65,7 @@ export async function openPrivateStoreObject(
     const identity = await handle.stat({ bigint: true })
     const expected = kind === 'directory' ? 0o700 : 0o600
     const actual = info.mode & 0o7777
-    if (!isPrivateStoreStatTrusted(info, kind)) throw new Error('Untrusted private-store inode')
+    if (!isPrivateStoreStatTrusted(info, kind)) throw new PrivateStoreUntrustedError()
     if (actual !== expected && restore) {
       await beforeMutation?.()
       await handle.chmod(expected)
@@ -53,12 +76,12 @@ export async function openPrivateStoreObject(
     if (
       afterIdentity.dev !== identity.dev ||
       afterIdentity.ino !== identity.ino ||
-      named.dev !== identity.dev ||
-      named.ino !== identity.ino ||
       named.isSymbolicLink() ||
       (after.mode & 0o7777) !== (restore ? expected : actual)
     )
-      throw new Error('Private-store inode changed')
+      throw new PrivateStoreUntrustedError('Private-store inode changed')
+    if (named.dev !== identity.dev || named.ino !== identity.ino)
+      throw new PrivateStoreNameMovedError()
     return handle
   } catch (error) {
     await handle.close()
