@@ -1732,21 +1732,21 @@ export function App() {
 
   // Name the live app tab after the embed's `document.title` (mini-spec 06 §2).
   // Only the tab whose embed is live (`liveSandboxUiTabIdRef`) is renamed, and
-  // only when the event comes from the current launch and its `appRef` still
-  // matches the tab, so a late title event from a torn-down embed (even one of
-  // the same app being relaunched) can't relabel whichever view is live now.
-  // The store ignores empty titles, so the tab keeps its `app.label` until a
-  // real title arrives.
+  // only when the event comes from the current launch, so a late title event
+  // from a torn-down embed (even one of the same app being relaunched) can't
+  // relabel whichever view is live now. The launchId alone is enough: main tags
+  // each event with the appRef/launchId pair of the open that created the view,
+  // and every open goes through `launchSandboxUiApp`, which activates a tab of
+  // that same app in the commit that publishes the launchId — so whenever the
+  // launchId is current, the live tab (if any) holds the event's app. The store
+  // ignores empty titles, so the tab keeps its `app.label` until a real title
+  // arrives.
   React.useEffect(() => {
-    const off = window.clerum.sandboxUi.onTitleChanged?.(({ appRef, launchId, title }) => {
+    const off = window.clerum.sandboxUi.onTitleChanged?.(({ launchId, title }) => {
       if (launchId !== currentSandboxUiLaunchIdRef.current) return
       const tabId = liveSandboxUiTabIdRef.current
       if (!tabId) return
-      setWorkspaceTabs(state => {
-        const tab = state.tabs.find(candidate => candidate.id === tabId && candidate.kind === 'app')
-        if (!tab || tab.app?.appRef !== appRef) return state
-        return setAppTabTitle(state, tabId, title)
-      })
+      setWorkspaceTabs(state => setAppTabTitle(state, tabId, title))
     })
     return () => off?.()
   }, [setWorkspaceTabs])
