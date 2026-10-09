@@ -257,18 +257,26 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     expect(bcrypt.getRounds(compare.mock.calls[0][1] as string)).toBe(12)
   })
   it('denies a sixth source attempt before bcrypt', async () => {
-    for (let i = 0; i < 5; i++) {
-      await openPace()
-      expect((await login(`source-${i}@example.invalid`)).status).toBe(401)
+    // Keep all six source hits in one fixed minute even when five bcrypt
+    // compares straddle a wall-clock boundary; otherwise global pace can
+    // deny the sixth request before the source limiter is observed.
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(Date.now())
+    try {
+      for (let i = 0; i < 5; i++) {
+        await openPace()
+        expect((await login(`source-${i}@example.invalid`)).status).toBe(401)
+      }
+      expect(compare).toHaveBeenCalledTimes(5)
+      const sourceDenials = await denialCount('source_rate')
+      const before = compare.mock.calls.length
+      const response = await login('sixth@example.invalid')
+      expect(response.status).toBe(429)
+      expect(response.body.error).toBe('rate_limited')
+      expect(compare.mock.calls.length).toBe(before)
+      expect(await denialCount('source_rate')).toBe(sourceDenials + 1)
+    } finally {
+      wallClock.mockRestore()
     }
-    expect(compare).toHaveBeenCalledTimes(5)
-    const sourceDenials = await denialCount('source_rate')
-    const before = compare.mock.calls.length
-    const response = await login('sixth@example.invalid')
-    expect(response.status).toBe(429)
-    expect(response.body.error).toBe('rate_limited')
-    expect(compare.mock.calls.length).toBe(before)
-    expect(await denialCount('source_rate')).toBe(sourceDenials + 1)
   })
   it('denies rotating sources and canonical identifier variants after five attempts', async () => {
     for (let i = 0; i < 5; i++) {
