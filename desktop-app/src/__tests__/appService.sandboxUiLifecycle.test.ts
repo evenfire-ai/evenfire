@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { shell } from 'electron'
+import { app, shell } from 'electron'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -785,5 +785,124 @@ describe('AppService sandbox-ui embed across a session clear', () => {
     await service.logout()
 
     await expectEmbedGoneWithoutRefresh(parentWindow, firstView, firstWebContentsId)
+  })
+})
+
+describe('AppService sandbox-ui embed across a login that replaces a live session', () => {
+  // A is still logged in when B logs in: no logout runs in between, so only the
+  // login itself can retire A's sandbox-ui work.
+  beforeEach(() => {
+    // The login replacement fences the outgoing user's GFS uploads on disk.
+    vi.mocked(app.getPath).mockImplementation(() => userDataDir)
+    __setChatStoreBaseDirForTests(userDataDir)
+  })
+
+  afterEach(() => {
+    vi.mocked(app.getPath).mockImplementation(() => tmpdir())
+  })
+
+  async function loginAs(service: AppService, token: string, userId: string): Promise<void> {
+    const authClient = (service as unknown as { authClient: Record<string, unknown> }).authClient
+    authClient.googleLogin = vi.fn().mockResolvedValue({
+      token,
+      me: { id: userId, teamId: `team-${userId}` },
+    })
+    await service.googleLogin(`id-token-${userId}`)
+  }
+
+  async function drainSandboxUiQueue(service: AppService): Promise<void> {
+    await (
+      service as unknown as { enqueueSandboxUiLifecycle(op: () => Promise<void>): Promise<void> }
+    ).enqueueSandboxUiLifecycle(async () => undefined)
+  }
+
+  function holdMint(recipeName: string) {
+    let answer: (response: Response) => void = () => undefined
+    const held = new Promise<Response>(resolve => {
+      answer = resolve
+    })
+    mintResponders.set(recipeName, () => held)
+    return (response: Response) => answer(response)
+  }
+
+  async function serviceLoggedInAsA(): Promise<AppService> {
+    const service = new AppService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    await loginAs(service, 'session-token-a', 'user-a')
+    return service
+  }
+
+  it('an open whose mint lands after B logged in over A installs nothing and rejects', async () => {
+    const onClosed = vi.fn()
+    const service = await serviceLoggedInAsA()
+    const parentWindow = new FakeParentWindow()
+    const answerMint = holdMint('first-app')
+
+    const outcome = service.openSandboxUi(openArgs('first-app', parentWindow, onClosed)).then(
+      () => 'opened',
+      (error: unknown) => error
+    )
+    await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(1), { timeout: 1_000 })
+    await loginAs(service, 'session-token-b', 'user-b')
+    answerMint(mintOk('first-app'))
+
+    const settled = await outcome
+    await drainSandboxUiQueue(service)
+    expect(settled).toMatchObject({ message: expect.stringMatching(/session changed/) })
+    expect(electronMocks.sessionObject.cookies.set).not.toHaveBeenCalled()
+    expect(electronMocks.views).toHaveLength(0)
+    expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(onClosed).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(1)
+  })
+
+  it("B logging in over A closes A's embed and stops its refresh loop", async () => {
+    const service = await serviceLoggedInAsA()
+    const parentWindow = new FakeParentWindow()
+    await service.openSandboxUi(openArgs('first-app', parentWindow))
+    const first = getActiveSandboxUi()
+    expect(first?.appRef).toBe('sandbox-recipes/first-app')
+    const firstView = electronMocks.views[0]
+
+    await loginAs(service, 'session-token-b', 'user-b')
+
+    await expectEmbedGoneWithoutRefresh(parentWindow, firstView, first!.webContentsId)
+  })
+
+  it("a refresh of A's embed whose mint lands after B logged in writes no cookie and reports nothing", async () => {
+    const onRefreshError = vi.fn()
+    const service = await serviceLoggedInAsA()
+    const parentWindow = new FakeParentWindow()
+    await service.openSandboxUi({ ...openArgs('first-app', parentWindow), onRefreshError })
+    const answerMint = holdMint('first-app')
+    electronMocks.sessionObject.cookies.set.mockClear()
+
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1)
+    await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(2), { timeout: 1_000 })
+    await loginAs(service, 'session-token-b', 'user-b')
+    answerMint(mintOk('first-app'))
+    await vi.waitFor(() => expect(getActiveSandboxUi()).toBeNull(), { timeout: 1_000 })
+    await drainSandboxUiQueue(service)
+
+    expect(electronMocks.sessionObject.cookies.set).not.toHaveBeenCalled()
+    expect(onRefreshError).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(2)
+  })
+
+  it("an open B issues right after logging in over A mounts B's embed", async () => {
+    const service = await serviceLoggedInAsA()
+    const parentWindow = new FakeParentWindow()
+    await service.openSandboxUi(openArgs('first-app', parentWindow))
+    const firstView = electronMocks.views[0]
+
+    await loginAs(service, 'session-token-b', 'user-b')
+    await service.openSandboxUi(openArgs('second-app', parentWindow))
+
+    expect(getActiveSandboxUi()?.appRef).toBe('sandbox-recipes/second-app')
+    expect(firstView?.webContents.isDestroyed()).toBe(true)
+    expect(electronMocks.views).toHaveLength(2)
   })
 })

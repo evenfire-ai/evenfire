@@ -1393,13 +1393,17 @@ export class AppService {
     this.workflowTeamByKey.clear()
     this.rpcTokenManager.clear()
     unbindChatStore()
+    this.invalidateSandboxUiSession()
+  }
+
+  /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
+  private invalidateSandboxUiSession(): void {
     this.sandboxUiSessionEpoch += 1
-    // The embed and its refresh loop run on the session being cleared. Queued
-    // rather than awaited: callers are synchronous and must not wait on a
-    // pending open's mint; the serial queue still tears down whatever that
-    // open mounts.
+    // The embed and its refresh loop run on the outgoing session. Queued rather
+    // than awaited: callers must not wait on a pending open's mint; the serial
+    // queue still tears down whatever that open mounts.
     void this.closeSandboxUi().catch(error => {
-      console.error('[SandboxUI] Could not close the embed on session clear:', error)
+      console.error('[SandboxUI] Could not close the embed on session change:', error)
     })
   }
 
@@ -1659,6 +1663,9 @@ export class AppService {
       }
       this.logoutInProgress = false
       this.sessionGeneration += 1
+      // A login over a live session replaces it without a logout, so nothing
+      // else retires the outgoing user's embed, refresh loop or in-flight open.
+      if (hadAuthenticatedScope) this.invalidateSandboxUiSession()
       this.sessionToken = result.token
       this.me = result.me
       this.updateEntityChangeSessionToken(result.token)
