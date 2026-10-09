@@ -253,6 +253,24 @@ describe('Desktop environment handoff concurrency', () => {
     )
   })
 
+  it('clears a prior setup confirmation when environment verification fails', async () => {
+    const refreshRuntimeConfigState = vi.fn(async () => {
+      throw new Error('runtime config unavailable')
+    })
+    const { handler, setPendingDesktopEnvironmentSetup, setStatus } = createHandler(
+      () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false }),
+      refreshRuntimeConfigState
+    )
+
+    await handler(targetEnvironment)
+
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      'Could not verify the desktop environment. Try opening it again.',
+      'error'
+    )
+  })
+
   it('discards a link when the native session generation changes during config refresh', async () => {
     let finishRefresh!: (state: DesktopRuntimeConfigState) => void
     let reportRefreshStarted!: () => void
@@ -354,6 +372,49 @@ describe('Desktop environment handoff concurrency', () => {
     })
 
     expect(selectRuntimeConfig).toHaveBeenCalledOnce()
+    expect(onSessionNeedsLoad).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
+  it('does not load a selected environment when login completes after selection returns', async () => {
+    const savedTarget = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!savedTarget) throw new Error('The config producer did not return the saved target')
+    let generationReads = 0
+    const getSessionGeneration = vi.fn(async () => {
+      generationReads += 1
+      if (generationReads === 3) {
+        await nativeProducer.googleLogin('synthetic-login-after-selection-return')
+      }
+      return nativeProducer.getSessionGeneration()
+    })
+    const {
+      handler,
+      selectRuntimeConfig,
+      setPendingDesktopEnvironmentSetup,
+      onSessionNeedsLoad,
+      setStatus,
+    } = createHandler(
+      () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      getSessionGeneration
+    )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id, expect.any(Number))
     expect(onSessionNeedsLoad).not.toHaveBeenCalled()
     expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
     expect(setStatus).toHaveBeenCalledWith(

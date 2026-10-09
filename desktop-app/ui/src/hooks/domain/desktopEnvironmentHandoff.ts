@@ -222,6 +222,7 @@ export function createDesktopEnvironmentSetupHandler({
     try {
       configState = await refreshRuntimeConfigState()
     } catch {
+      setPendingDesktopEnvironmentSetup(null)
       setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
       return
     }
@@ -333,6 +334,7 @@ export function createDesktopEnvironmentSetupHandler({
       try {
         configState = await refreshRuntimeConfigState()
       } catch {
+        setPendingDesktopEnvironmentSetup(null)
         setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
         return
       }
