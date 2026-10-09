@@ -366,6 +366,105 @@ describe('AppService team-context quit lifecycle', () => {
     await expect(homeRead).resolves.toBe('team-home-token')
   })
 
+  it('rejects a quit-time team hop promptly while an earlier team operation is queued', async () => {
+    const operation = deferred<void>()
+    const operationStarted = deferred<void>()
+    const { service } = createAuthenticatedService()
+    const earlierOperation = service.runWithTeamContext('team-home', async () => {
+      operationStarted.resolve()
+      await operation.promise
+      return 'home-read'
+    })
+    await operationStarted.promise
+    await service.prepareForQuit()
+
+    const rejectedHop = service.runWithTeamContext('team-a', async token => token)
+    const rejection = rejectedHop.then(
+      () => null,
+      error => error
+    )
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      rejection,
+      new Promise<'pending'>(resolve => {
+        timeout = setTimeout(() => resolve('pending'), 100)
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+    operation.resolve()
+    await earlierOperation
+
+    expect(outcome).toBeInstanceOf(Error)
+    expect(outcome).toMatchObject({ message: 'Application is shutting down' })
+  })
+
+  it('does not keep quit open for queued work that no longer needs a team switch', async () => {
+    const firstOperation = deferred<void>()
+    const firstStarted = deferred<void>()
+    const queuedOperation = deferred<void>()
+    const queuedStarted = deferred<void>()
+    const { service, tokenStore } = createAuthenticatedService()
+    const prepareTokenStore = vi.spyOn(tokenStore, 'prepareForQuit')
+    const firstRead = service.runWithTeamContext('team-home', async () => {
+      firstStarted.resolve()
+      await firstOperation.promise
+      return 'home-read'
+    })
+    await firstStarted.promise
+    const queuedRead = service.runWithTeamContext('team-a', async () => {
+      queuedStarted.resolve()
+      await queuedOperation.promise
+      return 'team-a-read'
+    })
+
+    await service.switchTeam('team-a')
+    const preparation = service.prepareForQuit()
+    firstOperation.resolve()
+    await queuedStarted.promise
+    await preparation
+
+    expect(prepareTokenStore).toHaveBeenCalledOnce()
+    queuedOperation.resolve()
+    await expect(firstRead).resolves.toBe('home-read')
+    await expect(queuedRead).resolves.toBe('team-a-read')
+  })
+
+  it('continues draining home reads added while an earlier home read is running', async () => {
+    const hopOperation = deferred<void>()
+    const hopStarted = deferred<void>()
+    const nestedHomeReadCompleted = deferred<void>()
+    const { service } = createAuthenticatedService()
+    let nestedHomeRead: Promise<string> | undefined
+
+    const hop = service.runWithTeamContext('team-a', async () => {
+      hopStarted.resolve()
+      await hopOperation.promise
+      return 'team-a-complete'
+    })
+    await hopStarted.promise
+    const homeRead = service.runWithTeamContext('team-home', async token => {
+      nestedHomeRead = service.runWithTeamContext('team-home', async nestedToken => {
+        nestedHomeReadCompleted.resolve()
+        return nestedToken
+      })
+      return token
+    })
+    hopOperation.resolve()
+
+    await expect(hop).resolves.toBe('team-a-complete')
+    await expect(homeRead).resolves.toBe('team-home-token')
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const drainOutcome = await Promise.race([
+      nestedHomeReadCompleted.promise.then(() => 'completed' as const),
+      new Promise<'pending'>(resolve => {
+        timeout = setTimeout(() => resolve('pending'), 100)
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+    expect(drainOutcome).toBe('completed')
+    await expect(nestedHomeRead).resolves.toBe('team-home-token')
+  })
+
   it('does not keep quit open for a same-team operation with no credential switch', async () => {
     const operation = deferred<string>()
     const operationStarted = deferred<void>()

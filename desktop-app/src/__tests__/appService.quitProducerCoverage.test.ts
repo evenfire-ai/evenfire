@@ -41,24 +41,21 @@ async function createService() {
     me: { id: string; teamId: string } | null
     sessionToken: string | null
     authClient: { switchTeam(token: string, teamId: string): Promise<unknown> }
-    switchTeamOnce: ReturnType<typeof vi.fn>
-    restoreSavedSessionOnce: ReturnType<typeof vi.fn>
-    installAuthenticatedLoginOnce: ReturnType<typeof vi.fn>
-    applyRuntimeEnvironmentChangeOnce: ReturnType<typeof vi.fn>
     switchTeam: (teamId: string) => Promise<unknown>
-    restoreSavedSession: () => Promise<unknown>
     installAuthenticatedLogin: (result: unknown) => Promise<unknown>
-    applyRuntimeEnvironmentChange: (operation: () => Promise<void>) => Promise<void>
+    initialize: () => Promise<unknown>
     runWithTeamContext: <T>(
       teamId: string | null | undefined,
       operation: (sessionToken: string) => Promise<T>
     ) => Promise<T>
     prepareForQuit: () => Promise<void>
+    getRuntimeConfigState: () => unknown
+    saveRuntimeConfig: (next: {
+      externalRestApiBaseUrl: string
+      rpcProxyBaseUrl: string
+      appName: string
+    }) => Promise<unknown>
   }
-  service.switchTeamOnce = vi.fn().mockResolvedValue(undefined)
-  service.restoreSavedSessionOnce = vi.fn().mockResolvedValue(undefined)
-  service.installAuthenticatedLoginOnce = vi.fn().mockResolvedValue(undefined)
-  service.applyRuntimeEnvironmentChangeOnce = vi.fn().mockResolvedValue(undefined)
   await service.prepareForQuit()
   return service
 }
@@ -68,14 +65,12 @@ describe('AppService quit producer admission', () => {
     const service = await createService()
 
     await expect(service.switchTeam('team-b')).rejects.toThrow('Application is shutting down')
-    expect(service.switchTeamOnce).not.toHaveBeenCalled()
   })
 
   it('rejects saved-session restore after quit admission closes', async () => {
     const service = await createService()
 
-    await expect(service.restoreSavedSession()).rejects.toThrow('Application is shutting down')
-    expect(service.restoreSavedSessionOnce).not.toHaveBeenCalled()
+    await expect(service.initialize()).rejects.toThrow('Application is shutting down')
   })
 
   it('rejects login installation after quit admission closes', async () => {
@@ -84,18 +79,20 @@ describe('AppService quit producer admission', () => {
     await expect(
       service.installAuthenticatedLogin({ token: 'token', me: { id: 'user' } })
     ).rejects.toThrow('Application is shutting down')
-    expect(service.installAuthenticatedLoginOnce).not.toHaveBeenCalled()
   })
 
   it('rejects runtime-environment changes before their operation runs', async () => {
     const service = await createService()
-    const changeRuntime = vi.fn(async () => undefined)
+    const previousRuntime = service.getRuntimeConfigState()
 
-    await expect(service.applyRuntimeEnvironmentChange(changeRuntime)).rejects.toThrow(
-      'Application is shutting down'
-    )
-    expect(changeRuntime).not.toHaveBeenCalled()
-    expect(service.applyRuntimeEnvironmentChangeOnce).not.toHaveBeenCalled()
+    await expect(
+      service.saveRuntimeConfig({
+        externalRestApiBaseUrl: 'https://quit-admission.example.invalid',
+        rpcProxyBaseUrl: 'https://rpc.quit-admission.example.invalid',
+        appName: 'Quit admission test',
+      })
+    ).rejects.toThrow('Application is shutting down')
+    expect(service.getRuntimeConfigState()).toEqual(previousRuntime)
   })
 
   it('rejects a temporary team hop through the real quit gate before dispatch', async () => {
