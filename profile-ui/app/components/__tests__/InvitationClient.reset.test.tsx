@@ -220,4 +220,38 @@ describe('InvitationClient verified password recovery', () => {
     expect(mocks.checkAuth).not.toHaveBeenCalled()
     expect(mocks.routerReplace).not.toHaveBeenCalled()
   })
+
+  it('does not resubmit a reset proof after an ambiguous recovery outcome', async () => {
+    mocks.setupInvitationPasswordWithToken.mockRejectedValue(
+      new Error('503 Service Unavailable - recovery_outcome_unknown')
+    )
+    render(
+      <InvitationClient
+        invitationToken="verified-reset-proof"
+        initialInvitation={passwordReset}
+        initialError=""
+      />
+    )
+
+    fillPassword()
+    fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+
+    expect(
+      await screen.findByText(
+        'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.',
+        { exact: true }
+      )
+    ).toBeTruthy()
+    expect(screen.queryByLabelText('Password')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reset password' })).toBeNull()
+    expect(screen.getByRole('link', { name: 'Try signing in' }).getAttribute('href')).toBe(
+      PROFILE_ROUTES.login({ email: 'member@example.invalid' })
+    )
+    expect(
+      screen.getByRole('link', { name: 'Request a new recovery link' }).getAttribute('href')
+    ).toBe(PROFILE_ROUTES.forgotPassword({ email: 'member@example.invalid' }))
+    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
+    expect(mocks.checkAuth).not.toHaveBeenCalled()
+    expect(mocks.routerReplace).not.toHaveBeenCalled()
+  })
 })

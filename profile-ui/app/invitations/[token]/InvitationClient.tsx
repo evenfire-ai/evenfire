@@ -70,6 +70,20 @@ function statusForInvitation(invitation: InvitationPreview): string {
   return `Accept your Evenfire invitation for ${teamLabel}.`
 }
 
+function isAmbiguousRecoveryOutcome(value: unknown): boolean {
+  if (!(value instanceof Error)) return true
+  const message = value.message.replace(/^\d{3}\s+[A-Za-z ]+\s+-\s+/, '')
+  if (message === 'recovery_outcome_unknown') return true
+  if (value instanceof TypeError || value.name === 'SyntaxError') return true
+  const status = value.message.match(/^\s*(\d{3})\b/)
+  return Boolean(
+    status &&
+    Number(status[1]) >= 500 &&
+    !message.includes('authority_unavailable') &&
+    !message.includes('rate_limited')
+  )
+}
+
 export function InvitationClient({
   invitationToken,
   initialInvitation,
@@ -87,6 +101,7 @@ export function InvitationClient({
   const [confirmPassword, setConfirmPassword] = useState('')
   const [submitting, setSubmitting] = useState<'accept' | 'password' | null>(null)
   const [recoveryCommitted, setRecoveryCommitted] = useState(false)
+  const [recoveryOutcomeUnknown, setRecoveryOutcomeUnknown] = useState(false)
   const [sessionCheckInFlight, setSessionCheckInFlight] = useState(false)
   const actionInFlightRef = useRef(false)
 
@@ -100,6 +115,11 @@ export function InvitationClient({
     setError(initialError)
     setStatus(initialInvitation ? statusForInvitation(initialInvitation) : '')
   }, [initialInvitation, initialError])
+
+  useEffect(() => {
+    setRecoveryCommitted(false)
+    setRecoveryOutcomeUnknown(false)
+  }, [invitationToken])
 
   const invitationExpired = useMemo(() => {
     if (!invitation || invitation.status !== 'pending') return false
@@ -129,6 +149,9 @@ export function InvitationClient({
   const profileLoginHref = PROFILE_ROUTES.login({
     email: invitation?.email.trim().toLowerCase(),
   })
+  const forgotPasswordHref = PROFILE_ROUTES.forgotPassword({
+    email: invitation?.email.trim().toLowerCase(),
+  })
   const busy = submitting !== null
 
   function friendlyInvitationError(value: unknown): string {
@@ -148,6 +171,9 @@ export function InvitationClient({
       return 'Account recovery is temporarily busy. Please wait a moment and try again.'
     if (message === 'authority_unavailable')
       return 'Account recovery is temporarily unavailable. Please try again shortly.'
+    if (message === 'recovery_outcome_unknown') {
+      return 'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
+    }
     return message
   }
 
@@ -232,7 +258,7 @@ export function InvitationClient({
       !invitation ||
       busy ||
       actionInFlightRef.current ||
-      (isPasswordReset && recoveryCommitted)
+      (isPasswordReset && (recoveryCommitted || recoveryOutcomeUnknown))
     ) {
       return
     }
@@ -275,7 +301,16 @@ export function InvitationClient({
         passwordPending: false,
       })
     } catch (nextError) {
-      setError(friendlyInvitationError(nextError))
+      if (isPasswordReset && isAmbiguousRecoveryOutcome(nextError)) {
+        setRecoveryOutcomeUnknown(true)
+        setPassword('')
+        setConfirmPassword('')
+        setError(
+          'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
+        )
+      } else {
+        setError(friendlyInvitationError(nextError))
+      }
     } finally {
       actionInFlightRef.current = false
       setSubmitting(null)
@@ -371,6 +406,15 @@ export function InvitationClient({
             </Button>
             <a className="cu-btn" href={profileLoginHref}>
               Sign in instead
+            </a>
+          </div>
+        ) : isPasswordReset && recoveryOutcomeUnknown ? (
+          <div className="stack">
+            <a className="cu-btn cu-btn--primary" href={profileLoginHref}>
+              Try signing in
+            </a>
+            <a className="cu-btn" href={forgotPasswordHref}>
+              Request a new recovery link
             </a>
           </div>
         ) : (isPasswordReset && invitation.status === 'pending') ||
