@@ -470,6 +470,47 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('does not load a saved environment when generation changes after selection', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    const targetOptionId = await savedTargetOptionId()
+    const initialGeneration = nativeAppService!.getSessionGeneration()
+    const otherOption = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
+      option => option.id !== targetOptionId && option.id !== '__localhost__'
+    )
+    if (!otherOption) throw new Error('The runtime config producer did not return a second profile')
+    mocks.loadSession.mockClear()
+    mocks.selectRuntimeConfigForHandoff.mockImplementationOnce(
+      async (optionId: string, expectedGeneration: number) => {
+        const selection = await nativeAppService!.selectRuntimeConfigForHandoff(
+          optionId,
+          expectedGeneration
+        )
+        await nativeAppService!.selectRuntimeConfigForHandoff(
+          otherOption.id,
+          selection.sessionGeneration
+        )
+        return selection
+      }
+    )
+
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(
+      targetOptionId,
+      initialGeneration
+    )
+    expect(mocks.loadSession).not.toHaveBeenCalled()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
   it('opens the active matching environment without prompting for setup', async () => {
     const targetOptionId = await savedTargetOptionId()
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(targetOptionId)
