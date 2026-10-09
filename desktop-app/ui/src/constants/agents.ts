@@ -1,3 +1,5 @@
+import type { ModelStepBlockedReason } from '../../../src/types'
+
 export const MAX_VISIBLE_SESSIONS = 6
 export const SESSION_PREVIEW_LIMIT = 5
 /**
@@ -25,4 +27,21 @@ export const AGENT_ERROR_CODE_LABELS: Record<string, string> = {
   LLM_INVALID_ATTACHMENT: 'Invalid Attachment',
   LLM_MODEL_SELECTION_CONFLICT: 'Model Selection Changed',
   LLM_MODEL_NOT_ALLOWED: 'Model Not Allowed',
+}
+
+/** Action label of the model-step continuation (#1044); distinct from Resend. */
+export const MODEL_STEP_RETRY_LABEL = 'Retry model step'
+
+/** What the user can still do when a model step cannot be continued (#1044). */
+export const MODEL_STEP_RESEND_HINT = 'Send the message again to start a new turn.'
+
+/** Why the Host refuses to continue a model-step checkpoint (#1043 contract). */
+export const MODEL_STEP_BLOCKED_REASON_LABELS: Record<ModelStepBlockedReason, string> = {
+  principal_mismatch: 'The signed-in account is not the one that started this turn.',
+  host_mismatch: 'This turn belongs to a different Host.',
+  grant_revoked: 'The tool access this turn used has been revoked.',
+  model_unavailable: 'The model this turn used is no longer available.',
+  budget_exhausted: 'The task budget for this turn is used up.',
+  reference_unavailable: 'A file or reference this turn used is no longer available.',
+  attachment_expired: 'A file attached to this turn is no longer kept on the Host.',
 }

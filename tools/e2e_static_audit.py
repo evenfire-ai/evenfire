@@ -22,11 +22,22 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("core-route success mock", re.compile(r"(?:route|fulfill)\s*\([^\n]*(?:uploads|gfs|complete|parts)[^\n]*(?:status\s*:\s*2|status\s*:\s*20)")),
 )
 
+# Opt-in rules for files that declare E2E_GUARDIAN_STRICT_NETWORK: the journey
+# must reach the real services, so any request interception and any forced
+# click (which skips Playwright's actionability checks) fails the audit. Files
+# without the marker keep the rules above unchanged.
+STRICT_NETWORK_MARKER = "E2E_GUARDIAN_STRICT_NETWORK"
+STRICT_NETWORK_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("network interception in a strict-network file", re.compile(r"\b(?:page|context)\.route\s*\(")),
+    ("forced action in a strict-network file", re.compile(r"\bforce\s*:\s*true\b")),
+)
+
 
 def audit_file(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     findings: list[str] = []
-    for label, pattern in RULES:
+    rules = RULES + (STRICT_NETWORK_RULES if STRICT_NETWORK_MARKER in text else ())
+    for label, pattern in rules:
         for match in pattern.finditer(text):
             line = text.count("\n", 0, match.start()) + 1
             findings.append(f"{path}:{line}: {label}")

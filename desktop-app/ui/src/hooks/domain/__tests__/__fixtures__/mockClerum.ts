@@ -57,6 +57,7 @@ interface RpcMock {
   listSessions: Fn
   loadSessionMessages: Fn
   renameSession: Fn
+  continueModelStep: Fn
   getContextBreakdown: Fn
   cancelTask: Fn
   subscribeHostActivity: Fn
@@ -142,6 +143,11 @@ export function installMockClerum(): MockClerum {
         title,
       })
     ),
+    // #1044 — no default answer: a test that reaches the continuation POST
+    // must state the contract row it expects.
+    continueModelStep: vi.fn(async () => {
+      throw new Error('mockClerum: continueModelStep is not stubbed for this test')
+    }),
     getContextBreakdown: vi.fn(async () => ({ breakdown: null })),
     cancelTask: vi.fn(async () => undefined),
     subscribeHostActivity: vi.fn(

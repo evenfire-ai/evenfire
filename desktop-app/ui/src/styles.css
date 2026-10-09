@@ -14635,6 +14635,31 @@ pre {
   color: var(--text-muted);
 }
 
+/* #1044 — model-step checkpoint notice (Retry model step / blocked reason),
+ * rendered below the thread like the nudge card and sharing its frame. */
+.model-step-retry-notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  max-width: 460px;
+  padding: var(--space-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+}
+
+.model-step-retry-notice__error {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--danger);
+}
+
+.model-step-retry-notice__footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* ── Global File System (Files page) — P4-S07 ─────────────────────────────── */
 /* Card headers and tabs use the shared page primitives (see
    STYLE_STANDARDIZATION.md). GFS-specific rules below only arrange the

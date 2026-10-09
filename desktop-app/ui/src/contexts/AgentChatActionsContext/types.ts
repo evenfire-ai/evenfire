@@ -39,6 +39,8 @@ export interface AgentChatActionsContextValue {
   handleRetryFailedAgentSend: () => Promise<void>
   handleRecoverFailedAgentSend: () => void
   handleDiscardFailedAgentSend: () => void
+  /** #1044 — continue the active chat's resumable model-step checkpoint. */
+  handleRetryModelStep: () => Promise<void>
 }
 
 export interface AgentChatActionsProviderProps {

@@ -1070,6 +1070,11 @@ export interface SessionMessagesResult {
   activeTaskId?: string
   pendingApproval?: PendingApprovalLite
   tokens?: SessionTokensLite
+  /**
+   * Model-step checkpoint of the session (issues #1043 / #1044). Present only
+   * while a checkpoint is `resumable`, `claimed` or `blocked`.
+   */
+  modelStepCheckpoint?: ModelStepCheckpointView
   turns: Array<{
     number: number
     user_input: string
@@ -1080,6 +1085,97 @@ export interface SessionMessagesResult {
     tool_steps?: MessageToolStep[]
   }>
 }
+
+/*
+ * Model-step checkpoint wire contract (issues #1043 / #1044). Desktop copy of
+ * `mcp-host/src/core/conversation/modelStepCheckpointContract.ts`; the contract
+ * test loads the shared vectors in `tests/fixtures/model-step-checkpoint/` so a
+ * change on either side breaks a test. See `docs/contracts/model-step-checkpoint.md`.
+ */
+export type ModelStepCheckpointVisibleStatus = 'resumable' | 'claimed' | 'blocked'
+
+export type ModelStepBlockedReason =
+  | 'principal_mismatch'
+  | 'host_mismatch'
+  | 'grant_revoked'
+  | 'model_unavailable'
+  | 'budget_exhausted'
+  | 'reference_unavailable'
+  /** The retained bytes of an inline uploaded file expired or are missing; Resend still works. */
+  | 'attachment_expired'
+
+export interface ModelStepCheckpointToolCounts {
+  confirmed: number
+  unknown: number
+  notDispatched: number
+}
+
+/** The session read's view of a checkpoint. Never carries transcript, arguments or results. */
+export interface ModelStepCheckpointView {
+  checkpointId: string
+  /** Increases on every transition; the continuation POST echoes it. */
+  version: number
+  status: ModelStepCheckpointVisibleStatus
+  /** True only when `status === 'resumable'`. */
+  retryAvailable: boolean
+  originTaskId: string
+  /** Present when `status === 'claimed'`. */
+  continuationTaskId?: string
+  provider: string
+  model: string
+  /** Present when `status === 'blocked'`. */
+  blockedReason?: ModelStepBlockedReason
+  tools: ModelStepCheckpointToolCounts
+  /** ISO-8601. */
+  failedAt: string
+  /** ISO-8601. */
+  expiresAt: string
+}
+
+/** 202: a continuation is running (new claim, re-claim, or replay of a live claim). */
+export interface ModelStepContinueClaimed {
+  taskId: string
+  checkpointId: string
+  status: 'claimed'
+  replayed: boolean
+}
+
+/** 200: the continuation already completed; replays its task id. */
+export interface ModelStepContinueCompleted {
+  taskId: string
+  checkpointId: string
+  status: 'completed'
+  replayed: true
+}
+
+/** 404 */
+export interface ModelStepContinueNotFound {
+  code: 'model_step_checkpoint_not_found'
+}
+
+/** 409 */
+export interface ModelStepContinueVersionMismatch {
+  code: 'model_step_checkpoint_version_mismatch'
+  current: ModelStepCheckpointView
+}
+
+/** 409 */
+export interface ModelStepContinueBlocked {
+  code: 'model_step_checkpoint_blocked'
+  blockedReason: ModelStepBlockedReason
+}
+
+/**
+ * Parsed answer of `POST …/model-step-checkpoints/:checkpointId/continue`, one
+ * variant per row of the contract's precedence table. Any other status (503
+ * `host_draining`, 5xx, an unparseable body) is thrown, never mapped here.
+ */
+export type ModelStepContinueResult =
+  | { outcome: 'claimed'; httpStatus: 202; body: ModelStepContinueClaimed }
+  | { outcome: 'completed'; httpStatus: 200; body: ModelStepContinueCompleted }
+  | { outcome: 'not_found'; httpStatus: 404; body: ModelStepContinueNotFound }
+  | { outcome: 'version_mismatch'; httpStatus: 409; body: ModelStepContinueVersionMismatch }
+  | { outcome: 'blocked'; httpStatus: 409; body: ModelStepContinueBlocked }
 
 export interface SessionMessagesQuery {
   limit?: number

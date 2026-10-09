@@ -77,9 +77,30 @@ function writeIsolatedRuntimeConfig(
   )
 }
 
-export async function launchDesktopApp(): Promise<ElectronApplication> {
+export interface LaunchDesktopOptions {
+  /**
+   * A caller-owned Electron user-data directory. A relaunch with the same
+   * directory reopens the same Desktop profile (signed-in state, local chats).
+   */
+  userDataDir?: string
+  /**
+   * Keep the caller-owned directory when the app closes; the caller deletes it
+   * when its test ends. Requires `userDataDir`.
+   */
+  keepOnClose?: boolean
+}
+
+export async function launchDesktopApp(
+  options: LaunchDesktopOptions = {}
+): Promise<ElectronApplication> {
+  if (options.keepOnClose && options.userDataDir === undefined)
+    throw new Error('keepOnClose requires a caller-owned userDataDir')
   const { externalApiUrl, rpcProxyUrl } = profileOwnedEndpoints()
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-subscription-electron-'))
+  const callerOwned = options.userDataDir !== undefined
+  const userDataDir = callerOwned
+    ? path.resolve(options.userDataDir!)
+    : fs.mkdtempSync(path.join(os.tmpdir(), 'codex-subscription-electron-'))
+  if (callerOwned) fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 })
   const runtimeConfigPath = path.join(userDataDir, 'e2e-runtime-config.json')
   writeIsolatedRuntimeConfig(runtimeConfigPath, externalApiUrl, rpcProxyUrl)
 
@@ -100,7 +121,8 @@ export async function launchDesktopApp(): Promise<ElectronApplication> {
       },
     })
   } catch (error) {
-    fs.rmSync(userDataDir, { recursive: true, force: true })
+    // A caller-owned directory stays with its caller, who removes it.
+    if (!callerOwned) fs.rmSync(userDataDir, { recursive: true, force: true })
     throw error
   }
 
@@ -114,6 +136,7 @@ export async function launchDesktopApp(): Promise<ElectronApplication> {
     )
   }
 
-  app.on('close', () => fs.rmSync(userDataDir, { recursive: true, force: true }))
+  if (!options.keepOnClose)
+    app.on('close', () => fs.rmSync(userDataDir, { recursive: true, force: true }))
   return app
 }

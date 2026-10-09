@@ -53,6 +53,7 @@ import { ChatMarkdownContent } from './ChatMarkdownContent'
 import { ChatStateBadge } from './ChatStateBadge'
 import { InFlightAssistantPlaceholder } from './InFlightAssistantPlaceholder'
 import { MessageTokens } from './MessageTokens'
+import { ModelStepRetryNotice } from './ModelStepRetryNotice'
 import { NudgeArea } from './NudgeArea'
 
 type ChatThreadProps = {
@@ -290,6 +291,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     localSearchQuery,
     localSearchCurrentMatch,
     semanticModelsByMessageId,
+    modelStepCheckpoint,
+    modelStepRetry,
   } = useChatThreadStateContext()
   const {
     chatList,
@@ -307,6 +310,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     handleDeleteChat: onDeleteChat,
     handleAddComposerImageAttachments: onAddComposerImageAttachments,
     handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
+    handleRetryModelStep,
   } = useAgentChatActionsContext()
   const { cancelTask: onCancelTask } = useMcpRuntimeContext()
 
@@ -978,6 +982,13 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
           chatId={activeChatId}
           onStartNewChat={() => onStartNewChat(selectedAgent, { selectLatest: false })}
           onRefreshState={() => onSelectChat(activeChatId)}
+        />
+      )}
+      {activeChatId && selectedAgent && (modelStepCheckpoint || modelStepRetry?.unavailable) && (
+        <ModelStepRetryNotice
+          checkpoint={modelStepCheckpoint}
+          retry={modelStepRetry ?? null}
+          onRetry={() => void handleRetryModelStep()}
         />
       )}
       {isDedicatedAgentView && (

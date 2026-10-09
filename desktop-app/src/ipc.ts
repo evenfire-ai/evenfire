@@ -1573,6 +1573,40 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
+  // Issue #1044 — "Retry model step": continue a resumable model-step
+  // checkpoint. Single-host like rename: never a renderer-supplied fleet list.
+  ipcMain.handle(
+    'rpc:continueModelStep',
+    async (
+      event,
+      payload: {
+        hostRef: string
+        agent: string
+        chatId: string
+        checkpointId: string
+        version: number
+      }
+    ) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      const agent = sanitizeString(payload?.agent)
+      const chatId = sanitizeString(payload?.chatId)
+      const checkpointId = sanitizeString(payload?.checkpointId)
+      if (!hostRef || !agent || !chatId || !checkpointId) {
+        throw new Error('hostRef, agent, chatId, and checkpointId are required')
+      }
+      const version = payload?.version
+      if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) {
+        throw new Error('version must be a non-negative integer')
+      }
+      assertSafeRouteSegment('hostRef', hostRef)
+      assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+      assertSafeRouteSegment('chatId', chatId)
+      assertSafeRouteSegment('checkpointId', checkpointId)
+      return service.continueModelStep(hostRef, agent, chatId, checkpointId, version)
+    }
+  )
+
   ipcMain.handle('rpc:getTokenMetadata', async event => {
     assertTrustedSender(event)
     return service.getTokenMetadata()

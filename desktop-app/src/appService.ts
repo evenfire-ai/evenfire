@@ -62,6 +62,7 @@ import {
   HostRuntimeStatus,
   HostStatusStreamEvent,
   LoginBackendHint,
+  ModelStepContinueResult,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
@@ -4868,6 +4869,64 @@ export class AppService {
       targetModel,
       expectedRevision
     )
+  }
+
+  /**
+   * Issue #1044 — continue a `resumable` model-step checkpoint. The Host claims
+   * the checkpoint and starts a NEW linked task (the continuation), so this
+   * rides the same wakeable message-invoke scopes as {@link invokeHostMessage}:
+   * the POST creates work on the Host exactly like a send. The token is minted
+   * for this single hostRef only. Every contract row resolves to a typed result;
+   * any other answer throws.
+   */
+  async continueModelStep(
+    hostRef: string,
+    agent: string,
+    chatId: string,
+    checkpointId: string,
+    version: number
+  ): Promise<ModelStepContinueResult> {
+    const targetHostRef = String(hostRef || '').trim()
+    const targetAgent = String(agent || '').trim()
+    const targetChatId = String(chatId || '').trim()
+    const targetCheckpointId = String(checkpointId || '').trim()
+    if (!targetHostRef || !targetAgent || !targetChatId || !targetCheckpointId) {
+      throw new Error('hostRef, agent, chatId, and checkpointId are required')
+    }
+    const effectiveHostRefs = [targetHostRef]
+    const rpc = await this.issueRpcTokenForHostRefs(
+      HOST_WAKEABLE_OPERATION_SCOPES,
+      effectiveHostRefs
+    )
+    try {
+      return await this.rpcClient.continueModelStep(
+        rpc.token,
+        targetHostRef,
+        targetAgent,
+        targetChatId,
+        targetCheckpointId,
+        version
+      )
+    } catch (error) {
+      const availabilityError = AppService.toHostAvailabilityError(targetHostRef, error)
+      if (availabilityError) throw availabilityError
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(
+          HOST_WAKEABLE_OPERATION_SCOPES,
+          effectiveHostRefs
+        )
+        return this.rpcClient.continueModelStep(
+          retried.token,
+          targetHostRef,
+          targetAgent,
+          targetChatId,
+          targetCheckpointId,
+          version
+        )
+      }
+      throw error
+    }
   }
 
   /**
