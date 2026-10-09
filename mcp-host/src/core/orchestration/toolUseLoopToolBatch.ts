@@ -279,7 +279,6 @@ export async function executeToolCalls(
     // result right after it: a dispatch without a result reads `unknown`.
     await config.modelStepCheckpointRecorder?.recordDispatch(call)
     const toolResult = await executeAdmittedTool(admission, config, iteration)
-    await config.modelStepCheckpointRecorder?.recordResult(call, toolResult)
 
     // Retain policy-processed output before a subsequent tool can throw.
     if (config.onAttachments && toolResult.attachments?.length) {
@@ -288,6 +287,7 @@ export async function executeToolCalls(
       if (attachments.length) config.onAttachments(attachments)
     }
     if (config.abortSignal?.aborted) {
+      await config.modelStepCheckpointRecorder?.recordResult(call, toolResult)
       toolResults.push(toolResult)
       return { toolResults, cancelled: true }
     }
@@ -351,6 +351,7 @@ export async function executeToolCalls(
       return { toolResults, pendingApproval: approval }
     }
 
+    await config.modelStepCheckpointRecorder?.recordResult(call, toolResult)
     toolResults.push(toolResult)
 
     reportToolComplete(

@@ -37,8 +37,8 @@ import { isModelStepCheckpointEligibleError } from './modelStepCheckpointEligibi
  * `updateState` once the tool results are in, and `settle` once per loop
  * exit. A continuation paused for approval may enter another loop with this
  * recorder. A `tool_dispatch` is written before the tool's effect, so a dispatch
- * without a result reads `unknown` and is never re-executed. A result shares
- * the transaction of the next write (plan addendum A2).
+ * without a result reads `unknown` and is never re-executed. A confirmed
+ * result and its tool message share one fenced append.
  *
  * A failed write poisons the recorder: the loop keeps running as it does
  * without a recorder, and the checkpoint can never become `resumable`. A
@@ -121,7 +121,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   readonly checkpointId: string
   private currentFence: ModelStepCheckpointFence | null
   private recordedUpTo = 0
-  private pendingResults: ModelStepCheckpointEntryInput[] = []
+  private readonly recordedToolMessages = new Set<string>()
   private confirmedResults: number
   private isPoisoned = false
   private settled = false
@@ -197,8 +197,13 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   async syncMessages(messages: ChatMessage[]): Promise<void> {
     const pending = messages.slice(this.recordedUpTo)
     this.recordedUpTo = messages.length
-    if (pending.length === 0 && this.pendingResults.length === 0) return
-    await this.append(pending.map(message => this.messageEntry(message)))
+    const entries = pending
+      .filter(
+        message =>
+          message.role !== 'tool' || !this.recordedToolMessages.has(message.tool_call_id ?? '')
+      )
+      .map(message => this.messageEntry(message))
+    if (entries.length > 0) await this.append(entries)
   }
 
   rebase(length: number): void {
@@ -211,19 +216,27 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     ])
   }
 
-  /**
-   * The result is held and written in the next transaction (the next
-   * dispatch, message sync or settle), never later than the next write: a
-   * dispatch still precedes its effect, and a crash before that write reads
-   * `unknown`, the same as a crash between the effect and its own write.
-   */
+  /** Confirm the result only with the message Retry needs to reconstruct it. */
   async recordResult(call: ToolCall, result: ToolResult): Promise<void> {
     if (this.isPoisoned || !this.currentFence) return
-    this.pendingResults.push({
-      kind: 'tool_result',
-      toolCallId: call.id,
-      payload: JSON.stringify({ name: call.name, isError: result.is_error === true }),
-    })
+    const written = await this.append([
+      {
+        kind: 'tool_result',
+        toolCallId: call.id,
+        payload: JSON.stringify({ name: call.name, isError: result.is_error === true }),
+      },
+      this.messageEntry({
+        role: 'tool',
+        content: result.content,
+        tool_call_id: result.tool_call_id,
+        name: result.name,
+        spillover_ref: result.spillover_ref,
+      }),
+    ])
+    if (written) {
+      this.confirmedResults += 1
+      this.recordedToolMessages.add(call.id)
+    }
   }
 
   async updateState(nextIteration: number): Promise<void> {
@@ -243,7 +256,6 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     if (this.settled) throw new Error('model-step checkpoint recorder settled twice')
     const fence = this.currentFence
     if (!fence) return undefined
-    if (this.pendingResults.length > 0) await this.append([])
     const source = this.opts.mode.kind === 'origin' ? 'open' : 'claimed'
 
     // The approval gate has not executed the announced call yet. A continuation
@@ -305,16 +317,10 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     return undefined
   }
 
-  /** Writes `entries` after any held tool results, in one transaction. */
-  private async append(entries: ModelStepCheckpointEntryInput[]): Promise<void> {
+  private async append(entries: ModelStepCheckpointEntryInput[]): Promise<boolean> {
     const fence = this.currentFence
-    if (this.isPoisoned || !fence) return
-    const results = this.pendingResults
-    this.pendingResults = []
-    const written = await this.write('append', () =>
-      this.opts.store.append(this.opts.sessionKey, fence, [...results, ...entries])
-    )
-    if (written) this.confirmedResults += results.length
+    if (this.isPoisoned || !fence) return false
+    return this.write('append', () => this.opts.store.append(this.opts.sessionKey, fence, entries))
   }
 
   /**
