@@ -21,6 +21,7 @@ import {
 import type { ConnectorDetailTab } from '@constants/connectorDetail'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { McpServerCondition } from '@lib/api'
+import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 
 function text(value: unknown, fallback = '—'): string {
   return typeof value === 'string' && value.trim() ? value : fallback
@@ -107,6 +108,8 @@ export function ConnectorDetailPage() {
 
   const activeBoundary = accessBoundary(activeTab)
   const spec = server?.spec ?? {}
+  const auth =
+    spec.auth && typeof spec.auth === 'object' ? (spec.auth as Record<string, unknown>) : {}
   const conditions = server?.status?.conditions ?? []
   const transport =
     spec.transport && typeof spec.transport === 'object'
@@ -273,6 +276,10 @@ export function ConnectorDetailPage() {
                 value={spec.enabled === false ? 'No' : 'Yes'}
               />
               <ConnectorReadOnlyField label="Transport" value={text(transport.type)} />
+              <ConnectorReadOnlyField
+                label="Authentication"
+                value={connectorAuthenticationLabel(auth.type)}
+              />
               <ConnectorReadOnlyField code label="Endpoint" value={text(transport.url)} wide />
             </div>
           </FormSection>

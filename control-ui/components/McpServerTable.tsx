@@ -8,6 +8,7 @@ import {
   TableViewport,
   TruncatedText,
 } from '@clerum/frontend-components'
+import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { ConnectorAgentAccessDialog } from './ConnectorAgentAccessDialog'
 import type {
   ConnectorAgentBinding,
@@ -20,16 +21,17 @@ import { IconCable } from './Sidebar/icons'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconRefresh } from './icons'
+import { IconChevronRight, IconRefresh } from './icons'
 import { Button } from './ui'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to agents.'
-type ConnectorSortKey = 'name' | 'description' | 'managed' | 'enabled' | 'status'
+type ConnectorSortKey = 'name' | 'description' | 'authentication' | 'managed' | 'enabled' | 'status'
 type SortDirection = 'asc' | 'desc'
 
 const CONNECTOR_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name', width: '24%' },
   { key: 'description', label: 'Description' },
+  { key: 'authentication', label: 'Authentication', width: '10rem' },
   { key: 'managed', label: 'Managed', width: '6rem' },
   { key: 'enabled', label: 'Enabled', title: ENABLED_TOOLTIP, width: '6rem' },
   { key: 'status', label: 'Status', width: '7rem' },
@@ -86,13 +88,15 @@ function StatusBadge({ status }: { status?: McpServerStatus }) {
   )
 }
 
+function AuthenticationBadge({ authType }: { authType: unknown }) {
+  return <span className="cu-connector-badge">{connectorAuthenticationLabel(authType)}</span>
+}
+
 export function McpServerTable({
   items,
-  accessByConnectorKey,
   agentBindingsByConnectorName = {},
   agentTargets = [],
   onAddToAgents,
-  onRemoveFromAgents,
   updatingAgentAccessKey,
   onDelete,
   onOpen,
@@ -109,10 +113,6 @@ export function McpServerTable({
   const [sortKey, setSortKey] = useState<ConnectorSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [serverKeyAddingAgents, setServerKeyAddingAgents] = useState<string | null>(null)
-  const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
-  const accessDialogRef = React.useRef<HTMLElement | null>(null)
-  const accessCloseButtonRef = React.useRef<HTMLButtonElement | null>(null)
-  const accessOpenerRef = React.useRef<HTMLElement | null>(null)
   const rows = useMemo(
     () =>
       items.map(item => {
@@ -126,14 +126,10 @@ export function McpServerTable({
   const filteredRows = useMemo(() => {
     const matchingRows = !normalizedSearch
       ? rows
-      : rows.filter(({ namespace, name, item, key }) => {
+      : rows.filter(({ namespace, name, item }) => {
           const spec = item.spec || {}
-          const access = accessByConnectorKey?.[key]
-          const accessText = [
-            ...(access?.agents ?? []),
-            ...(access?.users ?? []),
-            ...(access?.teams ?? []),
-          ]
+          const accessText = (agentBindingsByConnectorName[name] ?? [])
+            .flatMap(binding => binding.agents)
             .flatMap(principal => [principal.id, principal.label])
             .join(' ')
           const conditionText = (item.status?.conditions || [])
@@ -146,6 +142,7 @@ export function McpServerTable({
             name,
             spec.image,
             spec.description,
+            spec.auth?.type,
             spec.transport?.type,
             spec.transport?.url,
             accessText,
@@ -166,57 +163,29 @@ export function McpServerTable({
                 undefined,
                 { sensitivity: 'base' }
               )
-            : sortKey === 'managed'
-              ? Number((left.item.spec?.managed ?? true) === true) -
-                Number((right.item.spec?.managed ?? true) === true)
-              : sortKey === 'enabled'
-                ? Number((left.item.spec?.enabled ?? true) === true) -
-                  Number((right.item.spec?.enabled ?? true) === true)
-                : getStatusLabel(left.item.status).localeCompare(getStatusLabel(right.item.status))
+            : sortKey === 'authentication'
+              ? connectorAuthenticationLabel(left.item.spec?.auth?.type).localeCompare(
+                  connectorAuthenticationLabel(right.item.spec?.auth?.type)
+                )
+              : sortKey === 'managed'
+                ? Number((left.item.spec?.managed ?? true) === true) -
+                  Number((right.item.spec?.managed ?? true) === true)
+                : sortKey === 'enabled'
+                  ? Number((left.item.spec?.enabled ?? true) === true) -
+                    Number((right.item.spec?.enabled ?? true) === true)
+                  : getStatusLabel(left.item.status).localeCompare(
+                      getStatusLabel(right.item.status)
+                    )
       if (comparison !== 0) return comparison * direction
       return left.key.localeCompare(right.key)
     })
-  }, [accessByConnectorKey, normalizedSearch, rows, sortDirection, sortKey])
+  }, [agentBindingsByConnectorName, normalizedSearch, rows, sortDirection, sortKey])
 
   React.useEffect(() => {
     if (!onRefresh) return
     const id = setInterval(() => void onRefresh(), 10_000)
     return () => clearInterval(id)
   }, [onRefresh])
-
-  React.useEffect(() => {
-    if (!serverKeyViewingAccess) return
-    accessCloseButtonRef.current?.focus()
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        setServerKeyViewingAccess(null)
-        return
-      }
-      if (event.key !== 'Tab') return
-      const focusable = Array.from(
-        accessDialogRef.current?.querySelectorAll<HTMLElement>(
-          'a[href], button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
-        ) ?? []
-      )
-      const first = focusable[0]
-      const last = focusable.at(-1)
-      if (!first || !last) return
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    const opener = accessOpenerRef.current
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      opener?.focus()
-    }
-  }, [serverKeyViewingAccess])
 
   function toggleSort(key: ConnectorSortKey) {
     if (sortKey === key) {
@@ -247,12 +216,6 @@ export function McpServerTable({
     setServerKeyAddingAgents(key)
   }
 
-  function openAccessDetails(key: string) {
-    accessOpenerRef.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
-    setServerKeyViewingAccess(key)
-  }
-
   const isInitialLoad = loading && items.length === 0
 
   return (
@@ -264,44 +227,49 @@ export function McpServerTable({
             {isInitialLoad ? 'Connectors' : `Connectors (${filteredRows.length})`}
           </>
         }
-        secondaryActions={
+        titleActions={
           onCreate || onAddRemote ? (
-            <>
-              {onCreate ? (
-                <Button
-                  size="sm"
-                  className="cu-btn--mcp-install"
-                  onClick={onCreate}
-                  disabled={isInitialLoad}
-                >
-                  Create connector
-                </Button>
-              ) : null}
-              {onAddRemote ? (
-                <Button
-                  size="sm"
-                  className="cu-btn--mcp-install"
-                  onClick={onAddRemote}
-                  disabled={isInitialLoad}
-                >
-                  Add remote server
-                </Button>
-              ) : null}
-            </>
+            <RowActionsMenu
+              ariaLabel="Connector actions"
+              horizontalTrigger
+              actions={[
+                ...(onCreate
+                  ? [
+                      {
+                        key: 'create-connector',
+                        label: 'Create connector',
+                        onClick: onCreate,
+                        disabled: isInitialLoad,
+                      },
+                    ]
+                  : []),
+                ...(onAddRemote
+                  ? [
+                      {
+                        key: 'add-remote-server',
+                        label: 'Add remote server',
+                        onClick: onAddRemote,
+                        disabled: isInitialLoad,
+                      },
+                    ]
+                  : []),
+              ]}
+            />
           ) : undefined
         }
         subtitle="Browse connector deployments and agent access."
         actionsClassName="cu-table-panel__actions--mcp"
         primaryAction={
           onInstallFromRegistry ? (
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm cu-btn--mcp-install"
+            <Button
+              size="sm"
+              variant="primary"
               onClick={onInstallFromRegistry}
               disabled={isInitialLoad}
             >
-              Install from Marketplace
-            </button>
+              <IconChevronRight width={16} height={16} />
+              Marketplace
+            </Button>
           ) : undefined
         }
         refreshAction={
@@ -350,7 +318,6 @@ export function McpServerTable({
             ) : (
               filteredRows.map(({ key, namespace, name, item }) => {
                 const spec = item.spec || {}
-                const agentBindings = bindingsForConnector(name)
                 const agentAccessBusy = updatingAgentAccessKey === key
                 return (
                   <TableRow
@@ -361,6 +328,9 @@ export function McpServerTable({
                     <td>{name}</td>
                     <td className="cu-registry-description">
                       <TruncatedText value={spec.description} />
+                    </td>
+                    <td>
+                      <AuthenticationBadge authType={spec.auth?.type} />
                     </td>
                     <td>
                       <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />
@@ -397,23 +367,6 @@ export function McpServerTable({
                                   onClick: () => openAddAgents(key),
                                 },
                               ]
-                            : []),
-                          {
-                            key: 'view-access',
-                            label: 'View access details',
-                            onClick: () => openAccessDetails(key),
-                          },
-                          ...(onRemoveFromAgents
-                            ? agentBindings.map(binding => ({
-                                key: `remove-agents-${binding.contextRef}`,
-                                label:
-                                  binding.agents.length === 1
-                                    ? `Remove from ${binding.agents[0].label}`
-                                    : `Remove from ${binding.agents.length} agents`,
-                                disabled: agentAccessBusy,
-                                onClick: () =>
-                                  void onRemoveFromAgents({ name, namespace }, binding),
-                              }))
                             : []),
                           ...(onDelete
                             ? [
@@ -453,83 +406,6 @@ export function McpServerTable({
                 onAdd={onAddToAgents}
                 onDismiss={() => setServerKeyAddingAgents(null)}
               />
-            )
-          })()
-        : null}
-      {serverKeyViewingAccess
-        ? (() => {
-            const row = rows.find(candidate => candidate.key === serverKeyViewingAccess)
-            if (!row) return null
-            const access = accessByConnectorKey?.[row.key]
-            const linkedAgents = bindingsForConnector(row.name).flatMap(binding => binding.agents)
-            const groups = [
-              {
-                key: 'agents',
-                label: 'Agents',
-                items: linkedAgents.map(item => ({ key: item.id, label: item.label })),
-              },
-              {
-                key: 'teams',
-                label: 'Teams',
-                items: (access?.teams ?? []).map(item => ({ key: item.id, label: item.label })),
-              },
-              {
-                key: 'users',
-                label: 'Users',
-                items: (access?.users ?? []).map(item => ({ key: item.id, label: item.label })),
-              },
-            ]
-            return (
-              <div
-                className="cu-modal-overlay"
-                role="presentation"
-                onMouseDown={event => {
-                  if (event.target === event.currentTarget) setServerKeyViewingAccess(null)
-                }}
-              >
-                <section
-                  aria-labelledby="connector-access-title"
-                  aria-modal="true"
-                  className="cu-modal-panel"
-                  ref={accessDialogRef}
-                  role="dialog"
-                >
-                  <div className="cu-modal-panel__header">
-                    <h3 className="cu-modal-panel__title" id="connector-access-title">
-                      Access for {row.name}
-                    </h3>
-                  </div>
-                  <div className="cu-registry-context-access cu-connector-access-grid">
-                    {groups.map(group => (
-                      <section className="cu-registry-context-access__group" key={group.key}>
-                        <div className="cu-registry-context-access__heading">
-                          <h4>{group.label}</h4>
-                          <span>{group.items.length}</span>
-                        </div>
-                        {group.items.length ? (
-                          <ul className="cu-registry-context-access__list">
-                            {group.items.map(item => (
-                              <li key={item.key}>{item.label}</li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <p className="cu-muted">No {group.label.toLowerCase()} linked.</p>
-                        )}
-                      </section>
-                    ))}
-                  </div>
-                  <div className="cu-modal-panel__actions">
-                    <button
-                      className="cu-btn cu-btn--primary"
-                      onClick={() => setServerKeyViewingAccess(null)}
-                      ref={accessCloseButtonRef}
-                      type="button"
-                    >
-                      Close
-                    </button>
-                  </div>
-                </section>
-              </div>
             )
           })()
         : null}
