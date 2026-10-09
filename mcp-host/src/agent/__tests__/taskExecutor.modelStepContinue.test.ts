@@ -229,7 +229,10 @@ async function claimedCheckpoint(options: {
   const handle = makeSqliteStore()
   handles.push(handle)
   const manager = new ConversationManager(handle.store)
-  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => clock })
+  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+    now: () => clock,
+    blockedTtlMs: RESUMABLE_TTL_MS,
+  })
   const message = options.message ?? sourceMessage()
   const conversation = await manager.getOrCreate(SESSION_KEY, {
     userId: USER,

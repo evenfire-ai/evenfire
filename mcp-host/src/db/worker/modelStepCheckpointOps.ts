@@ -161,6 +161,7 @@ export type ModelStepCheckpointOp =
   | {
       kind: 'model_step_checkpoint_transition'
       fence: ModelStepCheckpointFence
+      blockedTtlMs: number
       from: ModelStepCheckpointRowStatus[]
       to: ModelStepCheckpointRowStatus
       now: number
@@ -332,13 +333,13 @@ function statements(db: Database): Statements {
     `),
     // A blocked row may come from an older checkpoint with a null deadline.
     // Reuse the source checkpoint's configured lifetime when present; the
-    // historical null case receives the original seven-day default.
+    // historical null case receives the configured lifetime.
     transition: db.prepare(`
       UPDATE model_step_checkpoints
       SET status = @to, version = version + 1, updated_at = @now,
           failed_at = COALESCE(@failed_at, failed_at),
           expires_at = CASE WHEN @to = 'blocked'
-            THEN @now + COALESCE(expires_at - failed_at, 604800000)
+            THEN @now + COALESCE(expires_at - failed_at, @blocked_ttl_ms)
             ELSE COALESCE(@expires_at, expires_at) END,
           blocked_reason = CASE WHEN @to = 'blocked' THEN @blocked_reason ELSE NULL END,
           provider = COALESCE(@provider, provider), model = COALESCE(@model, model),
@@ -593,6 +594,7 @@ export function completeModelStepCheckpointWithMessage(
     from: 'claimed',
     to: 'completed',
     now,
+    blocked_ttl_ms: null,
     failed_at: null,
     expires_at: null,
     blocked_reason: null,
@@ -679,6 +681,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
             from,
             to: op.to,
             now: op.now,
+            blocked_ttl_ms: op.blockedTtlMs,
             failed_at: op.failedAt ?? null,
             expires_at: op.expiresAt ?? null,
             blocked_reason: op.blockedReason ?? null,

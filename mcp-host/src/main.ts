@@ -1685,7 +1685,10 @@ async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): 
       `Conversation store mode=${handle.mode} has no persist queue for model-step checkpoints`
     )
   }
-  const store = new ModelStepCheckpointStore(persistQueue, { now: () => Date.now() })
+  const store = new ModelStepCheckpointStore(persistQueue, {
+    now: () => Date.now(),
+    blockedTtlMs: config.modelStepCheckpointTtlMs,
+  })
   const hostInstanceId = randomUUID()
   const reaped = await store.bootReap(hostInstanceId)
   logger.info(

@@ -37,13 +37,19 @@ function tempDbPath(): string {
   return path.join(dir, 'host.db')
 }
 
-function storeOver(worker: InProcessWorkerHandle): {
+function storeOver(
+  worker: InProcessWorkerHandle,
+  blockedTtlMs = 7 * 24 * 3_600_000
+): {
   checkpoints: ModelStepCheckpointStore
   queue: PersistQueue
 } {
   const queue = new PersistQueue(worker.worker, { syncTimeoutMs: 2000, asyncTimeoutMs: 5000 })
   openQueues.push(queue)
-  return { checkpoints: new ModelStepCheckpointStore(queue, { now: () => clock }), queue }
+  return {
+    checkpoints: new ModelStepCheckpointStore(queue, { now: () => clock, blockedTtlMs }),
+    queue,
+  }
 }
 
 function header(checkpointId = 'cp-1', sessionKey = SESSION_KEY): ModelStepCheckpointOpenHeader {
@@ -340,7 +346,10 @@ describe('ModelStepCheckpointStore (#1043)', () => {
   it('4c. a new turn retires the previous resumable checkpoint in its own transaction', async () => {
     const handle = makeSqliteStore({ dbPath: tempDbPath() })
     openQueues.push(handle.persistQueue)
-    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => clock })
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => clock,
+      blockedTtlMs: 7 * 24 * 3_600_000,
+    })
     const manager = new ConversationManager(handle.store)
     const conv = await manager.getOrCreate(SESSION_KEY)
     await manager.startTurn(conv, 'first turn', 'task-1')
@@ -370,7 +379,10 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     async function reclaimed() {
       const handle = makeSqliteStore({ dbPath: tempDbPath() })
       openQueues.push(handle.persistQueue)
-      const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => clock })
+      const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+        now: () => clock,
+        blockedTtlMs: 7 * 24 * 3_600_000,
+      })
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
       await manager.startTurn(conv, 'turn', 'task-1')
@@ -700,7 +712,8 @@ describe('ModelStepCheckpointStore (#1043)', () => {
 
   it('6c2. blocking rearms expiry and repairs an inherited null deadline', async () => {
     const worker = createInProcessWorker(tempDbPath())
-    const { checkpoints } = storeOver(worker)
+    const blockedTtlMs = 2 * 3_600_000
+    const { checkpoints } = storeOver(worker, blockedTtlMs)
     const { fence } = await openResumable(checkpoints)
     worker.db
       .prepare('UPDATE model_step_checkpoints SET expires_at = NULL WHERE checkpoint_id = ?')
@@ -716,7 +729,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     const row = worker.db
       .prepare('SELECT expires_at FROM model_step_checkpoints WHERE checkpoint_id = ?')
       .get('cp-1') as { expires_at: number | null }
-    expect(row.expires_at).toBe(clock + 7 * 24 * 3_600_000)
+    expect(row.expires_at).toBe(clock + blockedTtlMs)
     expect((await checkpoints.loadLive(SESSION_KEY))?.header.status).toBe('blocked')
 
     // A valid source deadline also receives a fresh window of its original length.
@@ -939,7 +952,10 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       // retired by a new turn
       const handle = makeSqliteStore({ dbPath: tempDbPath() })
       openQueues.push(handle.persistQueue)
-      const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => clock })
+      const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+        now: () => clock,
+        blockedTtlMs: 7 * 24 * 3_600_000,
+      })
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
       await manager.startTurn(conv, 'first turn', 'task-1')

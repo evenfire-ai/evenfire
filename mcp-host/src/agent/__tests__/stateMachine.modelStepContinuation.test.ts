@@ -115,7 +115,10 @@ function task(
 }
 
 async function claimedCheckpoint(handle: StoreHandle, manager?: ConversationManager) {
-  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => NOW })
+  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+    now: () => NOW,
+    blockedTtlMs: RESUMABLE_TTL_MS,
+  })
   const conversationManager = manager ?? new ConversationManager(handle.store)
   const conversation = await conversationManager.getOrCreate(SESSION_KEY, {
     userId: USER,

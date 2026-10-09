@@ -74,7 +74,7 @@ function harness(
   const queue = new PersistQueue(worker.worker, { syncTimeoutMs: 5000, asyncTimeoutMs: 5000 })
   queues.push(queue)
   const now = overrides.now ?? (() => 1_000_000)
-  const store = new ModelStepCheckpointStore(queue, { now })
+  const store = new ModelStepCheckpointStore(queue, { now, blockedTtlMs: 7 * 24 * 3_600_000 })
   const safety = new BasicSafety()
   const onFenceLost = vi.fn()
   const recorder = createModelStepCheckpointRecorder({
@@ -131,7 +131,14 @@ function storeHarness(): {
   const queue = new PersistQueue(worker.worker, { syncTimeoutMs: 5000, asyncTimeoutMs: 5000 })
   queues.push(queue)
   const clock = { value: 1_000_000 }
-  return { worker, store: new ModelStepCheckpointStore(queue, { now: () => clock.value }), clock }
+  return {
+    worker,
+    store: new ModelStepCheckpointStore(queue, {
+      now: () => clock.value,
+      blockedTtlMs: 7 * 24 * 3_600_000,
+    }),
+    clock,
+  }
 }
 
 /**

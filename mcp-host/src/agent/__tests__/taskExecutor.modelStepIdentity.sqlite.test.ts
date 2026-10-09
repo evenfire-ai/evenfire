@@ -116,7 +116,10 @@ function deps(
     onFail: vi.fn<(task: Task, error: TaskError) => void>(),
     dynamicEnvProvider: () => ({}),
     modelStepCheckpoints: {
-      store: new ModelStepCheckpointStore(handle.persistQueue, { now: () => NOW }),
+      store: new ModelStepCheckpointStore(handle.persistQueue, {
+        now: () => NOW,
+        blockedTtlMs: 7 * 24 * 3_600_000,
+      }),
       hostInstanceId: 'instance-a',
       hostId: 'host-a',
       resumableTtlMs: 86_400_000,

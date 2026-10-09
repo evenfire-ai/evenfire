@@ -137,7 +137,10 @@ async function runOutageTask(toolCallsBeforeOutage: number, withCheckpoints = tr
     ...(withCheckpoints
       ? {
           modelStepCheckpoints: {
-            store: new ModelStepCheckpointStore(handle.persistQueue, { now: () => NOW }),
+            store: new ModelStepCheckpointStore(handle.persistQueue, {
+              now: () => NOW,
+              blockedTtlMs: RESUMABLE_TTL_MS,
+            }),
             hostInstanceId: 'host-instance-1',
             hostId: 'host-a',
             resumableTtlMs: RESUMABLE_TTL_MS,
@@ -251,7 +254,10 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
       // The session read serves the checkpoint under the same key the
       // executor wrote it with.
       expect(header.session_key).toBe('authenticated-user:rpc:isolated-channel:default')
-      const store = new ModelStepCheckpointStore(handle.persistQueue, { now: () => NOW })
+      const store = new ModelStepCheckpointStore(handle.persistQueue, {
+        now: () => NOW,
+        blockedTtlMs: RESUMABLE_TTL_MS,
+      })
       const { handleSessionMessages } = createSessionRouteHandlers({
         getConversationManager: () => new ConversationManager(handle.store),
         redactToolError: (_tool, raw) => raw,

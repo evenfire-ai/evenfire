@@ -201,7 +201,10 @@ function createHarness(
   const handle = makeSqliteStore()
   openHandles.push(handle)
   const now = options.now ?? (() => NOW)
-  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now })
+  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+    now,
+    blockedTtlMs: RESUMABLE_TTL_MS,
+  })
   const support: ModelStepCheckpointSupport = {
     store: checkpoints,
     hostInstanceId: HOST_INSTANCE_ID,
@@ -758,7 +761,10 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
   it('abandons the claim and rethrows when admission itself fails', async () => {
     const handle = makeSqliteStore()
     openHandles.push(handle)
-    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => NOW })
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => NOW,
+      blockedTtlMs: RESUMABLE_TTL_MS,
+    })
     const failure = new Error('continuation admission failed')
     const enqueue = vi.fn(async () => {
       throw failure
@@ -800,7 +806,10 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
     })
     await manager.startTurn(conversation, sourceMessage().content, ORIGIN_TASK_ID)
     await manager.failTurn(conversation)
-    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => NOW })
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => NOW,
+      blockedTtlMs: RESUMABLE_TTL_MS,
+    })
     const { version } = await openResumable(checkpoints, { originTurnNumber: 1 })
     const failure = new Error('enqueue rejected after turn reopen')
     const service = new ModelStepContinuationService({
