@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { DesktopRuntimeConfigHandoffSelection } from '../../../../../src/types'
+import type {
+  DesktopRuntimeConfigHandoffSelection,
+  DesktopRuntimeConfigState,
+} from '../../../../../src/types'
 import { createDesktopEnvironmentSetupHandler } from '../desktopEnvironmentHandoff'
 
 const targetEnvironment = {
@@ -35,6 +38,7 @@ type NativeHandoffProducer = {
   sessionToken: string | null
   googleLogin: (token: string) => Promise<unknown>
   getSessionGeneration: () => number
+  getRuntimeConfigState: () => DesktopRuntimeConfigState
   logout: () => Promise<number>
   selectRuntimeConfigForHandoff: (
     optionId: string,
@@ -129,7 +133,8 @@ function createHandler(
     activeExternalRestApiBaseUrl: string
     targetEnvironmentName: string
     targetExternalRestApiBaseUrl: string
-  }) => Promise<boolean> = vi.fn(async () => true)
+  }) => Promise<boolean> = vi.fn(async () => true),
+  getSessionGenerationOverride?: () => Promise<number>
 ) {
   let signedOutGeneration: number | null = null
   const getCurrentAuthState = () => {
@@ -166,7 +171,8 @@ function createHandler(
   const setStatus = vi.fn()
   const handler = createDesktopEnvironmentSetupHandler({
     getAuthState: getCurrentAuthState,
-    getSessionGeneration: async () => nativeProducer.getSessionGeneration(),
+    getSessionGeneration:
+      getSessionGenerationOverride ?? (async () => nativeProducer.getSessionGeneration()),
     refreshRuntimeConfigState,
     handleSelectRuntimeConfig: selectRuntimeConfig,
     onSessionNeedsLoad,
@@ -203,7 +209,7 @@ describe('Desktop environment handoff concurrency', () => {
     await handler(targetEnvironment)
 
     expect(selectRuntimeConfig).not.toHaveBeenCalled()
-    expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
   })
 
   it('rechecks the auth operation state after runtime configuration loads', async () => {
@@ -237,12 +243,269 @@ describe('Desktop environment handoff concurrency', () => {
     await handling
 
     expect(selectRuntimeConfig).not.toHaveBeenCalled()
-    expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
     expect((await runtimeConfigModule!.getDesktopRuntimeConfigState()).activeOptionId).toBe(
       originalActiveOptionId
     )
     expect(setStatus).toHaveBeenCalledWith(
       'Finish the current authentication action, then reopen this desktop link.',
+      'info'
+    )
+  })
+
+  it('discards a link when the native session generation changes during config refresh', async () => {
+    let finishRefresh!: (state: DesktopRuntimeConfigState) => void
+    let reportRefreshStarted!: () => void
+    const refreshStarted = new Promise<void>(resolve => {
+      reportRefreshStarted = resolve
+    })
+    const runtimeConfigState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const refreshRuntimeConfigState = () =>
+      new Promise<DesktopRuntimeConfigState>(resolve => {
+        finishRefresh = resolve
+        reportRefreshStarted()
+      })
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(
+        () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false }),
+        refreshRuntimeConfigState
+      )
+
+    const handling = handler(targetEnvironment)
+    await refreshStarted
+    await nativeProducer.googleLogin('synthetic-login-during-config-refresh')
+    finishRefresh(runtimeConfigState)
+    await handling
+
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
+  it('passes the captured generation to native selection across an auth race', async () => {
+    const savedTarget = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!savedTarget) throw new Error('The config producer did not return the saved target')
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, onSessionNeedsLoad } =
+      createHandler(() => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: false,
+      }))
+    const expectedGeneration = nativeProducer.getSessionGeneration()
+    selectRuntimeConfig.mockImplementationOnce(async (optionId, requestedGeneration) => {
+      await nativeProducer.googleLogin('synthetic-login-before-native-selection')
+      try {
+        return await nativeProducer.selectRuntimeConfigForHandoff(
+          optionId,
+          requestedGeneration ?? expectedGeneration
+        )
+      } catch {
+        return null
+      }
+    })
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id, expectedGeneration)
+    expect(onSessionNeedsLoad).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+  })
+
+  it('does not load a selected environment after the generation changes post-selection', async () => {
+    const savedTarget = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!savedTarget) throw new Error('The config producer did not return the saved target')
+    const {
+      handler,
+      selectRuntimeConfig,
+      setPendingDesktopEnvironmentSetup,
+      onSessionNeedsLoad,
+      setStatus,
+    } = createHandler(() => ({
+      booting: false,
+      busy: false,
+      authTransitioning: false,
+      isAuthenticated: false,
+    }))
+    selectRuntimeConfig.mockImplementationOnce(async (optionId, expectedGeneration) => {
+      const selection = await nativeProducer.selectRuntimeConfigForHandoff(
+        optionId,
+        expectedGeneration ?? nativeProducer.getSessionGeneration()
+      )
+      await nativeProducer.googleLogin('synthetic-login-after-native-selection')
+      return selection
+    })
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(selectRuntimeConfig).toHaveBeenCalledOnce()
+    expect(onSessionNeedsLoad).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
+  it('stops after logout when a newer native login wins before the handoff continues', async () => {
+    let isAuthenticated = true
+    const logout = vi.fn(async () => {
+      await ensureNativeSession()
+      const generation = await nativeProducer.logout()
+      isAuthenticated = false
+      await nativeProducer.googleLogin('synthetic-login-after-handoff-logout')
+      return generation
+    })
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(
+        () => ({
+          booting: false,
+          busy: false,
+          authTransitioning: false,
+          isAuthenticated,
+        }),
+        undefined,
+        logout,
+        vi.fn(async () => {})
+      )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(logout).toHaveBeenCalledOnce()
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
+  it('keeps the new-session status when reload rejects after changing generation', async () => {
+    const setPendingDesktopEnvironmentSetup = vi.fn()
+    const setStatus = vi.fn()
+    const initialGeneration = nativeProducer.getSessionGeneration()
+    const handler = createDesktopEnvironmentSetupHandler({
+      getAuthState: () => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: true,
+      }),
+      getSessionGeneration: async () => nativeProducer.getSessionGeneration(),
+      refreshRuntimeConfigState: async () => runtimeConfigModule!.getDesktopRuntimeConfigState(),
+      handleSelectRuntimeConfig: vi.fn(async () => null),
+      onSessionNeedsLoad: async () => {
+        await nativeProducer.googleLogin('synthetic-login-before-reload-error')
+        throw new Error('stale reload')
+      },
+      requestEnvironmentSwitchConfirmation: async () => true,
+      logoutForEnvironmentMismatch: async () => initialGeneration,
+      setPendingDesktopEnvironmentSetup,
+      setStatus,
+    })
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+    expect(setStatus).not.toHaveBeenCalledWith(
+      'Could not verify your sign-in state before switching desktop environments.',
+      'error'
+    )
+  })
+
+  it('reports a generation change after a successful signed-out reload', async () => {
+    const setPendingDesktopEnvironmentSetup = vi.fn()
+    const setStatus = vi.fn()
+    const initialGeneration = nativeProducer.getSessionGeneration()
+    let isAuthenticated = true
+    const handler = createDesktopEnvironmentSetupHandler({
+      getAuthState: () => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated,
+      }),
+      getSessionGeneration: async () => nativeProducer.getSessionGeneration(),
+      refreshRuntimeConfigState: async () => runtimeConfigModule!.getDesktopRuntimeConfigState(),
+      handleSelectRuntimeConfig: vi.fn(async () => null),
+      onSessionNeedsLoad: async () => {
+        await nativeProducer.googleLogin('synthetic-login-during-session-reload')
+        isAuthenticated = false
+      },
+      requestEnvironmentSwitchConfirmation: async () => true,
+      logoutForEnvironmentMismatch: async () => initialGeneration,
+      setPendingDesktopEnvironmentSetup,
+      setStatus,
+    })
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
+
+  it('rechecks the generation before exposing a new-profile setup confirmation', async () => {
+    let generationReads = 0
+    const getSessionGeneration = async () => {
+      generationReads += 1
+      if (generationReads === 3) {
+        await nativeProducer.googleLogin('synthetic-login-before-setup-confirmation')
+      }
+      return nativeProducer.getSessionGeneration()
+    }
+    const { handler, setPendingDesktopEnvironmentSetup, setStatus } = createHandler(
+      () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      getSessionGeneration
+    )
+
+    await handler({
+      appName: 'New tenant',
+      externalRestApiBaseUrl: 'https://brand-new-api.example.test/api/v1',
+    })
+
+    expect(generationReads).toBe(3)
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        externalRestApiBaseUrl: 'https://brand-new-api.example.test/api/v1',
+      })
+    )
+    expect(setStatus).toHaveBeenCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
       'info'
     )
   })
@@ -265,6 +528,7 @@ describe('Desktop environment handoff concurrency', () => {
         option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
     )
     if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+    const initialGeneration = nativeProducer.getSessionGeneration()
 
     let busy = false
     let isAuthenticated = true
@@ -308,10 +572,9 @@ describe('Desktop environment handoff concurrency', () => {
     expect(busy).toBe(false)
     expect(logout).toHaveBeenCalledOnce()
     if (action === 'select') {
-      expect(selectRuntimeConfig).toHaveBeenCalledWith(
-        savedTarget.id,
-        await logout.mock.results[0]?.value
-      )
+      const logoutGeneration = await logout.mock.results[0]?.value
+      expect(logoutGeneration).not.toBe(initialGeneration)
+      expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id, logoutGeneration)
       const selection = await selectRuntimeConfig.mock.results[0]?.value
       expect(selection?.sessionGeneration).toBe(nativeProducer.getSessionGeneration())
       expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
@@ -619,7 +882,7 @@ describe('Desktop environment handoff concurrency', () => {
 
       const handling = handler({ ...targetEnvironment, externalRestApiBaseUrl })
       await secondRefreshStarted
-      let finishLogin: (() => void) | null = null
+      const loginCompletion: { finish?: () => void } = {}
       let pendingLogin: Promise<unknown> | null = null
       if (loginState) {
         const loginResultValue = {
@@ -639,7 +902,7 @@ describe('Desktop environment handoff concurrency', () => {
           reportLoginStarted = resolve
         })
         const loginResult = new Promise<typeof loginResultValue>(resolve => {
-          finishLogin = () => resolve(loginResultValue)
+          loginCompletion.finish = () => resolve(loginResultValue)
         })
         nativeProducer.authClient.googleLogin.mockImplementationOnce(() => {
           reportLoginStarted()
@@ -650,7 +913,7 @@ describe('Desktop environment handoff concurrency', () => {
         await loginStarted
         authState = { ...authState, ...loginState }
         if (loginState.isAuthenticated) {
-          finishLogin()
+          loginCompletion.finish?.()
           await login
         }
       } else {
@@ -664,8 +927,8 @@ describe('Desktop environment handoff concurrency', () => {
       finishSecondRefresh()
       await handling
 
-      if (pendingLogin && finishLogin) {
-        finishLogin()
+      if (pendingLogin && loginCompletion.finish) {
+        loginCompletion.finish()
         await pendingLogin
       }
 
