@@ -87,7 +87,7 @@ describe('control-api approval rate limit config', () => {
   it('defaults approval request rate limit to multi-agent channel-reader capacity', async () => {
     const config = await loadConfigWith({})
 
-    expect(config.approvalRlRequestPerMin).toBe(120)
+    expect(config.approvalRlRequestPerMin).toBe(600)
   })
 
   it('accepts the approval request rate limit environment override', async () => {

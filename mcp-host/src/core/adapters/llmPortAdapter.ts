@@ -17,9 +17,10 @@ import {
 } from '../../llm/promptCacheMetrics'
 import { logger } from '../../logger'
 import { LlmUsageEvent, UsageReporter, newRequestId } from '../../usage/usageReporter.js'
+import { visualDimensionLimit } from '../../visualInput/deliveryLimits'
 import { gfsImageParts, projectGfsMessages } from '../../visualInput/messageProjection'
 import { type ImageInputCapability, VisualInputError } from '../../visualInput/policy'
-import { assertVisualRequestFits, hasGfsImageInput } from '../../visualInput/requestPolicy'
+import { hasGfsImageInput, hasUnknownImageGeometry } from '../../visualInput/requestPolicy'
 import type { SessionTokenUsage } from '../conversation/conversationStore'
 import { LlmError, LlmErrorCode } from '../errors'
 import { LlmPort } from '../interfaces'
@@ -30,6 +31,7 @@ import {
   ChatMessage,
   CompletionRequest,
   CompletionResponse,
+  MessageContentPart,
   MessageRole,
   ToolCompletionRequest,
   ToolCompletionResponse,
@@ -164,9 +166,10 @@ export class LlmPortAdapter implements LlmPort {
     if (decision.state !== 'supported') return { status: decision.state }
     return {
       status: 'supported',
-      provider: this.providerName,
+      provider: this.provider.getProviderType(),
       model: this.model,
       evidence: decision.evidence?.reference ?? 'live-catalog-row',
+      deliveryLimits: this.provider.getVisualDeliveryLimits?.('completeWithTools') ?? null,
     }
   }
 
@@ -289,27 +292,74 @@ export class LlmPortAdapter implements LlmPort {
   ): ChatMessage[] {
     let messages = providerMessages
     const candidates = gfsImageParts(messages)
+    if (candidates.length === 0) return messages
+
+    const limits =
+      this.provider.getVisualDeliveryLimits?.(
+        this.dispatchMethodFor(request, 'tools' in request)
+      ) ?? null
+    const allImages = (current: ChatMessage[]) =>
+      current.flatMap(message =>
+        (message.contentParts ?? []).filter(
+          (part): part is Extract<MessageContentPart, { type: 'image' }> =>
+            part.type === 'image' && !part.sourceIdentityOnly
+        )
+      )
+    const imageBytes = (part: Extract<MessageContentPart, { type: 'image' }>): number =>
+      Buffer.byteLength(part.data, 'base64')
+    if (!limits) {
+      // A catalog vision capability does not establish a physical byte/count
+      // contract. Keep the governed file receipt for this attempt, without pixels.
+      return projectGfsMessages(
+        messages,
+        new Set(candidates),
+        'provider_visual_profile_unavailable'
+      )
+    }
+    if (hasUnknownImageGeometry(messages, limits)) {
+      return projectGfsMessages(messages, new Set(candidates), 'geometry_unknown')
+    }
+    const exceeds = (current: ChatMessage[]): boolean => {
+      const images = allImages(current)
+      const dimensionLimit = visualDimensionLimit(limits, images.length)
+      const totalImageBytes = images.reduce((total, part) => total + imageBytes(part), 0)
+      const requestBytes = current.reduce(
+        (total, message) => total + Buffer.byteLength(JSON.stringify(message), 'utf8'),
+        'tools' in request ? Buffer.byteLength(JSON.stringify(request.tools ?? []), 'utf8') : 0
+      )
+      return (
+        images.length > limits.maxImages ||
+        (limits.maxTotalImageBytes !== undefined && totalImageBytes > limits.maxTotalImageBytes) ||
+        (limits.maxImageBytes !== undefined &&
+          images.some(part => imageBytes(part) > limits.maxImageBytes!)) ||
+        (limits.maxImageEncodedBytes !== undefined &&
+          images.some(part => part.data.length > limits.maxImageEncodedBytes!)) ||
+        images.some(
+          part =>
+            part.width !== undefined &&
+            part.height !== undefined &&
+            ((dimensionLimit !== undefined &&
+              (part.width > dimensionLimit || part.height > dimensionLimit)) ||
+              (limits.maxPixels !== undefined && part.width * part.height > limits.maxPixels))
+        ) ||
+        requestBytes > limits.maxVisualRequestBytes
+      )
+    }
+
     let demoted = 0
     for (;;) {
-      try {
-        assertVisualRequestFits(messages, { ...request, messages })
+      if (!exceeds(messages)) {
         if (demoted > 0)
           logger.info(
             { provider: this.providerName, model: this.model, demotedImages: demoted },
             'GFS images projected to references for this provider attempt'
           )
         return messages
-      } catch (error) {
-        if (
-          !(error instanceof VisualInputError) ||
-          error.code !== 'limit_exceeded' ||
-          candidates.length === 0
-        )
-          throw error
-        const selected = candidates.pop()!
-        messages = projectGfsMessages(messages, new Set([selected]), 'image_input_limit_exceeded')
-        demoted++
       }
+      const selected = candidates.pop()
+      if (!selected) throw new VisualInputError('limit_exceeded')
+      messages = projectGfsMessages(messages, new Set([selected]), 'image_input_limit_exceeded')
+      demoted++
     }
   }
 
@@ -397,9 +447,10 @@ export class LlmPortAdapter implements LlmPort {
     roles: readonly MessageRole[]
   ): ImageInputDecision {
     if (!this.imageInputResolver) return { state: 'unknown', reason: 'model_unknown' }
+    const providerType = this.provider.getProviderType()
     let source: ImageInputCapabilitySource | undefined
     try {
-      source = this.imageInputResolver(this.providerName, this.model)
+      source = this.imageInputResolver(providerType, this.model)
     } catch (err) {
       // A catalog read failure must not fail a text-only turn, and must not be
       // read as support: it degrades to `unknown`, which blocks images only.
@@ -416,7 +467,7 @@ export class LlmPortAdapter implements LlmPort {
     }
     if (!source) return { state: 'unknown', reason: 'model_unknown' }
     return decideImageInput({
-      providerType: this.providerName,
+      providerType,
       method,
       roles,
       capability: source.capability,
@@ -473,7 +524,23 @@ export class LlmPortAdapter implements LlmPort {
     const roles = imageInputRolesFor(messages)
     if (roles.length === 0) return messages
     const decision = this.decideImageInputForAttempt(method, roles)
-    if (decision.state === 'supported') return messages
+    if (decision.state === 'supported') {
+      const gfsImages = gfsImageParts(messages)
+      if (gfsImages.length > 0) {
+        const limits = this.provider.getVisualDeliveryLimits?.(method) ?? null
+        // Project receipts while their GFS identities are still present. The
+        // API-key view may later deduplicate a frame against an ordinary image.
+        if (!limits)
+          return projectGfsMessages(
+            messages,
+            new Set(gfsImages),
+            'provider_visual_profile_unavailable'
+          )
+        if (hasUnknownImageGeometry(messages, limits))
+          return projectGfsMessages(messages, new Set(gfsImages), 'geometry_unknown')
+      }
+      return messages
+    }
 
     const carriesImages = (message: ChatMessage): boolean =>
       message.contentParts?.some(part => part.type === 'image') === true

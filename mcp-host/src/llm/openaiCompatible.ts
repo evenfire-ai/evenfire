@@ -38,6 +38,7 @@ import type {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
+import type { ImageTransportOperation } from './imageInput'
 import { OpenAIProvider } from './openai'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError } from './types'
@@ -79,6 +80,10 @@ const MODEL_NOT_AVAILABLE_CODES = new Set(['1211', '1220', 'ModelNotFound', 'Mod
 const BILLING_CODES = new Set(['1113', 'Arrearage'])
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
+  /** Compatibility and a configured URL do not establish an official API contract. */
+  override getVisualDeliveryLimits(_operation: ImageTransportOperation): null {
+    return null
+  }
   /** Provider temperature upper bound — 1 for Moonshot, else the [0,2] default. */
   private readonly temperatureCeiling: number
   /**

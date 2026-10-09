@@ -126,6 +126,8 @@ export const CONTROL_ROUTES = {
       withQuery(`/secrets/connector/${segment(name)}/edit`, query),
     editRecipe: (name: string, query?: ControlRouteQuery) =>
       withQuery(`/secrets/recipe/${segment(name)}/edit`, query),
+    editLlm: (name: string, query?: ControlRouteQuery) =>
+      withQuery(`/secrets/llm/${segment(name)}/edit`, query),
   },
   settings: {
     root: '/settings',

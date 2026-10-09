@@ -34,10 +34,14 @@ it('admits visual authorization envelopes only on the exact gateway route', () =
   const route = gateway.match(
     /location = \/api\/v1\/mcp-host\/llm\/provider-attempts\/authorize \{([\s\S]*?)\n        \}/
   )?.[1]
-  expect(route).toContain('client_max_body_size 25165824;')
+  expect(route).toContain('client_max_body_size 36700160;')
   expect(route).toMatch(/limit_except POST\s*\{\s*deny all;/)
   expect(route).toContain('proxy_set_header Authorization $http_authorization;')
-  expect(route).toContain('proxy_pass http://control_api_upstream;')
+  // The URI part forwards the canonical path, so a normalized alias nginx
+  // admitted here cannot reach control-api on a raw, unrecognised path.
+  expect(route).toContain(
+    'proxy_pass http://control_api_upstream/api/v1/mcp-host/llm/provider-attempts/authorize;'
+  )
   expect(gateway.match(/client_max_body_size/g)).toHaveLength(1)
 })
 
@@ -87,7 +91,13 @@ const PUBLISHED_RUNTIME_LIMIT_KEYS = [
 // Publishing it takes four edits: the fixture's `limits`, REQUIRED_LIMIT_KEYS,
 // PUBLISHED_RUNTIME_LIMIT_KEYS and the architecture doc table. Keeping it
 // runtime-only takes one: add it here.
-const RUNTIME_ONLY_LIMIT_KEYS = ['maxIdLength', 'maxNestingDepth'] as const
+const RUNTIME_ONLY_LIMIT_KEYS = [
+  'maxIdLength',
+  'maxNestingDepth',
+  'maxRequestContainers',
+  'maxRequestMembers',
+  'maxRequestElements',
+] as const
 
 const SENSITIVE_VALUE_PATTERN =
   /^(?:sk-[A-Za-z0-9]+|Bearer\s+\S+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|(?!https?:\/\/)[^;\s]+=[^;\s]+(?:;|$))/

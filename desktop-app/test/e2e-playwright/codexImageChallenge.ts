@@ -1,3 +1,4 @@
+// E2E_GUARDIAN_IPC_FLOW: test-only generation/collection for Electron IPC journeys; no renderer HTTP transition.
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -34,22 +35,23 @@ function loadHostCreateCanvas():
   }
 }
 
+export type PixelRenderingOptions = { requirePixels?: boolean }
+
 /** A neutral image with an answer absent from the filename and user prompt. */
 export function challengeImageAt(
   format: 'png' | 'jpeg',
   width: number,
-  height: number
+  height: number,
+  options: PixelRenderingOptions = {}
 ): { code: string; bytes: Buffer; width: number; height: number } {
   const code = randomBytes(8).toString('hex').toUpperCase()
-  // Prefer the Host renderer when mcp-host is installed (T0 / Playwright OCR).
-  // Desktop CI does not install that package; fall back to contract-framed
-  // containers so unit tests still prove size and pixel bounds.
+  // Non-strict containers exist only for geometry/size unit fixtures when
+  // Desktop CI lacks the Host native addon. Every visual journey opts into
+  // requirePixels; an unrendered declared header cannot prove image perception.
   const createCanvas = loadHostCreateCanvas()
   if (!createCanvas) {
-    if (process.env.E2E_CODEX_IMAGE_INPUT === '1') {
-      throw new Error(
-        'Codex image E2E requires mcp-host/@napi-rs/canvas so the hex is painted in pixels'
-      )
+    if (options.requirePixels || process.env.E2E_CODEX_IMAGE_INPUT === '1') {
+      throw new Error('Image challenge requires native mcp-host/@napi-rs/canvas pixels')
     }
     const bytes =
       format === 'png'
@@ -74,17 +76,21 @@ export function challengeImageAt(
   }
 }
 
-export function challengeImage(format: 'png' | 'jpeg'): { code: string; bytes: Buffer } {
-  const image = challengeImageAt(format, 800, 120)
+export function challengeImage(
+  format: 'png' | 'jpeg',
+  options: PixelRenderingOptions = {}
+): { code: string; bytes: Buffer } {
+  const image = challengeImageAt(format, 800, 120, options)
   return { code: image.code, bytes: image.bytes }
 }
 
 /** Same pixel challenge, grown to an exact decoded size the contract still accepts. */
 export function paddedChallengeImage(
   format: 'png' | 'jpeg',
-  targetBytes: number
+  targetBytes: number,
+  options: PixelRenderingOptions = {}
 ): { code: string; bytes: Buffer } {
-  const image = challengeImage(format)
+  const image = challengeImage(format, options)
   const bytes =
     format === 'png'
       ? fixtures.padPngToSize(image.bytes, targetBytes)
