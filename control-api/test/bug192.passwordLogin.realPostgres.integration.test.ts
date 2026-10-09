@@ -128,7 +128,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       const response = await login(email)
       expect({ status: response.status, body: response.body }).toEqual({
         status: 401,
-        body: { error: 'invalid_credentials' },
+        body: { error: 'Unauthorized' },
       })
     }
   )
@@ -150,7 +150,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     await holder.pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, userId])
     const response = await login('member@example.invalid', password)
     expect(response.status).toBe(401)
-    expect(response.body).toEqual({ error: 'invalid_credentials' })
+    expect(response.body).toEqual({ error: 'Unauthorized' })
     expect(compare).toHaveBeenCalledTimes(1)
     expect(compare.mock.calls[0][1]).not.toBe(hash)
     expect(bcrypt.getRounds(compare.mock.calls[0][1] as string)).toBe(12)
