@@ -37,6 +37,7 @@ export const CONTROL_ROUTES = {
     new: '/connectors/new',
     remoteNew: '/connectors/remote/new',
     detail: (name: string) => `/connectors/${segment(name)}`,
+    detailTab: (name: string, tab: string) => `/connectors/${segment(name)}/${segment(tab)}`,
     edit: (name: string) => `/connectors/${segment(name)}/edit`,
     editTab: (name: string, tab: string) => `/connectors/${segment(name)}/edit/${segment(tab)}`,
   },
