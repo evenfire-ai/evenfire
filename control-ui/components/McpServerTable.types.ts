@@ -69,14 +69,12 @@ export type ConnectorAgentTarget = {
 
 export type McpServerTableProps = {
   items: McpServerItem[]
-  accessByConnectorKey?: Record<string, ConnectorAccessSummary>
   agentBindingsByConnectorName?: Record<string, ConnectorAgentBinding[]>
   agentTargets?: ConnectorAgentTarget[]
   onAddToAgents?: (
     server: ServerRef,
     agents: Array<{ name: string; contextRef: string }>
   ) => Promise<boolean>
-  onRemoveFromAgents?: (server: ServerRef, binding: ConnectorAgentBinding) => Promise<void>
   updatingAgentAccessKey?: string | null
   onDelete?: (server: ServerRef) => Promise<void>
   onOpen?: (server: ServerRef) => void

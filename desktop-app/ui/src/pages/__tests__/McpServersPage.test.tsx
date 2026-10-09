@@ -45,6 +45,7 @@ const CONNECTORS: RpcConnectorsResult = {
           status: 'requires_setup',
         },
         { name: 'filesystem', authKind: 'static', status: 'no_oauth' },
+        { name: 'public-data', status: 'no_oauth' },
         {
           name: 'shared-drive',
           provider: 'google',
@@ -117,7 +118,8 @@ const rowName = (row: HTMLElement) =>
   row.querySelector('.context-id-cell')?.textContent?.trim() ?? ''
 const agentTag = (row: HTMLElement) =>
   row.querySelector('.reference-tag--agent .reference-tag__label')?.textContent?.trim() ?? null
-const chipText = (row: HTMLElement) => row.querySelector('.ui-pill')?.textContent?.trim() ?? null
+const chipText = (row: HTMLElement) =>
+  row.querySelector('td:nth-child(5) .ui-pill')?.textContent?.trim() ?? null
 // One row per (connector, agent): identify by BOTH so the two `monday` sibling
 // rows are addressable independently.
 const rowBy = (rows: HTMLElement[], name: string, agent: string) => {
@@ -233,10 +235,19 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(buttonLabels(clickup)).toEqual(['Authorize'])
 
     const filesystem = rowBy(rows, 'filesystem', 'agent-zeta')
-    expect(chipText(filesystem)).toBe('No OAuth')
+    expect(chipText(filesystem)).toBe('—')
     expect(buttonLabels(filesystem)).toEqual([])
+    expect(filesystem.querySelector('td:nth-child(4)')?.textContent?.trim()).toBe(
+      'Static credentials'
+    )
 
-    // oauth-user status pill surfaces the blast-radius caption as a tooltip.
+    const publicData = rowBy(rows, 'public-data', 'agent-zeta')
+    const authenticationCell = publicData.querySelector('td:nth-child(4)')
+    expect(authenticationCell?.textContent?.trim()).toBe('')
+    expect(authenticationCell?.childElementCount).toBe(0)
+    expect(publicData.textContent).not.toContain('No authentication')
+
+    // oauth-user scope pill surfaces the blast-radius caption as a tooltip.
     expect(monday.querySelector('.ui-pill')?.getAttribute('title')).toMatch(
       /Affects all your agents/i
     )

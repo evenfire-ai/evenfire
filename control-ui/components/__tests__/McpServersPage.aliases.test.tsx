@@ -38,13 +38,6 @@ vi.mock('../McpServerTable', async () => {
         server: { name: string; namespace: string },
         agents: Array<{ name: string; contextRef: string }>
       ) => Promise<void>
-      onRemoveFromAgents: (
-        server: { name: string; namespace: string },
-        binding: {
-          agents: Array<{ id: string; label: string }>
-          contextRef: string
-        }
-      ) => Promise<void>
     }) => {
       const binding = props.agentBindingsByConnectorName.search?.[0]
       return React.createElement(
@@ -65,18 +58,7 @@ vi.mock('../McpServerTable', async () => {
             type: 'button',
           },
           'add alias connector'
-        ),
-        binding
-          ? React.createElement(
-              'button',
-              {
-                onClick: () =>
-                  props.onRemoveFromAgents({ name: 'search', namespace: 'mcp-server' }, binding),
-                type: 'button',
-              },
-              'remove alias connector'
-            )
-          : null
+        )
       )
     },
   }
@@ -120,7 +102,7 @@ describe('Installed Connectors Context aliases', () => {
     })
   })
 
-  it('shows the owner and uses the resource name for add and remove mutations', async () => {
+  it('shows the owner and uses the resource name for add mutations', async () => {
     render(<McpServersPage />)
 
     expect(await screen.findByText('owners:Agent Alpha')).toBeInTheDocument()
@@ -135,17 +117,6 @@ describe('Installed Connectors Context aliases', () => {
           contextId: 'ctx-wire',
           mcpServers: ['search', 'new-search'],
         }),
-      })
-    )
-
-    vi.mocked(api.updateContext).mockClear()
-    fireEvent.click(screen.getByRole('button', { name: 'remove alias connector' }))
-    await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
-    expect(api.updateContext).toHaveBeenLastCalledWith(
-      'ctx-resource',
-      expect.objectContaining({
-        metadata: { resourceVersion: 'rv-1' },
-        spec: expect.objectContaining({ contextId: 'ctx-wire', mcpServers: [] }),
       })
     )
   })
