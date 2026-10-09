@@ -263,20 +263,63 @@ describe('RPC token mint revocation contract', () => {
       node => ts.isFunctionDeclaration(node) && node.name?.text === 'rpcTokenMintRevocationMessage',
       'Desktop requested-Host mint classifier'
     )
-    const desktopSet = oneLiveNode(
+    const desktopExactReader = oneLiveNode(
       desktopHelper,
-      node =>
-        ts.isNewExpression(node) &&
-        ts.isIdentifier(node.expression) &&
-        node.expression.text === 'Set' &&
-        Boolean(
-          node.arguments?.length === 1 &&
-          ts.isPropertyAccessExpression(node.arguments[0]!) &&
-          ts.isIdentifier(node.arguments[0]!.expression) &&
-          node.arguments[0]!.expression.text === 'record'
-        ),
-      'Desktop Set reader from the parsed mint body'
-    ) as ts.NewExpression
+      node => {
+        if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
+          return false
+        }
+        const receiver = node.expression.expression
+        const comparison = node.arguments[0]
+        return (
+          node.expression.name.text === 'every' &&
+          ts.isPropertyAccessExpression(receiver) &&
+          ts.isIdentifier(receiver.expression) &&
+          receiver.expression.text === 'record' &&
+          receiver.name.text === 'revokedHostRefs' &&
+          ts.isArrowFunction(comparison) &&
+          ts.isBinaryExpression(comparison.body) &&
+          comparison.body.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+          ts.isElementAccessExpression(comparison.body.right) &&
+          ts.isIdentifier(comparison.body.right.expression) &&
+          comparison.body.right.expression.text === 'canonicalRefs'
+        )
+      },
+      'Desktop exact-array reader from the parsed mint body'
+    ) as ts.CallExpression
+    const desktopLengthCheck = oneLiveNode(
+      desktopHelper,
+      node => {
+        if (
+          !ts.isBinaryExpression(node) ||
+          node.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken ||
+          !ts.isPropertyAccessExpression(node.left) ||
+          !ts.isPropertyAccessExpression(node.right)
+        ) {
+          return false
+        }
+        const refs = node.left.expression
+        return (
+          node.left.name.text === 'length' &&
+          ts.isPropertyAccessExpression(refs) &&
+          ts.isIdentifier(refs.expression) &&
+          refs.expression.text === 'record' &&
+          refs.name.text === 'revokedHostRefs' &&
+          node.right.name.text === 'length' &&
+          ts.isIdentifier(node.right.expression) &&
+          node.right.expression.text === 'canonicalRefs'
+        )
+      },
+      'Desktop exact-array length check'
+    ) as ts.BinaryExpression
+    const desktopReaderField = (
+      (desktopExactReader.expression as ts.PropertyAccessExpression)
+        .expression as ts.PropertyAccessExpression
+    ).name.text
+    const desktopLengthField = (
+      (desktopLengthCheck.left as ts.PropertyAccessExpression)
+        .expression as ts.PropertyAccessExpression
+    ).name.text
 
     expect({
       controlApiJson: writtenRefField(mintObject, 'revokedHostRefs', 'mint JSON refs'),
@@ -287,13 +330,15 @@ describe('RPC token mint revocation contract', () => {
         'REST returned refs'
       ),
       restJson: writtenRefField(routeObject, 'revokedHostRefs', 'REST JSON refs'),
-      desktopSet: (desktopSet.arguments![0] as ts.PropertyAccessExpression).name.text,
+      desktopReader: desktopReaderField,
+      desktopLength: desktopLengthField,
     }).toEqual({
       controlApiJson: 'revokedHostRefs',
       restBody: 'revokedHostRefs',
       restReturn: 'revokedHostRefs',
       restJson: 'revokedHostRefs',
-      desktopSet: 'revokedHostRefs',
+      desktopReader: 'revokedHostRefs',
+      desktopLength: 'revokedHostRefs',
     })
   })
 })
