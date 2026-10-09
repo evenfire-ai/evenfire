@@ -41,11 +41,16 @@ export type GfsDownloadQuotaScope = 'host' | 'caller'
 
 export type GfsDownloadQuotaReason =
   | 'storage_bytes'
-  | 'retained_files'
   | 'active_downloads'
   | 'free_space'
+  | 'protected_bytes'
 
-export type GfsDownloadExpiryOutcome = 'expired_removed' | 'cleanup_failed' | 'sweep_failed'
+export type GfsDownloadExpiryOutcome =
+  | 'expired_removed'
+  | 'incomplete_removed'
+  | 'remove_failed'
+  | 'retired_legacy_store'
+  | 'sweep_failed'
 
 const gfsDownloadAdmissionsTotal = getOrCreateCounter({
   name: 'clerum_gfs_download_admissions_total',
