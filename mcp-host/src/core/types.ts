@@ -447,6 +447,14 @@ export interface Conversation {
   pending_approval?: PendingApproval
   auto_approved_tools: Set<string>
   /**
+   * Session-scoped tools (SESSION_SCOPED_APPROVAL_TOOLS) approved without
+   * "always" during the current task. Every later call of the task proceeds,
+   * including after resumes; `startTurn` clears it when the next user message
+   * starts a new task. Ephemeral (like `auto_approved_tools`): not persisted,
+   * so a cold resume asks again. Absent until the first such approval.
+   */
+  task_approved_tools?: Set<string>
+  /**
    * Guardrail doom-loop counter (spec §6.4) — tracks consecutive identical
    * `(resolved tool, effective-input)` tool calls across turns within a task.
    * Ephemeral (like `auto_approved_tools`): not persisted; resets on resume.

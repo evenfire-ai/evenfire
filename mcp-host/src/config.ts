@@ -14,6 +14,7 @@ import {
   parseNativeToolDiscoveryBytes,
   parseNativeToolPresentation,
 } from './core/orchestration/toolPresentationPolicy'
+import { SHELL_TIMEOUT_CLEANUP_MS } from './core/tools/shellTimeouts'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { logger } from './logger'
 import type { McpCatalogBootstrapConfig } from './mcp/grantProbe'
@@ -354,22 +355,59 @@ function getEnv(key: string, defaultValue?: string): string | undefined {
   return process.env[key] ?? defaultValue
 }
 
+/** Largest delay, in ms, that a Node.js timer accepts. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
+ * Upper bound for a tool timeout: it reserves the shell's declared cleanup
+ * budget below the timer range. executeWithTimeout arms no cleanup timer for
+ * the shell (it joins abort settlement), but it rejects any timeout whose sum
+ * with that budget exceeds the timer range, so a larger value would fail every
+ * shell call at runtime (#1021).
+ */
+const MAX_TOOL_TIMEOUT_MS = MAX_TIMER_DELAY_MS - SHELL_TIMEOUT_CLEANUP_MS
+
 function getExecutionLimit(
   key: string,
   defaultValue: number,
   allowZero = false,
-  maximum = 2_147_483_647
+  maximum = MAX_TIMER_DELAY_MS
 ): number {
   const raw = getEnv(key)
   if (raw === undefined) return defaultValue
   const value = Number(raw)
+  const minimum = allowZero ? 0 : 1
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(
+      `${key} must be a valid bounded integer from ${minimum} to ${maximum} (inclusive)`
+    )
+  }
+  return value
+}
+
+/** Progress snapshots are never scheduled more than once per second. */
+const MIN_TOOL_PROGRESS_INTERVAL_MS = 1000
+
+/**
+ * Milliseconds between native-tool progress snapshots. Unset keeps 30000; 0
+ * disables periodic snapshots; any other value must be a whole decimal integer
+ * from 1000 to the Node.js timer range. Anything else stops the Host at
+ * startup: a larger value would fire every millisecond and NaN would silently
+ * disable progress. The raw value is never echoed.
+ */
+function getToolProgressIntervalMs(): number {
+  const key = 'CLERUM_TOOL_PROGRESS_INTERVAL_MS'
+  const raw = getEnv(key)
+  if (raw === undefined) return 30000
+  const value = Number(raw)
   if (
     !/^\d+$/.test(raw) ||
     !Number.isSafeInteger(value) ||
-    value < (allowZero ? 0 : 1) ||
-    value > maximum
+    (value !== 0 && (value < MIN_TOOL_PROGRESS_INTERVAL_MS || value > MAX_TIMER_DELAY_MS))
   ) {
-    throw new Error(`${key} must be a valid bounded integer`)
+    throw new Error(
+      `${key} must be 0 (disables tool progress streaming) or an integer from ${MIN_TOOL_PROGRESS_INTERVAL_MS} to ${MAX_TIMER_DELAY_MS} (inclusive)`
+    )
   }
   return value
 }
@@ -1073,9 +1111,9 @@ export const config: Config = {
   // Native tool configuration
   nativeTool: {
     workspacePath: process.env.CLERUM_WORKSPACE_PATH || process.cwd(),
-    shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000),
-    toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000),
-    toolProgressInterval: parseInt(getEnv('CLERUM_TOOL_PROGRESS_INTERVAL_MS', '30000')!, 10),
+    shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000, false, MAX_TOOL_TIMEOUT_MS),
+    toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000, false, MAX_TOOL_TIMEOUT_MS),
+    toolProgressInterval: getToolProgressIntervalMs(),
     httpAllowlist: (process.env.CLERUM_HTTP_ALLOWLIST || '')
       .split(',')
       .map(s => s.trim())
