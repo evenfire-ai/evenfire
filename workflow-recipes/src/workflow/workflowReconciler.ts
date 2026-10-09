@@ -3064,6 +3064,7 @@ export class WorkflowReconciler {
         ? {
             cron: scheduleTrigger.cron,
             timezone: scheduleTrigger.timezone,
+            concurrencyPolicy: scheduleTrigger.concurrencyPolicy,
             suspend: scheduleTrigger.suspend,
           }
         : spec.scheduling
