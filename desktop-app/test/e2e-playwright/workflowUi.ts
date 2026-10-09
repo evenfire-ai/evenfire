@@ -425,7 +425,7 @@ async function pacedPasswordLogin(
   }
   const first = await attempt()
   if (first.status !== 429) return first
-  let retryAfterSeconds = Number.NaN
+  let retryAfterSeconds: number
   try {
     retryAfterSeconds = Number(JSON.parse(first.body).retryAfterSeconds)
   } catch {
