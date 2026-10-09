@@ -120,6 +120,7 @@ function deps(
       hostInstanceId: 'instance-a',
       hostId: 'host-a',
       resumableTtlMs: 86_400_000,
+      pendingApprovalTtlMs: 86_400_000,
       claimLeaseMs: 300_000,
       attachmentTtlMs: 3_600_000,
     },
