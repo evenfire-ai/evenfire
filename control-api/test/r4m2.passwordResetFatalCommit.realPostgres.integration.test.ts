@@ -149,7 +149,7 @@ realPg('R4-M2 PostgreSQL session termination after COMMIT dispatch', () => {
     })
     expect(await bcrypt.compare(newPassword, committed.rows[0].password_hash as string)).toBe(true)
 
-    const terminated = await observer.query<{ terminated: boolean }>(
+    const terminated = await admin.query<{ terminated: boolean }>(
       'SELECT pg_terminate_backend($1) AS terminated',
       [backendPid]
     )
