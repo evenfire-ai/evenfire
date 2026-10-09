@@ -143,6 +143,38 @@ describe('routes/invitations', () => {
     )
   })
 
+  it('uses non-enumerating wording when a reset row does not match the verified link', async () => {
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'current-reset-row',
+      email: 'invitee@example.com',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+      error: 'forbidden',
+    })
+
+    const res = await request(makeApp())
+      .post('/invitations/password')
+      .send({
+        token: 'Synthetic-verified-password-reset-link',
+        email: 'invitee@example.com',
+        invitationId: 'stale-reset-row',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(403)
+
+    expect(res.body).toEqual({ error: 'Invitation is invalid or unavailable' })
+    expect(JSON.stringify(res.body)).not.toContain('invitee@example.com')
+    expect(res.headers['set-cookie']).toBeUndefined()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).toHaveBeenCalledWith(
+      'Synthetic-verified-password-reset-link',
+      'invitee@example.com',
+      'stale-reset-row',
+      'Synthetic-new-password-123'
+    )
+  })
+
   it('preserves only sanitized recovery saturation metadata', async () => {
     invitationsServiceMock.getInvitationByToken.mockResolvedValue({
       id: 'inv-1',

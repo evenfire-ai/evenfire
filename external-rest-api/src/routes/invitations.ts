@@ -66,7 +66,7 @@ function sendInvitationPasswordError(
     return
   }
   if (error === 'forbidden') {
-    res.status(403).json({ error: 'Invitation email does not match authenticated user' })
+    res.status(403).json({ error: 'Invitation is invalid or unavailable' })
     return
   }
   if (error === 'not_accepted') {
