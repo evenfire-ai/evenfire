@@ -51,9 +51,9 @@ for (const mode of ['deterministic', 'real']) {
   })
 }
 test('the tool-call limit and model-step retry cases are mandatory only in deterministic mode', () => {
-  assert.equal(expectedTitles('deterministic').length, 14)
+  assert.equal(expectedTitles('deterministic').length, 18)
   assert.equal(expectedTitles('real').length, 6)
-  assert.equal(modelStepRetryTitles.length, 6)
+  assert.equal(modelStepRetryTitles.length, 10)
   for (const title of [toolCallLimitTitle, toolCallLimitBoundaryTitle, ...modelStepRetryTitles]) {
     assert.ok(expectedTitles('deterministic').includes(title))
     assert.ok(!expectedTitles('real').includes(title))
@@ -175,7 +175,7 @@ test('rejects model-step evidence that is missing, reset or not reported', () =>
   const after = modelStepEvidence(modelStepRetryExpectedDelta)
   assert.throws(() => validateModelStepEvidence({}, after), /missing or reset: turns/)
   assert.throws(
-    () => validateModelStepEvidence(modelStepEvidence({ ...zeroCounts, turns: 9 }), after),
+    () => validateModelStepEvidence(modelStepEvidence({ ...zeroCounts, turns: 11 }), after),
     /missing or reset: turns/
   )
   const partial = modelStepEvidence(modelStepRetryExpectedDelta)

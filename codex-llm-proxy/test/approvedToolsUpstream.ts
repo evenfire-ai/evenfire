@@ -23,12 +23,14 @@ const LIMIT_BOUNDARY_CALLS = 256
 // - `twice`: like `probe`, but the first continuation also gets a 503; the
 //   second continuation gets the final answer.
 // - `zero`: a 503 for the first model step, before any tool runs.
+// - `approval`: after the kept search and 503, discovery leads to a real
+//   fixture receipt call that requires the user's decision.
 // A turn left on its 503 can be sent again by the user (Resend): the history
 // then carries the marker's user message twice and no tool rows, and gets a
 // plain answer. A turn containing `model step retry followup <marker>` is a new
 // message sent instead of the retry; it gets a plain answer.
 const MODEL_STEP_TURN =
-  /\bmodel step retry (probe|twice|zero) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
+  /\bmodel step retry (probe|twice|zero|approval) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
 const MODEL_STEP_FOLLOWUP = /\bmodel step retry followup ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
 const MODEL_STEP_PREFIX = 'model step retry '
 const MODEL_STEP_MAX_TURNS = 64
@@ -383,6 +385,8 @@ export function createApprovedToolsUpstream() {
       resends: 0,
       followUps: 0,
       unexpectedRetries: 0,
+      approvalRequests: 0,
+      approvalFinals: 0,
     },
     // Only bounded measurements, never request or result contents.
     requests: [] as Array<{
@@ -406,9 +410,9 @@ export function createApprovedToolsUpstream() {
   const modelStepTurns = new Map<
     string,
     {
-      kind: 'probe' | 'twice' | 'zero'
+      kind: 'probe' | 'twice' | 'zero' | 'approval'
       callId: string | null
-      stage: 'searched' | 'unavailable' | 'continued' | 'resent' | 'followed_up'
+      stage: 'searched' | 'unavailable' | 'approving' | 'continued' | 'resent' | 'followed_up'
       unavailable: number
     }
   >()
@@ -552,7 +556,9 @@ export function createApprovedToolsUpstream() {
           const turn = modelStepTurns.get(followUp[1]!)
           // A follow-up answers a probe turn that was left on its 503.
           if (!turn || rows.length) throw new Error('unknown_model_step_turn')
-          if (turn.stage !== 'unavailable') {
+          // Denial and cancellation finish the waiting continuation locally.
+          // A later user message is a fresh turn, never a replay of its tools.
+          if (turn.stage !== 'unavailable' && turn.stage !== 'approving') {
             evidence.modelStepRetry.unexpectedRetries++
             throw new Error('unexpected_retry')
           }
@@ -567,7 +573,7 @@ export function createApprovedToolsUpstream() {
         }
         const opened = MODEL_STEP_TURN.exec(text)
         if (!opened) throw new Error('invalid_model_step_marker')
-        const kind = opened[1] as 'probe' | 'twice' | 'zero'
+        const kind = opened[1] as 'probe' | 'twice' | 'zero' | 'approval'
         const marker = opened[2]!
         const turn = modelStepTurns.get(marker)
         // How many user messages of the history open this same turn: one for
@@ -634,12 +640,13 @@ export function createApprovedToolsUpstream() {
         if (
           turn.callId === null ||
           openings !== 1 ||
-          (turn.stage !== 'searched' && turn.stage !== 'unavailable')
+          (turn.stage !== 'searched' && turn.stage !== 'unavailable' && turn.stage !== 'approving')
         ) {
           evidence.modelStepRetry.unexpectedRetries++
           throw new Error('unexpected_retry')
         }
-        const received = modelStepToolResults(rows, turn.callId, marker)
+        const originalRows = turn.stage === 'approving' ? rows.slice(0, 2) : rows
+        const received = modelStepToolResults(originalRows, turn.callId, marker)
         if (turn.stage === 'searched') {
           // The model step after the confirmed search result: the provider is
           // unavailable, so the Host keeps the turn as a resumable checkpoint.
@@ -654,6 +661,43 @@ export function createApprovedToolsUpstream() {
           turn.unavailable++
           evidence.modelStepRetry.continuationUnavailable++
           return unavailable('model_step_continuation_unavailable')
+        }
+        if (turn.kind === 'approval') {
+          const decision = receiptDecision(exchanges(rows.slice(2)))
+          if (decision.stage === 'denied') {
+            evidence.requests.push(measured('model_step_approval_denied'))
+            return stream({
+              type: 'response.output_text.delta',
+              delta: 'The receipt operation was denied.',
+            })
+          }
+          if (decision.stage === 'final') {
+            turn.stage = 'continued'
+            evidence.modelStepRetry.continuations++
+            evidence.modelStepRetry.toolResults += received
+            evidence.modelStepRetry.approvalFinals++
+            evidence.completions++
+            evidence.requests.push(measured('model_step_approval_final'))
+            return stream({
+              type: 'response.output_text.delta',
+              delta: `approved ${marker} businessId=${decision.result!.businessId} toolResults=${received}`,
+            })
+          }
+          if (!names.has(decision.stage)) throw new Error('unadvertised_function')
+          turn.stage = 'approving'
+          if (rows.length === 2) evidence.modelStepRetry.approvalRequests++
+          evidence.completions++
+          evidence.requests.push(measured('model_step_approval_tool'))
+          return stream({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: randomUUID(),
+              call_id: randomUUID(),
+              name: decision.stage,
+              arguments: JSON.stringify(decision.args),
+            },
+          })
         }
         // The continuation after Retry model step. The answer reports how many
         // results of the original search it carried, so a duplicated or lost

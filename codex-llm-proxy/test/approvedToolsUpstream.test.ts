@@ -682,6 +682,75 @@ describe('approved-tools model-step retry probe (#1044)', () => {
     }
   }
 
+  it('continues through discovery and an approved receipt without replaying the kept search', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const approval = { role: 'user', content: `model step retry approval ${marker}` }
+    const first = await request(simulator, [approval])
+    const keptCall = first.event.item as Entry
+    const history: Entry[] = [
+      approval,
+      keptCall,
+      { type: 'function_call_output', call_id: keptCall.call_id, output: searchResult },
+    ]
+    expect((await request(simulator, history)).response.status).toBe(503)
+    const outputs = [
+      { found: 1, returned: 1, results: [{ name: target, server: 'fixture' }] },
+      { found: true, name: target, parameters: { type: 'object', properties: {} } },
+      { runId: 'fixture-run', tool: 'workitem_read_receipt', callId: randomUUID(), businessId: randomUUID() },
+    ]
+    for (let index = 0; index < outputs.length; index++) {
+      const step = await request(simulator, history)
+      expect(step.response.status).toBe(200)
+      expect(step.event.item.name).toBe(bridges[index])
+      history.push(step.event.item, {
+        type: 'function_call_output',
+        call_id: step.event.item.call_id,
+        output: JSON.stringify(outputs[index]),
+      })
+    }
+    const final = await request(simulator, history)
+    expect(final.response.status).toBe(200)
+    expect(final.event.delta).toBe(
+      `approved ${marker} businessId=${outputs[2]!.businessId} toolResults=1`
+    )
+    expect(simulator.evidence().modelStepRetry).toMatchObject({
+      turns: 1,
+      markerSearches: 1,
+      approvalRequests: 1,
+      approvalFinals: 1,
+      continuations: 1,
+      toolResults: 1,
+      unexpectedRetries: 0,
+    })
+  })
+
+  it('answers a new message after an approval is denied or cancelled locally', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const approval = { role: 'user', content: `model step retry approval ${marker}` }
+    const first = await request(simulator, [approval])
+    const keptCall = first.event.item as Entry
+    const history: Entry[] = [
+      approval,
+      keptCall,
+      { type: 'function_call_output', call_id: keptCall.call_id, output: searchResult },
+    ]
+    expect((await request(simulator, history)).response.status).toBe(503)
+    const discovery = await request(simulator, history)
+    expect(discovery.event.item.name).toBe(bridges[0])
+    // Desktop's deny/cancel resolves the suspended task locally, so no tool
+    // result is added to the old turn before the next visible user send.
+    const next = await request(simulator, [
+      ...history,
+      { role: 'user', content: `model step retry followup ${marker}` },
+    ])
+    expect(next.event.delta).toBe(`followup ${marker} answered`)
+    expect(simulator.evidence().modelStepRetry).toMatchObject({
+      markerSearches: 1,
+      followUps: 1,
+      unexpectedRetries: 0,
+    })
+  })
+
   it('serves one marker search, then a 503, then the continued answer', async () => {
     const simulator = createApprovedToolsUpstream()
     const { call, history } = await searched(simulator)

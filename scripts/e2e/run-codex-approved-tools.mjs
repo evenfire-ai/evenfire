@@ -29,25 +29,26 @@ export const modelStepRetryTitles = [
   'model step retry C3: a new message instead of the retry abandons the checkpoint',
   'model step retry C4: a double click on Retry model step runs one continuation',
   'model step retry C5: a continuation that meets a 503 again is offered for retry again',
+  'model step retry C6: sending the same prompt starts a new turn instead of continuing',
+  'model step retry C7: approval inside a continuation executes the receipt once',
+  'model step retry C9: denying an approval inside a continuation releases the session',
+  'model step retry C10: cancelling an approval inside a continuation releases the session',
   'model step retry C8: the checkpoint survives a Host restart between the 503 and the retry',
 ]
-// What the six cases together must leave in the 83-tool scenario's upstream
-// evidence (`codex-llm-proxy/test/approvedToolsUpstream.ts`, `modelStepRetry`):
-// six turns, one search each except the zero-tool turn, seven 503s (one per
-// turn plus the second one of C5), four answered continuations each carrying
-// the one search result, one Resend, one follow-up, and no retry the Host must
-// never make.
+// Aggregate business signals from the ten deterministic Desktop journeys.
 export const modelStepRetryExpectedDelta = Object.freeze({
-  turns: 6,
-  markerSearches: 5,
-  unavailableResponses: 7,
+  turns: 10,
+  markerSearches: 9,
+  unavailableResponses: 11,
   zeroToolUnavailable: 1,
   continuationUnavailable: 1,
-  continuations: 4,
-  toolResults: 4,
-  resends: 1,
-  followUps: 1,
+  continuations: 5,
+  toolResults: 5,
+  resends: 2,
+  followUps: 3,
   unexpectedRetries: 0,
+  approvalRequests: 3,
+  approvalFinals: 1,
 })
 
 // The tool-call limit cases exist only in deterministic mode: only the

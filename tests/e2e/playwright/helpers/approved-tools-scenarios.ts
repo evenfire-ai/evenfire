@@ -81,6 +81,8 @@ export const modelStepRetryFields = [
   'resends',
   'followUps',
   'unexpectedRetries',
+  'approvalRequests',
+  'approvalFinals',
 ] as const
 export type ModelStepRetryEvidence = Record<(typeof modelStepRetryFields)[number], number>
 export function required(name: string): string {
