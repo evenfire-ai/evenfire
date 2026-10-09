@@ -55,7 +55,7 @@ describe('accepted invitation password authority outcomes', () => {
   async function submitPassword() {
     return request(makeApp())
       .post('/invitations/password')
-      .set('authorization', 'Bearer synthetic-authenticated-session')
+      .set('authorization', 'Bearer test-session')
       .send({ invitationId: 'synthetic-invitation-row', password: 'Synthetic-Password-123' })
   }
 
@@ -93,9 +93,7 @@ describe('accepted invitation password authority outcomes', () => {
       passwordUpdated: true,
       status: 'accepted',
     })
-    expect(String(retried.headers['set-cookie'])).toContain(
-      'profile_session=synthetic-authenticated-session'
-    )
+    expect(String(retried.headers['set-cookie'])).toContain('profile_session=test-session')
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 

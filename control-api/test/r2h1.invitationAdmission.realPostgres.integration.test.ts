@@ -142,7 +142,7 @@ realPg('R2-H1 invitation admission identity on PostgreSQL', () => {
   async function complete(source: string) {
     return request(edge).post('/probe/complete').set('X-Forwarded-For', source).send({
       email: 'synthetic-member@example.invalid',
-      token: 'not-a-signed-flow-token',
+      token: 'invalid',
       invitationId: '00000000-0000-4000-8000-000000000001',
       password: 'Synthetic-Password-12',
     })
