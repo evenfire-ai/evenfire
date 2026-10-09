@@ -6,7 +6,9 @@ import path from 'node:path'
 import {
   clearPendingExternalLogout,
   hasPendingExternalLogout,
+  readPendingExternalLogoutIntent,
   recordPendingExternalLogout,
+  recordPendingKeytarCleanup,
 } from '../pendingExternalLogout.js'
 
 let userDataDirectory = ''
@@ -32,7 +34,10 @@ describe('pending external logout intent', () => {
     recordPendingExternalLogout(userDataDirectory, ENV_A)
 
     expect(hasPendingExternalLogout(userDataDirectory, ENV_A)).toBe(true)
-    expect(await fs.readFile(markerPath(ENV_A), 'utf8')).toBe('')
+    expect(await fs.readFile(markerPath(ENV_A), 'utf8')).toBe(
+      JSON.stringify({ version: 1, intent: 'logout-pending' })
+    )
+    expect((await fs.stat(markerPath(ENV_A))).mode & 0o777).toBe(0o600)
     expect(await fs.readdir(userDataDirectory)).toEqual([
       `pending-external-logout-${createHash('sha256').update(ENV_A).digest('hex')}`,
     ])
@@ -49,6 +54,23 @@ describe('pending external logout intent', () => {
     expect(hasPendingExternalLogout(userDataDirectory, ENV_A)).toBe(true)
     expect(hasPendingExternalLogout(userDataDirectory, ENV_B)).toBe(false)
     expect((await fs.readdir(userDataDirectory)).join('')).not.toContain(ENV_A)
+  })
+
+  it('distinguishes a secure credential cleanup from a pending logout', async () => {
+    userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-pending-logout-'))
+
+    recordPendingExternalLogout(userDataDirectory, ENV_A)
+    recordPendingKeytarCleanup(userDataDirectory, ENV_A, 'safe-storage')
+
+    expect(readPendingExternalLogoutIntent(userDataDirectory, ENV_A)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'safe-storage',
+    })
+
+    recordPendingExternalLogout(userDataDirectory, ENV_A)
+    expect(readPendingExternalLogoutIntent(userDataDirectory, ENV_A)).toEqual({
+      intent: 'logout-pending',
+    })
   })
 
   it('ignores the unscoped marker and leaves it untouched by environment cleanup', async () => {

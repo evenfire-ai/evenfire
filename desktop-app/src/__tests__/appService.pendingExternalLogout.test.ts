@@ -324,6 +324,68 @@ describe('AppService pending external logout', () => {
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
   })
 
+  it('retires startup cleanup intent only after the recorded credential restores', async () => {
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'active-keytar')
+    const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('verified-active-keytar-token', activeEnvKey)
+    const authClient = (
+      service as unknown as {
+        authClient: { getMe: (token: string) => Promise<typeof loginResult.me> }
+      }
+    ).authClient
+    const getMe = vi
+      .spyOn(authClient, 'getMe')
+      .mockRejectedValueOnce(new Error('temporary network failure'))
+      .mockResolvedValueOnce(loginResult.me)
+
+    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'active-keytar',
+    })
+
+    await expect(service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+    expect(getMe).toHaveBeenCalledTimes(2)
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+  })
+
+  it('does not restore a plaintext token after safeStorage cleanup succeeds', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
+    const { service, tokenStore } = createService()
+    const authClient = (
+      service as unknown as {
+        authClient: { getMe: (token: string) => Promise<typeof loginResult.me> }
+      }
+    ).authClient
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    vi.mocked(safeStorage.decryptString).mockImplementation(value => {
+      if (value.toString() === 'corrupt') throw new Error('encrypted credential is corrupt')
+      return value.toString('utf8')
+    })
+    vi.spyOn(authClient, 'getMe').mockResolvedValue(loginResult.me)
+    await fs.writeFile(
+      path.join(userDataDirectory, `session-token-${activeEnvKey}.json`),
+      JSON.stringify({ token: 'stale-plaintext-session-token' })
+    )
+    await fs.writeFile(path.join(userDataDirectory, `session-token-${activeEnvKey}.enc`), 'corrupt')
+
+    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'safe-storage',
+    })
+    expect(authClient.getMe).not.toHaveBeenCalled()
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(
+      'stale-plaintext-session-token'
+    )
+  })
+
   it('clears the prior logout intent before persisting an explicit login', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
@@ -488,6 +550,9 @@ describe('AppService pending external logout', () => {
     vi.spyOn(tokenStore, 'setSessionToken').mockImplementation(async (_token, _envKey, options) => {
       throw new Error(options?.requireKeytar ? 'Keytar replacement failed' : 'file fallback failed')
     })
+    vi.spyOn(tokenStore, 'setSafeStorageSessionToken').mockRejectedValue(
+      new Error('file fallback failed')
+    )
 
     try {
       await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
@@ -529,7 +594,7 @@ describe('AppService pending external logout', () => {
       })
 
       expect(persistToken).toHaveBeenCalledWith(loginResult.token, activeEnvKey, {
-        requireSafeStorageFallback: true,
+        requireKeytar: true,
       })
       expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
       expect(keychain.get(keyOf('Evenfire', legacyAccount))).toBe('legacy-session-token')
@@ -541,6 +606,12 @@ describe('AppService pending external logout', () => {
   it('allows encrypted file-backed login when the whole Keytar store fails and retains the marker', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
+    const authClient = (
+      service as unknown as {
+        authClient: { getMe: (token: string) => Promise<typeof loginResult.me> }
+      }
+    ).authClient
+    vi.spyOn(authClient, 'getMe').mockResolvedValue(loginResult.me)
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
@@ -571,6 +642,11 @@ describe('AppService pending external logout', () => {
       expect(await fs.readdir(userDataDirectory)).not.toContain(
         `session-token-${activeEnvKey}.json`
       )
+      await expect(service.initialize()).resolves.toEqual({
+        authenticated: true,
+        me: loginResult.me,
+      })
+      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
     } finally {
       vi.mocked(keytar.getPassword).mockReset().mockImplementation(originalGet)
       vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
@@ -617,7 +693,10 @@ describe('AppService pending external logout', () => {
     const reportFailure = vi.fn()
     const { service, tokenStore } = createService(undefined, reportFailure)
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
-    vi.spyOn(tokenStore, 'setSessionToken').mockRejectedValue(new Error('credential write failed'))
+    vi.spyOn(tokenStore, 'setSessionToken').mockRejectedValue(new Error('Keytar write failed'))
+    vi.spyOn(tokenStore, 'setSafeStorageSessionToken').mockRejectedValue(
+      new Error('credential write failed')
+    )
 
     await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
       'credential write failed'
@@ -658,6 +737,35 @@ describe('AppService pending external logout', () => {
     }
   })
 
+  it('rewrites logout intent when marker unlink succeeds but directory sync fails', async () => {
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    const { service, tokenStore } = createService()
+    const originalFsync = fsSync.fsyncSync.bind(fsSync)
+    let failedDirectorySync = false
+    const fsync = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
+      if (!failedDirectorySync && fsSync.fstatSync(descriptor).isDirectory()) {
+        failedDirectorySync = true
+        throw Object.assign(new Error('directory sync failed'), { code: 'EIO' })
+      }
+      return originalFsync(descriptor)
+    })
+
+    try {
+      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
+        'directory sync failed'
+      )
+
+      expect(failedDirectorySync).toBe(true)
+      expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+        intent: 'logout-pending',
+      })
+      expect(internals(service).sessionToken).toBeNull()
+      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
+    } finally {
+      fsync.mockRestore()
+    }
+  })
+
   it('keeps the marker and removes the fresh credential when chat binding fails', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
@@ -694,7 +802,7 @@ describe('AppService pending external logout', () => {
     state.quitPreparationStarted = true
     const originalOpen = fsSync.openSync.bind(fsSync)
     const open = vi.spyOn(fsSync, 'openSync').mockImplementation((...args) => {
-      if (String(args[0]) === markerPath()) {
+      if (String(args[0]).startsWith(`${markerPath()}.`)) {
         throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
       }
       return originalOpen(...args)

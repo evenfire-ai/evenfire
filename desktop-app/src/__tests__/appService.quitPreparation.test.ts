@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -8,6 +8,7 @@ let isolatedConfigPath = ''
 let AppServiceClass: typeof import('../appService.js').AppService
 let TokenStoreClass: typeof import('../tokenStore.js').TokenStore
 let getDesktopRuntimeConfigState: typeof import('../config.js').getDesktopRuntimeConfigState
+let userDataDirectory = ''
 
 beforeAll(async () => {
   const isolatedDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-quit-preparation-'))
@@ -37,6 +38,17 @@ afterAll(async () => {
   vi.resetModules()
 })
 
+beforeEach(async () => {
+  userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-quit-preparation-data-'))
+})
+
+afterEach(async () => {
+  if (userDataDirectory) {
+    await fs.rm(userDataDirectory, { recursive: true, force: true })
+    userDataDirectory = ''
+  }
+})
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
   let reject!: (error: unknown) => void
@@ -50,7 +62,7 @@ function deferred<T>() {
 function createService(tokenStore = new TokenStoreClass()) {
   return new AppServiceClass({
     tokenStore,
-    getUserDataDirectory: () => path.dirname(isolatedConfigPath),
+    getUserDataDirectory: () => userDataDirectory,
   })
 }
 
@@ -64,6 +76,9 @@ describe('AppService quit preparation', () => {
     const prepareForQuit = vi.spyOn(tokenStore, 'prepareForQuit')
     const reopenAdmission = vi.spyOn(tokenStore, 'reopenAdmission')
     const clearSessionToken = vi.spyOn(tokenStore, 'clearSessionToken').mockResolvedValue()
+    const clearSessionTokenStrictly = vi
+      .spyOn(tokenStore, 'clearSessionTokenStrictly')
+      .mockResolvedValue({ keytarAvailable: true, keytarDisabled: false })
     const service = createService(tokenStore)
 
     await service.prepareForQuit()
@@ -71,7 +86,8 @@ describe('AppService quit preparation', () => {
 
     service.cancelQuitPreparation()
     await expect(service.logout()).resolves.toBeUndefined()
-    expect(clearSessionToken).toHaveBeenCalledOnce()
+    expect(clearSessionToken).not.toHaveBeenCalled()
+    expect(clearSessionTokenStrictly).toHaveBeenCalledOnce()
     expect(reopenAdmission).toHaveBeenCalledOnce()
     expect(prepareForQuit).toHaveBeenCalledOnce()
   })

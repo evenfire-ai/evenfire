@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -70,7 +71,7 @@ afterEach(async () => {
 })
 
 describe('AppService pending logout when Keytar is unavailable', () => {
-  it('retains the marker through startup and verified file-backed login', async () => {
+  it('keeps a cleanup marker and restores verified safeStorage login while Keytar is unavailable', async () => {
     const tokenStore = new TokenStoreClass()
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
@@ -78,6 +79,12 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       tokenStore,
       getUserDataDirectory: () => userDataDirectory,
     })
+    const authClient = (
+      service as unknown as {
+        authClient: { getMe: (token: string) => Promise<typeof user> }
+      }
+    ).authClient
+    vi.spyOn(authClient, 'getMe').mockResolvedValue(user)
     const internals = service as unknown as {
       sessionToken: string | null
       me: typeof user | null
@@ -108,10 +115,44 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     const files = await readdir(userDataDirectory)
     expect(files).toContain(`session-token-${activeEnvKey}.enc`)
     expect(files).not.toContain(`session-token-${activeEnvKey}.json`)
+    await expect(service.initialize()).resolves.toEqual({ authenticated: true, me: user })
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
+    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(
+      'test-token-new-file-backed-session'
+    )
+
+    const environmentId = createHash('sha256').update(activeEnvKey).digest('hex')
+    const marker = await readFile(
+      path.join(userDataDirectory, `pending-external-logout-${environmentId}`),
+      'utf8'
+    )
+    expect(marker).toContain('"intent":"keytar-cleanup-pending"')
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+  })
+
+  it('does not restore a safeStorage token for an active-Keytar cleanup marker', async () => {
+    const tokenStore = new TokenStoreClass()
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    await tokenStore.setSafeStorageSessionToken('stale-safe-storage-token', activeEnvKey)
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'active-keytar')
+    const service = new AppServiceClass({
+      tokenStore,
+      getUserDataDirectory: () => userDataDirectory,
+    })
+    const authClient = (
+      service as unknown as {
+        authClient: { getMe: (token: string) => Promise<typeof user> }
+      }
+    ).authClient
+    const getMe = vi.spyOn(authClient, 'getMe')
 
     await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-    await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
-    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+
+    expect(getMe).not.toHaveBeenCalled()
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'active-keytar',
+    })
   })
 })
