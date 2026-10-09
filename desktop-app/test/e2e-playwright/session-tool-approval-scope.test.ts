@@ -43,6 +43,11 @@ import {
   startFreshThread,
 } from './workflowAgentChatTools.js'
 
+// The Host default gpt-5.4-mini skipped requested tool calls (it answered a second shell
+// request from earlier outputs and ran the shell but never the requested http_request), so
+// no approval card could appear. The composer menu lists only the Host provider's allowlisted
+// models (openai on the branch profile), so the lane selects the larger gpt-5.4 from it.
+const CHAT_MODEL = 'gpt-5.4'
 const RUN_ID = randomUUID().replace(/-/g, '').slice(0, 8)
 const TURN_TIMEOUT = 300_000
 const CARD_TIMEOUT = 180_000
@@ -59,8 +64,23 @@ function markerFor(testInfo: TestInfo, step: string): string {
   return `STA_${RUN_ID}_${testId}_${step}`
 }
 
+// `date` makes the output unpredictable: with a bare `printf <marker>` the model answered the
+// second task from the first task's outputs without calling shell_exec, so no approval card
+// could appear. Reading /proc/sys/kernel/random/uuid instead made the model refuse the tool.
 function shellCommand(marker: string): string {
-  return `printf ${marker}`
+  return `echo ${marker}; date`
+}
+
+// Same visible path as qa-recorder-image-capabilities.spec.ts: model chip -> menu -> row.
+async function selectChatModel(page: Page, model: string): Promise<void> {
+  const chip = page.getByTestId('selected-chat-model')
+  await expect(chip).toBeVisible({ timeout: 30_000 })
+  await chip.click()
+  await expect(page.getByRole('menu', { name: 'Select model' })).toBeVisible({ timeout: 20_000 })
+  const row = page.getByTestId(`model-option-${model}`)
+  await expect(row, `${model} must be offered by the chatllm catalog`).toHaveCount(1)
+  await row.click()
+  await expect(chip).toHaveAttribute('data-model-id', model)
 }
 
 function escapeRegExp(value: string): string {
@@ -315,6 +335,7 @@ test.describe.serial('per-task tool approval scope', () => {
     await test.step('end user opens a fresh chatllm thread', async () => {
       await enterChatllmChat(appPage)
       await startFreshThread(appPage)
+      await selectChatModel(appPage, CHAT_MODEL)
       await installCardLedger(appPage)
       expect(await readCardLedger(appPage)).toEqual([])
     })
@@ -420,6 +441,7 @@ test.describe.serial('per-task tool approval scope', () => {
     await test.step('end user opens a fresh chatllm thread', async () => {
       await enterChatllmChat(appPage)
       await startFreshThread(appPage)
+      await selectChatModel(appPage, CHAT_MODEL)
       await installCardLedger(appPage)
       expect(await readCardLedger(appPage)).toEqual([])
     })
