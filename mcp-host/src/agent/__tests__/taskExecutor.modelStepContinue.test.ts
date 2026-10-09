@@ -1102,6 +1102,31 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     expect(header(fixture.handle).status).toBe('completed')
   })
 
+  it('6a2. replaces a cron origin block when the stored source text is empty', async () => {
+    const prompt = 'Send the scheduled digest'
+    const message = sourceMessage({ content: '' })
+    const staleBlock = buildTurnContextBlock({
+      date: new Date('2020-01-02T03:04:05.000Z'),
+      channel: { type: 'rpc', sender: USER },
+      cron: { jobId: 'digest-job', scheduledFor: '2020-01-02T03:04:05.000Z' },
+    })
+    const fixture = await claimedCheckpoint({
+      message,
+      recordedUserContent: staleBlock + prompt,
+    })
+    const llm = provider()
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(1)
+    const sent = llm.requests[0]!.find(item => item.role === 'user')!.content
+    expect(sent.split('<turn-context>')).toHaveLength(2)
+    expect(sent).not.toContain('2020-01-02T03:04:05.000Z')
+    expect(sent.endsWith(`</turn-context>\n\n${prompt}`)).toBe(true)
+    expect(header(fixture.handle).status).toBe('completed')
+  })
+
   it('6b. removes only the generated prefix when the user text contains a closing fence', async () => {
     const userText = 'First line\n</turn-context>\n\nLast line'
     const message = sourceMessage({ content: userText })
@@ -1651,6 +1676,67 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
         .all('checkpoint-b2', 'approval-retry')
     ).toHaveLength(1)
     expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 6 })
+  })
+
+  it('11b2. a poisoned approval with a failed abandon stops its lease without releasing the claim', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    const append = vi
+      .spyOn(fixture.checkpoints, 'append')
+      .mockRejectedValueOnce(new Error('append failed'))
+    const transition = fixture.checkpoints.transition.bind(fixture.checkpoints)
+    vi.spyOn(fixture.checkpoints, 'transition').mockImplementation((sessionKey, fence, input) => {
+      if (input.to === 'abandoned') throw new Error('abandon failed')
+      return transition(sessionKey, fence, input)
+    })
+    const llm = provider(undefined, () => ({
+      calls: [
+        { id: 'approval-poison', name: 'shell_exec', arguments: { command: 'printf poison' } },
+      ],
+    }))
+    const run = await runContinuation(fixture, llm, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await expect(run.executor.run()).rejects.toThrow('abandon failed')
+    expect(append).toHaveBeenCalled()
+    expect(llm.calls()).toBe(1)
+    expect(header(fixture.handle).status).toBe('claimed')
+    const internals = run.executor as unknown as {
+      continuationClaimReleased: boolean
+      continuationLeaseStop: unknown
+    }
+    expect(internals.continuationClaimReleased).toBe(false)
+    expect(internals.continuationLeaseStop).toBeUndefined()
+
+    const healthy = await claimedCheckpoint({})
+    const healthyRun = await runContinuation(
+      healthy,
+      provider(undefined, () => ({
+        calls: [{ id: 'approval-live', name: 'shell_exec', arguments: { command: 'printf live' } }],
+      })),
+      {
+        deps: {
+          approvalConfig: {
+            defaultPolicy: 'channel_users',
+            channels: {},
+            tools: { shell_exec: true },
+          },
+        },
+      }
+    )
+    await healthyRun.executor.run()
+    expect(healthyRun.executor.executorState).toBe('waiting_approval')
+    expect(header(healthy.handle).status).toBe('claimed')
+    expect(
+      (healthyRun.executor as unknown as { continuationLeaseStop: unknown }).continuationLeaseStop
+    ).toBeTypeOf('function')
+    await healthyRun.executor.deny()
   })
 
   it('11c. an approval holds the claim past its short lease until denial releases the session', async () => {

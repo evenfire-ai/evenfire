@@ -1154,7 +1154,9 @@ export class TaskExecutor {
         throw err
       }
       if (waitingForApproval && recorder.poisoned) {
-        this.continuationClaimReleased = true
+        // A poisoned recorder cannot establish that its abandon transition
+        // succeeded. Let run() abandon the owned claim and stop renewal.
+        waitingForApproval = false
         throw new Error('Model-step continuation approval lost its checkpoint recorder')
       }
       // A clean response keeps the claim for the final turn boundary. Every
@@ -2069,6 +2071,17 @@ export class TaskExecutor {
         : sourceText,
       { secretWarning: 'Potential secret detected in model-step checkpoint' }
     ).content
+    const stripRecordedBlock = (text: string): string => {
+      if (recordedSourceText) return stripTurnContextBlock(text, recordedSourceText)
+      // Cron origins record the prompt in the user turn, while their stored
+      // source message is empty. Recognize only a generated cron prefix and
+      // keep every byte after its first closing fence.
+      const close = '\n</turn-context>\n\n'
+      const closeIndex = text.indexOf(close)
+      if (closeIndex < 0 || !text.slice(0, closeIndex).includes('\ncron_job: ')) return text
+      const prompt = text.slice(closeIndex + close.length)
+      return stripTurnContextBlock(text, prompt)
+    }
     for (let i = originIndex; i >= originIndex; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -2076,7 +2089,7 @@ export class TaskExecutor {
         const textIndex = m.contentParts.findIndex(part => part.type === 'text')
         const contentParts = m.contentParts.flatMap((part, index) => {
           if (index !== textIndex || part.type !== 'text') return [part]
-          const text = stripTurnContextBlock(part.text, recordedSourceText)
+          const text = stripRecordedBlock(part.text)
           // prependTextToParts adds a text part when the message had none.
           return text.length > 0 ? [{ ...part, text }] : []
         })
@@ -2084,7 +2097,7 @@ export class TaskExecutor {
       } else {
         messages[i] = {
           ...m,
-          content: stripTurnContextBlock(m.content, recordedSourceText),
+          content: stripRecordedBlock(m.content),
         }
       }
       break
