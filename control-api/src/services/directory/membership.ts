@@ -264,7 +264,7 @@ async function lockPasswordResetUser(
        FROM users
       WHERE email = $1
       LIMIT 1
-      FOR UPDATE`,
+      FOR NO KEY UPDATE`,
     [email]
   )
   return (result.rows[0] as InvitationUserRow | undefined) ?? null
