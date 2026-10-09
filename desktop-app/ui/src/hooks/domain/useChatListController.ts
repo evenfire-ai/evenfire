@@ -104,7 +104,6 @@ export interface ChatListControllerHost {
   beginSelectionIntent: () => number
   getSelectionIntentRevision: () => number
   clearPendingSelection: (agentRef: string, preserveSpecificChatId?: string) => void
-  restoreLatestChatSelection: (agentRef: string) => Promise<void>
   scrollChatToBottom: () => void
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
@@ -1063,13 +1062,6 @@ export function useChatListController({
         if (restoreChatId) {
           const restore = host.current?.switchToChat(agentRef, restoreChatId)
           void restore?.catch(() => undefined)
-        } else if (
-          pendingSelection?.mode !== 'none' &&
-          activeChatIdAtCreate === null &&
-          !chatMessagesLoadingAtCreate
-        ) {
-          const restoreLatest = host.current?.restoreLatestChatSelection(agentRef)
-          void restoreLatest?.catch(() => undefined)
         }
       }
       throw error
@@ -1770,8 +1762,6 @@ export function useChatListController({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [latestChatSessions, isHostAccessBlocked, hostAuthorityRevision]
   )
-  const getChatListRequestGeneration = useCallback(() => requestGenerationRef.current, [])
-
   return {
     // State (public contract, re-exported unchanged by the parent).
     chatList: selectedAgent && isHostAccessBlocked(selectedAgent) ? [] : chatList,
@@ -1791,7 +1781,6 @@ export function useChatListController({
     handleDeleteChatForAgent,
     // Loader + list-loading control (parent agent-selection effect).
     loadChatList,
-    getChatListRequestGeneration,
     loadMoreChatSessions,
     setChatListLoading,
     clearList,

@@ -507,7 +507,6 @@ export function useAgentChatController({
     latestChatSessionsLoading,
     hideAgent,
     loadChatList,
-    getChatListRequestGeneration,
     loadMoreChatSessions,
     setChatListLoading,
     clearList,
@@ -1207,63 +1206,12 @@ export function useAgentChatController({
     handleDeleteChat,
     handleDeleteChatForAgent,
   } = chatListCtl
-  const restoreLatestChatSelection = useCallback(
-    async (agentRef: string) => {
-      const visible = activeChatVisibilityRef.current
-      if (
-        selectedAgent !== agentRef ||
-        navItem !== DESKTOP_ROUTES.chat ||
-        visible.selectedAgent !== agentRef ||
-        visible.activeChatId !== null ||
-        isHostAccessBlocked(agentRef)
-      )
-        return
-
-      const selectionIntentRevision = beginSelectionIntent(true)
-      setChatListLoading(true)
-      const listLoad = loadChatList(agentRef, selectionIntentRevision)
-      const listRequestGeneration = getChatListRequestGeneration()
-      const result = await listLoad
-      if (getChatListRequestGeneration() !== listRequestGeneration) return
-      if (
-        selectionIntentRevisionRef.current !== selectionIntentRevision ||
-        selectedAgent !== agentRef ||
-        navItem !== DESKTOP_ROUTES.chat ||
-        isHostAccessBlocked(agentRef)
-      ) {
-        setChatListLoading(false)
-        return
-      }
-
-      setChatListLoading(false)
-      const latest = result?.merged[0]
-      if (!latest) {
-        settleChatMessagesLoading(selectionIntentRevision)
-        return
-      }
-
-      autoSelectedChatIdRef.current = latest.id
-      await switchToChatForIntent(agentRef, latest.id, selectionIntentRevision)
-    },
-    [
-      beginSelectionIntent,
-      getChatListRequestGeneration,
-      isHostAccessBlocked,
-      loadChatList,
-      navItem,
-      selectedAgent,
-      setChatListLoading,
-      settleChatMessagesLoading,
-      switchToChatForIntent,
-    ]
-  )
   useEffect(() => {
     chatListHostRef.current = {
       switchToChat,
       beginSelectionIntent,
       getSelectionIntentRevision: () => selectionIntentRevisionRef.current,
       clearPendingSelection,
-      restoreLatestChatSelection,
       scrollChatToBottom,
       dispatchSession,
       clearComposerDraft,
