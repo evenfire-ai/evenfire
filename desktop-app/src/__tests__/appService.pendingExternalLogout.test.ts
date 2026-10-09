@@ -324,6 +324,22 @@ describe('AppService pending external logout', () => {
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
   })
 
+  it('keeps an authenticated session when canceled-quit retry only has Keytar cleanup pending', async () => {
+    const { service } = createService()
+    const state = internals(service)
+    state.sessionToken = loginResult.token
+    state.me = loginResult.me
+    markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
+    markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'safe-storage')
+
+    await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(false)
+
+    expect(state.sessionToken).toBe(loginResult.token)
+    expect(state.me).toEqual(loginResult.me)
+    expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
+    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+  })
+
   it('retires startup cleanup intent only after the recorded credential restores', async () => {
     markerStore.recordPendingKeytarCleanup(userDataDirectory, activeEnvKey, 'active-keytar')
     const { service, tokenStore } = createService()
