@@ -22,7 +22,13 @@ import { ModelStepCheckpointStore } from '../../core/conversation/persistence/mo
 import { LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { buildTurnContextBlock } from '../../core/orchestration/turnContext'
-import { type AgentEvent, type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
+import {
+  type AgentEvent,
+  type ChatMessage,
+  FinishReason,
+  type MessageContentPart,
+  type ToolCall,
+} from '../../core/types'
 import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
 import { GfscHttpError } from '../../internalTools/gfsClient'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
@@ -59,6 +65,7 @@ let dateNow: typeof Date.now
 const savedConfig = {
   enableApproval: appConfig.enableApproval,
   dynamicToolsEnabled: appConfig.dynamicToolsEnabled,
+  promptCacheEnabled: appConfig.promptCacheEnabled,
 }
 
 type ProviderScript = (
@@ -217,6 +224,7 @@ async function claimedCheckpoint(options: {
   checkpointId?: string
   /** The user message as the origin sent it (production records it with its turn-context block). */
   recordedUserContent?: string
+  recordedUserParts?: MessageContentPart[]
 }): Promise<CheckpointFixture> {
   const handle = makeSqliteStore()
   handles.push(handle)
@@ -241,6 +249,7 @@ async function claimedCheckpoint(options: {
       payload: JSON.stringify({
         role: 'user',
         content: options.recordedUserContent ?? message.content,
+        ...(options.recordedUserParts ? { contentParts: options.recordedUserParts } : {}),
       }),
     },
   ]
@@ -1072,6 +1081,116 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     expect(sent).not.toContain(originDate.toISOString())
     expect(sent.endsWith(`</turn-context>\n\n${message.content}`)).toBe(true)
     expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 4 })
+  })
+
+  it('6a. preserves a user-pasted context fence when the origin added no block', async () => {
+    appConfig.promptCacheEnabled = false
+    const block = buildTurnContextBlock({
+      date: new Date('2020-01-02T03:04:05.000Z'),
+      channel: { type: 'rpc', sender: USER },
+    })
+    const message = sourceMessage({ content: `${block}Keep this entire quoted message` })
+    const fixture = await claimedCheckpoint({ message })
+    const llm = provider()
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(1)
+    expect(llm.requests[0]!.find(item => item.role === 'user')?.content).toBe(message.content)
+    expect(header(fixture.handle).status).toBe('completed')
+  })
+
+  it('6b. removes only the generated prefix when the user text contains a closing fence', async () => {
+    const userText = 'First line\n</turn-context>\n\nLast line'
+    const message = sourceMessage({ content: userText })
+    const originBlock = buildTurnContextBlock({
+      date: new Date('2020-01-02T03:04:05.000Z'),
+      channel: { type: 'rpc', sender: USER },
+    })
+    const fixture = await claimedCheckpoint({
+      message,
+      recordedUserContent: originBlock + userText,
+    })
+    const llm = provider()
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(1)
+    const sent = llm.requests[0]!.find(item => item.role === 'user')!.content
+    expect(sent.endsWith(`</turn-context>\n\n${userText}`)).toBe(true)
+    expect(sent).not.toContain('2020-01-02T03:04:05.000Z')
+    expect(header(fixture.handle).status).toBe('completed')
+  })
+
+  it('6b2. preserves the same user fence in recorded text parts', async () => {
+    const userText = 'Part text\n</turn-context>\n\nKeep this suffix'
+    const message = sourceMessage({ content: userText })
+    const originBlock = buildTurnContextBlock({
+      date: new Date('2020-01-02T03:04:05.000Z'),
+      channel: { type: 'rpc', sender: USER },
+    })
+    const fixture = await claimedCheckpoint({
+      message,
+      recordedUserContent: originBlock + userText,
+      recordedUserParts: [{ type: 'text', text: originBlock + userText }],
+    })
+    const llm = provider()
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(1)
+    const sent = llm.requests[0]!.find(item => item.role === 'user')!
+    expect(sent.content.endsWith(`</turn-context>\n\n${userText}`)).toBe(true)
+    expect(sent.contentParts).toEqual([{ type: 'text', text: sent.content }])
+    expect(sent.content).not.toContain('2020-01-02T03:04:05.000Z')
+    expect(header(fixture.handle).status).toBe('completed')
+  })
+
+  it('6c. spends only the ten restored iterations left at 40/50 and blocks at 50/50', async () => {
+    const limit = 50
+    const taskBudget = budget({ iterationsUsed: 40, maxIterations: limit })
+    const fixture = await claimedCheckpoint({ taskBudget })
+    const events = new SimpleEventEmitter()
+    const completed: AgentEvent[] = []
+    events.on('loop:completed', event => completed.push(event))
+    let nextTool = 0
+    const llm = provider(undefined, () => ({
+      calls: [{ id: `iteration-${++nextTool}`, name: 'system_info', arguments: {} }],
+    }))
+    const config = {
+      maxTaskDuration: 300_000,
+      maxToolCallsPerTask: limit,
+      autoStart: true,
+      taskDelay: 0,
+      approvalTimeout: 300_000,
+    }
+    const run = await runContinuation(fixture, llm, { events, deps: { config } })
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(10)
+    expect(completed).toEqual([
+      expect.objectContaining({ data: { iteration: 10, resultType: 'exhaustion' } }),
+    ])
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+
+    const exhausted = await claimedCheckpoint({
+      taskBudget: budget({ iterationsUsed: limit, maxIterations: limit }),
+    })
+    const blockedProvider = provider()
+    const blocked = await runContinuation(exhausted, blockedProvider, { deps: { config } })
+    await blocked.executor.run()
+    await exhausted.handle.persistQueue.drain()
+
+    expect(blockedProvider.calls()).toBe(0)
+    expect(blocked.verdict).toHaveBeenCalledWith({
+      kind: 'blocked',
+      blockedReason: 'budget_exhausted',
+    })
+    expect(header(exhausted.handle).status).toBe('blocked')
   })
 
   it('7. blocks when a recorded tool grant is no longer present', async () => {

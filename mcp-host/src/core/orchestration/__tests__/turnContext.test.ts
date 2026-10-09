@@ -25,19 +25,26 @@ describe('stripTurnContextBlock (#1043)', () => {
       date: new Date('2026-10-08T00:00:00.000Z'),
       channel: { type: 'rpc', sender: 'user-1' },
     })
-    expect(stripTurnContextBlock(`${block}Summarize the notes`)).toBe('Summarize the notes')
-    expect(stripTurnContextBlock(block)).toBe('')
+    expect(stripTurnContextBlock(`${block}Summarize the notes`, 'Summarize the notes')).toBe(
+      'Summarize the notes'
+    )
+    expect(stripTurnContextBlock(block, '')).toBe('')
   })
 
   it('returns text without a leading block unchanged', () => {
     const text = 'Explain <turn-context>\nquoted\n</turn-context>\n\n in prose'
-    expect(stripTurnContextBlock(text)).toBe(text)
+    expect(stripTurnContextBlock(text, text)).toBe(text)
   })
 
-  it('refuses a recorded block with no closing fence', () => {
-    expect(() => stripTurnContextBlock('<turn-context>\ndate: x\nhello')).toThrow(
-      'Recorded <turn-context> block has no closing fence'
-    )
+  it('keeps a user-pasted closing fence and does not cut an unclosed block', () => {
+    const block = buildTurnContextBlock({
+      date: new Date('2026-10-08T00:00:00.000Z'),
+      channel: { type: 'rpc' },
+    })
+    const userText = 'First line\n</turn-context>\n\nlast line'
+    expect(stripTurnContextBlock(`${block}${userText}`, userText)).toBe(userText)
+    const unclosed = '<turn-context>\ndate: x\nhello'
+    expect(stripTurnContextBlock(unclosed, 'hello')).toBe(unclosed)
   })
 })
 

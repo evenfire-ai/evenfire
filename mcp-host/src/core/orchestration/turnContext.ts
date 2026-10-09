@@ -222,16 +222,21 @@ const TURN_CONTEXT_OPEN = '<turn-context>\n'
 const TURN_CONTEXT_CLOSE = '\n</turn-context>\n\n'
 
 /**
- * #1043 — the text without its leading `<turn-context>` block, or the text
- * unchanged when it has none. A model-step continuation replays the recorded
- * turn, whose block describes the origin attempt; the continuation removes it
- * and builds a new one from its own re-resolved references. Client values in
- * the block are single-line (`quotePromptValue`), so the first closing fence
- * is the block's own.
+ * #1043 — remove only the context prefix added to the recorded origin text.
+ * The source message is kept separately from the recorded model input. Its
+ * exact text anchors the end of the prefix, even when the user pasted a
+ * closing fence into their message. If the recorded text differs for another
+ * reason, leave it intact instead of guessing where the prefix ends.
  */
-export function stripTurnContextBlock(text: string): string {
-  if (!text.startsWith(TURN_CONTEXT_OPEN)) return text
-  const end = text.indexOf(TURN_CONTEXT_CLOSE)
-  if (end < 0) throw new Error('Recorded <turn-context> block has no closing fence')
-  return text.slice(end + TURN_CONTEXT_CLOSE.length)
+export function stripTurnContextBlock(text: string, sourceText: string): string {
+  if (text === sourceText || !text.endsWith(sourceText)) return text
+  const prefix = text.slice(0, text.length - sourceText.length)
+  if (
+    !prefix.startsWith(`${TURN_CONTEXT_OPEN}date: `) ||
+    !prefix.includes('\nchannel: ') ||
+    !prefix.endsWith(TURN_CONTEXT_CLOSE)
+  ) {
+    return text
+  }
+  return sourceText
 }

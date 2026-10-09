@@ -2047,6 +2047,16 @@ export class TaskExecutor {
         'Model-step continuation origin user message index does not point at a user message'
       )
     }
+    const sourceText = this.task.sourceMessage?.content ?? ''
+    // The recorder redacts the whole model message before storing it. Match
+    // against that same projection, including the image-only text supplied by
+    // buildSourceMessageContentParts, so the original prefix remains exact.
+    const recordedSourceText = this.responseSafety.sanitizeFreeformContent(
+      !sourceText.trim() && origin.contentParts?.some(part => part.type === 'image')
+        ? 'User attached image(s).'
+        : sourceText,
+      { secretWarning: 'Potential secret detected in model-step checkpoint' }
+    ).content
     for (let i = originIndex; i >= originIndex; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -2054,13 +2064,16 @@ export class TaskExecutor {
         const textIndex = m.contentParts.findIndex(part => part.type === 'text')
         const contentParts = m.contentParts.flatMap((part, index) => {
           if (index !== textIndex || part.type !== 'text') return [part]
-          const text = stripTurnContextBlock(part.text)
+          const text = stripTurnContextBlock(part.text, recordedSourceText)
           // prependTextToParts adds a text part when the message had none.
           return text.length > 0 ? [{ ...part, text }] : []
         })
         messages[i] = { ...m, contentParts, content: textContentFromParts(contentParts) }
       } else {
-        messages[i] = { ...m, content: stripTurnContextBlock(m.content) }
+        messages[i] = {
+          ...m,
+          content: stripTurnContextBlock(m.content, recordedSourceText),
+        }
       }
       break
     }
