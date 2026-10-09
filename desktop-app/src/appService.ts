@@ -1341,7 +1341,8 @@ export class AppService {
   private sandboxUiGeneration = 0
 
   /**
-   * Advanced only when the authenticated session is cleared. Sandbox-ui work
+   * Advanced only when the signed-in user goes away: the session is cleared, or
+   * a login replaces it without a logout. Sandbox-ui work
    * that awaits the network (open mint, OAuth authorize-url fetch) captures it
    * first and drops its effects if it moved. `sessionGeneration` cannot serve:
    * every token commit bumps it, including the two of each transient team hop
