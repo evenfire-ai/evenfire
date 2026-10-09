@@ -145,6 +145,8 @@ export interface MessageResponse {
     // reason==='connect_required'.
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
+    /** false when the card must not offer "Always approve". */
+    alwaysApproveAllowed?: false
   }
 }
 
@@ -287,7 +289,7 @@ export type ActivityStreamHandler = (onEvent: (event: HostActivityEvent) => void
 }
 export type ApprovalHandler = (
   decision: ApprovalDecision
-) => Promise<{ success: boolean; error?: string }>
+) => Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }>
 export interface ProviderWorkflowApprovalDecision {
   approvalRequestId: string
   decision: 'approve' | 'deny'

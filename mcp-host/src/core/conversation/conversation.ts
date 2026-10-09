@@ -1,9 +1,9 @@
 import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
+import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import { SESSION_SCOPED_APPROVAL_TOOLS } from '../extensions/approvalController'
-import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
   ChatMessage,
   ContextBreakdown,
@@ -23,6 +23,8 @@ import {
   SessionListQuery,
   SessionMessagesQuery,
 } from './conversationStore'
+import { liftDenial, recordDenial } from './denialPolicy'
+import { mayStoreGrant } from './pendingApprovalView'
 import { userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
@@ -103,6 +105,7 @@ export class ConversationManager {
       state: ConversationState.Idle,
       turns: [],
       auto_approved_tools: new Set(),
+      denials: new Map(),
       created_at: new Date(),
       updated_at: new Date(),
       // #654 — a freshly inserted row carries the column default, so the RAM
@@ -268,8 +271,6 @@ export class ConversationManager {
     conversation.traceContext = traceContext
     conversation.updated_at = new Date()
 
-    // Clear per-turn wildcard approval — each new message requires fresh approval
-    conversation.auto_approved_tools.delete('*')
     // A new user message starts a new task: plain session-scoped approvals end here.
     conversation.task_approved_tools?.clear()
 
@@ -545,19 +546,24 @@ export class ConversationManager {
    * Resume after approval.
    * Transitions: AwaitingApproval → Processing
    *
-   * Proven turn-wide consent keeps the legacy expansion: all tools in this turn,
-   * plus the MCP server prefix for future turns. Exact-call and legacy unknown
-   * scopes authorize only the frozen invocation being resumed.
-   *
-   * SESSION_SCOPED_APPROVAL_TOOLS are the exception: turn-wide consent for one
-   * of them stores only that tool name, never '*' — in `task_approved_tools`
-   * for the current task, or in `auto_approved_tools` with alwaysApprove.
-   *
-   * When alwaysApprove=true, also stores the individual tool name (backwards compat).
+   * Approving one tool does not allowlist other tools, an MCP server, or the
+   * rest of the turn. Only an ordinary card (authorization_scope 'turn_tools')
+   * may store a grant: alwaysApprove stores that tool's exact name for later
+   * turns, and a plain approval of a SESSION_SCOPED_APPROVAL_TOOLS tool lasts
+   * for the current task. Exact-invocation and legacy unknown scopes (forced
+   * gates, denial re-asks, guardrail and live-tool cards) authorize only the
+   * frozen call being resumed. Approving this tool lifts its denial only when
+   * the approver is the user who denied it (or the denier is unknown); another
+   * user's approval runs this call once, keeps the denial and grants nothing
+   * (denialPolicy).
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
-  async approve(conversation: Conversation, alwaysApprove: boolean): Promise<void> {
+  async approve(
+    conversation: Conversation,
+    alwaysApprove: boolean,
+    userId?: string
+  ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot approve: conversation is ${conversation.state}`,
@@ -568,30 +574,28 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
-      const turnWide = conversation.pending_approval.authorization_scope === 'turn_tools'
-
-      if (turnWide && SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
-        // Session-scoped consent covers this tool alone and neither grants nor
-        // revokes '*'. A plain approval lasts for the current task; "always"
-        // lasts for later tasks while the conversation is in memory.
-        if (alwaysApprove) conversation.auto_approved_tools.add(toolName)
-        else (conversation.task_approved_tools ??= new Set()).add(toolName)
-      } else {
-        // Only proven turn-wide consent expands. Exact-call and legacy unknown
-        // scopes authorize just the frozen invocation being resumed.
-        if (turnWide) conversation.auto_approved_tools.add('*')
-        else conversation.auto_approved_tools.delete('*')
-
-        // MCP tools: also auto-approve the entire server for future turns
-        if (turnWide && isMcpToolName(toolName)) {
-          const serverPrefix = toolName.split('__')[0]
-          conversation.auto_approved_tools.add(serverPrefix)
+      const approval = conversation.pending_approval
+      const lifted = liftDenial(conversation, toolName, userId)
+      const grantable = mayStoreGrant(approval)
+      if (lifted === 'kept_for_denier') {
+        if (alwaysApprove) {
+          logger.info(
+            { event: 'always_approve_ignored', toolName, reason: 'denied_by_another_user' },
+            'Always approve ignored: another user denied this tool'
+          )
         }
-
-        // alwaysApprove also stores the individual tool name (for future turns)
-        if (turnWide && alwaysApprove) {
-          conversation.auto_approved_tools.add(toolName)
+      } else if (!grantable) {
+        if (alwaysApprove) {
+          logger.info(
+            { event: 'always_approve_ignored', toolName, reason: 'exact_invocation' },
+            'Always approve ignored: this card authorizes only its own call'
+          )
         }
+      } else if (alwaysApprove) {
+        conversation.auto_approved_tools.add(toolName)
+      } else if (SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
+        // A plain approval of a session-scoped tool lasts for the current task.
+        ;(conversation.task_approved_tools ??= new Set()).add(toolName)
       }
     }
 
@@ -606,9 +610,16 @@ export class ConversationManager {
    * Deny approval.
    * Transitions: AwaitingApproval → Idle
    *
+   * Records a denial of pending_approval.tool_name (denialPolicy) before clearing
+   * pending_approval. A user denial is persisted with the session. An approval
+   * timeout passes record:false and does not.
+   *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async deny(conversation: Conversation): Promise<void> {
+  async deny(
+    conversation: Conversation,
+    options?: { record?: boolean; userId?: string }
+  ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot deny: conversation is ${conversation.state}`,
@@ -617,6 +628,17 @@ export class ConversationManager {
     }
 
     const requestId = conversation.pending_approval?.request_id
+    const deniedTool = conversation.pending_approval?.tool_name
+    const record = options?.record !== false
+    if (deniedTool && record) {
+      // The deny is the latest explicit decision: recordDenial also revokes an
+      // earlier "Always approve" for this exact tool.
+      recordDenial(conversation, deniedTool, options?.userId)
+      logger.info(
+        { event: 'approval_denial_recorded', toolName: deniedTool },
+        'Recorded a tool denial'
+      )
+    }
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — deny is terminal (→ Idle), no task in flight

@@ -67,5 +67,6 @@ export function projectGfsApproval(approval: PendingApproval): PendingApproval {
     ...(approval.reason ? { reason: approval.reason } : {}),
     ...(approval.authorization_scope ? { authorization_scope: approval.authorization_scope } : {}),
     ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
+    ...(approval.reask ? { reask: approval.reask } : {}),
   }
 }

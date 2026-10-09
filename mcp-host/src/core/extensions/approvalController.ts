@@ -2,23 +2,31 @@
  * ApprovalController - LoopController decorator for tool approval.
  *
  * Phase 6: Wraps a delegate LoopController (UnifiedApprovalGateController)
- * and intercepts beforeTool() to check the conversation's auto_approved_tools
- * set BEFORE the delegate's approval check fires.
+ * and intercepts beforeTool() before the delegate's approval check fires.
  *
- * There is a SINGLE approval gate in the code (SPEC-UNIFIED §21):
- *   loopController.beforeTool() in toolUseLoop.ts
+ * Approval decisions go through loopController.beforeTool() in toolUseLoop
+ * (SPEC-UNIFIED §21). The one other decision point is the guardrail `ask`
+ * lane in toolCallPolicy, which consumes only an exact one-shot grant.
+ * Both read denials through core/conversation/denialPolicy.
  *
  * The decorator chain:
- *   ApprovalController (live tools → delegate; other tools → auto_approved_tools + one-shot)
+ *   ApprovalController (denial re-ask, re-ask for tools that start other tools
+ *     while a denial is active, forced approval, live tools → delegate, exact
+ *     auto_approved_tools / task_approved_tools name, then a one-shot of the
+ *     same tool call id and arguments)
  *     └─ UnifiedApprovalGateController (MCP tool? → suspend. Native requiresApproval? → suspend. Else → "proceed")
  *
- * Gate 2 (tool.requiresApproval() inside toolUseLoop) was REMOVED as part of
- * the BUG-11 fix. All approval decisions now flow through this single gate.
+ * A "*" entry or an MCP server prefix in auto_approved_tools does not
+ * short-circuit this gate. Gate 2 (tool.requiresApproval() inside toolUseLoop)
+ * was REMOVED as part of the BUG-11 fix.
  */
-import { LoopController } from '../interfaces'
+import { randomUUID } from 'node:crypto'
+import { logger } from '../../logger'
+import { hasActiveDenials, isDenied } from '../conversation/denialPolicy'
+import { LoopController, ToolRegistry } from '../interfaces'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
 import type { Conversation } from '../types'
-import { getMcpServerPrefix } from './mcpApprovalGateController'
+import { oneShotMatches } from './approvalMatch'
 
 /**
  * Native tools whose approval is scoped to the tool itself. A plain approval
@@ -26,9 +34,7 @@ import { getMcpServerPrefix } from './mcpApprovalGateController'
  * for the rest of the current task, including after resumes; the next user
  * message starts a new task and asks again. An "always" approval stores it in
  * `auto_approved_tools`, which covers later tasks while the conversation stays
- * in memory. Neither survives a cold resume. These approvals never add the
- * turn-wide `'*'`, and a `'*'` granted by any other approval does not cover
- * these tools: each one needs its own approval.
+ * in memory. Neither survives a cold resume.
  */
 export const SESSION_SCOPED_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
   'shell_exec',
@@ -47,25 +53,62 @@ export interface ForcedApprovalGate {
   ): { type: 'suspend'; approval: PendingApproval } | null
 }
 
+export interface ApprovalControllerOptions {
+  /** Cron×stateless keeps #529 autonomy: a denial must not turn a proceed
+   * into a suspension for list/get/delete. Default true. */
+  honorDenials?: boolean
+  toolRegistry?: ToolRegistry
+  /** Tools that always consult the delegate for every model-generated call. */
+  liveApprovalTools?: ReadonlySet<string>
+  /** Forced approvals ask on every call, before any stored approval. */
+  forcedApprovalGate?: ForcedApprovalGate
+}
+
+/** cron_manage actions that start or schedule autonomous work. */
+const CRON_STARTING_ACTIONS = new Set(['create', 'enable', 'trigger'])
+
 /**
- * Decorator that checks auto_approved_tools before delegating to base controller.
+ * Tools that can run other tools out of the user's sight. While a denial is
+ * active they ask again, since the denied tool could run through them.
+ */
+function startsOtherTools(toolName: string, params: Record<string, unknown>): boolean {
+  if (toolName === 'workflow_trigger') return true
+  return (
+    toolName === 'cron_manage' &&
+    typeof params.action === 'string' &&
+    CRON_STARTING_ACTIONS.has(params.action)
+  )
+}
+
+function reaskDescription(toolName: string, reask: 'denied' | 'denials_active'): string {
+  return reask === 'denied'
+    ? `Tool "${toolName}" was denied and must be approved again`
+    : `Tool "${toolName}" can run other tools, and another tool was denied in this chat, so it must be approved again`
+}
+
+/**
+ * Decorator that honors a denial, a forced approval, live tools, then an exact
+ * allowlisted name, then a one-shot pending approval, before delegating.
  */
 export class ApprovalController implements LoopController {
   private readonly conversation: Conversation
   private readonly delegate: LoopController
+  private readonly honorDenials: boolean
+  private readonly toolRegistry?: ToolRegistry
   private readonly liveApprovalTools: ReadonlySet<string>
   private readonly forcedApprovalGate: ForcedApprovalGate | undefined
 
   constructor(
     conversation: Conversation,
     delegate: LoopController,
-    liveApprovalTools?: ReadonlySet<string>,
-    forcedApprovalGate?: ForcedApprovalGate
+    options?: ApprovalControllerOptions
   ) {
     this.conversation = conversation
     this.delegate = delegate
-    this.liveApprovalTools = liveApprovalTools ?? new Set<string>()
-    this.forcedApprovalGate = forcedApprovalGate
+    this.honorDenials = options?.honorDenials !== false
+    this.toolRegistry = options?.toolRegistry
+    this.liveApprovalTools = options?.liveApprovalTools ?? new Set<string>()
+    this.forcedApprovalGate = options?.forcedApprovalGate
   }
 
   shouldAccept(content: string, iteration: number): boolean {
@@ -77,26 +120,43 @@ export class ApprovalController implements LoopController {
   }
 
   /**
-   * A forced approval (cron×stateless create/enable) is checked first and
-   * always suspends, before any stored approval is consulted.
+   * Order: denial re-ask, re-ask for tools that start other tools while a
+   * denial is active, forced approval, live tools, exact allowlisted name
+   * (auto_approved_tools / task_approved_tools), one-shot of the same tool call
+   * id and arguments, otherwise the delegate.
    *
-   * Live-approval tools always consult the delegate. Other tools retain the
-   * auto_approved_tools and matching pending_approval one-shot behavior;
-   * `'*'` does not apply to SESSION_SCOPED_APPROVAL_TOOLS.
+   * A forced approval (cron×stateless create/enable) always suspends: no stored
+   * approval covers it, and the approved frozen call runs directly on resume.
+   * Live-approval tools always consult the delegate.
    *
-   * Non-live one-shot approval: if the conversation has a pending_approval whose
-   * tool_name matches, this means the user approved the tool for this
-   * specific call (alwaysApprove=false). Clear pending_approval and proceed.
-   * This prevents the infinite re-suspension loop where resumeAfterApproval
-   * re-runs the loop, the LLM calls the same tool, and the gate blocks it again.
+   * One-shot approval matches the call the user just approved. A later call
+   * of the same name with different arguments or a new id suspends again.
    */
   beforeTool(
     toolName: string,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
+    toolCallId?: string
   ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
-    // Forced approvals ask on every call: no '*', per-task, "always" or server
-    // prefix approval covers them, and their exact scope keeps an approved card
-    // from adding any of those.
+    if (this.honorDenials && isDenied(this.conversation, toolName)) {
+      logger.info(
+        { event: 'approval_reask_required', toolName },
+        'Previously denied tool requires approval again'
+      )
+      return this.reask(toolName, params, toolCallId, 'denied')
+    }
+
+    if (
+      this.honorDenials &&
+      hasActiveDenials(this.conversation) &&
+      startsOtherTools(toolName, params)
+    ) {
+      logger.info(
+        { event: 'approval_reask_required', toolName, reason: 'chat_has_denials' },
+        'A tool that can start other tools requires approval while a tool denial is active'
+      )
+      return this.reask(toolName, params, toolCallId, 'denials_active')
+    }
+
     const forced = this.forcedApprovalGate?.forcedApproval(toolName, params)
     if (forced) return forced
 
@@ -104,28 +164,16 @@ export class ApprovalController implements LoopController {
     // Every model-generated live call needs a new delegate decision; retained
     // snapshot data and persistent approvals cannot authorize another invocation.
     if (this.liveApprovalTools.has(toolName)) {
-      const decision = this.delegate.beforeTool(toolName, params)
+      const decision = this.delegate.beforeTool(toolName, params, toolCallId)
       return typeof decision === 'object'
         ? {
             ...decision,
-            approval: {
-              ...decision.approval,
-              authorization_scope: 'exact_invocation',
-            },
+            approval: { ...decision.approval, authorization_scope: 'exact_invocation' },
           }
         : decision
     }
 
-    // "Approve once, run all" — user approved any tool in this turn, auto-approve
-    // the rest, except session-scoped tools, which need their own approval.
-    if (
-      this.conversation.auto_approved_tools.has('*') &&
-      !SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)
-    ) {
-      return 'proceed'
-    }
-
-    // Check individual tool name: "always" grants, then this task's plain
+    // Exact-name grants: "always" approvals, then this task's plain
     // session-scoped approvals.
     if (
       this.conversation.auto_approved_tools.has(toolName) ||
@@ -134,22 +182,59 @@ export class ApprovalController implements LoopController {
       return 'proceed'
     }
 
-    // Check MCP server-level approval (e.g., "airtable-server" approves all airtable-server__* tools)
-    const serverPrefix = getMcpServerPrefix(toolName)
-    if (serverPrefix && this.conversation.auto_approved_tools.has(serverPrefix)) {
-      return 'proceed'
-    }
-
-    // One-shot: pending_approval was granted but not yet consumed
-    if (
-      this.conversation.pending_approval &&
-      this.conversation.pending_approval.tool_name === toolName
-    ) {
+    const pending = this.conversation.pending_approval
+    if (pending && oneShotMatches(pending, toolName, params, toolCallId)) {
       this.conversation.pending_approval = undefined
       return 'proceed'
     }
 
-    return this.delegate.beforeTool(toolName, params)
+    return this.delegate.beforeTool(toolName, params, toolCallId)
+  }
+
+  /**
+   * Suspend for a re-ask. The gate's own card (and its description, e.g. the
+   * stateless cron cost warning) is kept and only marked; when the gate would
+   * proceed, a re-ask card is built here. A re-ask authorizes only the call it
+   * shows: it never offers Always approve.
+   */
+  private reask(
+    toolName: string,
+    params: Record<string, unknown>,
+    toolCallId: string | undefined,
+    reask: 'denied' | 'denials_active'
+  ): 'skip' | { type: 'suspend'; approval: PendingApproval } {
+    const decision = this.delegate.beforeTool(toolName, params, toolCallId)
+    if (decision === 'skip') return decision
+    const approval =
+      decision === 'proceed'
+        ? this.reapproval(toolName, params, reaskDescription(toolName, reask))
+        : decision.approval
+    return {
+      type: 'suspend',
+      approval: {
+        ...approval,
+        reask,
+        authorization_scope: 'exact_invocation',
+      },
+    }
+  }
+
+  private reapproval(
+    toolName: string,
+    params: Record<string, unknown>,
+    description: string
+  ): PendingApproval {
+    const tool = this.toolRegistry?.get(toolName) ?? null
+    const trace = tool?.traceDescriptor?.(params)
+    return {
+      request_id: randomUUID(),
+      tool_name: toolName,
+      ...(trace ? { tool_kind: trace.kind, tool_source_ref: trace.sourceRef } : {}),
+      parameters: params,
+      description,
+      tool_call_id: '',
+      context_snapshot: [],
+    }
   }
 
   onExhaustion(iteration: number): string {

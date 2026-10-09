@@ -6,6 +6,7 @@ import {
   type Turn,
   type TurnToolCall,
 } from '../types'
+import { type PendingApprovalSummary, summarizePendingApproval } from './pendingApprovalView'
 import { sessionPartsFromPrefixedKey, userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
@@ -89,7 +90,7 @@ export interface ConversationSessionSummary {
   // U5 — includes the connect_required discriminator (reason/mcpServerName)
   // so the REST rejoin snapshot lets the desktop rebuild a "Connect <server>"
   // suspension, not a generic approval. Absent reason ⇒ generic approval.
-  pendingApproval?: Pick<PendingApproval, 'request_id' | 'tool_name' | 'reason' | 'mcpServerName'>
+  pendingApproval?: PendingApprovalSummary
   turnCount: number
   messageCount: number
   lastActivityAt: Date
@@ -174,12 +175,7 @@ function sessionMessagesFromConversation(
     state: conversation.state,
     activeTaskId: conversation.activeTaskId,
     pendingApproval: conversation.pending_approval
-      ? {
-          request_id: conversation.pending_approval.request_id,
-          tool_name: conversation.pending_approval.tool_name,
-          reason: conversation.pending_approval.reason,
-          mcpServerName: conversation.pending_approval.mcpServerName,
-        }
+      ? summarizePendingApproval(conversation.pending_approval)
       : undefined,
     turns,
     totalTurns: conversation.turns.length,
@@ -438,12 +434,7 @@ export class InMemoryConversationStore implements ConversationStore {
         state: conversation.state,
         activeTaskId: conversation.activeTaskId,
         pendingApproval: conversation.pending_approval
-          ? {
-              request_id: conversation.pending_approval.request_id,
-              tool_name: conversation.pending_approval.tool_name,
-              reason: conversation.pending_approval.reason,
-              mcpServerName: conversation.pending_approval.mcpServerName,
-            }
+          ? summarizePendingApproval(conversation.pending_approval)
           : undefined,
         turnCount: conversation.turns.length,
         messageCount: conversation.turns.reduce(

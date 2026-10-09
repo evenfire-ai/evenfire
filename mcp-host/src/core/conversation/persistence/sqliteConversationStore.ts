@@ -47,6 +47,8 @@ import {
   type SessionTokenUsage,
   boundedTurns,
 } from '../conversationStore'
+import { serializeDenials } from '../denialPolicy'
+import { summarizePendingApproval, summarizePendingApprovalRow } from '../pendingApprovalView'
 import {
   sessionPartsFromPrefixedKey,
   userIdFromRpcPrefix,
@@ -56,7 +58,6 @@ import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
   groupMessagesIntoTurns,
-  normalizeConnectReason,
   reconstructConversation,
   reconstructPendingApproval,
 } from './reconstruct'
@@ -393,21 +394,10 @@ export class SqliteConversationStore implements ConversationStore {
         activeTaskId: cached ? cached.activeTaskId : (row.session.active_task_id ?? undefined),
         pendingApproval: cached
           ? cached.pending_approval
-            ? {
-                request_id: cached.pending_approval.request_id,
-                tool_name: cached.pending_approval.tool_name,
-                reason: cached.pending_approval.reason,
-                mcpServerName: cached.pending_approval.mcpServerName,
-              }
+            ? summarizePendingApproval(cached.pending_approval)
             : undefined
           : row.pending_approval
-            ? {
-                request_id: row.pending_approval.request_id,
-                tool_name: row.pending_approval.tool_name,
-                // DB-direct (cold) projection: snake→camel + narrow the reason.
-                reason: normalizeConnectReason(row.pending_approval.reason),
-                mcpServerName: row.pending_approval.mcp_server_name ?? undefined,
-              }
+            ? summarizePendingApprovalRow(row.pending_approval)
             : undefined,
         turnCount: Math.max(0, Math.floor(row.turn_count ?? 0)),
         messageCount: Math.max(0, Math.floor(row.session.message_count ?? 0)),
@@ -446,12 +436,7 @@ export class SqliteConversationStore implements ConversationStore {
         state: cached.state,
         activeTaskId: cached.activeTaskId,
         pendingApproval: cached.pending_approval
-          ? {
-              request_id: cached.pending_approval.request_id,
-              tool_name: cached.pending_approval.tool_name,
-              reason: cached.pending_approval.reason,
-              mcpServerName: cached.pending_approval.mcpServerName,
-            }
+          ? summarizePendingApproval(cached.pending_approval)
           : undefined,
         turns,
         totalTurns: cached.turns.length,
@@ -484,13 +469,7 @@ export class SqliteConversationStore implements ConversationStore {
       state: conversationStateFromRow(page.session.state),
       activeTaskId: page.session.active_task_id ?? undefined,
       pendingApproval: page.pending_approval
-        ? {
-            request_id: page.pending_approval.request_id,
-            tool_name: page.pending_approval.tool_name,
-            // DB-direct (cold) projection: snake→camel + narrow the reason.
-            reason: normalizeConnectReason(page.pending_approval.reason),
-            mcpServerName: page.pending_approval.mcp_server_name ?? undefined,
-          }
+        ? summarizePendingApprovalRow(page.pending_approval)
         : undefined,
       turns: groupMessagesIntoTurns(page.messages),
       totalTurns: Math.max(0, Math.floor(page.total_turns ?? 0)),
@@ -1092,21 +1071,69 @@ export class SqliteConversationStore implements ConversationStore {
   ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (sessionKey) this.reconcilePinning(sessionKey, conv)
-    await this.persistQueue.enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
-    await this.persistQueue.enqueueSync(
-      {
-        kind: 'update_session_state',
-        sessionId: conv.id,
-        state: conv.state,
-        endedAt: decision === 'cancel' ? Date.now() / 1000 : undefined,
-        endReason: decision === 'cancel' ? 'cancelled' : undefined,
-        // D.1 — approve resumes the SAME task (→ Processing): preserve.
-        // deny/cancel are terminal (→ Idle): clear the in-flight task.
-        activeTaskId: decision === 'approve' ? undefined : null,
-        activeTraceContext: decision === 'approve' ? undefined : null,
-      },
-      sessionKey
-    )
+    const deniedToolsJson = decision === 'cancel' ? undefined : serializeDenials(conv)
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'update_session_state',
+          sessionId: conv.id,
+          state: conv.state,
+          endedAt: decision === 'cancel' ? Date.now() / 1000 : undefined,
+          endReason: decision === 'cancel' ? 'cancelled' : undefined,
+          // D.1 — approve resumes the SAME task (→ Processing): preserve.
+          // deny/cancel are terminal (→ Idle): clear the in-flight task.
+          activeTaskId: decision === 'approve' ? undefined : null,
+          activeTraceContext: decision === 'approve' ? undefined : null,
+          deniedToolsJson,
+          // One transaction: the pending row is consumed together with the
+          // session/denial outcome.
+          deletePendingRequestId: requestId,
+        },
+        sessionKey
+      )
+    } catch (err) {
+      // The decision is already applied in memory. Consume the pending row so
+      // a restart cannot rehydrate an approval for a call that was already
+      // decided, then surface the failure. First try with the session state
+      // (so the chat is not left awaiting an approval that no longer exists),
+      // then the row alone. If the store rejects both (e.g. a dead worker), the
+      // row can still come back on restart; the caller already reports the
+      // decision as not saved.
+      await this.consumeAfterFailedDecision(conv, requestId, decision, sessionKey)
+      throw err
+    }
+  }
+
+  private async consumeAfterFailedDecision(
+    conv: Conversation,
+    requestId: string,
+    decision: 'approve' | 'deny' | 'cancel',
+    sessionKey: string | undefined
+  ): Promise<void> {
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'update_session_state',
+          sessionId: conv.id,
+          state: conv.state,
+          activeTaskId: decision === 'approve' ? undefined : null,
+          activeTraceContext: decision === 'approve' ? undefined : null,
+          deletePendingRequestId: requestId,
+        },
+        sessionKey
+      )
+      return
+    } catch {
+      // Fall through to consuming the row on its own.
+    }
+    await this.persistQueue
+      .enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
+      .catch(deleteErr => {
+        logger.error(
+          { err: deleteErr, requestId, decision },
+          'Failed to consume a pending approval after its decision write failed'
+        )
+      })
   }
 
   async shutdown(): Promise<void> {

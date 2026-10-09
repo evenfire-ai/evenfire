@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ProgressStep, TaskProgress } from '../../uiTypes'
 import { ProgressStepper } from '../ProgressStepper'
 
@@ -537,6 +537,243 @@ describe('ProgressStepper — suspended status (approval flow)', () => {
     expect(denyBtn.hasAttribute('disabled')).toBe(false)
     fireEvent.click(denyBtn)
     expect(onDeny).toHaveBeenCalledOnce()
+  })
+
+  describe('decision latch is bound to the current request', () => {
+    function suspendedOn(requestId: string, displayName: string) {
+      return makeProgress({ status: 'suspended', suspendedInfo: { requestId, displayName } })
+    }
+
+    function controls() {
+      return ['approval-approve-btn', 'approval-always-approve-btn', 'approval-deny-btn'].map(id =>
+        screen.getByTestId(id)
+      )
+    }
+
+    function deferred<T>() {
+      let resolve!: (value: T) => void
+      const promise = new Promise<T>(r => {
+        resolve = r
+      })
+      return { promise, resolve }
+    }
+
+    it('enables every control for a second request on the same mounted card', async () => {
+      const first = deferred<string>()
+      const onApprove = vi.fn().mockReturnValueOnce(first.promise)
+      const { rerender } = render(
+        <ProgressStepper
+          progress={suspendedOn('req-A', 'Tool A')}
+          onApprove={onApprove}
+          onAlwaysApprove={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      )
+
+      fireEvent.click(screen.getByTestId('approval-approve-btn'))
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(true)
+
+      rerender(
+        <ProgressStepper
+          progress={suspendedOn('req-B', 'Tool B')}
+          onApprove={onApprove}
+          onAlwaysApprove={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      )
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(false)
+      expect(screen.getByTestId('approval-approve-btn').textContent).toBe('Approve')
+
+      // A late settlement for request A must not touch request B's controls.
+      await act(async () => {
+        first.resolve('failed')
+        await first.promise
+      })
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(false)
+
+      fireEvent.click(screen.getByTestId('approval-deny-btn'))
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(true)
+    })
+
+    it('re-enables the same request for a retry when its decision failed', async () => {
+      const onApprove = vi.fn().mockResolvedValueOnce('failed')
+      render(<ProgressStepper progress={suspendedOn('req-A', 'Tool A')} onApprove={onApprove} />)
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approval-approve-btn'))
+      })
+      const btn = screen.getByTestId('approval-approve-btn')
+      expect(btn.hasAttribute('disabled')).toBe(false)
+      expect(btn.textContent).toBe('Approve')
+    })
+
+    it('keeps the request locked once its decision was accepted', async () => {
+      const onApprove = vi.fn().mockResolvedValueOnce('ok')
+      render(<ProgressStepper progress={suspendedOn('req-A', 'Tool A')} onApprove={onApprove} />)
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approval-approve-btn'))
+      })
+      const btn = screen.getByTestId('approval-approve-btn')
+      expect(btn.hasAttribute('disabled')).toBe(true)
+      expect(btn.textContent).toBe('Approving...')
+    })
+
+    it('keeps the request locked when the decision took effect but was not saved', async () => {
+      const onDeny = vi.fn().mockResolvedValueOnce('decided_not_saved')
+      render(
+        <ProgressStepper
+          progress={suspendedOn('req-A', 'Tool A')}
+          onApprove={vi.fn()}
+          onDeny={onDeny}
+        />
+      )
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approval-deny-btn'))
+      })
+      expect(screen.getByTestId('approval-deny-btn').hasAttribute('disabled')).toBe(true)
+      expect(screen.getByTestId('approval-approve-btn').hasAttribute('disabled')).toBe(true)
+    })
+
+    it('re-enables the same request for a retry when its decision handler rejected', async () => {
+      const onApprove = vi.fn().mockRejectedValueOnce(new Error('ipc down'))
+      render(<ProgressStepper progress={suspendedOn('req-A', 'Tool A')} onApprove={onApprove} />)
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approval-approve-btn'))
+      })
+      const btn = screen.getByTestId('approval-approve-btn')
+      expect(btn.hasAttribute('disabled')).toBe(false)
+      expect(btn.textContent).toBe('Approve')
+    })
+
+    it('labels only the clicked control as pending', () => {
+      render(
+        <ProgressStepper
+          progress={suspendedOn('req-A', 'Tool A')}
+          onApprove={vi.fn()}
+          onAlwaysApprove={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      )
+
+      fireEvent.click(screen.getByTestId('approval-deny-btn'))
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(true)
+      expect(screen.getByTestId('approval-deny-btn').textContent).toBe('Denying...')
+      expect(screen.getByTestId('approval-approve-btn').textContent).toBe('Approve')
+      expect(screen.getByTestId('approval-always-approve-btn').textContent).toBe('Always approve')
+    })
+
+    it('labels only Always approve as pending when it was clicked', () => {
+      render(
+        <ProgressStepper
+          progress={suspendedOn('req-A', 'Tool A')}
+          onApprove={vi.fn()}
+          onAlwaysApprove={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      )
+
+      fireEvent.click(screen.getByTestId('approval-always-approve-btn'))
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(true)
+      expect(screen.getByTestId('approval-always-approve-btn').textContent).toBe('Approving...')
+      expect(screen.getByTestId('approval-approve-btn').textContent).toBe('Approve')
+      expect(screen.getByTestId('approval-deny-btn').textContent).toBe('Deny')
+    })
+
+    it("a late failure for request A does not release request B's pending decision", async () => {
+      const first = deferred<string>()
+      const second = deferred<string>()
+      const onApprove = vi.fn().mockReturnValueOnce(first.promise)
+      const onDeny = vi.fn().mockReturnValueOnce(second.promise)
+      const { rerender } = render(
+        <ProgressStepper
+          progress={suspendedOn('req-A', 'Tool A')}
+          onApprove={onApprove}
+          onAlwaysApprove={vi.fn()}
+          onDeny={onDeny}
+        />
+      )
+
+      fireEvent.click(screen.getByTestId('approval-approve-btn'))
+      rerender(
+        <ProgressStepper
+          progress={suspendedOn('req-B', 'Tool B')}
+          onApprove={onApprove}
+          onAlwaysApprove={vi.fn()}
+          onDeny={onDeny}
+        />
+      )
+      fireEvent.click(screen.getByTestId('approval-deny-btn'))
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(true)
+
+      await act(async () => {
+        first.resolve('failed')
+        await first.promise
+      })
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(true)
+      expect(screen.getByTestId('approval-deny-btn').textContent).toBe('Denying...')
+    })
+  })
+
+  describe('Always approve availability and scope', () => {
+    it('hides Always approve when the suspension disallows it', () => {
+      render(
+        <ProgressStepper
+          progress={makeProgress({
+            status: 'suspended',
+            suspendedInfo: {
+              requestId: 'req-1',
+              displayName: 'Shell',
+              alwaysApproveAllowed: false,
+            },
+          })}
+          onApprove={vi.fn()}
+          onAlwaysApprove={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      )
+
+      expect(screen.queryByTestId('approval-always-approve-btn')).toBeNull()
+      expect(screen.getByTestId('approval-approve-btn')).not.toBeNull()
+      expect(screen.getByTestId('approval-deny-btn')).not.toBeNull()
+    })
+
+    it('shows Always approve when the suspension omits the flag', () => {
+      render(
+        <ProgressStepper
+          progress={makeProgress({
+            status: 'suspended',
+            suspendedInfo: { requestId: 'req-1', displayName: 'Shell' },
+          })}
+          onApprove={vi.fn()}
+          onAlwaysApprove={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      )
+
+      expect(screen.getByTestId('approval-always-approve-btn')).not.toBeNull()
+    })
+
+    it('describes what Always approve allows', () => {
+      render(
+        <ProgressStepper
+          progress={makeProgress({
+            status: 'suspended',
+            suspendedInfo: { requestId: 'req-1', displayName: 'Shell' },
+          })}
+          onAlwaysApprove={vi.fn()}
+        />
+      )
+
+      const btn = screen.getByTestId('approval-always-approve-btn')
+      const scope = 'Allow every future Shell call in this conversation'
+      expect(btn.getAttribute('title')).toBe(scope)
+      const describedBy = btn.getAttribute('aria-describedby')
+      expect(describedBy).toBeTruthy()
+      expect(document.getElementById(describedBy!)?.textContent).toBe(scope)
+    })
   })
 
   it('renders step list when suspended with existing steps after expanding details', () => {

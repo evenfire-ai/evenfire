@@ -8,9 +8,11 @@ import { parseTaskExecutionBudget } from '../../../agent/taskExecutionBudget'
  *
  * Anything ephemeral (`auto_approved_tools`, `compactionState`) is set to
  * empty defaults — by design (see T2.1 §11.3 and `aclaraciones/sqlite-persistence.md`).
+ * `denied_tools` is durable (migration 016) and is rehydrated from the session row.
  */
 import type { MessageRow, PendingApprovalRow, PersistedSession } from '../../../db/worker/protocol'
 import { deserializeCompletedResults } from '../../../db/worker/protocol'
+import { logger } from '../../../logger'
 import type {
   ChatMessage,
   Conversation,
@@ -21,6 +23,7 @@ import type {
   TurnToolCall,
 } from '../../types'
 import { ConversationState, isTraceContextV1 } from '../../types'
+import { parseDenials } from '../denialPolicy'
 
 function parseTraceContext(raw: string | null | undefined): TraceContextV1 | null {
   if (!raw) return null
@@ -72,6 +75,12 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     turns,
     pending_approval: pending,
     auto_approved_tools: new Set(),
+    denials: parseDenials(persisted.session.denied_tools, () =>
+      logger.error(
+        { event: 'denied_tools_unreadable', sessionId: persisted.session.id },
+        'Persisted tool denials could not be read'
+      )
+    ),
     created_at: startedAt,
     updated_at: lastActivityAt,
     // D.1 — repopulate the in-flight task from the durable column. After a pod
@@ -157,7 +166,7 @@ export function normalizeConnectReason(
   return raw === 'connect_required' ? 'connect_required' : undefined
 }
 
-function normalizeAuthorizationScope(
+export function normalizeAuthorizationScope(
   raw: string | null | undefined
 ): PendingApproval['authorization_scope'] {
   if (raw === null || raw === undefined) return undefined

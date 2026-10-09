@@ -122,11 +122,17 @@ function parsePendingApproval(value: unknown, label: string): PendingApprovalLit
   // byte-identical generic-approval flow.
   const reason = optionalWireString(record.reason, `${label}.reason`)
   const mcpServerName = optionalWireString(record.mcpServerName, `${label}.mcpServerName`)
+  // Additive: only an explicit `false` hides "Always approve"; absent = allowed.
+  const alwaysApproveAllowed = optionalWireBoolean(
+    record.alwaysApproveAllowed,
+    `${label}.alwaysApproveAllowed`
+  )
   return {
     requestId: wireString(record.requestId, `${label}.requestId`),
     displayName: wireString(record.displayName, `${label}.displayName`),
     ...(reason !== undefined ? { reason } : {}),
     ...(mcpServerName !== undefined ? { mcpServerName } : {}),
+    ...(alwaysApproveAllowed === false ? { alwaysApproveAllowed: false as const } : {}),
   }
 }
 
@@ -415,11 +421,12 @@ async function parseApprovalDecisionResponse(response: Response): Promise<Approv
   const text = await response.text()
   if (!text) return { success: true }
   try {
-    const parsed = JSON.parse(text) as { success?: unknown; error?: unknown }
+    const parsed = JSON.parse(text) as { success?: unknown; error?: unknown; code?: unknown }
     if (parsed && parsed.success === false) {
       return {
         success: false,
         error: typeof parsed.error === 'string' ? parsed.error : undefined,
+        ...(typeof parsed.code === 'string' ? { code: parsed.code } : {}),
       }
     }
     return { success: true }
@@ -926,7 +933,8 @@ export class RpcProxyClient {
     rpcToken: string,
     hostRef: string,
     taskId: string,
-    toolCallId: string
+    toolCallId: string,
+    alwaysApprove = false
   ): Promise<ApprovalDecisionResult> {
     const response = await fetch(
       url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/approve`),
@@ -936,7 +944,11 @@ export class RpcProxyClient {
           'content-type': 'application/json',
           authorization: `Bearer ${rpcToken}`,
         },
-        body: JSON.stringify({ taskId, toolCallId }),
+        body: JSON.stringify({
+          taskId,
+          toolCallId,
+          ...(alwaysApprove ? { alwaysApprove: true } : {}),
+        }),
         signal: withTimeout(),
       }
     )

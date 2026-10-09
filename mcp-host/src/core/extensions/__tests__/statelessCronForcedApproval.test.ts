@@ -41,7 +41,7 @@ async function harness(
   const manager = new ConversationManager()
   const conversation = await manager.getOrCreate(sessionKey)
   const gate = gateFor(options)
-  const controller = new ApprovalController(conversation, gate, undefined, gate)
+  const controller = new ApprovalController(conversation, gate, { forcedApprovalGate: gate })
   await manager.startTurn(conversation, 'First message', 'test-task')
   let callCount = 0
 
@@ -113,14 +113,13 @@ describe('stateless cron_manage create/enable forced approval', () => {
     })
   })
 
-  it("after an MCP approval adds '*', create still suspends with exact scope", async () => {
+  it('after an MCP approval, create still suspends with exact scope', async () => {
     const h = await harness('cron-user:rpc:cron-agent:wildcard')
     expect(await h.call('mongodb-server__find')).toBe('suspend')
     await h.approve()
-    expect(h.conversation.auto_approved_tools).toEqual(new Set(['*', 'mongodb-server']))
+    // The MCP approval ran that call only: no wildcard, no server prefix.
+    expect(h.conversation.auto_approved_tools).toEqual(new Set())
 
-    // Witness: '*' covers another MCP server's tool in the same turn.
-    expect(await h.call('airtable-server__list_tables')).toBe('proceed')
     expect(await h.call('cron_manage', create)).toBe('suspend')
     expect(h.conversation.pending_approval?.authorization_scope).toBe('exact_invocation')
   })

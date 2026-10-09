@@ -35,9 +35,9 @@ describe('approval authorization scope', () => {
     await expect(approvedScope('exact_invocation', true)).resolves.toEqual(new Set())
   })
 
-  it('preserves explicitly consented turn-wide behavior for ordinary new approvals', async () => {
+  it('lets an ordinary card store only its exact tool name, never a wildcard', async () => {
     await expect(approvedScope('turn_tools', true, 'workflow_trigger')).resolves.toEqual(
-      new Set(['*', 'workflow_trigger'])
+      new Set(['workflow_trigger'])
     )
   })
 
@@ -50,16 +50,17 @@ describe('approval authorization scope', () => {
   })
 
   it.each(['exact_invocation', undefined] as const)(
-    'removes an ambiguous wildcard for scope %s while preserving explicit grants',
+    'adds nothing for scope %s and keeps the grants already stored',
     async scope => {
       const manager = new ConversationManager()
       const conversation = await manager.getOrCreate('scope-user:rpc:scope-agent:legacy')
       conversation.state = ConversationState.Processing
-      conversation.auto_approved_tools = new Set(['*', 'http_request', 'trusted-server'])
+      conversation.auto_approved_tools = new Set(['http_request', 'trusted-server'])
       await manager.suspendForApproval(conversation, approval(scope))
       await manager.approve(conversation, true)
 
       expect(conversation.auto_approved_tools).toEqual(new Set(['http_request', 'trusted-server']))
+      expect(conversation.task_approved_tools?.size ?? 0).toBe(0)
     }
   )
 })

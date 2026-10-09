@@ -1533,31 +1533,27 @@
   },
   {
     "suite": "approvalController.test.ts",
-    "fullName": "ApprovalController should bypass every tool outside the session-scoped set when wildcard '*' is in auto_approved_tools"
+    "fullName": "ApprovalController returns the delegate suspend for shell_exec when wildcard '*' is in auto_approved_tools"
   },
   {
     "suite": "approvalController.test.ts",
-    "fullName": "ApprovalController does not let wildcard '*' cover shell_exec, http_request or cron_manage"
+    "fullName": "ApprovalController does not let a '*' entry cover any tool, including the session-scoped ones"
   },
   {
     "suite": "sessionScopedApproval.test.ts",
-    "fullName": "session-scoped approvals next to turn-wide MCP approvals an MCP turn-wide approval adds '*' that does not cover shell_exec"
+    "fullName": "per-call approvals next to session-scoped approvals an MCP approval runs that call only: no wildcard, no server prefix"
   },
   {
     "suite": "sessionScopedApproval.test.ts",
-    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps MCP behaviour: '*' covers other MCP tools in the turn and the server prefix persists"
+    "fullName": "per-call approvals next to session-scoped approvals a plain shell_exec approval covers shell_exec for the task only"
   },
   {
     "suite": "sessionScopedApproval.test.ts",
-    "fullName": "session-scoped approvals next to turn-wide MCP approvals shell_exec approval after an MCP '*' covers shell_exec without revoking '*'"
+    "fullName": "per-call approvals next to session-scoped approvals a plain workflow_trigger approval grants nothing, so the next call asks again"
   },
   {
     "suite": "sessionScopedApproval.test.ts",
-    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps workflow_trigger turn-wide: '*' covers other gated tools this turn, and a new turn asks again"
-  },
-  {
-    "suite": "sessionScopedApproval.test.ts",
-    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps workflow_trigger \"always\" approval across turns through its tool name"
+    "fullName": "per-call approvals next to session-scoped approvals Always approve stores only the exact tool name, across turns"
   },
   {
     "suite": "statelessCronForcedApproval.test.ts",
@@ -1569,7 +1565,7 @@
   },
   {
     "suite": "statelessCronForcedApproval.test.ts",
-    "fullName": "stateless cron_manage create/enable forced approval after an MCP approval adds '*', create still suspends with exact scope"
+    "fullName": "stateless cron_manage create/enable forced approval after an MCP approval, create still suspends with exact scope"
   },
   {
     "suite": "statelessCronForcedApproval.test.ts",
@@ -1582,5 +1578,29 @@
   {
     "suite": "statelessCronForcedApproval.test.ts",
     "fullName": "stateless cron_manage create/enable forced approval keeps the cron-sourced gate-only path: create suspends and every other call proceeds"
+  },
+  {
+    "suite": "approvalScopeDurability.test.ts",
+    "fullName": "approval scope across a restart a forced cron create card stores no grant after a restart"
+  },
+  {
+    "suite": "approvalScopeDurability.test.ts",
+    "fullName": "approval scope across a restart a denial re-ask stores no grant after a restart"
+  },
+  {
+    "suite": "approvalScopeDurability.test.ts",
+    "fullName": "approval scope across a restart an ordinary card still stores its exact name after a restart (positive control)"
+  },
+  {
+    "suite": "guardrailGate.test.ts",
+    "fullName": "guardrail ask for a denied tool (RP726-02) is an exact-scope denial re-ask, and approving it stores no grant"
+  },
+  {
+    "suite": "sessionRouteHandlers.test.ts",
+    "fullName": "createSessionRouteHandlers — Always approve eligibility on every view (RP726-03) hides Always approve for a forced card on hot and cold list/messages views"
+  },
+  {
+    "suite": "sessionRouteHandlers.test.ts",
+    "fullName": "createSessionRouteHandlers — Always approve eligibility on every view (RP726-03) offers Always approve for an ordinary card on the same views"
   }
 ]

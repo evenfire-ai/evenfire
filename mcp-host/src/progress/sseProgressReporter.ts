@@ -167,6 +167,7 @@ export class SseProgressReporter implements ProgressReporter {
     options?: {
       reason?: 'approval_required' | 'connect_required'
       mcpServerName?: string
+      alwaysApproveAllowed?: false
       toolName?: string
       parameters?: Record<string, unknown>
     }
@@ -177,6 +178,7 @@ export class SseProgressReporter implements ProgressReporter {
     if (reason === 'connect_required') {
       if (options?.mcpServerName) data.mcpServerName = options.mcpServerName
     }
+    if (options?.alwaysApproveAllowed === false) data.alwaysApproveAllowed = false
     if (reason === 'approval_required' && options?.toolName && options.parameters) {
       const toolName = options.toolName
       const preview = projectApprovalInputPreview(

@@ -614,6 +614,40 @@ describe('RpcProxyClient.listSessions', () => {
   })
 
   it.each([
+    [false, { alwaysApproveAllowed: false }],
+    [true, {}],
+  ])(
+    'carries pendingApproval.alwaysApproveAllowed only when it is false (wire %s)',
+    async (wire, expected) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            agent: 'agent-a',
+            chatId: 'chat-a',
+            state: 'awaiting_approval',
+            pendingApproval: {
+              requestId: 'req-1',
+              displayName: 'Shell',
+              alwaysApproveAllowed: wire,
+            },
+            turns: [],
+          }),
+        })
+      )
+
+      const result = await client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+      expect(result.pendingApproval).toEqual({
+        requestId: 'req-1',
+        displayName: 'Shell',
+        ...expected,
+      })
+    }
+  )
+
+  it.each([
     ['oldestTurnNumber', -1],
     ['oldestTurnNumber', 0.5],
     ['oldestTurnNumber', Number.MAX_SAFE_INTEGER + 1],

@@ -590,7 +590,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
               ? () => {
                   // Surface (c), §4.7.4: the in-chat gate funnels through the
                   // central decider (optimistic FSM dispatch + RPC + resolve/toast).
-                  void decideApproval({
+                  return decideApproval({
                     agentRef: selectedAgent,
                     chatId: activeChatId,
                     taskId: taskId!,
@@ -601,10 +601,26 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                 }
               : undefined
           }
+          onAlwaysApprove={
+            // The host may refuse to allowlist this call (`alwaysApproveAllowed: false`).
+            canAct && si && si.alwaysApproveAllowed !== false && selectedAgent && activeChatId
+              ? () => {
+                  return decideApproval({
+                    agentRef: selectedAgent,
+                    chatId: activeChatId,
+                    taskId: taskId!,
+                    requestId: si.requestId,
+                    decision: 'approve',
+                    alwaysApprove: true,
+                    source: 'in_chat',
+                  })
+                }
+              : undefined
+          }
           onDeny={
             canAct && si && selectedAgent && activeChatId
               ? () => {
-                  void decideApproval({
+                  return decideApproval({
                     agentRef: selectedAgent,
                     chatId: activeChatId,
                     taskId: taskId!,

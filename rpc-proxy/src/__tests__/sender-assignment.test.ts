@@ -269,6 +269,47 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve — userId identity invaria
     const parsed = JSON.parse(capturedBody!)
     expect(parsed.userId).toBe(VALID_CLAIMS.sub)
   })
+
+  it.each([['false'], ['true'], [1], [{}]])(
+    'rejects a non-boolean alwaysApprove (%j) without calling the host',
+    async value => {
+      const fetchMock = vi.fn()
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      await request(makeApp())
+        .post('/rpc/hosts/chatllm/approvals/approve')
+        .set('authorization', 'Bearer user-token')
+        .send({ toolCallId: 'tc-1', alwaysApprove: value })
+        .expect(400)
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    [true, true],
+    [false, false],
+    [undefined, false],
+  ])('forwards alwaysApprove %j as %j', async (value, expected) => {
+    let capturedBody: string | undefined
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedBody = init.body as string
+      return {
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () => JSON.stringify({ ok: true }),
+      } as unknown as Response
+    }) as unknown as typeof fetch
+
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/approvals/approve')
+      .set('authorization', 'Bearer user-token')
+      .send({ toolCallId: 'tc-1', alwaysApprove: value })
+      .expect(200)
+
+    expect(JSON.parse(capturedBody!).alwaysApprove).toBe(expected)
+  })
 })
 
 describe('POST /rpc/hosts/:hostRef/approvals/deny — userId identity invariant', () => {

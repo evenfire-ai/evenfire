@@ -1,21 +1,27 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import { Button, IconButton } from '@components/Common'
 import { extractArtifactNames } from '@lib/artifacts'
 import { formatTokenBreakdown, formatTokenCount } from '@lib/format'
 import { formatToolApprovalLabel } from '@lib/toolLabels'
+import type { ApprovalDecisionSettlement } from '../hooks/domain/approvalDecision'
 import type { ProgressStep, TaskProgress } from '../uiTypes'
 import { ArtifactsBadge } from './ArtifactsBadge'
 
 interface ProgressStepperProps {
   progress: TaskProgress | undefined
   hostRef?: string
-  onApprove?: () => void
-  onDeny?: () => void
+  // A decision handler may resolve to its outcome; `'failed'` (or a rejection)
+  // re-enables the same request for a retry (see `ApprovalDecisionSettlement`).
+  onApprove?: () => void | Promise<ApprovalDecisionSettlement>
+  onAlwaysApprove?: () => void | Promise<ApprovalDecisionSettlement>
+  onDeny?: () => void | Promise<ApprovalDecisionSettlement>
   onCancel?: () => void
   // U5 (mcp-oauth reactive consent): fired for a `connect_required` suspension —
   // opens the provider "Connect <server>" OAuth flow instead of Approve/Deny.
   onConnect?: () => void
 }
+
+type ApprovalAction = 'approve' | 'always' | 'deny'
 
 function ThinkingIndicator({ label }: { label: string }) {
   return (
@@ -266,15 +272,21 @@ export function ProgressStepper({
   progress,
   hostRef,
   onApprove,
+  onAlwaysApprove,
   onDeny,
   onCancel,
   onConnect,
 }: ProgressStepperProps) {
   const [expanded, setExpanded] = useState(false)
-  // The request id of the suspension the user already decided. A later suspension in
-  // the same task (another tool asking after an approval) has a new id, so its card
-  // starts with enabled buttons instead of inheriting the previous decision.
-  const [decidedRequestId, setDecidedRequestId] = useState<string | null>(null)
+  // The decision latch belongs to one approval request, not to the mounted card:
+  // the same card stays mounted while a resumed task suspends on a new request,
+  // which must start with active controls. Only a failed (or rejected) decision
+  // releases it. `action` scopes the pending label to the clicked button.
+  const [deciding, setDeciding] = useState<{
+    requestId: string
+    action: ApprovalAction
+  } | null>(null)
+  const alwaysApproveScopeId = useId()
   const [connectPending, setConnectPending] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
 
@@ -431,7 +443,29 @@ export function ProgressStepper({
     const isConnect = info?.reason === 'connect_required'
     const connectServer = info?.mcpServerName || 'the connector'
     const canConnect = isConnect && !!onConnect
-    const approvalPending = !!info && decidedRequestId === info.requestId
+    const pendingAction = info && deciding?.requestId === info.requestId ? deciding.action : null
+    const approvalPending = pendingAction !== null
+    // The host refuses to allowlist some suspensions (`alwaysApproveAllowed: false`).
+    const canAlwaysApprove = !!onAlwaysApprove && info?.alwaysApproveAllowed !== false
+    const alwaysApproveScope = info
+      ? `Allow every future ${formatToolApprovalLabel({
+          displayName: info.displayName,
+          toolName: info.toolName,
+        })} call in this conversation`
+      : undefined
+    const decide = (action: ApprovalAction, handler: () => void | Promise<unknown>) => {
+      if (!info) return
+      const requestId = info.requestId
+      setDeciding({ requestId, action })
+      // Release only this request's latch: a late settlement for an earlier
+      // request must not unlock the request the card shows now.
+      const release = () =>
+        setDeciding(current => (current?.requestId === requestId ? null : current))
+      // The executor runs `handler` synchronously; a sync throw becomes a rejection.
+      void new Promise(resolve => resolve(handler())).then(outcome => {
+        if (outcome === 'failed') release()
+      }, release)
+    }
     return (
       <div data-testid="progress-stepper" className="progress-stepper status-suspended">
         <div className="stepper-suspended-row">
@@ -496,7 +530,7 @@ export function ProgressStepper({
             </Button>
           </div>
         )}
-        {info && !canConnect && !isConnect && (onApprove || onDeny) && (
+        {info && !canConnect && !isConnect && (onApprove || canAlwaysApprove || onDeny) && (
           <div className="stepper-approval-actions">
             {onApprove && (
               <Button
@@ -504,15 +538,32 @@ export function ProgressStepper({
                 className="stepper-btn stepper-btn-approve"
                 color="success"
                 disabled={approvalPending}
-                onClick={() => {
-                  setDecidedRequestId(info.requestId)
-                  onApprove()
-                }}
+                onClick={() => decide('approve', onApprove)}
                 size="sm"
                 variant="soft"
               >
-                {approvalPending ? 'Approving...' : 'Approve'}
+                {pendingAction === 'approve' ? 'Approving...' : 'Approve'}
               </Button>
+            )}
+            {canAlwaysApprove && (
+              <>
+                <Button
+                  data-testid="approval-always-approve-btn"
+                  className="stepper-btn stepper-btn-always-approve"
+                  color="success"
+                  disabled={approvalPending}
+                  onClick={() => decide('always', onAlwaysApprove!)}
+                  size="sm"
+                  title={alwaysApproveScope}
+                  aria-describedby={alwaysApproveScopeId}
+                  variant="soft"
+                >
+                  {pendingAction === 'always' ? 'Approving...' : 'Always approve'}
+                </Button>
+                <span id={alwaysApproveScopeId} hidden>
+                  {alwaysApproveScope}
+                </span>
+              </>
             )}
             {onDeny && (
               <Button
@@ -520,14 +571,11 @@ export function ProgressStepper({
                 className="stepper-btn stepper-btn-deny"
                 color="danger"
                 disabled={approvalPending}
-                onClick={() => {
-                  setDecidedRequestId(info.requestId)
-                  onDeny()
-                }}
+                onClick={() => decide('deny', onDeny)}
                 size="sm"
                 variant="soft"
               >
-                Deny
+                {pendingAction === 'deny' ? 'Denying...' : 'Deny'}
               </Button>
             )}
           </div>

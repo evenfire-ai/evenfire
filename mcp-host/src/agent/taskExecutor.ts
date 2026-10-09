@@ -22,6 +22,7 @@ import {
 } from '../core/attachments/attachmentReadBudget'
 import { compactConversation } from '../core/conversation/compaction'
 import { ConversationManager } from '../core/conversation/conversation'
+import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
 import { deriveAutoTitle } from '../core/conversation/sessionTitle'
 import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
@@ -429,11 +430,9 @@ export class TaskExecutor {
     if (approval.task_budget !== undefined) this.executionBudget.restore(approval.task_budget)
     else if (approval.legacy_budget === true) this.legacyApprovalBudget = true
     else throw new Error('Pending approval has no verifiable execution budget')
-    if (approval.authorization_scope !== 'turn_tools') {
-      // Legacy rows predate consent provenance. A wildcard retained by an old
-      // process must not authorize a different risky tool after cold resume.
-      this.conversation.auto_approved_tools.delete('*')
-    }
+    // A '*' entry is not a grant, but an older process may have left one in
+    // memory: drop it so nothing ever reads it as consent.
+    this.conversation.auto_approved_tools.delete('*')
     this.task.traceContext = approval.traceContext ?? this.conversation.traceContext ?? null
     this.state = 'waiting_approval'
   }
@@ -634,7 +633,7 @@ export class TaskExecutor {
   /**
    * Resume execution after approval was granted.
    */
-  async resumeAfterApproval(alwaysApprove: boolean): Promise<void> {
+  async resumeAfterApproval(alwaysApprove: boolean, userId?: string): Promise<void> {
     if (this.state !== 'waiting_approval' || !this.conversation) {
       throw new Error(`Cannot resume: executor state is ${this.state}`)
     }
@@ -676,7 +675,7 @@ export class TaskExecutor {
         this.legacyApprovalBudget = false
         return
       }
-      await this.deps.conversationManager.approve(this.conversation, alwaysApprove)
+      await this.deps.conversationManager.approve(this.conversation, alwaysApprove, userId)
       if (approvalBeforeResolution?.tool_call_id) {
         this.approvedToolCorrelation = {
           toolCallId: approvalBeforeResolution.tool_call_id,
@@ -687,13 +686,20 @@ export class TaskExecutor {
 
       const approval = this.conversation.pending_approval
 
-      // Fallback: no snapshot, re-run from scratch
+      // Every production producer saves the conversation context with the
+      // approval, so this branch should never run. Without it the approved call
+      // cannot be resumed: re-running the loop fails closed (the model's new call
+      // has a new id, so the gate asks again), but it can repeat the same card.
+      // Log it at error level so it never goes unnoticed.
       if (!approval?.context_snapshot?.length) {
+        logger.error(
+          { taskId: this.taskId, requestId: approvalBeforeResolution?.request_id },
+          'Approved call has no saved context; re-running the loop, which will ask again'
+        )
         // There is no frozen call to execute. A regenerated call must not
         // consume the old approval through a name-only approval/guardrail gate.
         this.executionBudget.assertTime()
         this.conversation.pending_approval = undefined
-        logger.info({ taskId: this.taskId }, 'No snapshot, re-running from scratch')
         const result = await this.runAgentLoop()
         await this.handleLoopResult(result)
         if (
@@ -851,6 +857,10 @@ export class TaskExecutor {
         return
       }
 
+      // The approved call already ran. Drop the one-shot so a later call of the
+      // same name, with arguments the user did not see, has to ask again.
+      this.conversation.pending_approval = undefined
+
       // Reconstruct messages using the resolved completed_results.
       // `resolvedCompletedResults` is `approval.completed_results` with any
       // spillover refs swapped in for their blob bodies (invariant #2).
@@ -1006,27 +1016,33 @@ export class TaskExecutor {
    * durable pending_approval delete before returning, so we await here too —
    * the channel notification (responseCallback) only fires after the DB
    * mutation lands. Callers that fire-and-forget should attach `.catch(...)`.
+   *
+   * A denial fails safe: if recording it throws, the call is still cancelled
+   * and the task still completes, then the error is rethrown so the caller can
+   * report that the denial was not saved.
    */
-  async deny(): Promise<void> {
+  async deny(options?: { record?: boolean; userId?: string }): Promise<void> {
     if (this.state !== 'waiting_approval' || !this.conversation) return
 
     const toolName = this.conversation.pending_approval?.tool_name || 'unknown'
-    await this.deps.conversationManager.deny(this.conversation)
+    try {
+      await this.deps.conversationManager.deny(this.conversation, options)
+    } finally {
+      // Terminal SSE event emitted automatically when onComplete → queue.completeTask
+      // → lifecycle.transition('completed') fires (SseProgressReporter subscription).
 
-    // Terminal SSE event emitted automatically when onComplete → queue.completeTask
-    // → lifecycle.transition('completed') fires (SseProgressReporter subscription).
+      const denialMessage = `Tool \`${toolName}\` was denied by the user. The operation was not performed.`
+      if (this.task.responseCallback) {
+        this.task.responseCallback({ response: denialMessage }).catch(err => {
+          logger.error({ taskId: this.taskId, err }, 'Failed to send denial')
+        })
+      }
 
-    const denialMessage = `Tool \`${toolName}\` was denied by the user. The operation was not performed.`
-    if (this.task.responseCallback) {
-      this.task.responseCallback({ response: denialMessage }).catch(err => {
-        logger.error({ taskId: this.taskId, err }, 'Failed to send denial')
-      })
+      this.state = 'completed'
+      await this.settleGfsRetentionOwner()
+      this.deps.onComplete(this.task)
+      this.resolveCompletion?.()
     }
-
-    this.state = 'completed'
-    await this.settleGfsRetentionOwner()
-    this.deps.onComplete(this.task)
-    this.resolveCompletion?.()
   }
 
   /**
@@ -1415,6 +1431,7 @@ export class TaskExecutor {
             {
               reason: result.approval.reason ?? 'approval_required',
               mcpServerName: result.approval.mcpServerName,
+              alwaysApproveAllowed: pendingApprovalWireFields(result.approval).alwaysApproveAllowed,
               toolName: result.approval.tool_name,
               parameters: result.approval.parameters,
             }
@@ -2345,19 +2362,20 @@ export class TaskExecutor {
         )
       : null
     const innerController = approvalGate
-      ? new ApprovalController(
-          this.conversation!,
-          approvalGate,
-          gfsWorkspace &&
+      ? new ApprovalController(this.conversation!, approvalGate, {
+          honorDenials: !cronManageGateApplies,
+          toolRegistry: compositeRegistry,
+          liveApprovalTools:
+            gfsWorkspace &&
             appConfig.enableApproval &&
             this.task.source === 'channel' &&
             this.deps.approvalConfig?.tools?.shell_exec !== false
-            ? new Set(['clerum__gfs_download'])
-            : undefined,
+              ? new Set(['clerum__gfs_download'])
+              : undefined,
           // The same gate's forced approvals (stateless cron create/enable) run
           // before any stored approval, so none of them can cover such a call.
-          approvalGate
-        )
+          forcedApprovalGate: approvalGate,
+        })
       : new DefaultLoopController()
 
     const mcpManager = this.deps.mcpManager

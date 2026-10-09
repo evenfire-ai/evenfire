@@ -74,9 +74,10 @@ export class DeferrableToolController implements LoopController {
 
   beforeTool(
     toolName: string,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
+    toolCallId?: string
   ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
-    return this.delegate.beforeTool(toolName, params)
+    return this.delegate.beforeTool(toolName, params, toolCallId)
   }
 
   onExhaustion(iteration: number): string {
