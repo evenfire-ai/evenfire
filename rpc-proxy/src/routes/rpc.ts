@@ -1100,8 +1100,8 @@ export function createRpcRouter(): Router {
               claims: auth,
               rpcAccessToken,
               deadlineMs: wakeDeadlineMs,
-              // Re-presenting this checkpoint/version replays a live claim or
-              // completed result; it cannot admit a second continuation task.
+              // A live claim or completed result replays. After the claim lease
+              // lapses, a new task may claim it; the old task loses its write fence.
               retryUntilDeadline: true,
               attemptUpstream: async timeoutMs => {
                 const { response, body } = await forwardContinuation(timeoutMs)

@@ -69,7 +69,10 @@ async function claimedCheckpoint(
   sessionKey = SESSION_KEY,
   checkpointId = 'cp-turn'
 ): Promise<ModelStepCheckpointFence> {
-  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => CLOCK })
+  const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+    now: () => CLOCK,
+    blockedTtlMs: 7 * 24 * 3_600_000,
+  })
   const fence = await checkpoints.open(
     {
       checkpointId,
@@ -141,7 +144,10 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     const origin = await manager.getOrCreate(SESSION_KEY)
     await manager.startTurn(origin, 'origin input', 'task-origin')
     await manager.failTurn(origin)
-    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => CLOCK })
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => CLOCK,
+      blockedTtlMs: 7 * 24 * 3_600_000,
+    })
     const fence = await checkpoints.open(
       {
         checkpointId: 'cp-restart',

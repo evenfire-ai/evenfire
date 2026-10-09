@@ -25,6 +25,8 @@ interface Applied {
 export interface ModelStepCheckpointStoreOptions {
   /** Clock in epoch ms. Injected so TTL and lease tests are deterministic. */
   now: () => number
+  /** Configured lifetime for a blocked checkpoint with no inherited deadline. */
+  blockedTtlMs: number
 }
 
 export class ModelStepCheckpointStore {
@@ -105,7 +107,13 @@ export class ModelStepCheckpointStore {
     }
   ): Promise<number | null> {
     const result = await this.queue.enqueueSync<{ applied: boolean; version?: number }>(
-      { kind: 'model_step_checkpoint_transition', fence, now: this.opts.now(), ...change },
+      {
+        kind: 'model_step_checkpoint_transition',
+        fence,
+        now: this.opts.now(),
+        blockedTtlMs: this.opts.blockedTtlMs,
+        ...change,
+      },
       sessionKey
     )
     if (!result.applied) return null
