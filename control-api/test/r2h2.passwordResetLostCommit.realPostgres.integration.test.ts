@@ -14,7 +14,7 @@ import {
 import { createPostgresCommitReplyBlackhole } from './helpers/realPostgresCancellation.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
-const holder = vi.hoisted(() => ({ pool: null as unknown as Pool }))
+const holder = vi.hoisted(() => ({ pool: null as unknown as Pool, unknownCommitOutcomes: 0 }))
 
 vi.mock('../src/db.js', async importOriginal => {
   const real = await importOriginal<typeof import('../src/db.js')>()
@@ -31,7 +31,18 @@ vi.mock('../src/db.js', async importOriginal => {
       fn: Parameters<typeof real.withTransaction>[0],
       _txPool?: Parameters<typeof real.withTransaction>[1],
       options?: Parameters<typeof real.withTransaction>[2]
-    ) => real.withTransaction(fn, holder.pool, options),
+    ) =>
+      real.withTransaction(
+        fn,
+        holder.pool,
+        options && {
+          ...options,
+          onCommitOutcomeUnknown: () => {
+            holder.unknownCommitOutcomes += 1
+            options.onCommitOutcomeUnknown?.()
+          },
+        }
+      ),
   }
 })
 
@@ -105,6 +116,7 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
   })
 
   it('reports an unknown outcome without replay when reset committed but PostgreSQL reply was lost', async () => {
+    holder.unknownCommitOutcomes = 0
     const lease = await acquirePasswordWork()
     expect(lease).not.toBeNull()
     if (!lease) throw new Error('password-work owner was not acquired')
@@ -163,6 +175,7 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
       expect(outcome.error.message).not.toMatch(/password|sql|invitation|database/i)
     }
     expect(blackhole.commands.filter(command => command === 'COMMIT')).toHaveLength(1)
+    expect(holder.unknownCommitOutcomes).toBe(1)
 
     const responseApp = express()
     responseApp.post('/password-reset', (_req, res) => {
@@ -178,5 +191,106 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
     expect(publicResponse.headers['retry-after']).toBe('2')
     expect(publicResponse.headers['cache-control']).toBe('no-store')
     expect(publicResponse.headers['set-cookie']).toBeUndefined()
+  }, 20_000)
+
+  it('keeps reset proof retryable when PostgreSQL rejects COMMIT definitively', async () => {
+    const retryEmail = `r2h3-${randomBytes(8).toString('hex')}@example.invalid`
+    const retryUserHash = await bcrypt.hash(oldPassword, 12)
+    const retryUser = await normalPool.query(
+      'INSERT INTO users(email, password_hash) VALUES ($1, $2) RETURNING id',
+      [retryEmail, retryUserHash]
+    )
+    const retryUserId = retryUser.rows[0].id as string
+    const retryReset = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic R2-H3 member',
+      email: retryEmail,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+    const retrySibling = await createSilentInvitationForTeams({
+      inviteeName: 'Synthetic R2-H3 member',
+      email: retryEmail,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
+
+    await normalPool.query(`
+      CREATE FUNCTION reject_r2h3_user_update() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'synthetic deferred commit rejection' USING ERRCODE = '23514';
+      END;
+      $$ LANGUAGE plpgsql
+    `)
+    await normalPool.query(`
+      CREATE CONSTRAINT TRIGGER reject_r2h3_user_update
+      AFTER UPDATE ON users DEFERRABLE INITIALLY DEFERRED
+      FOR EACH ROW EXECUTE FUNCTION reject_r2h3_user_update()
+    `)
+
+    holder.unknownCommitOutcomes = 0
+    let resetError: unknown
+    try {
+      await setInvitationPasswordForEmail(retryEmail, retryReset.id, newPassword, retryUserId)
+    } catch (error) {
+      resetError = error
+    }
+    expect(resetError).toMatchObject({
+      status: 503,
+      publicError: 'authority_unavailable',
+    })
+    expect(holder.unknownCommitOutcomes).toBe(0)
+    const errorApp = express()
+    errorApp.post('/password-reset', (_req, res) => {
+      if (!sendPasswordAdmissionError(resetError, res)) {
+        res.status(500).json({ error: 'unexpected response contract' })
+      }
+    })
+    const publicError = await request(errorApp).post('/password-reset').send({})
+    expect(publicError.status).toBe(503)
+    expect(publicError.body).toEqual({ error: 'authority_unavailable', retryAfterSeconds: 2 })
+    expect(publicError.headers['retry-after']).toBe('2')
+    expect(publicError.headers['cache-control']).toBe('no-store')
+
+    const unchanged = await observer.query(
+      `SELECT i.status AS reset_status, sibling.status AS sibling_status,
+              u.password_hash, (SELECT COUNT(*)::int FROM password_verification_work) AS owners
+         FROM invitations i
+         JOIN invitations sibling ON sibling.id = $2
+         JOIN users u ON u.id = $3
+        WHERE i.id = $1`,
+      [retryReset.id, retrySibling.id, retryUserId]
+    )
+    expect(unchanged.rows[0]).toMatchObject({
+      reset_status: 'pending',
+      sibling_status: 'pending',
+      owners: 0,
+      password_hash: retryUserHash,
+    })
+
+    await normalPool.query('DROP TRIGGER reject_r2h3_user_update ON users')
+    await normalPool.query('DROP FUNCTION reject_r2h3_user_update()')
+    const retried = await setInvitationPasswordForEmail(
+      retryEmail,
+      retryReset.id,
+      newPassword,
+      retryUserId
+    )
+    expect(retried).toMatchObject({ data: { passwordUpdated: true } })
+    expect(holder.unknownCommitOutcomes).toBe(0)
+    const recovered = await observer.query(
+      `SELECT i.status AS reset_status, sibling.status AS sibling_status, u.password_hash
+         FROM invitations i
+         JOIN invitations sibling ON sibling.id = $2
+         JOIN users u ON u.id = $3
+        WHERE i.id = $1`,
+      [retryReset.id, retrySibling.id, retryUserId]
+    )
+    expect(recovered.rows[0]).toMatchObject({
+      reset_status: 'accepted',
+      sibling_status: 'revoked',
+    })
+    expect(await bcrypt.compare(newPassword, recovered.rows[0].password_hash as string)).toBe(true)
   }, 20_000)
 })

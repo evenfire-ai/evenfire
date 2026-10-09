@@ -6738,6 +6738,17 @@ export type DbTransactionOptions = {
   onCommitOutcomeUnknown?: () => void
 }
 
+function isPostgresErrorResponse(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const response = error as { name?: unknown; code?: unknown; severity?: unknown }
+  return (
+    response.name === 'error' &&
+    typeof response.code === 'string' &&
+    /^[0-9A-Z]{5}$/.test(response.code) &&
+    typeof response.severity === 'string'
+  )
+}
+
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
   // Injectable only so the carrier's client lifecycle can be unit-tested against
@@ -6891,9 +6902,9 @@ export async function withTransaction<T>(
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
     }
-    // Once COMMIT was sent, a missing reply is an unknown durable outcome.
-    // Cancellation does not establish rollback, no spend or no dispatch.
-    if (commitSent && !transactionFinished) {
+    // A PostgreSQL ErrorResponse proves COMMIT failed. Only a lost transport or
+    // malformed response leaves the durable outcome unknown after COMMIT was sent.
+    if (commitSent && !transactionFinished && !isPostgresErrorResponse(error)) {
       options.onCommitOutcomeUnknown?.()
     }
     signal?.throwIfAborted()
