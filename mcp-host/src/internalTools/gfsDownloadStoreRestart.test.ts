@@ -33,8 +33,12 @@ const { renameFailure, rmFailure } = vi.hoisted(() => ({
 // would (EBUSY: EACCES and EPERM from rm restore owner access and retry once).
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>()
+  const { freeSpaceSizedStatfs } = await import('../__tests__/fixtures/gfsStoreTestKit')
   return {
     ...actual,
+    // The volume sized to its free space, so the disk's occupancy never
+    // meets the store's free-space floor.
+    statfs: freeSpaceSizedStatfs(actual.statfs),
     rename: async (...values: Parameters<typeof actual.rename>) => {
       if (
         renameFailure.target !== undefined &&
@@ -206,7 +210,7 @@ describe('GFS download store restart', () => {
     const { receipt, bytes } = await completedCopy(store, root, CALLER, 3, 64)
     await expect(store.readManagedFile(receipt.path, CALLER)).resolves.toEqual(bytes)
 
-    // The hourly sweep retries without a restart.
+    // The periodic sweep retries without a restart.
     await expect(store.cleanupExpired()).resolves.toMatchObject({ removeFailed: 0 })
 
     expect(retirementWarnings(warn)).toHaveLength(1)

@@ -28,9 +28,9 @@ const { faults } = vi.hoisted(() => ({
   faults: new Map<string, (target: string) => string | undefined>(),
 }))
 
-// A 95-byte volume at the default 85% gives a budget of floor(80.75) = 80:
+// A 115-byte volume at the default 70% gives a budget of floor(80.5) = 80:
 // eight 5-byte copies per caller fill it exactly.
-const VOLUME_BYTES = 95n
+const VOLUME_BYTES = 115n
 
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof fs>()

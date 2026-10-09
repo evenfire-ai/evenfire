@@ -160,14 +160,6 @@
     "fullName": "one shell approval covers the rest of the turn: two shell calls, one approval"
   },
   {
-    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
-    "fullName": "approval parity: http_request asks once per turn and the approval covers the next call"
-  },
-  {
-    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
-    "fullName": "approval parity: shell_exec asks once per turn and the approval covers the next call"
-  },
-  {
     "suite": "taskExecutor.gfsPreparation.test.ts",
     "fullName": "TaskExecutor prepares admitted GFS files before its first model call asks for each configured clerum__gfs_download despite turn and persistent approval"
   },
@@ -297,11 +289,11 @@
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: quota and capacity Q12: when every copy is pinned admission fails with the quota code and succeeds after release"
+    "fullName": "GFS download store boundaries: quota and capacity Q12: when pins fill the Host protected cap admission fails with the quota code and succeeds after release"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
-    "fullName": "GFS download store boundaries: expiry E1: reuse matches until one millisecond before expiry"
+    "fullName": "GFS download store boundaries: expiry E1: reuse matches until one millisecond before the copy has one hour left"
   },
   {
     "suite": "gfsDownloadStoreBoundaries.test.ts",
@@ -777,7 +769,7 @@
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: share of the workspace volume BUD-1: the default 85% budget admits exactly up to floor(total * 85 / 100) bytes"
+    "fullName": "GFS download store budget: share of the workspace volume BUD-1: the default 70% budget admits exactly up to floor(total * 70 / 100) bytes"
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
@@ -805,7 +797,7 @@
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
-    "fullName": "GFS download store budget: no per-caller storage or file-count limit BUD-8: the quota denial is identical whoever fills the budget"
+    "fullName": "GFS download store budget: no per-caller storage or file-count limit BUD-8: the quota denial is identical whoever holds the pinned bytes"
   },
   {
     "suite": "gfsDownloadStoreBudget.test.ts",
@@ -897,11 +889,11 @@
   },
   {
     "suite": "gfsDownloadStoreProtected.test.ts",
-    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) SOL-R3-PINS: one caller pins up to the cap, exactly, and other callers keep admitting"
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) SOL-R3-PINS: one caller pins up to its cap, exactly, and another caller is still admitted beside it"
   },
   {
     "suite": "gfsDownloadStoreProtected.test.ts",
-    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a refused caller gets the same error object as a full Host budget"
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) a refused caller gets the same error object as a Host-wide refusal"
   },
   {
     "suite": "gfsDownloadStoreProtected.test.ts",
@@ -1097,11 +1089,11 @@
   },
   {
     "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
-    "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) SOL-R5-TRASH-CHARGE: expired pinned copies whose trash cannot be removed keep their charge until cleanup succeeds"
+    "fullName": "GFS download store: a copy left under a trash name stays charged (R5-F1) SOL-R5-TRASH-CHARGE: an expired pinned copy and an unpinned one whose trash cannot be removed keep their charge until cleanup succeeds"
   },
   {
     "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
-    "fullName": "GFS download store: reuse that crosses expiry while hashing (R5-F2) SOL-R5-REUSE-CROSS-EXPIRY: a copy that expires while it is hashed is a cache miss and gets no pin"
+    "fullName": "GFS download store: reuse that crosses expiry while hashing (R5-F2) SOL-R5-REUSE-CROSS-EXPIRY: a copy that enters its last hour while it is hashed is a cache miss and gets no pin"
   },
   {
     "suite": "gfsManagedImage.test.ts",
@@ -1173,11 +1165,11 @@
   },
   {
     "suite": "gfsDownloadStoreRemovalCharge.test.ts",
-    "fullName": "GFS download store removal charges RC-REUSE-UNPINNED-false: post-hash expiry is a miss with and without a new retention owner"
+    "fullName": "GFS download store removal charges RC-REUSE-UNPINNED-false: crossing the one-hour reuse margin after the hash is a miss with and without a new retention owner"
   },
   {
     "suite": "gfsDownloadStoreRemovalCharge.test.ts",
-    "fullName": "GFS download store removal charges RC-REUSE-UNPINNED-true: post-hash expiry is a miss with and without a new retention owner"
+    "fullName": "GFS download store removal charges RC-REUSE-UNPINNED-true: crossing the one-hour reuse margin after the hash is a miss with and without a new retention owner"
   },
   {
     "suite": "gfsDownloadStoreRemovalCharge.test.ts",
@@ -1296,10 +1288,6 @@
     "fullName": "tool timeouts bounded to the executable timer range (#1021) U11: the accepted maximum runs a shell call and one more is refused by the timer guard"
   },
   {
-    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
-    "fullName": "one turn-wide shell approval auto-approves cron_manage and http_request for the rest of the turn"
-  },
-  {
     "suite": "taskExecutor.gfsPreparation.test.ts",
     "fullName": "TaskExecutor prepares admitted GFS files before its first model call maps the real tool output for a disk_full store refusal to its preparation code"
   },
@@ -1370,5 +1358,217 @@
   {
     "suite": "gfsDownloadStoreRestart.test.ts",
     "fullName": "GFS download store restart R1: restarting on a volume written by the dev store never blocks admission: restarted by the dev Host, every record quarantined (#1019)"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U1b: readManagedFile refuses an adopted copy recorded for the same caller from the index, before touching its directory"
+  },
+  {
+    "suite": "gfsDownloadStoreBoundaries.test.ts",
+    "fullName": "GFS download store boundaries: caller isolation U1b: readManagedFilePrefix refuses an adopted copy recorded for the same caller from the index, before touching its directory"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: free-space floor value FSF-1: the floor is 15% of the volume, and never less than 16 MiB"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: free-space floor value FSF-1b: a restore aims for the floor plus 5% of the volume"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: admission keeps the free-space floor FSF-2: an admission is refused as disk_full while every copy is pinned, and admitted after evicting released copies"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-3: below the floor, cleanupExpired evicts the adopted copy and then the least recently used ones up to the floor plus 5%, and keeps pinned copies and active transfers"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-4: above the floor, cleanupExpired evicts nothing while it still removes an expired copy"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-5: a deficit larger than every unpinned copy is restored partially, and the evictions are kept"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-6: when statfs rejects, cleanupExpired keeps its sweep result, evicts nothing and logs the failure"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-6: when two invalid readings, cleanupExpired keeps its sweep result, evicts nothing and logs the failure"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: the periodic sweep restores the free-space floor FSF-7: a restore continues past the floor and stops once the floor plus 5% is free"
+  },
+  {
+    "suite": "gfsDownloadStoreFreeSpaceFloor.test.ts",
+    "fullName": "GFS download store: startup restores the free-space floor FSF-8: a store initialized on a volume below the floor evicts adopted copies before it is available"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) HOST-CAP: two callers each under their own cap are refused once their sum would exceed three quarters of the budget, and admitted after a release"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a store directory made unwritable is still removed RCV-1c: an adopted copy whose .gfs-downloads parent is chmod 0500 is evicted after the owner rwx is restored on the parent, and its charge is released"
+  },
+  {
+    "suite": "gfsDownloadStoreRecovery.test.ts",
+    "fullName": "GFS download store: a store directory made unwritable is still removed RCV-1d: a symlink swapped in for the .gfs-downloads parent after a refused rename is not followed, and the removal is refused"
+  },
+  {
+    "suite": "gfsDownloadStoreRemovalCharge.test.ts",
+    "fullName": "GFS download store removal charges RC-EXPIRED-KEPT: an expired entry whose removal fails in the sweep stays indexed and charged"
+  },
+  {
+    "suite": "gfsDownloadStoreTrashAndExpiry.test.ts",
+    "fullName": "GFS download store: reuse that crosses expiry while hashing (R5-F2) REUSE-MARGIN: a copy with 59 minutes left is a cache miss and gets no pin, while a copy with 61 minutes left is reused and pinned"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap the default cycle runs cleanup every five minutes"
+  },
+  {
+    "suite": "gfsRuntime.test.ts",
+    "fullName": "GFS runtime bootstrap stop resolves when the cycle in flight never settles: it waits stopTimeoutMs, warns and closes the store"
+  },
+  {
+    "suite": "gfsDownloadStoreProtected.test.ts",
+    "fullName": "GFS download store: a caller protects at most half the budget (R3-F1) TWO-CALLERS-HOST-CAP: two callers that together protect three quarters of the budget refuse a third caller with the Host-wide scope"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain shell_exec approval covers its later calls in the same task and a new task asks again"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain http_request approval covers its later calls in the same task and a new task asks again"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain cron_manage approval covers its later calls in the same task and a new task asks again"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "an \"always\" shell_exec approval covers its calls in later tasks"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "an \"always\" http_request approval covers its calls in later tasks"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "an \"always\" cron_manage approval covers its calls in later tasks"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain shell_exec approval covers 31 later shell calls of the same task"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "a plain shell_exec approval still covers shell after a clerum__gfs_download card in the same task"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "after a shell_exec approval, cron_manage and http_request still suspend for their own approval"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "on a stateless host every cron_manage create asks, and an approved create card runs only that call"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "asks again for a plain shell_exec approval when a cold resume rebuilds the conversation mid-task"
+  },
+  {
+    "suite": "taskExecutor.gfsLiveApproval.integration.test.ts",
+    "fullName": "asks again for an \"always\" shell_exec approval after a cold resume rebuilds the conversation"
+  },
+  {
+    "suite": "authorizationScope.test.ts",
+    "fullName": "approval authorization scope scopes turn-wide consent for shell_exec to the tool itself, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of shell_exec stores the tool for the current task only, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of shell_exec stores the tool for later tasks, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of http_request stores the tool for the current task only, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of http_request stores the tool for later tasks, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals a plain approve() of cron_manage stores the tool for the current task only, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals an \"always\" approve() of cron_manage stores the tool for later tasks, without a wildcard"
+  },
+  {
+    "suite": "conversation.test.ts",
+    "fullName": "ConversationManager — session-scoped tool approvals startTurn clears plain session-scoped approvals and keeps \"always\" ones"
+  },
+  {
+    "suite": "approvalController.test.ts",
+    "fullName": "ApprovalController should bypass every tool outside the session-scoped set when wildcard '*' is in auto_approved_tools"
+  },
+  {
+    "suite": "approvalController.test.ts",
+    "fullName": "ApprovalController does not let wildcard '*' cover shell_exec, http_request or cron_manage"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals an MCP turn-wide approval adds '*' that does not cover shell_exec"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps MCP behaviour: '*' covers other MCP tools in the turn and the server prefix persists"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals shell_exec approval after an MCP '*' covers shell_exec without revoking '*'"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps workflow_trigger turn-wide: '*' covers other gated tools this turn, and a new turn asks again"
+  },
+  {
+    "suite": "sessionScopedApproval.test.ts",
+    "fullName": "session-scoped approvals next to turn-wide MCP approvals keeps workflow_trigger \"always\" approval across turns through its tool name"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval after a plain cron_manage list approval in the task, create still suspends with exact scope"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval after an \"always\" cron_manage approval, enable still suspends in a later task"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval after an MCP approval adds '*', create still suspends with exact scope"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval approving a forced create card stores no approval, so the next create asks again"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval on a non-stateless host a plain cron_manage approval covers create for the rest of the task"
+  },
+  {
+    "suite": "statelessCronForcedApproval.test.ts",
+    "fullName": "stateless cron_manage create/enable forced approval keeps the cron-sourced gate-only path: create suspends and every other call proceeds"
   }
 ]

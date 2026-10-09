@@ -2,7 +2,8 @@
  * Physical free space versus cached copies (PR #1028 review R1-H1, R1-L1).
  *
  * With the budget at 85% of the volume, the cache plus foreign data can leave
- * less free space than a request and its 16 MiB margin while the cache is
+ * less free space than a request and the free-space floor (16 MiB, its
+ * minimum, on the 40 MiB volume used here) while the cache is
  * still under budget. Unpinned, unreserved copies are evicted to cover that
  * deficit, planned as a whole before any delete; pinned copies never are.
  * statfs is the only boundary replaced: it reports a simulated volume whose
@@ -127,7 +128,7 @@ describe('GFS download store: disk pressure evicts unpinned copies', () => {
   it('DP-1: a full disk under budget evicts the least recently used unpinned copies of another caller instead of refusing as disk_full', async () => {
     // 40 MiB volume, 10 MiB foreign, budget floor(40 MiB * 85%) = 34 MiB.
     // Ten 1 MiB copies leave 20 MiB (minus meta.json bytes) free; a 5 MiB
-    // download needs 5 MiB + the 16 MiB margin = 21 MiB, while the cache
+    // download needs 5 MiB + the 16 MiB floor = 21 MiB, while the cache
     // (10 MiB + 5 MiB) is far under budget.
     simulatedVolume(40 * MIB, 10 * MIB)
     const store = await openStore()
@@ -187,7 +188,7 @@ describe('GFS download store: disk pressure evicts unpinned copies', () => {
     const ids = await fillWithCopiesOfB(store)
     const evicted = await expiryCount('expired_removed')
 
-    // 15 MiB + 16 MiB margin = 31 MiB; at most 20 + 10 = 30 MiB can be free.
+    // 15 MiB + 16 MiB floor = 31 MiB; at most 20 + 10 = 30 MiB can be free.
     await expect(startTransfer(store, rootA, A, 603, 15 * MIB)).rejects.toMatchObject({
       code: 'disk_full',
     })
@@ -201,17 +202,17 @@ describe('GFS download store: disk pressure evicts unpinned copies', () => {
 
 describe('GFS download store: eviction metric', () => {
   it('EVM-1: a budget eviction increments expired_removed and removes the evicted directory', async () => {
-    // 100-byte volume, budget 85: 40 + 40 retained + 10 requested is over.
+    // 100-byte volume, budget 70: 30 + 30 retained + 15 requested is over.
     volumeOf(100)
     const store = await openStore()
-    const oldest = await completedCopy(store, rootB, B, 700, 40)
+    const oldest = await completedCopy(store, rootB, B, 700, 30)
     tick()
-    const newer = await completedCopy(store, rootA, A, 701, 40)
+    const newer = await completedCopy(store, rootA, A, 701, 30)
     tick()
     const evicted = await expiryCount('expired_removed')
     const removed = await expiryCount('incomplete_removed')
 
-    await startTransfer(store, rootC, C, 702, 10)
+    await startTransfer(store, rootC, C, 702, 15)
 
     // Witness: the eviction happened, and only the least recently used copy went.
     expect(exists(downloadDirectory(rootB, oldest.receipt.id))).toBe(false)

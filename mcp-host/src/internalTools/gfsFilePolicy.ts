@@ -41,12 +41,14 @@ export const GFS_FILE_LIMITS = Object.freeze({
   /**
    * Share of the volume holding the Host root that retained downloads may
    * occupy: `floor(volumeTotalBytes * storagePercent / 100)`, measured with
-   * statfs at every admission.
+   * statfs at every admission. The default 70 plus the store's 15% free-space
+   * floor leaves 15% of the volume that the cache never fills, so on a volume
+   * with a 5% root reservation the budget, not the floor, is the cache's limit.
    */
   storagePercent: configuredGfsInteger(
     'MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT',
     process.env.MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT,
-    85,
+    70,
     100
   ),
   callerActiveDownloads: configuredGfsInteger(

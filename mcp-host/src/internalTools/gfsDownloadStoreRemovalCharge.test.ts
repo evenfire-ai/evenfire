@@ -17,6 +17,7 @@ import {
   completedCopy,
   digestOf,
   downloadDirectory,
+  expiryCount,
   plantDownload,
   quotaCount,
   sourceFor,
@@ -119,9 +120,11 @@ function failTrashRemoval(): string[] {
   return hits
 }
 
+// Unpinned: two 4 MiB pins would exceed the Host-wide protected cap (7.5 MiB
+// of the 10 MiB budget), and an expired copy is swept whether it is pinned or not.
 async function expiredTrash(store: GfsDownloadStore) {
-  await completedCopy(store, roots.a, 'a', 1, 4 * MIB, { owner: 'owner-a' })
-  await completedCopy(store, roots.b, 'b', 2, 4 * MIB, { owner: 'owner-b' })
+  await completedCopy(store, roots.a, 'a', 1, 4 * MIB)
+  await completedCopy(store, roots.b, 'b', 2, 4 * MIB)
   vi.setSystemTime(Date.now() + 2 * HOUR)
   const hits = failTrashRemoval()
   expect((await store.cleanupExpired()).removeFailed).toBe(2)
@@ -175,8 +178,9 @@ afterEach(async () => {
 describe('GFS download store removal charges', () => {
   it('RC-UNDO-FAIL: post-rename verification and undo failures retain the renamed bytes', async () => {
     const store = await storeWithBudget()
-    await completedCopy(store, roots.a, 'a', 1, 4 * MIB, { owner: 'a-owner' })
-    await completedCopy(store, roots.b, 'b', 2, 4 * MIB, { owner: 'b-owner' })
+    // Unpinned, as in expiredTrash: the copies expire before the sweep.
+    await completedCopy(store, roots.a, 'a', 1, 4 * MIB)
+    await completedCopy(store, roots.b, 'b', 2, 4 * MIB)
     vi.setSystemTime(Date.now() + 2 * HOUR)
     const checkFault = new Set<string>()
     const undone: string[] = []
@@ -211,10 +215,13 @@ describe('GFS download store removal charges', () => {
     'RC-FAILED-TRANSFER-%s: failed transfer trash keeps its former reservation charged',
     async stage => {
       const store = await storeWithBudget()
-      const attempts = []
+      const hits = failTrashRemoval()
+      // One transfer at a time: two 4 MiB reservations at once would exceed the
+      // Host-wide protected cap (7.5 MiB of the 10 MiB budget). A held trash
+      // charge is not protected, so the second transfer is admitted after the
+      // first one failed.
       for (const [index, caller] of ['a', 'b'].entries()) {
         const attempt = await startTransfer(store, roots[caller], caller, index, 4 * MIB)
-        attempts.push({ ...attempt, caller })
         if (stage === 'post-source-rename') {
           const directory = downloadDirectory(roots[caller], attempt.transfer.id)
           boundaries.open.mockImplementation(async (...args: unknown[]) => {
@@ -229,18 +236,18 @@ describe('GFS download store removal charges', () => {
           expect(syncFs.existsSync(path.join(directory, 'meta.json'))).toBe(true)
           restoreBoundary('open')
         }
-      }
-      expect(view(store).active).toBe(8 * MIB)
-      const hits = failTrashRemoval()
-      for (const attempt of attempts)
-        await expect(store.fail(attempt.transfer.id, attempt.caller)).rejects.toMatchObject({
+        expect(view(store).active).toBe(4 * MIB)
+        await expect(store.fail(attempt.transfer.id, caller)).rejects.toMatchObject({
           code: 'storage_write_failed',
         })
-      expect(hits).toHaveLength(2)
+      }
+      // Three removals: a's trash, a's trash again under a new trash name
+      // (retried by b's admission sweep), then b's trash.
+      expect(hits).toHaveLength(3)
       expect(storedBytes(hostRoot)).toBe(8 * MIB)
-      // Each reservation moved, unchanged, to the trash name its removal left.
+      // Each reservation moved, unchanged, to the last trash name its removal left.
       expect(view(store)).toMatchObject({ active: 0, held: 8 * MIB, charged: 8 * MIB })
-      expect([...view(store).state.held.keys()].sort()).toEqual([...hits].sort())
+      expect([...view(store).state.held.keys()].sort()).toEqual(hits.slice(1).sort())
       await expectRefused(store)
       await recoverAndWitness(store)
     }
@@ -336,12 +343,15 @@ describe('GFS download store removal charges', () => {
   it('RC-SERIAL-SWEEPS: concurrent admission and cleanup queue behind the pre-check sweep and preserve live pins and active transfers', async () => {
     const store = await storeWithBudget()
     const expiry = new Date(Date.now() + 24 * HOUR).toISOString()
-    const live = await completedCopy(store, roots.a, 'a', 0, 2 * MIB, {
+    // Protected bytes stay within the Host-wide cap (7.5 MiB of the 10 MiB
+    // budget): the live pin and the active transfer take 1 MiB each, and the
+    // expiring copy and the admission below 3 MiB each, one after the other.
+    const live = await completedCopy(store, roots.a, 'a', 0, MIB, {
       owner: 'live',
       expiresAt: expiry,
     })
-    const active = await startTransfer(store, roots.a, 'a', 1, 2 * MIB, { expiresAt: expiry })
-    const expiring = await completedCopy(store, roots.b, 'b', 2, 4 * MIB, { owner: 'expire' })
+    const active = await startTransfer(store, roots.a, 'a', 1, MIB, { expiresAt: expiry })
+    const expiring = await completedCopy(store, roots.b, 'b', 2, 3 * MIB)
     vi.setSystemTime(Date.now() + 2 * HOUR)
     let enter!: () => void
     let release!: () => void
@@ -362,7 +372,7 @@ describe('GFS download store removal charges', () => {
       return Reflect.apply(nativeFs.rm, nativeFs, args)
     })
     boundaries.statfs.mockClear()
-    const first = startTransfer(store, roots.c, 'c', 3, 4 * MIB)
+    const first = startTransfer(store, roots.c, 'c', 3, 3 * MIB)
     await entered
     let secondSettled = false
     let cleanupSettled = false
@@ -399,24 +409,25 @@ describe('GFS download store removal charges', () => {
       code: 'download_missing',
       message: 'GFS download store failed (download_missing)',
     })
-    expect(view(store).charged).toBe(8 * MIB)
+    expect(view(store).charged).toBe(5 * MIB)
     await store.fail(active.transfer.id, 'a')
-    const next = await startTransfer(store, roots.d, 'd', 4, 4 * MIB)
-    expect(view(store).charged).toBe(10 * MIB)
+    const next = await startTransfer(store, roots.d, 'd', 4, MIB)
+    expect(view(store).charged).toBe(5 * MIB)
     expect((await store.readManagedFile(live.receipt.path, 'a')).equals(live.bytes)).toBe(true)
     await store.fail(admitted.transfer.id, 'c')
     await store.fail(next.transfer.id, 'd')
   })
 
   it.each([false, true])(
-    'RC-REUSE-UNPINNED-%s: post-hash expiry is a miss with and without a new retention owner',
+    'RC-REUSE-UNPINNED-%s: crossing the one-hour reuse margin after the hash is a miss with and without a new retention owner',
     async owner => {
       const store = await storeWithBudget()
       const copy = await completedCopy(store, roots.a, 'a', 0, 1024)
       await expect(store.reusableReceipt('a', sourceFor(0), 1024)).resolves.toMatchObject({
         id: copy.receipt.id,
       })
-      vi.setSystemTime(Date.parse(copy.receipt.expiresAt) - 1)
+      const reuseMargin = 60 * 60_000
+      vi.setSystemTime(Date.parse(copy.receipt.expiresAt) - reuseMargin - 1)
       let enter!: () => void
       let release!: () => void
       const entered = new Promise<void>(resolve => {
@@ -447,11 +458,12 @@ describe('GFS download store removal charges', () => {
         owner ? { retentionOwnerId: 'new-owner' } : undefined
       )
       await entered
-      vi.setSystemTime(Date.parse(copy.receipt.expiresAt))
+      vi.setSystemTime(Date.parse(copy.receipt.expiresAt) - reuseMargin)
       release()
       await expect(reuse).resolves.toBeUndefined()
       expect(view(store).state.pins.size).toBe(0)
-      await store.cleanupExpired()
+      vi.setSystemTime(Date.parse(copy.receipt.expiresAt))
+      expect((await store.cleanupExpired()).removedExpired).toBe(1)
       const fresh = await completedCopy(store, roots.a, 'a', 0, 1024, { owner: 'new-owner' })
       expect((await store.readManagedFile(fresh.receipt.path, 'a')).equals(fresh.bytes)).toBe(true)
     }
@@ -473,8 +485,6 @@ describe('GFS download store removal charges', () => {
 
   it('RC-FAIL-BEFORE-RENAME: a failed transfer still in its original incomplete directory retains its charge', async () => {
     const store = await storeWithBudget()
-    const a = await startTransfer(store, roots.a, 'a', 1, 4 * MIB)
-    const b = await startTransfer(store, roots.b, 'b', 2, 4 * MIB)
     const hits: string[] = []
     boundaries.rename.mockImplementation((...args: unknown[]) => {
       if (path.basename(String(args[0])).startsWith('input-')) {
@@ -483,17 +493,24 @@ describe('GFS download store removal charges', () => {
       }
       return Reflect.apply(nativeFs.rename, nativeFs, args)
     })
+    // One transfer at a time: two 4 MiB reservations at once would exceed the
+    // Host-wide protected cap (7.5 MiB of the 10 MiB budget).
+    const a = await startTransfer(store, roots.a, 'a', 1, 4 * MIB)
     await expect(store.fail(a.transfer.id, 'a')).rejects.toMatchObject({
       code: 'storage_write_failed',
     })
+    expect(hits).toHaveLength(1)
+    // b's admission sweep retries a's directory once more.
+    const b = await startTransfer(store, roots.b, 'b', 2, 4 * MIB)
+    expect(hits).toHaveLength(2)
     await expect(store.fail(b.transfer.id, 'b')).rejects.toMatchObject({
       code: 'storage_write_failed',
     })
-    expect(hits).toHaveLength(2)
+    expect(hits).toHaveLength(3)
     expect(storedBytes(hostRoot)).toBe(8 * MIB)
     expect(view(store).held).toBe(8 * MIB)
     await expectRefused(store)
-    expect(hits).toHaveLength(4)
+    expect(hits).toHaveLength(5)
     await recoverAndWitness(store)
   })
 
@@ -610,12 +627,7 @@ describe('GFS download store removal charges', () => {
 
   it('RC-FAIL-PARENT-REFUSED: a failed transfer whose parent check refuses before the rename keeps its reservation charged', async () => {
     const store = await storeWithBudget()
-    const a = await startTransfer(store, roots.a, 'a', 1, 4 * MIB)
-    const b = await startTransfer(store, roots.b, 'b', 2, 4 * MIB)
-    const faulted = new Set([
-      path.join(roots.a, '.gfs-downloads'),
-      path.join(roots.b, '.gfs-downloads'),
-    ])
+    const faulted = new Set<string>()
     const hits: string[] = []
     boundaries.realpath.mockImplementation(async (...args: unknown[]) => {
       if (faulted.has(String(args[0]))) {
@@ -624,13 +636,16 @@ describe('GFS download store removal charges', () => {
       }
       return Reflect.apply(nativeFs.realpath, nativeFs, args)
     })
-    for (const [attempt, caller] of [
-      [a, 'a'],
-      [b, 'b'],
-    ] as const)
+    // One transfer at a time: two 4 MiB reservations at once would exceed the
+    // Host-wide protected cap (7.5 MiB of the 10 MiB budget). Each parent is
+    // faulted after its own admission, which resolves it.
+    for (const [index, caller] of ['a', 'b'].entries()) {
+      const attempt = await startTransfer(store, roots[caller], caller, index + 1, 4 * MIB)
+      faulted.add(path.join(roots[caller], '.gfs-downloads'))
       await expect(store.fail(attempt.transfer.id, caller)).rejects.toMatchObject({
         code: 'storage_write_failed',
       })
+    }
     expect(hits.length).toBeGreaterThanOrEqual(2)
     expect(storedBytes(hostRoot)).toBe(8 * MIB)
     expect(view(store)).toMatchObject({ entries: 0, active: 0, held: 8 * MIB, charged: 8 * MIB })
@@ -662,7 +677,9 @@ describe('GFS download store removal charges', () => {
       return Reflect.apply(nativeFs.readdir, nativeFs, args)
     })
     for (let i = 0; i < 3; i++) await store.cleanupExpired()
-    expect(renames).toHaveLength(3)
+    // Two per sweep: an EACCES rename restores the owner's access on the
+    // caller root and is retried once, and the retry fails the same way.
+    expect(renames).toHaveLength(6)
     expect(walked).toEqual([])
     expect(view(store)).toMatchObject({ held: 0, charged: 4 * MIB })
     expect((await store.readManagedFile(copy.receipt.path, 'b')).equals(copy.bytes)).toBe(true)
@@ -765,6 +782,46 @@ describe('GFS download store removal charges', () => {
     expect(storedBytes(roots.a) + storedBytes(roots.b)).toBe(4 * MIB)
     expect(storedBytes(hostRoot)).toBe(8 * MIB)
     await store.fail(fits.transfer.id, 'c')
+  })
+
+  it('RC-EXPIRED-KEPT: an expired entry whose removal fails in the sweep stays indexed and charged', async () => {
+    const store = await storeWithBudget()
+    const expiresAt = new Date(Date.now() + HOUR).toISOString()
+    const copyA = await completedCopy(store, roots.a, 'a', 1, 4 * MIB, { expiresAt })
+    const copyB = await completedCopy(store, roots.b, 'b', 2, 4 * MIB, { expiresAt })
+    const stuck = [copyA, copyB].map(({ receipt }, index) =>
+      downloadDirectory(roots[index === 0 ? 'a' : 'b'], receipt.id)
+    )
+    vi.setSystemTime(Date.now() + 2 * HOUR)
+    const attempts: string[] = []
+    boundaries.rename.mockImplementation((...args: unknown[]) => {
+      if (stuck.includes(String(args[0]))) {
+        attempts.push(String(args[0]))
+        return Promise.reject(eio())
+      }
+      return Reflect.apply(nativeFs.rename, nativeFs, args)
+    })
+    const removeFailed = await expiryCount('remove_failed')
+    const removedExpired = await expiryCount('expired_removed')
+
+    expect(await store.cleanupExpired()).toMatchObject({ removedExpired: 0, removeFailed: 2 })
+
+    // Witness: the sweep tried to remove both expired copies, and counted it.
+    expect([...attempts].sort()).toEqual([...stuck].sort())
+    expect(await expiryCount('remove_failed')).toBe(removeFailed + 2)
+    expect(await expiryCount('expired_removed')).toBe(removedExpired)
+    // Both are still indexed under their own names, and their 8 MiB charged.
+    expect([...view(store).state.entries.keys()].sort()).toEqual(
+      [copyA.receipt.id, copyB.receipt.id].sort()
+    )
+    expect(view(store)).toMatchObject({ entries: 8 * MIB, held: 0, charged: 8 * MIB })
+    expect(storedBytes(hostRoot)).toBe(8 * MIB)
+    // The charge still counts against the 10 MiB budget: 8 + 4 MiB is refused.
+    const denied = await quotaCount('host', 'storage_bytes')
+    await expectRefused(store)
+    expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
+    restoreBoundary('rename')
+    await recoverAndWitness(store)
   })
 
   it('RC-UNDO-RESTORED-UNINDEXED: startup leftovers restored by an undone refusal are measured once their parent passes again', async () => {

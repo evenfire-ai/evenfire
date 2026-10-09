@@ -2329,7 +2329,7 @@ export class TaskExecutor {
     const cronManageGateApplies =
       appConfig.enableApproval && this.task.source === 'cron' && appConfig.statelessLifecycle
     const approvalApplies = interactiveApprovalApplies || cronManageGateApplies
-    const baseController = approvalApplies
+    const approvalGate = approvalApplies
       ? new UnifiedApprovalGateController(
           compositeRegistry,
           this.deps.approvalConfig,
@@ -2343,19 +2343,22 @@ export class TaskExecutor {
             cronManageGateOnly: cronManageGateApplies,
           }
         )
-      : new DefaultLoopController()
-    const innerController = approvalApplies
+      : null
+    const innerController = approvalGate
       ? new ApprovalController(
           this.conversation!,
-          baseController,
+          approvalGate,
           gfsWorkspace &&
             appConfig.enableApproval &&
             this.task.source === 'channel' &&
             this.deps.approvalConfig?.tools?.shell_exec !== false
             ? new Set(['clerum__gfs_download'])
-            : undefined
+            : undefined,
+          // The same gate's forced approvals (stateless cron create/enable) run
+          // before any stored approval, so none of them can cover such a call.
+          approvalGate
         )
-      : baseController
+      : new DefaultLoopController()
 
     const mcpManager = this.deps.mcpManager
     // Exact native membership preserves every native/plugin capability.

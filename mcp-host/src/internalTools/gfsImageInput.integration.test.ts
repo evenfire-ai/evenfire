@@ -26,6 +26,14 @@ const { sdkCreate, clientFactory } = vi.hoisted(() => ({
   clientFactory: vi.fn(),
 }))
 
+// statfs reports the volume sized to its free space, so the disk's occupancy
+// never meets the store's free-space floor.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  const { freeSpaceSizedStatfs } = await import('../__tests__/fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
+})
+
 // Only external transport boundaries are replaced. Production client, tool,
 // native adapter, message construction and provider serialization all execute.
 vi.mock('openai', () => ({

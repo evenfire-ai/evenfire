@@ -29,7 +29,22 @@ const META_FILE = 'meta.json'
 const SOURCE_FILE = 'source'
 const PARTIAL_FILE = 'source.partial'
 const META_MAX_BYTES = 64 * 1024
-const FREE_SPACE_RESERVE_BYTES = 16n * 1024n * 1024n
+/**
+ * Share of the volume admission keeps free and the startup and periodic
+ * sweeps restore. The
+ * volume is shared: on a stateless Host `state/` (state.db) is a subPath of
+ * the same PVC, and shell commands and file writes land on it too.
+ */
+const FREE_SPACE_FLOOR_PERCENT = 15n
+/** The floor on a volume too small for its percentage to reach this. */
+const FREE_SPACE_FLOOR_MIN_BYTES = 16n * 1024n * 1024n
+/**
+ * Share of the volume, above the floor, that a restore frees once the volume
+ * fell below the floor. Admission still requires only the floor.
+ */
+const FREE_SPACE_RESTORE_HEADROOM_PERCENT = 5n
+/** A copy reused with less time left could expire while a shell command reads it. */
+const REUSE_MIN_REMAINING_MS = 60 * 60 * 1000
 /** Host-root directory of the ledger store written before #1028; never read. */
 const LEGACY_STORE_DIRECTORY = '.gfs-download-store'
 
@@ -53,7 +68,7 @@ const SHA256_RE = /^[0-9a-f]{64}$/
 
 export type GfsDownloadStoreErrorCode =
   | 'caller_mismatch'
-  /** The Host volume's free space cannot hold the reservation plus its margin. */
+  /** The Host volume's free space cannot hold the reservation plus the free-space floor. */
   | 'disk_full'
   | 'download_busy'
   | 'download_expired'
@@ -174,6 +189,26 @@ interface VolumeSpace {
  */
 function retainedBudget(volume: VolumeSpace): bigint {
   return (volume.blocks * volume.bsize * BigInt(GFS_FILE_LIMITS.storagePercent)) / 100n
+}
+
+/**
+ * Free bytes the volume must keep after every admission:
+ * `max(floor(volumeTotalBytes * 15 / 100), 16 MiB)`, in bigint.
+ */
+export function freeSpaceFloor(volume: { bsize: bigint; blocks: bigint }): bigint {
+  const share = (volume.blocks * volume.bsize * FREE_SPACE_FLOOR_PERCENT) / 100n
+  return share > FREE_SPACE_FLOOR_MIN_BYTES ? share : FREE_SPACE_FLOOR_MIN_BYTES
+}
+
+/**
+ * Free bytes a restore aims for once the volume is below the floor:
+ * `freeSpaceFloor + floor(volumeTotalBytes * 5 / 100)`, in bigint.
+ */
+export function freeSpaceRestoreTarget(volume: { bsize: bigint; blocks: bigint }): bigint {
+  return (
+    freeSpaceFloor(volume) +
+    (volume.blocks * volume.bsize * FREE_SPACE_RESTORE_HEADROOM_PERCENT) / 100n
+  )
 }
 
 /** `bytes` rounded up to whole blocks of the volume. */
@@ -462,19 +497,50 @@ async function treeUsage(root: string): Promise<{ files: number; bytes: number }
 }
 
 /**
+ * Gives the owner rwx on one directory, keeping its other mode bits. The name
+ * is opened with O_DIRECTORY | O_NOFOLLOW and the mode is changed through
+ * that descriptor, after its fstat confirms a directory: a symlink in the
+ * name's place is refused by the open and never followed, and the mode that
+ * is set is computed from, and applied to, the inode that was opened,
+ * whatever the name leads to afterwards. A symlink or a non-directory
+ * changes nothing and returns false. The open needs the owner's read bit, so
+ * a directory whose mode denies its owner read access (`chmod 0300`, `0000`)
+ * cannot be repaired here: that EACCES propagates, like any other failure.
+ */
+async function restoreDirectoryOwnerAccess(directory: string): Promise<boolean> {
+  let handle: fs.FileHandle
+  try {
+    handle = await fs.open(
+      directory,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    )
+  } catch (error) {
+    const code = errorCode(error)
+    if (code === 'ELOOP' || code === 'ENOTDIR') return false
+    throw error
+  }
+  try {
+    const info = await handle.stat()
+    if (!info.isDirectory()) return false
+    await handle.chmod((info.mode & 0o7777) | 0o700)
+    return true
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
  * Gives the owner rwx on every real directory under `root`, root included,
- * keeping the other mode bits. Every path is lstat-ed first and only a
- * directory is changed, so no symlink is followed to its target; a name
- * swapped for a symlink between that lstat and the chmod leads to an inode
- * the Host UID owns or cannot change, and gains owner bits only.
+ * through restoreDirectoryOwnerAccess. Children are listed and reached by
+ * path, because Node has no openat: the final component of each path is
+ * never followed, but a directory swapped for a symlink after it was changed
+ * is resolved as a parent component when its children are listed and opened.
  */
 async function restoreOwnerAccess(root: string): Promise<void> {
   const pending = [root]
   while (pending.length > 0) {
     const directory = pending.pop()!
-    const info = await fs.lstat(directory)
-    if (!info.isDirectory()) continue
-    await fs.chmod(directory, (info.mode & 0o7777) | 0o700)
+    if (!(await restoreDirectoryOwnerAccess(directory))) continue
     for (const entry of await fs.readdir(directory, { withFileTypes: true }))
       if (entry.isDirectory()) pending.push(path.join(directory, entry.name))
   }
@@ -596,7 +662,14 @@ export class GfsDownloadStore {
       if (error instanceof GfsDownloadStoreError) throw error
       throw new GfsDownloadStoreError('workspace_unavailable')
     }
-    const totals = await this.serialize(() => this.sweep(Date.now()))
+    // The floor is restored at startup too: a Host restarting on a full volume
+    // frees unpinned copies before the rest of the process needs to write.
+    const totals = await this.serialize(async () => {
+      const now = Date.now()
+      const swept = await this.sweep(now)
+      await this.restoreFreeSpaceFloor(now)
+      return swept
+    })
     if (this.closed || this.closing) throw new GfsDownloadStoreError('download_busy')
     this.initialized = true
     logger.info(
@@ -905,12 +978,14 @@ export class GfsDownloadStore {
       if (bounds?.retentionOwnerId !== undefined) this.assertReceiptOwner(bounds.retentionOwnerId)
       // Only copies this process published: an adopted meta.json carries an
       // identity and a digest that anyone with the Host UID could have written.
-      // A miss is final; the caller downloads the file again.
+      // A miss is final; the caller downloads the file again. A copy with less
+      // than REUSE_MIN_REMAINING_MS left is a miss too, so a fresh download
+      // with the full retention replaces it instead of being hashed for nothing.
       const entry = [...this.entries.values()].find(
         candidate =>
           candidate.provenance === 'published' &&
           candidate.callerIdentity === callerIdentity &&
-          Date.parse(candidate.expiresAt) > Date.now() &&
+          Date.parse(candidate.expiresAt) - REUSE_MIN_REMAINING_MS > Date.now() &&
           candidate.sizeBytes === sizeBytes &&
           candidate.source.drive === source.drive &&
           candidate.source.resourceId === source.resourceId &&
@@ -918,7 +993,8 @@ export class GfsDownloadStore {
       )
       if (!entry) return undefined
       // Pinning a copy this caller does not protect yet adds it to the
-      // caller's protected bytes; checked before hashing, so a refusal costs
+      // caller's protected bytes (capped at half the budget) and to the Host
+      // total (capped at three quarters); checked before hashing, so a refusal costs
       // no read. A copy the caller already protects adds nothing, so that is
       // decided first and re-pinning it never depends on statfs.
       if (
@@ -964,10 +1040,11 @@ export class GfsDownloadStore {
         return undefined
       }
       this.assertPublicationOpen(bounds)
-      // Expiry may have been crossed while the copy was hashed: an expired
-      // copy is a cache miss, never pinned or returned. The caller downloads
-      // the file again and the sweep removes this copy.
-      if (Date.parse(entry.expiresAt) <= Date.now()) return undefined
+      // The reuse margin may have been crossed while the copy was hashed: a
+      // copy that expires within REUSE_MIN_REMAINING_MS is a cache miss, never
+      // pinned or returned. The caller downloads the file again and the sweep
+      // removes this copy once it expires.
+      if (Date.parse(entry.expiresAt) - REUSE_MIN_REMAINING_MS <= Date.now()) return undefined
       entry.lastUsedMs = Date.now()
       if (bounds?.retentionOwnerId !== undefined)
         this.pin(bounds.retentionOwnerId, callerIdentity, entry.id)
@@ -1079,11 +1156,20 @@ export class GfsDownloadStore {
     })
   }
 
-  /** Removes expired and incomplete downloads; startup runs the same sweep. */
+  /**
+   * Removes expired and incomplete downloads, then restores the free-space
+   * floor in the same critical section. Startup runs the same sweep and
+   * restore; an admission runs only the sweep and plans its own eviction
+   * against the floor.
+   */
   async cleanupExpired(now = Date.now()): Promise<GfsDownloadSweepResult> {
     this.assertReadable()
     try {
-      const totals = await this.serialize(() => this.sweep(now))
+      const totals = await this.serialize(async () => {
+        const swept = await this.sweep(now)
+        await this.restoreFreeSpaceFloor(now)
+        return swept
+      })
       return {
         removedExpired: totals.removedExpired,
         removedIncomplete: totals.removedIncomplete,
@@ -1732,22 +1818,29 @@ export class GfsDownloadStore {
    * about space. A statfs that rejects is not a reading and propagates as is.
    */
   private async measureVolume(): Promise<VolumeSpace> {
+    const volume = await this.readVolume()
+    if (volume !== undefined) return volume
+    recordGfsDownloadQuota('host', 'free_space')
+    throw new GfsDownloadStoreError('volume_unmeasurable')
+  }
+
+  /** Up to two statfs readings; undefined when both are invalid (see measureVolume). */
+  private async readVolume(): Promise<VolumeSpace | undefined> {
     for (let reading = 0; reading < 2; reading += 1) {
       const space = await fs.statfs(this.hostRoot, { bigint: true })
       if (space.bsize > 0n && space.blocks > 0n && space.bavail >= 0n)
         return { bsize: space.bsize, blocks: space.blocks, bavail: space.bavail }
     }
-    recordGfsDownloadQuota('host', 'free_space')
-    throw new GfsDownloadStoreError('volume_unmeasurable')
+    return undefined
   }
 
   /**
    * Bytes the volume is short of for this admission: the request and every
-   * active reservation, each rounded up to whole blocks, plus the 16 MiB
-   * margin, minus the available bytes; 0n when it fits.
+   * active reservation, each rounded up to whole blocks, plus the free-space
+   * floor, minus the available bytes; 0n when it fits.
    */
   private physicalDeficit(space: VolumeSpace, sizeBytes: number): bigint {
-    let required = blockBytes(space, sizeBytes) + FREE_SPACE_RESERVE_BYTES
+    let required = blockBytes(space, sizeBytes) + freeSpaceFloor(space)
     // Use the full outstanding reservation of every active transfer rather
     // than crediting sparse, shared or concurrently written allocation.
     for (const transfer of this.active.values()) required += blockBytes(space, transfer.sizeBytes)
@@ -1763,17 +1856,22 @@ export class GfsDownloadStore {
   }
 
   /**
-   * Ids one caller holds out of eviction: its active reservations and the
-   * unexpired copies its retention owners pin, each id once. An expired
-   * pinned copy protects nothing: the sweep and eviction both remove it.
+   * Ids held out of eviction: active reservations and the unexpired copies
+   * retention owners pin, each id once; those of one caller, or of every
+   * caller when `callerIdentity` is omitted. An expired pinned copy protects
+   * nothing: the sweep and eviction both remove it.
    */
-  private protectedIds(callerIdentity: string): Set<string> {
+  private protectedIds(callerIdentity?: string): Set<string> {
     const ids = new Set<string>()
     const now = Date.now()
     for (const transfer of this.active.values())
-      if (transfer.callerIdentity === callerIdentity) ids.add(transfer.id)
+      if (callerIdentity === undefined || transfer.callerIdentity === callerIdentity)
+        ids.add(transfer.id)
     for (const [key, pinned] of this.pins)
-      if ((JSON.parse(key) as [string, string])[0] === callerIdentity)
+      if (
+        callerIdentity === undefined ||
+        (JSON.parse(key) as [string, string])[0] === callerIdentity
+      )
         for (const id of pinned) {
           const entry = this.entries.get(id)
           if (entry !== undefined && Date.parse(entry.expiresAt) <= now) continue
@@ -1782,19 +1880,28 @@ export class GfsDownloadStore {
     return ids
   }
 
+  /** Bytes of the protected `ids`: a reservation's size, or an indexed copy's. */
+  private protectedBytes(ids: ReadonlySet<string>): bigint {
+    let bytes = 0n
+    for (const id of ids)
+      bytes += BigInt(this.active.get(id)?.sizeBytes ?? this.entries.get(id)?.sizeBytes ?? 0)
+    return bytes
+  }
+
   /**
    * Eviction never reclaims an unexpired pinned copy or a reservation, so
-   * without a bound one caller's open tasks could hold the whole budget and
-   * refuse every other caller. One caller's protected bytes may therefore
-   * reach at most `floor(budget / 2)`. That bounds each caller, not their
-   * sum: two callers at the cap protect `budget - (budget mod 2)` bytes, the
-   * whole budget when it is even and all but one byte when it is odd, and
-   * more callers can protect all of it. Then admissions larger than what is
-   * left are refused until protection is released or the pinned copies
+   * without a bound open tasks could hold the whole budget, refuse every
+   * other admission and leave the free-space restore nothing to evict. Two
+   * bounds apply: the bytes one caller protects may reach `floor(budget / 2)`,
+   * and the bytes every caller protects together may reach
+   * `floor(budget * 3 / 4)`, so at least a quarter of the budget always stays
+   * evictable. One caller at its bound leaves a quarter of the budget for the
+   * other callers' protected copies; filling the Host bound takes at least two
+   * callers. A refusal waits until protection is released or the pinned copies
    * expire. Expiry is absolute, so one pinned copy cannot outlive its
    * retention window, but re-pinning fresh copies (new downloads or reuse of
-   * unexpired ones) can keep that state beyond one TTL. Only this caller's
-   * own usage decides; the refusal is the fixed code.
+   * unexpired ones) can keep that state beyond one TTL. Both refusals are the
+   * fixed code; the metric scope says which bound refused.
    */
   private assertProtectedRoom(
     callerIdentity: string,
@@ -1803,11 +1910,13 @@ export class GfsDownloadStore {
   ): void {
     const ids = this.protectedIds(callerIdentity)
     if (addition.id !== undefined && ids.has(addition.id)) return
-    let bytes = BigInt(addition.sizeBytes)
-    for (const id of ids)
-      bytes += BigInt(this.active.get(id)?.sizeBytes ?? this.entries.get(id)?.sizeBytes ?? 0)
-    if (bytes > budget / 2n) {
+    const added = BigInt(addition.sizeBytes)
+    if (this.protectedBytes(ids) + added > budget / 2n) {
       recordGfsDownloadQuota('caller', 'protected_bytes')
+      throw new GfsDownloadStoreError('host_quota_exceeded')
+    }
+    if (this.protectedBytes(this.protectedIds()) + added > (budget * 3n) / 4n) {
+      recordGfsDownloadQuota('host', 'protected_bytes')
       throw new GfsDownloadStoreError('host_quota_exceeded')
     }
   }
@@ -1838,7 +1947,7 @@ export class GfsDownloadStore {
    * process published, then published copies least recently used first.
    * The same plan covers the free-space deficit: with the budget at a share
    * of the volume, the cache plus everything else on it can leave less free
-   * space than a request and its margin while the cache is under budget, and
+   * space than a request and the floor while the cache is under budget, and
    * the copies it holds are what can be freed. A copy is credited with its
    * size in whole blocks; the volume is measured again after the removals,
    * so a copy that freed less (a hard link, say) refuses then, not here.
@@ -1856,11 +1965,7 @@ export class GfsDownloadStore {
       budgetCovered: !this.overBudget(sizeBytes, budget, ids),
       physicalCovered: freed >= deficit,
     })
-    const now = Date.now()
-    const candidates = [...this.entries.values()]
-      .filter(entry => !this.isPinned(entry.id) || Date.parse(entry.expiresAt) <= now)
-      .sort(evictionOrder)
-    for (const candidate of candidates) {
+    for (const candidate of this.evictionCandidates(Date.now())) {
       const state = covered()
       if (state.budgetCovered && state.physicalCovered) break
       ids.add(candidate.id)
@@ -1869,12 +1974,89 @@ export class GfsDownloadStore {
     return { ids, ...covered() }
   }
 
+  /**
+   * Indexed copies eviction may take, in evictionOrder: every copy that is
+   * not pinned, or whose pin protects nothing because it expired by `now`.
+   * Reservations are never indexed, so no active transfer is a candidate.
+   */
+  private evictionCandidates(now: number): Entry[] {
+    return [...this.entries.values()]
+      .filter(entry => !this.isPinned(entry.id) || Date.parse(entry.expiresAt) <= now)
+      .sort(evictionOrder)
+  }
+
   /** Removes a planned eviction; each removed copy counts as expired_removed. */
   private async evict(ids: ReadonlySet<string>): Promise<void> {
     for (const id of ids) {
       const entry = this.entries.get(id)
       if (entry) await this.removeEntry(entry, 'expired_removed')
     }
+  }
+
+  /**
+   * The periodic and startup half of the free-space floor. Admission keeps
+   * the floor for its own request, but nothing else on the volume asks
+   * first: state.db, shell output and file writes can take the free space
+   * below the floor after the cache filled. When the volume is below the
+   * floor, unpinned copies are evicted in evictionOrder (adopted first, then
+   * published least recently used; an expired pinned copy counts as
+   * unpinned, as in planEviction) until the copies actually removed, each
+   * credited with its size in whole blocks, bring the free space to the
+   * floor plus FREE_SPACE_RESTORE_HEADROOM_PERCENT of the volume, or no
+   * candidate is left. The headroom keeps the next small write from putting
+   * the volume below the floor again right away. Unlike
+   * an admission, a partial restore is kept: any space freed helps every
+   * other writer on the volume. Each removal goes through removeEntry, so
+   * charges follow its rules: a copy whose removal failed stays indexed and
+   * charged, and one left under a trash name frees nothing and is not
+   * credited. An unmeasurable volume (statfs rejects, or two invalid
+   * readings) is logged and counted as sweep_failed, and the restore is
+   * skipped: the sweep that already ran keeps its result, and the next cycle
+   * measures again.
+   */
+  private async restoreFreeSpaceFloor(now: number): Promise<void> {
+    let volume: VolumeSpace | undefined
+    try {
+      volume = await this.readVolume()
+    } catch (error) {
+      this.reportFloorUnmeasured(errorCode(error))
+      return
+    }
+    if (volume === undefined) {
+      this.reportFloorUnmeasured('volume_unmeasurable')
+      return
+    }
+    const free = volume.bavail * volume.bsize
+    if (free >= freeSpaceFloor(volume)) return
+    const deficit = freeSpaceRestoreTarget(volume) - free
+    let freed = 0n
+    let evicted = 0
+    let removeFailed = 0
+    for (const candidate of this.evictionCandidates(now)) {
+      if (freed >= deficit) break
+      const result = await this.removeEntry(candidate, 'expired_removed')
+      if (result === 'removed') {
+        evicted += 1
+        freed += blockBytes(volume, candidate.sizeBytes)
+      } else if (result === 'failed' || result === 'trashed') removeFailed += 1
+    }
+    logger.warn(
+      {
+        component: GFS_DOWNLOAD_STORE_LOG_COMPONENT,
+        evicted,
+        removeFailed,
+        restored: freed >= deficit,
+      },
+      'GFS download store found the volume below its free-space floor and evicted unpinned copies'
+    )
+  }
+
+  private reportFloorUnmeasured(code: string): void {
+    recordGfsDownloadExpiry('sweep_failed')
+    logger.warn(
+      { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code },
+      'GFS download store could not measure the volume to restore its free-space floor; the next sweep retries it'
+    )
   }
 
   /**
@@ -1887,9 +2069,10 @@ export class GfsDownloadStore {
   private async removeEntry(
     entry: Entry,
     outcome: 'incomplete_removed' | 'expired_removed'
-  ): Promise<void> {
+  ): Promise<RemovalResult> {
     const result = await this.removeDirectory(entry.directory, outcome, entry.sizeBytes)
     if (result !== 'failed') this.forget(entry.id)
+    return result
   }
 
   /**
@@ -1963,6 +2146,15 @@ export class GfsDownloadStore {
    * so whatever the swapped path led to keeps its name and content. A
    * failure after the rename throws TrashLeftError naming the trash path,
    * because the bytes are then on disk under that name.
+   *
+   * A shell running with the Host UID can take the write bit off the parent
+   * (`chmod 0500 .gfs-downloads`); every rename out of it then fails with
+   * EACCES or EPERM and the entry would stay charged forever. Those two
+   * codes, on a parent that passed the check, restore the owner's rwx on that
+   * parent only (restoreDirectoryOwnerAccess: opened without following a
+   * symlink, other mode bits kept) and retry the rename once. Any other code,
+   * a parent that is no longer a real directory, or a second failure leaves
+   * the directory in place (KeptInPlaceError).
    */
   private async removeVerified(directory: string): Promise<'removed' | 'absent'> {
     await this.assertRemovable(directory)
@@ -1973,9 +2165,20 @@ export class GfsDownloadStore {
     try {
       await fs.rename(directory, trash)
     } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw new KeptInPlaceError(error)
-      await assertAbsent(directory)
-      return 'absent'
+      const code = errorCode(error)
+      if (code === 'ENOENT') {
+        await assertAbsent(directory)
+        return 'absent'
+      }
+      if (code !== 'EACCES' && code !== 'EPERM') throw new KeptInPlaceError(error)
+      try {
+        if (!(await restoreDirectoryOwnerAccess(path.dirname(directory))))
+          throw new KeptInPlaceError(error)
+        await fs.rename(directory, trash)
+      } catch (retryError) {
+        if (retryError instanceof KeptInPlaceError) throw retryError
+        throw new KeptInPlaceError(retryError)
+      }
     }
     try {
       await this.assertRemovable(trash)

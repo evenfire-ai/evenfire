@@ -18,6 +18,7 @@ import {
   downloadDirectory,
   exists,
   expiryCount,
+  freeSpaceSizedStatfs,
   metaFor,
   plantDownload,
   quotaCount,
@@ -29,22 +30,27 @@ import { logger } from '../logger'
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
 import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 
-const { statfsBoundary, renameBoundary, openBoundary, realpathBoundary } = vi.hoisted(() => ({
-  statfsBoundary: vi.fn(),
-  renameBoundary: vi.fn(),
-  openBoundary: vi.fn(),
-  realpathBoundary: vi.fn(),
-}))
+const { statfsBoundary, renameBoundary, openBoundary, realpathBoundary, rmBoundary } = vi.hoisted(
+  () => ({
+    statfsBoundary: vi.fn(),
+    renameBoundary: vi.fn(),
+    openBoundary: vi.fn(),
+    realpathBoundary: vi.fn(),
+    rmBoundary: vi.fn(),
+  })
+)
 // Pass-through boundaries, overridden only to simulate statfs results and
 // failures or to act between the two renames of a publication; open is only
 // observed, to prove which files a lookup touched; realpath is where a path
-// swap is injected right after the store's check returns.
+// swap is injected right after the store's check returns; rm fails to leave
+// bytes held under a trash name.
 vi.mock('node:fs/promises', async original => ({
   ...(await original<typeof fs>()),
   statfs: statfsBoundary,
   rename: renameBoundary,
   open: openBoundary,
   realpath: realpathBoundary,
+  rm: rmBoundary,
 }))
 
 const A = 'caller-a'
@@ -109,6 +115,37 @@ function volumeOf(totalBytes: number): void {
   })
 }
 
+/**
+ * Leaves `sizes` charged under trash names in `caller`'s store directory: the
+ * copies expire and their removal fails. Eviction cannot reclaim a held
+ * charge, and protected bytes are capped at half the budget per caller and three
+ * quarters Host-wide, so held charges are how a test fills the budget with bytes
+ * no eviction can free.
+ * The rm fault stays installed for the rest of the test.
+ */
+async function heldTrash(
+  target: GfsDownloadStore,
+  caller: string,
+  firstIndex: number,
+  sizes: number[]
+): Promise<void> {
+  const root = callerDirectory(hostRoot, caller)
+  for (const [offset, size] of sizes.entries())
+    await completedCopy(target, root, caller, firstIndex + offset, size)
+  vi.setSystemTime(Date.now() + 3 * HOUR)
+  rmBoundary.mockImplementation(async (removed: string, options: unknown) => {
+    const parent = path.dirname(removed)
+    if (
+      path.basename(parent) === '.gfs-downloads' &&
+      path.basename(path.dirname(parent)) === caller &&
+      path.basename(removed).startsWith('.trash-')
+    )
+      throw Object.assign(new Error('injected EIO'), { code: 'EIO' })
+    return nativeFs.rm(removed, options as Parameters<typeof nativeFs.rm>[1])
+  })
+  expect((await target.cleanupExpired()).removeFailed).toBe(sizes.length)
+}
+
 /** meta.json padded with an ignored field to exactly `bytes` bytes. */
 function paddedMeta(id: string, bytes: Buffer, size: number): string {
   const base = JSON.stringify({ ...metaFor(id, bytes, Date.now()), padding: '' })
@@ -124,9 +161,16 @@ beforeEach(async () => {
   nativeFs = await vi.importActual<typeof fs>('node:fs/promises')
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(new Date('2026-10-08T10:00:00.000Z'))
-  for (const boundary of [statfsBoundary, renameBoundary, openBoundary, realpathBoundary])
+  for (const boundary of [
+    statfsBoundary,
+    renameBoundary,
+    openBoundary,
+    realpathBoundary,
+    rmBoundary,
+  ])
     boundary.mockReset()
-  statfsBoundary.mockImplementation(nativeFs.statfs)
+  rmBoundary.mockImplementation(nativeFs.rm)
+  statfsBoundary.mockImplementation(freeSpaceSizedStatfs(nativeFs.statfs))
   renameBoundary.mockImplementation(nativeFs.rename)
   openBoundary.mockImplementation(nativeFs.open)
   realpathBoundary.mockImplementation(nativeFs.realpath)
@@ -306,14 +350,16 @@ describe('GFS download store boundaries: meta.json validation', () => {
 
 describe('GFS download store boundaries: quota and capacity', () => {
   it('Q1: retained bytes exactly at the volume budget are admitted and one byte more is refused', async () => {
-    // Budget 20; a caller protects at most 10, so A and B each pin half and
-    // the refused byte comes from C, which protects nothing yet.
+    // Budget 20; protected bytes are capped at 10. caller-e holds 11 bytes
+    // under trash names, A and B pin 4 and 5, and the refused byte from C
+    // stays within the protected cap, so only the budget can refuse it.
     volumeOf(20)
     const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
-    await completedCopy(limited, rootA, A, 310, 10, { owner: 'task-q1' })
+    await heldTrash(limited, 'caller-e', 313, [6, 5])
+    await completedCopy(limited, rootA, A, 310, 4, { owner: 'task-q1' })
     const denied = await quotaCount('host', 'storage_bytes')
 
-    const atBudget = await completedCopy(limited, rootB, B, 311, 10, { owner: 'task-q1' })
+    const atBudget = await completedCopy(limited, rootB, B, 311, 5, { owner: 'task-q1' })
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
     await expect(limited.readManagedFile(atBudget.receipt.path, B)).resolves.toEqual(atBudget.bytes)
 
@@ -326,24 +372,20 @@ describe('GFS download store boundaries: quota and capacity', () => {
 
   it('Q2: there is no retained-file limit: one caller keeps 65 copies and only bytes refuse', async () => {
     // 65 one-byte copies: more than the removed 8-per-caller and 64-per-Host limits.
-    // A caller protects at most half the budget, so the budget is 132: A pins
-    // 65 bytes and its 66th byte stays within its 66, while B pins 60 (six
-    // 10-byte copies, the file limit) and C pins the remaining 7.
+    // A caller's protected bytes are capped at half the budget, so the budget is 132: A
+    // pins 65 bytes and its 66th byte stays within the 66, while B holds 67
+    // bytes (six 10-byte copies, the file limit, and 7) under trash names.
     const files = 65
     volumeOf(132)
     const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
+    await heldTrash(limited, B, 500, [10, 10, 10, 10, 10, 10, 7])
     const denied = await quotaCount('host', 'storage_bytes')
     for (let index = 0; index < files; index += 1)
       await completedCopy(limited, rootA, A, 400 + index, 1, { owner: 'task-q2' })
-    for (let index = 0; index < 6; index += 1)
-      await completedCopy(limited, rootB, B, 500 + index, 10, { owner: 'task-q2' })
-    const rootC = callerDirectory(hostRoot, 'caller-c')
-    await completedCopy(limited, rootC, 'caller-c', 506, 7, { owner: 'task-q2' })
     expect((await limited.debugInventory()).byCaller.get(A)).toEqual({ files, bytes: files })
-    expect((await limited.debugInventory()).bytes).toBe(132)
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
 
-    // Every copy is pinned, so the byte budget is the only thing that can refuse.
+    // Every copy is pinned or held, so the byte budget is the only thing that can refuse.
     await expect(startTransfer(limited, rootA, A, 400 + files, 1)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
     })
@@ -353,16 +395,18 @@ describe('GFS download store boundaries: quota and capacity', () => {
   }, 60_000)
 
   it('Q3: Host bytes exactly at the budget are admitted and one byte more is refused', async () => {
+    // Budget 30; protected bytes are capped at 15. caller-e holds 16 bytes
+    // under trash names and B, C and A pin 14 between them.
     volumeOf(30)
     const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
+    await heldTrash(limited, 'caller-e', 320, [8, 8])
     const rootC = callerDirectory(hostRoot, 'caller-c')
-    await completedCopy(limited, rootB, B, 316, 10, { owner: 'task-b' })
-    await completedCopy(limited, rootC, 'caller-c', 317, 10, { owner: 'task-c' })
+    await completedCopy(limited, rootB, B, 316, 5, { owner: 'task-b' })
+    await completedCopy(limited, rootC, 'caller-c', 317, 4, { owner: 'task-c' })
     const denied = await quotaCount('host', 'storage_bytes')
 
-    await completedCopy(limited, rootA, A, 318, 10, { owner: 'task-a' })
+    await completedCopy(limited, rootA, A, 318, 5, { owner: 'task-a' })
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
-    expect((await limited.debugInventory()).bytes).toBe(30)
 
     const rootD = callerDirectory(hostRoot, 'caller-d')
     await expect(startTransfer(limited, rootD, 'caller-d', 319, 1)).rejects.toMatchObject({
@@ -374,8 +418,11 @@ describe('GFS download store boundaries: quota and capacity', () => {
   it('Q5: free space exactly at the threshold is admitted and one byte less is refused', async () => {
     const observed = await nativeFs.statfs(hostRoot, { bigint: true })
     const size = 100
-    const threshold = BigInt(size) + 16n * 1024n * 1024n
-    statfsBoundary.mockResolvedValue({ ...observed, bsize: 1n, bavail: threshold - 1n })
+    // A 1 GiB volume (block size 1): the free-space floor is
+    // floor(2^30 * 15 / 100) = 161061273 bytes, above its 16 MiB minimum.
+    const blocks = 2n ** 30n
+    const threshold = BigInt(size) + 161_061_273n
+    statfsBoundary.mockResolvedValue({ ...observed, bsize: 1n, blocks, bavail: threshold - 1n })
     const denied = await quotaCount('host', 'free_space')
 
     await expect(startTransfer(store, rootA, A, 320, size)).rejects.toMatchObject({
@@ -383,16 +430,18 @@ describe('GFS download store boundaries: quota and capacity', () => {
     })
     expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
 
-    statfsBoundary.mockResolvedValue({ ...observed, bsize: 1n, bavail: threshold })
+    statfsBoundary.mockResolvedValue({ ...observed, bsize: 1n, blocks, bavail: threshold })
     await expect(startTransfer(store, rootA, A, 320, size)).resolves.toBeDefined()
     expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
   })
 
   it('Q6: a statfs failure refuses that admission loudly and the next one succeeds', async () => {
     statfsBoundary.mockRejectedValueOnce(Object.assign(new Error('injected EIO'), { code: 'EIO' }))
+    // Startup already measured the volume once to restore the free-space floor.
+    const measured = statfsBoundary.mock.calls.length
 
     await expect(startTransfer(store, rootA, A, 321, 4)).rejects.toMatchObject({ code: 'EIO' })
-    expect(statfsBoundary).toHaveBeenCalledTimes(1)
+    expect(statfsBoundary).toHaveBeenCalledTimes(measured + 1)
 
     // The caller's single concurrency slot was not kept by the failed admission.
     const next = await completedCopy(store, rootA, A, 321, 4)
@@ -467,47 +516,65 @@ describe('GFS download store boundaries: quota and capacity', () => {
     expect(exists(downloadDirectory(rootA, older.receipt.id))).toBe(true)
   })
 
-  it('Q12: when every copy is pinned admission fails with the quota code and succeeds after release', async () => {
-    // Budget 15; a caller protects at most 7. B and C each pin 7, and A's 7
-    // would bring the Host to 21: only the host budget can refuse it.
+  it('Q12: when pins fill the Host protected cap admission fails with the quota code and succeeds after release', async () => {
+    // Budget 15; protected bytes are capped at 7 per caller and 11 Host-wide.
+    // Two loose copies and the pins of B (6) and C (5) fill the budget, and
+    // A's 1 byte would bring the protected bytes to 12: the Host-wide cap
+    // refuses it before any eviction. The loose copies come first: an open
+    // reservation counts as protected too.
     volumeOf(15)
     const limited = await limitedStore(SMALL_FILES_FULL_VOLUME)
-    const pinned = await completedCopy(limited, rootB, B, 334, 7, { owner: 'task-q12' })
+    const rootD = callerDirectory(hostRoot, 'caller-d')
+    const loose = await completedCopy(limited, rootD, 'caller-d', 337, 2)
+    tick()
+    const looseNewer = await completedCopy(limited, rootD, 'caller-d', 338, 2)
+    tick()
+    const pinned = await completedCopy(limited, rootB, B, 334, 6, { owner: 'task-q12' })
+    tick()
     const rootC = callerDirectory(hostRoot, 'caller-c')
-    await completedCopy(limited, rootC, 'caller-c', 336, 7, { owner: 'task-q12' })
+    await completedCopy(limited, rootC, 'caller-c', 336, 5, { owner: 'task-q12' })
     const directory = downloadDirectory(rootB, pinned.receipt.id)
-    const denied = await quotaCount('host', 'storage_bytes')
+    const denied = await quotaCount('host', 'protected_bytes')
 
-    await expect(startTransfer(limited, rootA, A, 335, 7)).rejects.toMatchObject({
+    await expect(startTransfer(limited, rootA, A, 335, 1)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
     })
-    expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
-    expect(exists(directory)).toBe(true)
+    expect(await quotaCount('host', 'protected_bytes')).toBe(denied + 1)
+    // Nothing was evicted for the refused admission.
+    expect(exists(downloadDirectory(rootD, loose.receipt.id))).toBe(true)
+    expect(exists(downloadDirectory(rootD, looseNewer.receipt.id))).toBe(true)
 
     await limited.releaseReceiptOwner('task-q12', B)
-    await expect(startTransfer(limited, rootA, A, 335, 7)).resolves.toBeDefined()
-    expect(exists(directory)).toBe(false)
-    expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
+    await expect(startTransfer(limited, rootA, A, 335, 1)).resolves.toBeDefined()
+    // Witness: the admitted byte needed one eviction, and it took the oldest
+    // loose copy.
+    expect(exists(downloadDirectory(rootD, loose.receipt.id))).toBe(false)
+    expect(exists(downloadDirectory(rootD, looseNewer.receipt.id))).toBe(true)
+    expect(exists(directory)).toBe(true)
+    expect(await quotaCount('host', 'protected_bytes')).toBe(denied + 1)
   })
 })
 
 describe('GFS download store boundaries: expiry', () => {
   async function expiringCopy(index: number) {
-    const expiresAtMs = Date.now() + HOUR
+    const expiresAtMs = Date.now() + 2 * HOUR
     const copy = await completedCopy(store, rootA, A, index, 8, { expiresAt: at(expiresAtMs) })
     return { ...copy, expiresAtMs, directory: downloadDirectory(rootA, copy.receipt.id) }
   }
 
-  it('E1: reuse matches until one millisecond before expiry', async () => {
+  it('E1: reuse matches until one millisecond before the copy has one hour left', async () => {
     const copy = await expiringCopy(340)
-    vi.setSystemTime(copy.expiresAtMs - 1)
+    vi.setSystemTime(copy.expiresAtMs - HOUR - 1)
     await expect(store.reusableReceipt(A, sourceFor(340), 8)).resolves.toMatchObject({
       id: copy.receipt.id,
     })
-    vi.setSystemTime(copy.expiresAtMs)
-    await expect(store.reusableReceipt(A, sourceFor(340), 8)).resolves.toBeUndefined()
-    vi.setSystemTime(copy.expiresAtMs + 1)
-    await expect(store.reusableReceipt(A, sourceFor(340), 8)).resolves.toBeUndefined()
+    for (const instant of [copy.expiresAtMs - HOUR, copy.expiresAtMs - 1, copy.expiresAtMs]) {
+      vi.setSystemTime(instant)
+      await expect(store.reusableReceipt(A, sourceFor(340), 8)).resolves.toBeUndefined()
+    }
+    // Witness: a miss inside the last hour leaves the copy readable until it expires.
+    vi.setSystemTime(copy.expiresAtMs - 1)
+    await expect(store.readManagedFile(copy.receipt.path, A)).resolves.toEqual(copy.bytes)
   })
 
   it('E2: a managed read succeeds until one millisecond before expiry', async () => {
@@ -828,6 +895,36 @@ describe('GFS download store boundaries: caller isolation', () => {
       const owned = await reads[api](store, receipt.path, A)
       expect(owned).toEqual(api === 'readManagedFile' ? bytes : bytes.subarray(0, 4))
       expect(opensUnder(receipt.id)).toBeGreaterThan(0)
+    }
+  )
+
+  it.each(Object.keys(reads) as Array<keyof typeof reads>)(
+    'U1b: %s refuses an adopted copy recorded for the same caller from the index, before touching its directory',
+    async api => {
+      // Planted with this caller's identity, so only the provenance check in
+      // the index lookup can refuse it before the disk is reached.
+      const planted = plantComplete(rootA, A, 72, Buffer.alloc(8, 7))
+      await store.cleanupExpired()
+      const published = await completedCopy(store, rootA, A, 73, 8)
+      openBoundary.mockClear()
+      realpathBoundary.mockClear()
+
+      await expect(reads[api](store, receiptPathOf(planted.id), A)).rejects.toMatchObject({
+        code: 'download_missing',
+      })
+
+      expect(opensUnder(planted.id)).toBe(0)
+      expect(realpathBoundary).not.toHaveBeenCalled()
+      // Witness: the planted copy is indexed as adopted for this caller, and
+      // the published copy read through the same API opens its source.
+      const index = (store as unknown as { entries: Map<string, Record<string, unknown>> }).entries
+      expect(index.get(planted.id)).toMatchObject({ provenance: 'adopted', callerIdentity: A })
+      const owned = await reads[api](store, published.receipt.path, A)
+      expect(owned).toEqual(
+        api === 'readManagedFile' ? published.bytes : published.bytes.subarray(0, 4)
+      )
+      expect(opensUnder(published.receipt.id)).toBeGreaterThan(0)
+      expect(realpathBoundary).toHaveBeenCalled()
     }
   )
 

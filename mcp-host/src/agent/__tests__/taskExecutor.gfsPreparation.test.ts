@@ -24,6 +24,14 @@ import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../t
 /** The store keys the caller like its root: the channel-namespaced key, never the raw sender. */
 const UNIT_CALLER_STORE_KEY = deriveUserKey('unit-caller', 'rpc')
 
+// statfs reports the volume sized to its free space, so the disk's occupancy
+// never meets the store's free-space floor.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  const { freeSpaceSizedStatfs } = await import('../../__tests__/fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
+})
+
 const { clientFactory } = vi.hoisted(() => ({ clientFactory: vi.fn() }))
 // Only GFSC's external HTTP/token-file boundary is doubled. The real client,
 // store, registry, approval gate, TaskExecutor and shell all execute.

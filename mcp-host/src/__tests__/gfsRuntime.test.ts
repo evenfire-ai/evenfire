@@ -8,6 +8,14 @@ import { type GfsRuntime, bootstrapGfsRuntime } from '../gfsRuntime'
 import { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import { logger } from '../logger'
 
+// statfs is the only boundary replaced: the volume sized to its free space,
+// so the disk's occupancy never meets the store's free-space floor.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  const { freeSpaceSizedStatfs } = await import('./fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
+})
+
 const roots: string[] = []
 const runtimes: GfsRuntime[] = []
 
@@ -80,7 +88,7 @@ describe('GFS runtime bootstrap', () => {
     expect(runtime.store.isAvailable()).toBe(false)
     expect(error).toHaveBeenCalledWith(
       { component: 'gfs-runtime', code: 'workspace_unavailable' },
-      expect.stringContaining('retried by the hourly cycle')
+      expect.stringContaining('retried by the next cycle')
     )
     // The cause goes away: the symlink becomes a real directory.
     await fs.rm(link)
@@ -201,6 +209,45 @@ describe('GFS runtime bootstrap', () => {
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       })
     ).rejects.toMatchObject({ code: 'download_busy' })
+  })
+
+  it('the default cycle runs cleanup every five minutes', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const cleanup = vi.spyOn(GfsDownloadStore.prototype, 'cleanupExpired')
+    const runtime = await start(await root())
+    expect(runtime.store.isAvailable()).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1)
+    expect(cleanup).not.toHaveBeenCalled()
+    // Witness: the cycle reaches cleanup at five minutes, and again five minutes later.
+    await vi.advanceTimersByTimeAsync(1)
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(1))
+    // The next cycle is scheduled only after this one settles.
+    await cleanup.mock.results[0]!.value
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(2))
+  })
+
+  it('stop resolves when the cycle in flight never settles: it waits stopTimeoutMs, warns and closes the store', async () => {
+    const runtime = await bootstrapGfsRuntime(await root(), { cycleMs: 25, stopTimeoutMs: 50 })
+    runtimes.push(runtime)
+    const sweepStarted = deferred()
+    vi.spyOn(GfsDownloadStore.prototype, 'cleanupExpired').mockImplementationOnce(() => {
+      sweepStarted.resolve()
+      return new Promise(() => undefined)
+    })
+    await sweepStarted.promise
+    const close = vi.spyOn(runtime.store, 'close')
+    const warn = vi.spyOn(logger, 'warn')
+
+    await runtime.stop()
+
+    expect(warn).toHaveBeenCalledWith(
+      { component: 'gfs-runtime', timeoutMs: 50 },
+      'GFS runtime stop timed out waiting for the cycle in flight; the store is closed anyway'
+    )
+    expect(close).toHaveBeenCalledWith(50)
+    expect(runtime.store.isAvailable()).toBe(false)
   })
 
   it('stop during a slow cycle initialize leaves the store unavailable', async () => {

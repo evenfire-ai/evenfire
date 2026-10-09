@@ -109,6 +109,24 @@ export function plantDownload(
   return { id, directory, sourcePath }
 }
 
+type BigintStatfs = (target: string, options: { bigint: true }) => Promise<fs.BigIntStatsFs>
+
+/**
+ * statfs as the test volume reports it, with the volume sized to its free
+ * space (`blocks = bfree = bavail`). The store keeps a free-space floor of
+ * 15% of the volume, so on a development or CI disk that is more than 85%
+ * full the real size would refuse every admission as disk_full; sized to its
+ * free space, the volume's other data no longer counts, and what the tests
+ * write is still taken from real free space. A test whose subject is the
+ * size of the volume replaces this with its own reading.
+ */
+export function freeSpaceSizedStatfs(real: BigintStatfs): BigintStatfs {
+  return async (target, options) => {
+    const reading = await real(target, options)
+    return { ...reading, blocks: reading.bavail, bfree: reading.bavail }
+  }
+}
+
 export async function metricValue(name: string, labels: Record<string, string>): Promise<number> {
   const metric = register.getSingleMetric(name)
   if (metric === undefined) throw new Error(`metric ${name} is not registered`)
@@ -146,7 +164,11 @@ export interface TransferringStore {
   ): Promise<{ id: string; path: string; sha256: string; expiresAt: string }>
 }
 
-/** Admits a transfer and writes its partial file; `fill` sets every byte. */
+/**
+ * Admits a transfer and writes its partial file; `fill` sets every byte. The
+ * default expiry is two hours, more than the one hour a copy must have left to
+ * be reused.
+ */
 export async function startTransfer(
   store: TransferringStore,
   root: string,
@@ -161,7 +183,7 @@ export async function startTransfer(
     callerWorkspacePath: root,
     source: sourceFor(index, options.version ?? 1),
     sizeBytes,
-    expiresAt: options.expiresAt ?? new Date(Date.now() + 60 * 60_000).toISOString(),
+    expiresAt: options.expiresAt ?? new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
     ...(options.owner === undefined ? {} : { retentionOwnerId: options.owner }),
   })
   fs.writeFileSync(path.join(root, transfer.partialPath), bytes)

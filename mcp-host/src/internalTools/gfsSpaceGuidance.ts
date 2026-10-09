@@ -16,8 +16,9 @@ export const GFS_DISK_FULL_GUIDANCE =
 // Deleting downloaded copies by hand cannot admit the download. The budget
 // refusal comes when evicting every copy no running task protects would still
 // not make room, or when a planned eviction fails to remove a copy, which
-// stays charged until a sweep removes it. The per-caller cap, checked before
-// any eviction, counts only copies the caller's running tasks protect. Only
+// stays charged until a sweep removes it. The per-caller and Host-wide
+// protected caps, checked before any eviction, count only copies that running
+// tasks protect. Only
 // tasks finishing (or being cancelled), copies expiring and sweeps free that
 // space.
 export const GFS_CACHE_FULL_GUIDANCE =

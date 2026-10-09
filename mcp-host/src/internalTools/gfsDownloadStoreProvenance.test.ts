@@ -39,14 +39,18 @@ vi.mock('node:crypto', async original => ({
   createHash: hashBoundary,
 }))
 // statfs reports the real free space; a test that sets `volume.totalBytes`
-// sizes the volume (block size 1), and with it the retained budget.
+// sizes the volume (block size 1), and with it the retained budget. Otherwise
+// the volume is sized to its free space (freeSpaceSizedStatfs).
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof fs>()
   return {
     ...actual,
     statfs: async (target: string, options: { bigint: true }) => {
+      if (volume.totalBytes === undefined) {
+        const { freeSpaceSizedStatfs } = await import('../__tests__/fixtures/gfsStoreTestKit')
+        return freeSpaceSizedStatfs(actual.statfs)(target, options)
+      }
       const real = await actual.statfs(target, options)
-      if (volume.totalBytes === undefined) return real
       return { ...real, bsize: 1n, blocks: volume.totalBytes, bavail: real.bavail * real.bsize }
     },
   }
@@ -196,7 +200,9 @@ describe('GFS download store provenance: planted copies', () => {
   it('T-S4: a planted entry is inventoried under the directory that contains it and evicted first', async () => {
     const bytes = Buffer.alloc(10, 0x43)
     const planted = plantComplete(rootB, C, 9, bytes)
-    volume.totalBytes = 20n
+    // Budget 18; the active reservations stay within the 9 protected bytes
+    // the Host allows.
+    volume.totalBytes = 18n
     const limited = await withEnvironment(
       {
         MCP_HOST_GFS_MAX_FILE_BYTES: '10',
@@ -216,13 +222,13 @@ describe('GFS download store provenance: planted copies', () => {
     expect(inventory.byCaller.has(C)).toBe(false)
     const denied = await quotaCount('host', 'storage_bytes')
 
-    // 10 planted + 10 requested fit the budget of 20, so nothing is evicted.
+    // 10 planted + 4 requested fit the budget of 18, so nothing is evicted.
     const rootC = callerDirectory(hostRoot, C)
-    await startTransfer(limited, rootC, C, 10, 10)
+    await startTransfer(limited, rootC, C, 10, 4)
     expect(exists(planted.directory)).toBe(true)
 
-    // 10 + 10 + 10 does not: the plant goes, the active reservation stays.
-    await startTransfer(limited, rootB, B, 11, 10)
+    // 10 + 4 + 5 does not: the plant goes, the active reservation stays.
+    await startTransfer(limited, rootB, B, 11, 5)
     expect(exists(planted.directory)).toBe(false)
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied)
   })

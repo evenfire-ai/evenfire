@@ -5,7 +5,9 @@
  * E2E contract (e2e-test-guardian):
  *  - Real user journey: login → Files → visible upload of an exact 3,836,961-byte
  *    CSV → exact managed agent chat → governed download → user-visible
- *    attended shell approvals → completed tool stepper and bounded response.
+ *    attended shell approval (one card per task; later shell_exec calls in the
+ *    same task run without a new card) → completed tool stepper and bounded
+ *    response.
  *  - Business signals: the download step reports a workspace file; execution
  *    completes after attended review; the final response reports the independent
  *    data-record count and complete header. The synthetic file also proves its
@@ -154,17 +156,21 @@ async function sendTaskAndWaitForReviewedShell(
   await expect(commandPreview).toContainText(receiptPath!)
   await expect(completedToolStepRow(page, 'shell_exec')).toHaveCount(0)
   // The agent creates its own program from the normal business request. A
-  // reviewer inspects each complete visible command and approves individually
-  // in the UI; keyword matching cannot authorize arbitrary generated code.
+  // reviewer inspects the complete command shown on the task's single shell
+  // approval card and approves it in the UI; that approval covers later
+  // shell_exec calls for the rest of the task, so later commands are not
+  // reviewed card by card. Keyword matching cannot authorize arbitrary
+  // generated code.
   await test.info().attach('attended-shell-review-required', {
     contentType: 'text/plain',
-    body: 'Review each complete command and referenced script, verify read-only access to this receipt and bounded summary output, then approve each request individually in the owned Desktop window.',
+    body: "Review the complete command and referenced script shown on the task's shell approval card, verify read-only access to this receipt and bounded summary output, then approve it in the owned Desktop window. That approval covers later shell commands for the rest of this task only; the next user message asks again.",
   })
   // Local control becomes actionable only after this test verifies the initial
   // receipt and unexecuted shell. Every decision still clicks the visible UI.
   reviewer?.activate()
-  // Wait on the stable turn while the attending reviewer handles every
-  // request through the one-use local transport and visible approval button.
+  // Wait on the stable turn while the attending reviewer decides the task's
+  // shell approval card through the one-use local transport and visible
+  // approval button; later shell_exec calls in this task need no new card.
   // Merely recognizing a program's keywords cannot grant execution consent.
   await expect(stepper).toHaveClass(/\bstatus-completed\b/, {
     timeout: RESPONSE_TIMEOUT_MS,

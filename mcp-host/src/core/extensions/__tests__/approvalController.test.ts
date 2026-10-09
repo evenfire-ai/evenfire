@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DefaultLoopController, buildLoopConfig } from '../../orchestration/loopConfig'
 import { ConversationState } from '../../types'
 import type { Conversation, PendingApproval } from '../../types'
-import { ApprovalController } from '../approvalController'
+import { ApprovalController, SESSION_SCOPED_APPROVAL_TOOLS } from '../approvalController'
 
 function makeConversation(overrides?: Partial<Conversation>): Conversation {
   return {
@@ -277,7 +277,7 @@ describe('ApprovalController', () => {
     expect(result2).toBe('proceed') // DefaultLoopController returns "proceed"
   })
 
-  it("should bypass ALL tools when wildcard '*' is in auto_approved_tools", () => {
+  it("should bypass every tool outside the session-scoped set when wildcard '*' is in auto_approved_tools", () => {
     const conv = makeConversation({
       auto_approved_tools: new Set(['*']),
     })
@@ -305,14 +305,61 @@ describe('ApprovalController', () => {
 
     const controller = new ApprovalController(conv, customDelegate)
 
-    // Wildcard should bypass delegate for any tool
-    expect(controller.beforeTool('shell_exec', { command: 'rm -rf /' })).toBe('proceed')
+    // Wildcard bypasses the delegate for MCP tools and other gated natives
     expect(controller.beforeTool('mongodb-server__drop_database', {})).toBe('proceed')
-    expect(controller.beforeTool('http_request', { url: 'https://evil.com' })).toBe('proceed')
+    expect(controller.beforeTool('workflow_trigger', { recipe: 'report' })).toBe('proceed')
     expect(controller.beforeTool('airtable-server__delete_all', {})).toBe('proceed')
 
-    // Delegate should NEVER have been called — wildcard bypasses everything
+    // Delegate should NEVER have been called for those tools
     expect(customDelegate.beforeTool).not.toHaveBeenCalled()
+  })
+
+  it("does not let wildcard '*' cover shell_exec, http_request or cron_manage", () => {
+    const conv = makeConversation({
+      auto_approved_tools: new Set(['*']),
+    })
+    const suspendFor = (toolName: string) => ({
+      type: 'suspend' as const,
+      approval: {
+        request_id: `req-${toolName}`,
+        tool_name: toolName,
+        parameters: {},
+        description: toolName,
+        tool_call_id: `tc-${toolName}`,
+        context_snapshot: [],
+      },
+    })
+    const customDelegate = {
+      ...new DefaultLoopController(),
+      beforeTool: vi.fn((toolName: string) => suspendFor(toolName)),
+      shouldAccept: delegate.shouldAccept.bind(delegate),
+      onTextRejected: delegate.onTextRejected.bind(delegate),
+      onExhaustion: delegate.onExhaustion.bind(delegate),
+      refreshTools: delegate.refreshTools.bind(delegate),
+    }
+    const controller = new ApprovalController(conv, customDelegate)
+
+    // Witness: the wildcard is live and covers an MCP tool of the same turn.
+    expect(controller.beforeTool('mongodb-server__find', {})).toBe('proceed')
+    expect(customDelegate.beforeTool).not.toHaveBeenCalled()
+
+    for (const toolName of SESSION_SCOPED_APPROVAL_TOOLS) {
+      expect(controller.beforeTool(toolName, {})).toEqual(suspendFor(toolName))
+    }
+    expect(customDelegate.beforeTool.mock.calls.map(call => call[0])).toEqual([
+      'shell_exec',
+      'http_request',
+      'cron_manage',
+    ])
+
+    // Each session-scoped tool proceeds once its own name is approved, either
+    // for later tasks ("always") or for the current task.
+    conv.auto_approved_tools.add('shell_exec')
+    conv.task_approved_tools = new Set(['cron_manage'])
+    expect(controller.beforeTool('shell_exec', {})).toBe('proceed')
+    expect(controller.beforeTool('cron_manage', {})).toBe('proceed')
+    expect(controller.beforeTool('http_request', {})).toEqual(suspendFor('http_request'))
+    expect(customDelegate.beforeTool).toHaveBeenCalledTimes(4)
   })
 
   it('should NOT bypass tools when wildcard is absent and individual tool is not approved', () => {

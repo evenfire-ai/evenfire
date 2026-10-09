@@ -47,7 +47,7 @@ const B = 'caller-b'
 const C = 'caller-c'
 const HOUR_MS = 60 * 60_000
 const MIB = 1024 * 1024
-/** The store's fixed free-space margin. */
+/** The free-space floor on the 1000-byte volumes below: its 16 MiB minimum. */
 const MARGIN = 16n * BigInt(MIB)
 
 let nativeFs: typeof fs
@@ -228,13 +228,17 @@ describe('GFS download store: expired copies never make the disk full (M1)', () 
 })
 
 describe('GFS download store: a copy left under a trash name stays charged (R5-F1)', () => {
-  it('SOL-R5-TRASH-CHARGE: expired pinned copies whose trash cannot be removed keep their charge until cleanup succeeds', async () => {
-    // 1% of a 1000 MiB volume: budget 10 MiB, caller cap 5 MiB; the free
-    // space always holds the 16 MiB margin, so only the budget can refuse.
+  it('SOL-R5-TRASH-CHARGE: an expired pinned copy and an unpinned one whose trash cannot be removed keep their charge until cleanup succeeds', async () => {
+    // 1% of a 1000 MiB volume: budget 10 MiB, protected caps 5 MiB per caller
+    // and 7.5 MiB Host-wide; the free
+    // space always holds the 150 MiB free-space floor, so only the budget
+    // can refuse. One copy is pinned, and the unpinned one comes first: a
+    // second 4 MiB pin, or its reservation beside the pin, would exceed the
+    // Host-wide protected cap.
     coherentVolume(1000n * BigInt(MIB), 1000n * BigInt(MIB))
     const store = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '1' })
+    const copyB = await completedCopy(store, rootB, B, 1, 4 * MIB)
     const copyA = await completedCopy(store, rootA, A, 0, 4 * MIB, { owner: 'task-a' })
-    const copyB = await completedCopy(store, rootB, B, 1, 4 * MIB, { owner: 'task-b' })
     vi.setSystemTime(Date.now() + 2 * HOUR_MS)
     const trashRemovals: string[] = []
     rmBoundary.mockImplementation((...args: unknown[]) => {
@@ -291,8 +295,11 @@ describe('GFS download store: a copy left under a trash name stays charged (R5-F
   it('OPUS-R6-RESTART: after a Host restart a trash directory whose removal keeps failing is sized and charged again', async () => {
     coherentVolume(1000n * BigInt(MIB), 1000n * BigInt(MIB))
     const store = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '1' })
+    // One copy is pinned, and the unpinned one comes first: a second 4 MiB
+    // pin, or its reservation beside the pin, would exceed the Host-wide
+    // protected cap of 7.5 MiB.
+    await completedCopy(store, rootB, B, 1, 4 * MIB)
     await completedCopy(store, rootA, A, 0, 4 * MIB, { owner: 'task-a' })
-    await completedCopy(store, rootB, B, 1, 4 * MIB, { owner: 'task-b' })
     vi.setSystemTime(Date.now() + 2 * HOUR_MS)
     const trashRemovals: string[] = []
     rmBoundary.mockImplementation((...args: unknown[]) => {
@@ -334,8 +341,6 @@ describe('GFS download store: a copy left under a trash name stays charged (R5-F
   it('DS-R6-FAIL-PARTIAL: a failed transfer whose trash cannot be removed stays charged with the bytes it wrote', async () => {
     coherentVolume(1000n * BigInt(MIB), 1000n * BigInt(MIB))
     const store = await limitedStore({ MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT: '1' })
-    const first = await startTransfer(store, rootA, A, 0, 4 * MIB)
-    const second = await startTransfer(store, rootB, B, 1, 4 * MIB)
     const trashRemovals: string[] = []
     rmBoundary.mockImplementation((...args: unknown[]) => {
       if (path.basename(String(args[0])).startsWith('.trash-')) {
@@ -346,14 +351,19 @@ describe('GFS download store: a copy left under a trash name stays charged (R5-F
     })
 
     // Neither transfer was published, so the store holds no indexed size for
-    // either; both partials are left on disk under trash names.
+    // either; both partials are left on disk under trash names. One transfer
+    // at a time: two 4 MiB reservations at once would exceed the Host-wide
+    // protected cap of 7.5 MiB.
+    const first = await startTransfer(store, rootA, A, 0, 4 * MIB)
     await expect(store.fail(first.transfer.id, A)).rejects.toMatchObject({
       code: 'storage_write_failed',
     })
+    // The second admission's sweep retries the first trash once.
+    const second = await startTransfer(store, rootB, B, 1, 4 * MIB)
     await expect(store.fail(second.transfer.id, B)).rejects.toMatchObject({
       code: 'storage_write_failed',
     })
-    expect(trashRemovals).toHaveLength(2)
+    expect(trashRemovals).toHaveLength(3)
     expect(trashIn(rootA)).toHaveLength(1)
     expect(trashIn(rootB)).toHaveLength(1)
     expect(storedSourceBytes(hostRoot)).toBe(8 * MIB)
@@ -376,30 +386,63 @@ describe('GFS download store: a copy left under a trash name stays charged (R5-F
 })
 
 describe('GFS download store: reuse that crosses expiry while hashing (R5-F2)', () => {
-  it('SOL-R5-REUSE-CROSS-EXPIRY: a copy that expires while it is hashed is a cache miss and gets no pin', async () => {
+  it('REUSE-MARGIN: a copy with 59 minutes left is a cache miss and gets no pin, while a copy with 61 minutes left is reused and pinned', async () => {
+    coherentVolume(1000n, MARGIN + 1000n)
+    const store = await openStore()
+    const minute = 60_000
+    const short = await completedCopy(store, rootA, A, 20, 30, {
+      expiresAt: new Date(Date.now() + 59 * minute).toISOString(),
+    })
+    const long = await completedCopy(store, rootA, A, 21, 30, {
+      expiresAt: new Date(Date.now() + 61 * minute).toISOString(),
+    })
+    const pinnedIds = () =>
+      [...(store as unknown as { pins: Map<string, Set<string>> }).pins.values()].flatMap(ids => [
+        ...ids,
+      ])
+
+    await expect(
+      store.reusableReceipt(A, sourceFor(20), 30, { retentionOwnerId: 'task-b' })
+    ).resolves.toBeUndefined()
+    expect(pinnedIds()).toEqual([])
+    // Witness: the same call for the copy with 61 minutes left returns its receipt and pins it.
+    await expect(
+      store.reusableReceipt(A, sourceFor(21), 30, { retentionOwnerId: 'task-b' })
+    ).resolves.toMatchObject({ id: long.receipt.id, expiresAt: long.receipt.expiresAt })
+    expect(pinnedIds()).toEqual([long.receipt.id])
+    // The miss does not remove the short copy: it stays readable until it expires.
+    await expect(store.readManagedFile(short.receipt.path, A)).resolves.toEqual(short.bytes)
+  })
+
+  it('SOL-R5-REUSE-CROSS-EXPIRY: a copy that enters its last hour while it is hashed is a cache miss and gets no pin', async () => {
     coherentVolume(1000n, MARGIN + 1000n)
     const store = await openStore()
     const held = await completedCopy(store, rootA, A, 0, 30, { owner: 'task-a' })
-    // Witness: before expiry the copy is reused and pinned for task-b.
+    // A copy with less than this left is not reused.
+    const reuseMargin = 60 * 60_000
+    // Witness: before the margin the copy is reused and pinned for task-b.
     await expect(
       store.reusableReceipt(A, sourceFor(0), 30, { retentionOwnerId: 'task-b' })
     ).resolves.toMatchObject({ id: held.receipt.id })
     expect(pinOwners(store)).toEqual([`${A}/task-a`, `${A}/task-b`])
 
-    vi.setSystemTime(Date.parse(held.receipt.expiresAt) - 1)
+    vi.setSystemTime(Date.parse(held.receipt.expiresAt) - reuseMargin - 1)
     const gate = pauseNextSourceRead()
     const reusing = store.reusableReceipt(A, sourceFor(0), 30, {
       retentionOwnerId: 'task-c',
       deadlineMs: Date.now() + 60_000,
       signal: new AbortController().signal,
     })
-    // Witness: the hash read was reached before expiry and paused there.
+    // Witness: the hash read was reached before the margin and paused there.
     await gate.reached
-    vi.setSystemTime(Date.parse(held.receipt.expiresAt))
+    vi.setSystemTime(Date.parse(held.receipt.expiresAt) - reuseMargin)
     gate.resume()
 
     await expect(reusing).resolves.toBeUndefined()
     expect(pinOwners(store)).toEqual([`${A}/task-a`, `${A}/task-b`])
+    // The miss does not shorten the copy's life: it is readable until it expires.
+    await expect(store.readManagedFile(held.receipt.path, A)).resolves.toEqual(held.bytes)
+    vi.setSystemTime(Date.parse(held.receipt.expiresAt))
     await expect(store.readManagedFile(held.receipt.path, A)).rejects.toMatchObject({
       code: 'download_expired',
     })

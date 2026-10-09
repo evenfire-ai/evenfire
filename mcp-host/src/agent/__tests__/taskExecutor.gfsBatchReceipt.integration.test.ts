@@ -22,6 +22,14 @@ import { ScopedWorkspaceProvider } from '../../workspace/scopedWorkspace'
 import { deriveUserKeyFromSource } from '../../workspace/userKey'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 
+// statfs reports the volume sized to its free space, so the disk's occupancy
+// never meets the store's free-space floor.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  const { freeSpaceSizedStatfs } = await import('../../__tests__/fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
+})
+
 const { clientFactory } = vi.hoisted(() => ({ clientFactory: vi.fn() }))
 // Double only GFSC's external transport and the model. The native registry,
 // store, decoder, shell, SQLite dispatcher and approval reconstruction stay real.

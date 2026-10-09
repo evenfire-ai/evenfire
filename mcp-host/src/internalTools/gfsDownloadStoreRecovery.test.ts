@@ -18,6 +18,7 @@ import {
   digestOf,
   downloadDirectory,
   exists,
+  freeSpaceSizedStatfs,
   metaFor,
   plantDownload,
   quotaCount,
@@ -27,10 +28,14 @@ import { logger } from '../logger'
 import { GfsDownloadStore } from './gfsDownloadStore'
 import { REMOVED_GFS_STORAGE_VARIABLES } from './gfsFilePolicy'
 
-const { statfsBoundary } = vi.hoisted(() => ({ statfsBoundary: vi.fn() }))
+const { statfsBoundary, renameBoundary } = vi.hoisted(() => ({
+  statfsBoundary: vi.fn(),
+  renameBoundary: vi.fn(),
+}))
 vi.mock('node:fs/promises', async original => ({
   ...(await original<typeof fs>()),
   statfs: statfsBoundary,
+  rename: renameBoundary,
 }))
 
 const A = 'caller-a'
@@ -85,7 +90,11 @@ function storeDirectories(callerRoot: string): string[] {
 beforeEach(async () => {
   nativeFs = await vi.importActual<typeof fs>('node:fs/promises')
   statfsBoundary.mockReset()
-  statfsBoundary.mockImplementation(nativeFs.statfs)
+  statfsBoundary.mockImplementation(freeSpaceSizedStatfs(nativeFs.statfs))
+  renameBoundary.mockReset()
+  renameBoundary.mockImplementation((...args: unknown[]) =>
+    Reflect.apply(nativeFs.rename, nativeFs, args)
+  )
   hostRoot = syncFs.mkdtempSync(path.join(tmpdir(), 'gfs-store-recovery-'))
   outside = syncFs.mkdtempSync(path.join(tmpdir(), 'gfs-store-recovery-outside-'))
   rootA = callerDirectory(hostRoot, A)
@@ -118,11 +127,11 @@ describe('GFS download store: a store directory made unwritable is still removed
 
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-10-08T10:00:00.000Z'))
-    // 100-byte volume, budget 85: A and B hold 40 bytes each.
+    // 100-byte volume, budget 70: A and B hold 30 bytes each.
     volumeOf(100)
     const store = await openStore()
-    const copyA = await completedCopy(store, rootA, A, 800, 40)
-    const copyB = await completedCopy(store, rootB, B, 801, 40)
+    const copyA = await completedCopy(store, rootA, A, 800, 30)
+    const copyB = await completedCopy(store, rootB, B, 801, 30)
     const directoryA = downloadDirectory(rootA, copyA.receipt.id)
     const directoryB = downloadDirectory(rootB, copyB.receipt.id)
     // A symlink inside the tree to a directory outside the Host root whose
@@ -140,12 +149,106 @@ describe('GFS download store: a store directory made unwritable is still removed
     expect(sweep).toMatchObject({ removedExpired: 2, removeFailed: 0 })
     expect(storeDirectories(rootA)).toEqual([])
     expect(storeDirectories(rootB)).toEqual([])
-    const admitted = await startTransfer(store, rootC, C, 802, 40)
-    expect(admitted.transfer.sizeBytes).toBe(40)
+    const admitted = await startTransfer(store, rootC, C, 802, 30)
+    expect(admitted.transfer.sizeBytes).toBe(30)
     expect(await quotaCount('host', 'storage_bytes')).toBe(budgetDenied)
     // The symlink was removed, never followed: its target keeps its mode.
     expect(syncFs.statSync(target).mode & 0o777).toBe(0o500)
   })
+
+  /** A valid planted copy of `sizeBytes` zero bytes; the source is sparse. */
+  function plantSparseCopy(callerRoot: string, sizeBytes: number) {
+    const id = randomUUID()
+    const bytes = Buffer.alloc(sizeBytes)
+    const planted = plantDownload(callerRoot, {
+      id,
+      bytes: Buffer.alloc(0),
+      meta: metaFor(id, bytes, Date.now()),
+    })
+    syncFs.truncateSync(path.join(planted.directory, 'source'), sizeBytes)
+    return planted
+  }
+
+  /** Whether `candidate` names `directory` in its .gfs-downloads parent. */
+  function isPlantedPath(candidate: string, directory: string): boolean {
+    return (
+      path.basename(candidate) === path.basename(directory) &&
+      path.basename(path.dirname(candidate)) === '.gfs-downloads'
+    )
+  }
+
+  // Root bypasses the mode bits, so the refused rename cannot be produced.
+  it.skipIf(process.getuid?.() === 0)(
+    'RCV-1c: an adopted copy whose .gfs-downloads parent is chmod 0500 is evicted after the owner rwx is restored on the parent, and its charge is released',
+    async () => {
+      // 100-byte volume, budget 70: the adopted 50 bytes plus B's 30 exceed it.
+      volumeOf(100)
+      const planted = plantSparseCopy(rootA, 50)
+      const parent = path.dirname(planted.directory)
+      const store = await openStore()
+      syncFs.chmodSync(parent, 0o500)
+      // Precondition: the parent refuses a rename out of it for this user.
+      const probe = path.join(parent, `probe-${randomUUID()}`)
+      expect(() => syncFs.renameSync(planted.directory, probe)).toThrow(
+        expect.objectContaining({ code: 'EACCES' })
+      )
+      const budgetDenied = await quotaCount('host', 'storage_bytes')
+
+      const admitted = await startTransfer(store, rootB, B, 803, 30)
+
+      expect(admitted.transfer.sizeBytes).toBe(30)
+      expect(exists(planted.directory)).toBe(false)
+      expect(storeDirectories(rootA)).toEqual([])
+      expect(await quotaCount('host', 'storage_bytes')).toBe(budgetDenied)
+      // Witness: the first rename was refused and the retry succeeded on the
+      // parent whose owner bits were restored, other bits kept.
+      // Paths are matched by name: the store works on resolved paths.
+      const renamesOutOfParent = renameBoundary.mock.calls.filter(call =>
+        isPlantedPath(String(call[0]), planted.directory)
+      )
+      expect(renamesOutOfParent).toHaveLength(2)
+      expect(syncFs.statSync(parent).mode & 0o777).toBe(0o700)
+    }
+  )
+
+  it.skipIf(process.getuid?.() === 0)(
+    'RCV-1d: a symlink swapped in for the .gfs-downloads parent after a refused rename is not followed, and the removal is refused',
+    async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-10-08T10:00:00.000Z'))
+      volumeOf(100)
+      const planted = plantSparseCopy(rootA, 20)
+      const parent = path.dirname(planted.directory)
+      const store = await openStore()
+      // The directory the symlink will lead to; its mode must not change.
+      const target = path.join(outside, 'target')
+      syncFs.mkdirSync(target, { mode: 0o500 })
+      const movedParent = path.join(outside, 'moved-downloads')
+      let swapped = 0
+      renameBoundary.mockImplementation(async (...args: unknown[]) => {
+        const from = String(args[0])
+        if (swapped === 0 && isPlantedPath(from, planted.directory)) {
+          swapped += 1
+          // The refused rename, then the parent swapped for a symlink before
+          // the store restores the parent's owner access.
+          await nativeFs.rename(path.dirname(from), movedParent)
+          await nativeFs.symlink(target, path.dirname(from))
+          throw Object.assign(new Error('EACCES: injected'), { code: 'EACCES' })
+        }
+        return Reflect.apply(nativeFs.rename, nativeFs, args)
+      })
+      vi.setSystemTime(Date.now() + 2 * HOUR)
+
+      const sweep = await store.cleanupExpired()
+
+      expect(swapped).toBe(1)
+      expect(sweep).toMatchObject({ removedExpired: 0, removeFailed: 1 })
+      // The symlink was refused, never followed: its target keeps its mode.
+      expect(syncFs.lstatSync(parent).isSymbolicLink()).toBe(true)
+      expect(syncFs.statSync(target).mode & 0o777).toBe(0o500)
+      expect(exists(path.join(movedParent, path.basename(planted.directory)))).toBe(true)
+    }
+  )
 })
 
 describe('GFS download store: a non-regular meta.json', () => {

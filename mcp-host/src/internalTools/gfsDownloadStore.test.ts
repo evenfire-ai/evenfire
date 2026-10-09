@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { register } from 'prom-client'
+import { freeSpaceSizedStatfs } from '../__tests__/fixtures/gfsStoreTestKit'
 import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
@@ -53,7 +54,8 @@ function sourceFor(index: number, version = 1): GfsImageSource {
   }
 }
 
-function future(ms = 60 * 60_000): string {
+/** Two hours by default: a reused copy must have more than one hour left. */
+function future(ms = 2 * 60 * 60_000): string {
   return new Date(Date.now() + ms).toISOString()
 }
 
@@ -113,6 +115,50 @@ async function completedCopy(
   const { transfer, bytes } = await startTransfer(target, root, caller, index, sizeBytes, options)
   const receipt = await target.publish(transfer.id, caller, digest(bytes))
   return { receipt, bytes }
+}
+
+/**
+ * Leaves each copy charged under a trash name: it expires and its removal
+ * fails. Eviction cannot reclaim a held charge, and protected bytes are capped
+ * at half the budget per caller and three quarters Host-wide, so held charges
+ * are how these tests fill the budget with bytes no eviction can free. The rm fault covers trash names in
+ * this caller's store directory only, so evictions elsewhere still remove,
+ * and it stays installed until the test restores `rmBoundary`. Copies made
+ * afterwards are not expired.
+ */
+async function heldTrash(
+  target: GfsDownloadStore,
+  root: string,
+  caller: string,
+  copies: Array<{ index: number; sizeBytes: number; owner?: string }>
+) {
+  const receipts = []
+  for (const copy of copies)
+    receipts.push(
+      await completedCopy(
+        target,
+        root,
+        caller,
+        copy.index,
+        copy.sizeBytes,
+        copy.owner === undefined ? {} : { owner: copy.owner }
+      )
+    )
+  vi.setSystemTime(Date.now() + 3 * 60 * 60_000)
+  // The store removes through the resolved path, so match the caller directory by name.
+  const callerName = path.basename(root)
+  rmBoundary.mockImplementation(async (removed: string, options: unknown) => {
+    const parent = path.dirname(removed)
+    if (
+      path.basename(parent) === '.gfs-downloads' &&
+      path.basename(path.dirname(parent)) === callerName &&
+      path.basename(removed).startsWith('.trash-')
+    )
+      throw Object.assign(new Error('injected EIO'), { code: 'EIO' })
+    return nativeFs.rm(removed, options as Parameters<typeof nativeFs.rm>[1])
+  })
+  expect((await target.cleanupExpired()).removeFailed).toBe(copies.length)
+  return receipts
 }
 
 async function metricValue(name: string, labels: Record<string, string>): Promise<number> {
@@ -203,7 +249,7 @@ beforeEach(async () => {
   vi.setSystemTime(new Date('2026-10-08T10:00:00.000Z'))
   for (const boundary of [statfsBoundary, renameBoundary, rmBoundary, lstatBoundary, hashBoundary])
     boundary.mockReset()
-  statfsBoundary.mockImplementation(nativeFs.statfs)
+  statfsBoundary.mockImplementation(freeSpaceSizedStatfs(nativeFs.statfs))
   renameBoundary.mockImplementation(nativeFs.rename)
   rmBoundary.mockImplementation(nativeFs.rm)
   lstatBoundary.mockImplementation(nativeFs.lstat)
@@ -439,26 +485,26 @@ describe('GFS download store: quotas and eviction', () => {
   })
 
   it('F10: when eviction cannot make room nothing is deleted', async () => {
-    // Budget 16; a caller protects at most 8. CALLER pins 4 + 4, caller-b pins
-    // 8, and caller-c, protecting nothing yet, asks for 8: only the host budget
-    // can refuse it.
+    // Budget 16; protected bytes are capped at 8. caller-b holds 9 bytes under
+    // trash names it cannot remove, CALLER keeps a pinned 2 and a loose 2, and
+    // caller-c asks for 6: 9 + 2 + 6 = 17 > 16 even after evicting the loose
+    // copy, so only the host budget can refuse it.
     volumeOf(16)
     const { limited } = await limitedStore(SMALL_FILES_FULL_VOLUME)
-    const otherRoot = await callerDirectory(hostRoot, 'caller-b')
-    await completedCopy(limited, callerRoot, CALLER, 30, 4, { owner: 'task-1' })
+    await heldTrash(limited, await callerDirectory(hostRoot, 'caller-b'), 'caller-b', [
+      { index: 33, sizeBytes: 5 },
+      { index: 34, sizeBytes: 4 },
+    ])
+    await completedCopy(limited, callerRoot, CALLER, 30, 2, { owner: 'task-1' })
     tick()
-    await completedCopy(limited, callerRoot, CALLER, 31, 4, { owner: 'task-1' })
-    tick()
-    await completedCopy(limited, otherRoot, 'caller-b', 33, 8, { owner: 'task-2' })
+    await completedCopy(limited, callerRoot, CALLER, 31, 2)
     const downloads = path.join(callerRoot, '.gfs-downloads')
-    const otherDownloads = path.join(otherRoot, '.gfs-downloads')
     const before = (await nativeFs.readdir(downloads)).sort()
-    const otherBefore = (await nativeFs.readdir(otherDownloads)).sort()
     const denied = await quotaCount('host', 'storage_bytes')
     lstatBoundary.mockClear()
 
     const requester = await callerDirectory(hostRoot, 'caller-c')
-    await expect(startTransfer(limited, requester, 'caller-c', 32, 8)).rejects.toMatchObject({
+    await expect(startTransfer(limited, requester, 'caller-c', 32, 6)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
     })
 
@@ -466,9 +512,10 @@ describe('GFS download store: quotas and eviction', () => {
     expect(lstatBoundary.mock.calls.length).toBeGreaterThan(0)
     expect((await nativeFs.readdir(downloads)).sort()).toEqual(before)
     expect(before).toHaveLength(2)
-    expect((await nativeFs.readdir(otherDownloads)).sort()).toEqual(otherBefore)
-    expect(otherBefore).toHaveLength(1)
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
+    // Witness: once the held bytes can be removed the same admission succeeds.
+    rmBoundary.mockImplementation(nativeFs.rm)
+    await expect(startTransfer(limited, requester, 'caller-c', 32, 6)).resolves.toBeDefined()
   })
 
   it("F10b: a quota denial carries only its code, never another caller's id, path, name or usage", async () => {
@@ -476,13 +523,19 @@ describe('GFS download store: quotas and eviction', () => {
     const { limited } = await limitedStore(SMALL_FILES_FULL_VOLUME)
     const otherRoot = await callerDirectory(hostRoot, 'caller-b')
     const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
-    const other = await completedCopy(limited, otherRoot, 'caller-b', 24, 10, { owner: 'task-b' })
-    const third = await completedCopy(limited, thirdRoot, 'caller-c', 25, 10, { owner: 'task-c' })
+    // caller-c holds 20 bytes under trash names it cannot remove; the pinned
+    // copies take 10 of the 15 protected bytes the Host allows.
+    const [, third] = await heldTrash(limited, thirdRoot, 'caller-c', [
+      { index: 29, sizeBytes: 10 },
+      { index: 25, sizeBytes: 10, owner: 'task-c' },
+    ])
+    const other = await completedCopy(limited, otherRoot, 'caller-b', 24, 5, { owner: 'task-b' })
     await completedCopy(limited, callerRoot, CALLER, 28, 5, { owner: 'task-a' })
 
-    // Within maxFileBytes (10); the Host would reach 35 of 30 and every copy
-    // is pinned, so only the Host quota decision can refuse it.
-    const error = await startTransfer(limited, callerRoot, CALLER, 26, 10).then(
+    // Within maxFileBytes (10) and the protected cap; the Host would reach 35
+    // of 30 and nothing is evictable, so only the Host quota decision can
+    // refuse it.
+    const error = await startTransfer(limited, callerRoot, CALLER, 26, 5).then(
       () => undefined,
       (rejection: unknown) => rejection
     )
@@ -508,27 +561,35 @@ describe('GFS download store: quotas and eviction', () => {
     ])
       expect(serialized).not.toContain(secret)
     expect(await exists(downloadDirectory(otherRoot, other.receipt.id))).toBe(true)
-    // Neither size nor free space was the cause: 5 bytes fit the Host's 30 exactly.
-    await expect(startTransfer(limited, callerRoot, CALLER, 27, 5)).resolves.toBeDefined()
+    // Neither size nor free space was the cause: once the held bytes can be
+    // removed, the same 5 bytes are admitted.
+    rmBoundary.mockImplementation(nativeFs.rm)
+    await expect(startTransfer(limited, callerRoot, CALLER, 26, 5)).resolves.toBeDefined()
   })
 
   it('F11: pinned and active downloads are never evicted', async () => {
-    volumeOf(30)
+    // Budget 18; the pinned, active and requested bytes stay within the 9
+    // protected bytes the Host allows.
+    volumeOf(18)
     const { limited } = await limitedStore(SMALL_FILES_FULL_VOLUME)
     const otherRoot = await callerDirectory(hostRoot, 'caller-b')
     const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
-    const pinned = await completedCopy(limited, callerRoot, CALLER, 40, 10, { owner: 'task-40' })
+    const pinned = await completedCopy(limited, callerRoot, CALLER, 40, 3, { owner: 'task-40' })
     tick()
-    const active = await startTransfer(limited, otherRoot, 'caller-b', 41, 10)
+    const unpinned = await completedCopy(limited, thirdRoot, 'caller-c', 42, 5)
     tick()
-    const unpinned = await completedCopy(limited, thirdRoot, 'caller-c', 42, 10)
+    const newest = await completedCopy(limited, thirdRoot, 'caller-c', 44, 5)
+    tick()
+    const active = await startTransfer(limited, otherRoot, 'caller-b', 41, 3)
     tick()
 
-    // The Host would reach 40 of 30; one eviction makes room.
-    await startTransfer(limited, await callerDirectory(hostRoot, 'caller-d'), 'caller-d', 43, 10)
+    // The Host would reach 19 of 18; one eviction makes room.
+    await startTransfer(limited, await callerDirectory(hostRoot, 'caller-d'), 'caller-d', 43, 3)
 
-    // Witness: the only eligible copy, although the newest, was evicted.
+    // Witness: the oldest eligible copy, although newer than the pinned one,
+    // was evicted, and only that one.
     expect(await exists(downloadDirectory(thirdRoot, unpinned.receipt.id))).toBe(false)
+    expect(await exists(downloadDirectory(thirdRoot, newest.receipt.id))).toBe(true)
     expect(await exists(downloadDirectory(callerRoot, pinned.receipt.id))).toBe(true)
     expect(await exists(downloadDirectory(otherRoot, active.transfer.id))).toBe(true)
   })
@@ -537,9 +598,17 @@ describe('GFS download store: quotas and eviction', () => {
     const otherRoot = await callerDirectory(hostRoot, 'caller-b')
     await startTransfer(store, otherRoot, 'caller-b', 50, 4096 * 10)
     const observed = await nativeFs.statfs(hostRoot, { bigint: true })
+    // A 40 MiB volume: 15% of it is under 16 MiB, so the free-space floor is
+    // its 16 MiB minimum.
+    const volumeBlocks = 10_240n
     const reserveBlocks = (16n * 1024n * 1024n) / 4096n
-    // Room for the request and the reserve, but not for the active reservation.
-    statfsBoundary.mockResolvedValue({ ...observed, bsize: 4096n, bavail: reserveBlocks + 2n })
+    // Room for the request and the floor, but not for the active reservation.
+    statfsBoundary.mockResolvedValue({
+      ...observed,
+      bsize: 4096n,
+      blocks: volumeBlocks,
+      bavail: reserveBlocks + 2n,
+    })
     const denied = await quotaCount('host', 'free_space')
 
     await expect(startTransfer(store, callerRoot, CALLER, 51, 4096)).rejects.toMatchObject({
@@ -549,7 +618,12 @@ describe('GFS download store: quotas and eviction', () => {
     expect(await quotaCount('host', 'free_space')).toBe(denied + 1)
 
     // Control: with room for the active reservation too, the same request is admitted.
-    statfsBoundary.mockResolvedValue({ ...observed, bsize: 4096n, bavail: reserveBlocks + 11n })
+    statfsBoundary.mockResolvedValue({
+      ...observed,
+      bsize: 4096n,
+      blocks: volumeBlocks,
+      bavail: reserveBlocks + 11n,
+    })
     await expect(startTransfer(store, callerRoot, CALLER, 51, 4096)).resolves.toBeDefined()
   })
 
@@ -996,26 +1070,30 @@ describe('GFS download store: adversarial review kill tests', () => {
   it('ADV-S08: an infeasible eviction plan deletes nothing even when some copies are evictable', async () => {
     volumeOf(15)
     const { limited } = await limitedStore(SMALL_FILES_FULL_VOLUME)
-    // Budget 15; a caller protects at most 7. The 10 pinned bytes are held by
-    // caller-b and caller-c (5 each) and CALLER asks for 7: 5 + 10 + 7 = 22,
-    // and evicting the loose 5 still leaves 17 > 15.
-    const loose = await completedCopy(limited, callerRoot, CALLER, 70, 5)
+    // Budget 15; protected bytes are capped at 7. caller-c holds 9 bytes under
+    // trash names it cannot remove, caller-b pins 2 and CALLER asks for 5:
+    // 9 + 4 + 2 + 5 = 20, and evicting the loose 4 still leaves 16 > 15.
+    const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
+    await heldTrash(limited, thirdRoot, 'caller-c', [
+      { index: 73, sizeBytes: 5 },
+      { index: 74, sizeBytes: 4 },
+    ])
+    const loose = await completedCopy(limited, callerRoot, CALLER, 70, 4)
     tick()
     const otherRoot = await callerDirectory(hostRoot, 'caller-b')
-    const thirdRoot = await callerDirectory(hostRoot, 'caller-c')
-    await completedCopy(limited, otherRoot, 'caller-b', 71, 5, { owner: 'task-1' })
-    await completedCopy(limited, thirdRoot, 'caller-c', 73, 5, { owner: 'task-2' })
+    await completedCopy(limited, otherRoot, 'caller-b', 71, 2, { owner: 'task-1' })
     const denied = await quotaCount('host', 'storage_bytes')
-    await expect(startTransfer(limited, callerRoot, CALLER, 72, 7)).rejects.toMatchObject({
+    await expect(startTransfer(limited, callerRoot, CALLER, 72, 5)).rejects.toMatchObject({
       code: 'host_quota_exceeded',
     })
     // Witness: the admission reached the quota decision.
     expect(await quotaCount('host', 'storage_bytes')).toBe(denied + 1)
     // The unpinned copy could not make room on its own, so it must survive.
     expect(await exists(downloadDirectory(callerRoot, loose.receipt.id))).toBe(true)
-    // Witness: once one pin is released the same admission evicts and succeeds.
+    // Witness: once the pin is released the same admission evicts and succeeds.
     await limited.releaseReceiptOwner('task-1', 'caller-b')
-    await expect(startTransfer(limited, callerRoot, CALLER, 72, 7)).resolves.toBeDefined()
+    await expect(startTransfer(limited, callerRoot, CALLER, 72, 5)).resolves.toBeDefined()
+    expect(await exists(downloadDirectory(callerRoot, loose.receipt.id))).toBe(false)
   })
 
   it('ADV-S11: publish refuses a digest that does not match the partial bytes', async () => {

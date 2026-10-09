@@ -4,7 +4,7 @@
  * bounded race reports `blocked`, the other end is opened once to release the
  * worker thread, and the assertion on the outcome fails the test.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as syncFs from 'node:fs'
@@ -20,6 +20,14 @@ import {
 } from '../__tests__/fixtures/gfsStoreTestKit'
 import { bootstrapGfsRuntime } from '../gfsRuntime'
 import { GfsDownloadStore } from './gfsDownloadStore'
+
+// statfs is the only boundary replaced: the volume sized to its free space,
+// so the disk's occupancy never meets the store's free-space floor.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  const { freeSpaceSizedStatfs } = await import('../__tests__/fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
+})
 
 const KEY = 'fifo-key'
 const BOUND_MS = 2_000

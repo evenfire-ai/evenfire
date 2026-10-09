@@ -19,8 +19,12 @@ const { rmFailure } = vi.hoisted(() => ({
 // directory fail once, as a read-only parent or a busy mount would.
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>()
+  // statfs reports the volume sized to its free space, so the disk's occupancy
+  // never meets the store's free-space floor.
+  const { freeSpaceSizedStatfs } = await import('../__tests__/fixtures/gfsStoreTestKit')
   return {
     ...actual,
+    statfs: freeSpaceSizedStatfs(actual.statfs),
     rm: async (...values: Parameters<typeof actual.rm>) => {
       if (
         rmFailure.target !== undefined &&

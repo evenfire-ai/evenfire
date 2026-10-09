@@ -26,7 +26,7 @@ describe('GFS file policy', () => {
       inlineTextBytes: 8192,
       metadataBytes: 64 * 1024,
       errorBytes: 8 * 1024,
-      storagePercent: 85,
+      storagePercent: 70,
       callerActiveDownloads: 1,
       retentionMs: 7 * 24 * 60 * 60 * 1000,
     })
@@ -97,7 +97,7 @@ describe('GFS file policy', () => {
 
     const policy = await import('./gfsFilePolicy')
 
-    expect(policy.GFS_FILE_LIMITS.storagePercent).toBe(85)
+    expect(policy.GFS_FILE_LIMITS.storagePercent).toBe(70)
     expect(Object.keys(policy.GFS_FILE_LIMITS)).not.toContain('storageBytes')
     expect(policy.REMOVED_GFS_STORAGE_VARIABLES).toEqual([
       'MCP_HOST_GFS_DOWNLOAD_STORAGE_BYTES',
