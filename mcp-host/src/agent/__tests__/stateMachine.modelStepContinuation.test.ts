@@ -221,6 +221,69 @@ afterEach(async () => {
 })
 
 describe('AgentStateMachine model-step continuation model pinning (#1043)', () => {
+  it('blocks an unavailable pinned approval checkpoint and rehydrates the next session', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const handle = makeSqliteStore()
+    handles.push(handle)
+    const manager = new ConversationManager(handle.store)
+    const { checkpoints, fence, taskBudget } = await claimedCheckpoint(handle, manager)
+    const badConversation = manager.getSessionByKey(SESSION_KEY)!
+    await manager.resumeTurnForContinuation(badConversation, 'task-continuation-state-b2', 1, null)
+    await manager.suspendForApproval(badConversation, {
+      request_id: 'approval-unavailable',
+      tool_name: 'shell_exec',
+      tool_call_id: 'tc-unavailable',
+      parameters: {},
+      description: 'Unavailable model approval',
+      context_snapshot: [{ role: 'user', content: message().content }],
+      task_budget: JSON.parse(taskBudget!),
+      sourceMessage: sourceMessageForResume(message()),
+    })
+
+    const healthyMessage = { ...message(), threadId: 'healthy-chat', messageId: 'healthy-message' }
+    const healthySessionKey = `${USER}:rpc:${AGENT}:healthy-chat`
+    const healthyConversation = await manager.getOrCreate(healthySessionKey, {
+      userId: USER,
+      channelType: 'rpc',
+      channelId: AGENT,
+      threadId: 'healthy-chat',
+      source: 'rpc',
+    })
+    await manager.startTurn(healthyConversation, healthyMessage.content, 'healthy-task')
+    await manager.suspendForApproval(healthyConversation, {
+      request_id: 'approval-healthy',
+      tool_name: 'shell_exec',
+      tool_call_id: 'tc-healthy',
+      parameters: {},
+      description: 'Healthy session approval',
+      context_snapshot: [{ role: 'user', content: healthyMessage.content }],
+      task_budget: JSON.parse(taskBudget!),
+      sourceMessage: sourceMessageForResume(healthyMessage),
+    })
+
+    const { stateMachine } = agent(handle)
+    stateMachine.setLLMProvider(provider('openai') as never, 'host-default-model')
+    stateMachine.setTaskModelResolver(() => null)
+    stateMachine.setModelStepCheckpoints(support(handle, checkpoints))
+    stateMachine.setColdStartLoader(new SqliteColdStartLoader(handle.store))
+
+    await stateMachine.bootstrap()
+    await handle.persistQueue.drain()
+
+    expect(
+      handle.worker.db
+        .prepare(
+          'SELECT status, blocked_reason FROM model_step_checkpoints WHERE checkpoint_id = ?'
+        )
+        .get(fence.checkpointId)
+    ).toEqual({ status: 'blocked', blocked_reason: 'model_unavailable' })
+    expect(stateMachine.getPendingApprovals().map(approval => approval.requestId)).toEqual([
+      'approval-healthy',
+    ])
+    expect(badConversation.pending_approval).toBeUndefined()
+    expect(healthyConversation.pending_approval?.request_id).toBe('approval-healthy')
+  })
+
   it('rehydrates a waiting approval with the checkpoint model after Host takeover', async () => {
     Object.assign(appConfig, { enableApproval: true })
     const handle = makeSqliteStore()

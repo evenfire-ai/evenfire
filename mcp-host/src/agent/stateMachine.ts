@@ -49,6 +49,7 @@ import { logger } from '../logger'
 import { McpManager } from '../mcp'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
+import type { ModelStepContinuationRef } from '../queue/types'
 import type { TaskError } from '../queue/types'
 import { SessionProcessor, serializeSessionKey } from '../session'
 import { parseSessionKey } from '../session/types'
@@ -860,14 +861,15 @@ export class AgentStateMachine extends EventEmitter {
       let pinnedModel: ResolvedTaskModel | undefined
       if (task.modelStepContinuation) {
         const continuation = task.modelStepContinuation
-        pinnedModel =
-          this.taskModelResolver?.({ [continuation.provider]: continuation.model }) ?? undefined
-        if (
-          !pinnedModel ||
-          pinnedModel.provider.getProviderType() !== continuation.provider ||
-          pinnedModel.model !== continuation.model
-        ) {
-          throw new Error('Pending approval checkpoint model is unavailable on this Host')
+        pinnedModel = this.resolveContinuationModel(task) ?? undefined
+        if (!pinnedModel) {
+          const blocked = await this.blockUnavailableContinuation(continuation, entry.session_key)
+          logger.warn(
+            { taskId: task.id, checkpointId: continuation.checkpointId, blocked },
+            'Pending approval checkpoint model is unavailable on this Host'
+          )
+          await this.conversationManager.clearPendingApproval(entry.session_key, entry.request_id)
+          continue
         }
       }
       const executor = this.createTaskExecutor(task, pinnedModel)
@@ -1481,6 +1483,41 @@ export class AgentStateMachine extends EventEmitter {
     }
   }
 
+  private resolveContinuationModel(task: Task): ResolvedTaskModel | null {
+    const continuation = task.modelStepContinuation
+    if (!continuation || !this.llmProvider) return null
+    try {
+      const resolved = this.taskModelResolver?.({ [continuation.provider]: continuation.model })
+      return resolved?.provider.getProviderType() === continuation.provider &&
+        resolved.model === continuation.model
+        ? resolved
+        : null
+    } catch (err) {
+      logger.warn(
+        { taskId: task.id, checkpointId: continuation.checkpointId, err },
+        'Model-step checkpoint model could not be resolved'
+      )
+      return null
+    }
+  }
+
+  private async blockUnavailableContinuation(
+    continuation: ModelStepContinuationRef,
+    sessionKey: string
+  ): Promise<boolean> {
+    if (!this.modelStepCheckpoints) throw new Error('Model-step checkpoints are not configured')
+    const version = await this.modelStepCheckpoints.store.transition(
+      sessionKey,
+      continuation.fence,
+      {
+        from: ['claimed'],
+        to: 'blocked',
+        blockedReason: 'model_unavailable',
+      }
+    )
+    return version !== null
+  }
+
   /**
    * Execute a single task by delegating to a TaskExecutor.
    * Creates executor, registers callbacks, and awaits run().
@@ -1492,16 +1529,7 @@ export class AgentStateMachine extends EventEmitter {
     const continuation = task.modelStepContinuation
     let continuationModel: ResolvedTaskModel | null = null
     if (continuation) {
-      try {
-        continuationModel = this.taskModelResolver
-          ? this.taskModelResolver({ [continuation.provider]: continuation.model })
-          : null
-      } catch (err) {
-        logger.warn(
-          { taskId: task.id, checkpointId: continuation.checkpointId, err },
-          'Model-step checkpoint model could not be resolved'
-        )
-      }
+      continuationModel = this.resolveContinuationModel(task)
       if (!this.modelStepCheckpoints) {
         continuation.onVerdict({ kind: 'lost' })
         this.handleTaskFailure(task, {
@@ -1512,31 +1540,21 @@ export class AgentStateMachine extends EventEmitter {
         })
         return false
       }
-      if (
-        !this.llmProvider ||
-        !continuationModel ||
-        continuationModel.provider.getProviderType() !== continuation.provider ||
-        continuationModel.model !== continuation.model
-      ) {
-        const version = await this.modelStepCheckpoints.store.transition(
-          resolveTaskSessionKey(task),
-          continuation.fence,
-          { from: ['claimed'], to: 'blocked', blockedReason: 'model_unavailable' }
+      if (!continuationModel) {
+        const blocked = await this.blockUnavailableContinuation(
+          continuation,
+          resolveTaskSessionKey(task)
         )
         continuation.onVerdict(
-          version === null
-            ? { kind: 'lost' }
-            : { kind: 'blocked', blockedReason: 'model_unavailable' }
+          blocked ? { kind: 'blocked', blockedReason: 'model_unavailable' } : { kind: 'lost' }
         )
         this.handleTaskFailure(task, {
-          code:
-            version === null
-              ? MODEL_STEP_CONTINUE_ERROR_CODES.notFound
-              : MODEL_STEP_CONTINUE_ERROR_CODES.blocked,
-          message:
-            version === null
-              ? 'The model-step checkpoint is no longer available.'
-              : `The checkpoint model ${continuation.provider}/${continuation.model} is unavailable.`,
+          code: !blocked
+            ? MODEL_STEP_CONTINUE_ERROR_CODES.notFound
+            : MODEL_STEP_CONTINUE_ERROR_CODES.blocked,
+          message: !blocked
+            ? 'The model-step checkpoint is no longer available.'
+            : `The checkpoint model ${continuation.provider}/${continuation.model} is unavailable.`,
           retryable: false,
           provider: continuation.provider,
         })
