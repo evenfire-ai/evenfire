@@ -56,6 +56,34 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(duplicates, `duplicate migration slot(s):\n${duplicates.join('\n')}`).toEqual([])
   })
 
+  it('keeps current-dev password migrations before the relocated Task 106 sequence', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const versions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
+    const parentDev = [
+      '0126_bug192_password_admission',
+      '0127_password_evaluation_retention',
+      '0128_password_work_ownership',
+    ]
+    const task106 = [
+      '0129_user_access_foundation',
+      '0130_invitation_delivery_commands',
+      '0131_catalog_utf8_ordering',
+      '0132_composable_catalog_revisions',
+      '0133_gfs_catalog_revision_components',
+      '0134_user_access_foundation_definer_temp_shadow_hardening',
+      '0135_legacy_password_security_epoch_backfill',
+      '0143_authorization_revision_delete_compatibility',
+    ]
+
+    expect(
+      versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
+    ).toEqual(parentDev)
+    expect(
+      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 8)
+    ).toEqual(task106)
+    expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
+  })
+
   it('keeps legacy aliases unique and distinct from current versions', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const current = new Set(CONTROL_API_MIGRATIONS.map(migration => migration.version))
@@ -69,19 +97,20 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
   it('registers the narrow R56-B1 access-foundation definer hardening migration', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
-    const version = '012b_user_access_foundation_definer_temp_shadow_hardening'
+    const version = '0134_user_access_foundation_definer_temp_shadow_hardening'
     const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
     const versions = CONTROL_API_MIGRATIONS.map(candidate => candidate.version)
 
     expect(migration).toBeDefined()
     expect(migration?.legacyVersions).toEqual([
+      '012b_user_access_foundation_definer_temp_shadow_hardening',
       '012a_user_access_foundation_definer_temp_shadow_hardening',
     ])
-    expect(versions.indexOf('012a_gfs_catalog_revision_components')).toBeLessThan(
+    expect(versions.indexOf('0133_gfs_catalog_revision_components')).toBeLessThan(
       versions.indexOf(version)
     )
     expect(versions.indexOf(version)).toBeLessThan(
-      versions.indexOf('0130_legacy_password_security_epoch_backfill')
+      versions.indexOf('0135_legacy_password_security_epoch_backfill')
     )
     if (!migration) return
 
@@ -113,7 +142,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       'authorization_bump_operational_relationship_revision()',
     ]
 
-    // 0129_composable_catalog_revisions removes this trigger before 012b runs.
+    // 0132_composable_catalog_revisions removes this trigger before 0134 runs.
     expect(signatures).not.toContain('authorization_bump_catalog_revision()')
     expect(sql.match(/ALTER FUNCTION public\./g)).toHaveLength(signatures.length)
     for (const signature of signatures) {
@@ -122,6 +151,34 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       )
     }
     expect(sql).not.toMatch(/\b(?:CREATE OR REPLACE|DROP|GRANT|REVOKE|OWNER TO)\b/i)
+  })
+
+  it('recognizes deployed BUG-192 admission without reapplying its schema', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb, assertDbReady } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0126_bug192_password_admission'
+    )
+    expect(migration?.legacyVersions).toEqual(['0125_bug192_password_admission'])
+    const appliedVersions = CONTROL_API_MIGRATIONS.filter(
+      candidate => candidate.version !== migration?.version
+    ).map(candidate => ({ version: candidate.version }))
+    appliedVersions.push({ version: '0125_bug192_password_admission' })
+    const query = vi.fn(async (sql: string) =>
+      sql.includes('SELECT version FROM schema_migrations')
+        ? { rows: appliedVersions, rowCount: appliedVersions.length }
+        : { rows: [], rowCount: 0 }
+    )
+    const release = vi.fn()
+    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+    expect(query.mock.calls.map(([sql]) => sql)).not.toContainEqual(
+      expect.stringContaining('CREATE TABLE IF NOT EXISTS password_identifier_state')
+    )
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO schema_migrations(version)'),
+      ['0126_bug192_password_admission']
+    )
+    await expect(assertDbReady({ query } as never)).resolves.toBeUndefined()
+    expect(release).toHaveBeenCalledOnce()
   })
 
   it('recognizes all previously deployed feed migration versions without reapplying DDL', async () => {
@@ -280,21 +337,21 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     )
   })
 
-  it('registers the narrow 0126 team-delete compatibility successor', async () => {
+  it('registers the narrow 0129 team-delete compatibility successor', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const predecessorIndex = CONTROL_API_MIGRATIONS.findIndex(
-      candidate => candidate.version === '0126_user_access_foundation'
+      candidate => candidate.version === '0129_user_access_foundation'
     )
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0138_authorization_revision_delete_compatibility'
+      candidate => candidate.version === '0143_authorization_revision_delete_compatibility'
     )
 
     expect(predecessorIndex).toBeGreaterThanOrEqual(0)
     expect(migration).toBeDefined()
     expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(
-      '0138_authorization_revision_delete_compatibility'
+      '0143_authorization_revision_delete_compatibility'
     )
-    expect(migration?.legacyVersions).toBeUndefined()
+    expect(migration?.legacyVersions).toEqual(['0138_authorization_revision_delete_compatibility'])
     if (!migration) return
 
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })

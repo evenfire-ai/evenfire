@@ -1,5 +1,5 @@
-import bcrypt from 'bcryptjs'
 import { withTransaction } from '../../db.js'
+import { verifyMemberPassword } from '../auth/passwordCredentialVerification.js'
 import type { TeamRole } from './types.js'
 
 type MembershipRow = {
@@ -169,39 +169,9 @@ export async function googleLoginData(input: { email: string; name?: string; pic
 }
 
 export async function passwordLoginData(input: { email: string; password: string }) {
+  const user = await verifyMemberPassword(input.email, input.password, { publicLogin: true })
+  if (!user) return null
   return withTransaction(async db => {
-    const result = await db.query(
-      `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
-         FROM users
-        WHERE email = $1
-        LIMIT 1`,
-      [input.email.trim().toLowerCase()]
-    )
-    if ((result.rowCount ?? 0) === 0) {
-      return null
-    }
-
-    const user = result.rows[0] as {
-      id: string
-      email: string
-      name: string | null
-      picture: string | null
-      password_hash: string | null
-      lifecycle_state?: string | null
-      lifecycle_version?: number | string | null
-    }
-    if (user.lifecycle_state !== 'active') {
-      return { error: 'user_retired' as const }
-    }
-    if (!user.password_hash) {
-      return { error: 'password_not_set' as const }
-    }
-
-    const matches = await bcrypt.compare(input.password, user.password_hash)
-    if (!matches) {
-      return null
-    }
-
     let membership = await findFirstActiveMembership(db, user.id)
     if ((membership.rowCount ?? 0) === 0) {
       await healAcceptedInvitationMemberships(db, user.id, user.email)
@@ -242,21 +212,9 @@ export async function verifyUserPassword(input: {
   email: string
   password: string
 }): Promise<boolean> {
-  const result = await withTransaction(async db =>
-    db.query(
-      `SELECT password_hash
-         FROM users
-        WHERE id = $1
-          AND email = $2
-          AND lifecycle_state = 'active'
-        LIMIT 1`,
-      [input.userId.trim(), input.email.trim().toLowerCase()]
-    )
-  )
-
-  const row = result.rows[0] as { password_hash: string | null } | undefined
-  if (!row?.password_hash) {
-    return false
-  }
-  return bcrypt.compare(input.password, row.password_hash)
+  const user = await verifyMemberPassword(input.email, input.password, {
+    publicLogin: false,
+    userId: input.userId.trim(),
+  })
+  return !!user
 }

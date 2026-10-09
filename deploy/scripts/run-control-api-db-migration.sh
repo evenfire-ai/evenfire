@@ -696,7 +696,7 @@ runtime_access_contract_values() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { exit 2 }
     $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
-    $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/ { exit 4 }
+    $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/ { exit 4 }
     seen[$1]++ { exit 5 }
     {
       count++
@@ -839,11 +839,13 @@ verify_runtime_access_contract() {
            -- link_lifecycle deliberately permits create plus governed tombstone
            -- transitions. Physical DELETE remains denied so history cannot be
            -- erased by the runtime role.
+           -- insert_delete permits immutable reservation creation and release,
+           -- while UPDATE and privileged table operations remain denied.
            VALUES
              ('SELECT', expected.access_profile != 'none'),
-             ('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle')),
+             ('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle', 'insert_delete')),
              ('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert', 'link_lifecycle')),
-             ('DELETE', expected.access_profile IN ('legacy_dml')),
+             ('DELETE', expected.access_profile IN ('legacy_dml', 'insert_delete')),
              ('TRUNCATE', false),
              ('REFERENCES', false),
              ('TRIGGER', false)
@@ -853,6 +855,15 @@ verify_runtime_access_contract() {
                 actual.oid,
                 required.privilege_name
               ) IS DISTINCT FROM required.allowed
+           OR (
+             NOT required.allowed
+             AND required.privilege_name IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+             AND has_any_column_privilege(
+                   'control_api_runtime',
+                   actual.oid,
+                   required.privilege_name
+                 )
+           )
      )
      SELECT
        (SELECT COUNT(*) FROM relation_coverage_violations)
@@ -942,6 +953,15 @@ verify_trace_maintenance_access_contract() {
                 actual.oid,
                 required.privilege_name
               ) IS DISTINCT FROM required.allowed
+           OR (
+             NOT required.allowed
+             AND required.privilege_name IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+             AND has_any_column_privilege(
+                   'trace_maintenance_runtime',
+                   actual.oid,
+                   required.privilege_name
+                 )
+           )
      )
      SELECT
        (SELECT COUNT(*) FROM relation_coverage_violations)

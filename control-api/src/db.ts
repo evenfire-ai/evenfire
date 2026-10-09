@@ -18,6 +18,11 @@ import {
   backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
+import {
+  applyPasswordAdmissionSchema,
+  applyPasswordEvaluationRetentionSchema,
+} from './services/auth/passwordAdmissionSchema.js'
+import { applyPasswordWorkOwnershipSchema } from './services/auth/passwordWorkOwnershipSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
@@ -6486,11 +6491,24 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyAdminSubscriptionRateLimitNamespace,
   },
   {
-    // The frozen dev parent now owns every slot through 0125. Preserve each
-    // previously deployed identity as an alias so re-slotting only records a
-    // canonical version and never replays an already-applied migration body.
-    version: '0126_user_access_foundation',
+    version: '0126_bug192_password_admission',
+    // Preserve the deployed identity after dev assigned slot 0125 to admin admission.
+    legacyVersions: ['0125_bug192_password_admission'],
+    apply: applyPasswordAdmissionSchema,
+  },
+  {
+    version: '0127_password_evaluation_retention',
+    apply: applyPasswordEvaluationRetentionSchema,
+  },
+  {
+    version: '0128_password_work_ownership',
+    apply: applyPasswordWorkOwnershipSchema,
+  },
+  {
+    // Preserve the displaced Task 106 identity as a same-body receipt alias.
+    version: '0129_user_access_foundation',
     legacyVersions: [
+      '0126_user_access_foundation',
       '0125_user_access_foundation',
       '0109_user_access_foundation',
       '0107_user_access_foundation',
@@ -6499,8 +6517,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0127_invitation_delivery_commands',
+    version: '0130_invitation_delivery_commands',
     legacyVersions: [
+      '0127_invitation_delivery_commands',
       '0126_invitation_delivery_commands',
       '010a_invitation_delivery_commands',
       '0108_invitation_delivery_commands',
@@ -6509,8 +6528,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyInvitationDeliveryCommandFoundation,
   },
   {
-    version: '0128_catalog_utf8_ordering',
+    version: '0131_catalog_utf8_ordering',
     legacyVersions: [
+      '0128_catalog_utf8_ordering',
       '0127_catalog_utf8_ordering',
       '010b_catalog_utf8_ordering',
       '0109_catalog_utf8_ordering',
@@ -6519,8 +6539,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyCatalogUtf8OrderingSchema,
   },
   {
-    version: '0129_composable_catalog_revisions',
+    version: '0132_composable_catalog_revisions',
     legacyVersions: [
+      '0129_composable_catalog_revisions',
       '0128_composable_catalog_revisions',
       '010c_composable_catalog_revisions',
       '010a_composable_catalog_revisions',
@@ -6531,8 +6552,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // Fix-forward for databases that recorded the first composable-catalog
     // body before the GFS resource-component mapping was completed.
-    version: '012a_gfs_catalog_revision_components',
+    version: '0133_gfs_catalog_revision_components',
     legacyVersions: [
+      '012a_gfs_catalog_revision_components',
       '0129_gfs_catalog_revision_components',
       '010d_gfs_catalog_revision_components',
       '010b_gfs_catalog_revision_components',
@@ -6543,13 +6565,17 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // The access-foundation bodies are immutable; harden their installed
     // SECURITY DEFINER search paths without replaying those historical bodies.
-    version: '012b_user_access_foundation_definer_temp_shadow_hardening',
-    legacyVersions: ['012a_user_access_foundation_definer_temp_shadow_hardening'],
+    version: '0134_user_access_foundation_definer_temp_shadow_hardening',
+    legacyVersions: [
+      '012b_user_access_foundation_definer_temp_shadow_hardening',
+      '012a_user_access_foundation_definer_temp_shadow_hardening',
+    ],
     apply: applyUserAccessFoundationDefinerTempShadowHardening,
   },
   {
-    version: '0130_legacy_password_security_epoch_backfill',
+    version: '0135_legacy_password_security_epoch_backfill',
     legacyVersions: [
+      '0130_legacy_password_security_epoch_backfill',
       '010e_legacy_password_security_epoch_backfill',
       '010c_legacy_password_security_epoch_backfill',
       '0106_legacy_password_security_epoch_backfill',
@@ -6610,8 +6636,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyR31RuntimeBehaviorSourcesSchema,
   },
   {
-    // Compatibility repair is applied atomically with 0125 by the migration runner.
-    version: '0138_authorization_revision_delete_compatibility',
+    // This narrow forward fix retains its late canonical receipt while the
+    // runner executes it atomically immediately after the access foundation.
+    version: '0143_authorization_revision_delete_compatibility',
+    legacyVersions: ['0138_authorization_revision_delete_compatibility'],
     apply: applyAuthorizationRevisionDeleteCompatibility,
   },
 ]

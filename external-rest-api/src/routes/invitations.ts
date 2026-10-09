@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response, Router } from 'express'
 import { verifyToken } from '../authToken.js'
+import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
@@ -158,6 +159,7 @@ export function createInvitationsRouter(): Router {
         }
         res.status(200).json(result.data)
       } catch (error) {
+        if (sendPasswordAuthorityError(error, res)) return
         next(error)
       }
     }

@@ -84,8 +84,7 @@ jobs:
             pinned_suites: gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/mcp-host.json
           - service: control-api
-            pinned_suites:
-              helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
+            pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
           - service: codex-llm-proxy
             pinned_suites: originPolicy.test.ts server.security.test.ts
@@ -154,6 +153,11 @@ jobs:
       - name: Install RPC Proxy dependencies for Control API tests
         if: matrix.service == 'control-api'
         working-directory: rpc-proxy
+        run: npm ci
+
+      - name: Install External REST contract-test dependencies
+        if: matrix.service == 'control-api'
+        working-directory: external-rest-api
         run: npm ci
 
       # Desktop strict-pixel fixture checks consume the Host's locked native
@@ -348,6 +352,21 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # R61-B1 acceptance runs the exact migration producers that created the
+      # historical Task 106 receipts and the observed DEV receipt set. These
+      # immutable source pins make the RealPG test self-contained on clean CI.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 2370a399d4221350946462d41427fad8aee0087f
+          path: r61-b1-producers/historical-task106
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 0b26101eb247adcc44f70d39451f3e82c3225d47
+          path: r61-b1-producers/observed-dev
+          persist-credentials: false
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
@@ -369,11 +388,49 @@ jobs:
       - name: Install producer-backed test dependencies
         run: bash scripts/ci/install-test-producer-dependencies.sh control-api
 
+      - name: Install historical Task 106 producer dependencies
+        working-directory: r61-b1-producers/historical-task106/packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build historical Task 106 producer dependency
+        working-directory: r61-b1-producers/historical-task106/packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install historical Task 106 Control API dependencies
+        working-directory: r61-b1-producers/historical-task106/control-api
+        run: npm ci
+
+      - name: Build historical Task 106 migration runner
+        working-directory: r61-b1-producers/historical-task106/control-api
+        run: npm run build
+
+      - name: Install observed DEV producer dependencies
+        working-directory: r61-b1-producers/observed-dev/packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build observed DEV producer dependency
+        working-directory: r61-b1-producers/observed-dev/packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install observed DEV Control API dependencies
+        working-directory: r61-b1-producers/observed-dev/control-api
+        run: npm ci
+
+      - name: Build observed DEV migration runner
+        working-directory: r61-b1-producers/observed-dev/control-api
+        run: npm run build
+
+      - name: Install External REST contract-test dependencies
+        working-directory: external-rest-api
+        run: npm ci
+
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
           CONTROL_API_REAL_PG_REQUIRED: '1'
+          TASK106_R61_B1_HISTORICAL_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/historical-task106
+          TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
           FORCE_COLOR: '0'
           NO_COLOR: '1'
         # The `realPostgres` filter matches every control-api

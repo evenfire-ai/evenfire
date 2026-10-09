@@ -9,10 +9,16 @@ import {
   handleExternalSessionBackendFailure,
   requireExternalSessionRateLimitContext,
 } from '../../middleware/externalSessionAuth.js'
+import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
 import {
   externalUserRateLimitOptions,
   requireAuthenticatedExternalUserRateLimitContext,
 } from '../../middleware/externalUserRateLimitPolicy.js'
+import {
+  passwordLoginSourceAdmission,
+  sendPasswordAdmissionError,
+  validatePasswordLogin,
+} from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { RpcScope } from '../../profileTypes.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
@@ -85,7 +91,7 @@ function requireLegacySessionTokenPayload(req: Request, res: Response, next: Nex
   next()
 }
 
-function sendExternalLoginError(res: Response, error: string | undefined): Response {
+function sendExternalLoginError(res: Response, error: unknown): Response {
   if (error === 'password_not_set') {
     return res.status(409).json({ error: 'password_not_set' })
   }
@@ -181,7 +187,8 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/auth/password-login',
-    rateLimitMiddleware(externalUserRateLimitOptions('authentication_attempt', 'pre_auth')),
+    validatePasswordLogin,
+    passwordLoginSourceAdmission,
     async (req, res, next) => {
       try {
         const email = String(req.body?.email || '')
@@ -226,6 +233,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           },
         })
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }

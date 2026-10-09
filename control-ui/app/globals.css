@@ -5828,6 +5828,61 @@ td.cu-registry-description {
   margin-top: auto;
 }
 
+.cu-connector-detail__grid {
+  align-items: start;
+}
+
+.cu-connector-detail__field--wide {
+  grid-column: 1 / -1;
+}
+
+.cu-connector-detail__value {
+  min-width: 0;
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.cu-connector-detail__value--code,
+.cu-connector-detail__value--code code {
+  font-family: var(--cu-font-mono);
+}
+
+.cu-connector-detail__conditions {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-connector-detail__condition {
+  display: grid;
+  gap: var(--cu-space-1);
+  min-width: 0;
+  padding: var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-connector-detail__condition-header {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  color: var(--cu-text);
+}
+
+.cu-connector-detail__condition-header > span {
+  color: var(--cu-text-muted);
+}
+
+.cu-connector-detail__condition-message {
+  margin: 0;
+  color: var(--cu-text-soft);
+  overflow-wrap: anywhere;
+}
+
 .cu-agent-create-panel.cu-detail-flow-panel + .cu-card,
 .cu-agent-create-panel.cu-detail-flow-panel + .cu-banner + .cu-card,
 .cu-agent-create-panel.cu-detail-flow-panel + .cu-banner + .cu-banner + .cu-card,

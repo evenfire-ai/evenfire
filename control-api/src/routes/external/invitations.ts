@@ -12,6 +12,7 @@ import {
   externalUserRateLimitOptions,
   requireAuthenticatedExternalUserRateLimitContext,
 } from '../../middleware/externalUserRateLimitPolicy.js'
+import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import {
@@ -241,6 +242,7 @@ export function createExternalInvitationsRouter(): Router {
           expiresInSeconds: 120,
         })
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }

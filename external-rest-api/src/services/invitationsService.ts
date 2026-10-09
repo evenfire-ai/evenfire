@@ -104,6 +104,7 @@ export async function createDesktopAuthorization(
     return { data }
   } catch (error) {
     if (!(error instanceof ControlApiError)) throw error
+    if ([429, 503].includes(error.status)) throw error
     if (error.status === 404) return { error: 'not_found' }
     if (error.status === 400 || error.status === 401 || error.status === 403) {
       return { error: 'invalid_password' }

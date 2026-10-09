@@ -4,6 +4,7 @@ import { pool, rateLimitPool } from '../db.js'
 import { LogThrottle } from '../observability/logThrottle.js'
 import { rootLogger } from '../observability/logger.js'
 import { rateLimitBackendErrorsTotal } from '../observability/metrics.js'
+import { cleanupPasswordIdentifierState } from './auth/passwordCredentialVerification.js'
 import { boundedBucketKey } from './rateLimitBucketKey.js'
 
 /**
@@ -212,6 +213,8 @@ export type RateLimitConcurrencyLease = {
 export type RateLimitConcurrencyLeaseOptions = {
   /** Test/integration seam; production callers use the dedicated pool client. */
   client?: PoolClient
+  /** Finite credential work must not pin a pool session after its final lease. */
+  releaseIdleClient?: boolean
 }
 
 let concurrencyClient: PoolClient | null = null
@@ -379,13 +382,15 @@ export async function acquireRateLimitConcurrencyLease(
         }
         if (!selected) {
           const unlocked = await unlockSlots(client, acquired)
-          if (!unlocked) await invalidateDedicatedConcurrencyClient(client)
+          if (!unlocked || (options.releaseIdleClient && heldSlotsFor(client).size === 0))
+            await invalidateDedicatedConcurrencyClient(client)
           return { allowed: false, backendAvailable: true, release: async () => undefined }
         }
       }
     } catch (error) {
       const unlocked = await unlockSlots(client, acquired)
-      if (!unlocked) await invalidateDedicatedConcurrencyClient(client)
+      if (!unlocked || (options.releaseIdleClient && heldSlotsFor(client).size === 0))
+        await invalidateDedicatedConcurrencyClient(client)
       rootLogger.warn(
         {
           event: 'rate_limit_concurrency_db_error',
@@ -405,7 +410,8 @@ export async function acquireRateLimitConcurrencyLease(
         released = true
         await serializeConcurrencyOperation(async () => {
           const unlocked = await unlockSlots(client, acquired)
-          if (!unlocked) await invalidateDedicatedConcurrencyClient(client)
+          if (!unlocked || (options.releaseIdleClient && heldSlotsFor(client).size === 0))
+            await invalidateDedicatedConcurrencyClient(client)
         })
       },
     }
@@ -422,6 +428,7 @@ export async function cleanupExpiredBuckets(nowMs = Date.now()): Promise<number>
     `DELETE FROM rate_limit_buckets WHERE window_start_ms < $1`,
     [cutoff]
   )
+  await cleanupPasswordIdentifierState()
   return result.rowCount ?? 0
 }
 

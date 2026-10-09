@@ -1,5 +1,6 @@
 import { Request, Response, Router } from 'express'
 import { ControlApiError } from '../controlApiClient.js'
+import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
   loginWithGoogle,
@@ -103,35 +104,20 @@ export function createAuthRouter(): Router {
 
   router.post('/auth/password-login', async (req, res, next) => {
     try {
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const password = String(req.body?.password || '')
-      if (!email || !password) {
-        res.status(400).json({ error: 'email and password are required' })
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
+      const password = typeof req.body?.password === 'string' ? req.body.password : ''
+      if (!email || !password || email.length > 320 || password.length > 256) {
+        res.status(400).json({ error: 'invalid_request' })
         return
       }
-
       const result = await loginWithPassword(email, password, requestedSessionContract(req), req.ip)
       sendLoginResponse(req, res, result)
     } catch (error) {
-      const message = error instanceof Error ? error.message : ''
-      if (message.includes('(409)')) {
-        res.status(409).json({ error: 'password_not_set' })
+      if (error instanceof ControlApiError && [401, 403, 409].includes(error.status)) {
+        res.status(401).json({ error: 'invalid_credentials' })
         return
       }
-      if (message.includes('(401)')) {
-        res.status(401).json({ error: 'Unauthorized' })
-        return
-      }
-      if (isRetiredAccountLoginDenial(error)) {
-        res.status(401).json({ error: 'Unauthorized' })
-        return
-      }
-      if (message.includes('(403)')) {
-        res.status(403).json({ error: 'Membership not found' })
-        return
-      }
+      if (sendPasswordAuthorityError(error, res)) return
       next(error)
     }
   })
