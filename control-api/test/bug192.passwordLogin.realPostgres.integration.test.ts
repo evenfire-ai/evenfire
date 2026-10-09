@@ -367,6 +367,13 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
           body: { error: 'invalid_credentials' },
         })
       }
+      const sourceCharges = await holder.pool.query(
+        `SELECT COALESCE(sum(count), 0)::int AS count
+           FROM rate_limit_buckets
+          WHERE bucket_key = $1`,
+        ['external_authentication_attempt:ip:192.0.2.123']
+      )
+      expect(sourceCharges.rows[0].count).toBe(3)
       const limited = await request(edge)
         .post('/api/v1/auth/password-login')
         .set('X-Forwarded-For', '192.0.2.124')

@@ -189,7 +189,6 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
     '/external/auth/password-login',
     validatePasswordLogin,
     passwordLoginSourceAdmission,
-    rateLimitMiddleware(externalUserRateLimitOptions('authentication_attempt', 'pre_auth')),
     async (req, res, next) => {
       try {
         const email = String(req.body?.email || '')
