@@ -135,8 +135,9 @@ interface ActiveRecipeRun {
  * never duplicated. `expectedFireAt` is the next_fire_at this replica wrote
  * with its last skip; if the row arrives with any other slot (another replica
  * fired or skipped it, or the batch rolled back) the streak restarts at 1.
- * Entries are deleted when the schedule fires, so the map is bounded by the
- * number of schedules that are currently being skipped.
+ * Only a fire deletes an entry; a schedule skipped and then deleted, disabled
+ * or actor-gated keeps its entry until restart. The map is therefore bounded
+ * by the number of schedules.
  */
 const forbiddenSkipStreaks = new Map<string, { count: number; expectedFireAt: string }>()
 
@@ -313,9 +314,12 @@ export async function processMaturedSchedules(
  * the SELECT, defeating the concurrency guard). `fireOneSchedule` surfaces
  * malformed cron expressions and insert errors as
  * `{fired:false, reason:'invalid_cron'|'error'}`, so committing at the end is
- * safe. The one exception is the concurrency-policy active-run lookup: its
- * error propagates so the whole batch rolls back and no run is ever created
- * without the check. A catastrophic DB error (lost connection, deadlock on
+ * safe. Exceptions: the concurrency-policy active-run lookup and the Forbid
+ * skip's own `UPDATE workflow_schedules` propagate their errors, so the batch
+ * rolls back and no run is created without the check. A DB-level `createRun`
+ * failure aborts the transaction (the final COMMIT becomes a ROLLBACK), and
+ * the next Forbid lookup in the batch throws "current transaction is aborted",
+ * so the sweep surfaces as an error. A catastrophic DB error (lost connection, deadlock on
  * COMMIT) also triggers a best-effort ROLLBACK before re-raising.
  */
 async function fireOneBatch(client: DbClient, batchSize: number): Promise<ScheduleFireResult[]> {
