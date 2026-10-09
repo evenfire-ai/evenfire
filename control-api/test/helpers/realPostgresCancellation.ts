@@ -24,7 +24,8 @@ async function createPostgresProtocolBlackhole(
   }
   const target = new URL(connectionString)
   const targetHost = target.searchParams.get('host') || target.hostname.replace(/^\[|\]$/g, '')
-  const targetPort = Number(target.searchParams.get('port') || target.port || 5432)
+  const queryPort = target.searchParams.get('port')
+  const targetPort = Number(queryPort || target.port || 5432)
   const sslMode = target.searchParams.get('sslmode')
   if (sslMode && sslMode !== 'disable') {
     throw new Error('COMMIT reply observation requires the harness plaintext PostgreSQL connection')
