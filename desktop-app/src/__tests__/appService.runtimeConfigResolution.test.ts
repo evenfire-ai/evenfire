@@ -308,6 +308,48 @@ describe('AppService runtime config discovery ownership', () => {
     expect(app.pendingRuntimeConfigDiscovery).toBeNull()
   })
 
+  it.each([
+    [
+      'Google',
+      (service: { googleLogin: (idToken: string) => Promise<unknown> }) =>
+        service.googleLogin('token'),
+    ],
+    [
+      'password',
+      (service: { passwordLogin: (email: string, password: string) => Promise<unknown> }) =>
+        service.passwordLogin('user@example.test', 'password'),
+    ],
+  ])('commits matching discovery after a failed %s login', async (_kind, login) => {
+    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    await runtimeConfig.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: restA,
+      rpcProxyBaseUrl: '',
+      appName: 'Environment A',
+    })
+    const app = service as unknown as {
+      authClient: {
+        getDesktopEnvironment: ReturnType<typeof vi.fn>
+        googleLogin: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
+      }
+      passwordLogin: (email: string, password: string) => Promise<unknown>
+    }
+    app.authClient = {
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
+        externalRestApiBaseUrl: restA,
+        rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+        appName: 'Environment A',
+      }),
+      googleLogin: vi.fn().mockRejectedValue(new Error('Google login rejected')),
+      passwordLogin: vi.fn().mockRejectedValue(new Error('password login rejected')),
+    }
+
+    await expect(login(app)).rejects.toThrow('login rejected')
+
+    expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-discovered.example.test')
+    expect(service.tokenStore.setSessionToken).not.toHaveBeenCalled()
+  })
+
   it('shares a pending discovery for the same profile and REST endpoint', async () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     await runtimeConfig.saveDesktopRuntimeConfig({
