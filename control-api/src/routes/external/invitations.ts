@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { type Request, Router } from 'express'
 import { randomBytes } from 'node:crypto'
 import { config } from '../../config.js'
 import {
