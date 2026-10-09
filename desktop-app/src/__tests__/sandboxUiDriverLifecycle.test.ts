@@ -70,9 +70,17 @@ const electronMocks = vi.hoisted(() => {
     }
   }
 
+  // Partition cookie jar keyed by `${url}|${name}`, the identity Electron's
+  // `cookies.remove(url, name)` matches on.
+  const cookieJar = new Map<string, string>()
   const sessionObject = {
     cookies: {
-      set: vi.fn(async (_details?: { value: string }): Promise<void> => undefined),
+      set: vi.fn(
+        async (_details?: { url: string; name: string; value: string }): Promise<void> => undefined
+      ),
+      remove: vi.fn(async (url: string, name: string): Promise<void> => {
+        cookieJar.delete(`${url}|${name}`)
+      }),
     },
     setPermissionRequestHandler: vi.fn(),
     setPermissionCheckHandler: vi.fn(),
@@ -87,6 +95,7 @@ const electronMocks = vi.hoisted(() => {
     getDisplayMatching: vi.fn(() => ({ scaleFactor: 1 })),
     touchSandboxUiPartition: vi.fn(async () => undefined),
     sessionObject,
+    cookieJar,
     views,
   }
 })
@@ -167,8 +176,24 @@ function mountArgs(overrides: MountSandboxUiViewOverrides): MountSandboxUiViewAr
 beforeEach(() => {
   vi.clearAllMocks()
   electronMocks.views.length = 0
+  electronMocks.cookieJar.clear()
   electronMocks.sessionObject.cookies.set.mockResolvedValue(undefined)
 })
+
+/** Holds every cookie write pending; `release()` lands them in the jar. */
+function holdCookieWrites(): { release: () => void } {
+  const pending: Array<() => void> = []
+  electronMocks.sessionObject.cookies.set.mockImplementation(
+    details =>
+      new Promise<void>(resolve => {
+        pending.push(() => {
+          if (details) electronMocks.cookieJar.set(`${details.url}|${details.name}`, details.value)
+          resolve()
+        })
+      })
+  )
+  return { release: () => pending.splice(0).forEach(land => land()) }
+}
 
 afterEach(async () => {
   await unmountSandboxUiView()
@@ -418,6 +443,55 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     expect(electronMocks.views).toHaveLength(0)
     expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
     expect(parentWindow.listenerCount('closed')).toBe(0)
+  })
+
+  it('removes the cookie it wrote when the session changes during the write', async () => {
+    const parentWindow = new FakeParentWindow()
+    const cookieWrites = holdCookieWrites()
+    let sessionCurrent = true
+
+    const mount = mountSandboxUiView(mountArgs({ parentWindow, isCurrent: () => sessionCurrent }))
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledOnce()
+    })
+
+    sessionCurrent = false
+    cookieWrites.release()
+    await mount
+
+    expect([...electronMocks.cookieJar.keys()]).toEqual([])
+    expect(electronMocks.views).toHaveLength(0)
+    expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
+  })
+
+  it('leaves the cookie alone when a newer mount superseded the write', async () => {
+    const parentWindow = new FakeParentWindow()
+    const cookieWrites = holdCookieWrites()
+    let sessionCurrent = true
+
+    const mount = mountSandboxUiView(mountArgs({ parentWindow, isCurrent: () => sessionCurrent }))
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledOnce()
+    })
+
+    const newerMount = mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        setCookie:
+          'clerum_sandbox_ui_session=tok-newer;' +
+          ' Path=/api/v1/sandbox-ui/sandbox-recipes/task-board/; HttpOnly',
+      })
+    )
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledTimes(2)
+    })
+    sessionCurrent = false
+    cookieWrites.release()
+    await Promise.all([mount, newerMount])
+
+    expect(electronMocks.sessionObject.cookies.remove).not.toHaveBeenCalled()
+    expect([...electronMocks.cookieJar.values()]).toEqual(['tok-newer'])
+    expect(electronMocks.views).toHaveLength(1)
   })
 
   it('encodes the canonical client route before handing it to the mounted app', async () => {

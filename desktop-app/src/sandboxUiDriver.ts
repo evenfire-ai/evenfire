@@ -297,6 +297,25 @@ async function writeSandboxUiCookie(args: {
 }
 
 /**
+ * Undo `writeSandboxUiCookie`: removes the cookie it would set for the same
+ * arguments. Removal matches by name and by the URL the cookie is sent to, so
+ * it also clears an older value left at that Path by a previous mount.
+ */
+async function removeSandboxUiCookie(args: {
+  rpcProxyOrigin: string
+  recipeNs: string
+  recipeName: string
+  setCookie: string | string[]
+  partition: string
+}): Promise<void> {
+  const { rpcProxyOrigin, recipeNs, recipeName, setCookie, partition } = args
+  const cookiePath = extractSandboxUiPath(setCookie, recipeNs, recipeName)
+  await session
+    .fromPartition(partition)
+    .cookies.remove(`${rpcProxyOrigin}${cookiePath}`, SANDBOX_UI_COOKIE_NAME)
+}
+
+/**
  * Refresh the active partition's session cookie. No-op when nothing is
  * mounted (refresh can race with teardown). Throws on a missing cookie
  * value or a partition write error so the caller can surface a refresh
@@ -396,14 +415,19 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // navigation request carries it. The proxy enforces the recipe binding
   // claim on every request — installing on a stale partition would still
   // fail closed at rpc-proxy.
-  await writeSandboxUiCookie({
-    rpcProxyOrigin: proxyOriginUrl,
-    recipeNs,
-    recipeName,
-    setCookie,
-    partition,
-  })
-  if (generation !== mountGeneration || !isCurrent()) return
+  const cookieArgs = { rpcProxyOrigin: proxyOriginUrl, recipeNs, recipeName, setCookie, partition }
+  await writeSandboxUiCookie(cookieArgs)
+  if (generation !== mountGeneration) return
+  if (!isCurrent()) {
+    // The partition is keyed per recipe, not per user, and a session change
+    // does not clear it: the cookie just written would outlive the session
+    // that minted it. Only when this mount is still the newest one — a newer
+    // mount may already have written its own cookie at the same Path.
+    await removeSandboxUiCookie(cookieArgs).catch(err => {
+      console.warn('[SandboxUI] could not remove a stale session cookie:', err)
+    })
+    return
+  }
   if (parentWindow.isDestroyed()) {
     throw new Error('parent window is destroyed')
   }
