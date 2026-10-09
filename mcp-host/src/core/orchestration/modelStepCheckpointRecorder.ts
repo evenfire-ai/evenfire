@@ -34,8 +34,9 @@ import { isModelStepCheckpointEligibleError } from './modelStepCheckpointEligibi
  * The loop calls it at fixed points: `begin` before the first completion,
  * `syncMessages` before every context-management pass and before a tool batch
  * is dispatched, `recordDispatch`/`recordResult` around each tool execution,
- * `updateState` once the tool results are in, and `settle` exactly once on
- * exit. A `tool_dispatch` is written before the tool's effect, so a dispatch
+ * `updateState` once the tool results are in, and `settle` once per loop
+ * exit. A continuation paused for approval may enter another loop with this
+ * recorder. A `tool_dispatch` is written before the tool's effect, so a dispatch
  * without a result reads `unknown` and is never re-executed. A result shares
  * the transaction of the next write (plan addendum A2).
  *
@@ -238,11 +239,18 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
 
   async settle(result: LoopResult | undefined): Promise<string | undefined> {
     if (this.settled) throw new Error('model-step checkpoint recorder settled twice')
-    this.settled = true
     const fence = this.currentFence
     if (!fence) return undefined
     if (this.pendingResults.length > 0) await this.append([])
     const source = this.opts.mode.kind === 'origin' ? 'open' : 'claimed'
+
+    // The approval gate has not executed the announced call yet. A continuation
+    // keeps its claim and recorder so the approved result joins the same ledger
+    // before the next model request. A later loop invocation may settle again.
+    if (result?.type === 'need_approval' && source === 'claimed' && !this.isPoisoned) {
+      return undefined
+    }
+    this.settled = true
 
     if (
       result?.type === 'error' &&

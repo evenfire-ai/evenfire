@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { ConversationManager } from '../../core/conversation/conversation'
 import {
   MODEL_STEP_CONTINUE_ERROR_CODES,
   type ModelStepContinueClaimed,
@@ -103,13 +104,14 @@ interface HeaderOverrides {
   sessionKey?: string
   /** Explicit `null` stores no source message; `undefined` stores the valid one. */
   sourceMessage?: string | null
+  originTurnNumber?: number
 }
 
 function header(overrides: HeaderOverrides = {}): ModelStepCheckpointOpenHeader {
   return {
     checkpointId: overrides.checkpointId ?? CHECKPOINT_ID,
     sessionKey: overrides.sessionKey ?? SESSION_KEY,
-    originTurnNumber: ORIGIN_TURN_NUMBER,
+    originTurnNumber: overrides.originTurnNumber ?? ORIGIN_TURN_NUMBER,
     originTaskId: ORIGIN_TASK_ID,
     provider: 'codex-subscription',
     model: 'gpt-6.1-sol',
@@ -206,6 +208,7 @@ function createHarness(
     hostId: options.hostId ?? HOST_ID,
     resumableTtlMs: RESUMABLE_TTL_MS,
     claimLeaseMs: LEASE_MS,
+    pendingApprovalTtlMs: RESUMABLE_TTL_MS,
     attachmentTtlMs: ATTACHMENT_TTL_MS,
   }
   let resolveCaptured: (call: EnqueueCall) => void = () => {}
@@ -218,7 +221,11 @@ function createHarness(
       if (options.verdict) continuation.onVerdict(options.verdict)
     }
   )
-  const service = new ModelStepContinuationService({ checkpoints: support, enqueue })
+  const service = new ModelStepContinuationService({
+    checkpoints: support,
+    conversationManager: new ConversationManager(handle.store),
+    enqueue,
+  })
   return { handle, checkpoints, service, enqueue, captured }
 }
 
@@ -761,8 +768,10 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
         hostId: HOST_ID,
         resumableTtlMs: RESUMABLE_TTL_MS,
         claimLeaseMs: LEASE_MS,
+        pendingApprovalTtlMs: RESUMABLE_TTL_MS,
         attachmentTtlMs: ATTACHMENT_TTL_MS,
       },
+      conversationManager: new ConversationManager(handle.store),
       enqueue,
     })
     const { version } = await openResumable(checkpoints)
@@ -774,6 +783,51 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
       version: version + 2,
     })
     expect(enqueue).toHaveBeenCalledTimes(1)
+  })
+
+  it('resets a reopened session atomically when admission fails before dispatch', async () => {
+    const handle = makeSqliteStore()
+    openHandles.push(handle)
+    const manager = new ConversationManager(handle.store)
+    const conversation = await manager.getOrCreate(SESSION_KEY, {
+      userId: USER_ID,
+      channelType: 'rpc',
+      channelId: AGENT,
+      threadId: CHAT_ID,
+      source: 'rpc',
+    })
+    await manager.startTurn(conversation, sourceMessage().content, ORIGIN_TASK_ID)
+    await manager.failTurn(conversation)
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, { now: () => NOW })
+    const { version } = await openResumable(checkpoints, { originTurnNumber: 1 })
+    const failure = new Error('enqueue rejected after turn reopen')
+    const service = new ModelStepContinuationService({
+      checkpoints: {
+        store: checkpoints,
+        hostInstanceId: HOST_INSTANCE_ID,
+        hostId: HOST_ID,
+        resumableTtlMs: RESUMABLE_TTL_MS,
+        claimLeaseMs: LEASE_MS,
+        pendingApprovalTtlMs: RESUMABLE_TTL_MS,
+        attachmentTtlMs: ATTACHMENT_TTL_MS,
+      },
+      conversationManager: manager,
+      enqueue: async (_message, taskId) => {
+        await manager.resumeTurnForContinuation(conversation, taskId, 1, null)
+        throw failure
+      },
+    })
+
+    await expect(service.continue(continuationRequest(version))).rejects.toThrow(failure)
+    expect(checkpointRow(handle, CHECKPOINT_ID)).toMatchObject({ status: 'abandoned' })
+    expect(
+      handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(SESSION_KEY)
+    ).toEqual({ state: 'idle', active_task_id: null })
+    expect(conversation.state).toBe('idle')
+    await manager.startTurn(conversation, 'new request after failed admission', 'task-new')
+    expect(conversation.activeTaskId).toBe('task-new')
   })
 
   it('re-admits the stored source message under a fresh messageId', async () => {

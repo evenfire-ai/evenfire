@@ -49,6 +49,8 @@ export interface ModelStepCheckpointSupport {
   resumableTtlMs: number
   /** Continuation claim lease, renewed every third of it. */
   claimLeaseMs: number
+  /** Durable pending approval lifetime; a suspended claim must remain owned for this window. */
+  pendingApprovalTtlMs: number
   /** Lifetime of inline uploaded file bytes held by a resumable checkpoint. */
   attachmentTtlMs: number
 }

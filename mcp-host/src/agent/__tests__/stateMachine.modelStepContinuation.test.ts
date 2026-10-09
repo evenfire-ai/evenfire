@@ -12,6 +12,7 @@ import {
   makeSqliteStore,
 } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
+import { SqliteColdStartLoader } from '../../core/conversation/persistence/sqliteColdStartLoader'
 import { LlmErrorCode } from '../../core/errors'
 import { type ChatMessage, FinishReason } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
@@ -25,8 +26,13 @@ import type {
   TaskResponsePayload,
 } from '../../queue/types'
 import type { IncomingMessage } from '../../server/types'
+import { sourceMessageForResume } from '../sourceMessageForResume'
 import { AgentStateMachine } from '../stateMachine'
-import { type ModelStepCheckpointExecutionSupport, resolveTaskSessionKey } from '../taskExecutor'
+import {
+  type ModelStepCheckpointExecutionSupport,
+  TaskExecutor,
+  resolveTaskSessionKey,
+} from '../taskExecutor'
 import type { ResolvedTaskModel } from '../types'
 
 const USER = 'user-state-b2'
@@ -178,6 +184,7 @@ function support(
     hostId: 'host-a',
     resumableTtlMs: RESUMABLE_TTL_MS,
     claimLeaseMs: LEASE_MS,
+    pendingApprovalTtlMs: RESUMABLE_TTL_MS,
     attachmentTtlMs: 3_600_000,
   }
 }
@@ -214,6 +221,76 @@ afterEach(async () => {
 })
 
 describe('AgentStateMachine model-step continuation model pinning (#1043)', () => {
+  it('rehydrates a waiting approval with the checkpoint model after Host takeover', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const handle = makeSqliteStore()
+    handles.push(handle)
+    const manager = new ConversationManager(handle.store)
+    const { checkpoints, fence, taskBudget } = await claimedCheckpoint(handle, manager)
+    const call = {
+      id: 'tc-cold-approval',
+      name: 'shell_exec',
+      arguments: { command: 'printf cold-approval' },
+    }
+    expect(
+      await checkpoints.append(SESSION_KEY, fence, [
+        {
+          kind: 'message',
+          toolCallId: null,
+          payload: JSON.stringify({ role: 'assistant', content: null, tool_calls: [call] }),
+        },
+      ])
+    ).toBe(true)
+    const conversation = manager.getSessionByKey(SESSION_KEY)!
+    await manager.resumeTurnForContinuation(conversation, 'task-continuation-state-b2', 1, null)
+    await manager.suspendForApproval(conversation, {
+      request_id: 'approval-cold-state',
+      tool_name: 'shell_exec',
+      tool_call_id: call.id,
+      parameters: call.arguments,
+      description: 'Approve the checkpoint tool',
+      context_snapshot: [
+        { role: 'user', content: message().content },
+        { role: 'assistant', content: '', tool_calls: [call] },
+      ],
+      task_budget: JSON.parse(taskBudget!),
+      sourceMessage: sourceMessageForResume(message()),
+    })
+    expect(await checkpoints.bootReap('host-instance-cold-state')).toEqual({
+      abandoned: 0,
+      reopened: 0,
+    })
+
+    const { stateMachine } = agent(handle)
+    const defaultProvider = provider('openai')
+    const pinnedProvider = provider(PIN.provider)
+    stateMachine.setLLMProvider(defaultProvider as never, 'host-default-model')
+    stateMachine.setTaskModelResolver(selections =>
+      selections?.[PIN.provider] === PIN.model
+        ? { provider: pinnedProvider, model: PIN.model, contextWindowTokens: 100_000 }
+        : null
+    )
+    stateMachine.setModelStepCheckpoints({
+      ...support(handle, checkpoints),
+      hostInstanceId: 'host-instance-cold-state',
+    })
+    stateMachine.setColdStartLoader(new SqliteColdStartLoader(handle.store))
+    await stateMachine.bootstrap()
+    const resumeSpy = vi.spyOn(TaskExecutor.prototype, 'resumeAfterApproval')
+    expect(
+      await stateMachine.handleApproval(USER, 'approval-cold-state', true, 'rpc', AGENT)
+    ).toEqual({ success: true })
+    await resumeSpy.mock.results[0]!.value
+    await handle.persistQueue.drain()
+
+    expect(pinnedProvider.calls()).toBe(1)
+    expect(defaultProvider.calls()).toBe(0)
+    expect(
+      handle.worker.db
+        .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get(fence.checkpointId)
+    ).toEqual({ status: 'completed' })
+  })
   it('12. runs the checkpoint provider and model even when the session selected another pair', async () => {
     const handle = makeSqliteStore()
     handles.push(handle)

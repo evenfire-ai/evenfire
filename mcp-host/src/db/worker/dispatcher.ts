@@ -360,6 +360,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       const syntheticErrorCode = includeLive
         ? 'APPROVAL_INTERRUPTED_BY_RESTART'
         : 'APPROVAL_EXPIRED_DURING_DOWNTIME'
+      const abandonSuspendedCheckpoint = db.prepare(`
+        UPDATE model_step_checkpoints
+        SET status = 'abandoned', version = version + 1,
+            claim_expires_at = NULL, updated_at = @now
+        WHERE session_key = @session_key AND continuation_task_id = @task_id
+          AND status IN ('claimed', 'resumable', 'blocked')
+      `)
       const reaped: ReapedSession[] = []
       for (;;) {
         const chunkReaped = await withBusyRetry(() => {
@@ -388,6 +395,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             }>
             const out: ReapedSession[] = []
             for (const sess of sessions) {
+              if (sess.active_task_id) {
+                abandonSuspendedCheckpoint.run({
+                  session_key: sess.session_key,
+                  task_id: sess.active_task_id,
+                  now: nowMs,
+                })
+              }
               const agg = s.selectSessionMaxOrdinalTurn.get({ session_id: sess.id }) as {
                 max_ordinal: number
                 max_turn: number | null

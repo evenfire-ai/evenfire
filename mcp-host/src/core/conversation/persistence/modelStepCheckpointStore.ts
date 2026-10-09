@@ -139,10 +139,35 @@ export class ModelStepCheckpointStore {
     )
   }
 
+  abandonAdmission(
+    sessionKey: string,
+    taskId: string,
+    fence: ModelStepCheckpointFence
+  ): Promise<{ applied: boolean; resetSession: boolean }> {
+    return this.queue.enqueueSync(
+      {
+        kind: 'model_step_checkpoint_abandon_admission',
+        sessionKey,
+        taskId,
+        fence,
+        now: this.opts.now(),
+      },
+      sessionKey
+    )
+  }
+
   /** The single non-terminal checkpoint of a session, or `null`. */
   loadLive(sessionKey: string): Promise<ModelStepCheckpointSnapshot | null> {
     return this.queue.enqueueSync<ModelStepCheckpointSnapshot | null>(
       { kind: 'model_step_checkpoint_load_live', sessionKey },
+      sessionKey
+    )
+  }
+
+  /** Boot approval recovery also inspects terminal rows to reject stale consent. */
+  loadForTask(sessionKey: string, taskId: string): Promise<ModelStepCheckpointSnapshot | null> {
+    return this.queue.enqueueSync<ModelStepCheckpointSnapshot | null>(
+      { kind: 'model_step_checkpoint_load_for_task', sessionKey, taskId },
       sessionKey
     )
   }

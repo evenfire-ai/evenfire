@@ -90,6 +90,20 @@ describe('ConversationManager.resumeTurnForContinuation (#1043)', () => {
     expect(store.continuationStarts).toEqual([{ conversationId: conv.id, turnNumber: 1 }])
   })
 
+  it('rejects an older unanswered turn after a newer one fails, then reopens the latest', async () => {
+    const manager = new ConversationManager(new ReopenableMemoryStore())
+    const conv = await manager.getOrCreate('user-two-turns')
+    await manager.startTurn(conv, 'first', 'task-first')
+    await manager.failTurn(conv)
+    await manager.startTurn(conv, 'second', 'task-second')
+    await manager.failTurn(conv)
+
+    await expectInvalidTransition(manager.resumeTurnForContinuation(conv, 'task-old', 1, null))
+    expect(conv.state).toBe(ConversationState.Idle)
+    await manager.resumeTurnForContinuation(conv, 'task-latest', 2, null)
+    expect(conv.activeTaskId).toBe('task-latest')
+  })
+
   it('rolls the in-RAM reopen back when the durable continuation start fails', async () => {
     const manager = new ConversationManager(new ReopenableMemoryStore(true))
     const conv = await manager.getOrCreate('user-rollback')

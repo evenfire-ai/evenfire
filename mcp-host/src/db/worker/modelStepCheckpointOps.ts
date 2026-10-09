@@ -192,7 +192,16 @@ export type ModelStepCheckpointOp =
       leaseMs: number
       now: number
     }
+  | {
+      /** Admission failed before a task took ownership: retire its claim and reopen the session atomically. */
+      kind: 'model_step_checkpoint_abandon_admission'
+      sessionKey: string
+      taskId: string
+      fence: ModelStepCheckpointFence
+      now: number
+    }
   | { kind: 'model_step_checkpoint_load_live'; sessionKey: string }
+  | { kind: 'model_step_checkpoint_load_for_task'; sessionKey: string; taskId: string }
   | { kind: 'model_step_checkpoint_load_entries'; checkpointId: string }
   | {
       /** Unexpired attachment bytes of a checkpoint that is resumable or claimed. */
@@ -201,7 +210,7 @@ export type ModelStepCheckpointOp =
       now: number
     }
   | {
-      /** Boot reaper: `open` → `abandoned`; `claimed` by another host → `resumable`. */
+      /** Boot reaper: abandon `open`, adopt claims with live approvals, reopen other foreign claims. */
       kind: 'model_step_checkpoint_boot_reap'
       hostInstanceId: string
       now: number
@@ -227,6 +236,7 @@ const WRITE_KINDS: ReadonlySet<ModelStepCheckpointOpKind> = new Set<ModelStepChe
   'model_step_checkpoint_transition',
   'model_step_checkpoint_renew_lease',
   'model_step_checkpoint_claim',
+  'model_step_checkpoint_abandon_admission',
   'model_step_checkpoint_boot_reap',
   'model_step_checkpoint_sweep',
 ])
@@ -256,6 +266,7 @@ interface Statements {
   retireLiveBySession: Statement
   stampMessage: Statement
   selectOpen: Statement
+  adoptApprovalClaims: Statement
   selectForeignClaims: Statement
   abandonById: Statement
   reopenClaim: Statement
@@ -352,6 +363,27 @@ function statements(db: Database): Statements {
     selectOpen: db.prepare(
       "SELECT checkpoint_id FROM model_step_checkpoints WHERE status = 'open'"
     ),
+    adoptApprovalClaims: db.prepare(`
+      UPDATE model_step_checkpoints
+      SET claim_owner = @owner, claim_generation = claim_generation + 1,
+          claim_expires_at = (
+            SELECT CAST(p.expires_at * 1000 AS INTEGER)
+            FROM pending_approvals p JOIN sessions sess ON sess.id = p.session_id
+            WHERE sess.session_key = model_step_checkpoints.session_key
+              AND p.task_id = model_step_checkpoints.continuation_task_id
+              AND sess.active_task_id = p.task_id AND sess.state = 'awaiting_approval'
+              AND p.expires_at > @now / 1000
+            LIMIT 1
+          ), updated_at = @now
+      WHERE status = 'claimed' AND claim_owner != @owner
+        AND EXISTS (
+          SELECT 1 FROM pending_approvals p JOIN sessions sess ON sess.id = p.session_id
+          WHERE sess.session_key = model_step_checkpoints.session_key
+            AND p.task_id = model_step_checkpoints.continuation_task_id
+            AND sess.active_task_id = p.task_id AND sess.state = 'awaiting_approval'
+            AND p.expires_at > @now / 1000
+        )
+    `),
     selectForeignClaims: db.prepare(
       "SELECT checkpoint_id FROM model_step_checkpoints WHERE status = 'claimed' AND claim_owner != ?"
     ),
@@ -370,7 +402,14 @@ function statements(db: Database): Statements {
       SET status = 'abandoned', version = version + 1, claim_expires_at = NULL, updated_at = @now
       WHERE expires_at IS NOT NULL AND expires_at <= @now
         AND (status IN ('resumable','blocked')
-             OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= @now))
+             OR (status = 'claimed' AND claim_expires_at IS NOT NULL AND claim_expires_at <= @now
+                 AND NOT EXISTS (
+                   SELECT 1 FROM pending_approvals p JOIN sessions sess ON sess.id = p.session_id
+                   WHERE sess.session_key = model_step_checkpoints.session_key
+                     AND p.task_id = model_step_checkpoints.continuation_task_id
+                     AND sess.active_task_id = p.task_id AND sess.state = 'awaiting_approval'
+                     AND p.expires_at > @now / 1000
+                 )))
     `),
     // Entries and attachments go with the header (ON DELETE CASCADE).
     deleteTerminalHeaders: db.prepare(`
@@ -674,6 +713,47 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
       return { applied: tx.immediate() }
     }
 
+    case 'model_step_checkpoint_abandon_admission': {
+      const tx = db.transaction(() => {
+        const changed = db
+          .prepare(
+            `UPDATE model_step_checkpoints
+                SET status = 'abandoned', version = version + 1,
+                    claim_expires_at = NULL, updated_at = @now
+              WHERE checkpoint_id = @checkpoint_id AND session_key = @session_key
+                AND continuation_task_id = @task_id AND status = 'claimed'
+                AND claim_owner = @owner AND claim_generation = @generation`
+          )
+          .run({
+            checkpoint_id: op.fence.checkpointId,
+            session_key: op.sessionKey,
+            task_id: op.taskId,
+            owner: op.fence.owner,
+            generation: op.fence.generation,
+            now: op.now,
+          }).changes
+        if (changed !== 1) return { applied: false, resetSession: false }
+        const resetSession =
+          db
+            .prepare(
+              `UPDATE sessions
+                SET state = 'idle', active_task_id = NULL, active_trace_context = NULL
+              WHERE session_key = ? AND active_task_id = ?
+                AND state IN ('processing', 'awaiting_approval')`
+            )
+            .run(op.sessionKey, op.taskId).changes === 1
+        if (resetSession) {
+          db.prepare(
+            `DELETE FROM pending_approvals
+              WHERE task_id = ? AND session_id =
+                (SELECT id FROM sessions WHERE session_key = ?)`
+          ).run(op.taskId, op.sessionKey)
+        }
+        return { applied: true, resetSession }
+      })
+      return tx.immediate()
+    }
+
     case 'model_step_checkpoint_claim': {
       const tx = db.transaction((): ModelStepClaimOutcome => {
         const header = s.selectHeader.get(op.checkpointId) as ModelStepCheckpointRow | undefined
@@ -695,10 +775,21 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
           header.status === 'resumable' ||
           header.status === 'claimed' ||
           header.status === 'blocked'
+        const approvalAlive =
+          header.status === 'claimed' &&
+          db
+            .prepare(
+              `SELECT 1 FROM pending_approvals p
+               JOIN sessions sess ON sess.id = p.session_id
+               WHERE sess.session_key = ? AND p.task_id = ?
+                 AND sess.active_task_id = p.task_id
+                 AND sess.state = 'awaiting_approval' AND p.expires_at > ? / 1000
+               LIMIT 1`
+            )
+            .get(header.session_key, header.continuation_task_id, op.now) !== undefined
         const leaseAlive =
           header.status === 'claimed' &&
-          header.claim_expires_at !== null &&
-          header.claim_expires_at > op.now
+          ((header.claim_expires_at !== null && header.claim_expires_at > op.now) || approvalAlive)
         if (
           nonTerminal &&
           header.expires_at !== null &&
@@ -715,7 +806,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
         }
         let reclaimed = false
         if (header.status === 'claimed') {
-          if (header.claim_expires_at !== null && header.claim_expires_at > op.now) {
+          if (leaseAlive) {
             return { outcome: 'replayed', taskId: requireTaskId(header) }
           }
           reclaimed = true
@@ -754,6 +845,17 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
       return header ? snapshot(s, header) : null
     }
 
+    case 'model_step_checkpoint_load_for_task': {
+      const header = db
+        .prepare(
+          `SELECT * FROM model_step_checkpoints
+           WHERE session_key = ? AND continuation_task_id = ?
+           ORDER BY updated_at DESC LIMIT 1`
+        )
+        .get(op.sessionKey, op.taskId) as ModelStepCheckpointRow | undefined
+      return header ? snapshot(s, header) : null
+    }
+
     case 'model_step_checkpoint_load_entries':
       return s.selectEntries.all(op.checkpointId) as ModelStepCheckpointEntryRow[]
 
@@ -767,6 +869,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
       const tx = db.transaction(() => {
         const open = s.selectOpen.all() as Array<{ checkpoint_id: string }>
         for (const row of open) s.abandonById.run({ checkpoint_id: row.checkpoint_id, now: op.now })
+        s.adoptApprovalClaims.run({ owner: op.hostInstanceId, now: op.now })
         const foreign = s.selectForeignClaims.all(op.hostInstanceId) as Array<{
           checkpoint_id: string
         }>

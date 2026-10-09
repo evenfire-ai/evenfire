@@ -895,9 +895,9 @@ export class SqliteConversationStore implements ConversationStore {
     if (!sessionKey) throw new Error(`Cannot reopen a turn of untracked session ${conv.id}`)
     this.reconcilePinning(sessionKey, conv)
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
-    if (turnNumber >= state.nextTurnNumber) {
+    if (turnNumber !== state.nextTurnNumber - 1) {
       throw new Error(
-        `Cannot reopen turn ${turnNumber} of session ${conv.id}: the next turn is ${state.nextTurnNumber}`
+        `Cannot reopen turn ${turnNumber} of session ${conv.id}: latest turn is ${state.nextTurnNumber - 1}`
       )
     }
     const marker = this.claimReopenedTurnMarker(state)

@@ -1698,6 +1698,7 @@ async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): 
     hostId: config.hostName,
     resumableTtlMs: config.modelStepCheckpointTtlMs,
     claimLeaseMs: config.modelStepClaimLeaseMs,
+    pendingApprovalTtlMs: config.pendingApprovalTtlMs,
     attachmentTtlMs: config.modelStepAttachmentTtlMs,
     fileReferenceGfsGate,
     gfsSurfaceRuntimeCapability,
@@ -1705,6 +1706,7 @@ async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): 
   agent.setModelStepCheckpoints(support)
   modelStepContinuationService = new ModelStepContinuationService({
     checkpoints: support,
+    conversationManager: agent.getConversationManager(),
     enqueue: async (message, taskId, continuation) => {
       if (!messageQueue || !taskLifecycle || !sessionProcessor) {
         throw new Error('Model-step continuation async admission is not initialized')

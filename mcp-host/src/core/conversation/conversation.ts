@@ -435,6 +435,7 @@ export class ConversationManager {
     const currentTurn = conversation.turns[conversation.turns.length - 1]
     if (
       !currentTurn ||
+      currentTurn.number !== turnNumber ||
       currentTurn.response !== undefined ||
       (replacingStaleTask && currentTurn.completed_at !== undefined)
     ) {
@@ -862,10 +863,10 @@ export class ConversationManager {
    *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async clearPendingApproval(sessionKey: string): Promise<void> {
-    const conv = this.store.get(sessionKey)
+  async clearPendingApproval(sessionKey: string, requestId?: string): Promise<void> {
+    const conv = this.store.get(sessionKey) ?? (await this.getSessionByKeyAsync(sessionKey))
     if (!conv) return
-    const requestId = conv.pending_approval?.request_id
+    requestId ??= conv.pending_approval?.request_id
     conv.pending_approval = undefined
     conv.state = ConversationState.Idle // release the turn lock (BUG-8)
     conv.activeTaskId = undefined

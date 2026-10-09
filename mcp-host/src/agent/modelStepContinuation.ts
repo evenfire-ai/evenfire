@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { ConversationManager } from '../core/conversation/conversation'
 import {
   MODEL_STEP_BLOCKED_REASONS,
   MODEL_STEP_CONTINUE_ERROR_CODES,
@@ -51,6 +52,7 @@ export type ModelStepContinuationHandler = (
 
 export interface ModelStepContinuationServiceDeps {
   checkpoints: ModelStepCheckpointSupport
+  conversationManager: ConversationManager
   /** Creates an indexed task and uses the ordinary async admission and result-delivery path. */
   enqueue: (
     message: IncomingMessage,
@@ -213,10 +215,17 @@ export class ModelStepContinuationService {
       }
       await this.deps.enqueue(sourceMessage, claim.taskId, continuation)
     } catch (err) {
-      await checkpoints.store.transition(sessionKey, claim.fence, {
-        from: ['claimed'],
-        to: 'abandoned',
-      })
+      const abandoned = await checkpoints.store.abandonAdmission(
+        sessionKey,
+        claim.taskId,
+        claim.fence
+      )
+      if (abandoned.resetSession) {
+        const conversation = this.deps.conversationManager.getSessionByKey(sessionKey)
+        if (conversation?.activeTaskId === claim.taskId) {
+          await this.deps.conversationManager.failTurn(conversation)
+        }
+      }
       logger.error(
         {
           checkpointId: request.checkpointId,

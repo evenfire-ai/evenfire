@@ -393,6 +393,7 @@ async function runContinuation(
       hostId: 'host-a',
       resumableTtlMs: RESUMABLE_TTL_MS,
       claimLeaseMs: LEASE_MS,
+      pendingApprovalTtlMs: RESUMABLE_TTL_MS,
       attachmentTtlMs: ATTACHMENT_TTL_MS,
       ...options.deps?.modelStepCheckpoints,
     },
@@ -899,6 +900,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
             hostId: 'host-a',
             resumableTtlMs: RESUMABLE_TTL_MS,
             claimLeaseMs: LEASE_MS,
+            pendingApprovalTtlMs: RESUMABLE_TTL_MS,
             attachmentTtlMs: ATTACHMENT_TTL_MS,
             fileReferenceGfsGate: gate,
             gfsSurfaceRuntimeCapability: () => ({
@@ -946,6 +948,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
           hostId: 'host-a',
           resumableTtlMs: RESUMABLE_TTL_MS,
           claimLeaseMs: LEASE_MS,
+          pendingApprovalTtlMs: RESUMABLE_TTL_MS,
           attachmentTtlMs: ATTACHMENT_TTL_MS,
           fileReferenceGfsGate: () => ({ status: 'available', client: { resolve } }),
           gfsSurfaceRuntimeCapability: () => ({
@@ -993,6 +996,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
           hostId: 'host-a',
           resumableTtlMs: RESUMABLE_TTL_MS,
           claimLeaseMs: LEASE_MS,
+          pendingApprovalTtlMs: RESUMABLE_TTL_MS,
           attachmentTtlMs: ATTACHMENT_TTL_MS,
           fileReferenceGfsGate: () => ({ status: 'available', client: { resolve } }),
           gfsSurfaceRuntimeCapability: () => ({
@@ -1042,6 +1046,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
           hostId: 'host-a',
           resumableTtlMs: RESUMABLE_TTL_MS,
           claimLeaseMs: LEASE_MS,
+          pendingApprovalTtlMs: RESUMABLE_TTL_MS,
           attachmentTtlMs: ATTACHMENT_TTL_MS,
           fileReferenceGfsGate: () => ({ status: 'available', client: { resolve } }),
           gfsSurfaceRuntimeCapability: () => ({
@@ -1356,7 +1361,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     ])
   })
 
-  it('11. approval suspension and its later completion do not complete the checkpoint', async () => {
+  it('11. approval keeps the claim and records the approved result before completion', async () => {
     Object.assign(appConfig, { enableApproval: true })
     const fixture = await claimedCheckpoint({})
     const llm = provider(undefined, messages => {
@@ -1385,23 +1390,315 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     await run.executor.run()
     expect(run.onApprovalNeeded).toHaveBeenCalledTimes(1)
     expect(run.executor.executorState).toBe('waiting_approval')
-    expect(header(fixture.handle)).toMatchObject({ status: 'abandoned', version: 4 })
+    expect(header(fixture.handle)).toMatchObject({ status: 'claimed', version: 3 })
 
     await run.executor.resumeAfterApproval(true)
     await fixture.handle.persistQueue.drain()
 
     expect(llm.calls()).toBe(2)
     expect(run.onComplete).toHaveBeenCalledTimes(1)
-    expect(header(fixture.handle)).toMatchObject({ status: 'abandoned', version: 4 })
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 4 })
+    expect(
+      fixture.handle.worker.db
+        .prepare(
+          `SELECT kind, tool_call_id FROM model_step_checkpoint_entries
+           WHERE checkpoint_id = ? AND tool_call_id = ?
+             AND kind IN ('tool_dispatch', 'tool_result') ORDER BY seq`
+        )
+        .all('checkpoint-b2', 'approval-1')
+    ).toEqual([
+      { kind: 'tool_dispatch', tool_call_id: 'approval-1' },
+      { kind: 'tool_result', tool_call_id: 'approval-1' },
+    ])
     expect(turnRows(fixture.handle)).toEqual([
       expect.objectContaining({ role: 'user', turn_number: 1 }),
       expect.objectContaining({
         role: 'assistant',
         content: 'approved continuation final answer',
         turn_number: 1,
-        model_step_checkpoint_id: null,
+        model_step_checkpoint_id: 'checkpoint-b2',
       }),
     ])
+  })
+
+  it('11b. a provider outage after approval retries without executing the approved tool again', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    const llm = provider(undefined, messages =>
+      messages.some(message => message.role === 'tool')
+        ? { error: new Error('upstream 503') }
+        : {
+            calls: [
+              {
+                id: 'approval-retry',
+                name: 'shell_exec',
+                arguments: { command: 'printf approved-once' },
+              },
+            ],
+          }
+    )
+    const first = await runContinuation(fixture, llm, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await first.executor.run()
+    expect(header(fixture.handle)).toMatchObject({ status: 'claimed', version: 3 })
+    await first.executor.resumeAfterApproval(true)
+    expect(first.onFail).toHaveBeenCalledTimes(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'resumable', version: 4 })
+
+    const retryClaim = await fixture.checkpoints.claim({
+      sessionKey: SESSION_KEY,
+      checkpointId: 'checkpoint-b2',
+      version: 4,
+      hostInstanceId: 'host-instance-retry',
+      newTaskId: 'task-retry',
+      leaseMs: LEASE_MS,
+    })
+    if (retryClaim.outcome !== 'claimed') {
+      throw new Error(`Retry claim failed: ${retryClaim.outcome}`)
+    }
+    expect(retryClaim.snapshot.tools.confirmed).toBe(1)
+    fixture.taskBudget = retryClaim.snapshot.header.task_budget!
+    fixture.confirmedResults = retryClaim.snapshot.tools.confirmed
+    const retryProvider = provider(undefined, () => ({ content: 'retry final answer' }))
+    const retry = await runContinuation(fixture, retryProvider, {
+      taskId: 'task-retry',
+      fence: retryClaim.fence,
+    })
+    await retry.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(retry.onComplete).toHaveBeenCalledTimes(1)
+    expect(retryProvider.calls()).toBe(1)
+    expect(retryProvider.requests[0]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'tool', tool_call_id: 'approval-retry' }),
+      ])
+    )
+    expect(
+      fixture.handle.worker.db
+        .prepare(
+          `SELECT kind FROM model_step_checkpoint_entries
+           WHERE checkpoint_id = ? AND tool_call_id = ? AND kind = 'tool_dispatch'`
+        )
+        .all('checkpoint-b2', 'approval-retry')
+    ).toHaveLength(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 6 })
+  })
+
+  it('11c. an approval holds the claim past its short lease until denial releases the session', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    // Approval starts near the checkpoint deadline; its own seven-day TTL
+    // extends beyond that deadline.
+    clock += 6 * 24 * 3_600_000
+    const llm = provider(undefined, () => ({
+      calls: [{ id: 'approval-lease', name: 'shell_exec', arguments: { command: 'printf held' } }],
+    }))
+    const run = await runContinuation(fixture, llm, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await run.executor.run()
+    clock += 2 * 24 * 3_600_000 + LEASE_MS + 1
+    const swept = await fixture.checkpoints.sweep(RESUMABLE_TTL_MS)
+    expect(swept.expired).toBe(0)
+    const competing = await fixture.checkpoints.claim({
+      sessionKey: SESSION_KEY,
+      checkpointId: 'checkpoint-b2',
+      version: 3,
+      hostInstanceId: 'competing-host',
+      newTaskId: 'competing-task',
+      leaseMs: LEASE_MS,
+    })
+    expect(competing).toEqual({ outcome: 'replayed', taskId: 'task-continuation-b2' })
+    expect(llm.calls()).toBe(1)
+
+    await run.executor.deny()
+    await fixture.handle.persistQueue.drain()
+    expect(header(fixture.handle)).toMatchObject({ status: 'abandoned', version: 4 })
+    expect(
+      fixture.handle.worker.db
+        .prepare('SELECT COUNT(*) AS count FROM pending_approvals WHERE task_id = ?')
+        .get('task-continuation-b2')
+    ).toEqual({ count: 0 })
+    expect(
+      fixture.handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(SESSION_KEY)
+    ).toEqual({ state: 'idle', active_task_id: null })
+    const conversation = fixture.manager.getSessionByKey(SESSION_KEY)!
+    await fixture.manager.startTurn(conversation, 'A new request after denial', 'task-after-denial')
+    expect(conversation.activeTaskId).toBe('task-after-denial')
+  })
+
+  it('11d. a restarted Host adopts the waiting claim and records the approved result', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    const initial = provider(undefined, () => ({
+      calls: [{ id: 'approval-cold', name: 'shell_exec', arguments: { command: 'printf cold' } }],
+    }))
+    const first = await runContinuation(fixture, initial, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await first.executor.run()
+    const pending = first.executor.pendingApproval!
+    expect(pending).toBeDefined()
+    expect(await fixture.checkpoints.bootReap('host-instance-cold')).toEqual({
+      abandoned: 0,
+      reopened: 0,
+    })
+    const adopted = await fixture.checkpoints.loadLive(SESSION_KEY)
+    expect(adopted?.header).toMatchObject({
+      status: 'claimed',
+      claim_owner: 'host-instance-cold',
+      claim_generation: 2,
+    })
+    fixture.taskBudget = adopted!.header.task_budget!
+    fixture.confirmedResults = adopted!.tools.confirmed
+    const resumedProvider = provider(undefined, () => ({ content: 'cold approval completed' }))
+    const resumed = await runContinuation(fixture, resumedProvider, {
+      fence: {
+        checkpointId: 'checkpoint-b2',
+        owner: 'host-instance-cold',
+        generation: 2,
+      },
+      deps: {
+        modelStepCheckpoints: {
+          store: fixture.checkpoints,
+          hostInstanceId: 'host-instance-cold',
+          hostId: 'host-a',
+          resumableTtlMs: RESUMABLE_TTL_MS,
+          claimLeaseMs: LEASE_MS,
+          pendingApprovalTtlMs: RESUMABLE_TTL_MS,
+          attachmentTtlMs: ATTACHMENT_TTL_MS,
+        },
+      },
+    })
+    await resumed.executor.rehydrateWaitingApproval(SESSION_KEY, pending)
+    await resumed.executor.resumeAfterApproval(true)
+    expect(resumed.onComplete).toHaveBeenCalledTimes(1)
+    expect(resumedProvider.calls()).toBe(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'completed', version: 4 })
+    expect(
+      fixture.handle.worker.db
+        .prepare(
+          `SELECT kind FROM model_step_checkpoint_entries
+           WHERE checkpoint_id = ? AND tool_call_id = ? AND kind = 'tool_result'`
+        )
+        .all('checkpoint-b2', 'approval-cold')
+    ).toHaveLength(1)
+  })
+
+  it('11e. cancelling a suspended continuation releases approval, claim and session', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    const llm = provider(undefined, () => ({
+      calls: [
+        { id: 'approval-cancel', name: 'shell_exec', arguments: { command: 'printf cancel' } },
+      ],
+    }))
+    const run = await runContinuation(fixture, llm, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await run.executor.run()
+    expect(run.executor.executorState).toBe('waiting_approval')
+    const requestId = run.executor.pendingApproval!.request_id
+    fixture.manager.cancelTurnBySessionKey(SESSION_KEY)
+    await fixture.manager.clearPendingApproval(SESSION_KEY, requestId)
+    run.executor.abort()
+    await run.executor.waitForCompletion()
+    await fixture.handle.persistQueue.drain()
+
+    expect(header(fixture.handle)).toMatchObject({ status: 'abandoned', version: 4 })
+    expect(
+      fixture.handle.worker.db
+        .prepare('SELECT COUNT(*) AS count FROM pending_approvals WHERE task_id = ?')
+        .get('task-continuation-b2')
+    ).toEqual({ count: 0 })
+    expect(
+      fixture.handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(SESSION_KEY)
+    ).toEqual({ state: 'idle', active_task_id: null })
+    const conversation = fixture.manager.getSessionByKey(SESSION_KEY)!
+    await fixture.manager.startTurn(
+      conversation,
+      'A new request after cancellation',
+      'task-after-cancel'
+    )
+    expect(conversation.activeTaskId).toBe('task-after-cancel')
+  })
+
+  it('11f. boot expiry reaps the approval and its checkpoint before a new turn', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    const llm = provider(undefined, () => ({
+      calls: [
+        { id: 'approval-expiry', name: 'shell_exec', arguments: { command: 'printf expiry' } },
+      ],
+    }))
+    const run = await runContinuation(fixture, llm, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await run.executor.run()
+    expect(run.executor.executorState).toBe('waiting_approval')
+    clock += RESUMABLE_TTL_MS + LEASE_MS + 1
+    expect(await fixture.checkpoints.bootReap('host-after-expiry')).toEqual({
+      abandoned: 0,
+      reopened: 1,
+    })
+    const reaped = await fixture.handle.store.reapExpiredAwaitingApprovalSessions(clock)
+    expect(reaped).toHaveLength(1)
+    expect(header(fixture.handle)).toMatchObject({ status: 'abandoned', version: 5 })
+    expect(
+      fixture.handle.worker.db
+        .prepare('SELECT COUNT(*) AS count FROM pending_approvals WHERE task_id = ?')
+        .get('task-continuation-b2')
+    ).toEqual({ count: 0 })
+    expect(
+      fixture.handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(SESSION_KEY)
+    ).toEqual({ state: 'idle', active_task_id: null })
+    const conversation = await fixture.manager.getOrCreate(SESSION_KEY, {
+      userId: USER,
+      channelType: 'rpc',
+      channelId: AGENT,
+      threadId: CHAT,
+      source: 'rpc',
+    })
+    await fixture.manager.startTurn(conversation, 'A new request after expiry', 'task-after-expiry')
+    expect(conversation.activeTaskId).toBe('task-after-expiry')
   })
 
   it('12. keeps the fresh turn-context on the origin user when a later user message exists', async () => {
@@ -1435,6 +1732,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
           hostId: 'host-a',
           resumableTtlMs: RESUMABLE_TTL_MS,
           claimLeaseMs: LEASE_MS,
+          pendingApprovalTtlMs: RESUMABLE_TTL_MS,
           attachmentTtlMs: ATTACHMENT_TTL_MS,
           fileReferenceGfsGate: () => ({ status: 'available', client: { resolve } }),
           gfsSurfaceRuntimeCapability: () => ({

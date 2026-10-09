@@ -115,7 +115,8 @@ export interface Task {
   /**
    * #1043 — present on the task that continues a claimed model-step
    * checkpoint. The task reopens the origin turn instead of starting one.
-   * In-memory only: a restart leaves the checkpoint to the boot reaper.
+   * A restart adopts a claim held by a live pending approval and rebuilds
+   * this reference before the approval executor can run again.
    */
   modelStepContinuation?: ModelStepContinuationRef
 }

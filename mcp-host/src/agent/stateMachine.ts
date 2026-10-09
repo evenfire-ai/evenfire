@@ -223,7 +223,10 @@ export class AgentStateMachine extends EventEmitter {
   // the durable write best-effort with eventual consistency. Layer 2 (the
   // B7 TTL filter in `SqliteColdStartLoader`) is the safety net for rows
   // we ultimately give up on.
-  private clearPendingApprovalRetries = new Map<string, { attempts: number; nextTry: number }>()
+  private clearPendingApprovalRetries = new Map<
+    string,
+    { attempts: number; nextTry: number; requestId: string }
+  >()
   private clearRetryTimer: ReturnType<typeof setInterval> | null = null
   private isRunning: boolean = false
 
@@ -807,7 +810,67 @@ export class AgentStateMachine extends EventEmitter {
         conversationHistory: [],
         createdAt: new Date(now),
       }
-      const executor = this.createTaskExecutor(task)
+      if (this.modelStepCheckpoints) {
+        const checkpoint = await this.modelStepCheckpoints.store.loadForTask(
+          entry.session_key,
+          task.id
+        )
+        const header = checkpoint?.header
+        if (checkpoint && header) {
+          if (header.status !== 'claimed') {
+            if (header.status === 'resumable' || header.status === 'blocked') {
+              const settled = await this.modelStepCheckpoints.store.transition(
+                entry.session_key,
+                {
+                  checkpointId: header.checkpoint_id,
+                  owner: header.claim_owner,
+                  generation: header.claim_generation,
+                },
+                { from: [header.status], to: 'abandoned' }
+              )
+              if (settled === null) {
+                throw new Error('Pending approval checkpoint changed during boot recovery')
+              }
+            }
+            await this.conversationManager.clearPendingApproval(entry.session_key, entry.request_id)
+            continue
+          }
+          if (header.claim_owner !== this.modelStepCheckpoints.hostInstanceId) {
+            throw new Error('Pending approval checkpoint was not adopted by this Host')
+          }
+          task.modelStepContinuation = {
+            checkpointId: header.checkpoint_id,
+            originTaskId: header.origin_task_id,
+            originTurnNumber: header.origin_turn_number,
+            provider: header.provider,
+            model: header.model,
+            fence: {
+              checkpointId: header.checkpoint_id,
+              owner: header.claim_owner,
+              generation: header.claim_generation,
+            },
+            confirmedResults: checkpoint.tools.confirmed,
+            taskBudget: header.task_budget,
+            onVerdict: () => {
+              throw new Error('Rehydrated approval cannot emit a new admission verdict')
+            },
+          }
+        }
+      }
+      let pinnedModel: ResolvedTaskModel | undefined
+      if (task.modelStepContinuation) {
+        const continuation = task.modelStepContinuation
+        pinnedModel =
+          this.taskModelResolver?.({ [continuation.provider]: continuation.model }) ?? undefined
+        if (
+          !pinnedModel ||
+          pinnedModel.provider.getProviderType() !== continuation.provider ||
+          pinnedModel.model !== continuation.model
+        ) {
+          throw new Error('Pending approval checkpoint model is unavailable on this Host')
+        }
+      }
+      const executor = this.createTaskExecutor(task, pinnedModel)
       await executor.rehydrateWaitingApproval(entry.session_key, entry.approval)
       this.activeExecutors.set(task.id, executor)
       this.approvalMap.set(entry.request_id, {
@@ -1034,8 +1097,16 @@ export class AgentStateMachine extends EventEmitter {
     approval: PendingApproval
   ): void {
     const now = Date.now()
-    const expiresAt =
-      this.config.approvalTimeout > 0 ? now + this.config.approvalTimeout : undefined
+    let timeoutMs = this.config.approvalTimeout
+    if (task.modelStepContinuation) {
+      const support = this.modelStepCheckpoints
+      if (!support) throw new Error('Model-step continuation approval has no checkpoint store')
+      timeoutMs =
+        timeoutMs > 0
+          ? Math.min(timeoutMs, support.pendingApprovalTtlMs)
+          : support.pendingApprovalTtlMs
+    }
+    const expiresAt = timeoutMs > 0 ? now + timeoutMs : undefined
     const timerId = this.makeApprovalTimeout(requestId, expiresAt, now)
 
     this.approvalMap.set(requestId, {
@@ -1879,7 +1950,7 @@ export class AgentStateMachine extends EventEmitter {
           // pending_approval row. `tryClearPendingApproval` is fire-and-
           // forget by design (the lifecycle subscriber is sync); the retry
           // timer drains pending failures.
-          this.tryClearPendingApproval(sessionKey)
+          this.tryClearPendingApproval(sessionKey, reqId)
           this.releaseSessionForTask(executor.sourceTask)
           executor.abort() // defensive; no-op while suspended
           this.activeExecutors.delete(ev.taskId) // explicit — no finally will run
@@ -1911,19 +1982,19 @@ export class AgentStateMachine extends EventEmitter {
    * SQLite errors don't silently leak orphan `pending_approval` rows that
    * cold-start would later resurrect.
    */
-  private tryClearPendingApproval(sessionKey: string): void {
+  private tryClearPendingApproval(sessionKey: string, requestId: string): void {
     this.conversationManager
-      .clearPendingApproval(sessionKey)
+      .clearPendingApproval(sessionKey, requestId)
       .then(() => {
         // Success — drop any prior retry bookkeeping.
         this.clearPendingApprovalRetries.delete(sessionKey)
       })
       .catch(err => {
-        this.scheduleClearRetry(sessionKey, err)
+        this.scheduleClearRetry(sessionKey, requestId, err)
       })
   }
 
-  private scheduleClearRetry(sessionKey: string, lastErr: unknown): void {
+  private scheduleClearRetry(sessionKey: string, requestId: string, lastErr: unknown): void {
     const prior = this.clearPendingApprovalRetries.get(sessionKey)
     const attempts = (prior?.attempts ?? 0) + 1
     if (attempts > AgentStateMachine.CLEAR_RETRY_MAX_ATTEMPTS) {
@@ -1942,7 +2013,7 @@ export class AgentStateMachine extends EventEmitter {
       AgentStateMachine.CLEAR_RETRY_CAP_MS
     )
     const nextTry = Date.now() + backoff
-    this.clearPendingApprovalRetries.set(sessionKey, { attempts, nextTry })
+    this.clearPendingApprovalRetries.set(sessionKey, { attempts, nextTry, requestId })
     logger.warn(
       {
         attempts,
@@ -1960,7 +2031,7 @@ export class AgentStateMachine extends EventEmitter {
       if (entry.nextTry > now) continue
       // Re-attempt. `tryClearPendingApproval` either deletes the entry on
       // success or re-schedules via `scheduleClearRetry`.
-      this.tryClearPendingApproval(sessionKey)
+      this.tryClearPendingApproval(sessionKey, entry.requestId)
     }
   }
 

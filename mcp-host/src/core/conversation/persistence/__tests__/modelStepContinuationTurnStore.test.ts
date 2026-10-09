@@ -310,9 +310,7 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     await expect(
       handle.store.persistContinuationStart({ ...conv, id: 'conv-untracked' }, 1)
     ).rejects.toThrow(/untracked session/)
-    await expect(handle.store.persistContinuationStart(conv, 1)).rejects.toThrow(
-      /the next turn is 1/
-    )
+    await expect(handle.store.persistContinuationStart(conv, 1)).rejects.toThrow(/latest turn is 0/)
 
     await manager.startTurn(conv, 'origin input', 'task-origin')
     await manager.failTurn(conv)
@@ -320,6 +318,20 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
 
     await handle.store.persistContinuationStart(conv, 1)
     expect(handle.store.activeTurnNumber(conv)).toBe(1)
+  })
+
+  it('rejects a prior turn after a newer turn was opened, while the latest still reopens', async () => {
+    const handle = freshStore()
+    const manager = new ConversationManager(handle.store)
+    const conv = await manager.getOrCreate(SESSION_KEY)
+    await manager.startTurn(conv, 'first input', 'task-first')
+    await manager.failTurn(conv)
+    await manager.startTurn(conv, 'second input', 'task-second')
+    await manager.failTurn(conv)
+
+    await expect(handle.store.persistContinuationStart(conv, 1)).rejects.toThrow(/latest turn is 2/)
+    await handle.store.persistContinuationStart(conv, 2)
+    expect(handle.store.activeTurnNumber(conv)).toBe(2)
   })
 
   it('rolls the reopened ordinal back when the durable continuation start fails', async () => {

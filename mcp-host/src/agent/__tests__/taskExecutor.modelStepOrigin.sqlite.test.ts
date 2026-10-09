@@ -142,6 +142,7 @@ async function runOutageTask(toolCallsBeforeOutage: number, withCheckpoints = tr
             hostId: 'host-a',
             resumableTtlMs: RESUMABLE_TTL_MS,
             claimLeaseMs: 300_000,
+            pendingApprovalTtlMs: 7 * 24 * 3_600_000,
             attachmentTtlMs: ATTACHMENT_TTL_MS,
           },
         }
