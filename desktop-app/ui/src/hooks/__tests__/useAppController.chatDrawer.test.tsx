@@ -294,6 +294,70 @@ describe('useAppController — chat drawer keepNavItem', () => {
     }
   })
 
+  it('keeps an implicit latest load when a no-chat notification arrives before it selects a chat', async () => {
+    // This goes through the production notification action instead of calling
+    // setPendingChatSelection directly.  At the notification point the agent
+    // and chat route are already selected, but no chat ID has materialised yet.
+    const { clerum } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    await clerum.chat.create('agent-x', 'chat-newest')
+    await clerum.chat.upsertMessages('agent-x', 'chat-newest', [
+      { id: 'newest-message', role: 'user', content: 'newest history', timestamp: 1 },
+    ])
+    const index = await clerum.readIndex('agent-x')
+    const deferredIndex = deferred<Awaited<ReturnType<typeof clerum.chat.getIndex>>>()
+    const app = renderAppController()
+    unmount = app.unmount
+
+    try {
+      await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+      await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+      clerum.chat.getIndex.mockClear()
+      clerum.chat.getIndex.mockReturnValue(deferredIndex.promise)
+
+      act(() => {
+        app.result.current.handleSelectChatAgent('agent-x', { selectLatest: true })
+      })
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledTimes(1))
+      expect({
+        activeChatId: app.result.current.activeChatId,
+        loading: app.result.current.chatMessagesLoading,
+        route: app.result.current.navItem,
+      }).toEqual({ activeChatId: null, loading: false, route: DESKTOP_ROUTES.chat })
+
+      await act(async () => {
+        await app.result.current.handleOpenNotification({
+          id: 'n-implicit-no-chat',
+          kind: 'approval_required',
+          agentName: 'agent-x',
+          teamId: 'team-1',
+          text: 'Agent notification without a conversation',
+          timestamp: Date.now(),
+          read: false,
+          approval: { taskId: 't-implicit', requestId: 'r-implicit' },
+        } as Parameters<typeof app.result.current.handleOpenNotification>[0])
+      })
+
+      await act(async () => {
+        deferredIndex.resolve(index)
+      })
+      await waitFor(() => {
+        expect({
+          activeChatId: app.result.current.activeChatId,
+          messages: app.result.current.activeMessages,
+          loading: app.result.current.chatMessagesLoading,
+        }).toEqual({
+          activeChatId: 'chat-newest',
+          messages: expect.arrayContaining([expect.objectContaining({ id: 'newest-message' })]),
+          loading: false,
+        })
+      })
+    } finally {
+      deferredIndex.resolve(index)
+      app.unmount()
+      unmount = null
+    }
+  })
+
   it('reports a failed notification switch without starting an unobserved fallback', async () => {
     const { clerum } = installAppControllerClerum({ agentNames: ['agent-x'] })
     await clerum.chat.create('agent-x', 'chat-1')
