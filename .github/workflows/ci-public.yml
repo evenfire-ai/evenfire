@@ -367,6 +367,12 @@ jobs:
           path: r61-b1-producers/observed-dev
           persist-credentials: false
 
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 84368da042476ebec41292e4cc551889207ba45c
+          path: r61-b1-producers/historical-pr2
+          persist-credentials: false
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
@@ -420,6 +426,22 @@ jobs:
         working-directory: r61-b1-producers/observed-dev/control-api
         run: npm run build
 
+      - name: Install historical PR2 producer dependency
+        working-directory: r61-b1-producers/historical-pr2/packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build historical PR2 producer dependency
+        working-directory: r61-b1-producers/historical-pr2/packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install historical PR2 Control API dependencies
+        working-directory: r61-b1-producers/historical-pr2/control-api
+        run: npm ci
+
+      - name: Build historical PR2 migration runner
+        working-directory: r61-b1-producers/historical-pr2/control-api
+        run: npm run build
+
       - name: Install External REST contract-test dependencies
         working-directory: external-rest-api
         run: npm ci
@@ -431,6 +453,7 @@ jobs:
           CONTROL_API_REAL_PG_REQUIRED: '1'
           TASK106_R61_B1_HISTORICAL_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/historical-task106
           TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
+          TASK106_R61_B1_PR2_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/historical-pr2
           FORCE_COLOR: '0'
           NO_COLOR: '1'
         # The `realPostgres` filter matches every control-api

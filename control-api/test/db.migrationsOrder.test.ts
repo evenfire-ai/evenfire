@@ -72,6 +72,13 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0133_gfs_catalog_revision_components',
       '0134_user_access_foundation_definer_temp_shadow_hardening',
       '0135_legacy_password_security_epoch_backfill',
+      '0136_workflow_authority_bindings',
+      '0137_gfs_upload_authority_bindings',
+      '0138_pr2_readiness_evidence',
+      '0139_pr2_runtime_privileges',
+      '0140_workflow_recipe_authority_entity',
+      '0141_workflow_run_failure_reason',
+      '0142_r31_runtime_behavior_sources',
       '0143_authorization_revision_delete_compatibility',
     ]
 
@@ -79,7 +86,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
     ).toEqual(parentDev)
     expect(
-      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 8)
+      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 15)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
   })

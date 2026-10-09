@@ -6585,18 +6585,27 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // The frozen parent now owns every slot through 0130. Preserve each previously
     // published PR2 identity so re-slotting records a canonical version without replaying DDL.
-    version: '0131_workflow_authority_bindings',
-    legacyVersions: ['0115_workflow_authority_bindings', '010f_workflow_authority_bindings'],
+    version: '0136_workflow_authority_bindings',
+    legacyVersions: [
+      '0131_workflow_authority_bindings',
+      '0115_workflow_authority_bindings',
+      '010f_workflow_authority_bindings',
+    ],
     apply: applyWorkflowAuthorityBindingsSchema,
   },
   {
-    version: '0132_gfs_upload_authority_bindings',
-    legacyVersions: ['0116_gfs_upload_authority_bindings', '0110_gfs_upload_authority_bindings'],
+    version: '0137_gfs_upload_authority_bindings',
+    legacyVersions: [
+      '0132_gfs_upload_authority_bindings',
+      '0116_gfs_upload_authority_bindings',
+      '0110_gfs_upload_authority_bindings',
+    ],
     apply: applyGfsUploadAuthorityBindingSchema,
   },
   {
-    version: '0133_pr2_readiness_evidence',
+    version: '0138_pr2_readiness_evidence',
     legacyVersions: [
+      '0133_pr2_readiness_evidence',
       '0119_pr2_readiness_evidence',
       '0117_pr2_readiness_evidence',
       '0111_pr2_readiness_evidence',
@@ -6604,8 +6613,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyPr2ReadinessEvidenceSchema,
   },
   {
-    version: '0134_pr2_runtime_privileges',
+    version: '0139_pr2_runtime_privileges',
     legacyVersions: [
+      '0134_pr2_runtime_privileges',
       '011a_pr2_runtime_privileges',
       '0118_pr2_runtime_privileges',
       '0112_pr2_runtime_privileges',
@@ -6613,8 +6623,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyPr2RuntimePrivilegesSchema,
   },
   {
-    version: '0135_workflow_recipe_authority_entity',
+    version: '0140_workflow_recipe_authority_entity',
     legacyVersions: [
+      '0135_workflow_recipe_authority_entity',
       '011b_workflow_recipe_authority_entity',
       '0119_workflow_recipe_authority_entity',
       '0113_workflow_recipe_authority_entity',
@@ -6622,8 +6633,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyWorkflowRecipeAuthorityEntitySchema,
   },
   {
-    version: '0136_workflow_run_failure_reason',
+    version: '0141_workflow_run_failure_reason',
     legacyVersions: [
+      '0136_workflow_run_failure_reason',
       '011c_workflow_run_failure_reason',
       '011a_workflow_run_failure_reason',
       '0114_workflow_run_failure_reason',
@@ -6631,8 +6643,8 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyWorkflowRunFailureReasonSchema,
   },
   {
-    version: '0137_r31_runtime_behavior_sources',
-    legacyVersions: ['0120_r31_runtime_behavior_sources'],
+    version: '0142_r31_runtime_behavior_sources',
+    legacyVersions: ['0137_r31_runtime_behavior_sources', '0120_r31_runtime_behavior_sources'],
     apply: applyR31RuntimeBehaviorSourcesSchema,
   },
   {

@@ -41,8 +41,9 @@ grep -q 'applyPendingPr1Migrations' "$DB_FILE" || \
 grep -q 'CREATE INDEX CONCURRENTLY' "$INDEX_PLAN_FILE" || \
   fail "existing-table indexes are not prepared concurrently"
 
-index_count="$(grep -c "^    migrationVersion: '012[57]_" "$INDEX_PLAN_FILE")"
-[ "$index_count" = "25" ] || fail "expected 25 online indexes, found $index_count"
+index_migrations='0129_user_access_foundation|0131_catalog_utf8_ordering'
+index_count="$(grep -Ec "^    migrationVersion: '($index_migrations)'" "$INDEX_PLAN_FILE")"
+[ "$index_count" = "25" ] || fail "expected 25 PR1 online indexes, found $index_count"
 
 grep -q 'activeDeadlineSeconds' "$DEPLOY_FILE" || \
   fail "migration Job has no active deadline"

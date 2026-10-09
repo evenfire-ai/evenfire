@@ -163,6 +163,7 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
       ALTER TABLE workflow_runs DROP COLUMN failure_reason;
       DELETE FROM schema_migrations
        WHERE version IN (
+         '0141_workflow_run_failure_reason',
          '0136_workflow_run_failure_reason',
          '011c_workflow_run_failure_reason',
          '011a_workflow_run_failure_reason',
@@ -174,9 +175,9 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
 
     const upgraded = await databasePool.query<{ version: string }>(
       `SELECT version FROM schema_migrations
-        WHERE version = '0136_workflow_run_failure_reason'`
+        WHERE version = '0141_workflow_run_failure_reason'`
     )
-    expect(upgraded.rows).toEqual([{ version: '0136_workflow_run_failure_reason' }])
+    expect(upgraded.rows).toEqual([{ version: '0141_workflow_run_failure_reason' }])
 
     const runId = await insertPendingRun()
     await expect(

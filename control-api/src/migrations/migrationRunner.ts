@@ -40,13 +40,13 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
 ] as const)
 
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
-  '0131_workflow_authority_bindings',
-  '0132_gfs_upload_authority_bindings',
-  '0133_pr2_readiness_evidence',
-  '0134_pr2_runtime_privileges',
-  '0135_workflow_recipe_authority_entity',
-  '0136_workflow_run_failure_reason',
-  '0137_r31_runtime_behavior_sources',
+  '0136_workflow_authority_bindings',
+  '0137_gfs_upload_authority_bindings',
+  '0138_pr2_readiness_evidence',
+  '0139_pr2_runtime_privileges',
+  '0140_workflow_recipe_authority_entity',
+  '0141_workflow_run_failure_reason',
+  '0142_r31_runtime_behavior_sources',
 ])
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)

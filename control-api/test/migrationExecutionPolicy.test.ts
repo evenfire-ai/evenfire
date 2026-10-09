@@ -105,7 +105,7 @@ describe('D34 migration execution policy', () => {
     expect(countByMigrationVersion).toEqual({
       '0129_user_access_foundation': 18,
       '0131_catalog_utf8_ordering': 7,
-      '0131_workflow_authority_bindings': 1,
+      '0136_workflow_authority_bindings': 1,
     })
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
@@ -156,7 +156,7 @@ describe('D34 migration execution policy', () => {
     )
     const classified = [
       ...PR1_ONLINE_INDEX_PLAN.filter(
-        index => index.migrationVersion !== '0131_workflow_authority_bindings'
+        index => index.migrationVersion !== '0136_workflow_authority_bindings'
       ).map(index => index.name),
       ...FRESH_TABLE_INDEXES,
     ].sort()
@@ -172,7 +172,7 @@ describe('D34 migration execution policy', () => {
         .replace(/\s*([(),])\s*/g, '$1')
         .trim()
     for (const index of PR1_ONLINE_INDEX_PLAN) {
-      if (index.migrationVersion === '0131_workflow_authority_bindings') continue
+      if (index.migrationVersion === '0136_workflow_authority_bindings') continue
       expect(canonical(index.createSql), index.name).toBe(
         canonical(historicalDefinitions.get(index.name) ?? '')
       )
@@ -352,7 +352,7 @@ describe('D34 PR1 migration runner', () => {
         return { rows: [], rowCount: 0 }
       }),
     }
-    const pendingVersion = '0131_workflow_authority_bindings'
+    const pendingVersion = '0136_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS,
@@ -387,7 +387,7 @@ describe('D34 PR1 migration runner', () => {
       if (sql.startsWith('CREATE INDEX CONCURRENTLY')) throw new Error('online index failed')
       return { rows: [], rowCount: 0 }
     })
-    const pendingVersion = '0131_workflow_authority_bindings'
+    const pendingVersion = '0136_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS,
@@ -772,6 +772,7 @@ describe('D34 PR1 migration runner', () => {
           version !== USER_ACCESS_FOUNDATION_VERSION &&
           version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
       ).map(version => ({ version, apply: vi.fn(async () => undefined) })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn(async () => undefined) })),
       foundation,
       compatibility,
     ]
@@ -782,6 +783,7 @@ describe('D34 PR1 migration runner', () => {
           version !== USER_ACCESS_FOUNDATION_VERSION &&
           version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
       ),
+      ...PR2_MIGRATION_VERSIONS,
       '0126_user_access_foundation',
       '0138_authorization_revision_delete_compatibility',
     ])
@@ -824,6 +826,10 @@ describe('D34 PR1 migration runner', () => {
               version === AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
                 ? ['0138_authorization_revision_delete_compatibility']
                 : undefined,
+            apply: vi.fn(async () => undefined),
+          })),
+          ...PR2_MIGRATION_VERSIONS.map(version => ({
+            version,
             apply: vi.fn(async () => undefined),
           })),
         ],
