@@ -42,7 +42,10 @@ const member = (teamId: string) => ({
 
 /** An AppService signed in on team-a whose auth client answers team switches. */
 function signedInService(getMeAnswers: string[]): AppService {
-  const service = new AppService() as unknown as Record<string, unknown>
+  const service = new AppService({ getUserDataDirectory: () => base }) as unknown as Record<
+    string,
+    unknown
+  >
   service.sessionToken = 'team-a-token'
   service.me = member('team-a')
   const getMe = vi.fn()
