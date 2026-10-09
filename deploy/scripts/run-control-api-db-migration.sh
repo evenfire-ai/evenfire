@@ -10,6 +10,7 @@ MAINTENANCE_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/trace-maintenance-runtime-access
 MAINTENANCE_SEQUENCE_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/trace-maintenance-runtime-sequence-access-profiles.tsv"
 MAINTENANCE_FUNCTION_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/trace-maintenance-runtime-function-access-profiles.tsv"
 WORKFLOW_RECIPES_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/workflow-recipes-runtime-access-profiles.tsv"
+WORKFLOW_RECIPES_COLUMN_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/workflow-recipes-runtime-column-access-profiles.tsv"
 CONTEXT="${CONTEXT:?set CONTEXT to the target kube-context}"
 ALLOWED_CONTEXTS="${ALLOWED_CONTEXTS:?set ALLOWED_CONTEXTS to an exact comma-separated context allowlist}"
 
@@ -796,7 +797,7 @@ workflow_recipes_access_contract_values() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { exit 2 }
     $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
-    $2 !~ /^(legacy_dml|read|read_update|upsert|delete)$/ { exit 4 }
+    $2 !~ /^(legacy_dml|read|read_update|upsert|delete|none)$/ { exit 4 }
     seen[$1]++ { exit 5 }
     {
       count++
@@ -805,6 +806,28 @@ workflow_recipes_access_contract_values() {
     END { if (count == 0) exit 6 }
   ' "$WORKFLOW_RECIPES_ACCESS_PROFILES_FILE" || \
     die "workflow-recipes access profile file is malformed or contains duplicate relations: $WORKFLOW_RECIPES_ACCESS_PROFILES_FILE"
+}
+
+workflow_recipes_column_access_contract_values() {
+  [ -f "$WORKFLOW_RECIPES_COLUMN_ACCESS_PROFILES_FILE" ] || \
+    die "workflow-recipes column access profile file not found: $WORKFLOW_RECIPES_COLUMN_ACCESS_PROFILES_FILE"
+
+  awk -F '\t' '
+    BEGIN { count = 0 }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    NF != 3 { exit 2 }
+    $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
+    $2 !~ /^[a-z][a-z0-9_]*$/ { exit 4 }
+    $3 !~ /^SELECT$/ { exit 5 }
+    {
+      key = $1 SUBSEP $2 SUBSEP $3
+      if (seen[key]++) exit 6
+      count++
+      printf "%s(\047%s\047, \047%s\047, \047%s\047)", (count == 1 ? "" : ",\n"), $1, $2, $3
+    }
+    END { if (count == 0) exit 7 }
+  ' "$WORKFLOW_RECIPES_COLUMN_ACCESS_PROFILES_FILE" || \
+    die "workflow-recipes column access profile file is malformed or contains duplicate privileges: $WORKFLOW_RECIPES_COLUMN_ACCESS_PROFILES_FILE"
 }
 
 verify_runtime_access_contract() {
@@ -1041,8 +1064,9 @@ verify_trace_maintenance_access_contract() {
 }
 
 verify_workflow_recipes_runtime_boundary() {
-  local expected_values
+  local expected_values expected_column_values
   expected_values="$(workflow_recipes_access_contract_values)"
+  expected_column_values="$(workflow_recipes_column_access_contract_values)"
 
   assert_db_query_equals \
     "workflow_recipes_runtime relation privileges differ from the explicit access contract" \
@@ -1055,13 +1079,13 @@ verify_workflow_recipes_runtime_boundary() {
          FROM pg_class relation
          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
         WHERE namespace.nspname = 'public'
-          AND relation.relkind IN ('r', 'p', 'v', 'm')
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
      ),
      relation_coverage_violations AS (
-       SELECT expected.relation_name
+       SELECT COALESCE(expected.relation_name, actual.relation_name) AS relation_name
          FROM expected_access expected
-         LEFT JOIN actual_relations actual USING (relation_name)
-        WHERE actual.relation_name IS NULL
+         FULL OUTER JOIN actual_relations actual USING (relation_name)
+        WHERE expected.relation_name IS NULL OR actual.relation_name IS NULL
      ),
      privilege_violations AS (
        SELECT actual.relation_name
@@ -1086,6 +1110,73 @@ verify_workflow_recipes_runtime_boundary() {
      SELECT
        (SELECT COUNT(*) FROM relation_coverage_violations)
        + (SELECT COUNT(*) FROM privilege_violations);"
+
+  assert_db_query_equals \
+    "workflow_recipes_runtime effective column privileges differ from the explicit access contract" \
+    "0" \
+    "WITH expected_access(relation_name, access_profile) AS (
+       VALUES ${expected_values}
+     ),
+     expected_column_access(relation_name, column_name, privilege_name) AS (
+       VALUES ${expected_column_values}
+     ),
+     actual_relations AS (
+       SELECT relation.oid, relation.relname AS relation_name
+         FROM pg_class relation
+         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+     ),
+     actual_columns AS (
+       SELECT relation.oid,
+              relation.relation_name,
+              attribute.attname AS column_name
+         FROM actual_relations relation
+         JOIN pg_attribute attribute ON attribute.attrelid = relation.oid
+        WHERE attribute.attnum > 0
+          AND NOT attribute.attisdropped
+     ),
+     column_policy_coverage_violations AS (
+       SELECT exception.relation_name, exception.column_name, exception.privilege_name
+         FROM expected_column_access exception
+         LEFT JOIN expected_access profile USING (relation_name)
+         LEFT JOIN actual_columns actual
+           ON actual.relation_name = exception.relation_name
+          AND actual.column_name = exception.column_name
+        WHERE profile.relation_name IS NULL
+           OR actual.column_name IS NULL
+           OR CASE exception.privilege_name
+                WHEN 'SELECT' THEN profile.access_profile IN ('legacy_dml', 'read', 'read_update', 'upsert')
+                WHEN 'INSERT' THEN profile.access_profile IN ('legacy_dml', 'upsert')
+                WHEN 'UPDATE' THEN profile.access_profile IN ('legacy_dml', 'read_update', 'upsert')
+                WHEN 'REFERENCES' THEN false
+              END
+     ),
+     column_privilege_violations AS (
+       SELECT actual.relation_name, actual.column_name, required.privilege_name
+         FROM actual_columns actual
+         JOIN expected_access profile USING (relation_name)
+         CROSS JOIN LATERAL (
+           VALUES
+             ('SELECT', profile.access_profile IN ('legacy_dml', 'read', 'read_update', 'upsert')),
+             ('INSERT', profile.access_profile IN ('legacy_dml', 'upsert')),
+             ('UPDATE', profile.access_profile IN ('legacy_dml', 'read_update', 'upsert')),
+             ('REFERENCES', false)
+         ) required(privilege_name, table_allowed)
+         LEFT JOIN expected_column_access exception
+           ON exception.relation_name = actual.relation_name
+          AND exception.column_name = actual.column_name
+          AND exception.privilege_name = required.privilege_name
+        WHERE has_column_privilege(
+                'workflow_recipes_runtime',
+                actual.oid,
+                actual.column_name,
+                required.privilege_name
+              ) IS DISTINCT FROM (required.table_allowed OR exception.relation_name IS NOT NULL)
+     )
+     SELECT
+       (SELECT COUNT(*) FROM column_policy_coverage_violations)
+       + (SELECT COUNT(*) FROM column_privilege_violations);"
 
   assert_db_query_equals \
     "workflow_recipes_runtime sequence privileges differ from the explicit access contract" \
