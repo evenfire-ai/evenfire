@@ -6738,14 +6738,17 @@ export type DbTransactionOptions = {
   onCommitOutcomeUnknown?: () => void
 }
 
-function isPostgresErrorResponse(error: unknown): boolean {
+const UNKNOWN_COMMIT_OUTCOME_SQLSTATES = new Set(['08007', '40003'])
+
+function isDefinitivePostgresCommitErrorResponse(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const response = error as { name?: unknown; code?: unknown; severity?: unknown }
   return (
     response.name === 'error' &&
     typeof response.code === 'string' &&
     /^[0-9A-Z]{5}$/.test(response.code) &&
-    typeof response.severity === 'string'
+    typeof response.severity === 'string' &&
+    !UNKNOWN_COMMIT_OUTCOME_SQLSTATES.has(response.code)
   )
 }
 
@@ -6902,9 +6905,11 @@ export async function withTransaction<T>(
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
     }
-    // A PostgreSQL ErrorResponse proves COMMIT failed. Only a lost transport or
-    // malformed response leaves the durable outcome unknown after COMMIT was sent.
-    if (commitSent && !transactionFinished && !isPostgresErrorResponse(error)) {
+    // Most PostgreSQL ErrorResponses prove COMMIT failed, but SQLSTATE 08007
+    // (transaction_resolution_unknown) and 40003 (statement_completion_unknown)
+    // explicitly leave the durable outcome uncertain. Lost transport and malformed
+    // responses are uncertain as well.
+    if (commitSent && !transactionFinished && !isDefinitivePostgresCommitErrorResponse(error)) {
       options.onCommitOutcomeUnknown?.()
     }
     signal?.throwIfAborted()
