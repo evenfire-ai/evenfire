@@ -66,19 +66,20 @@ describe('toModelStepCheckpointView (#1043)', () => {
       { status: 'blocked' as const, version: 2, blocked_reason: 'model_unavailable' },
     ],
   ])('projects the row behind %s exactly', (vector, overrides) => {
-    expect(toModelStepCheckpointView(snapshot(overrides))).toEqual(readVector(vector))
+    expect(toModelStepCheckpointView(snapshot(overrides), FAILED_AT)).toEqual(readVector(vector))
   })
 
   it.each(['open', 'completed', 'abandoned'] as const)('serves no view for %s', status => {
     // Witness: the same row with a visible status does produce a view.
-    expect(toModelStepCheckpointView(snapshot({}))).toBeDefined()
-    expect(toModelStepCheckpointView(snapshot({ status }))).toBeUndefined()
+    expect(toModelStepCheckpointView(snapshot({}), FAILED_AT)).toBeDefined()
+    expect(toModelStepCheckpointView(snapshot({ status }), FAILED_AT)).toBeUndefined()
   })
 
   it('serves attachment_expired as a blocked reason', () => {
     expect(
       toModelStepCheckpointView(
-        snapshot({ status: 'blocked', blocked_reason: 'attachment_expired' })
+        snapshot({ status: 'blocked', blocked_reason: 'attachment_expired' }),
+        FAILED_AT
       )
     ).toMatchObject({
       status: 'blocked',
@@ -87,15 +88,36 @@ describe('toModelStepCheckpointView (#1043)', () => {
     })
   })
 
-  it('refuses a blocked row with an unknown reason', () => {
-    expect(() =>
-      toModelStepCheckpointView(snapshot({ status: 'blocked', blocked_reason: 'disk_full' }))
-    ).toThrow('unknown blocked reason: disk_full')
+  it('hides a blocked row with an unknown reason while valid rows remain visible', () => {
+    expect(
+      toModelStepCheckpointView(
+        snapshot({ status: 'blocked', blocked_reason: 'disk_full' }),
+        FAILED_AT
+      )
+    ).toBeUndefined()
+    expect(
+      toModelStepCheckpointView(
+        snapshot({ status: 'blocked', blocked_reason: 'model_unavailable' }),
+        FAILED_AT
+      )
+    ).toBeDefined()
   })
 
-  it('refuses a visible row without failure time', () => {
-    expect(() => toModelStepCheckpointView(snapshot({ failed_at: null }))).toThrow(
-      'without failure or expiry time'
-    )
+  it('hides an incomplete or expired checkpoint while preserving a live view', () => {
+    expect(toModelStepCheckpointView(snapshot({}), EXPIRES_AT - 1)).toBeDefined()
+    expect(toModelStepCheckpointView(snapshot({ failed_at: null }), EXPIRES_AT - 1)).toBeUndefined()
+    expect(
+      toModelStepCheckpointView(snapshot({ expires_at: null }), EXPIRES_AT - 1)
+    ).toBeUndefined()
+    expect(toModelStepCheckpointView(snapshot({}), EXPIRES_AT)).toBeUndefined()
+    expect(toModelStepCheckpointView(snapshot({}), EXPIRES_AT + 1)).toBeUndefined()
+
+    // A live claim still replays after header expiry, matching claim and sweep.
+    expect(
+      toModelStepCheckpointView(
+        snapshot({ status: 'claimed', claim_expires_at: EXPIRES_AT + 100 }),
+        EXPIRES_AT
+      )
+    ).toMatchObject({ status: 'claimed' })
   })
 })

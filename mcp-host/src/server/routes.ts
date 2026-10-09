@@ -1407,7 +1407,7 @@ export async function handleSessionMessagesRoute(
     json(res, 200, result)
   } catch (error) {
     logger.error({ err: error }, '[Server] Error fetching session messages')
-    json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+    json(res, 500, { error: 'Failed to fetch session messages' })
   }
 }
 

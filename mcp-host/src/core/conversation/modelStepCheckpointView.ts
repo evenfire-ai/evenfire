@@ -17,28 +17,23 @@ function isBlockedReason(reason: string): reason is ModelStepBlockedReason {
 
 /**
  * #1043 — wire view of a live checkpoint (§4.1). `undefined` for an `open`
- * header, which is internal and never offered. A visible row that violates the
- * contract (no failure time, unknown blocked reason) throws: serving it would
- * offer an action the Host cannot honour.
+ * header or an expired/invalid row, which must not offer an action. The
+ * transcript remains readable when an older checkpoint row is incomplete.
  */
 export function toModelStepCheckpointView(
-  snapshot: ModelStepCheckpointSnapshot
+  snapshot: ModelStepCheckpointSnapshot,
+  now = Date.now()
 ): ModelStepCheckpointView | undefined {
   const { header, tools } = snapshot
   if (!isVisibleStatus(header.status)) return undefined
-  if (header.failed_at === null || header.expires_at === null) {
-    throw new Error(
-      `Model-step checkpoint ${header.checkpoint_id} is ${header.status} without failure or expiry time`
-    )
-  }
+  if (header.failed_at === null || header.expires_at === null) return undefined
+  const leaseAlive =
+    header.status === 'claimed' && header.claim_expires_at !== null && header.claim_expires_at > now
+  if (header.expires_at <= now && !leaseAlive) return undefined
   let blockedReason: ModelStepBlockedReason | undefined
   if (header.status === 'blocked') {
     const reason = header.blocked_reason ?? ''
-    if (!isBlockedReason(reason)) {
-      throw new Error(
-        `Model-step checkpoint ${header.checkpoint_id} has an unknown blocked reason: ${reason}`
-      )
-    }
+    if (!isBlockedReason(reason)) return undefined
     blockedReason = reason
   }
   return {

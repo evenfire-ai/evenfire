@@ -328,11 +328,16 @@ function statements(db: Database): Statements {
       WHERE checkpoint_id = @checkpoint_id AND claim_owner = @owner AND claim_generation = @generation
         AND status IN ('open','claimed')
     `),
+    // A blocked row may come from an older checkpoint with a null deadline.
+    // Reuse the source checkpoint's configured lifetime when present; the
+    // historical null case receives the original seven-day default.
     transition: db.prepare(`
       UPDATE model_step_checkpoints
       SET status = @to, version = version + 1, updated_at = @now,
           failed_at = COALESCE(@failed_at, failed_at),
-          expires_at = COALESCE(@expires_at, expires_at),
+          expires_at = CASE WHEN @to = 'blocked'
+            THEN @now + COALESCE(expires_at - failed_at, 604800000)
+            ELSE COALESCE(@expires_at, expires_at) END,
           blocked_reason = CASE WHEN @to = 'blocked' THEN @blocked_reason ELSE NULL END,
           task_budget = COALESCE(@task_budget, task_budget),
           claim_expires_at = CASE WHEN @to = 'claimed' THEN claim_expires_at ELSE NULL END
@@ -351,6 +356,7 @@ function statements(db: Database): Statements {
           claim_owner = @owner, claim_generation = claim_generation + 1,
           claim_expires_at = @claim_expires_at, blocked_reason = NULL, updated_at = @now
       WHERE checkpoint_id = @checkpoint_id AND version = @version
+        AND status IN ('resumable','claimed')
     `),
     retireLiveBySession: db.prepare(`
       UPDATE model_step_checkpoints
@@ -417,8 +423,8 @@ function statements(db: Database): Statements {
       WHERE status IN ('completed','abandoned') AND updated_at <= @cutoff
     `),
     ledgerKinds: db.prepare(`
-      SELECT kind, tool_call_id FROM model_step_checkpoint_entries
-      WHERE checkpoint_id = ? AND kind IN ('tool_dispatch','tool_result')
+      SELECT kind, tool_call_id, payload FROM model_step_checkpoint_entries
+      WHERE checkpoint_id = ? AND kind IN ('message','tool_dispatch','tool_result')
     `),
     insertAttachment: db.prepare(`
       INSERT INTO model_step_checkpoint_attachments
@@ -471,25 +477,40 @@ function statements(db: Database): Statements {
 /**
  * Tool ledger of a checkpoint. A dispatch with a recorded result is
  * `confirmed`; a dispatch without one is `unknown` (its effect may have
- * happened). Calls announced by the model but never dispatched are counted
- * from the message entries by the caller that reconstructs the transcript,
- * so this ledger reports them as 0.
+ * happened). Assistant messages also record the calls the model announced;
+ * any such call without a dispatch is `notDispatched`.
  */
 function ledger(s: Statements, checkpointId: string): ModelStepCheckpointToolLedger {
   const rows = s.ledgerKinds.all(checkpointId) as Array<{
     kind: ModelStepCheckpointEntryKind
     tool_call_id: string | null
+    payload: string
   }>
+  const announced = new Set<string>()
   const dispatched = new Set<string>()
   const resulted = new Set<string>()
   for (const row of rows) {
+    if (row.kind === 'message') {
+      const message = JSON.parse(row.payload) as {
+        role?: string
+        tool_calls?: Array<{ id?: string }> | null
+      }
+      if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
+        for (const call of message.tool_calls) {
+          if (typeof call.id === 'string') announced.add(call.id)
+        }
+      }
+      continue
+    }
     if (row.tool_call_id === null) continue
     if (row.kind === 'tool_dispatch') dispatched.add(row.tool_call_id)
     else resulted.add(row.tool_call_id)
   }
   let unknown = 0
   for (const id of dispatched) if (!resulted.has(id)) unknown += 1
-  return { confirmed: resulted.size, unknown, notDispatched: 0 }
+  let notDispatched = 0
+  for (const id of announced) if (!dispatched.has(id)) notDispatched += 1
+  return { confirmed: resulted.size, unknown, notDispatched }
 }
 
 function snapshot(s: Statements, header: ModelStepCheckpointRow): ModelStepCheckpointSnapshot {

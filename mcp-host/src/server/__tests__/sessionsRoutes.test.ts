@@ -231,11 +231,7 @@ describe('handleSessionsListRoute', () => {
     } as unknown as Request
     const captured = makeRes()
 
-    await handleSessionsListRoute(
-      req,
-      captured.res,
-      makeHandlers({ sessionsListHandler: null })
-    )
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler: null }))
 
     expect(captured.statusCode).toBe(400)
     expect(captured.jsonBody).toEqual({ error: 'Invalid sessions cursor' })
@@ -515,15 +511,23 @@ describe('handleSessionMessagesRoute', () => {
     expect(captured.jsonBody).toEqual({ error: 'limit must be a positive integer' })
   })
 
-  it('returns 500 when sessionMessagesHandler throws', async () => {
+  it('returns a generic 500 without exposing checkpoint internals and still serves a healthy read', async () => {
     const sessionMessagesHandler: SessionMessagesHandler = vi
       .fn()
-      .mockRejectedValue(new Error('db unavailable'))
+      .mockRejectedValueOnce(
+        new Error('Model-step checkpoint cp-private is blocked without expiry')
+      )
+      .mockResolvedValueOnce({ turns: [] })
     const req = makeReqWithParams('user-1', 'chatllm', 'c1')
     const captured = makeRes()
     await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
     expect(captured.statusCode).toBe(500)
-    expect((captured.jsonBody as { error: string }).error).toBe('db unavailable')
+    expect(captured.jsonBody).toEqual({ error: 'Failed to fetch session messages' })
+
+    const healthy = makeRes()
+    await handleSessionMessagesRoute(req, healthy.res, makeHandlers({ sessionMessagesHandler }))
+    expect(healthy.statusCode).toBe(200)
+    expect(healthy.jsonBody).toEqual({ turns: [] })
   })
 })
 

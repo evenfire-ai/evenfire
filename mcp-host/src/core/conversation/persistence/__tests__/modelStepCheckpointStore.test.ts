@@ -2,7 +2,7 @@
  * #1043 — durable model-step checkpoint store over the real dispatcher and a
  * file-backed SQLite database (so a cold reopen reads what the disk holds).
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -67,6 +67,15 @@ const userEntry: ModelStepCheckpointEntryInput = {
   toolCallId: null,
   payload: JSON.stringify({ role: 'user', content: 'list the files' }),
 }
+const announced = (...ids: string[]): ModelStepCheckpointEntryInput => ({
+  kind: 'message',
+  toolCallId: null,
+  payload: JSON.stringify({
+    role: 'assistant',
+    content: '',
+    tool_calls: ids.map(id => ({ id, name: 'list_files', arguments: {} })),
+  }),
+})
 const dispatch = (id: string): ModelStepCheckpointEntryInput => ({
   kind: 'tool_dispatch',
   toolCallId: id,
@@ -109,6 +118,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     const { checkpoints, queue } = storeOver(first)
     const fence = await checkpoints.open(header(), [userEntry])
     await checkpoints.append(SESSION_KEY, fence, [
+      announced('tc-1', 'tc-2', 'tc-3'),
       dispatch('tc-1'),
       result('tc-1'),
       dispatch('tc-2'),
@@ -129,14 +139,15 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     const after = await cold.loadLive(SESSION_KEY)
     expect(after).toEqual(before)
     expect(after?.header).toMatchObject({ status: 'resumable', version: 2, claim_generation: 0 })
-    expect(after?.tools).toEqual({ confirmed: 1, unknown: 1, notDispatched: 0 })
+    expect(after?.tools).toEqual({ confirmed: 1, unknown: 1, notDispatched: 1 })
     const entriesAfter = await cold.loadEntries(SESSION_KEY, 'cp-1')
     expect(entriesAfter).toEqual(entriesBefore)
     expect(entriesAfter.map(e => [e.seq, e.kind, e.tool_call_id])).toEqual([
       [1, 'message', null],
-      [2, 'tool_dispatch', 'tc-1'],
-      [3, 'tool_result', 'tc-1'],
-      [4, 'tool_dispatch', 'tc-2'],
+      [2, 'message', null],
+      [3, 'tool_dispatch', 'tc-1'],
+      [4, 'tool_result', 'tc-1'],
+      [5, 'tool_dispatch', 'tc-2'],
     ])
     reopened.terminate()
   })
@@ -204,6 +215,51 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       leaseMs: LEASE_MS,
     })
     expect(foreign).toEqual({ outcome: 'not_found' })
+  })
+
+  it('3c. claim SQL fences blocked rows even at the current version', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const prepare = vi.spyOn(worker.db, 'prepare')
+    const { checkpoints } = storeOver(worker)
+    const blockedKey = 'user-1043:rpc:agent:blocked'
+    const { fence, version } = await openResumable(checkpoints, 'cp-blocked', blockedKey)
+    const blockedVersion = await checkpoints.transition(blockedKey, fence, {
+      from: ['resumable'],
+      to: 'blocked',
+      blockedReason: 'reference_unavailable',
+    })
+    expect(blockedVersion).toBe((version as number) + 1)
+
+    const claimSql = prepare.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes("SET status = 'claimed'")
+    )?.[0]
+    expect(claimSql).toEqual(expect.any(String))
+    const changed = worker.db.prepare(claimSql as string).run({
+      checkpoint_id: 'cp-blocked',
+      version: blockedVersion,
+      task_id: 'task-illegal',
+      owner: 'host-instance-a',
+      claim_expires_at: clock + LEASE_MS,
+      now: clock,
+    }).changes
+    expect(changed).toBe(0)
+    expect(statusOf(worker, 'cp-blocked')).toBe('blocked')
+
+    // The same prepared claim admits an eligible row through the public path.
+    const liveKey = 'user-1043:rpc:agent:live'
+    const live = await openResumable(checkpoints, 'cp-live', liveKey)
+    expect(
+      (
+        await checkpoints.claim({
+          sessionKey: liveKey,
+          checkpointId: 'cp-live',
+          version: live.version,
+          hostInstanceId: 'host-instance-a',
+          newTaskId: 'task-live',
+          leaseMs: LEASE_MS,
+        })
+      ).outcome
+    ).toBe('claimed')
   })
 
   it('4. an expired lease is re-claimed: same checkpoint and entries, a new task id, one claimed row', async () => {
@@ -640,6 +696,42 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       })
     ).toEqual({ outcome: 'not_found' })
     expect(statusOf(worker, 'cp-blocked')).toBe('blocked')
+  })
+
+  it('6c2. blocking rearms expiry and repairs an inherited null deadline', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+    const { fence } = await openResumable(checkpoints)
+    worker.db
+      .prepare('UPDATE model_step_checkpoints SET expires_at = NULL WHERE checkpoint_id = ?')
+      .run('cp-1')
+    clock += 50
+    expect(
+      await checkpoints.transition(SESSION_KEY, fence, {
+        from: ['resumable'],
+        to: 'blocked',
+        blockedReason: 'reference_unavailable',
+      })
+    ).toBe(3)
+    const row = worker.db
+      .prepare('SELECT expires_at FROM model_step_checkpoints WHERE checkpoint_id = ?')
+      .get('cp-1') as { expires_at: number | null }
+    expect(row.expires_at).toBe(clock + 7 * 24 * 3_600_000)
+    expect((await checkpoints.loadLive(SESSION_KEY))?.header.status).toBe('blocked')
+
+    // A valid source deadline also receives a fresh window of its original length.
+    const otherKey = 'user-1043:rpc:agent:other'
+    const other = await openResumable(checkpoints, 'cp-other', otherKey)
+    clock += 50
+    await checkpoints.transition(otherKey, other.fence, {
+      from: ['resumable'],
+      to: 'blocked',
+      blockedReason: 'reference_unavailable',
+    })
+    const otherRow = worker.db
+      .prepare('SELECT expires_at FROM model_step_checkpoints WHERE checkpoint_id = ?')
+      .get('cp-other') as { expires_at: number }
+    expect(otherRow.expires_at).toBe(clock + 7 * 24 * 3_600_000)
   })
 
   it('6d. claim replays a claimed row whose lease outlives the header expiry', async () => {
