@@ -516,6 +516,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const handle of handles.splice(0)) await handle.shutdown()
   Object.assign(appConfig, savedConfig)
+  vi.useRealTimers()
   Date.now = dateNow
   vi.restoreAllMocks()
 })
@@ -1457,12 +1458,21 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
 
   it('10. ends a reopened turn with the limit message and abandons the checkpoint', async () => {
     const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
-    const llm = provider(
-      undefined,
-      () => new Promise(resolve => setTimeout(() => resolve({}), 250))
-    )
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    let enteredProvider!: () => void
+    const providerEntered = new Promise<void>(resolve => {
+      enteredProvider = resolve
+    })
+    const llm = provider(undefined, () => {
+      enteredProvider()
+      return new Promise(resolve => setTimeout(() => resolve({}), 250))
+    })
     const run = await runContinuation(fixture, llm)
-    await run.executor.run()
+    const execution = run.executor.run()
+    await providerEntered
+    expect(llm.calls()).toBe(1)
+    await vi.advanceTimersByTimeAsync(101)
+    await execution
     await fixture.handle.persistQueue.drain()
 
     expect(llm.calls()).toBe(1)
@@ -1478,6 +1488,38 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
         model_step_checkpoint_id: null,
       }),
     ])
+  })
+
+  it('10b. expires during preparation before provider entry', async () => {
+    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    let enterPreparation!: () => void
+    let releasePreparation!: () => void
+    const preparationEntered = new Promise<void>(resolve => {
+      enterPreparation = resolve
+    })
+    const preparationGate = new Promise<void>(resolve => {
+      releasePreparation = resolve
+    })
+    const getOrCreate = fixture.manager.getOrCreate.bind(fixture.manager)
+    fixture.manager.getOrCreate = async (...args) => {
+      enterPreparation()
+      await preparationGate
+      return getOrCreate(...args)
+    }
+    const llm = provider(undefined, () => ({ content: 'would have answered' }))
+    const run = await runContinuation(fixture, llm)
+    const execution = run.executor.run()
+    await preparationEntered
+    await vi.advanceTimersByTimeAsync(101)
+    releasePreparation()
+    await execution
+    await fixture.handle.persistQueue.drain()
+
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onFail.mock.calls[0]![1].code).toBe('TASK_DURATION_LIMIT')
+    expect(llm.calls()).toBe(0)
+    expect(header(fixture.handle).status).toBe('abandoned')
   })
 
   it('11. approval keeps the claim and records the approved result before completion', async () => {
