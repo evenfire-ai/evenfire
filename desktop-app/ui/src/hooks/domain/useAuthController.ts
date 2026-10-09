@@ -354,6 +354,7 @@ export function useAuthController({
         expectedSessionGeneration !== undefined &&
         message.includes('auth_transition_in_progress')
       ) {
+        setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Finish the current authentication action, then reopen this desktop link.',
           'info'
@@ -569,6 +570,7 @@ export function useAuthController({
       setStatus('The desktop session changed while processing this link. Open it again.', 'info')
     }
     const reportAuthenticationInProgress = () => {
+      setPendingDesktopEnvironmentSetup(null)
       setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
     }
 

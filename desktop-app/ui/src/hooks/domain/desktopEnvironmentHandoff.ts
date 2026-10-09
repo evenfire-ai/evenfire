@@ -125,8 +125,10 @@ function isAuthenticationOperationInProgress(state: DesktopEnvironmentHandoffSta
 
 function reportAuthenticationStateChanged(
   state: DesktopEnvironmentHandoffState,
-  setStatus: SetStatusFn
+  setStatus: SetStatusFn,
+  setPendingDesktopEnvironmentSetup: (config: DesktopRuntimeConfig | null) => void
 ): void {
+  setPendingDesktopEnvironmentSetup(null)
   if (isAuthenticationOperationInProgress(state)) {
     setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
     return
@@ -170,9 +172,11 @@ export function createDesktopEnvironmentSetupHandler({
   const ownsSessionGeneration = async (expectedSessionGeneration: number): Promise<boolean> => {
     try {
       if ((await getSessionGeneration()) === expectedSessionGeneration) return true
+      setPendingDesktopEnvironmentSetup(null)
       setStatus('The desktop session changed while processing this link. Open it again.', 'info')
       return false
     } catch {
+      setPendingDesktopEnvironmentSetup(null)
       setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
       return false
     }
@@ -225,7 +229,7 @@ export function createDesktopEnvironmentSetupHandler({
     if (!(await ownsSessionGeneration(sessionGeneration))) return
     let authState = getAuthState()
     if (isAuthenticationOperationInProgress(authState)) {
-      reportAuthenticationStateChanged(authState, setStatus)
+      reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
       return
     }
 
@@ -270,7 +274,7 @@ export function createDesktopEnvironmentSetupHandler({
 
       authState = getAuthState()
       if (isAuthenticationOperationInProgress(authState) || !authState.isAuthenticated) {
-        reportAuthenticationStateChanged(authState, setStatus)
+        reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
         return
       }
 
@@ -305,7 +309,7 @@ export function createDesktopEnvironmentSetupHandler({
 
       authState = getAuthState()
       if (isAuthenticationOperationInProgress(authState)) {
-        reportAuthenticationStateChanged(authState, setStatus)
+        reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
         return
       }
       if (authState.isAuthenticated) {
@@ -322,7 +326,7 @@ export function createDesktopEnvironmentSetupHandler({
         if (!(await ownsSessionGeneration(sessionGeneration))) return
         authState = getAuthState()
         if (authState.isAuthenticated) {
-          reportAuthenticationStateChanged(authState, setStatus)
+          reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
           return
         }
       }
@@ -335,7 +339,7 @@ export function createDesktopEnvironmentSetupHandler({
       if (!(await ownsSessionGeneration(sessionGeneration))) return
       authState = getAuthState()
       if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
-        reportAuthenticationStateChanged(authState, setStatus)
+        reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
         return
       }
       restMatch = resolveDesktopEnvironmentRestMatch(
@@ -386,7 +390,7 @@ export function createDesktopEnvironmentSetupHandler({
       if (!(await ownsSessionGeneration(selection.sessionGeneration))) return
       authState = getAuthState()
       if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
-        reportAuthenticationStateChanged(authState, setStatus)
+        reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
         return
       }
       try {
@@ -404,7 +408,7 @@ export function createDesktopEnvironmentSetupHandler({
     if (!(await ownsSessionGeneration(sessionGeneration))) return
     authState = getAuthState()
     if (isAuthenticationOperationInProgress(authState) || authState.isAuthenticated) {
-      reportAuthenticationStateChanged(authState, setStatus)
+      reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
       return
     }
     setPendingDesktopEnvironmentSetup({ ...linkedConfig, rpcProxyBaseUrl: '' })
@@ -416,6 +420,7 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
     if (isAuthenticationOperationInProgress(getAuthState())) {
+      setPendingDesktopEnvironmentSetup(null)
       setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
       return
     }

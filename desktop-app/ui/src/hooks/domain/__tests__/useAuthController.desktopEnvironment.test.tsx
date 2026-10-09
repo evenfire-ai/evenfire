@@ -739,6 +739,50 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('clears linked setup confirmation when saving hits an auth transition', async () => {
+    mocks.saveRuntimeConfig.mockRejectedValueOnce(
+      wrapLikeElectronIpc('auth:saveRuntimeConfig', new Error('auth_transition_in_progress'))
+    )
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink({
+      appName: 'Linked tenant',
+      externalRestApiBaseUrl: 'https://new-api.example.test',
+    })
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      'https://new-api.example.test'
+    )
+
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'Finish the current authentication action, then reopen this desktop link.',
+      'info'
+    )
+  })
+
+  it('clears linked setup confirmation when confirmation meets an auth operation', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink({
+      appName: 'Linked tenant',
+      externalRestApiBaseUrl: 'https://new-api.example.test',
+    })
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      'https://new-api.example.test'
+    )
+    await act(async () => setBootingForTest?.(true))
+
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      'Finish the current authentication action, then reopen this desktop link.',
+      'info'
+    )
+  })
+
   it('leaves RPC discovery to the backend for a REST-only environment link', async () => {
     const linkedEnvironment = {
       appName: 'New tenant',
