@@ -67,7 +67,9 @@ describe('AppService invitation configuration lookup', () => {
     ] = await Promise.all([import('../appService.js'), import('../config.js')])
     const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
 
-    const service = new AppService() as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: {
         passwordLogin: ReturnType<typeof vi.fn>
         getDesktopEnvironment: ReturnType<typeof vi.fn>
@@ -165,7 +167,7 @@ describe('AppService invitation configuration lookup', () => {
       import('../appService.js'),
       import('../config.js'),
     ])
-    const service = new AppService() as unknown as {
+    const service = new AppService({ getUserDataDirectory: () => os.tmpdir() }) as unknown as {
       authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
@@ -207,13 +209,16 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('does not contact member-registration-service when runtime config is already set', async () => {
+    const configPath = await createTempConfigPath('clerum-desktop-config-already-set')
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
     const { AppService } = await import('../appService.js')
-    const service = new AppService() as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: { passwordLogin: ReturnType<typeof vi.fn> }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       tokenStore: { setSessionToken: ReturnType<typeof vi.fn> }
@@ -272,7 +277,9 @@ describe('AppService invitation configuration lookup', () => {
     const { AppService } = await import('../appService.js')
     const getSessionToken = vi.fn().mockResolvedValue('stored-token')
     const clearSessionToken = vi.fn().mockResolvedValue(undefined)
-    const service = new AppService() as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
       tokenStore: {
         getSessionToken: ReturnType<typeof vi.fn>
@@ -329,13 +336,16 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('fails closed when the saved-token store cannot be read', async () => {
+    const configPath = await createTempConfigPath('clerum-desktop-token-read-failure')
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     vi.resetModules()
 
     const { AppService } = await import('../appService.js')
     const getMe = vi.fn()
-    const service = new AppService() as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
       tokenStore: {
         getSessionToken: ReturnType<typeof vi.fn>
@@ -363,30 +373,51 @@ describe('AppService invitation configuration lookup', () => {
     expect(getMe).not.toHaveBeenCalled()
   })
 
-  it('releases the logout guard when clearing the saved token fails', async () => {
+  it('records durable logout intent and releases the logout guard when token cleanup fails', async () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
+    const configPath = await createTempConfigPath('clerum-desktop-logout-failure')
     vi.resetModules()
 
-    const [{ AppService }, { getActiveEnvKey, getActiveLegacyRestOnlyEnvKey }] = await Promise.all([
-      import('../appService.js'),
-      import('../config.js'),
-    ])
-    const service = new AppService() as unknown as {
-      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+    const [{ AppService }, { getActiveEnvKey, getActiveLegacyRestOnlyEnvKey }, markerStore] =
+      await Promise.all([
+        import('../appService.js'),
+        import('../config.js'),
+        import('../pendingExternalLogout.js'),
+      ])
+    const reportFailure = vi.fn()
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+      reportDeferredLogoutFailure: reportFailure,
+    }) as unknown as {
+      tokenStore: { clearSessionTokenStrictly: ReturnType<typeof vi.fn> }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
       logoutInProgress: boolean
+      sessionToken: string | null
+      me: unknown
+      suspendDesktopGfsUploadsForAuthBoundary: ReturnType<typeof vi.fn>
       logout: () => Promise<void>
     }
     service.tokenStore = {
-      clearSessionToken: vi.fn().mockRejectedValue(new Error('keychain unavailable')),
+      clearSessionTokenStrictly: vi.fn().mockRejectedValue(new Error('keychain unavailable')),
     } as never
     service.rpcTokenManager = { clear: vi.fn() } as never
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
+    service.sessionToken = 'fixture-stale-session-token'
+    service.me = { id: 'user-1' }
 
-    await expect(service.logout()).rejects.toThrow(/keychain unavailable/)
-    expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
+    await expect(service.logout()).resolves.toBeUndefined()
+    expect(service.tokenStore.clearSessionTokenStrictly).toHaveBeenCalledWith(getActiveEnvKey(), {
       legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()],
     })
+    expect(
+      markerStore.readPendingExternalLogoutIntent(path.dirname(configPath), getActiveEnvKey())
+    ).toEqual({
+      intent: 'logout-pending',
+    })
+    expect(service.sessionToken).toBeNull()
+    expect(service.me).toBeNull()
+    expect(reportFailure).toHaveBeenCalledOnce()
     expect(service.logoutInProgress).toBe(false)
   })
 

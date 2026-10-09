@@ -49,7 +49,7 @@ vi.mock('../sandboxUiSessionRefresh.js', () => ({
 }))
 
 vi.mock('../config.js', () => ({
-  getActiveEnvKey: () => 'test-env',
+  getActiveEnvKey: () => 'test_env-000000000000',
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',

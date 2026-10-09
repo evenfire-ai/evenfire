@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import { mkdtemp, readFile, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
 import { config, getActiveEnvKey } from '../config.js'
 import { DesktopUploadCapabilityError, normalizeUploadProductMaxBytes } from '../gfs/upload.js'
@@ -273,7 +273,7 @@ type UploadScopeTestService = {
     googleLogin: ReturnType<typeof vi.fn>
   }
   tokenStore: {
-    clearSessionToken: ReturnType<typeof vi.fn>
+    clearSessionTokenStrictly: ReturnType<typeof vi.fn>
     setSessionToken: ReturnType<typeof vi.fn>
   }
   completePasswordLogin: (email: string, password: string) => ReturnType<AppService['googleLogin']>
@@ -293,7 +293,9 @@ type UploadScopeTestService = {
 }
 
 function authenticatedUploadService(statePath: string): UploadScopeTestService {
-  const service = new AppService() as unknown as UploadScopeTestService
+  const service = new AppService({
+    getUserDataDirectory: () => dirname(statePath),
+  }) as unknown as UploadScopeTestService
   service.sessionToken = 'token-a'
   service.me = {
     id: 'user-a',
@@ -318,7 +320,10 @@ function authenticatedUploadService(statePath: string): UploadScopeTestService {
     googleLogin: vi.fn(),
   }
   service.tokenStore = {
-    clearSessionToken: vi.fn().mockResolvedValue(undefined),
+    clearSessionTokenStrictly: vi.fn().mockResolvedValue({
+      keytarAvailable: true,
+      keytarDisabled: false,
+    }),
     setSessionToken: vi.fn().mockResolvedValue(undefined),
   }
   service.startDesktopGfsUpload = vi.fn()
@@ -880,7 +885,7 @@ describe('AppService GFS upload security scope', () => {
 
       await expect(settled).resolves.toContain('authentication fence')
       expect(service.sessionToken).toBeNull()
-      expect(service.tokenStore.clearSessionToken).toHaveBeenCalledTimes(1)
+      expect(service.tokenStore.clearSessionTokenStrictly).toHaveBeenCalledTimes(1)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -947,7 +952,8 @@ describe('AppService GFS upload security scope', () => {
         expect(service.gfsDispatchBlocked).toBe(false)
         expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
           'token-b',
-          getActiveEnvKey()
+          getActiveEnvKey(),
+          {}
         )
       } finally {
         await rm(root, { recursive: true, force: true })

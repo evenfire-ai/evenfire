@@ -1,4 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+let testHome = ''
+let restoreHomedir: (() => void) | undefined
 
 // In-memory keychain backing the mocked keytar module. Keyed by service:account
 // so per-environment account isolation is directly observable.
@@ -17,8 +24,8 @@ vi.mock('keytar', () => ({
   ),
 }))
 
-// app.isReady()=false + safeStorage unavailable ⇒ the keytar path is the only
-// active store, which is exactly what we want to assert per-env isolation on.
+// app.isReady()=false + safeStorage unavailable keeps keytar in memory and
+// routes plain-file fallback reads under the temporary home directory below.
 vi.mock('electron', () => ({
   app: { isReady: vi.fn(() => false), getPath: vi.fn(() => '/tmp/evenfire-test') },
   safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
@@ -35,12 +42,245 @@ const ENV_A_WITH_RPC = 'env_a_rpc-222222222222'
 
 let TokenStore: typeof import('../tokenStore.js').TokenStore
 
+beforeAll(async () => {
+  testHome = await mkdtemp(path.join(os.tmpdir(), 'evenfire-token-store-test-'))
+  const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(testHome)
+  restoreHomedir = () => homedirSpy.mockRestore()
+})
+
+afterAll(async () => {
+  restoreHomedir?.()
+  if (testHome) await rm(testHome, { recursive: true, force: true })
+})
+
 beforeEach(async () => {
   keychain.clear()
+  vi.clearAllMocks()
   TokenStore = (await import('../tokenStore.js')).TokenStore
 })
 
 describe('TokenStore per-environment slots (spec §5.2)', () => {
+  it('only permits Keytar replacement for the active account when no files failed', async () => {
+    const { SessionTokenStorageClearError } = await import('../tokenStore.js')
+    const activeAccount = `${LEGACY_ACCOUNT}::${ENV_A}`
+    const activeFailure = new SessionTokenStorageClearError(
+      [new Error('keychain locked')],
+      [activeAccount],
+      0
+    )
+    const otherAccountFailure = new SessionTokenStorageClearError(
+      [new Error('keychain locked')],
+      [`${LEGACY_ACCOUNT}::${ENV_B}`],
+      0
+    )
+    const additionalAccountFailure = new SessionTokenStorageClearError(
+      [new Error('keychain locked')],
+      [activeAccount, `${LEGACY_ACCOUNT}::${ENV_B}`],
+      0
+    )
+    const fileFailure = new SessionTokenStorageClearError(
+      [new Error('keychain locked'), new Error('file locked')],
+      [activeAccount],
+      1
+    )
+    const noKeytarFailure = new SessionTokenStorageClearError([], [], 0)
+
+    expect(activeFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(true)
+    expect(activeFailure.canUseSecureFileFallbackWhileMarkerRemains()).toBe(true)
+    expect(otherAccountFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
+    expect(additionalAccountFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
+    expect(fileFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
+    expect(fileFailure.canUseSecureFileFallbackWhileMarkerRemains()).toBe(false)
+    expect(noKeytarFailure.canBeReplacedByFreshLoginCredential(ENV_A)).toBe(false)
+    expect(noKeytarFailure.canUseSecureFileFallbackWhileMarkerRemains()).toBe(false)
+  })
+
+  it('rejects new operations after the TokenStore drain begins', async () => {
+    const keytar = await import('keytar')
+    let finishWrite!: () => void
+    vi.mocked(keytar.setPassword).mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishWrite = resolve
+        })
+    )
+    const store = new TokenStore()
+    const activeWrite = store.setSessionToken('active-token', ENV_A)
+    await vi.waitFor(() => {
+      expect(keytar.setPassword).toHaveBeenCalledWith(
+        SERVICE,
+        `${LEGACY_ACCOUNT}::${ENV_A}`,
+        'active-token'
+      )
+    })
+
+    const drain = store.prepareForQuit()
+    try {
+      await expect(store.setSessionToken('late-token', ENV_A)).rejects.toThrow(
+        'Application is shutting down'
+      )
+      expect(keytar.setPassword).toHaveBeenCalledOnce()
+    } finally {
+      finishWrite()
+      await Promise.all([activeWrite, drain])
+    }
+  })
+
+  it('accepts a new public operation after quit cancellation reopens admission', async () => {
+    const keytar = await import('keytar')
+    const store = new TokenStore()
+    await store.prepareForQuit()
+
+    await expect(store.getSessionToken(ENV_A)).rejects.toThrow('Application is shutting down')
+    store.reopenAdmission()
+    await store.setSessionToken('retry-token', ENV_A)
+
+    expect(keytar.setPassword).toHaveBeenCalledWith(
+      SERVICE,
+      `${LEGACY_ACCOUNT}::${ENV_A}`,
+      'retry-token'
+    )
+    await expect(store.getSessionToken(ENV_A)).resolves.toBe('retry-token')
+  })
+
+  it('reports storage failures when clearing a deferred logout intent', async () => {
+    const keytar = await import('keytar')
+    keychain.set(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`), 'saved-token')
+    vi.mocked(keytar.deletePassword).mockRejectedValueOnce(new Error('keychain unavailable'))
+
+    await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).rejects.toMatchObject({
+      message: 'Failed to clear session token storage',
+    })
+
+    expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe('saved-token')
+  })
+
+  it('allows a strict clear when keychain entries and fallback files are already absent', async () => {
+    await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).resolves.toMatchObject({
+      keytarAvailable: true,
+      keytarDisabled: false,
+    })
+  })
+
+  it('reports strict fallback-file deletion failures while continuing cleanup', async () => {
+    const fallbackPath = path.join(testHome, '.evenfire', `session-token-${ENV_A}.json`)
+    const otherFilePath = path.join(testHome, '.evenfire', 'session-token.enc')
+    await fs.mkdir(path.dirname(fallbackPath), { recursive: true })
+    await fs.writeFile(fallbackPath, JSON.stringify({ token: 'fixture-token' }), { mode: 0o600 })
+    await fs.writeFile(otherFilePath, Buffer.from('legacy-encrypted-token'), { mode: 0o600 })
+    keychain.set(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`), 'fixture-token')
+    const originalUnlink = fs.unlink.bind(fs)
+    const unlink = vi.spyOn(fs, 'unlink').mockImplementation(async filePath => {
+      if (String(filePath) === fallbackPath) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      }
+      return originalUnlink(filePath)
+    })
+
+    try {
+      await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).rejects.toMatchObject({
+        message: 'Failed to clear session token storage',
+      })
+      expect(await fs.readFile(fallbackPath, 'utf8')).toContain('fixture-token')
+      expect(keychain.has(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe(false)
+      await expect(fs.access(otherFilePath)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      unlink.mockRestore()
+      await fs.rm(fallbackPath, { force: true })
+    }
+  })
+
+  it('strictly clears the legacy global token files', async () => {
+    const storageDirectory = path.join(testHome, '.evenfire')
+    const legacyEncryptedFile = path.join(storageDirectory, 'session-token.enc')
+    const legacyPlainFile = path.join(storageDirectory, 'session-token.json')
+    await fs.mkdir(storageDirectory, { recursive: true })
+    await fs.writeFile(legacyEncryptedFile, Buffer.from('legacy-encrypted-token'), { mode: 0o600 })
+    await fs.writeFile(legacyPlainFile, JSON.stringify({ token: 'legacy-fixture-token' }), {
+      mode: 0o600,
+    })
+
+    await expect(new TokenStore().clearSessionTokenStrictly(ENV_A)).resolves.toMatchObject({
+      keytarAvailable: true,
+      keytarDisabled: false,
+    })
+
+    await expect(fs.access(legacyEncryptedFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.access(legacyPlainFile)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('finishes an accepted read migration after admission closes and drains its native write', async () => {
+    const keytar = await import('keytar')
+    const store = new TokenStore()
+    keychain.set(keyOf(SERVICE, LEGACY_ACCOUNT), 'legacy-token')
+
+    let finishLegacyRead!: () => void
+    const legacyRead = new Promise<void>(resolve => {
+      finishLegacyRead = resolve
+    })
+    const originalGetPassword = vi.mocked(keytar.getPassword).getMockImplementation()!
+    const originalSetPassword = vi.mocked(keytar.setPassword).getMockImplementation()!
+    vi.mocked(keytar.getPassword).mockImplementation(async (service, account) => {
+      if (account === LEGACY_ACCOUNT) await legacyRead
+      return originalGetPassword(service, account)
+    })
+
+    let finishWrite!: () => void
+    vi.mocked(keytar.setPassword).mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishWrite = resolve
+        })
+    )
+
+    const read = store.getSessionToken(ENV_A)
+    await vi.waitFor(() => {
+      expect(keytar.getPassword).toHaveBeenCalledWith(SERVICE, LEGACY_ACCOUNT)
+    })
+    let drainFinished = false
+    const drain = store.prepareForQuit().then(() => {
+      drainFinished = true
+    })
+    try {
+      await expect(store.clearSessionToken(ENV_B)).rejects.toThrow('Application is shutting down')
+      finishLegacyRead()
+      await vi.waitFor(() => {
+        expect(keytar.setPassword).toHaveBeenCalledWith(
+          SERVICE,
+          `${LEGACY_ACCOUNT}::${ENV_A}`,
+          'legacy-token'
+        )
+      })
+      expect(drainFinished).toBe(false)
+
+      finishWrite()
+      await expect(read).resolves.toBe('legacy-token')
+      await expect(drain).resolves.toBeUndefined()
+      expect(drainFinished).toBe(true)
+    } finally {
+      finishLegacyRead()
+      const migrationWriteStarted = await vi
+        .waitFor(() => {
+          expect(keytar.setPassword).toHaveBeenCalledWith(
+            SERVICE,
+            `${LEGACY_ACCOUNT}::${ENV_A}`,
+            'legacy-token'
+          )
+        })
+        .then(
+          () => true,
+          () => false
+        )
+      if (migrationWriteStarted) finishWrite?.()
+      else vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSetPassword)
+      await Promise.allSettled([read, drain])
+      vi.mocked(keytar.getPassword).mockReset().mockImplementation(originalGetPassword)
+      if (migrationWriteStarted) {
+        vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSetPassword)
+      }
+    }
+  })
+
   it('stores and reads a token under the env-scoped account', async () => {
     const store = new TokenStore()
     await store.setSessionToken('tok-a', ENV_A)
@@ -48,6 +288,41 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     // Physically stored under the namespaced account, never the global one.
     expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe('tok-a')
     expect(keychain.has(keyOf(SERVICE, LEGACY_ACCOUNT))).toBe(false)
+  })
+
+  it('waits for active native credential operations before quitting', async () => {
+    const keytar = await import('keytar')
+    let finishWrite!: () => void
+    vi.mocked(keytar.setPassword).mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishWrite = resolve
+        })
+    )
+    const store = new TokenStore()
+    const write = store.setSessionToken('tok-a', ENV_A)
+
+    await vi.waitFor(() => {
+      expect(keytar.setPassword).toHaveBeenCalledWith(
+        SERVICE,
+        `${LEGACY_ACCOUNT}::${ENV_A}`,
+        'tok-a'
+      )
+    })
+
+    let drainFinished = false
+    const prepareForQuit = (store as TokenStore & { prepareForQuit?: () => Promise<void> })
+      .prepareForQuit
+    const drain = (prepareForQuit ? prepareForQuit.call(store) : Promise.resolve()).then(() => {
+      drainFinished = true
+    })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(drainFinished).toBe(false)
+
+    finishWrite()
+    await expect(write).resolves.toBeUndefined()
+    await expect(drain).resolves.toBeUndefined()
+    expect(drainFinished).toBe(true)
   })
 
   it('does not leak env A token into env B', async () => {

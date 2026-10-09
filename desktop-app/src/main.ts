@@ -20,7 +20,13 @@ import {
 } from './devIsolation.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
-import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
+import {
+  createMainWindowCoordinator,
+  createRetryableInitializer,
+  isQuitAdmissionClosedError,
+  registerQuitDrain,
+  retryPendingExternalLogoutAfterQuitCancellation,
+} from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
@@ -64,10 +70,40 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
-const appService = new AppService(
-  devIsolationPlan
+const appService = new AppService({
+  ...(devIsolationPlan
     ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
-    : {}
+    : {}),
+  reportDeferredLogoutFailure: error => {
+    const errorName = error instanceof Error && error.name ? error.name : typeof error
+    console.error(`[Desktop] Could not apply deferred external logout (${errorName}).`)
+  },
+})
+registerQuitDrain(
+  app,
+  () => appService.prepareForQuit(),
+  () => {
+    retryPendingExternalLogoutAfterQuitCancellation(
+      () => appService.cancelQuitPreparation(),
+      () => appService.applyPendingExternalLogoutIntent(),
+      () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('auth:externalLogout')
+        }
+      },
+      error => {
+        const errorName = error instanceof Error && error.name ? error.name : typeof error
+        console.error(`[Desktop] Deferred external logout failed (${errorName}).`)
+        if (!appService.getCachedUserId() && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('auth:externalLogout')
+        }
+      }
+    )
+  },
+  error => {
+    const errorName = error instanceof Error && error.name ? error.name : typeof error
+    console.error(`[Desktop] Quit preparation failed; continuing quit (${errorName}).`)
+  }
 )
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
@@ -297,9 +333,19 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   appProtocol: DESKTOP_SETUP_PROTOCOL,
   focusMainWindow,
   getWindow: () => mainWindow,
+  getSessionState: async () => ({ authenticated: Boolean(appService.getCachedUserId()) }),
   handleSandboxUiDeepLink,
   isRendererReady: () => mainWindowRendererReady,
   logout: () => appService.logout(),
+  // AppService records the environment-scoped marker before rejecting this
+  // shutdown-time logout. The router treats that rejection as deferred work.
+  deferLogout: isQuitAdmissionClosedError,
+  reportLogoutFailure: error => {
+    // The main-process bootstrap has no service logger; log only the safe error
+    // name because native storage errors must not leak credential or URL data.
+    const errorName = error instanceof Error ? error.name : typeof error
+    console.error('[Desktop] External logout failed', { errorName })
+  },
   requestMainWindow,
   sandboxUiDeepLinkHost: SANDBOX_UI_DEEP_LINK_HOST,
   shouldAcceptSandboxUiProtocolLink,

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { QuitAdmissionClosedError } from '../appService.js'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
+import { isQuitAdmissionClosedError } from '../mainWindowCoordinator.js'
 
 type SentMessage = {
   channel: string
@@ -34,9 +36,13 @@ function createHarness() {
   const sent: SentMessage[] = []
   let currentWindow: TestWindow | null = createWindow('initial', sent)
   let rendererReady = false
+  let authenticated = true
   const focusWindow = vi.fn()
   const requestMainWindow = vi.fn()
   const logout = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+  const deferLogout = vi.fn<(error: unknown) => boolean | void>()
+  const getSessionState = vi.fn(async () => ({ authenticated }))
+  const reportLogoutFailure = vi.fn()
   const handleSandboxUiDeepLink = vi.fn<(rawUrl: string) => boolean>().mockReturnValue(true)
   const shouldAcceptSandboxUiProtocolLink = vi
     .fn<(rawUrl: string) => boolean>()
@@ -49,6 +55,9 @@ function createHarness() {
     handleSandboxUiDeepLink,
     isRendererReady: () => rendererReady,
     logout,
+    deferLogout,
+    getSessionState,
+    reportLogoutFailure,
     requestMainWindow,
     shouldAcceptSandboxUiProtocolLink,
   })
@@ -58,11 +67,17 @@ function createHarness() {
     focusWindow,
     handleSandboxUiDeepLink,
     logout,
+    deferLogout,
+    getSessionState,
+    reportLogoutFailure,
     requestMainWindow,
     router,
     sent,
     setRendererReady: (ready: boolean) => {
       rendererReady = ready
+    },
+    setAuthenticated: (value: boolean) => {
+      authenticated = value
     },
     replaceWindow: (id: string) => {
       currentWindow = createWindow(id, sent)
@@ -228,5 +243,93 @@ describe('evenfire deep-link router', () => {
     expect(harness.sent).toEqual([])
     expect(harness.focusWindow).not.toHaveBeenCalled()
     expect(harness.requestMainWindow).not.toHaveBeenCalled()
+  })
+
+  it('does not report an external logout as complete when quit rejects it', async () => {
+    const harness = createHarness()
+    const unhandledRejections: unknown[] = []
+    const observeUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason)
+    }
+    harness.logout.mockRejectedValue(new Error('Application is shutting down'))
+    process.on('unhandledRejection', observeUnhandledRejection)
+
+    try {
+      harness.router.handle('evenfire://logout')
+      await new Promise<void>(resolve => setImmediate(resolve))
+
+      expect(unhandledRejections).toEqual([])
+      expect(harness.sent).toEqual([])
+      expect(harness.focusWindow).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', observeUnhandledRejection)
+    }
+  })
+
+  it('reports a generic shutdown-shaped error unless the caller confirms durable deferral', async () => {
+    const harness = createHarness()
+    const failure = new Error('Application is shutting down')
+    harness.logout.mockRejectedValue(failure)
+    harness.setAuthenticated(true)
+
+    harness.router.handle('evenfire://logout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(harness.deferLogout).toHaveBeenCalledWith(failure)
+    expect(harness.reportLogoutFailure).toHaveBeenCalledWith(failure)
+    expect(harness.sent).toEqual([])
+  })
+
+  it('treats a durably recorded quit rejection as deferred work', async () => {
+    const harness = createHarness()
+    const failure = new QuitAdmissionClosedError()
+    harness.logout.mockRejectedValue(failure)
+    harness.deferLogout.mockImplementation(isQuitAdmissionClosedError)
+
+    harness.router.handle('evenfire://logout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(harness.deferLogout).toHaveBeenCalledWith(failure)
+    expect(harness.reportLogoutFailure).not.toHaveBeenCalled()
+    expect(harness.sent).toEqual([])
+  })
+
+  it('handles unexpected external logout failures without reporting completion', async () => {
+    const harness = createHarness()
+    const unhandledRejections: unknown[] = []
+    const observeUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason)
+    }
+    harness.logout.mockRejectedValue(new Error('logout failed'))
+    process.on('unhandledRejection', observeUnhandledRejection)
+
+    try {
+      harness.router.handle('evenfire://logout')
+      await new Promise<void>(resolve => setImmediate(resolve))
+
+      expect(unhandledRejections).toEqual([])
+      expect(harness.sent).toEqual([])
+      expect(harness.focusWindow).not.toHaveBeenCalled()
+      expect(harness.reportLogoutFailure).toHaveBeenCalledOnce()
+    } finally {
+      process.off('unhandledRejection', observeUnhandledRejection)
+    }
+  })
+
+  it('reports external logout after a failure that already cleared authentication', async () => {
+    const harness = createHarness()
+    const error = new Error('credential deletion failed')
+    harness.setAuthenticated(false)
+    harness.logout.mockRejectedValue(error)
+
+    harness.router.handle('evenfire://logout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(harness.reportLogoutFailure).toHaveBeenCalledWith(error)
+    expect(harness.getSessionState).toHaveBeenCalledOnce()
+    expect(harness.sent).toEqual([
+      { channel: 'auth:externalLogout', payload: undefined, window: 'initial' },
+    ])
+    expect(harness.focusWindow).toHaveBeenCalledOnce()
   })
 })

@@ -49,8 +49,12 @@ describe('AppService.invokeHostMessage', () => {
     await fs.rm(chatStoreBaseDir, { recursive: true, force: true })
   })
 
+  function createService(): AppService {
+    return new AppService({ getUserDataDirectory: () => chatStoreBaseDir })
+  }
+
   it('forces desktop host messages onto the authenticated rpc envelope', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'session-token'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
@@ -110,7 +114,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('forwards a 5 MiB JPEG without letting the payload choose identity, host, or scopes', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'session-token'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
@@ -167,7 +171,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('forwards a 10 MiB PNG + 5 MiB JPEG on the same authenticated envelope', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'session-token'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
@@ -218,7 +222,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('rejects malformed attachments before issuing an RPC token', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'test-token-session'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
@@ -277,7 +281,7 @@ describe('AppService.invokeHostMessage', () => {
     }
 
     function serviceWithRpc() {
-      const service = new AppService() as any
+      const service = createService() as any
       service.sessionToken = 'session-token'
       service.me = {
         id: '00000000-0000-4000-8000-000000000001',
@@ -342,7 +346,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('switches to a matching directory team before issuing RPC tokens for teamless sessions', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.desktopGfsUploadStatePath = vi
       .fn()
       .mockResolvedValue(path.join(chatStoreBaseDir, 'gfs-upload-state.json'))
@@ -415,7 +419,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('does not fence GFS uploads during a transient cross-team operation hop', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.desktopGfsUploadStatePath = vi
       .fn()
       .mockResolvedValue(path.join(chatStoreBaseDir, 'gfs-upload-state.json'))
@@ -473,7 +477,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('blocks new GFS dispatches while a transient team token is installed', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -518,7 +522,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('keeps existing GFS controls usable through the real team-hop lifecycle', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     const statePath = path.join(chatStoreBaseDir, 'gfs-upload-state.json')
     const uploadId = '92929292-9292-4292-8292-929292929292'
     const session = {
@@ -622,7 +626,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('fences the old GFS scope if a replacement team token cannot be refreshed', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -665,7 +669,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('clears and revokes a replacement token even when GFS fence persistence fails', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -710,7 +714,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('fences GFS uploads only after an explicit switchTeam succeeds', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -763,7 +767,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('clears the replacement team session when explicit GFS fence persistence fails', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -818,7 +822,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('does not fence GFS uploads when an explicit switchTeam is rejected', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -845,7 +849,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('uses the teamless session when a directly granted agent needs an RPC token', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'teamless-token'
     service.me = {
       id: 'user-1',
@@ -895,7 +899,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('uses the access catalog response without probing host status', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'session-token'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',

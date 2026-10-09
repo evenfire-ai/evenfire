@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { tmpdir } from 'node:os'
 // ── import after mocks are set up ─────────────────────────────────────────────
 
 import { AppService } from '../appService.js'
@@ -7,7 +8,7 @@ import { ApiError } from '../httpClient.js'
 // ── mock dependencies before AppService is imported ──────────────────────────
 
 vi.mock('../config.js', () => ({
-  getActiveEnvKey: () => 'test-env',
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
@@ -60,7 +61,7 @@ vi.mock('../tokenStore.js', () => ({
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function makeService(): AppService {
-  const svc = new AppService()
+  const svc = new AppService({ getUserDataDirectory: () => tmpdir() })
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
   ;(svc as unknown as { me: unknown }).me = { id: 1, teamId: 'team-1' }
   return svc

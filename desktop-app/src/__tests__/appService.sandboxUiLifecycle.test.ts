@@ -119,7 +119,7 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../config.js', () => ({
-  getActiveEnvKey: () => 'test-env',
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'https://rpc.example',
@@ -155,10 +155,25 @@ vi.mock('../authClient.js', () => ({
 }))
 
 vi.mock('../tokenStore.js', () => ({
+  SessionTokenStorageClearError: class extends Error {
+    canBeReplacedByFreshLoginCredential(): boolean {
+      return false
+    }
+  },
   TokenStore: class {
+    private safeStorageToken: string | null = null
+
     getSessionToken = vi.fn().mockResolvedValue(null)
     setSessionToken = vi.fn()
+    setSafeStorageSessionToken = vi.fn(async (token: string) => {
+      this.safeStorageToken = token
+    })
+    getSafeStorageSessionToken = vi.fn(async () => this.safeStorageToken)
     clearSessionToken = vi.fn()
+    clearSessionTokenStrictly = vi.fn().mockResolvedValue({
+      keytarAvailable: false,
+      keytarDisabled: false,
+    })
   },
 }))
 

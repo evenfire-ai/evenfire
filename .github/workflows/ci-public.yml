@@ -231,7 +231,7 @@ jobs:
         timeout-minutes: 10
         run: |
           node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 300 --heartbeat-seconds 20 --kill-grace-seconds 5 --label web-search-ci-image-build -- \
-            docker build -t issue198-ci-image:test .
+            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24-alpine -t issue198-ci-image:test .
           web_search_image_id="$(node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 10 --heartbeat-seconds 5 --kill-grace-seconds 5 --label web-search-ci-image-inspect -- \
             docker image inspect issue198-ci-image:test --format '{{.Id}}')"
           node test/run-network.mjs --image "$web_search_image_id"
@@ -296,6 +296,31 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
+  desktop-app-native-quit-drain:
+    name: Desktop native quit-drain (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - name: Install Desktop dependencies
+        working-directory: desktop-app
+        run: npm ci
+
+      - name: Verify Electron runtime
+        working-directory: desktop-app
+        run: npm run verify:electron
+
+      - name: Run native quit-drain fixture
+        working-directory: desktop-app
+        run: npm run test:native:quit-drain
+
   # ─── real-Postgres integration suites ─────────────────────────────────────
   # Runs EVERY *.realPostgres.integration suite against a real Postgres 16: the
   # DB migration plus the GFS reader-role / blob-migration / blob-reconciler /
@@ -312,7 +337,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_DB: postgres
@@ -503,7 +528,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

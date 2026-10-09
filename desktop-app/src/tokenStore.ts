@@ -65,6 +65,43 @@ export type TokenStoreOptions = {
   isolatedUserDataPath?: string
 }
 
+export class SessionTokenStorageClearError extends AggregateError {
+  constructor(
+    errors: readonly unknown[],
+    private readonly failedKeytarAccounts: readonly string[],
+    private readonly failedFileCount: number
+  ) {
+    super(errors, 'Failed to clear session token storage')
+    this.name = 'SessionTokenStorageClearError'
+  }
+
+  canBeReplacedByFreshLoginCredential(envKey: string): boolean {
+    return (
+      this.failedKeytarAccounts.length === 1 &&
+      this.failedKeytarAccounts[0] === accountFor(envKey) &&
+      this.failedFileCount === 0
+    )
+  }
+
+  canUseSecureFileFallbackWhileMarkerRemains(): boolean {
+    return this.failedKeytarAccounts.length > 0 && this.failedFileCount === 0
+  }
+
+  canUseFreshActiveKeytarCredential(envKey: string): boolean {
+    return (
+      this.failedKeytarAccounts.length > 0 &&
+      !this.failedKeytarAccounts.includes(accountFor(envKey)) &&
+      this.failedFileCount === 0
+    )
+  }
+}
+
+export type StrictSessionTokenClearResult = {
+  keytarAvailable: boolean
+  /** True when this isolated store is guaranteed never to use a Keytar account. */
+  keytarDisabled: boolean
+}
+
 async function loadKeytar(): Promise<KeytarModule | null> {
   try {
     const mod = await import('keytar')
@@ -156,6 +193,41 @@ async function removeTokenFileDurably(filePath: string): Promise<void> {
 }
 
 export class TokenStore {
+  private readonly pendingOperations = new Set<Promise<unknown>>()
+  private admissionClosed = false
+
+  private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.admissionClosed) {
+      return Promise.reject(new Error('Application is shutting down'))
+    }
+
+    const pending = Promise.resolve().then(operation)
+    this.pendingOperations.add(pending)
+    void pending.then(
+      () => this.pendingOperations.delete(pending),
+      () => this.pendingOperations.delete(pending)
+    )
+    return pending
+  }
+
+  /** Stop accepting new credential operations for the current quit attempt. */
+  private closeAdmission(): void {
+    this.admissionClosed = true
+  }
+
+  /** Reopen credential operations when Electron cancels the current quit attempt. */
+  reopenAdmission(): void {
+    this.admissionClosed = false
+  }
+
+  /** Wait for active Keytar work and any storage fallback it triggers. */
+  async prepareForQuit(): Promise<void> {
+    this.closeAdmission()
+    while (this.pendingOperations.size > 0) {
+      await Promise.allSettled([...this.pendingOperations])
+    }
+  }
+
   private readonly isolatedUserDataPath: string | undefined
 
   constructor(options: TokenStoreOptions = {}) {
@@ -204,6 +276,52 @@ export class TokenStore {
   async getSessionToken(
     envKey: string,
     options: { legacyEnvKeys?: readonly string[] } = {}
+  ): Promise<string | null> {
+    return this.trackOperation(() => this.getSessionTokenOnce(envKey, options))
+  }
+
+  /** Read only the current encrypted safeStorage file, bypassing Keytar and all plaintext files. */
+  async getSafeStorageSessionToken(envKey: string): Promise<string | null> {
+    return this.trackOperation(async () => {
+      assertEnvKey(envKey)
+      if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
+      const file = await this.encryptedFilePath(envKey)
+      let encrypted: Buffer
+      try {
+        encrypted = await fs.readFile(file)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return null
+        throw error
+      }
+      if (!app?.isReady() || !safeStorage.isEncryptionAvailable()) {
+        throw new Error('Electron safeStorage is unavailable for session-token recovery')
+      }
+      const token = safeStorage.decryptString(encrypted)
+      return token || null
+    })
+  }
+
+  /** Read only the active Keytar account, without legacy migration or file fallback. */
+  async getKeytarSessionToken(envKey: string): Promise<string | null> {
+    return this.trackOperation(async () => {
+      assertEnvKey(envKey)
+      if (this.isolatedUserDataPath !== undefined) {
+        await this.verifiedStorageBase()
+        return null
+      }
+      const keytar = await loadKeytar()
+      if (!keytar) return null
+      try {
+        return await keytar.getPassword(SERVICE, accountFor(envKey))
+      } catch {
+        return null
+      }
+    })
+  }
+
+  private async getSessionTokenOnce(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] }
   ): Promise<string | null> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
@@ -276,7 +394,7 @@ export class TokenStore {
         try {
           const token = await keytar.getPassword(SERVICE, legacyAccount)
           if (token) {
-            await this.setSessionToken(token, envKey)
+            await this.setSessionTokenOnce(token, envKey)
             await keytar.deletePassword(SERVICE, legacyAccount).catch(() => {})
             return token
           }
@@ -291,7 +409,7 @@ export class TokenStore {
           const encrypted = await fs.readFile(file)
           const token = safeStorage.decryptString(encrypted)
           if (token) {
-            await this.setSessionToken(token, envKey)
+            await this.setSessionTokenOnce(token, envKey)
             await removeTokenFileDurably(file).catch(() => {})
             return token
           }
@@ -306,7 +424,7 @@ export class TokenStore {
         const data = JSON.parse(raw) as { token?: unknown }
         const token = typeof data.token === 'string' && data.token ? data.token : null
         if (token) {
-          await this.setSessionToken(token, envKey)
+          await this.setSessionTokenOnce(token, envKey)
           await removeTokenFileDurably(file).catch(() => {})
           return token
         }
@@ -332,7 +450,7 @@ export class TokenStore {
       try {
         const legacy = await keytar.getPassword(SERVICE, LEGACY_ACCOUNT)
         if (legacy) {
-          await this.setSessionToken(legacy, envKey)
+          await this.setSessionTokenOnce(legacy, envKey)
           await keytar.deletePassword(SERVICE, LEGACY_ACCOUNT).catch(() => {})
           return legacy
         }
@@ -348,7 +466,7 @@ export class TokenStore {
         const encrypted = await fs.readFile(file)
         const token = safeStorage.decryptString(encrypted)
         if (token) {
-          await this.setSessionToken(token, envKey)
+          await this.setSessionTokenOnce(token, envKey)
           await removeTokenFileDurably(file).catch(() => {})
           return token
         }
@@ -364,7 +482,7 @@ export class TokenStore {
       const data = JSON.parse(raw) as { token?: unknown }
       const token = typeof data.token === 'string' && data.token ? data.token : null
       if (token) {
-        await this.setSessionToken(token, envKey)
+        await this.setSessionTokenOnce(token, envKey)
         await removeTokenFileDurably(file).catch(() => {})
       }
       return token
@@ -373,16 +491,49 @@ export class TokenStore {
     }
   }
 
-  async setSessionToken(token: string, envKey: string): Promise<void> {
+  async setSessionToken(
+    token: string,
+    envKey: string,
+    options: { requireKeytar?: boolean } = {}
+  ): Promise<void> {
+    return this.trackOperation(() => this.setSessionTokenOnce(token, envKey, options))
+  }
+
+  /** Persist only through safeStorage, bypassing Keytar and the plaintext fallback. */
+  async setSafeStorageSessionToken(token: string, envKey: string): Promise<void> {
+    return this.trackOperation(async () => {
+      assertEnvKey(envKey)
+      if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
+      if (!app?.isReady() || !safeStorage.isEncryptionAvailable()) {
+        throw new Error('Electron safeStorage is unavailable for session-token fallback')
+      }
+      await writeTokenFileAtomic(
+        await this.encryptedFilePath(envKey),
+        safeStorage.encryptString(token)
+      )
+    })
+  }
+
+  private async setSessionTokenOnce(
+    token: string,
+    envKey: string,
+    options: { requireKeytar?: boolean } = {}
+  ): Promise<void> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
     const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
+    if (options.requireKeytar && !keytar) {
+      throw new Error('Keytar is unavailable during session-token replacement')
+    }
     if (keytar) {
       try {
         await keytar.setPassword(SERVICE, account, token)
         return
-      } catch {
+      } catch (error) {
+        if (options.requireKeytar) {
+          throw new AggregateError([error], 'Failed to replace session token in Keytar')
+        }
         // Fall through to file storage when keychain writes fail.
       }
     }
@@ -401,6 +552,66 @@ export class TokenStore {
     envKey: string,
     options: { legacyEnvKeys?: readonly string[] } = {}
   ): Promise<void> {
+    return this.trackOperation(async () => {
+      await this.clearSessionTokenOnce(envKey, options)
+    })
+  }
+
+  async clearSessionTokenStrictly(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] } = {}
+  ): Promise<StrictSessionTokenClearResult> {
+    return this.trackOperation(() =>
+      this.clearSessionTokenOnce(envKey, { ...options, throwOnStorageError: true })
+    )
+  }
+
+  /** Delete only Keytar accounts, leaving encrypted and plaintext files untouched. */
+  async clearKeytarSessionTokensStrictly(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[]; preserveActiveEnvKey?: boolean } = {}
+  ): Promise<StrictSessionTokenClearResult> {
+    return this.trackOperation(async () => {
+      assertEnvKey(envKey)
+      if (this.isolatedUserDataPath !== undefined) {
+        await this.verifiedStorageBase()
+        return { keytarAvailable: false, keytarDisabled: true }
+      }
+      const legacyEnvKeys = Array.from(
+        new Set(
+          (options.legacyEnvKeys ?? [])
+            .map(key => String(key || '').trim())
+            .filter(key => key && key !== envKey)
+        )
+      )
+      for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
+      const keytar = await loadKeytar()
+      if (!keytar) return { keytarAvailable: false, keytarDisabled: false }
+
+      const failedKeytarAccounts: string[] = []
+      const errors: unknown[] = []
+      const scopedEnvKeys = options.preserveActiveEnvKey
+        ? legacyEnvKeys
+        : [envKey, ...legacyEnvKeys]
+      for (const account of [...scopedEnvKeys.map(accountFor), LEGACY_ACCOUNT]) {
+        try {
+          await keytar.deletePassword(SERVICE, account)
+        } catch (error) {
+          failedKeytarAccounts.push(account)
+          errors.push(error)
+        }
+      }
+      if (errors.length > 0) {
+        throw new SessionTokenStorageClearError(errors, failedKeytarAccounts, 0)
+      }
+      return { keytarAvailable: true, keytarDisabled: false }
+    })
+  }
+
+  private async clearSessionTokenOnce(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[]; throwOnStorageError?: boolean }
+  ): Promise<StrictSessionTokenClearResult> {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const legacyEnvKeys = Array.from(
@@ -413,12 +624,19 @@ export class TokenStore {
     for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
     const scopedEnvKeys = [envKey, ...legacyEnvKeys]
     const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
+    const storageErrors: unknown[] = []
+    const failedKeytarAccounts: string[] = []
+    let failedFileCount = 0
     if (keytar) {
       const deleteKeychainPassword = async (account: string) => {
         try {
           await keytar.deletePassword(SERVICE, account)
-        } catch {
+        } catch (error) {
           // Keychain cleanup is best-effort; continue through the scoped files.
+          if (options.throwOnStorageError) {
+            storageErrors.push(error)
+            failedKeytarAccounts.push(account)
+          }
         }
       }
       for (const scopedEnvKey of scopedEnvKeys) {
@@ -430,28 +648,32 @@ export class TokenStore {
     }
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.
-    const scopedFileRemovals = [
-      ...scopedEnvKeys.flatMap(scopedEnvKey => [
-        this.encryptedFilePath(scopedEnvKey)
-          .then(file => fs.unlink(file))
-          .catch(() => {}),
-        this.plainFilePath(scopedEnvKey)
-          .then(file => fs.unlink(file))
-          .catch(() => {}),
-      ]),
-    ]
-    if (this.isolatedUserDataPath !== undefined) {
-      await Promise.all(scopedFileRemovals)
-      return
-    }
-    await Promise.all([
-      ...scopedFileRemovals,
-      legacyEncryptedFilePath()
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
-      legacyFilePath()
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
+    const filePaths = scopedEnvKeys.flatMap(scopedEnvKey => [
+      this.encryptedFilePath(scopedEnvKey),
+      this.plainFilePath(scopedEnvKey),
     ])
+    if (this.isolatedUserDataPath === undefined) {
+      filePaths.push(legacyEncryptedFilePath(), legacyFilePath())
+    }
+    await Promise.all(
+      filePaths.map(async filePath => {
+        try {
+          await fs.unlink(await filePath)
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code
+          if (options.throwOnStorageError && code !== 'ENOENT') {
+            storageErrors.push(error)
+            failedFileCount += 1
+          }
+        }
+      })
+    )
+    if (options.throwOnStorageError && storageErrors.length > 0) {
+      throw new SessionTokenStorageClearError(storageErrors, failedKeytarAccounts, failedFileCount)
+    }
+    return {
+      keytarAvailable: keytar !== null,
+      keytarDisabled: this.isolatedUserDataPath !== undefined,
+    }
   }
 }
