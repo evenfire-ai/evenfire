@@ -1340,6 +1340,22 @@ export class AppService {
    */
   private sandboxUiGeneration = 0
 
+  /**
+   * Advanced only when the signed-in user goes away: the session is cleared, or
+   * a login replaces it without a logout. Sandbox-ui work
+   * that awaits the network (open mint, OAuth authorize-url fetch) captures it
+   * first and drops its effects if it moved. `sessionGeneration` cannot serve:
+   * every token commit bumps it, including the two of each transient team hop
+   * that unrelated concurrent work performs while a mint is in flight.
+   */
+  private sandboxUiSessionEpoch = 0
+
+  private assertSandboxUiSessionEpoch(epoch: number): void {
+    if (this.sandboxUiSessionEpoch !== epoch) {
+      throw new Error('The session changed while this app request was in flight')
+    }
+  }
+
   private enqueueSandboxUiLifecycle<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.sandboxUiLifecycleQueue.then(operation)
     this.sandboxUiLifecycleQueue = result.then(
@@ -1378,6 +1394,18 @@ export class AppService {
     this.workflowTeamByKey.clear()
     this.rpcTokenManager.clear()
     unbindChatStore()
+    this.invalidateSandboxUiSession()
+  }
+
+  /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
+  private invalidateSandboxUiSession(): void {
+    this.sandboxUiSessionEpoch += 1
+    // The embed and its refresh loop run on the outgoing session. Queued rather
+    // than awaited: callers must not wait on a pending open's mint; the serial
+    // queue still tears down whatever that open mounts.
+    void this.closeSandboxUi().catch(error => {
+      console.error('[SandboxUI] Could not close the embed on session change:', error)
+    })
   }
 
   private activateGfsAuthScope(identityOverride?: DesktopGfsUploadIdentity): void {
@@ -1636,6 +1664,9 @@ export class AppService {
       }
       this.logoutInProgress = false
       this.sessionGeneration += 1
+      // A login over a live session replaces it without a logout, so nothing
+      // else retires the outgoing user's embed, refresh loop or in-flight open.
+      if (hadAuthenticatedScope) this.invalidateSandboxUiSession()
       this.sessionToken = result.token
       this.me = result.me
       this.updateEntityChangeSessionToken(result.token)
@@ -5013,6 +5044,7 @@ export class AppService {
     const clientId = String(oauthClientId || '').trim()
     if (!ns || !name) throw new Error('recipeNs and recipeName are required')
     if (!clientId) throw new Error('oauthClientId is required')
+    const sessionEpoch = this.sandboxUiSessionEpoch
     const token = this.requireSessionToken()
     const issueRpc = () =>
       this.rpcTokenManager.getOrIssue(token, SANDBOX_UI_VIEW_SCOPES, [SANDBOX_UI_HOST_REF_SENTINEL])
@@ -5041,6 +5073,9 @@ export class AppService {
         throw error
       }
     }
+    // The authorize URL binds the grant to the session that fetched it; never
+    // hand it to the browser once that session is gone.
+    this.assertSandboxUiSessionEpoch(sessionEpoch)
     if (background) {
       const { dialog, BrowserWindow } = await import('electron')
       const win = BrowserWindow.getFocusedWindow() ?? undefined
@@ -5057,6 +5092,7 @@ export class AppService {
         ? await dialog.showMessageBox(win, opts)
         : await dialog.showMessageBox(opts)
       if (result.response !== 1) return
+      this.assertSandboxUiSessionEpoch(sessionEpoch)
     }
     await openExternalDataUrl(result.authorizeUrl, { requireHttps: true })
   }
@@ -5241,9 +5277,10 @@ export class AppService {
    * view at the bounds the renderer reserved.
    *
    * Only one sandbox-ui view exists at a time across the desktop app —
-   * re-opening recipe B while A is up tears down A first (the driver enforces
-   * this). This keeps memory + GPU usage bounded and avoids accidental
-   * cross-recipe focus / cookie-jar mixups.
+   * re-opening recipe B while A is up tears down A first, before B's session
+   * is minted, so a failed open leaves no view at all. This keeps memory + GPU
+   * usage bounded and avoids accidental cross-recipe focus / cookie-jar
+   * mixups.
    */
   openSandboxUi(args: {
     recipeNs: string
@@ -5258,29 +5295,51 @@ export class AppService {
     onOauthError?: (message: string) => void
     onTitleChanged?: (title: string) => void
   }): Promise<void> {
-    return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args))
+    // Captured at request time, not when the queue reaches it: an open asked for
+    // under one session must not run under the next one.
+    const sessionEpoch = this.sandboxUiSessionEpoch
+    return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args, sessionEpoch))
   }
 
-  private async openSandboxUiNow(args: {
-    recipeNs: string
-    recipeName: string
-    title?: string
-    defaultPath?: string
-    routePath?: string
-    bounds: import('./sandboxUiDriver.js').SandboxUiBounds
-    parentWindow: import('electron').BrowserWindow
-    onClosed?: () => void
-    onRefreshError?: (message: string) => void
-    onOauthError?: (message: string) => void
-    onTitleChanged?: (title: string) => void
-  }): Promise<void> {
+  private async openSandboxUiNow(
+    args: Parameters<AppService['openSandboxUi']>[0],
+    sessionEpoch: number
+  ): Promise<void> {
     const recipeNs = String(args.recipeNs || '').trim()
     const recipeName = String(args.recipeName || '').trim()
     if (!recipeNs || !recipeName) throw new Error('recipeNs and recipeName are required')
     this.sandboxUiGeneration += 1
+    // An open replaces the current view whatever its outcome, so the outgoing
+    // view goes BEFORE the network mint: a failed mint must not leave it
+    // painted (with its refresh loop still minting) after the renderer has been
+    // told the open failed. Deliberately silent — no `onClosed`: the renderer
+    // drops its owner of the embed on `sandboxUi:closed`, which here would
+    // orphan the view this open is about to mount. Failure is reported only by
+    // the rejection.
+    await this.teardownSandboxUiView()
+    try {
+      await this.mintAndMountSandboxUiView(args, recipeNs, recipeName, sessionEpoch)
+    } catch (error) {
+      await this.teardownSandboxUiView()
+      throw error
+    }
+  }
+
+  private async mintAndMountSandboxUiView(
+    args: Parameters<AppService['openSandboxUi']>[0],
+    recipeNs: string,
+    recipeName: string,
+    sessionEpoch: number
+  ): Promise<void> {
+    // The close queued by a session clear only runs after this open settles, so
+    // the open itself must refuse to install the cleared session's cookie or
+    // attach a view for it.
+    this.assertSandboxUiSessionEpoch(sessionEpoch)
     const { setCookie } = await this.mintSandboxUiSession(recipeNs, recipeName)
+    this.assertSandboxUiSessionEpoch(sessionEpoch)
     const driver = await import('./sandboxUiDriver.js')
     const refreshModule = await import('./sandboxUiSessionRefresh.js')
+    this.assertSandboxUiSessionEpoch(sessionEpoch)
     await driver.mountSandboxUiView({
       recipeNs,
       recipeName,
@@ -5319,7 +5378,9 @@ export class AppService {
           args.onOauthError?.(message)
         })
       },
+      isCurrent: () => this.sandboxUiSessionEpoch === sessionEpoch,
     })
+    this.assertSandboxUiSessionEpoch(sessionEpoch)
     const activeView = driver.getActiveSandboxUi()
     if (!activeView || activeView.appRef !== `${recipeNs}/${recipeName}`) {
       // A queued close or newer mount can invalidate this operation while an
@@ -5341,21 +5402,31 @@ export class AppService {
       webContentsId: activeView.webContentsId,
       parentWindow: args.parentWindow,
       refresh: (ns, name) => this.mintSandboxUiSession(ns, name),
-      installCookie: setCookieValue => driver.installSandboxUiCookie(setCookieValue),
+      // A refresh minted before a session clear can land before the queued
+      // close cancels this loop. Rejecting stops the loop without writing the
+      // cleared session's cookie; the user has nothing to act on, so it is not
+      // reported.
+      installCookie: async setCookieValue => {
+        this.assertSandboxUiSessionEpoch(sessionEpoch)
+        await driver.installSandboxUiCookie(setCookieValue)
+      },
       onError: err => {
+        if (this.sandboxUiSessionEpoch !== sessionEpoch) return
         args.onRefreshError?.(err instanceof Error ? err.message : String(err))
       },
     })
   }
 
   closeSandboxUi(): Promise<void> {
-    return this.enqueueSandboxUiLifecycle(async () => {
-      const driver = await import('./sandboxUiDriver.js')
-      const refreshModule = await import('./sandboxUiSessionRefresh.js')
-      refreshModule.cancelSandboxUiRefresh()
-      tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
-      await driver.unmountSandboxUiView()
-    })
+    return this.enqueueSandboxUiLifecycle(() => this.teardownSandboxUiView())
+  }
+
+  private async teardownSandboxUiView(): Promise<void> {
+    const driver = await import('./sandboxUiDriver.js')
+    const refreshModule = await import('./sandboxUiSessionRefresh.js')
+    refreshModule.cancelSandboxUiRefresh()
+    tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
+    await driver.unmountSandboxUiView()
   }
 
   // Read the active embed's current in-app route for the renderer's tab store

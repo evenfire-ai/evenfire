@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { ConversationState, type PendingApproval } from '../../types'
 import { ConversationManager } from '../conversation'
 
-function approval(scope?: PendingApproval['authorization_scope']): PendingApproval {
+function approval(
+  scope?: PendingApproval['authorization_scope'],
+  toolName = 'shell_exec'
+): PendingApproval {
   return {
     request_id: 'approval-scope-test',
     authorization_scope: scope,
-    tool_name: 'shell_exec',
+    tool_name: toolName,
     parameters: { command: 'printf exact-call' },
     description: 'Unit approval scope',
     tool_call_id: 'tool-scope-test',
@@ -14,11 +17,15 @@ function approval(scope?: PendingApproval['authorization_scope']): PendingApprov
   }
 }
 
-async function approvedScope(scope?: PendingApproval['authorization_scope'], always = false) {
+async function approvedScope(
+  scope?: PendingApproval['authorization_scope'],
+  always = false,
+  toolName = 'shell_exec'
+) {
   const manager = new ConversationManager()
   const conversation = await manager.getOrCreate('scope-user:rpc:scope-agent:chat')
   conversation.state = ConversationState.Processing
-  await manager.suspendForApproval(conversation, approval(scope))
+  await manager.suspendForApproval(conversation, approval(scope, toolName))
   await manager.approve(conversation, always)
   return conversation.auto_approved_tools
 }
@@ -29,7 +36,13 @@ describe('approval authorization scope', () => {
   })
 
   it('preserves explicitly consented turn-wide behavior for ordinary new approvals', async () => {
-    await expect(approvedScope('turn_tools', true)).resolves.toEqual(new Set(['*', 'shell_exec']))
+    await expect(approvedScope('turn_tools', true, 'workflow_trigger')).resolves.toEqual(
+      new Set(['*', 'workflow_trigger'])
+    )
+  })
+
+  it('scopes turn-wide consent for shell_exec to the tool itself, without a wildcard', async () => {
+    await expect(approvedScope('turn_tools', true)).resolves.toEqual(new Set(['shell_exec']))
   })
 
   it('treats a legacy unknown scope as exact rather than granting a wildcard', async () => {
