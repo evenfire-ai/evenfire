@@ -269,7 +269,7 @@ function mintCallsFor(recipeName: string): number {
 
 function makeService(): AppService {
   const svc = new AppService()
-  ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
+  ;(svc as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
   return svc
 }
 
@@ -657,7 +657,7 @@ describe('AppService sandbox-ui embed across a session clear', () => {
     __setChatStoreBaseDirForTests(userDataDir)
     const authClient = (service as unknown as { authClient: Record<string, unknown> }).authClient
     authClient.googleLogin = vi.fn().mockResolvedValue({
-      token: 'session-token-b',
+      token: 'fake-session-token-b',
       me: { id: 'user-b', teamId: 'team-b' },
     })
     await service.googleLogin('id-token-b')
@@ -828,7 +828,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
   async function serviceLoggedInAsA(): Promise<AppService> {
     const service = new AppService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
-    await loginAs(service, 'session-token-a', 'user-a')
+    await loginAs(service, 'fake-session-token-a', 'user-a')
     return service
   }
 
@@ -843,7 +843,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
       (error: unknown) => error
     )
     await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(1), { timeout: 1_000 })
-    await loginAs(service, 'session-token-b', 'user-b')
+    await loginAs(service, 'fake-session-token-b', 'user-b')
     answerMint(mintOk('first-app'))
 
     const settled = await outcome
@@ -866,7 +866,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
     expect(first?.appRef).toBe('sandbox-recipes/first-app')
     const firstView = electronMocks.views[0]
 
-    await loginAs(service, 'session-token-b', 'user-b')
+    await loginAs(service, 'fake-session-token-b', 'user-b')
 
     await expectEmbedGoneWithoutRefresh(parentWindow, firstView, first!.webContentsId)
   })
@@ -881,7 +881,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
 
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1)
     await vi.waitFor(() => expect(mintCallsFor('first-app')).toBe(2), { timeout: 1_000 })
-    await loginAs(service, 'session-token-b', 'user-b')
+    await loginAs(service, 'fake-session-token-b', 'user-b')
     answerMint(mintOk('first-app'))
     await vi.waitFor(() => expect(getActiveSandboxUi()).toBeNull(), { timeout: 1_000 })
     await drainSandboxUiQueue(service)
@@ -898,7 +898,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
     await service.openSandboxUi(openArgs('first-app', parentWindow))
     const firstView = electronMocks.views[0]
 
-    await loginAs(service, 'session-token-b', 'user-b')
+    await loginAs(service, 'fake-session-token-b', 'user-b')
     await service.openSandboxUi(openArgs('second-app', parentWindow))
 
     expect(getActiveSandboxUi()?.appRef).toBe('sandbox-recipes/second-app')
