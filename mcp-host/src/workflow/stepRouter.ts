@@ -81,6 +81,15 @@ export interface McpClientConnection {
 
 export type McpClientFactory = (server: StepMcpServerRef) => McpClientConnection
 
+/**
+ * Error text the model receives when it calls a tool outside the step's
+ * allowedTools. Recoverable: the step continues and the model may retry with
+ * an offered tool (spec §3.1.2).
+ */
+function toolNotAllowedError(toolName: string): string {
+  return `Tool '${toolName}' is not allowed in this step and was not run. Use only the tools provided for this step.`
+}
+
 // ─── StepMcpRouter ──────────────────────────────────────────────────────
 
 export class StepMcpRouter {
@@ -93,6 +102,12 @@ export class StepMcpRouter {
   private readonly clientFactory: McpClientFactory
   private readonly ajv = new Ajv({ allErrors: true, strict: false, useDefaults: true })
   private outputDir = '/output'
+  // Names callTool() may dispatch when the step declares a non-empty
+  // allowedTools.include. null = no allowlist in effect (every registered tool
+  // is callable — the pre-§3.1.2 behaviour, kept for absent/empty include).
+  // Deliberately NOT cleared by disconnect(): a restriction must never lapse
+  // into "everything callable" on reuse; the caller re-applies it per step.
+  private callableToolNames: Set<string> | null = null
 
   constructor(clientFactory: McpClientFactory) {
     this.clientFactory = clientFactory
@@ -205,8 +220,50 @@ export class StepMcpRouter {
   }
 
   /**
+   * Enforce the step's allowlist at dispatch time (spec §3.1.2).
+   *
+   * - include absent or empty: no restriction. Every registered tool stays
+   *   callable, matching getFilteredTools(), which offers every tool then.
+   * - include non-empty: callTool() dispatches only names that are both listed
+   *   and registered, i.e. exactly what getFilteredTools() offers the model.
+   *   Any other name gets a recoverable tool-error result and never runs.
+   *
+   * Membership is checked against the live registry on each call, so this may
+   * be applied before or after connect().
+   */
+  setAllowedTools(allowedTools?: AllowedToolsConfig): void {
+    const include = allowedTools?.include
+    this.callableToolNames = include && include.length > 0 ? new Set(include) : null
+  }
+
+  private rejectNotAllowed(
+    toolName: string,
+    args: Record<string, unknown>
+  ): { result: ToolResult; record: ToolCallRecord } {
+    const separator = toolName.indexOf('__')
+    const errorResult = { success: false, error: toolNotAllowedError(toolName) }
+    // Arguments are model output (and so attacker-shapeable); log the name only.
+    logger.warn(
+      { toolName: toolName.slice(0, 200) },
+      'Workflow step tool call rejected: tool is not in allowedTools'
+    )
+    return {
+      result: { content: errorResult, isError: true },
+      record: {
+        serverName: separator > 0 ? toolName.slice(0, separator) : 'unknown',
+        toolName: separator > 0 ? toolName.slice(separator + 2) : toolName,
+        args,
+        result: errorResult,
+        durationMs: 0,
+      },
+    }
+  }
+
+  /**
    * Dispatch a tool call to the correct server by tool name prefix.
    * Internal tools (clerum__*) are dispatched locally without MCP connection.
+   * With a non-empty allowlist (setAllowedTools), names outside the offered set
+   * return a recoverable tool-error result instead of dispatching.
    */
   async callTool(
     toolName: string,
@@ -219,6 +276,16 @@ export class StepMcpRouter {
           ? options.signal.reason
           : 'step-timeout'
       throw new Error(reason)
+    }
+
+    // Spec §3.1.2: with an allowlist in effect, anything outside the offered set
+    // (unlisted, or listed but never registered) is answered with a recoverable
+    // tool error and is never dispatched.
+    if (
+      this.callableToolNames &&
+      !(this.callableToolNames.has(toolName) && this.toolMap.has(toolName))
+    ) {
+      return this.rejectNotAllowed(toolName, args)
     }
 
     // Check internal tools first
