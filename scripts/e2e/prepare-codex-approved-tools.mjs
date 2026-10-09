@@ -43,6 +43,7 @@ const proxyFlags = [
   'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE',
   'NODE_ENV',
 ]
+const hybridProxyFlags = [...proxyFlags, 'APPROVED_TOOLS_UPSTREAM_MODE', 'CODEX_REAL_UPSTREAM_CONFIRM']
 
 // Shared deadline budget: the outer prepare runner wraps Electron
 // verification, the static audit, and the inner Playwright run (including its
@@ -556,18 +557,24 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
     validateProxyImage(c.image, c.imagePullPolicy)
     if (
       !Array.isArray(c.env) ||
-      c.env.length !== 3 ||
-      new Set(c.env.map(e => e.name)).size !== 3 ||
+      ![3, 5].includes(c.env.length) ||
+      new Set(c.env.map(e => e.name)).size !== c.env.length ||
+      (c.env.length === 5 && hybridProxyFlags.some(name => !c.env.some(e => e.name === name))) ||
+      (c.env.length === 3 && proxyFlags.some(name => !c.env.some(e => e.name === name))) ||
       c.env.some(
         e =>
-          !proxyFlags.includes(e.name) ||
+          !hybridProxyFlags.includes(e.name) ||
           Object.keys(e).length !== 2 ||
           (e.$patch !== 'delete' &&
             !(e.name === 'NODE_ENV'
               ? ['production', 'development', 'test'].includes(e.value)
               : e.name === 'CODEX_APPROVED_TOOLS_TEST_ONLY'
                 ? e.value === '1'
-                : e.value === profile))
+                : e.name === 'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE'
+                  ? e.value === profile
+                  : e.name === 'APPROVED_TOOLS_UPSTREAM_MODE'
+                    ? e.value === 'real-hybrid'
+                    : e.value === '1'))
       )
     )
       throw new Error('Invalid proxy environment')
@@ -881,7 +888,8 @@ export async function restoreOwnedFixture({
     if (container.image === proxyImage) {
       if (!/^approved-tools-[a-f0-9]{12}$/.test(state.run ?? '') || runBinding !== state.run)
         throw new Error('Proxy fixture run binding is missing')
-      const env = proxyFlags.map(name => ({ name, $patch: 'delete' }))
+      const env = (state.mode === 'real-hybrid' ? hybridProxyFlags : proxyFlags)
+        .map(name => ({ name, $patch: 'delete' }))
       if (state.originalNodeEnv) env[2] = state.originalNodeEnv
       await patchProxy({
         metadata: {
@@ -1233,6 +1241,147 @@ async function main() {
     }
     return
   }
+  if (required('APPROVED_TOOLS_UPSTREAM_MODE') === 'real-hybrid') {
+    if (action !== 'run' || process.env.CODEX_REAL_UPSTREAM_CONFIRM !== '1')
+      throw new Error('Real hybrid requires run mode and explicit subscription confirmation')
+    for (const name of ['TEST_USER_EMAIL', 'TEST_USER_PASSWORD', 'APPROVED_TOOLS_SCENARIOS'])
+      required(name)
+    const scenarios = JSON.parse(required('APPROVED_TOOLS_SCENARIOS'))
+    if (!Array.isArray(scenarios) || scenarios.length !== 3 ||
+        [83, 150, 250].some(size => scenarios.filter(row => row?.catalogSize === size).length !== 1))
+      throw new Error('Real hybrid requires three prepared approved-tools scenarios')
+    for (const row of scenarios) {
+      for (const key of ['runId', 'agentName', 'agentDisplayName', 'modelName', 'fixtureUrl']) {
+        if (typeof row[key] !== 'string' || !row[key].trim())
+          throw new Error(`Real hybrid scenario missing ${key}`)
+      }
+      const fixture = new URL(row.fixtureUrl)
+      if (!['http:', 'https:'].includes(fixture.protocol) ||
+          !['localhost', '127.0.0.1', '[::1]'].includes(fixture.hostname) ||
+          !fixture.port || fixture.username || fixture.password || fixture.pathname !== '/' ||
+          fixture.search || fixture.hash)
+        throw new Error('Real hybrid fixture evidence must use an owned loopback origin')
+    }
+    const imageManifest = JSON.parse(
+      readOwnedFile(path.join(repo, 'deploy/minikube'), '.image-manifest.json', 4 * 1024 * 1024)
+    )
+    const inventory = JSON.parse(command('image-inventory', [], { timeout: 30_000 }))
+    if (!Array.isArray(inventory)) throw new Error('IMAGE_PROOF_MANIFEST_INVALID: invalid inventory')
+    const observedImages = inventory.flatMap(item => {
+      if (item.repoTags == null) return []
+      if (!Array.isArray(item.repoTags) || typeof item.id !== 'string')
+        throw new Error('IMAGE_PROOF_MANIFEST_INVALID: invalid inventory item')
+      const id = item.id.startsWith('sha256:') ? item.id : `sha256:${item.id}`
+      return item.repoTags.map(ref => ({ ref, id }))
+    })
+    const imageProof = buildApprovedToolsImageProof({
+      profile,
+      sourceHead: head,
+      manifest: imageManifest,
+      images: observedImages,
+    })
+    const deployment = JSON.parse(
+      kubectl(['-n', 'control-plane', 'get', 'deployment/codex-llm-proxy', '-o', 'json'])
+    )
+    const container = deployment.spec.template.spec.containers.find(c => c.name === 'codex-llm-proxy')
+    if (!container || container.image === proxyImage ||
+        deployment.spec.template.metadata?.annotations?.[proxyRunAnnotation] !== undefined ||
+        (container.env ?? []).some(e => hybridProxyFlags.filter(name => name !== 'NODE_ENV').includes(e.name)))
+      throw new Error('Proxy already has test ownership')
+    validateProxyImage(container.image, container.imagePullPolicy)
+    const originalNodeEnv = container.env?.find(e => e.name === 'NODE_ENV')
+    if (originalNodeEnv && !['production', 'development', 'test'].includes(originalNodeEnv.value))
+      throw new Error('Unsupported explicit NODE_ENV binding')
+    const run = 'approved-tools-' + randomBytes(6).toString('hex')
+    const port = await freePort()
+    const upstreamEvidenceUrl = `http://127.0.0.1:${port}`
+    const hybridScenarios = scenarios.map(row => ({ ...row, upstreamEvidenceUrl }))
+    state = {
+      mode: 'real-hybrid', profile, worktree: repo, head, run, imageProof,
+      forwards: [], resources: [], identitySeedStarted: false,
+      originalProxyImage: container.image,
+      originalImagePullPolicy: container.imagePullPolicy,
+      originalNodeEnv,
+      proxyUid: deployment.metadata.uid,
+      restored: false,
+    }
+    stateFile = openOwnedFile(evidence, 'fixture-state.json', { create: true })
+    save()
+    try {
+      kubectl([
+        '-n', 'control-plane', 'patch', 'deployment/codex-llm-proxy', '--type=strategic', '-p',
+        JSON.stringify({
+          metadata: { uid: deployment.metadata.uid, resourceVersion: deployment.metadata.resourceVersion },
+          spec: { template: {
+            metadata: { annotations: { [proxyRunAnnotation]: run } },
+            spec: { containers: [{
+              name: 'codex-llm-proxy', image: proxyImage, imagePullPolicy: 'Never',
+              env: [
+                { name: 'NODE_ENV', value: 'test' },
+                { name: 'CODEX_APPROVED_TOOLS_TEST_ONLY', value: '1' },
+                { name: 'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE', value: profile },
+                { name: 'APPROVED_TOOLS_UPSTREAM_MODE', value: 'real-hybrid' },
+                { name: 'CODEX_REAL_UPSTREAM_CONFIRM', value: '1' },
+              ],
+            }] },
+          } },
+        }),
+      ])
+      kubectl(
+        ['-n', 'control-plane', 'rollout', 'status', 'deployment/codex-llm-proxy', '--timeout=180s'],
+        { timeout: 190_000 }
+      )
+      const record = path.join(profilePidDirectory, `${run}-codex-llm-proxy.pid`)
+      validateOwnerArgs(
+        [record, profile, profile, repo, 'control-plane', 'codex-llm-proxy', String(port), '9090'],
+        false, profile, profilePidDirectory
+      )
+      const log = fs.openSync(path.join(evidence, 'pf-codex-llm-proxy.log'), 'wx', 0o600)
+      const child = spawn(
+        'kubectl',
+        [`--context=${profile}`, '-n', 'control-plane', 'port-forward', '--address=127.0.0.1',
+          'svc/codex-llm-proxy', `${port}:9090`],
+        { cwd: repo, detached: true, stdio: ['ignore', log, log] }
+      )
+      try {
+        await new Promise((resolve, reject) => {
+          child.once('spawn', resolve)
+          child.once('error', reject)
+        })
+      } finally {
+        fs.closeSync(log)
+      }
+      child.unref()
+      try {
+        owner('pf_owner_record_process', [record, String(child.pid), profile, profile, repo,
+          'control-plane', 'codex-llm-proxy', String(port), '9090'])
+      } catch (error) {
+        child.kill('SIGTERM')
+        throw error
+      }
+      state.forwards.push({ record, namespace: 'control-plane', service: 'codex-llm-proxy',
+        localPort: port, remotePort: 9090 })
+      save()
+      await waitHttp(`${upstreamEvidenceUrl}/approved-tools/evidence`, value =>
+        value.injected503 === 0 && Number.isSafeInteger(value.forwarded))
+      owner('pf_owner_record_process_matches', [record, profile, profile, repo,
+        'control-plane', 'codex-llm-proxy', String(port), '9090'])
+      process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(hybridScenarios)
+      command('runner', [], { timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS, inherit: true })
+      await restore()
+      process.stdout.write(`${JSON.stringify({ fixture: 'real-hybrid', restored: state.restored })}\n`)
+    } catch (error) {
+      try {
+        await restore()
+      } catch {
+        process.stderr.write('Hybrid proxy restore failed; use the explicit restore target before another gate\n')
+      }
+      throw error
+    } finally {
+      fs.closeSync(stateFile.fd)
+    }
+    return
+  }
   if (required('APPROVED_TOOLS_UPSTREAM_MODE') !== 'deterministic')
     throw new Error(
       'Synthetic preparation is deterministic-only; real accounts require separate authorized preconditions'
@@ -1351,7 +1500,7 @@ async function main() {
     !container ||
     container.image === proxyImage ||
     deployment.spec.template.metadata?.annotations?.[proxyRunAnnotation] !== undefined ||
-    (container.env ?? []).some(e => proxyFlags.slice(0, 2).includes(e.name))
+    (container.env ?? []).some(e => hybridProxyFlags.filter(name => name !== 'NODE_ENV').includes(e.name))
   )
     throw new Error('Proxy already has test ownership')
   const originalNodeEnv = container.env?.find(e => e.name === 'NODE_ENV')

@@ -7,12 +7,14 @@ import { fileURLToPath } from 'node:url'
 import { openOwnedFile, readOwnedDescriptor } from './prepare-codex-approved-tools.mjs'
 import {
   expectedTitles,
+  hybridRetryTitles,
   modelStepRetryExpectedDelta,
   modelStepRetryTitles,
   specFileFor,
   toolCallLimitBoundaryTitle,
   toolCallLimitTitle,
   validateModelStepEvidence,
+  validateHybridEvidence,
   validateReport,
 } from './run-codex-approved-tools.mjs'
 
@@ -41,7 +43,7 @@ function greenReport(mode = 'deterministic') {
     ],
   }
 }
-for (const mode of ['deterministic', 'real']) {
+for (const mode of ['deterministic', 'real', 'real-hybrid']) {
   test(`accepts exactly all mandatory green cases in ${mode} mode`, () => {
     assert.deepEqual(validateReport(greenReport(mode), mode), {
       tests: expectedTitles(mode).length,
@@ -53,6 +55,7 @@ for (const mode of ['deterministic', 'real']) {
 test('the tool-call limit and model-step retry cases are mandatory only in deterministic mode', () => {
   assert.equal(expectedTitles('deterministic').length, 18)
   assert.equal(expectedTitles('real').length, 6)
+  assert.deepEqual(expectedTitles('real-hybrid'), hybridRetryTitles)
   assert.equal(modelStepRetryTitles.length, 10)
   for (const title of [toolCallLimitTitle, toolCallLimitBoundaryTitle, ...modelStepRetryTitles]) {
     assert.ok(expectedTitles('deterministic').includes(title))
@@ -60,7 +63,24 @@ test('the tool-call limit and model-step retry cases are mandatory only in deter
   }
   assert.throws(
     () => expectedTitles('mock'),
-    /Select deterministic or real upstream mode explicitly/
+    /Select deterministic, real or real-hybrid upstream mode explicitly/
+  )
+})
+test('real-hybrid evidence requires exactly one R1 and R2 injection plus real forwarding', () => {
+  const before = {
+    forwarded: 10, injected503: 0, r1: 0, r2: 0, r1DistinctToolResults: 0,
+  }
+  const after = {
+    forwarded: 14, injected503: 2, r1: 1, r2: 1, r1DistinctToolResults: 1,
+  }
+  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 2 })
+  assert.throws(
+    () => validateHybridEvidence(before, { ...after, injected503: 0 }),
+    /injected503 did not move by 2/
+  )
+  assert.throws(
+    () => validateHybridEvidence(before, { ...after, forwarded: 10 }),
+    /did not forward real provider requests/
   )
 })
 test('rejects a deterministic report without the tool-call limit case', () => {

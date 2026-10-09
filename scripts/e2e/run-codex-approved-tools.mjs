@@ -17,6 +17,11 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const playwright = path.join(repo, 'tests/e2e/playwright')
 const specFile = 'codex-subscription-approved-tools.spec.ts'
 const modelStepSpecFile = 'model-step-retry-codex.spec.ts'
+const hybridSpecFile = 'model-step-retry-codex-hybrid.spec.ts'
+export const hybridRetryTitles = [
+  'real hybrid R1: a confirmed search survives one injected 503 and Retry completes',
+  'real hybrid R2: approval inside the continuation executes the receipt once',
+]
 export const toolCallLimitTitle =
   'tool call limit: Desktop shows Too Many Tool Calls without retry or connector call'
 export const toolCallLimitBoundaryTitle =
@@ -57,8 +62,9 @@ export const modelStepRetryExpectedDelta = Object.freeze({
 // by count as well as by title, so a case the spec declares and this list omits
 // fails the entire lane without ever naming it.
 export function expectedTitles(mode) {
-  if (!['deterministic', 'real'].includes(mode))
-    throw new Error('Select deterministic or real upstream mode explicitly')
+  if (!['deterministic', 'real', 'real-hybrid'].includes(mode))
+    throw new Error('Select deterministic, real or real-hybrid upstream mode explicitly')
+  if (mode === 'real-hybrid') return hybridRetryTitles
   return [
     'unauthenticated agent route guard prevents connector use',
     'authenticated user without agent access cannot select the protected agents',
@@ -74,7 +80,32 @@ export function expectedTitles(mode) {
 // The spec file that owns each registered title: a title found in another file
 // is not the registered case.
 export function specFileFor(title) {
+  if (hybridRetryTitles.includes(title)) return hybridSpecFile
   return modelStepRetryTitles.includes(title) ? modelStepSpecFile : specFile
+}
+
+export function validateHybridEvidence(before, after) {
+  for (const field of ['forwarded', 'injected503', 'r1', 'r2', 'r1DistinctToolResults']) {
+    if (
+      !Number.isSafeInteger(before?.[field]) ||
+      !Number.isSafeInteger(after?.[field]) ||
+      before[field] < 0 ||
+      after[field] < before[field]
+    )
+      throw new Error(`Real-hybrid evidence missing or reset: ${field}`)
+  }
+  for (const [field, expected] of Object.entries({
+    injected503: 2,
+    r1: 1,
+    r2: 1,
+    r1DistinctToolResults: 1,
+  })) {
+    if (after[field] - before[field] !== expected)
+      throw new Error(`Real-hybrid evidence ${field} did not move by ${expected}`)
+  }
+  if (after.forwarded <= before.forwarded)
+    throw new Error('Real-hybrid mode did not forward real provider requests')
+  return { forwarded: after.forwarded - before.forwarded, injected503: 2 }
 }
 
 /**
@@ -211,6 +242,9 @@ function runNode(args, cwd, env, timeout) {
 async function main() {
   if (process.versions.node.split('.')[0] !== '24')
     throw new Error('Desktop certification requires Node 24')
+  const mode = required('APPROVED_TOOLS_UPSTREAM_MODE')
+  if (!['deterministic', 'real', 'real-hybrid'].includes(mode))
+    throw new Error('Select deterministic, real or real-hybrid upstream mode explicitly')
   for (const key of [
     'MINIKUBE_PROFILE',
     'CONTROL_API_REAL_PG_CONTEXT',
@@ -218,15 +252,16 @@ async function main() {
     'EXTERNAL_REST_API_BASE_URL',
     'RPC_PROXY_BASE_URL',
     'APPROVED_TOOLS_SCENARIOS',
-    'APPROVED_TOOLS_WORKFLOW_SCENARIO',
-    'APPROVED_TOOLS_UNAUTHORIZED_EMAIL',
-    'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD',
+    ...(mode === 'real-hybrid'
+      ? []
+      : [
+          'APPROVED_TOOLS_WORKFLOW_SCENARIO',
+          'APPROVED_TOOLS_UNAUTHORIZED_EMAIL',
+          'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD',
+        ]),
   ])
     required(key)
-  const mode = required('APPROVED_TOOLS_UPSTREAM_MODE')
-  if (!['deterministic', 'real'].includes(mode))
-    throw new Error('Select deterministic or real upstream mode explicitly')
-  if (mode === 'real' && process.env.CODEX_REAL_UPSTREAM_CONFIRM !== '1')
+  if (mode !== 'deterministic' && process.env.CODEX_REAL_UPSTREAM_CONFIRM !== '1')
     throw new Error('Real subscription use requires explicit confirmation')
   const evidence = validateRunDirectory(
     required('APPROVED_TOOLS_CANONICAL_ROOT'),
@@ -267,6 +302,7 @@ async function main() {
         'tools/e2e_static_audit.py',
         `tests/e2e/playwright/desktop/${specFile}`,
         `tests/e2e/playwright/desktop/${modelStepSpecFile}`,
+        `tests/e2e/playwright/desktop/${hybridSpecFile}`,
         'tests/e2e/playwright/helpers/approved-tools-chat.ts',
         'tests/e2e/playwright/helpers/approved-tools-scenarios.ts',
         'tests/e2e/playwright/helpers/approved-tools-workflow.ts',
@@ -276,7 +312,9 @@ async function main() {
     )
     if (audit.error || audit.signal || audit.status !== 0)
       throw new Error('E2E Guardian audit failed')
-    const evidenceUrl = mode === 'deterministic' ? modelStepEvidenceUrl() : undefined
+    const evidenceUrl = mode === 'deterministic' || mode === 'real-hybrid'
+      ? modelStepEvidenceUrl()
+      : undefined
     const evidenceBefore = evidenceUrl ? await readModelStepEvidence(evidenceUrl) : undefined
     runNode(
       [
@@ -289,9 +327,12 @@ async function main() {
       APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS
     )
     const verified = validateReport(JSON.parse(readOwnedDescriptor(reportFile)), mode)
-    const modelStepRetry = evidenceUrl
-      ? validateModelStepEvidence(evidenceBefore, await readModelStepEvidence(evidenceUrl))
-      : undefined
+    const evidenceAfter = evidenceUrl ? await readModelStepEvidence(evidenceUrl) : undefined
+    const modelStepRetry = mode === 'deterministic'
+      ? validateModelStepEvidence(evidenceBefore, evidenceAfter)
+      : mode === 'real-hybrid'
+        ? validateHybridEvidence(evidenceBefore, evidenceAfter)
+        : undefined
     process.stdout.write(
       `${JSON.stringify({ lane: 'Playwright', upstream: mode, ...verified, modelStepRetry, report })}\n`
     )

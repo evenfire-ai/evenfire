@@ -256,10 +256,44 @@ test('missing seed and lease fail before first cluster mutation; no image acquis
   )
   assert.ok(lease >= 0 && lease < mutation)
   assert.ok(seedRead >= 0 && seedRead < mutation)
+  const hybridPatch = source.indexOf("if (required('APPROVED_TOOLS_UPSTREAM_MODE') === 'real-hybrid')")
+  assert.ok(lease < hybridPatch)
+  assert.ok(source.indexOf('buildApprovedToolsImageProof({', hybridPatch) <
+    source.indexOf("kubectl([\n        '-n', 'control-plane', 'patch'", hybridPatch))
   assert.equal(source.includes('build-images.sh'), false)
   assert.ok(source.includes("owner('pf_owner_record_process_matches'"))
   assert.ok(source.includes('state.originalImagePullPolicy'))
   assert.ok(source.includes('container.image !== state.originalProxyImage'))
+})
+
+test('real-hybrid proxy patch accepts only the five guarded test environment keys', () => {
+  const profile = 'clerum-test-12345678'
+  const env = [
+    { name: 'NODE_ENV', value: 'test' },
+    { name: 'CODEX_APPROVED_TOOLS_TEST_ONLY', value: '1' },
+    { name: 'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE', value: profile },
+    { name: 'APPROVED_TOOLS_UPSTREAM_MODE', value: 'real-hybrid' },
+    { name: 'CODEX_REAL_UPSTREAM_CONFIRM', value: '1' },
+  ]
+  const patch = {
+    metadata: { uid: 'owned', resourceVersion: '1' },
+    spec: { template: {
+      metadata: { annotations: { 'evenfire.ai/codex-tools-fixture-run': 'approved-tools-123456789abc' } },
+      spec: { containers: [{ name: 'codex-llm-proxy',
+        image: 'clerum/codex-approved-tools-proxy-e2e:test', imagePullPolicy: 'Never', env }] },
+    } },
+  }
+  const args = value => [`--context=${profile}`, '--request-timeout=30s', '-n', 'control-plane',
+    'patch', 'deployment/codex-llm-proxy', '--type=strategic', '-p', JSON.stringify(value)]
+  assert.doesNotThrow(() => validateKubectlArgs(args(patch), profile))
+  for (const [name, value] of [
+    ['CODEX_REAL_UPSTREAM_CONFIRM', '0'],
+    ['APPROVED_TOOLS_UPSTREAM_MODE', 'real'],
+  ]) {
+    const changed = structuredClone(patch)
+    changed.spec.template.spec.containers[0].env.find(entry => entry.name === name).value = value
+    assert.throws(() => validateKubectlArgs(args(changed), profile), /Invalid proxy environment/)
+  }
 })
 
 test('owned descriptors reject links, nonregular files, oversized data and unsafe directories', () => {
