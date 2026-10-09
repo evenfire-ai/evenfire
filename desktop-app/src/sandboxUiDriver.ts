@@ -125,6 +125,12 @@ export type MountSandboxUiArgs = {
    * viewer, so a click reveals nothing to the plugin.
    */
   onGfsOpen?: (uri: string) => void
+  /**
+   * Re-checked at every await before a session effect (cookie write, view
+   * creation). False means the caller's authenticated session ended while this
+   * mount was in flight, so it must not attach anything for it.
+   */
+  isCurrent?: () => boolean
 }
 
 type ActiveView = {
@@ -137,6 +143,7 @@ type ActiveView = {
   rpcProxyOrigin: string
   cleanupClientRouteHandoff?: () => void
   cleanupParentClosed?: () => void
+  cleanupRenderProcessGone?: () => void
   cleanupShortcutRouting?: () => void
   cleanupDocumentLifecycle?: () => void
   cleanupFindResults?: () => void
@@ -290,6 +297,25 @@ async function writeSandboxUiCookie(args: {
 }
 
 /**
+ * Undo `writeSandboxUiCookie`: removes the cookie it would set for the same
+ * arguments. Removal matches by name and by the URL the cookie is sent to, so
+ * it also clears an older value left at that Path by a previous mount.
+ */
+async function removeSandboxUiCookie(args: {
+  rpcProxyOrigin: string
+  recipeNs: string
+  recipeName: string
+  setCookie: string | string[]
+  partition: string
+}): Promise<void> {
+  const { rpcProxyOrigin, recipeNs, recipeName, setCookie, partition } = args
+  const cookiePath = extractSandboxUiPath(setCookie, recipeNs, recipeName)
+  await session
+    .fromPartition(partition)
+    .cookies.remove(`${rpcProxyOrigin}${cookiePath}`, SANDBOX_UI_COOKIE_NAME)
+}
+
+/**
  * Refresh the active partition's session cookie. No-op when nothing is
  * mounted (refresh can race with teardown). Throws on a missing cookie
  * value or a partition write error so the caller can surface a refresh
@@ -313,13 +339,16 @@ export async function installSandboxUiCookie(setCookie: string | string[]): Prom
   })
 }
 
-async function teardownActive(reason: 'replaced' | 'closed' | 'parent_closed'): Promise<void> {
+async function teardownActive(
+  reason: 'replaced' | 'closed' | 'parent_closed' | 'crashed'
+): Promise<void> {
   if (!active) return
   const current = active
   active = null
   try {
     current.cleanupClientRouteHandoff?.()
     current.cleanupParentClosed?.()
+    current.cleanupRenderProcessGone?.()
     current.cleanupShortcutRouting?.()
     current.cleanupDocumentLifecycle?.()
     current.cleanupFindResults?.()
@@ -352,6 +381,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     routePath,
     onClosed,
     onTitleChanged,
+    isCurrent = () => true,
   } = args
 
   if (parentWindow.isDestroyed()) {
@@ -370,7 +400,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // per-recipe partition is left in place so storage survives a re-mount
   // within the ACL window.
   await teardownActive('replaced')
-  if (generation !== mountGeneration) return
+  if (generation !== mountGeneration || !isCurrent()) return
 
   const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
@@ -385,14 +415,19 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // navigation request carries it. The proxy enforces the recipe binding
   // claim on every request — installing on a stale partition would still
   // fail closed at rpc-proxy.
-  await writeSandboxUiCookie({
-    rpcProxyOrigin: proxyOriginUrl,
-    recipeNs,
-    recipeName,
-    setCookie,
-    partition,
-  })
+  const cookieArgs = { rpcProxyOrigin: proxyOriginUrl, recipeNs, recipeName, setCookie, partition }
+  await writeSandboxUiCookie(cookieArgs)
   if (generation !== mountGeneration) return
+  if (!isCurrent()) {
+    // The partition is keyed per recipe, not per user, and a session change
+    // does not clear it: the cookie just written would outlive the session
+    // that minted it. Only when this mount is still the newest one — a newer
+    // mount may already have written its own cookie at the same Path.
+    await removeSandboxUiCookie(cookieArgs).catch(err => {
+      console.warn('[SandboxUI] could not remove a stale session cookie:', err)
+    })
+    return
+  }
   if (parentWindow.isDestroyed()) {
     throw new Error('parent window is destroyed')
   }
@@ -436,11 +471,10 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     },
   })
 
-  // The closed callback fires when the renderer gives up the view (parent
-  // window closed, teardown via removeChildView, or the embed crashed).
-  // For now we only wire the parent-window-closed case so the renderer can
-  // re-render its picker; teardown via `unmountSandboxUiView` is a
-  // synchronous user action (no callback needed).
+  // `onClosed` reports a teardown nobody asked for: the parent window closed
+  // or the embed's renderer died. Solicited teardowns (`unmountSandboxUiView`,
+  // a replacing mount) stay silent — the caller already knows, and the
+  // renderer drops its owner of the embed on that signal.
   const onParentClosed = (): void => {
     void teardownActive('parent_closed')
     onClosed?.()
@@ -448,6 +482,20 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   parentWindow.once('closed', onParentClosed)
   const cleanupParentClosed = (): void => {
     parentWindow.removeListener('closed', onParentClosed)
+  }
+  // A dead renderer leaves its last frame painted over the app with nothing
+  // behind it, whatever the reason. The identity check keeps a late signal
+  // from a view that was already replaced from tearing down its successor.
+  // `mountGeneration` is deliberately left alone: bumping it would abort an
+  // unrelated mount that is in flight.
+  const onRenderProcessGone = (): void => {
+    if (active?.view !== view) return
+    void teardownActive('crashed')
+    onClosed?.()
+  }
+  view.webContents.on('render-process-gone', onRenderProcessGone)
+  const cleanupRenderProcessGone = (): void => {
+    view.webContents.removeListener('render-process-gone', onRenderProcessGone)
   }
 
   active = {
@@ -459,6 +507,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     parentWindow,
     rpcProxyOrigin: proxyOriginUrl,
     cleanupParentClosed,
+    cleanupRenderProcessGone,
     documentGeneration: 0,
     documentReady: false,
   }
