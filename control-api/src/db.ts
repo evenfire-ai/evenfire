@@ -6747,7 +6747,7 @@ function isDefinitivePostgresCommitErrorResponse(error: unknown): boolean {
     response.name === 'error' &&
     typeof response.code === 'string' &&
     /^[0-9A-Z]{5}$/.test(response.code) &&
-    typeof response.severity === 'string' &&
+    response.severity === 'ERROR' &&
     !UNKNOWN_COMMIT_OUTCOME_SQLSTATES.has(response.code)
   )
 }
@@ -6905,10 +6905,9 @@ export async function withTransaction<T>(
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
     }
-    // Most PostgreSQL ErrorResponses prove COMMIT failed, but SQLSTATE 08007
-    // (transaction_resolution_unknown) and 40003 (statement_completion_unknown)
-    // explicitly leave the durable outcome uncertain. Lost transport and malformed
-    // responses are uncertain as well.
+    // Only an ERROR-severity PostgreSQL response proves COMMIT was rejected.
+    // FATAL/PANIC may terminate a backend after COMMIT succeeded while its
+    // acknowledgement is withheld, so those and SQLSTATE 08007/40003 stay unknown.
     if (commitSent && !transactionFinished && !isDefinitivePostgresCommitErrorResponse(error)) {
       options.onCommitOutcomeUnknown?.()
     }
