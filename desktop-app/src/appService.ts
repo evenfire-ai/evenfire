@@ -1421,9 +1421,7 @@ export class AppService {
         } finally {
           if (activeHop) {
             activeHop.restoredToken =
-              restoredOriginalTeam && this.me?.teamId === activeHop.homeTeamId
-                ? this.sessionToken
-                : null
+              this.me?.teamId === activeHop.homeTeamId ? this.sessionToken : null
             await this.drainHomeTeamOperations(activeHop)
           }
           if (shouldRestore) {

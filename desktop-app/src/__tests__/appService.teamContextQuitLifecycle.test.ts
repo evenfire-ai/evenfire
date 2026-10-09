@@ -344,6 +344,28 @@ describe('AppService team-context quit lifecycle', () => {
     await preparation
   })
 
+  it('runs a queued home read when the initial team switch fails before leaving home', async () => {
+    const switchStarted = deferred<void>()
+    const finishFailedSwitch = deferred<void>()
+    const { service } = createAuthenticatedService()
+    vi.mocked(service.authClient.switchTeam).mockImplementation(async (_token, teamId) => {
+      if (teamId === 'team-a') {
+        switchStarted.resolve()
+        await finishFailedSwitch.promise
+        throw new Error('initial team switch failed')
+      }
+      throw new Error(`unexpected switch to ${teamId}`)
+    })
+
+    const firstHop = service.runWithTeamContext('team-a', async () => 'unreachable')
+    await switchStarted.promise
+    const homeRead = service.runWithTeamContext('team-home', async token => token)
+    finishFailedSwitch.resolve()
+
+    await expect(firstHop).rejects.toThrow('initial team switch failed')
+    await expect(homeRead).resolves.toBe('team-home-token')
+  })
+
   it('does not keep quit open for a same-team operation with no credential switch', async () => {
     const operation = deferred<string>()
     const operationStarted = deferred<void>()
