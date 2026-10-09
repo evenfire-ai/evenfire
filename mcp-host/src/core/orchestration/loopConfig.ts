@@ -15,6 +15,7 @@ import {
 import { DefaultToolOutputProcessor } from '../safety/toolOutputProcessor'
 import type { SpilloverStorage } from '../spillover'
 import { Attachment, ChatMessage, Conversation, PendingApproval, ToolDefinition } from '../types'
+import type { ModelStepCheckpointRecorder } from './modelStepCheckpointRecorder'
 
 /**
  * Configuration for the tool-use loop.
@@ -158,6 +159,14 @@ export interface LoopConfig {
     getDeferrableCatalogNames: () => Set<string>
     nativeTargets: boolean
   }
+
+  /**
+   * #1043 — durable model-step checkpoint of this turn. Absent (memory store,
+   * or a caller that does not record) = today's behaviour. When set, a 503
+   * `provider_unavailable` after a confirmed tool result returns
+   * `LoopResult.error.checkpointId`.
+   */
+  modelStepCheckpointRecorder?: ModelStepCheckpointRecorder
 }
 
 /**

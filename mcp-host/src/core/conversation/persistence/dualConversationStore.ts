@@ -10,7 +10,11 @@
  * flip the canary to `sqlite`.
  */
 import { Counter } from 'prom-client'
-import type { ModelSelectionWriteOutcome, ReapedSession } from '../../../db/worker/protocol'
+import type {
+  ModelSelectionWriteOutcome,
+  ModelStepTurnFence,
+  ReapedSession,
+} from '../../../db/worker/protocol'
 import type { Conversation, PendingApproval, TurnToolCall } from '../../types'
 import type {
   ConversationSessionMessages,
@@ -18,6 +22,7 @@ import type {
   ConversationStore,
   EvictCallback,
   GetOrCreateOptions,
+  PersistTurnCompleteOptions,
   PersistedSessionListing,
   SessionListQuery,
   SessionMessagesQuery,
@@ -284,25 +289,43 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
-  async persistTurnComplete(conv: Conversation, response: string): Promise<void> {
+  async persistTurnComplete(
+    conv: Conversation,
+    response: string,
+    opts?: PersistTurnCompleteOptions
+  ): Promise<void> {
     await Promise.all([
       Promise.resolve(this.memory.persistTurnComplete(conv, response)),
-      Promise.resolve(this.sqlite.persistTurnComplete(conv, response)),
+      // #1043 — the checkpoint lives only in SQLite.
+      Promise.resolve(this.sqlite.persistTurnComplete(conv, response, opts)),
     ])
   }
 
-  async persistTurnCancel(conv: Conversation): Promise<void> {
+  async persistContinuationStart(conv: Conversation, turnNumber: number): Promise<void> {
+    if (!this.sqlite.persistContinuationStart) {
+      throw new Error('The SQLite side of the dual store cannot reopen a turn')
+    }
+    await this.sqlite.persistContinuationStart(conv, turnNumber)
+  }
+
+  async persistTurnCancel(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {
     await Promise.all([
+      // The fence is a SQLite checkpoint guard. The memory mirror stays a no-op
+      // so a dual write cannot reject after the durable boundary commits.
       Promise.resolve(this.memory.persistTurnCancel(conv)),
-      Promise.resolve(this.sqlite.persistTurnCancel(conv)),
+      Promise.resolve(this.sqlite.persistTurnCancel(conv, fence)),
     ])
   }
 
-  async persistTurnFail(conv: Conversation): Promise<void> {
+  async persistTurnFail(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {
     await Promise.all([
       Promise.resolve(this.memory.persistTurnFail(conv)),
-      Promise.resolve(this.sqlite.persistTurnFail(conv)),
+      Promise.resolve(this.sqlite.persistTurnFail(conv, fence)),
     ])
+  }
+
+  activeTurnNumber(conv: Conversation): number | undefined {
+    return this.sqlite.activeTurnNumber?.(conv)
   }
 
   async persistToolCall(conv: Conversation, toolCall: TurnToolCall): Promise<void> {

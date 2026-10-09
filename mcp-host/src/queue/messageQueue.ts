@@ -2,7 +2,7 @@
  * MessageQueue — factory-only shim (Phase C).
  *
  * State has moved entirely to TaskLifecycle. This class now:
- *   1. Creates Task objects via three factory methods (unchanged API).
+ *   1. Creates Task objects via factory methods.
  *   2. Maintains taskInstanceIndex for Task-object lookup (getTask).
  *   3. Keeps a pendingQueue[] for ordering and lifecycle registration of
  *      tasks enqueued outside messageHandler (e.g. cronScheduler.executeJob).
@@ -25,6 +25,7 @@ import { logger } from '../logger'
 import { IncomingMessage } from '../server'
 import {
   AdmissionOutcome,
+  type ModelStepContinuationRef,
   QueueEvent,
   QueueEventType,
   QueueStats,
@@ -121,6 +122,34 @@ export class MessageQueue extends EventEmitter {
       ],
       createdAt: new Date(),
       responseCallback,
+    }
+    this.taskInstanceIndex.set(task.id, task)
+    return task
+  }
+
+  createModelStepContinuationTask(
+    message: IncomingMessage,
+    taskId: string,
+    ref: ModelStepContinuationRef,
+    responseCallback?: (payload: TaskResponsePayload) => Promise<void>
+  ): Task {
+    const task: Task = {
+      id: taskId,
+      source: 'channel',
+      sourceMessage: message,
+      traceContext: message.traceContext ?? null,
+      priority: 'normal',
+      status: 'pending',
+      conversationHistory: [
+        {
+          role: 'user',
+          content: message.content,
+          timestamp: new Date(message.timestamp),
+        },
+      ],
+      createdAt: new Date(),
+      responseCallback,
+      modelStepContinuation: ref,
     }
     this.taskInstanceIndex.set(task.id, task)
     return task

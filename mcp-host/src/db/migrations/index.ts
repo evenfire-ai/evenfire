@@ -14,6 +14,8 @@ import * as pendingApprovalConnect from './013-pending-approval-connect'
 import * as pendingApprovalTaskBudget from './014-pending-approval-task-budget'
 import * as sessionModelSelectionRevision from './015-session-model-selection-revision'
 import * as pendingApprovalAuthorizationScope from './016-pending-approval-authorization-scope'
+import * as modelStepCheckpoints from './017-model-step-checkpoints'
+import * as modelStepCheckpointAttachments from './018-model-step-checkpoint-attachments'
 
 /**
  * Ordered list of migrations. New migrations append; never reorder or rename.
@@ -41,4 +43,6 @@ export const migrations: Array<{
   pendingApprovalTaskBudget,
   sessionModelSelectionRevision,
   pendingApprovalAuthorizationScope,
+  modelStepCheckpoints,
+  modelStepCheckpointAttachments,
 ]

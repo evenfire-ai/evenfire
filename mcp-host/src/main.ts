@@ -12,6 +12,7 @@
  *
  * Phase 6: Added approval handler wiring and approval config propagation.
  */
+import { randomUUID } from 'node:crypto'
 import * as path from 'node:path'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
@@ -19,14 +20,17 @@ import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
 import { createFileReferenceGfsGate } from './agent/fileReferenceGfsGate'
+import type { GfsSurfaceRuntimeCapability } from './agent/gfsReferenceSurfaces'
 import { createIncomingAdmission, replayedIncomingMessage } from './agent/incomingAdmission'
 import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
 import { IncomingDelivery } from './agent/incomingDelivery'
+import { ModelStepContinuationService } from './agent/modelStepContinuation'
 import {
   type SessionModelSelectionOptions,
   applySessionModelSelection as applySessionModelSelectionCore,
 } from './agent/sessionModelSelection'
 import { applySessionTitle as applySessionTitleCore } from './agent/sessionTitle'
+import type { ModelStepCheckpointExecutionSupport } from './agent/taskExecutor'
 import { BudgetClient } from './budget/budgetClient'
 // Structured JSON logging — must be first import
 import { config } from './config'
@@ -40,11 +44,13 @@ import {
   resolveSessionModel,
 } from './config/modelResolution'
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
+import { toModelStepCheckpointView } from './core/conversation/modelStepCheckpointView'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
   createConversationStore,
 } from './core/conversation/persistence'
+import { ModelStepCheckpointStore } from './core/conversation/persistence/modelStepCheckpointStore'
 import { validateApprovalConfig } from './core/extensions'
 import type { ApprovalDecision } from './core/extensions/approvalTypes'
 import { BasicSafety } from './core/safety/safety'
@@ -228,6 +234,11 @@ let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
 // round and exposes no pre-tick hook, so eviction runs on its own timer rather
 // than being folded into a probe round.
 let mcpPartitionEvictionTimer: ReturnType<typeof setInterval> | null = null
+// #1043 — expires resumable model-step checkpoints, purges expired inline
+// file bytes and deletes terminal headers past retention. The cadence bounds
+// how long expired bytes can stay at rest past their own TTL.
+const MODEL_STEP_CHECKPOINT_SWEEP_INTERVAL_MS = 5 * 60_000
+let modelStepCheckpointSweepTimer: ReturnType<typeof setInterval> | null = null
 let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
 let mcpManager: McpManager | null = null
@@ -240,6 +251,7 @@ let gfsDownloadStore: GfsDownloadStore | null = null
 let gfsRuntimeStop: (() => Promise<void>) | null = null
 let spilloverStorage: SpilloverStorage | null = null
 let conversationStoreHandle: ConversationStoreHandle | null = null
+let modelStepContinuationService: ModelStepContinuationService | null = null
 let promptCache: PromptCache | null = null
 let sessionSearchService: SessionSearchService | null = null
 
@@ -1655,8 +1667,76 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     },
   })
   agent.setColdStartLoader(loader)
+  await initializeModelStepCheckpoints(handle)
 
   return handle
+}
+
+/**
+ * #1043 — durable model-step checkpoints over the conversation store's
+ * persist queue. Boot-reap runs before any task is admitted; a failure there
+ * fails startup.
+ */
+async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): Promise<void> {
+  if (!agent) return
+  const persistQueue = handle.persistQueue
+  if (!persistQueue) {
+    throw new Error(
+      `Conversation store mode=${handle.mode} has no persist queue for model-step checkpoints`
+    )
+  }
+  const store = new ModelStepCheckpointStore(persistQueue, {
+    now: () => Date.now(),
+    blockedTtlMs: config.modelStepCheckpointTtlMs,
+  })
+  const hostInstanceId = randomUUID()
+  const reaped = await store.bootReap(hostInstanceId)
+  logger.info(
+    { component: 'ModelStepCheckpoint', hostInstanceId, ...reaped },
+    'model-step checkpoints ready'
+  )
+  const support: ModelStepCheckpointExecutionSupport = {
+    store,
+    hostInstanceId,
+    hostId: config.hostName,
+    resumableTtlMs: config.modelStepCheckpointTtlMs,
+    claimLeaseMs: config.modelStepClaimLeaseMs,
+    pendingApprovalTtlMs: config.pendingApprovalTtlMs,
+    attachmentTtlMs: config.modelStepAttachmentTtlMs,
+    fileReferenceGfsGate,
+    gfsSurfaceRuntimeCapability,
+  }
+  agent.setModelStepCheckpoints(support)
+  modelStepContinuationService = new ModelStepContinuationService({
+    checkpoints: support,
+    conversationManager: agent.getConversationManager(),
+    enqueue: async (message, taskId, continuation) => {
+      if (!messageQueue || !taskLifecycle || !sessionProcessor) {
+        throw new Error('Model-step continuation async admission is not initialized')
+      }
+      const task = messageQueue.createModelStepContinuationTask(message, taskId, continuation)
+      const response = await dispatchIncomingMessage(message, { async: true }, task)
+      if (!response.success || response.taskId !== taskId || response.status !== 'pending') {
+        throw new Error('Model-step continuation was not admitted as its claimed task')
+      }
+    },
+  })
+  modelStepCheckpointSweepTimer = setInterval(() => {
+    store.sweep(config.modelStepCheckpointTtlMs).then(
+      swept => {
+        if (swept.expired + swept.purgedCheckpoints + swept.purgedAttachments > 0) {
+          logger.info({ component: 'ModelStepCheckpoint', ...swept }, 'model-step checkpoint sweep')
+        }
+      },
+      err => {
+        logger.error(
+          { component: 'ModelStepCheckpoint', err },
+          'model-step checkpoint sweep failed'
+        )
+      }
+    )
+  }, MODEL_STEP_CHECKPOINT_SWEEP_INTERVAL_MS)
+  modelStepCheckpointSweepTimer.unref()
 }
 
 /**
@@ -1996,17 +2076,22 @@ const incomingDelivery = new IncomingDelivery()
 
 function dispatchIncomingMessage(
   message: IncomingMessage,
-  options?: { async?: boolean }
+  options?: { async?: boolean },
+  preparedTask?: Task
 ): MessageResponse | Promise<MessageResponse> {
-  const handler = new IncomingMessageHandler(message, {
-    messageQueue: messageQueue!,
-    agent,
-    pendingTaskResults,
-    getModel: () => currentHost?.spec.model?.name || 'unknown',
-    sanitizeAttachments,
-    sessionProcessor: sessionProcessor ?? undefined,
-    taskLifecycle: taskLifecycle!,
-  })
+  const handler = new IncomingMessageHandler(
+    message,
+    {
+      messageQueue: messageQueue!,
+      agent,
+      pendingTaskResults,
+      getModel: () => currentHost?.spec.model?.name || 'unknown',
+      sanitizeAttachments,
+      sessionProcessor: sessionProcessor ?? undefined,
+      taskLifecycle: taskLifecycle!,
+    },
+    preparedTask
+  )
 
   if (options?.async) {
     return handler.executeAsync()
@@ -2041,6 +2126,36 @@ const fileReferenceGfsGate = createFileReferenceGfsGate({
   logger,
 })
 
+function gfsSurfaceRuntimeCapability(message: IncomingMessage): GfsSurfaceRuntimeCapability {
+  const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
+  if (callerRootBinding.failureCode) {
+    logger.warn(
+      {
+        component: 'gfs-runtime',
+        event: 'gfs_caller_root_unavailable',
+        code: callerRootBinding.failureCode,
+      },
+      'GFS caller workspace unavailable; managed delivery and shell stay disabled'
+    )
+  }
+  const callerWorkspacePath = callerRootBinding.root
+  const shellApprovalEnabled =
+    (currentHost?.spec.approval || config.approvalConfig)?.tools?.shell_exec !== false
+  const workspaceFile = Boolean(
+    config.enableApproval &&
+    message.sender &&
+    gfsDownloadStore?.isAvailable() &&
+    callerWorkspacePath &&
+    shellApprovalEnabled
+  )
+  return {
+    workspaceFile,
+    localExecutor: workspaceFile,
+    // Visual support is decided per physical provider attempt, never here.
+    visual: false,
+  }
+}
+
 const prepareIncomingMessage = createIncomingAdmission({
   limits: {
     maxCount: INCOMING_ATTACHMENT_MAX_COUNT,
@@ -2057,35 +2172,7 @@ const prepareIncomingMessage = createIncomingAdmission({
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
   fileReferenceGfs: fileReferenceGfsGate,
-  gfsSurfaceRuntimeCapability: message => {
-    const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
-    if (callerRootBinding.failureCode) {
-      logger.warn(
-        {
-          component: 'gfs-runtime',
-          event: 'gfs_caller_root_unavailable',
-          code: callerRootBinding.failureCode,
-        },
-        'GFS caller workspace unavailable; managed delivery and shell stay disabled'
-      )
-    }
-    const callerWorkspacePath = callerRootBinding.root
-    const shellApprovalEnabled =
-      (currentHost?.spec.approval || config.approvalConfig)?.tools?.shell_exec !== false
-    const workspaceFile = Boolean(
-      config.enableApproval &&
-      message.sender &&
-      gfsDownloadStore?.isAvailable() &&
-      callerWorkspacePath &&
-      shellApprovalEnabled
-    )
-    return {
-      workspaceFile,
-      localExecutor: workspaceFile,
-      // Visual support is decided per physical provider attempt, never here.
-      visual: false,
-    }
-  },
+  gfsSurfaceRuntimeCapability,
   logger,
 })
 
@@ -2668,6 +2755,12 @@ async function startRPCServer(): Promise<void> {
 
   const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
     getConversationManager: () => agent!.getConversationManager(),
+    loadModelStepCheckpoint: async sessionKey => {
+      const support = agent!.getModelStepCheckpoints()
+      if (!support) return undefined
+      const snapshot = await support.store.loadLive(sessionKey)
+      return snapshot ? toModelStepCheckpointView(snapshot) : undefined
+    },
     redactToolError,
     redactTitle,
   })
@@ -2761,6 +2854,15 @@ async function startRPCServer(): Promise<void> {
     applySessionTitle(userSub, agentName, chatId, title)
 
   rpcServer.onMessage(handleIncomingMessage)
+  if (modelStepContinuationService) {
+    // Read the current service per request: re-initializing the agent replaces it.
+    rpcServer.onModelStepContinuation(request => {
+      if (!modelStepContinuationService) {
+        throw new Error('Model-step continuation service is no longer initialized')
+      }
+      return modelStepContinuationService.continue(request)
+    })
+  }
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
   rpcServer.onStatus(getStatus)
   rpcServer.onActivitySnapshot(getActivitySnapshot)
@@ -3060,6 +3162,10 @@ async function shutdown(signal: string): Promise<void> {
   if (guardrailResolveTimer) {
     clearInterval(guardrailResolveTimer)
     guardrailResolveTimer = null
+  }
+  if (modelStepCheckpointSweepTimer) {
+    clearInterval(modelStepCheckpointSweepTimer)
+    modelStepCheckpointSweepTimer = null
   }
 
   if (agent) {

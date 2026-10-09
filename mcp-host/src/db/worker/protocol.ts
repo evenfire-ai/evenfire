@@ -8,6 +8,74 @@
  * `error`/`result` payloads.
  */
 import type { ChatMessage, PendingApproval, ToolResult } from '../../core/types'
+import {
+  type ModelStepCheckpointFence,
+  type ModelStepCheckpointOp,
+  isModelStepCheckpointOp,
+  isModelStepCheckpointWriteOp,
+} from './modelStepCheckpointOps'
+
+// ─── Durable model-step loop state (#1043) ─────────────────────────────
+
+/**
+ * `model_step_checkpoints.loop_state`: recorder-owned progress plus the frozen
+ * identity of the origin user message. `originUserMessageIndex` is a 0-based
+ * index into the checkpoint's `kind === 'message'` entries, decided when the
+ * origin recorder first records that message. A later user-role, image or
+ * loop-injected message never moves it, so a continuation strips/prepends the
+ * turn-context block on the right entry by identity instead of by "last user".
+ */
+export interface ModelStepCheckpointLoopState {
+  nextIteration: number
+  originUserMessageIndex?: number
+}
+
+/** Serializes the frozen `loop_state` shape. */
+export function serializeModelStepCheckpointLoopState(state: ModelStepCheckpointLoopState): string {
+  return JSON.stringify(state)
+}
+
+/**
+ * Reads the durable loop state. A missing or malformed blob throws: a reader
+ * must fail loud rather than re-target the turn-context block by guesswork.
+ */
+export function parseModelStepCheckpointLoopState(
+  raw: string | null
+): ModelStepCheckpointLoopState {
+  if (raw === null) throw new Error('Model-step checkpoint has no loop state')
+  const parsed: unknown = JSON.parse(raw)
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Model-step checkpoint loop state is not an object')
+  }
+  const { nextIteration, originUserMessageIndex } = parsed as Record<string, unknown>
+  if (
+    typeof nextIteration !== 'number' ||
+    !Number.isSafeInteger(nextIteration) ||
+    nextIteration < 0
+  ) {
+    throw new Error('Model-step checkpoint loop state has no valid next iteration')
+  }
+  if (originUserMessageIndex === undefined) return { nextIteration }
+  if (
+    typeof originUserMessageIndex !== 'number' ||
+    !Number.isSafeInteger(originUserMessageIndex) ||
+    originUserMessageIndex < 0
+  ) {
+    throw new Error('Model-step checkpoint loop state has no valid origin user message index')
+  }
+  return { nextIteration, originUserMessageIndex }
+}
+
+/**
+ * A turn-boundary write that is only valid while this exact claim still owns
+ * the reopened origin turn (#1043 C5). `activeTaskId` is the continuation task
+ * that reopened it.
+ */
+export interface ModelStepTurnFence {
+  fence: ModelStepCheckpointFence
+  activeTaskId: string
+  originTurnNumber: number
+}
 
 // ─── Row shapes (DB-side representation) ───────────────────────────────
 
@@ -225,6 +293,13 @@ export type WorkerOp =
       activeTaskId?: string | null
       /** undefined = keep, string = set, null = clear. */
       activeTraceContext?: string | null
+      /**
+       * #1043 (C5) — when present, the dispatcher verifies inside this same
+       * transaction that the checkpoint still carries this id/owner/generation
+       * at this origin turn number and that the session's live active task is
+       * this continuation; a mismatch rolls the state write back.
+       */
+      modelStepTurnFence?: ModelStepTurnFence
     }
   | { kind: 'reap_processing_sessions'; nowEpoch: number; chunkSize?: number }
   | {
@@ -292,7 +367,26 @@ export type WorkerOp =
        * never overwrites, and a rename set earlier wins.
        */
       title?: string
+      /**
+       * #1043 — set on a turn start: every live model-step checkpoint of this
+       * session is retired (`abandoned`) in the same transaction, so a new
+       * turn can never coexist with a resumable one.
+       */
+      retireModelStepCheckpointsOf?: string
+      /**
+       * #1043 — set on the final message of a model-step continuation: the
+       * fenced checkpoint flips `claimed` → `completed` and stamps this message
+       * in the same transaction. A fence mismatch rolls the message back.
+       */
+      completeModelStepCheckpoint?: ModelStepCheckpointFence
+      /**
+       * #1043 (C5) — when present, the boundary message and the state flip only
+       * commit while this exact claim still owns the reopened origin turn; a
+       * mismatch rolls the whole transaction back.
+       */
+      modelStepTurnFence?: ModelStepTurnFence
     }
+  | ModelStepCheckpointOp
   | { kind: 'replace_messages'; sessionId: string; messages: MessageRow[] }
   | {
       kind: 'insert_pending_approval'
@@ -393,7 +487,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'sweep_closed_sessions':
       return true
     default:
-      return false
+      return isModelStepCheckpointOp(op) && isModelStepCheckpointWriteOp(op)
   }
 }
 

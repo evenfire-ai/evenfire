@@ -5,6 +5,7 @@ import { UnifiedApprovalGateController } from '../../extensions/mcpApprovalGateC
 import type { ToolRegistry } from '../../interfaces'
 import { ConversationState, PendingApproval } from '../../types'
 import { ConversationManager } from '../conversation'
+import { type ConversationStore, InMemoryConversationStore } from '../conversationStore'
 
 /** Ordinary-consent fixtures come from the real producer, including scope. */
 function ordinaryApproval(fixture: PendingApproval): PendingApproval {
@@ -90,6 +91,107 @@ describe('ConversationManager — state machine', () => {
     // Idle — cannot complete a turn that hasn't started
     await expect(manager.completeTurn(conv, 'response')).rejects.toThrow(ConversationError)
   })
+
+  it('rolls back RAM completion when durable completeTurn rejects', async () => {
+    class FailingCompleteStore extends InMemoryConversationStore implements ConversationStore {
+      fail = false
+
+      override async persistTurnComplete(): Promise<void> {
+        if (this.fail) throw new Error('stale model-step checkpoint fence')
+      }
+    }
+
+    const store = new FailingCompleteStore()
+    const failingManager = new ConversationManager(store)
+    const conv = await failingManager.getOrCreate('user-complete-reject')
+    await failingManager.startTurn(conv, 'Continue the checked turn', 'task-complete-reject')
+    store.fail = true
+
+    await expect(
+      failingManager.completeTurn(conv, 'rejected response', {
+        completeModelStepCheckpoint: {
+          checkpointId: 'checkpoint-complete-reject',
+          owner: 'task-complete-reject',
+          generation: 1,
+        },
+      })
+    ).rejects.toThrow('stale model-step checkpoint fence')
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.activeTaskId).toBe('task-complete-reject')
+    expect(conv.turns[0]?.response).toBeUndefined()
+    expect(conv.turns[0]?.completed_at).toBeUndefined()
+
+    store.fail = false
+    await failingManager.completeTurn(conv, 'durable response')
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.turns[0]?.response).toBe('durable response')
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+  })
+
+  it.each(['complete', 'cancel'] as const)(
+    'keeps a winner with identical response text after a stale %s rejects',
+    async ending => {
+      let rejectStale!: (error: Error) => void
+      const staleWrite = new Promise<void>((_resolve, reject) => {
+        rejectStale = reject
+      })
+      // The first durable boundary is deferred; later boundaries succeed. The
+      // fixture isolates ownership of the shared RAM turn from SQLite fencing.
+      class DeferredBoundaryStore extends InMemoryConversationStore {
+        private first = true
+        private write(): Promise<void> {
+          if (!this.first) return Promise.resolve()
+          this.first = false
+          return staleWrite
+        }
+        override persistTurnComplete(): Promise<void> {
+          return this.write()
+        }
+        override persistTurnCancel(): Promise<void> {
+          return this.write()
+        }
+        async persistContinuationStart(): Promise<void> {}
+      }
+      const ownerManager = new ConversationManager(new DeferredBoundaryStore())
+      const conv = await ownerManager.getOrCreate('same-response-owner')
+      await ownerManager.startTurn(conv, 'origin input', 'task-a')
+      const guard = {
+        fence: { checkpointId: 'cp-same-response', owner: 'host-a', generation: 1 },
+        activeTaskId: 'task-a',
+        originTurnNumber: 1,
+      }
+      const stale =
+        ending === 'complete'
+          ? ownerManager.completeTurn(conv, 'same answer')
+          : ownerManager.cancelTurn(conv, guard)
+      const rejection = expect(stale).rejects.toThrow('stale boundary rejected')
+      // A refreshed durable view has not seen A's pending answer. B reopens
+      // that same turn and produces exactly the same text as A.
+      const turn = conv.turns[0]!
+      turn.response = undefined
+      turn.completed_at = undefined
+      await ownerManager.resumeTurnForContinuation(conv, 'task-b', 1, null)
+      if (ending === 'complete') await ownerManager.completeTurn(conv, 'same answer')
+      else {
+        await ownerManager.cancelTurn(conv, {
+          ...guard,
+          fence: { ...guard.fence, generation: 2 },
+          activeTaskId: 'task-b',
+        })
+      }
+      const winnerResponse = turn.response
+      const winnerCompletedAt = turn.completed_at
+      expect(winnerResponse).toBe(
+        ending === 'complete' ? 'same answer' : '[Task cancelled by user before completion]'
+      )
+      expect(winnerCompletedAt).toBeDefined()
+      rejectStale(new Error('stale boundary rejected'))
+      await rejection
+      expect(turn.response).toBe(winnerResponse)
+      expect(turn.completed_at).toBe(winnerCompletedAt)
+      expect(conv.state).toBe(ConversationState.Idle)
+    }
+  )
 
   it('recordSessionUsage mirrors token totals in RAM and OR-accumulates cacheTokensReported', async () => {
     const conv = await manager.getOrCreate('user-1')

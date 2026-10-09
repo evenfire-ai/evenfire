@@ -459,6 +459,75 @@ describe('R1-M12 /messages keeps the retry-until-deadline loop (it carries a mes
   })
 })
 
+describe('R1-H3 model-step continuation wakes a sleeping or draining Host', () => {
+  const path = '/rpc/hosts/chatllm/sessions/chatllm/c1/model-step-checkpoints/msc-1/continue'
+  const upstreamPath = '/v1/runtime/sessions/chatllm/c1/model-step-checkpoints/msc-1/continue'
+
+  it('wakes after a dropped Host socket and relays the retry result', async () => {
+    let retriedBody = ''
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      req.setEncoding('utf8')
+      req.on('data', chunk => {
+        retriedBody += chunk
+      })
+      req.on('end', () => {
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ taskId: 'continuation-1', status: 'claimed' }))
+      })
+    })
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(202)
+
+    expect(response.body).toEqual({ taskId: 'continuation-1', status: 'claimed' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${upstreamPath}`,
+      `POST ${upstreamPath}`,
+    ])
+    expect(JSON.parse(retriedBody)).toEqual({ version: 3 })
+  })
+
+  it('wakes after host_draining and relays the retry result', async () => {
+    await startUpstream((_req, res, index) => {
+      res.writeHead(index === 0 ? 503 : 202, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(index === 0 ? { code: 'host_draining' } : { status: 'claimed' }))
+    })
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(202)
+
+    expect(response.body).toEqual({ status: 'claimed' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([upstreamPath, upstreamPath])
+  })
+
+  it('returns a sanitized failure when the Host is down and cannot be woken', async () => {
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({ kind: 'not-stateless' })
+    await startUpstream(req => dropConnection(req))
+
+    const response = await request(makeApp())
+      .post(path)
+      .set('authorization', 'Bearer tok')
+      .send({ version: 3 })
+      .expect(502)
+
+    expect(response.body).toEqual({ error: 'Upstream host unavailable' })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([`POST ${upstreamPath}`])
+  })
+})
+
 describe('artifact download deadlines (NEW-rpx-1)', () => {
   const DOWNLOAD_PATH = '/rpc/hosts/chatllm/artifacts/report.bin/download'
   const UPSTREAM_DOWNLOAD_PATH = '/v1/runtime/artifacts/report.bin/download'

@@ -13,7 +13,9 @@ import type { IncomingMessage } from '../server'
  * - `imageModel`: the visual model the turn was pinned to.
  * - file attachments (metadata) and `fileReferenceResolutions`: the version pins
  *   and attachment lines. Image attachments are dropped (their content lives in
- *   the frozen snapshot) and inline bytes (dataBase64) never persist.
+ *   the frozen snapshot) and inline bytes (dataBase64) never persist in the
+ *   approval row. (#1043: a resumable model-step checkpoint holds inline file
+ *   bytes separately, for at most its short byte TTL — migration 018.)
  *
  * Everything else the channel delivered (the raw Slack, email or Telegram
  * payload in `metadata`, `providerIdentity`, `traceContext`, the model piggyback)

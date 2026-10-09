@@ -5,7 +5,7 @@
  * Holds per-task state (task, conversation, tool count) that was previously
  * singleton on the AgentStateMachine.
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { BRIDGE_TOOL_NAMES } from '../capabilities/toolCatalogTools'
@@ -22,6 +22,10 @@ import {
 } from '../core/attachments/attachmentReadBudget'
 import { compactConversation } from '../core/conversation/compaction'
 import { ConversationManager } from '../core/conversation/conversation'
+import {
+  MODEL_STEP_CONTINUE_ERROR_CODES,
+  type ModelStepBlockedReason,
+} from '../core/conversation/modelStepCheckpointContract'
 import { deriveAutoTitle } from '../core/conversation/sessionTitle'
 import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
@@ -44,6 +48,10 @@ import type { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
 import { buildLoopConfig } from '../core/orchestration/loopConfig'
 import type { LoopConfig } from '../core/orchestration/loopConfig'
 import { DefaultLoopController } from '../core/orchestration/loopConfig'
+import {
+  type ModelStepCheckpointRecorder,
+  createModelStepCheckpointRecorder,
+} from '../core/orchestration/modelStepCheckpointRecorder'
 import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
@@ -63,10 +71,12 @@ import {
   mergeCollectedAttachments,
 } from '../core/orchestration/toolUseLoopMessages'
 import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
+import { resolveBridgeCall } from '../core/orchestration/toolUseLoopToolBatch'
 import {
   type PreparedGfsFile,
   attachedFilesForTurnContext,
   buildTurnContextBlock,
+  stripTurnContextBlock,
 } from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
 import {
@@ -108,6 +118,13 @@ import type {
 import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
+import type {
+  ModelStepCheckpointAttachmentRow,
+  ModelStepCheckpointEntryRow,
+  ModelStepCheckpointFence,
+} from '../db/worker/modelStepCheckpointOps'
+import type { ModelStepTurnFence } from '../db/worker/protocol'
+import { parseModelStepCheckpointLoopState } from '../db/worker/protocol'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
@@ -123,20 +140,38 @@ import {
   ensureReporter,
   progressReporterRegistry,
 } from '../progress/sseProgressReporter.js'
-import type { Task, TaskError, TaskSource } from '../queue/types'
+import type {
+  ModelStepContinuationRef,
+  ModelStepContinuationVerdict,
+  Task,
+  TaskError,
+  TaskSource,
+} from '../queue/types'
+import type { IncomingMessage } from '../server/types'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
-import { referencedFilesForTurnContext } from './fileReferenceResolver'
+import type { FileReferenceGfsAccess } from './fileReferenceGfsGate'
+import {
+  type FileReferenceCheckFailure,
+  referencedFilesForTurnContext,
+  resolveFileReferences,
+} from './fileReferenceResolver'
 import {
   gfsManagedWorkspaceExecution,
   gfsStoreCallerIdentity,
   gfsWorkspaceExecutionEnabled,
 } from './gfsExecutionCapability'
 import { hasLargeAvailableGfsReferences, prepareGfsFiles } from './gfsFilePreparation'
+import type { GfsSurfaceRuntimeCapability } from './gfsReferenceSurfaces'
+import { fileReferenceCheckError } from './incomingAdmission'
+import {
+  type RecordedCheckpointMessage,
+  restoreCheckpointMessages,
+} from './modelStepCheckpointAttachments'
 import {
   type ProviderWorkflowAccessDenialReason,
   isProviderWorkflowChannel,
@@ -148,7 +183,7 @@ import {
 import { sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
-import type { AgentConfig, ExecutorFailoverSupport } from './types'
+import type { AgentConfig, ExecutorFailoverSupport, ModelStepCheckpointSupport } from './types'
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
 
@@ -187,6 +222,13 @@ export function resolveTaskSessionKey(task: Task): string {
  */
 export function executionModeForSource(source: TaskSource): 'interactive' | 'unattended' {
   return source === 'channel' ? 'interactive' : 'unattended'
+}
+
+/** Resolver inputs belong to execution; the persistence support stays reusable. */
+export interface ModelStepCheckpointExecutionSupport extends ModelStepCheckpointSupport {
+  /** Required when a continuation carries file references. */
+  fileReferenceGfsGate?: () => FileReferenceGfsAccess
+  gfsSurfaceRuntimeCapability?: (message: IncomingMessage) => GfsSurfaceRuntimeCapability
 }
 
 export interface TaskExecutorDeps {
@@ -266,6 +308,12 @@ export interface TaskExecutorDeps {
   sessionSearchService?: SessionSearchService
 
   /**
+   * #1043 — durable model-step checkpoints. Present only with the SQLite store;
+   * absent (memory mode) → no recorder, no Retry model step.
+   */
+  modelStepCheckpoints?: ModelStepCheckpointExecutionSupport
+
+  /**
    * R5 — provider-fallback support for THIS task. When present with a non-empty
    * `policy.fallbacks`, `buildLoopConfig` wraps the primary `LlmPort` so an
    * eligible provider error switches to the next fallback (adapter-per-attempt
@@ -329,6 +377,17 @@ export class TaskExecutor {
    * resume that continues the same turn.
    */
   private readonly attachmentReadLedger = new AttachmentReadLedger()
+  /** #1043 — resumable checkpoint left by this turn's failed loop, if any. */
+  private modelStepCheckpointId: string | undefined
+  /** Last successful physical model completion for this task's transcript. */
+  private checkpointServedBy: { provider: string; model: string } | undefined
+  private continuationVerdictEmitted = false
+  private continuationCompletionFence: ModelStepCheckpointFence | undefined
+  private continuationFenceLost = false
+  private continuationClaimReleased = false
+  private continuationRecorder: ModelStepCheckpointRecorder | undefined
+  private continuationLeaseStop: (() => Promise<void>) | undefined
+  private suspendedCancellation: Promise<void> | undefined
   /**
    * P2 token budgets (§5.2) — snapshot of the conversation's lifetime token
    * counters captured at task start, used as the per-task brake baseline.
@@ -435,6 +494,31 @@ export class TaskExecutor {
       this.conversation.auto_approved_tools.delete('*')
     }
     this.task.traceContext = approval.traceContext ?? this.conversation.traceContext ?? null
+    if (this.task.modelStepContinuation) {
+      const continuation = this.task.modelStepContinuation
+      const support = this.deps.modelStepCheckpoints!
+      const checkpoint = await support.store.loadLive(sessionKey)
+      if (
+        checkpoint?.header.checkpoint_id !== continuation.checkpointId ||
+        checkpoint.header.status !== 'claimed' ||
+        checkpoint.header.claim_owner !== continuation.fence.owner ||
+        checkpoint.header.claim_generation !== continuation.fence.generation
+      ) {
+        throw new Error('Pending approval checkpoint claim is no longer owned by this task')
+      }
+      const attachments = await support.store.loadAttachments(sessionKey, continuation.checkpointId)
+      if (!this.restoreCheckpointAttachments(attachments)) {
+        throw new Error('Pending approval checkpoint attachments expired')
+      }
+      this.createContinuationRecorder(
+        sessionKey,
+        continuation,
+        checkpoint.header.loop_state,
+        checkpoint.tools.confirmed,
+        attachments
+      )
+      this.startContinuationLease(sessionKey, continuation)
+    }
     this.state = 'waiting_approval'
   }
 
@@ -456,8 +540,15 @@ export class TaskExecutor {
 
     try {
       this.state = 'processing'
-      this.executionBudget.start(this.abortController)
       this.turnTiming = new TurnTimingRecorder(this.task.createdAt)
+      if (this.task.modelStepContinuation) {
+        const result = await this.runModelStepContinuation()
+        if (!result) return
+        await this.handleLoopResult(result)
+        this.finishRun()
+        return
+      }
+      this.executionBudget.start(this.abortController)
 
       // 1. Resolve session key, get/create conversation
       // INVARIANT: for source==='cron' this MUST produce the same session key that
@@ -576,41 +667,52 @@ export class TaskExecutor {
       // 3. Handle result
       await this.handleLoopResult(result)
 
-      if (
-        (this.state as ExecutorState) !== 'waiting_approval' &&
-        !this.abortController.signal.aborted
-      ) {
-        this.state = 'completed'
-        logger.info({ taskId: this.taskId }, 'Task completed')
-        this.turnTiming?.emit(this.taskId)
-        this.deps.onComplete(this.task)
-      } else if (this.abortController.signal.aborted) {
-        logger.info({ taskId: this.taskId }, 'Task cancelled')
-      }
+      this.finishRun()
     } catch (error) {
+      let canEndTurn =
+        !this.task.modelStepContinuation ||
+        (!this.continuationFenceLost && this.conversation?.activeTaskId === this.taskId)
+      if (this.task.modelStepContinuation) {
+        await this.abandonModelStepContinuation()
+        this.emitContinuationVerdict({ kind: 'lost' })
+        canEndTurn = !this.continuationFenceLost && this.conversation?.activeTaskId === this.taskId
+      }
       if (
         this.abortController.signal.aborted &&
         !(this.abortController.signal.reason instanceof TaskLimitError)
       ) {
-        if (this.conversation)
+        if (this.conversation && canEndTurn) {
           await this.handleLoopResult({ type: 'cancelled', reason: 'signal_aborted' })
+        }
         return
       }
       if (this.abortController.signal.reason instanceof TaskLimitError)
         error = this.abortController.signal.reason
-      if (error instanceof TaskLimitError && this.conversation) {
+      if (error instanceof TaskLimitError && this.conversation && canEndTurn) {
         this.executionBudget.pause()
+        const fence = this.continuationTurnFence()
         try {
-          if (this.conversation.state === 'processing')
-            await this.deps.conversationManager.completeTurn(this.conversation, error.message)
-          else await this.deps.conversationManager.failTurn(this.conversation)
+          if (this.conversation.state === 'processing') {
+            await this.deps.conversationManager.completeTurn(
+              this.conversation,
+              error.message,
+              fence ? { modelStepTurnFence: fence } : undefined
+            )
+          } else if (this.task.modelStepContinuation) {
+            await this.failContinuationTurnIfFenced()
+          } else {
+            await this.deps.conversationManager.failTurn(this.conversation)
+          }
         } catch (persistError) {
+          if (this.isContinuationFenceMismatch(persistError)) this.continuationFenceLost = true
           // A failed durable write must not prevent lifecycle failure or completion release.
           logger.error(
             { taskId: this.taskId, err: persistError },
             'Failed to persist task limit interruption'
           )
         }
+      } else if (this.task.modelStepContinuation && this.conversation && canEndTurn) {
+        await this.failContinuationTurnIfFenced()
       }
       const taskError = this.toTaskError(error)
       logger.error(
@@ -624,11 +726,562 @@ export class TaskExecutor {
         this.deps.onFail(this.task, taskError)
       }
     } finally {
+      if (this.state !== 'waiting_approval') await this.stopContinuationLease()
       await this.settleGfsRetentionOwner()
       this.executionBudget.pause()
       if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
         this.resolveCompletion?.()
     }
+  }
+
+  private finishRun(): void {
+    if (this.state !== 'waiting_approval' && !this.abortController.signal.aborted) {
+      this.state = 'completed'
+      logger.info({ taskId: this.taskId }, 'Task completed')
+      this.turnTiming?.emit(this.taskId)
+      this.deps.onComplete(this.task)
+    } else if (this.abortController.signal.aborted) {
+      logger.info({ taskId: this.taskId }, 'Task cancelled')
+    }
+  }
+
+  private emitContinuationVerdict(verdict: ModelStepContinuationVerdict): void {
+    const continuation = this.task.modelStepContinuation
+    if (!continuation || this.continuationVerdictEmitted) return
+    this.continuationVerdictEmitted = true
+    continuation.onVerdict(verdict)
+  }
+
+  private failContinuationPreparation(
+    verdict: Exclude<ModelStepContinuationVerdict, { kind: 'started' | 'reference_check_failed' }>
+  ): void {
+    const continuation = this.task.modelStepContinuation!
+    this.emitContinuationVerdict(verdict)
+    this.state = 'failed'
+    this.deps.onFail(
+      this.task,
+      verdict.kind === 'blocked'
+        ? {
+            code: MODEL_STEP_CONTINUE_ERROR_CODES.blocked,
+            message: `Model-step continuation is blocked: ${verdict.blockedReason}.`,
+            retryable: false,
+            provider: continuation.provider,
+          }
+        : {
+            code: MODEL_STEP_CONTINUE_ERROR_CODES.notFound,
+            message: 'The model-step checkpoint is no longer available.',
+            retryable: false,
+            provider: continuation.provider,
+          }
+    )
+  }
+
+  private async blockModelStepContinuation(blockedReason: ModelStepBlockedReason): Promise<void> {
+    const continuation = this.task.modelStepContinuation!
+    const support = this.deps.modelStepCheckpoints!
+    const version = await support.store.transition(
+      resolveTaskSessionKey(this.task),
+      continuation.fence,
+      {
+        from: ['claimed'],
+        to: 'blocked',
+        blockedReason,
+      }
+    )
+    this.failContinuationPreparation(
+      version === null ? { kind: 'lost' } : { kind: 'blocked', blockedReason }
+    )
+  }
+
+  private async abandonModelStepContinuation(): Promise<void> {
+    const continuation = this.task.modelStepContinuation
+    const support = this.deps.modelStepCheckpoints
+    if (!continuation || !support) return
+    if (this.continuationClaimReleased) return
+    const version = await support.store.transition(
+      resolveTaskSessionKey(this.task),
+      continuation.fence,
+      {
+        from: ['claimed'],
+        to: 'abandoned',
+      }
+    )
+    if (version === null) this.continuationFenceLost = true
+    else this.continuationClaimReleased = true
+    this.continuationCompletionFence = undefined
+  }
+
+  private async stopContinuationLease(): Promise<void> {
+    const stop = this.continuationLeaseStop
+    this.continuationLeaseStop = undefined
+    await stop?.()
+  }
+
+  private startContinuationLease(sessionKey: string, continuation: ModelStepContinuationRef): void {
+    const support = this.deps.modelStepCheckpoints!
+    let renewal: Promise<void> | undefined
+    const timer = setInterval(() => {
+      if (renewal) return
+      renewal = support.store
+        .renewLease(sessionKey, continuation.fence, support.claimLeaseMs)
+        .then(
+          applied => {
+            if (!applied) {
+              this.continuationFenceLost = true
+              this.abort()
+            }
+          },
+          err => {
+            logger.error(
+              { taskId: this.taskId, checkpointId: continuation.checkpointId, err },
+              'Model-step continuation lease renewal failed'
+            )
+            this.continuationFenceLost = true
+            this.abort()
+          }
+        )
+        .finally(() => {
+          renewal = undefined
+        })
+    }, support.claimLeaseMs / 3)
+    timer.unref?.()
+    this.continuationLeaseStop = async () => {
+      clearInterval(timer)
+      await renewal
+    }
+  }
+
+  private async requireContinuationClaim(): Promise<ModelStepCheckpointRecorder> {
+    const continuation = this.task.modelStepContinuation
+    const support = this.deps.modelStepCheckpoints
+    const recorder = this.continuationRecorder
+    if (!continuation || !support || !recorder || recorder.poisoned) {
+      throw new Error('Model-step continuation approval has no live recorder')
+    }
+    if (
+      !(await support.store.renewLease(
+        resolveTaskSessionKey(this.task),
+        continuation.fence,
+        support.claimLeaseMs
+      ))
+    ) {
+      this.continuationFenceLost = true
+      throw new Error('Model-step continuation claim was lost during approval')
+    }
+    return recorder
+  }
+
+  private createContinuationRecorder(
+    sessionKey: string,
+    continuation: ModelStepContinuationRef,
+    loopState: string | null,
+    confirmedResults: number,
+    attachments: ModelStepCheckpointAttachmentRow[]
+  ): ModelStepCheckpointRecorder {
+    const support = this.deps.modelStepCheckpoints!
+    const recorder = createModelStepCheckpointRecorder({
+      store: support.store,
+      sessionKey,
+      mode: {
+        kind: 'continuation',
+        fence: continuation.fence,
+        confirmedResults,
+        loopState,
+      },
+      redact: text =>
+        this.responseSafety.sanitizeFreeformContent(text, {
+          secretWarning: 'Potential secret detected in model-step checkpoint',
+        }).content,
+      taskBudget: () =>
+        JSON.stringify({
+          ...this.executionBudget.snapshot(),
+          attachmentReadLedger: this.attachmentReadLedger.snapshot(),
+        }),
+      resumableTtlMs: support.resumableTtlMs,
+      sourceAttachments: this.task.sourceMessage?.attachments,
+      restoredAttachments: attachments,
+      attachmentTtlMs: support.attachmentTtlMs,
+      now: () => Date.now(),
+      onFenceLost: () => {
+        this.continuationFenceLost = true
+        this.abort()
+      },
+    })
+    const settle = recorder.settle.bind(recorder)
+    recorder.settle = async result => {
+      if (result?.type !== 'need_approval') await this.stopContinuationLease()
+      return settle(result)
+    }
+    this.continuationRecorder = recorder
+    return recorder
+  }
+
+  private continuationTurnFence(): ModelStepTurnFence | undefined {
+    const continuation = this.task.modelStepContinuation
+    if (!continuation || this.continuationFenceLost) return undefined
+    return {
+      fence: continuation.fence,
+      activeTaskId: this.taskId,
+      originTurnNumber: continuation.originTurnNumber,
+    }
+  }
+
+  private isContinuationFenceMismatch(err: unknown): boolean {
+    return err instanceof Error && err.message === 'model-step continuation fence mismatch'
+  }
+
+  private async failContinuationTurnIfFenced(): Promise<void> {
+    const fence = this.continuationTurnFence()
+    if (!fence || !this.conversation) return
+    try {
+      await this.deps.conversationManager.failTurn(this.conversation, fence)
+    } catch (err) {
+      if (!this.isContinuationFenceMismatch(err)) throw err
+      this.continuationFenceLost = true
+    }
+  }
+
+  private async runModelStepContinuation(): Promise<LoopResult | undefined> {
+    const continuation = this.task.modelStepContinuation!
+    const support = this.deps.modelStepCheckpoints
+    const message = this.task.sourceMessage
+    if (!support || !message) throw new Error('Model-step continuation execution is not wired')
+    const sessionKey = resolveTaskSessionKey(this.task)
+    if (!(await support.store.renewLease(sessionKey, continuation.fence, support.claimLeaseMs))) {
+      this.continuationFenceLost = true
+      this.failContinuationPreparation({ kind: 'lost' })
+      return undefined
+    }
+    if (continuation.taskBudget === null) {
+      throw new Error('Model-step checkpoint has no execution budget')
+    }
+    const budget = JSON.parse(continuation.taskBudget)
+    this.executionBudget.restore(budget)
+    const ledger = readAttachmentReadLedgerSnapshot(budget.attachmentReadLedger)
+    if (!ledger) throw new Error('Model-step checkpoint has no verifiable attachment read ledger')
+    this.attachmentReadLedger.restore(
+      mergeAttachmentReadLedgerSnapshots(this.attachmentReadLedger.snapshot(), ledger)
+    )
+    if (
+      this.executionBudget.remainingIterations === 0 ||
+      this.executionBudget.remainingDurationMs === 0
+    ) {
+      await this.blockModelStepContinuation('budget_exhausted')
+      return undefined
+    }
+    this.executionBudget.start(this.abortController)
+
+    const attachments = await support.store.loadAttachments(sessionKey, continuation.checkpointId)
+    if (!this.restoreCheckpointAttachments(attachments)) {
+      await this.blockModelStepContinuation('attachment_expired')
+      return undefined
+    }
+
+    const previousResolutions = message.fileReferenceResolutions ?? []
+    if (previousResolutions.length > 0) {
+      if (!support.fileReferenceGfsGate || !support.gfsSurfaceRuntimeCapability) {
+        throw new Error('Model-step continuation file-reference revalidation is not wired')
+      }
+      const references = previousResolutions.map(resolution => resolution.reference)
+      const access: FileReferenceGfsAccess = references.some(
+        reference => reference.source.kind === 'gfs'
+      )
+        ? support.fileReferenceGfsGate()
+        : { status: 'unsupported' }
+      const resolved =
+        access.status === 'credentials_failed'
+          ? { ok: false as const, failure: 'credentials' as const, errorClass: access.errorClass }
+          : await resolveFileReferences(
+              references,
+              access.status === 'available' ? access.client : null,
+              undefined,
+              support.gfsSurfaceRuntimeCapability(message)
+            )
+      if (!resolved.ok) {
+        logger.warn(
+          {
+            taskId: this.taskId,
+            checkpointId: continuation.checkpointId,
+            failure: resolved.failure,
+            errorClass: resolved.errorClass,
+          },
+          'Model-step continuation file-reference check failed'
+        )
+        await this.releaseClaimAfterReferenceCheckFailure(sessionKey, attachments, resolved.failure)
+        return undefined
+      }
+      const wasAvailable = new Set(
+        previousResolutions
+          .filter(resolution => resolution.availability === 'available')
+          .map(resolution => resolution.reference.id)
+      )
+      if (
+        resolved.resolutions.some(
+          resolution =>
+            wasAvailable.has(resolution.reference.id) && resolution.availability !== 'available'
+        )
+      ) {
+        await this.blockModelStepContinuation('reference_unavailable')
+        return undefined
+      }
+      message.fileReferenceResolutions = resolved.resolutions
+    }
+
+    const sessionLoadStart = Date.now()
+    this.conversation = await this.deps.conversationManager.getOrCreate(sessionKey, {
+      userId: message.sender,
+      channelType: message.channelType,
+      channelId: message.channelId,
+      threadId: message.threadId,
+      source: message.channelType,
+      model: this.deps.modelName,
+    })
+    await withAbort(() => this.prepareChannelWorkflowCallerContext(), this.abortController.signal)
+    const entries = await support.store.loadEntries(sessionKey, continuation.checkpointId)
+    const recordedMessages = entries
+      .filter(entry => entry.kind === 'message')
+      .map(entry => JSON.parse(entry.payload) as RecordedCheckpointMessage)
+    if (recordedMessages.length === 0) throw new Error('Model-step checkpoint has no messages')
+    const { registry, discoverableNatives, bridge } = await withAbort(
+      () => this.buildToolRegistry(),
+      this.abortController.signal
+    )
+    const discoverable = new Set(discoverableNatives.map(tool => tool.name))
+    const catalog = bridge?.getDeferrableCatalogNames()
+    for (const recorded of recordedMessages) {
+      for (const call of recorded.tool_calls ?? []) {
+        // Match the execution path's canonical bridge resolution, including
+        // exact catalog membership. The envelope's own registration is not a
+        // grant for its destination.
+        const resolved = resolveBridgeCall(call, bridge, [], catalog)
+        if (
+          resolved === 'handled' ||
+          (!registry.get(resolved.name) && !discoverable.has(resolved.name))
+        ) {
+          await this.blockModelStepContinuation('grant_revoked')
+          return undefined
+        }
+      }
+    }
+    this.executionBudget.assertTime()
+    // Preparation can outlast a lease. Fence again before reopening the turn.
+    if (!(await support.store.renewLease(sessionKey, continuation.fence, support.claimLeaseMs))) {
+      this.continuationFenceLost = true
+      this.failContinuationPreparation({ kind: 'lost' })
+      return undefined
+    }
+    const live = await support.store.loadLive(sessionKey)
+    const liveHeader = live?.header
+    if (
+      !liveHeader ||
+      liveHeader.checkpoint_id !== continuation.checkpointId ||
+      liveHeader.status !== 'claimed' ||
+      liveHeader.claim_owner !== continuation.fence.owner ||
+      liveHeader.claim_generation !== continuation.fence.generation
+    ) {
+      this.continuationFenceLost = true
+      this.failContinuationPreparation({ kind: 'lost' })
+      return undefined
+    }
+    const restoredMessages = restoreCheckpointMessages(recordedMessages, attachments, Date.now())
+    if (!restoredMessages.ok) {
+      await this.blockModelStepContinuation('attachment_expired')
+      return undefined
+    }
+    this.emitContinuationVerdict({ kind: 'started' })
+    await this.deps.conversationManager.resumeTurnForContinuation(
+      this.conversation,
+      this.taskId,
+      continuation.originTurnNumber,
+      this.task.traceContext ?? null,
+      this.conversation.state === 'processing' ? this.conversation.activeTaskId : undefined
+    )
+    this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
+    this.captureTaskTokenBaseline()
+    this.enqueueGovernedRunEvent('run_start', `task:${this.taskId}:start`)
+
+    this.startContinuationLease(sessionKey, continuation)
+    let waitingForApproval = false
+    try {
+      const references = message.fileReferenceResolutions
+      if (hasLargeAvailableGfsReferences(references)) {
+        const preparationConfig = await withAbort(
+          () => this.buildLoopConfig({ skipContextManager: true }),
+          this.abortController.signal
+        )
+        this.preparedGfsFiles = await prepareGfsFiles(references!, {
+          config: preparationConfig,
+          callerIdentity: message.sender,
+          toolTimeoutMs: appConfig.nativeTool.toolTimeout,
+          budget: this.executionBudget,
+        })
+        this.executionBudget.assertTime()
+      }
+      const messages = this.rebuildCheckpointMessages(restoredMessages.messages, entries)
+      const originUserMessageIndex = parseModelStepCheckpointLoopState(
+        liveHeader.loop_state
+      ).originUserMessageIndex
+      if (originUserMessageIndex === undefined) {
+        throw new Error('Model-step continuation is missing its origin user message index')
+      }
+      const originMessage = restoredMessages.messages[originUserMessageIndex]
+      const originIndex = originMessage ? messages.indexOf(originMessage) : -1
+      if (!originMessage || originMessage.role !== 'user' || originIndex < 0) {
+        throw new Error(
+          'Model-step continuation origin user message index does not point at a user message'
+        )
+      }
+      this.replaceRecordedTurnContextBlock(messages, originIndex)
+      validateToolLinkages(messages)
+      const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
+      const recorder = this.createContinuationRecorder(
+        sessionKey,
+        continuation,
+        liveHeader.loop_state,
+        continuation.confirmedResults,
+        attachments
+      )
+      loopConfig.modelStepCheckpointRecorder = recorder
+      this.currentTurnToolNames.clear()
+      let result: LoopResult
+      try {
+        result = await runToolUseLoop(loopConfig, messages)
+        waitingForApproval = result.type === 'need_approval'
+      } catch (err) {
+        // The loop settles before an exception leaves it. That settle already
+        // released this claim, so the outer catch must not abandon again.
+        this.continuationClaimReleased = true
+        throw err
+      }
+      if (waitingForApproval && recorder.poisoned) {
+        // A poisoned recorder cannot establish that its abandon transition
+        // succeeded. Let run() abandon the owned claim and stop renewal.
+        waitingForApproval = false
+        throw new Error('Model-step continuation approval lost its checkpoint recorder')
+      }
+      // A clean response keeps the claim for the final turn boundary. Every
+      // other settled result has already left `claimed`.
+      this.continuationClaimReleased =
+        (result.type !== 'response' && result.type !== 'need_approval') || recorder.poisoned
+      this.continuationCompletionFence =
+        result.type === 'response' && !recorder.poisoned ? continuation.fence : undefined
+      return result
+    } finally {
+      if (!waitingForApproval) await this.stopContinuationLease()
+    }
+  }
+
+  private restoreCheckpointAttachments(rows: ModelStepCheckpointAttachmentRow[]): boolean {
+    for (const attachment of this.task.sourceMessage?.attachments ?? []) {
+      if (attachment.kind !== 'file') continue
+      const row = rows.find(candidate => candidate.attachment_id === attachment.id)
+      if (!row || row.expires_at <= Date.now()) return false
+      const bytes = Buffer.from(row.bytes)
+      const digest = createHash('sha256').update(bytes).digest('hex')
+      if (
+        bytes.byteLength !== row.size_bytes ||
+        digest !== row.digest_hex ||
+        digest !== attachment.digest?.hex
+      ) {
+        logger.error(
+          { taskId: this.taskId, attachmentId: attachment.id },
+          'Model-step checkpoint attachment digest or size mismatch'
+        )
+        return false
+      }
+      attachment.dataBase64 = bytes.toString('base64')
+    }
+    return true
+  }
+
+  /**
+   * A file-reference check that cannot complete is handled as message
+   * admission handles it: the turn is refused with the same error. The claim
+   * goes back to `resumable` so Retry model step stays offered.
+   */
+  private async releaseClaimAfterReferenceCheckFailure(
+    sessionKey: string,
+    attachments: ModelStepCheckpointAttachmentRow[],
+    failure: FileReferenceCheckFailure
+  ): Promise<void> {
+    const continuation = this.task.modelStepContinuation!
+    const support = this.deps.modelStepCheckpoints!
+    const snapshot = await support.store.loadLive(sessionKey)
+    const header = snapshot?.header
+    if (
+      !header ||
+      header.checkpoint_id !== continuation.checkpointId ||
+      header.status !== 'claimed' ||
+      header.claim_owner !== continuation.fence.owner ||
+      header.claim_generation !== continuation.fence.generation
+    ) {
+      this.failContinuationPreparation({ kind: 'lost' })
+      return
+    }
+    if (header.failed_at === null || header.expires_at === null) {
+      throw new Error('Claimed model-step checkpoint has no failure or expiry time')
+    }
+    const version = await support.store.transition(sessionKey, continuation.fence, {
+      from: ['claimed'],
+      to: 'resumable',
+      failedAt: header.failed_at,
+      expiresAt: header.expires_at,
+      ...(attachments.length > 0
+        ? {
+            attachments: attachments.map(attachment => ({
+              attachmentId: attachment.attachment_id,
+              digestHex: attachment.digest_hex,
+              bytes: Buffer.from(attachment.bytes),
+              expiresAt: attachment.expires_at,
+            })),
+          }
+        : {}),
+    })
+    if (version === null) {
+      this.failContinuationPreparation({ kind: 'lost' })
+      return
+    }
+    this.emitContinuationVerdict({ kind: 'reference_check_failed' })
+    this.state = 'failed'
+    this.deps.onFail(this.task, fileReferenceCheckError(failure, continuation.provider))
+  }
+
+  private rebuildCheckpointMessages(
+    recordedMessages: ChatMessage[],
+    entries: ModelStepCheckpointEntryRow[]
+  ): ChatMessage[] {
+    const dispatched = new Set(
+      entries.filter(entry => entry.kind === 'tool_dispatch').map(entry => entry.tool_call_id)
+    )
+    const confirmed = new Set(
+      entries.filter(entry => entry.kind === 'tool_result').map(entry => entry.tool_call_id)
+    )
+    const messages: ChatMessage[] = []
+    let pending: NonNullable<ChatMessage['tool_calls']> = []
+    const finishBatch = (): void => {
+      for (const call of pending) {
+        if (confirmed.has(call.id))
+          throw new Error('Confirmed checkpoint tool result has no message')
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: call.name,
+          content: dispatched.has(call.id)
+            ? 'Tool outcome unknown; not re-executed'
+            : 'Not executed',
+        })
+      }
+      pending = []
+    }
+    for (const message of recordedMessages) {
+      if (message.role !== 'tool') finishBatch()
+      messages.push(message)
+      if (message.tool_calls) pending = [...message.tool_calls]
+      if (message.role === 'tool')
+        pending = pending.filter(call => call.id !== message.tool_call_id)
+    }
+    finishBatch()
+    return messages
   }
 
   /**
@@ -676,6 +1329,7 @@ export class TaskExecutor {
         this.legacyApprovalBudget = false
         return
       }
+      if (this.task.modelStepContinuation) await this.requireContinuationClaim()
       await this.deps.conversationManager.approve(this.conversation, alwaysApprove)
       if (approvalBeforeResolution?.tool_call_id) {
         this.approvedToolCorrelation = {
@@ -689,6 +1343,9 @@ export class TaskExecutor {
 
       // Fallback: no snapshot, re-run from scratch
       if (!approval?.context_snapshot?.length) {
+        if (this.task.modelStepContinuation) {
+          throw new Error('Model-step continuation approval has no frozen context')
+        }
         // There is no frozen call to execute. A regenerated call must not
         // consume the old approval through a name-only approval/guardrail gate.
         this.executionBudget.assertTime()
@@ -794,6 +1451,14 @@ export class TaskExecutor {
 
       const execStart = Date.now()
       this.executionBudget.assertTime()
+      const continuationRecorder = this.task.modelStepContinuation
+        ? await this.requireContinuationClaim()
+        : undefined
+      if (continuationRecorder) await continuationRecorder.begin(approval.context_snapshot)
+      await continuationRecorder?.recordDispatch(suspendedCall)
+      if (continuationRecorder?.poisoned) {
+        throw new Error('Model-step continuation approved dispatch could not be recorded')
+      }
       // approve() already resolved the durable approval. Consume its retained
       // RAM copy before execution so the next model-generated call cannot reuse
       // it through either approval gate. The local frozen approval still owns
@@ -871,6 +1536,14 @@ export class TaskExecutor {
       ]
 
       validateToolLinkages(messages)
+      if (continuationRecorder) {
+        await continuationRecorder.recordResult(suspendedCall, toolResult)
+        await continuationRecorder.syncMessages(messages)
+        if (continuationRecorder.poisoned) {
+          throw new Error('Model-step continuation approved result could not be recorded')
+        }
+        loopConfig.modelStepCheckpointRecorder = continuationRecorder
+      }
 
       const previousAttachments = [
         ...(approval.attachments || []),
@@ -880,6 +1553,21 @@ export class TaskExecutor {
       const result: LoopResult = toolResult.stopTurn
         ? turnStopResult(loopConfig, 0, toolResult.stopTurn.message, [])
         : await runToolUseLoop(loopConfig, messages)
+      if (continuationRecorder) {
+        if (toolResult.stopTurn) await continuationRecorder.settle(result)
+        if (result.type === 'need_approval' && continuationRecorder.poisoned) {
+          this.continuationClaimReleased = true
+          await this.failContinuationTurnIfFenced()
+          throw new Error('Model-step continuation approval lost its checkpoint recorder')
+        }
+        this.continuationClaimReleased =
+          (result.type !== 'response' && result.type !== 'need_approval') ||
+          continuationRecorder.poisoned
+        this.continuationCompletionFence =
+          result.type === 'response' && !continuationRecorder.poisoned
+            ? this.task.modelStepContinuation!.fence
+            : undefined
+      }
 
       // Preserve attachments
       if (previousAttachments.length > 0) {
@@ -910,6 +1598,21 @@ export class TaskExecutor {
         logger.info({ taskId: this.taskId }, 'Task cancelled')
       }
     } catch (error) {
+      if (this.task.modelStepContinuation && !this.continuationClaimReleased) {
+        await this.abandonModelStepContinuation()
+        await this.failContinuationTurnIfFenced()
+      }
+      if (
+        this.task.modelStepContinuation &&
+        this.continuationFenceLost &&
+        this.conversation?.activeTaskId === this.taskId
+      ) {
+        if (this.conversation.state === 'awaiting_approval') {
+          await this.deps.conversationManager.deny(this.conversation)
+        } else if (this.conversation.state === 'processing') {
+          await this.deps.conversationManager.failTurn(this.conversation)
+        }
+      }
       if (
         this.legacyApprovalBudget &&
         !this.abortController.signal.aborted &&
@@ -961,6 +1664,7 @@ export class TaskExecutor {
         this.deps.onFail(this.task, taskError)
       }
     } finally {
+      if (this.state !== 'waiting_approval') await this.stopContinuationLease()
       await this.settleGfsRetentionOwner()
       this.executionBudget.pause()
       if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
@@ -989,6 +1693,9 @@ export class TaskExecutor {
         provider: error.provider,
         httpStatus: error.httpStatus,
         providerCode: error.providerCode,
+        ...(this.modelStepCheckpointId !== undefined
+          ? { modelStepCheckpointId: this.modelStepCheckpointId }
+          : {}),
       }
     }
     return {
@@ -1012,6 +1719,10 @@ export class TaskExecutor {
 
     const toolName = this.conversation.pending_approval?.tool_name || 'unknown'
     await this.deps.conversationManager.deny(this.conversation)
+    if (this.task.modelStepContinuation) {
+      await this.stopContinuationLease()
+      await this.abandonModelStepContinuation()
+    }
 
     // Terminal SSE event emitted automatically when onComplete → queue.completeTask
     // → lifecycle.transition('completed') fires (SseProgressReporter subscription).
@@ -1047,10 +1758,20 @@ export class TaskExecutor {
     const suspended = this.state === 'waiting_approval'
     this.deps.taskLifecycle.transition(this.task.id, 'cancelled', 'user_requested')
     this.abortController.abort()
-    if (suspended) {
+    if (suspended && !this.suspendedCancellation) {
       // A suspended run has already returned, so its finally block will not
-      // re-enter. Its producers have settled; join owner release explicitly.
-      void this.settleGfsRetentionOwner().then(() => this.resolveCompletion?.())
+      // re-enter. Join claim settlement and owner release before completion.
+      this.suspendedCancellation = (async () => {
+        await this.stopContinuationLease()
+        if (this.task.modelStepContinuation) await this.abandonModelStepContinuation()
+        await this.settleGfsRetentionOwner()
+      })()
+        .then(() => this.resolveCompletion?.())
+        .catch(err => {
+          logger.error({ taskId: this.taskId, err }, 'Suspended task cancellation cleanup failed')
+          this.deps.onFail(this.task, this.toTaskError(err))
+          this.resolveCompletion?.()
+        })
     }
   }
 
@@ -1237,10 +1958,7 @@ export class TaskExecutor {
     // `referenced_file` lines, so a message with file attachments or resolved
     // file references gets it with the cache off too; the attachment
     // condition also registers `clerum__attachment_read`.
-    const hasFileAttachments =
-      this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
-    const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
-    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences) {
+    if (this.needsTurnContextBlock()) {
       this.prependTurnContextBlock(messages)
     }
     const promptAssemblyStart = Date.now()
@@ -1255,7 +1973,136 @@ export class TaskExecutor {
       }
       this.turnTiming.setInputCharsApprox(inputChars)
     }
+    const recorder = this.createOriginCheckpointRecorder(messages)
+    if (recorder) loopConfig.modelStepCheckpointRecorder = recorder
     return runToolUseLoop(loopConfig, messages)
+  }
+
+  /**
+   * #1043 — the recorder of a fresh turn. A turn resumed after an approval
+   * runs without one, and so does a turn without a sender: the continuation
+   * route authorizes against the recorded principal.
+   */
+  private createOriginCheckpointRecorder(
+    messages: ChatMessage[]
+  ): ModelStepCheckpointRecorder | undefined {
+    if (this.task.modelStepContinuation) return undefined
+    const support = this.deps.modelStepCheckpoints
+    if (!support) return undefined
+    const conversation = this.conversation!
+    const sessionKey = this.sessionKey
+    const principal = this.task.sourceMessage?.sender
+    if (!sessionKey || !principal) return undefined
+    const originTurnNumber = this.deps.conversationManager.activeTurnNumber(conversation)
+    if (originTurnNumber === undefined) {
+      throw new Error(
+        `Model-step checkpoints are wired but the conversation store has no durable turn number for session ${conversation.id}`
+      )
+    }
+    const sourceMessage = sourceMessageForResume(this.task.sourceMessage)
+    return createModelStepCheckpointRecorder({
+      store: support.store,
+      sessionKey,
+      mode: {
+        kind: 'origin',
+        header: {
+          checkpointId: randomUUID(),
+          sessionKey,
+          originTurnNumber,
+          originTaskId: this.taskId,
+          provider: this.deps.llmProvider.getProviderType(),
+          model: this.deps.modelName,
+          hostId: support.hostId,
+          principal,
+          sourceMessage: sourceMessage ? JSON.stringify(sourceMessage) : null,
+        },
+        originUserMessageIndex: messages.length - 1,
+      },
+      redact: text =>
+        this.responseSafety.sanitizeFreeformContent(text, {
+          secretWarning: 'Potential secret detected in model-step checkpoint',
+        }).content,
+      taskBudget: () =>
+        JSON.stringify({
+          ...this.executionBudget.snapshot(),
+          attachmentReadLedger: this.attachmentReadLedger.snapshot(),
+        }),
+      servedBy: () => this.checkpointServedBy,
+      resumableTtlMs: support.resumableTtlMs,
+      sourceAttachments: this.task.sourceMessage?.attachments,
+      attachmentTtlMs: support.attachmentTtlMs,
+      now: () => Date.now(),
+      onFenceLost: () => this.abort(),
+    })
+  }
+
+  /**
+   * #666 — the block is the only carrier of the `attached_file` and
+   * `referenced_file` lines, so a message with file attachments or resolved
+   * file references gets it with the prompt cache off too.
+   */
+  private needsTurnContextBlock(): boolean {
+    const hasFileAttachments =
+      this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
+    const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    return appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences
+  }
+
+  /**
+   * #1043 — the recorded turn carries the `<turn-context>` block of the origin
+   * attempt (its date, reference availability and prepared-file receipts).
+   * Replace it with one built from the continuation's own re-resolved
+   * references and prepared files (mutates in place).
+   */
+  private replaceRecordedTurnContextBlock(messages: ChatMessage[], originIndex: number): void {
+    const origin = messages[originIndex]
+    if (!origin || origin.role !== 'user') {
+      throw new Error(
+        'Model-step continuation origin user message index does not point at a user message'
+      )
+    }
+    const sourceText = this.task.sourceMessage?.content ?? ''
+    // The recorder redacts the whole model message before storing it. Match
+    // against that same projection, including the image-only text supplied by
+    // buildSourceMessageContentParts, so the original prefix remains exact.
+    const recordedSourceText = this.responseSafety.sanitizeFreeformContent(
+      !sourceText.trim() && origin.contentParts?.some(part => part.type === 'image')
+        ? 'User attached image(s).'
+        : sourceText,
+      { secretWarning: 'Potential secret detected in model-step checkpoint' }
+    ).content
+    const stripRecordedBlock = (text: string): string => {
+      if (recordedSourceText) return stripTurnContextBlock(text, recordedSourceText)
+      // Cron origins record the prompt in the user turn, while their stored
+      // source message is empty. Recognize only a generated cron prefix and
+      // keep every byte after its first closing fence.
+      const close = '\n</turn-context>\n\n'
+      const closeIndex = text.indexOf(close)
+      if (closeIndex < 0 || !text.slice(0, closeIndex).includes('\ncron_job: ')) return text
+      const prompt = text.slice(closeIndex + close.length)
+      return stripTurnContextBlock(text, prompt)
+    }
+    for (let i = originIndex; i >= originIndex; i--) {
+      const m = messages[i]
+      if (m.role !== 'user') continue
+      if (m.contentParts && m.contentParts.length > 0) {
+        const textIndex = m.contentParts.findIndex(part => part.type === 'text')
+        const contentParts = m.contentParts.flatMap((part, index) => {
+          if (index !== textIndex || part.type !== 'text') return [part]
+          const text = stripRecordedBlock(part.text)
+          // prependTextToParts adds a text part when the message had none.
+          return text.length > 0 ? [{ ...part, text }] : []
+        })
+        messages[i] = { ...m, contentParts, content: textContentFromParts(contentParts) }
+      } else {
+        messages[i] = {
+          ...m,
+          content: stripRecordedBlock(m.content),
+        }
+      }
+      break
+    }
+    if (this.needsTurnContextBlock()) this.prependTurnContextBlock(messages, originIndex)
   }
 
   /**
@@ -1265,8 +2112,10 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[]): void {
-    for (let i = messages.length - 1; i >= 0; i--) {
+  private prependTurnContextBlock(messages: ChatMessage[], onlyIndex?: number): void {
+    const start = onlyIndex ?? messages.length - 1
+    const end = onlyIndex ?? 0
+    for (let i = start; i >= end; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
       const block = buildTurnContextBlock({
@@ -1356,10 +2205,30 @@ export class TaskExecutor {
         // turn that was not persisted.
         this.executionBudget.assertTime()
         this.executionBudget.pause()
+        if (this.task.modelStepContinuation && this.continuationFenceLost) {
+          throw new Error('Model-step continuation lost its checkpoint completion fence')
+        }
+        const continuationFence = this.continuationTurnFence()
         try {
-          await this.deps.conversationManager.completeTurn(this.conversation!, content)
+          await this.deps.conversationManager.completeTurn(
+            this.conversation!,
+            content,
+            continuationFence || this.continuationCompletionFence
+              ? {
+                  ...(this.continuationCompletionFence
+                    ? { completeModelStepCheckpoint: this.continuationCompletionFence }
+                    : {}),
+                  ...(continuationFence ? { modelStepTurnFence: continuationFence } : {}),
+                }
+              : undefined
+          )
         } catch (err) {
-          await this.deps.conversationManager.failTurn(this.conversation!)
+          if (this.isContinuationFenceMismatch(err)) {
+            this.continuationFenceLost = true
+            throw err
+          }
+          if (this.task.modelStepContinuation) await this.failContinuationTurnIfFenced()
+          else await this.deps.conversationManager.failTurn(this.conversation!)
           throw err
         }
         if (this.task.responseCallback) {
@@ -1385,7 +2254,7 @@ export class TaskExecutor {
         }
         // #666 R4-M2 — persist the sanitized source message so a cold restart
         // rebuilds the file-reference pins and attachment metadata. The inline
-        // bytes (dataBase64) never persist.
+        // bytes (dataBase64) never persist in the approval row.
         result.approval.sourceMessage = sourceMessageForResume(this.task.sourceMessage)
         // Durable write FIRST: under sqlite/dual the suspend can reject. We
         // must not tell the client "suspended" (SSE) or register the approval
@@ -1430,7 +2299,18 @@ export class TaskExecutor {
         // LLM history so it does not leak into the next turn (BUG-9).
         // cancelTurn sets a synthetic assistant response on the current turn so that
         // buildMessageHistory emits a clean user↔assistant alternation.
-        this.deps.conversationManager.cancelTurn(this.conversation!)
+        if (this.task.modelStepContinuation) {
+          const fence = this.continuationTurnFence()
+          if (!fence) break
+          try {
+            await this.deps.conversationManager.cancelTurn(this.conversation!, fence)
+          } catch (err) {
+            if (!this.isContinuationFenceMismatch(err)) throw err
+            this.continuationFenceLost = true
+          }
+        } else {
+          this.deps.conversationManager.cancelTurn(this.conversation!)
+        }
         // NOTE: We do NOT write task.status or task.completedAt here — TaskLifecycle is the
         // single writer (Invariant I1). The cancel subscriber in AgentStateMachine already
         // transitioned the task to cancelled before the loop checkpoint fired executor.abort().
@@ -1444,7 +2324,9 @@ export class TaskExecutor {
       }
 
       case 'error': {
-        await this.deps.conversationManager.failTurn(this.conversation!)
+        this.modelStepCheckpointId = result.checkpointId
+        if (this.task.modelStepContinuation) await this.failContinuationTurnIfFenced()
+        else await this.deps.conversationManager.failTurn(this.conversation!)
         throw result.error
       }
 
@@ -1516,6 +2398,7 @@ export class TaskExecutor {
    */
   private wrapFailoverPort(primaryPort: LlmPortAdapter, conversation: Conversation): LlmPort {
     const support = this.deps.failover
+    if (this.task.modelStepContinuation) return primaryPort
     if (!support || support.policy.fallbacks.length === 0) return primaryPort
     const primaryProvider = this.deps.llmProvider.getProviderType()
     const primaryModel = this.deps.modelName
@@ -1524,6 +2407,9 @@ export class TaskExecutor {
       primaryPair: { provider: primaryProvider, model: primaryModel },
       engine: support.engine,
       policy: support.policy,
+      onServed: pair => {
+        this.checkpointServedBy = pair
+      },
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
         // R5.7 — a SAME-provider fallback (other key) respects the session's

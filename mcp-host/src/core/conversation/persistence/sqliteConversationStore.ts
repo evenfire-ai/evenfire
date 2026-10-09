@@ -24,6 +24,7 @@ import type {
   ReapedSession,
   SessionRow,
 } from '../../../db/worker/protocol'
+import type { ModelStepTurnFence } from '../../../db/worker/protocol'
 import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
 import { projectGfsApproval } from '../../../visualInput/suspension'
@@ -41,6 +42,7 @@ import {
   type ConversationStore,
   type EvictCallback,
   type GetOrCreateOptions,
+  type PersistTurnCompleteOptions,
   type PersistedSessionListing,
   type SessionListQuery,
   type SessionMessagesQuery,
@@ -180,6 +182,17 @@ const DEFAULT_PENDING_APPROVAL_TTL_MS = 7 * 24 * 3600 * 1000
 interface SessionOrdinalState {
   nextOrdinal: number
   nextTurnNumber: number
+  /**
+   * #1043 — the failed turn a model-step continuation reopened. Every row the
+   * continuation writes carries it, and its end does not advance
+   * `nextTurnNumber`, which already counts that turn.
+   */
+  reopenedTurnNumber?: number
+}
+
+/** The turn number the rows written now belong to. */
+function currentTurnNumber(state: SessionOrdinalState): number {
+  return state.reopenedTurnNumber ?? state.nextTurnNumber
 }
 
 function conversationStateFromRow(state: string): ConversationState {
@@ -194,6 +207,7 @@ export class SqliteConversationStore implements ConversationStore {
   private readonly cache: PinnedLRUMap<string, Conversation>
   private readonly prefetchedPrefixes = new Set<string>()
   private readonly ordinals = new Map<string, SessionOrdinalState>()
+  private readonly reopenedTurnCompletionOwners = new WeakMap<SessionOrdinalState, object>()
   private readonly sessionKeyById = new Map<string, string>()
   private readonly evictCallbacks: EvictCallback[] = []
 
@@ -706,6 +720,34 @@ export class SqliteConversationStore implements ConversationStore {
    * the replay anchor, and a torn start (message without `active_task_id`, or
    * vice versa) is impossible by construction.
    */
+
+  private claimReopenedTurnMarker(state: SessionOrdinalState): {
+    owner: object
+    previousOwner: object | undefined
+    previousReopenedTurnNumber: number | undefined
+  } {
+    const previousOwner = this.reopenedTurnCompletionOwners.get(state)
+    const previousReopenedTurnNumber = state.reopenedTurnNumber
+    const owner = {}
+    this.reopenedTurnCompletionOwners.set(state, owner)
+    return { owner, previousOwner, previousReopenedTurnNumber }
+  }
+
+  private releaseReopenedTurnMarker(state: SessionOrdinalState, marker: { owner: object }): void {
+    if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
+      this.reopenedTurnCompletionOwners.delete(state)
+    }
+  }
+
+  private restoreReopenedTurnMarker(
+    state: SessionOrdinalState,
+    marker: { owner: object; previousOwner: object | undefined }
+  ): void {
+    if (this.reopenedTurnCompletionOwners.get(state) !== marker.owner) return
+    if (marker.previousOwner === undefined) this.reopenedTurnCompletionOwners.delete(state)
+    else this.reopenedTurnCompletionOwners.set(state, marker.previousOwner)
+  }
+
   async persistTurnStart(conv: Conversation, userInput: string): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
@@ -713,37 +755,47 @@ export class SqliteConversationStore implements ConversationStore {
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
-    await this.persistQueue.enqueueSync(
-      {
-        kind: 'persist_turn_boundary',
-        message: {
-          session_id: conv.id,
-          ordinal,
-          role: 'user',
-          content: userInput,
-          content_parts: null,
-          tool_call_id: null,
-          tool_calls: null,
-          tool_name: null,
-          timestamp: Date.now() / 1000,
-          token_count: null,
-          finish_reason: null,
-          spillover_ref: null,
-          is_error: 0,
-          turn_number: turnNumber,
+    const marker = this.claimReopenedTurnMarker(state)
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'persist_turn_boundary',
+          message: {
+            session_id: conv.id,
+            ordinal,
+            role: 'user',
+            content: userInput,
+            content_parts: null,
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: Date.now() / 1000,
+            token_count: null,
+            finish_reason: null,
+            spillover_ref: null,
+            is_error: 0,
+            turn_number: turnNumber,
+          },
+          sessionId: conv.id,
+          state: conv.state,
+          // D.1 — mirror the in-RAM activeTaskId (set by startTurn) to the column.
+          activeTaskId: conv.activeTaskId ?? null,
+          activeTraceContext: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
+          // Auto-title (spec 15): materialize only on turn 1, gated on the durable
+          // `turnNumber` (not `turns.length`, which is RAM-fragile). The dispatcher
+          // runs a COALESCE write so a retried turn 1 is idempotent.
+          title: turnNumber === 1 ? (conv.title ?? undefined) : undefined,
+          // #1043 — admitting a new turn retires any live model-step checkpoint
+          // of this session in the same transaction (Resend and new messages).
+          retireModelStepCheckpointsOf: sessionKey,
         },
-        sessionId: conv.id,
-        state: conv.state,
-        // D.1 — mirror the in-RAM activeTaskId (set by startTurn) to the column.
-        activeTaskId: conv.activeTaskId ?? null,
-        activeTraceContext: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
-        // Auto-title (spec 15): materialize only on turn 1, gated on the durable
-        // `turnNumber` (not `turns.length`, which is RAM-fragile). The dispatcher
-        // runs a COALESCE write so a retried turn 1 is idempotent.
-        title: turnNumber === 1 ? (conv.title ?? undefined) : undefined,
-      },
-      sessionKey
-    )
+        sessionKey
+      )
+    } catch (err) {
+      this.restoreReopenedTurnMarker(state, marker)
+      throw err
+    }
+    this.releaseReopenedTurnMarker(state, marker)
   }
 
   /**
@@ -754,64 +806,139 @@ export class SqliteConversationStore implements ConversationStore {
    * async ops could leave `active_task_id` dirty — which would block a future
    * suspend gate forever — or ACK a turn that was never written.
    */
-  async persistTurnComplete(conv: Conversation, response: string): Promise<void> {
+  async persistTurnComplete(
+    conv: Conversation,
+    response: string,
+    opts?: PersistTurnCompleteOptions
+  ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
-    if (!sessionKey) return
+    if (!sessionKey) {
+      if (opts?.completeModelStepCheckpoint) {
+        throw new Error(`Cannot complete a model-step checkpoint for untracked session ${conv.id}`)
+      }
+      return
+    }
     this.reconcilePinning(sessionKey, conv)
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
-    const turnNumber = state.nextTurnNumber
+    const turnNumber = currentTurnNumber(state)
+    if (opts?.completeModelStepCheckpoint && state.reopenedTurnNumber === undefined) {
+      throw new Error(`A model-step checkpoint can only complete a reopened turn (${conv.id})`)
+    }
     // Reserve before the durability await so an immediate follow-up turn cannot
-    // reuse this number while the completion boundary is still queued.
-    state.nextTurnNumber += 1
+    // reuse this number while the completion boundary is still queued. A
+    // reopened turn's number is already counted.
+    if (state.reopenedTurnNumber === undefined) state.nextTurnNumber += 1
+    const previousReopenedTurnNumber = state.reopenedTurnNumber
+    const completionOwner = {}
+    this.reopenedTurnCompletionOwners.set(state, completionOwner)
+    state.reopenedTurnNumber = undefined
     // Stamp the per-turn token total onto the final assistant message (the turn
     // accumulated it in RAM via recordSessionUsage). reconstruct sums these back
     // onto the Turn on cold-load.
     const turn = conv.turns[conv.turns.length - 1]
-    await this.persistQueue.enqueueSync(
-      {
-        kind: 'persist_turn_boundary',
-        message: {
-          session_id: conv.id,
-          ordinal,
-          role: 'assistant',
-          content: response,
-          content_parts: null,
-          tool_call_id: null,
-          tool_calls: null,
-          tool_name: null,
-          timestamp: Date.now() / 1000,
-          token_count: null,
-          finish_reason: 'stop',
-          spillover_ref: null,
-          is_error: 0,
-          turn_number: turnNumber,
-          input_tokens: turn?.input_tokens ?? null,
-          output_tokens: turn?.output_tokens ?? null,
-          cache_read_tokens: turn?.cache_read_tokens ?? null,
-          cache_write_tokens: turn?.cache_write_tokens ?? null,
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'persist_turn_boundary',
+          message: {
+            session_id: conv.id,
+            ordinal,
+            role: 'assistant',
+            content: response,
+            content_parts: null,
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: Date.now() / 1000,
+            token_count: null,
+            finish_reason: 'stop',
+            spillover_ref: null,
+            is_error: 0,
+            turn_number: turnNumber,
+            input_tokens: turn?.input_tokens ?? null,
+            output_tokens: turn?.output_tokens ?? null,
+            cache_read_tokens: turn?.cache_read_tokens ?? null,
+            cache_write_tokens: turn?.cache_write_tokens ?? null,
+          },
+          sessionId: conv.id,
+          state: conv.state,
+          activeTaskId: null, // D.1 — turn complete clears the in-flight task
+          activeTraceContext: null,
+          ...(opts?.completeModelStepCheckpoint
+            ? { completeModelStepCheckpoint: opts.completeModelStepCheckpoint }
+            : {}),
+          ...(opts?.modelStepTurnFence ? { modelStepTurnFence: opts.modelStepTurnFence } : {}),
         },
-        sessionId: conv.id,
-        state: conv.state,
-        activeTaskId: null, // D.1 — turn complete clears the in-flight task
-        activeTraceContext: null,
-      },
-      sessionKey
-    )
+        sessionKey
+      )
+      if (this.reopenedTurnCompletionOwners.get(state) === completionOwner) {
+        this.reopenedTurnCompletionOwners.delete(state)
+      }
+    } catch (err) {
+      if (this.reopenedTurnCompletionOwners.get(state) === completionOwner) {
+        state.reopenedTurnNumber = previousReopenedTurnNumber
+        this.reopenedTurnCompletionOwners.delete(state)
+      }
+      throw err
+    }
   }
 
-  async persistTurnCancel(conv: Conversation): Promise<void> {
+  /**
+   * #1043 — reopens the failed turn `turnNumber` for a model-step
+   * continuation. No user row is written: the original one stays the turn's
+   * anchor. The session flips back to processing under the continuation task,
+   * awaited like `persistTurnStart`.
+   */
+  async persistContinuationStart(conv: Conversation, turnNumber: number): Promise<void> {
+    const sessionKey = this.sessionKeyById.get(conv.id)
+    if (!sessionKey) throw new Error(`Cannot reopen a turn of untracked session ${conv.id}`)
+    this.reconcilePinning(sessionKey, conv)
+    const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
+    if (turnNumber !== state.nextTurnNumber - 1) {
+      throw new Error(
+        `Cannot reopen turn ${turnNumber} of session ${conv.id}: latest turn is ${state.nextTurnNumber - 1}`
+      )
+    }
+    const marker = this.claimReopenedTurnMarker(state)
+    state.reopenedTurnNumber = turnNumber
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'update_session_state',
+          sessionId: conv.id,
+          state: conv.state,
+          activeTaskId: conv.activeTaskId ?? null,
+          activeTraceContext: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
+        },
+        sessionKey
+      )
+    } catch (err) {
+      if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
+        state.reopenedTurnNumber = marker.previousReopenedTurnNumber
+        this.restoreReopenedTurnMarker(state, marker)
+      }
+      throw err
+    }
+    this.releaseReopenedTurnMarker(state, marker)
+  }
+
+  async persistTurnCancel(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     this.reconcilePinning(sessionKey, conv)
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
-    const turnNumber = state.nextTurnNumber
+    const turnNumber = currentTurnNumber(state)
     // cancelTurn() intentionally remains synchronous/fire-and-forget at the
     // ConversationManager boundary. Reserve the next turn number before the
     // first await so an immediate follow-up startTurn cannot reuse this
-    // cancelled turn's number while the durable boundary is still queued.
-    state.nextTurnNumber += 1
+    // cancelled turn's number while the durable boundary is still queued. A
+    // reopened turn's number is already counted.
+    const marker = this.claimReopenedTurnMarker(state)
+    const countedNewTurn = marker.previousReopenedTurnNumber === undefined
+    if (countedNewTurn) state.nextTurnNumber += 1
+    state.reopenedTurnNumber = undefined
     // Stamp the partial per-turn total accumulated before cancellation.
     const turn = conv.turns[conv.turns.length - 1]
     // ATOMIC boundary (matches persistTurnComplete): the cancel message insert
@@ -820,36 +947,47 @@ export class SqliteConversationStore implements ConversationStore {
     // leave active_task_id dirty on an 'idle' session that NO boot reaper
     // matches — the D8 gate would then report activeWork forever and the Host
     // would never suspend. One op = no torn state.
-    await this.persistQueue.enqueueSync(
-      {
-        kind: 'persist_turn_boundary',
-        message: {
-          session_id: conv.id,
-          ordinal,
-          role: 'assistant',
-          content: '[Task cancelled by user before completion]',
-          content_parts: null,
-          tool_call_id: null,
-          tool_calls: null,
-          tool_name: null,
-          timestamp: Date.now() / 1000,
-          token_count: null,
-          finish_reason: 'stop',
-          spillover_ref: null,
-          is_error: 0,
-          turn_number: turnNumber,
-          input_tokens: turn?.input_tokens ?? null,
-          output_tokens: turn?.output_tokens ?? null,
-          cache_read_tokens: turn?.cache_read_tokens ?? null,
-          cache_write_tokens: turn?.cache_write_tokens ?? null,
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'persist_turn_boundary',
+          message: {
+            session_id: conv.id,
+            ordinal,
+            role: 'assistant',
+            content: '[Task cancelled by user before completion]',
+            content_parts: null,
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: Date.now() / 1000,
+            token_count: null,
+            finish_reason: 'stop',
+            spillover_ref: null,
+            is_error: 0,
+            turn_number: turnNumber,
+            input_tokens: turn?.input_tokens ?? null,
+            output_tokens: turn?.output_tokens ?? null,
+            cache_read_tokens: turn?.cache_read_tokens ?? null,
+            cache_write_tokens: turn?.cache_write_tokens ?? null,
+          },
+          sessionId: conv.id,
+          state: 'idle',
+          activeTaskId: null, // D.1 — cancel clears the in-flight task
+          activeTraceContext: null,
+          ...(fence ? { modelStepTurnFence: fence } : {}),
         },
-        sessionId: conv.id,
-        state: 'idle',
-        activeTaskId: null, // D.1 — cancel clears the in-flight task
-        activeTraceContext: null,
-      },
-      sessionKey
-    )
+        sessionKey
+      )
+    } catch (err) {
+      if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
+        if (countedNewTurn) state.nextTurnNumber -= 1
+        state.reopenedTurnNumber = marker.previousReopenedTurnNumber
+        this.restoreReopenedTurnMarker(state, marker)
+      }
+      throw err
+    }
+    this.releaseReopenedTurnMarker(state, marker)
   }
 
   /**
@@ -860,7 +998,7 @@ export class SqliteConversationStore implements ConversationStore {
    * resurrect a 'processing' session with a dirty active_task_id. A rejected
    * write propagates to the caller — never swallowed — like its siblings.
    */
-  async persistTurnFail(conv: Conversation): Promise<void> {
+  async persistTurnFail(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     this.reconcilePinning(sessionKey, conv)
@@ -868,17 +1006,37 @@ export class SqliteConversationStore implements ConversationStore {
     // Reserve before the durability await. If persistTurnComplete already
     // reserved this completed turn, keep that reservation rather than skipping
     // another number while failing the same in-RAM turn.
+    const marker = this.claimReopenedTurnMarker(state)
+    const previousNextTurnNumber = state.nextTurnNumber
     state.nextTurnNumber = Math.max(state.nextTurnNumber, conv.turns.length + 1)
-    await this.persistQueue.enqueueSync(
-      {
-        kind: 'update_session_state',
-        sessionId: conv.id,
-        state: 'idle',
-        activeTaskId: null, // D.1 — fail clears the in-flight task
-        activeTraceContext: null,
-      },
-      sessionKey
-    )
+    state.reopenedTurnNumber = undefined
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'update_session_state',
+          sessionId: conv.id,
+          state: 'idle',
+          activeTaskId: null, // D.1 — fail clears the in-flight task
+          activeTraceContext: null,
+          ...(fence ? { modelStepTurnFence: fence } : {}),
+        },
+        sessionKey
+      )
+    } catch (err) {
+      if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
+        state.nextTurnNumber = previousNextTurnNumber
+        state.reopenedTurnNumber = marker.previousReopenedTurnNumber
+        this.restoreReopenedTurnMarker(state, marker)
+      }
+      throw err
+    }
+    this.releaseReopenedTurnMarker(state, marker)
+  }
+
+  activeTurnNumber(conv: Conversation): number | undefined {
+    if (!this.sessionKeyById.has(conv.id)) return undefined
+    const state = this.ordinals.get(conv.id)
+    return state ? currentTurnNumber(state) : undefined
   }
 
   persistToolCall(conv: Conversation, toolCall: TurnToolCall): void {
@@ -887,7 +1045,7 @@ export class SqliteConversationStore implements ConversationStore {
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const assistantOrdinal = state.nextOrdinal++
     const toolOrdinal = state.nextOrdinal++
-    const turnNumber = state.nextTurnNumber
+    const turnNumber = currentTurnNumber(state)
     const now = Date.now() / 1000
     this.persistQueue.enqueueAsync(sessionKey, {
       kind: 'insert_message',

@@ -1,4 +1,9 @@
-import type { ModelSelectionWriteOutcome, ReapedSession } from '../../db/worker/protocol'
+import type { ModelStepCheckpointFence } from '../../db/worker/modelStepCheckpointOps'
+import type {
+  ModelSelectionWriteOutcome,
+  ModelStepTurnFence,
+  ReapedSession,
+} from '../../db/worker/protocol'
 import {
   type Conversation,
   ConversationState,
@@ -7,6 +12,20 @@ import {
   type TurnToolCall,
 } from '../types'
 import { sessionPartsFromPrefixedKey, userIdFromRpcPrefix } from './sessionKeyParts'
+
+export interface PersistTurnCompleteOptions {
+  /**
+   * #1043 — the continuation's claim on its model-step checkpoint. The
+   * checkpoint completes in the same transaction as the final response; a
+   * fence that no longer matches rolls the whole boundary back.
+   */
+  completeModelStepCheckpoint?: ModelStepCheckpointFence
+  /**
+   * #1043 — checked in the same transaction as this boundary. A mismatch
+   * rolls the write back. Absent on ordinary turns.
+   */
+  modelStepTurnFence?: ModelStepTurnFence
+}
 
 /**
  * Token usage from a SINGLE LLM call, accumulated additively into the durable
@@ -300,11 +319,29 @@ export interface ConversationStore {
    *  `active_task_id` clear as ONE transaction and return a promise the
    *  caller MUST await before ACKing the client; the in-memory store stays a
    *  sync no-op. */
-  persistTurnComplete(conv: Conversation, response: string): Promise<void> | void
+  persistTurnComplete(
+    conv: Conversation,
+    response: string,
+    opts?: PersistTurnCompleteOptions
+  ): Promise<void> | void
+  /**
+   * #1043 — a model-step continuation reopened the failed turn `turnNumber`:
+   * durable stores flip the session back to processing under the
+   * continuation task and write every later row of the turn (tool calls, the
+   * final response or cancellation) with that number, without starting a new
+   * turn. Only durable stores implement it.
+   */
+  persistContinuationStart?(conv: Conversation, turnNumber: number): Promise<void>
   /** Called when a turn is cancelled (synthetic response injected). */
-  persistTurnCancel(conv: Conversation): Promise<void> | void
+  persistTurnCancel(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> | void
   /** Called when a turn fails (no response written). */
-  persistTurnFail(conv: Conversation): Promise<void> | void
+  persistTurnFail(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> | void
+  /**
+   * #1043 — durable `turn_number` of the turn in flight (the one
+   * `persistTurnStart` wrote). Only durable stores answer; `undefined` when the
+   * session is not tracked.
+   */
+  activeTurnNumber?(conv: Conversation): number | undefined
   /** Called when a tool call records a result. */
   persistToolCall(conv: Conversation, toolCall: TurnToolCall): Promise<void> | void
 
@@ -507,14 +544,29 @@ export class InMemoryConversationStore implements ConversationStore {
   persistTurnStart(_conv: Conversation, _userInput: string): void {
     /* no-op */
   }
-  persistTurnComplete(_conv: Conversation, _response: string): void {
-    /* no-op */
+  persistTurnComplete(
+    _conv: Conversation,
+    _response: string,
+    opts?: PersistTurnCompleteOptions
+  ): void {
+    // #1043 — checkpoints exist only with the SQLite store; a fence here is a wiring error.
+    if (opts?.completeModelStepCheckpoint || opts?.modelStepTurnFence) {
+      throw new Error('The in-memory conversation store cannot complete a model-step checkpoint')
+    }
   }
-  persistTurnCancel(_conv: Conversation): void {
-    /* no-op */
+  persistTurnCancel(_conv: Conversation, fence?: ModelStepTurnFence): void {
+    if (fence) {
+      throw new Error(
+        'The in-memory conversation store cannot fence a model-step continuation turn'
+      )
+    }
   }
-  persistTurnFail(_conv: Conversation): void {
-    /* no-op */
+  persistTurnFail(_conv: Conversation, fence?: ModelStepTurnFence): void {
+    if (fence) {
+      throw new Error(
+        'The in-memory conversation store cannot fence a model-step continuation turn'
+      )
+    }
   }
   persistToolCall(_conv: Conversation, _toolCall: TurnToolCall): void {
     /* no-op */

@@ -1005,6 +1005,125 @@ export function createRpcRouter(): Router {
     }
   )
 
+  // Continue a model-step checkpoint — the write half of the session read
+  // above. Scoped like POST /messages (host:message:invoke: a continuation
+  // starts a turn) and forwarded to mcp-host
+  // POST /v1/runtime/sessions/:agent/:chatId/model-step-checkpoints/:checkpointId/continue
+  // (§"Write: continuation" in docs/contracts/model-step-checkpoint.md).
+  //
+  // The proxy adds no state to the protocol: mcp-host owns the checkpoint
+  // state machine, the version comparison and the revalidation, so its
+  // 202/200/404/409 body answers the caller unchanged. A lifecycle drain
+  // fence or down Host enters the same wake-and-hold path as POST /messages.
+  // The forwarded body is the parsed `{version}` re-serialized verbatim;
+  // mcp-host answers its own 400 for a malformed value. Only host.headers
+  // carry the edge identity, so the client Authorization is never forwarded.
+  router.post(
+    '/rpc/hosts/:hostRef/sessions/:agent/:chatId/model-step-checkpoints/:checkpointId/continue',
+    requireRpcAuth,
+    requireScope('host:message:invoke'),
+    jsonBody,
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        const agent = String(req.params.agent || '').trim()
+        const chatId = String(req.params.chatId || '').trim()
+        const checkpointId = String(req.params.checkpointId || '').trim()
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          !isSafeUpstreamAgentSegment(agent) ||
+          !isSafeUpstreamPathSegment(chatId) ||
+          !isSafeUpstreamPathSegment(checkpointId)
+        ) {
+          res.status(400).json({ error: 'Invalid hostRef, agent, chatId, or checkpointId' })
+          return
+        }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+        })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
+          return
+        }
+        const baseUrl = host.url.replace(/\/+$/, '')
+        // The segments are already control-char free (the guard above rejects
+        // the C0 range, CR/LF included); strip line breaks again as defense in
+        // depth so a logged value can never forge an extra log line. The body
+        // (the echoed `version`) is never logged.
+        const logAgent = agent.replace(/[\r\n]/g, '')
+        const logChatId = chatId.replace(/[\r\n]/g, '')
+        const logCheckpointId = checkpointId.replace(/[\r\n]/g, '')
+        console.info(
+          `[RPC_PROXY] user=${auth.sub} host=${sanitizeHostRefForLog(hostRef)} method=continue-model-step agent=${logAgent} chatId=${logChatId} checkpointId=${logCheckpointId}`
+        )
+        const upstreamUrl = `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/model-step-checkpoints/${encodeURIComponent(checkpointId)}/continue`
+        const forwardedBody = JSON.stringify(req.body)
+        const forwardContinuation = async (timeoutMs?: number) => {
+          const response = await fetch(upstreamUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...host.headers },
+            body: forwardedBody,
+            // No client-side deadline on the first attempt, like the message
+            // write path: mcp-host may already have claimed the checkpoint,
+            // so its own 202/404/409 answer must reach the caller instead
+            // of a proxy-generated 504. A client that leaves before the
+            // response still releases the upstream call (mutatingCallSignal).
+            signal: mutatingCallSignal(timeoutMs, res),
+          })
+          const body = await readMutatingResponseBody(response)
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          return { response, body }
+        }
+        try {
+          const { response, body } = await forwardContinuation()
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
+        } catch (error) {
+          console.warn(
+            `[RPC_PROXY] continue model step forward failed host=${sanitizeHostRefForLog(
+              hostRef
+            )} error=${describeErrorForLog(error)}`
+          )
+          if (isWakeEligibleHostError(error)) {
+            await respondWithWakeAndHold({
+              res,
+              hostRef,
+              host,
+              claims: auth,
+              rpcAccessToken,
+              deadlineMs: wakeDeadlineMs,
+              // A live claim or completed result replays. After the claim lease
+              // lapses, a new task may claim it; the old task loses its write fence.
+              retryUntilDeadline: true,
+              attemptUpstream: async timeoutMs => {
+                const { response, body } = await forwardContinuation(timeoutMs)
+                sendUpstreamBody(
+                  res,
+                  response.status,
+                  body,
+                  response.headers.get('content-type') || 'application/json'
+                )
+              },
+              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+            })
+            return
+          }
+          respondUpstreamUnavailable(res, error)
+        }
+      } catch (error) {
+        guardedNext(res, next, error)
+      }
+    }
+  )
+
   // Fetch one session's context-window breakdown — passthrough to mcp-host.
   // Mirrors the .../messages route exactly: same host:session:read scope and
   // per-user host resolution. mcp-host owns the per-user authorization (userSub
