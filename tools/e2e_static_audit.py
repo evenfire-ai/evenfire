@@ -43,12 +43,16 @@ def audit_file(path: Path) -> list[str]:
         findings.append(f"{path}: missing critical network-response/request wait")
 
     # Direct navigation is allowed only in an explicitly negative terminal
-    # guard, or as the first application-root entry when the spec opts into
-    # E2E_GUARDIAN_ENTRY_POINT. Deep links stay forbidden on that path.
+    # guard, as the first application-root entry, or as a marked password-reset
+    # link delivered by email. Other deep links remain forbidden.
     for match in re.finditer(r"\bpage\.goto\s*\(", text):
         before = text[max(0, match.start() - 240) : match.start()]
         after = text[match.end() : match.end() + 80]
         if re.search(r"terminal|deep.?link|foreign|missing|guard", before, re.IGNORECASE):
+            continue
+        if "E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT" in before and re.match(
+            r"\s*['\"]\/invitations\/[^'\"]+['\"]", after
+        ):
             continue
         if "E2E_GUARDIAN_ENTRY_POINT" in text and re.match(
             r"""\s*['\"]/?['\"]""", after
