@@ -138,7 +138,7 @@ describe('AppService setup and saved-session ownership', () => {
       appName: 'Environment B',
     })
 
-    await expect(setup).rejects.toThrow('desktop_setup_requires_signout')
+    await expect(setup).rejects.toThrow('stale_session_generation')
     expect(setupRequest).toHaveBeenCalledOnce()
     expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restA)
     expect(app.getSessionGeneration()).toBe(restoredGeneration)

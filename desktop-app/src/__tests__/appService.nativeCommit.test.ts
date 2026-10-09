@@ -160,6 +160,45 @@ describe('AppService native auth and environment commit ordering', () => {
     expect(service.getSessionGeneration()).toBe(generationDuringLogin + 1)
   })
 
+  it('uses the captured generation when login wins before setup dispatch', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const me = { id: 'user-a', email: 'user-a@example.test', teamId: 'team-a' }
+    service.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me }),
+    } as never
+    const setupRequest = vi.fn().mockResolvedValue({
+      valid: true,
+      email: 'user-a@example.test',
+      externalRestApiBaseUrl: 'https://api-b.example.test',
+      rpcProxyBaseUrl: 'https://rpc-b.example.test',
+      appName: 'Environment B',
+    })
+    const app = service as unknown as {
+      memberRegistrationServiceClient: { completeDesktopSetup: typeof setupRequest }
+      completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
+      withNativeAuthEnvironmentCommit<T>(operation: () => Promise<T>): Promise<T>
+    }
+    app.memberRegistrationServiceClient = { completeDesktopSetup: setupRequest }
+    const originalCommit = app.withNativeAuthEnvironmentCommit.bind(service)
+    let commitCount = 0
+    app.withNativeAuthEnvironmentCommit = async operation => {
+      commitCount += 1
+      if (commitCount === 2) {
+        app.withNativeAuthEnvironmentCommit = originalCommit
+        await service.googleLogin('synthetic-login-before-setup-dispatch')
+      }
+      return originalCommit(operation)
+    }
+
+    await expect(
+      app.completeDesktopSetup('user-a@example.test', 'synthetic-setup-token')
+    ).rejects.toThrow('stale_session_generation')
+
+    expect(setupRequest).not.toHaveBeenCalled()
+    expect(service.sessionToken).toBe('synthetic-session-a')
+    expect(service.getCachedUserId()).toBe('user-a')
+  })
+
   it('rejects handoff environment saves after auth changes or while auth is active', async () => {
     const { service, runtimeConfig, optionB, restA, restB } = await createNativeCommitTestHarness()
     const loginStarted = deferred<void>()

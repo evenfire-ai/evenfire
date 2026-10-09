@@ -2290,7 +2290,6 @@ export class AppService {
       | ReturnType<MemberRegistrationServiceClient['completeDesktopSetup']>
       | undefined
     await this.withNativeAuthEnvironmentCommit(async () => {
-      this.assertProfileHandoffSessionIsSignedOut()
       this.assertSessionGeneration(setupGeneration)
       setupRequest = this.memberRegistrationServiceClient.completeDesktopSetup(
         normalizedEmail,
@@ -2306,7 +2305,6 @@ export class AppService {
       }
 
       const committedGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
-        this.assertProfileHandoffSessionIsSignedOut()
         this.assertSessionGeneration(setupGeneration)
         await saveDesktopRuntimeConfig({
           externalRestApiBaseUrl: activation.externalRestApiBaseUrl,
