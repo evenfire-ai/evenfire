@@ -2161,8 +2161,11 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       codexView
     )
+    // A triggered run reconciles the run-scoped child CR; snippet Secret ownership
+    // belongs to the verified parent scope (WRC-resolved runtimeScopeRecipeName),
+    // never the child name. Non-triggered recipes default the scope to recipeName.
     const secretPreflightError = await this.validateSnippetSecretRefs(
-      recipeName,
+      runtimeScopeRecipeName,
       spec,
       currentStatus?.resourceInstances
     )
