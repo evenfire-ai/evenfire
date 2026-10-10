@@ -8446,6 +8446,58 @@ describe('WorkflowReconciler — reconcile loop', () => {
     expect((insertCall?.[1] as unknown[] | undefined)?.[9]).toBe(3600)
   })
 
+  it('mirrors triggers.schedule.concurrencyPolicy into workflow_schedules', async () => {
+    const { pool: pgPool, query: pgQuery } = makePgPool()
+    const reconciler = new WorkflowReconciler(makeDeps({ pgPool }))
+
+    await reconciler.reconcile(
+      'test-wf',
+      'uid-123',
+      'sandbox-recipes',
+      makeSpec({
+        triggers: {
+          schedule: { cron: '*/5 * * * *', timezone: 'UTC', concurrencyPolicy: 'Allow' },
+        },
+      }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      '11111111-1111-4111-8111-111111111111'
+    )
+
+    const insertCall = pgQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO workflow_schedules')
+    )
+    expect(insertCall).toBeDefined()
+    expect(String(insertCall?.[0])).toContain('concurrency_policy')
+    expect((insertCall?.[1] as unknown[] | undefined)?.[10]).toBe('Allow')
+  })
+
+  it('defaults concurrency_policy to Forbid when triggers.schedule omits it', async () => {
+    const { pool: pgPool, query: pgQuery } = makePgPool()
+    const reconciler = new WorkflowReconciler(makeDeps({ pgPool }))
+
+    await reconciler.reconcile(
+      'test-wf',
+      'uid-123',
+      'sandbox-recipes',
+      makeSpec({ triggers: { schedule: { cron: '*/5 * * * *', suspend: true } } }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      '11111111-1111-4111-8111-111111111111'
+    )
+
+    const insertCall = pgQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO workflow_schedules')
+    )
+    expect((insertCall?.[1] as unknown[] | undefined)?.[10]).toBe('Forbid')
+    // suspend still maps to enabled = false alongside the policy.
+    expect((insertCall?.[1] as unknown[] | undefined)?.[6]).toBe(false)
+  })
+
   it('calls tokenFactory to generate coordinator tokens (WRC→mcp-host tokens are now signed per-request, not on reconcile)', async () => {
     const reconciler = new WorkflowReconciler(deps)
     await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', makeSpec())
