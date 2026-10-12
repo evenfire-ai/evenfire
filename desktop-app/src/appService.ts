@@ -37,11 +37,11 @@ import { MemberRegistrationServiceClient } from './memberRegistrationServiceClie
 import {
   type PendingExternalLogoutIntent,
   type PendingExternalLogoutMarker,
-  clearPendingExternalLogoutIfContentsUnchanged,
   clearPendingExternalLogoutIfUnchanged,
   readPendingExternalLogoutContentsRevision,
   readPendingExternalLogoutMarker,
   recordPendingExternalLogout,
+  recordPendingExternalLogoutIfContentsUnchanged,
   recordPendingKeytarCleanupIfMissing,
   recordPendingKeytarCleanupIfUnchanged,
 } from './pendingExternalLogout.js'
@@ -894,7 +894,6 @@ type ActiveTeamContextHop = {
 type PendingLogoutLoginPlan = {
   intent: PendingExternalLogoutIntent | null
   marker: PendingExternalLogoutMarker | null
-  malformedMarkerContentsRevision: string | null
   writeKeytar: boolean
   requireSafeStorage: boolean
   retireMarker: boolean
@@ -1885,19 +1884,21 @@ export class AppService {
         throw markerError
       }
 
-      // Startup stays fail-closed for an unreadable marker. An explicit login
-      // can recover only after strict cleanup and a verified secure write.
+      // Normalize only the bytes observed above, before awaiting any cleanup.
+      // Explicit repair then uses the same revision-bound recovery plan as a
+      // valid logout marker, including secure fallback and isolated storage.
       try {
-        const result = await this.logoutOnce({ strictTokenClear: true })
-        return {
-          intent: { intent: 'logout-pending' },
-          marker: null,
-          malformedMarkerContentsRevision,
-          writeKeytar: result.keytarAvailable === true,
-          requireSafeStorage: !result.keytarAvailable,
-          retireMarker: result.keytarAvailable || result.keytarDisabled,
-          credentialSource: result.keytarAvailable ? 'active-keytar' : 'safe-storage',
+        if (
+          !recordPendingExternalLogoutIfContentsUnchanged(
+            userDataDirectory,
+            envKey,
+            malformedMarkerContentsRevision
+          )
+        ) {
+          throw new Error('Pending logout intent changed before login recovery')
         }
+        marker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
+        if (!marker) throw new Error('Pending logout intent disappeared before login recovery')
       } catch (clearError) {
         await this.failClosedForPendingLogout(clearError)
         throw clearError
@@ -1907,7 +1908,6 @@ export class AppService {
       return {
         intent: null,
         marker: null,
-        malformedMarkerContentsRevision: null,
         writeKeytar: false,
         requireSafeStorage: false,
         retireMarker: false,
@@ -1928,7 +1928,6 @@ export class AppService {
         return {
           intent,
           marker,
-          malformedMarkerContentsRevision: null,
           writeKeytar: result.keytarAvailable,
           requireSafeStorage: !result.keytarAvailable,
           retireMarker: cleanupVerified,
@@ -1942,7 +1941,6 @@ export class AppService {
           return {
             intent,
             marker,
-            malformedMarkerContentsRevision: null,
             writeKeytar: true,
             requireSafeStorage: false,
             retireMarker: true,
@@ -1957,7 +1955,6 @@ export class AppService {
           return {
             intent,
             marker,
-            malformedMarkerContentsRevision: null,
             writeKeytar: true,
             requireSafeStorage: false,
             retireMarker: false,
@@ -1969,7 +1966,6 @@ export class AppService {
           return {
             intent,
             marker,
-            malformedMarkerContentsRevision: null,
             writeKeytar: false,
             requireSafeStorage: true,
             retireMarker: false,
@@ -1989,7 +1985,6 @@ export class AppService {
       return {
         intent,
         marker,
-        malformedMarkerContentsRevision: null,
         writeKeytar: result.keytarAvailable === true,
         requireSafeStorage: !result.keytarAvailable && !result.keytarDisabled,
         retireMarker: result.keytarAvailable || result.keytarDisabled,
@@ -2003,7 +1998,6 @@ export class AppService {
         return {
           intent,
           marker,
-          malformedMarkerContentsRevision: null,
           writeKeytar: true,
           requireSafeStorage: false,
           retireMarker: true,
@@ -2018,7 +2012,6 @@ export class AppService {
         return {
           intent,
           marker,
-          malformedMarkerContentsRevision: null,
           writeKeytar: true,
           requireSafeStorage: false,
           retireMarker: false,
@@ -2033,7 +2026,6 @@ export class AppService {
         return {
           intent,
           marker,
-          malformedMarkerContentsRevision: null,
           writeKeytar: false,
           requireSafeStorage: true,
           retireMarker: false,
@@ -2368,15 +2360,9 @@ export class AppService {
         }
         this.activateGfsAuthScope()
         if (pendingLogout.intent && retirePendingLogoutMarker) {
-          const markerRetired = pendingLogout.marker
-            ? clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, pendingLogout.marker)
-            : pendingLogout.malformedMarkerContentsRevision
-              ? clearPendingExternalLogoutIfContentsUnchanged(
-                  userDataDirectory,
-                  envKey,
-                  pendingLogout.malformedMarkerContentsRevision
-                )
-              : false
+          const markerRetired =
+            pendingLogout.marker &&
+            clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, pendingLogout.marker)
           if (!markerRetired) {
             throw new Error('Pending logout intent changed while login was completing')
           }

@@ -230,6 +230,22 @@ export function recordPendingExternalLogout(userDataDirectory: string, envKey: s
   writeMarkerIntent(userDataDirectory, envKey, { intent: 'logout-pending' })
 }
 
+/** Normalize readable malformed bytes before joining the ordinary logout recovery flow. */
+export function recordPendingExternalLogoutIfContentsUnchanged(
+  userDataDirectory: string,
+  envKey: string,
+  expectedContentsRevision: string
+): boolean {
+  if (
+    readPendingExternalLogoutContentsRevision(userDataDirectory, envKey) !==
+    expectedContentsRevision
+  ) {
+    return false
+  }
+  writeMarkerIntent(userDataDirectory, envKey, { intent: 'logout-pending' })
+  return true
+}
+
 export function recordPendingKeytarCleanup(
   userDataDirectory: string,
   envKey: string,
