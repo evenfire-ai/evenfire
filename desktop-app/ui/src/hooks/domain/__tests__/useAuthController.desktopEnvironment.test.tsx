@@ -314,6 +314,68 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('refuses a confirmation save result for a different REST profile', async () => {
+    const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linked)
+    // Native config produces the intervening profile; the IPC result is its real state.
+    mocks.saveRuntimeConfig.mockImplementationOnce(async () => {
+      await nativeAppService!.saveRuntimeConfig(otherEnvironment)
+      return nativeAppService!.getRuntimeConfigState()
+    })
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(screen.getByTestId('setup-complete')).toHaveTextContent('no')
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'Desktop environment setup could not verify the confirmed REST and RPC endpoints.',
+      'error'
+    )
+  })
+
+  it('rejects duplicate saved matches that appear while the setup dialog is open', async () => {
+    const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linked)
+    for (const suffix of ['one', 'two']) {
+      await runtimeConfigModule!.saveDesktopRuntimeConfig({
+        externalRestApiBaseUrl: `${linked.externalRestApiBaseUrl}/${suffix}`,
+        rpcProxyBaseUrl: `https://rpc-${suffix}.example.test`,
+        appName: suffix,
+      })
+    }
+    // Preserve producer-written metadata and emulate legacy duplicate profile files.
+    const state = runtimeConfigModule!.getDesktopRuntimeConfigState()
+    for (const option of state.options.filter(option => ['one', 'two'].includes(option.appName))) {
+      if (!option.configPath) throw new Error('The config producer did not persist the profile')
+      const saved = JSON.parse(await fsp.readFile(option.configPath, 'utf8'))
+      await fsp.writeFile(
+        option.configPath,
+        JSON.stringify({ ...saved, externalRestApiBaseUrl: linked.externalRestApiBaseUrl })
+      )
+    }
+    vi.resetModules()
+    runtimeConfigModule = await import('../../../../../src/config')
+    const other = runtimeConfigModule
+      .getDesktopRuntimeConfigState()
+      .options.find(
+        option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+      )!
+    await runtimeConfigModule.selectDesktopRuntimeConfigOption(other.id)
+    mocks.saveRuntimeConfig.mockClear()
+    mocks.selectRuntimeConfigForHandoff.mockClear()
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
+    expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(runtimeConfigModule.getDesktopRuntimeConfigState().activeOptionId).toBe(other.id)
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'Desktop setup link rejected because multiple saved environments use this REST API.',
+      'error'
+    )
+  })
+
   it('preserves a native login that starts while setup confirmation rereads configuration', async () => {
     const linkedEnvironment = {
       appName: 'New tenant',
