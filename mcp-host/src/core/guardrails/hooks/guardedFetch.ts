@@ -34,7 +34,8 @@ export interface GuardHookFetcherOptions {
 
 export const DEFAULT_HOOK_HARD_DEADLINE_MS = 15000
 
-const UNAVAILABLE: HookHttpResult = { status: 0, body: undefined, unavailable: true }
+/** Fresh object per short-circuit so callers never share a mutable result. */
+const unavailable = (): HookHttpResult => ({ status: 0, body: undefined, unavailable: true })
 
 /** Identity of the breaker state (per hook pod+path), shared across tasks and lanes (§8.6). */
 export function hookBreakerKey(descriptor: HookDescriptor): string {
@@ -60,7 +61,7 @@ function withDeadline(
 ): Promise<HookHttpResult> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<HookHttpResult>(resolve => {
-    timer = setTimeout(() => resolve(UNAVAILABLE), hardDeadlineMs)
+    timer = setTimeout(() => resolve(unavailable()), hardDeadlineMs)
     // Don't let the backstop timer keep the event loop alive.
     ;(timer as { unref?: () => void }).unref?.()
   })
@@ -78,10 +79,10 @@ export function guardHookFetcher(opts: GuardHookFetcherOptions): HookFetcher {
   const key = hookBreakerKey(descriptor)
 
   return async args => {
-    if (descriptor.quarantined) return UNAVAILABLE
+    if (descriptor.quarantined) return unavailable()
     const engaged = hookBreakerEngaged(descriptor)
     // Breaker open: skip the dial (and its timeout); report unavailable.
-    if (engaged && breakers.isOpen(key, now())) return UNAVAILABLE
+    if (engaged && breakers.isOpen(key, now())) return unavailable()
 
     const res = await withDeadline(fetch, args, hardDeadlineMs)
     if (engaged) {
