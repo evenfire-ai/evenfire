@@ -32,7 +32,8 @@ npm start
 (`CLERUM_SERVER_PORT` changes it). Check it is up:
 
 ```bash
-curl -s http://localhost:8080/v1/runtime/health
+MCP_HOST="http://localhost:8080"
+curl -s "$MCP_HOST/v1/runtime/health"
 # {"status":"ok"}
 ```
 
@@ -66,7 +67,7 @@ channel headers must match the body, and `x-clerum-edge-host-ref` must match
 the Host name (`dev-host` by default):
 
 ```bash
-curl -s -X POST http://localhost:8080/v1/runtime/messages \
+curl -s -X POST "$MCP_HOST/v1/runtime/messages" \
   -H 'content-type: application/json' \
   -H 'x-clerum-edge-caller: channel-reader' \
   -H 'x-clerum-edge-host-ref: dev-host' \

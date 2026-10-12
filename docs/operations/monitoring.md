@@ -75,7 +75,7 @@ helm install grafana grafana/grafana -n monitoring \
 
 make -C monitoring status
 # Control UI already uses localhost:3000 on minikube, so forward Grafana elsewhere:
-kubectl port-forward -n monitoring svc/grafana 3001:80   # http://localhost:3001
+kubectl port-forward -n monitoring svc/grafana 3001:80   # then open localhost:3001
 ```
 
 The admin user is `admin`. The values file does not set a password. Set
