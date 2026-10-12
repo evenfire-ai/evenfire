@@ -3,6 +3,7 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { SidebarNav } from '../SidebarNav'
+import type { FileExplorerTreeProps } from '../SidebarNav/FileExplorerTree/types'
 import type { SidebarNavProps } from '../SidebarNav/types'
 
 // SidebarNav pulls from four contexts. Mock each module so we only render
@@ -40,7 +41,26 @@ vi.mock('@contexts/NavigationContext', () => ({
 // The real tree pulls TanStack Query and GFS contexts; the sidebar tests only
 // care that revealing it flips the explorer open, not what it renders.
 vi.mock('../SidebarNav/FileExplorerTree', () => ({
-  FileExplorerTree: () => <div data-testid="file-explorer-tree" />,
+  FileExplorerTree: ({ onOpenFolder, onOpenPreview }: FileExplorerTreeProps) => (
+    <div data-testid="file-explorer-tree">
+      <button data-testid="file-tree-open-folder" onClick={() => onOpenFolder('gfs://main/folder')}>
+        Open folder
+      </button>
+      <button
+        data-testid="file-tree-open-preview"
+        onClick={() =>
+          onOpenPreview({
+            bytes: 12,
+            gfsUri: 'gfs://main/readme.md',
+            kind: 'markdown',
+            name: 'readme.md',
+          })
+        }
+      >
+        Open preview
+      </button>
+    </div>
+  ),
 }))
 
 function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
@@ -259,6 +279,73 @@ describe('SidebarNav logo', () => {
     expect(container.querySelector('.left-nav')?.classList.contains('collapsed')).toBe(false)
     expect(screen.getByTestId('nav-new-chat')).toBeTruthy()
     expect(onCollapsedChange).not.toHaveBeenCalled()
+  })
+
+  it('closes the compact overlay when starting a new chat', () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onNewChat = vi.fn()
+    render(
+      <SidebarNav
+        {...baseProps({
+          compactMode: true,
+          compactMenuOpen: true,
+          onCompactMenuOpenChange,
+          onNewChat,
+        })}
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('nav-new-chat'))
+
+    expect(onNewChat).toHaveBeenCalledOnce()
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('closes the compact overlay after opening a file-tree folder', () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onOpenFilesSection = vi.fn()
+    const props = baseProps({
+      navItem: 'files',
+      compactMode: true,
+      compactMenuOpen: true,
+      onCompactMenuOpenChange,
+      onOpenFilesSection,
+    })
+    const { rerender } = render(<SidebarNav {...props} />)
+
+    fireEvent.click(screen.getByTestId('nav-files'))
+    rerender(<SidebarNav {...props} />)
+    onCompactMenuOpenChange.mockClear()
+    fireEvent.click(screen.getByTestId('file-tree-open-folder'))
+
+    expect(onOpenFilesSection).toHaveBeenCalledWith('gfs://main/folder')
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('closes the compact overlay after opening a file-tree preview', () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onOpenPreviewSection = vi.fn()
+    const props = baseProps({
+      navItem: 'files',
+      compactMode: true,
+      compactMenuOpen: true,
+      onCompactMenuOpenChange,
+      onOpenPreviewSection,
+    })
+    const { rerender } = render(<SidebarNav {...props} />)
+
+    fireEvent.click(screen.getByTestId('nav-files'))
+    rerender(<SidebarNav {...props} />)
+    onCompactMenuOpenChange.mockClear()
+    fireEvent.click(screen.getByTestId('file-tree-open-preview'))
+
+    expect(onOpenPreviewSection).toHaveBeenCalledWith({
+      bytes: 12,
+      gfsUri: 'gfs://main/readme.md',
+      kind: 'markdown',
+      name: 'readme.md',
+    })
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
   })
 })
 

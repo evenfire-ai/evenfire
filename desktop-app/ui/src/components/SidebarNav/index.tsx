@@ -420,6 +420,7 @@ export function SidebarNav({
                       onClick={event => {
                         event.stopPropagation()
                         onNewChat()
+                        onCompactMenuOpenChange(false)
                       }}
                       variant="ghost"
                     >
@@ -660,8 +661,14 @@ export function SidebarNav({
             {!isCollapsed && filesExplorerOpen && (
               <div className="nav-file-explorer">
                 <FileExplorerTree
-                  onOpenFolder={onOpenFilesSection}
-                  onOpenPreview={onOpenPreviewSection}
+                  onOpenFolder={uri => {
+                    onOpenFilesSection(uri)
+                    onCompactMenuOpenChange(false)
+                  }}
+                  onOpenPreview={preview => {
+                    onOpenPreviewSection(preview)
+                    onCompactMenuOpenChange(false)
+                  }}
                   pushToast={pushToast}
                 />
               </div>
