@@ -3,6 +3,7 @@ import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { act, renderHook } from '@testing-library/react'
 import type { HostAuthorityHoldKind } from '../../../../lib/hostAuthorityStore'
+import type { Tone } from '../../../../uiTypes'
 import { useAgentChatController } from '../../useAgentChatController'
 import { type HarnessHostAuthority, useHarnessHostAuthority } from './hostAuthorityHarness'
 
@@ -26,7 +27,7 @@ export interface RenderControllerResult {
     isBlocked: (agentRef: string) => boolean
   }
   spies: {
-    pushToast: ReturnType<typeof vi.fn>
+    pushToast: ReturnType<typeof vi.fn<(message: string, tone: Tone) => void>>
     pushNotification: ReturnType<typeof vi.fn>
     showDesktopNotification: ReturnType<typeof vi.fn>
     openAgentConversationFromNotification: ReturnType<typeof vi.fn>
@@ -56,7 +57,7 @@ export function renderController(
   options: RenderControllerOptions = {}
 ): RenderControllerResult {
   const spies = {
-    pushToast: vi.fn(),
+    pushToast: vi.fn<(message: string, tone: Tone) => void>(),
     pushNotification: vi.fn(),
     showDesktopNotification: vi.fn(async () => 'granted' as const),
     openAgentConversationFromNotification: vi.fn(async () => undefined),
