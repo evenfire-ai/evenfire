@@ -205,27 +205,15 @@ surfacing as an opaque `401` on the first message.
 Paste the key into its field under **Secrets → LLM**, allowlist at least one
 model, set the Host's provider and model. That's all — no env vars, no code.
 
-### 4.3 Amazon Bedrock
+### 4.3–4.5 Bedrock, Vertex AI, Azure OpenAI
 
-Enter **both** `aws-access-key-id` and `aws-secret-access-key` **in a single
-save** — a half-written pair is rejected client-side and by control-api, so a
-Host is never left half-configured. Then set `AWS_REGION` under
-**Host → Environment**. Bedrock model ids are runtime-qualified, e.g.
-`anthropic.claude-sonnet-4-6-v1:0`.
-
-### 4.4 Google Vertex AI
-
-Paste the **entire service-account JSON** into `vertex-service-account-json`.
-Its shape is validated (must parse, must contain `client_email` and
-`private_key`). Set `VERTEX_PROJECT_ID` (and optionally `VERTEX_LOCATION`) under
-**Host → Environment**. The driver builds credentials from the JSON **in memory**
-— it never writes a key file and never uses `GOOGLE_APPLICATION_CREDENTIALS`.
-
-### 4.5 Azure OpenAI
-
-Enter the key, then set `AZURE_OPENAI_ENDPOINT` under **Host → Environment**
-(this is required — construction fails closed without it). Remember the model
-field is your **deployment name**.
+These need more than one value: Bedrock takes a key pair saved together plus
+`AWS_REGION`; Vertex takes a service-account JSON plus `VERTEX_PROJECT_ID`;
+Azure takes a key plus `AZURE_OPENAI_ENDPOINT`, and its model name is your
+deployment name. Step-by-step setup is in the operator guide:
+[Vertex AI](../deploy/llm-providers.md#2-configuring-google-vertex-ai) ·
+[Bedrock](../deploy/llm-providers.md#3-configuring-amazon-bedrock) ·
+[Azure OpenAI](../deploy/llm-providers.md#3a-configuring-azure-openai).
 
 ### 4.6 Local development (no Kubernetes)
 
@@ -274,20 +262,11 @@ lives in the control-api Postgres table `llm_allowed_models`, is managed at
 `/llm-models`, is fully audited (`llm_allowed_models_audit`), and is materialized
 to the `clerum-llm-allowed-models` ConfigMap for the runtime.
 
-- **Fail-closed**: a row must exist and be `enabled`. A provider with no enabled
-  rows is unusable and flagged in the wizard.
-- **Discovery review**: `/llm-models` and `/llm-models/discovery` are the
-  route-backed Catalog and Discovery Review tabs of one operator surface. A
-  models.dev sync still lands rows as **disabled** for the operator to curate —
-  it never auto-enables anything. Models missing from the latest live catalog
-  remain in Catalog with a **Stale** row indicator and provider-level stale count.
-- **Deployed resources are never interrupted.** If a model falls out of the
-  allowlist, running Hosts keep working (a `WARN` plus a metric, marked "out of
-  allowlist" in the UI). Hard enforcement applies only to _new_ selections: host
-  create/edit, the runtime set-model call, and workflow `configure`.
-- **If the ConfigMap is missing** (rollout in progress, migration not yet run),
-  the runtime degrades explicitly: only the model already configured on the
-  Host/step is permitted. Neither open nor bricked.
+In short: it is **fail-closed** (a model needs an enabled row), catalog sync
+only proposes disabled rows, models already deployed are never interrupted,
+and a missing ConfigMap degrades to "only the configured model". Operator
+details (propagation, metrics, degraded mode, discovery review) are in the
+[operator guide](../deploy/llm-providers.md#5-the-model-allowlist).
 
 ### Image input capability (`image_input`)
 
@@ -371,6 +350,9 @@ the allowlist:
   falls back to the Host default and says so.
 - You can change the _model_, not the _provider_ — the provider is the operator's
   decision.
+
+Operator-side details (scopes, context-window indicator, usage attribution):
+[operator guide §6](../deploy/llm-providers.md#6-the-per-session-model-selector-desktop-app).
 
 ---
 

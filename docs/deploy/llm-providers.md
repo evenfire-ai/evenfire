@@ -80,6 +80,16 @@ returns key names only). To rotate a key, re-enter it.
    allowlist. Bedrock model ids are runtime-qualified, e.g.
    `anthropic.claude-sonnet-4-6-v1:0`.
 
+## 3a. Configuring Azure OpenAI
+
+1. In Control UI, open **Secrets → LLM**, expand the **Azure OpenAI** group,
+   and enter `azure-openai-api-key`.
+2. On the Host, open **Host → Environment** and set `AZURE_OPENAI_ENDPOINT`
+   (required; the driver fails closed without it) and optionally
+   `AZURE_OPENAI_API_VERSION`.
+3. Set the Host `spec.model.provider: azure`. The model name is your **Azure
+   deployment name**, not a catalog id, so allowlist the deployment name.
+
 ### Bedrock and Azure in workflows
 
 `bedrock` and `azure` are **not admissible in WorkflowRecipe steps**: they are
@@ -91,14 +101,12 @@ the other 22 providers are admissible in recipes — see the
 [providers overview](../llm-providers/README.md) for the per-surface matrix and
 the `clerum-model-secret-mapping` caveat.
 
-> **Dev-mode note.** When mcp-host runs in dev mode with no explicit
-> `spec.model`, it auto-detects the provider from whichever credential env vars
-> are present, in canonical id order (`openai` → `claude` → `zai` → `bailian` →
-> `vertex` → `bedrock` → the rest). Because Bedrock's slots are the standard AWS variables
-> (`aws-access-key-id` / `aws-secret-access-key`), a shell that already exports
-> generic AWS credentials — with `AWS_REGION` also set — can auto-select
-> `bedrock` when no higher-priority provider key is exported. Set `spec.model`
-> explicitly (or unset the AWS vars) if that is not what you want in dev.
+> **Dev-mode note.** Single-service dev mode (`CLERUM_DEV_MODE=true`, no
+> Kubernetes) reads credentials from env vars and the provider from
+> `CLERUM_MODEL_PROVIDER`. Bedrock's env vars are the standard
+> `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, so a shell that already exports
+> AWS credentials can auto-select `bedrock`. See
+> [Local development](../llm-providers/README.md#46-local-development-no-kubernetes).
 
 ## 4. Extra credential slots (for provider fallback, R5)
 
@@ -123,11 +131,20 @@ Fail-closed semantics: a model is usable only if a row exists for
 `(provider, model)` with `enabled = true`. A provider with no enabled rows is
 unusable and is flagged in the wizard.
 
+**Discovery review.** `/llm-models` (Catalog) and `/llm-models/discovery`
+(Discovery Review) are two tabs of the same screen. A models.dev catalog sync
+adds new rows as **disabled** for you to review; it never enables anything on
+its own. Models that disappear from the latest live catalog stay in Catalog
+with a **Stale** marker and a per-provider stale count.
+
+Per-model image-input capability (`image_input`) is covered in the
+[providers overview](../llm-providers/README.md#image-input-capability-image_input).
+
 ### Propagation to runtime (ConfigMap)
 
 control-api materializes the allowlist into the **`clerum-llm-allowed-models`**
 ConfigMap in the `mcp-host` namespace (`<provider>` → JSON array of
-`{ model, displayName?, contextWindowTokens? }`). mcp-host and the workflow
+`{ model, displayName?, contextWindowTokens?, vendor?, imageInput? }`). mcp-host and the workflow
 runtime read it — there is no hot call from mcp-host to control-api (the
 NetworkPolicy denies it by design). Changes therefore propagate **without a
 redeploy**: edit the allowlist, and the wizard, the host editor, and the runtime

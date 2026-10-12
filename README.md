@@ -64,8 +64,8 @@ make install-all && npm --prefix control-ui install
 npm run ui              # Control UI + Profile UI + Desktop App
 ```
 
-The full walkthrough (prerequisites, login, and the pure-API path) is in
-[Get started on minikube](docs/get-started/minikube.md).
+The full walkthrough (prerequisites, login, and the pure-API path) is in the
+[Quickstart](docs/get-started/quickstart.md).
 
 Evenfire is meant to be run on a remote cluster — see [Deploying to a remote cluster](#deploying-to-a-remote-cluster).
 
@@ -119,8 +119,7 @@ to its deep dive.
 
 - **vs a hosted assistant**: you own the data and the infrastructure. Evenfire
   adds no vendor to the request path: with your own model keys, prompts and files
-  go straight to the model provider you choose. Point an agent at a self-hosted
-  or local model and nothing leaves your environment at all.
+  go straight to the model provider you choose.
 - **vs an in-process agent framework**: real isolation and governance:
   per-agent pods, default-deny networking, multi-tenant teams and roles, and
   approvals enforced by the platform rather than by the calling application.
@@ -128,7 +127,7 @@ to its deep dive.
   connector registry, shared files, and cost accounting, all declared as
   configuration instead of assembled by hand.
 - **vs betting on one provider**: the same agents, tools, and configuration run
-  across a growing roster of providers, from frontier labs to local LLMs. Pick
+  across a growing roster of providers. Pick
   whichever model gives the best cost/quality tradeoff for each job, and switch
   providers without rebuilding, so your setup and data are never locked to a
   single vendor.
@@ -145,10 +144,14 @@ four layers constrain what it can do:
   channel, and callbacks are signature-verified.
 - **Least privilege.** Each agent reaches only the connectors its `Context`
   grants, through short-lived, scope-narrowed tokens that can't widen
-  themselves; container images must match a pinned digest and an allowlist.
-- **Deny-all networking.** Runtime namespaces start with no connectivity;
-  access is opened per (agent, connector), and outbound traffic is pinned to
-  the specific hosts a connector declares, never the open internet.
+  themselves. Connector images are checked against an allowlist (audit mode by
+  default), and custom workflow coordinator images must be digest-pinned.
+- **Deny-all networking.** Runtime namespaces start with no connectivity, and
+  access is opened per (agent, connector). A connector's egress is limited to
+  the hosts and ports it declares, unless an operator approves explicit
+  `public-web` egress. Agent pods may reach the public internet on ports
+  80/443 (for the LLM API and the approval-gated `http_request` tool);
+  private, metadata and cluster-internal ranges stay blocked.
 - **Authenticated internals.** Every service-to-service call carries a
   short-lived, audience-scoped token; shared-file access is re-checked and
   audited on each request, and inbound webhooks are signature-verified.
@@ -159,8 +162,7 @@ Report vulnerabilities privately: **[SECURITY.md](SECURITY.md)**.
 
 ## Supported LLM providers
 
-A broad, growing set of providers behind one interface, from frontier labs to
-local models. Keys live in a Kubernetes Secret you create (dev mode: a single
+A broad, growing set of hosted model providers behind one interface. Keys live in a Kubernetes Secret you create (dev mode: a single
 environment variable; setup infers the matching provider).
 
 | Provider                     | `provider` value     | Integration                           |

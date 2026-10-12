@@ -27,6 +27,11 @@ named `chatllm` you can message immediately.
   `HOST_MODEL_UNKNOWN`. Without any key, setup still boots, but the agent
   can't reply until you add one.
 
+Run `make prereqs` (alias `make doctor`) to check all of these at once. It
+prints the install command for anything missing and flags a `.env` without
+`ADMIN_PASSWORD` or an LLM key. `make minikube-setup` runs it first (skip with
+`SKIP_PREREQS=true`).
+
 ## 1. Configure
 
 ```bash
@@ -91,7 +96,10 @@ It seeds for you:
   install connectors from the registry) + a CommunicationChannel
 - one account, using the `ADMIN_PASSWORD` you set in `.env`: username
   **`admin`** for the Control UI and email **`admin@evenfire.local`** for the
-  Desktop App — the same account, and the sole Desktop App member
+  Desktop App — the same account, and the sole Desktop App member. It is also
+  the initial EvenDrive (GFS) operator. Re-running setup never recreates a
+  revoked operator link or adds a second member; if the link is missing,
+  setup stops with an actionable error.
 
 Verify:
 
