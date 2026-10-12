@@ -237,7 +237,8 @@ describe('AppService RPC discovery restore boundary', () => {
         teamId: string | null
         environmentKey: string
         baseUrl: string
-      }
+      },
+      status: 'active' | 'paused' = 'active'
     ) => {
       await seedService.persistDesktopGfsUpload({
         version: 2,
@@ -262,7 +263,7 @@ describe('AppService RPC discovery restore boundary', () => {
           expiresAt,
         },
         scope: { ...scope, drive: 'main', authEpoch: seedService.gfsAuthEpoch },
-        status: 'active',
+        status,
         updatedAt: new Date().toISOString(),
       })
     }
@@ -274,6 +275,12 @@ describe('AppService RPC discovery restore boundary', () => {
       baseUrl: 'https://api-other.example.test',
     })
     await seedService.logout()
+    await persistRecord('paused-upload', seedScope, 'paused')
+    const unrelatedEnvKey = runtimeConfig.resolveEnvKey('https://unrelated.example.test')
+    await persistRecord('other-environment-upload', {
+      ...seedScope,
+      environmentKey: unrelatedEnvKey,
+    })
 
     await runtimeConfig.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: restBaseUrl,
@@ -305,6 +312,18 @@ describe('AppService RPC discovery restore boundary', () => {
       }>
     }
     const byId = new Map(state.records.map(record => [record.uploadId, record]))
+    expect(byId.get('paused-upload')).toEqual(
+      expect.objectContaining({
+        status: 'paused',
+        scope: expect.objectContaining({ environmentKey: rpcEnvKey }),
+      })
+    )
+    expect(byId.get('other-environment-upload')).toEqual(
+      expect.objectContaining({
+        status: 'active',
+        scope: expect.objectContaining({ environmentKey: unrelatedEnvKey }),
+      })
+    )
     expect(byId.get('matching-upload')).toEqual(
       expect.objectContaining({
         status: 'suspended_auth',
