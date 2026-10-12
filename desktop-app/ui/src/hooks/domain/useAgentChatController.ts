@@ -1461,9 +1461,7 @@ export function useAgentChatController({
       pendingSwitch.agentRef === selectedAgent &&
       pendingSwitch.chatId === requestedSelection.chatId
     )
-    let switchStarted = false
     const switchForEffect = (chatId: string) => {
-      switchStarted = true
       if (sharesPendingSwitch) return pendingSwitch!.promise
       return runSwitchForIntent(
         selectedAgent,
@@ -1579,15 +1577,9 @@ export function useAgentChatController({
         }
       }
       settleChatMessagesLoading(selectionIntentRevision)
-    })().catch(error => {
-      if (cancelled || selectionIntentRevisionRef.current !== selectionIntentRevision) return
-      settleChatMessagesLoading(selectionIntentRevision)
-      if (switchStarted) return
-      liveDepsRef.current.pushToast(
-        `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      )
-    })
+      // List failures are normalized by loadChatList; switch failures are reported
+      // by their request. This continuation observes rejection without a second owner.
+    })().catch(() => undefined)
 
     return () => {
       cancelled = true

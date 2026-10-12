@@ -1070,15 +1070,16 @@ export function useChatListController({
               ? activeChatIdAtCreate
               : null
         if (restoreChatId) {
-          const restore = host.current?.switchToChat(agentRef, restoreChatId)
-          const restoreSelectionRevision = host.current?.getSelectionIntentRevision()
-          void restore?.catch(error => {
-            if (host.current?.getSelectionIntentRevision() !== restoreSelectionRevision) return
-            host.current?.pushToast(
-              `Could not restore conversation: ${error instanceof Error ? error.message : String(error)}`,
-              'error'
-            )
-          })
+          void host.current
+            ?.switchToChat(agentRef, restoreChatId, {
+              onCurrentError: error => {
+                host.current?.pushToast(
+                  `Could not restore conversation: ${error instanceof Error ? error.message : String(error)}`,
+                  'error'
+                )
+              },
+            })
+            .catch(() => undefined)
         }
       }
       throw error
