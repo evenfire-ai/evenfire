@@ -43,7 +43,7 @@ uninstall_loki:
 # mounts (dashboardsConfigMaps.default). Grafana pods cannot start without it.
 dashboards:
 	kubectl create configmap grafana-dashboards \
-		--from-file=dashboards/loki-grafana-dashboard.json \
+		--from-file=dashboards/ \
 		--namespace=monitoring --dry-run=client -o yaml | kubectl apply -f -
 
 install_grafana: dashboards

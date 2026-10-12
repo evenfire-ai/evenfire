@@ -48,18 +48,18 @@ make install_loki install_grafana STORAGE_CLASS=standard LOKI_SIZE=10Gi GRAFANA_
 
 ## Makefile Targets
 
-| Target                 | Description                                                                         |
-| ---------------------- | ----------------------------------------------------------------------------------- |
-| `setup`                | Add Grafana Helm repo + create namespace                                            |
-| `install_loki`         | Install loki-stack chart (v2.9.10)                                                  |
-| `upgrade_loki`         | Upgrade loki-stack release                                                          |
-| `uninstall_loki`       | Remove loki-stack release                                                           |
-| `dashboards`           | Create or update the `grafana-dashboards` ConfigMap from `dashboards/` (idempotent) |
-| `install_grafana`      | Run `dashboards`, then install Grafana chart                                        |
-| `upgrade_grafana`      | Run `dashboards`, then upgrade Grafana release                                      |
-| `uninstall_grafana`    | Remove Grafana release                                                              |
-| `port_forward_grafana` | Forward Grafana UI to `localhost:$(GRAFANA_PORT)` (default 3000)                    |
-| `status`               | Show pods, DaemonSets, and PVCs in the monitoring namespace                         |
+| Target                 | Description                                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `setup`                | Add Grafana Helm repo + create namespace                                                          |
+| `install_loki`         | Install loki-stack chart (v2.9.10)                                                                |
+| `upgrade_loki`         | Upgrade loki-stack release                                                                        |
+| `uninstall_loki`       | Remove loki-stack release                                                                         |
+| `dashboards`           | Create or update the `grafana-dashboards` ConfigMap from every file in `dashboards/` (idempotent) |
+| `install_grafana`      | Run `dashboards`, then install Grafana chart                                                      |
+| `upgrade_grafana`      | Run `dashboards`, then upgrade Grafana release                                                    |
+| `uninstall_grafana`    | Remove Grafana release                                                                            |
+| `port_forward_grafana` | Forward Grafana UI to `localhost:$(GRAFANA_PORT)` (default 3000)                                  |
+| `status`               | Show pods, DaemonSets, and PVCs in the monitoring namespace                                       |
 
 ## Grafana Configuration
 
