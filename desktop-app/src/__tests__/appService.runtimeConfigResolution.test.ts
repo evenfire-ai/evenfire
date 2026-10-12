@@ -260,31 +260,39 @@ describe('AppService runtime config discovery ownership', () => {
       authClient: {
         getDesktopEnvironment: ReturnType<typeof vi.fn>
         googleLogin: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
+        health: ReturnType<typeof vi.fn>
       }
-      restoreSavedSessionInFlight: Promise<unknown>
-      restoreSavedSessionReservationStarted: boolean
-      pendingRuntimeConfigDiscovery:
-        | (DesktopEnvironmentDiscovery & { profileId: string | null })
-        | null
+      getDependenciesHealth: () => Promise<unknown>
     }
-    app.restoreSavedSessionInFlight = Promise.resolve({ authenticated: false })
-    app.restoreSavedSessionReservationStarted = true
-    app.pendingRuntimeConfigDiscovery = {
-      profileId: runtimeConfig.getDesktopRuntimeConfigState().activeOptionId,
-      externalRestApiBaseUrl: restA,
-      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
-      appName: 'Environment A',
-    }
+    const restoredMe = deferred<ReturnType<typeof testSessionMe>>()
+    const restoreStarted = deferred<void>()
+    const { RpcProxyClient } = await import('../rpcProxyClient.js')
+    vi.spyOn(RpcProxyClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
+    service.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session')
     app.authClient = {
-      getDesktopEnvironment: vi.fn().mockResolvedValue({
-        externalRestApiBaseUrl: restA,
-        rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
-        appName: 'Environment A',
-      }),
+      getDesktopEnvironment: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('initial discovery unavailable'))
+        .mockResolvedValue({
+          externalRestApiBaseUrl: restA,
+          rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+          appName: 'Environment A',
+        }),
       googleLogin: vi.fn().mockResolvedValue(testLoginResult('session-token-a', testSessionMe())),
+      getMe: vi.fn(() => {
+        restoreStarted.resolve()
+        return restoredMe.promise
+      }),
+      health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
 
+    const restore = service.getSessionState()
+    await restoreStarted.promise
+    await app.getDependenciesHealth()
     await service.googleLogin('google-token-a')
+    restoredMe.resolve(testSessionMe())
+    await restore
 
     const rpcAwareEnvKey = runtimeConfig.getDesktopRuntimeConfigState().envKey
     expect(rpcAwareEnvKey).not.toBe(restOnlyEnvKey)
@@ -324,13 +332,21 @@ describe('AppService runtime config discovery ownership', () => {
         | null
       getEffectiveRpcProxyBaseUrl: () => string
     }
-    app.effectiveRuntimeRpcEndpoint = {
-      profileId: optionA.id,
-      externalRestApiBaseUrl: restA,
-      rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
-      appName: 'Environment A',
-    }
-    app.pendingRuntimeConfigDiscovery = app.effectiveRuntimeRpcEndpoint
+    const { AuthClient } = await import('../authClient.js')
+    vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment')
+      .mockRejectedValueOnce(new Error('initial discovery unavailable'))
+      .mockResolvedValue({
+        externalRestApiBaseUrl: restA,
+        rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
+        appName: 'A',
+      })
+    vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(testLoginResult())
+    vi.spyOn(AuthClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
+    const { RpcProxyClient } = await import('../rpcProxyClient.js')
+    vi.spyOn(RpcProxyClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
+    await service.googleLogin('synthetic-google')
+    const { AppService } = await import('../appService.js')
+    await (service as unknown as InstanceType<typeof AppService>).getDependenciesHealth()
 
     await service.selectRuntimeConfig(optionB.id)
 

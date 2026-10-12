@@ -108,6 +108,24 @@ describe('RPC discovery lifecycle through native producers', () => {
     expect(config.config.rpcProxyBaseUrl).toBe('')
   })
 
+  it('retires pending discovery when a durable RPC endpoint is configured on the same profile', async () => {
+    const { service, config, rest } = await fixture()
+    await service.googleLogin('synthetic-google-token')
+    await service.getDependenciesHealth()
+    await service.saveRuntimeConfig({
+      externalRestApiBaseUrl: rest,
+      rpcProxyBaseUrl: 'https://durable-rpc.example.test',
+    })
+    expect(
+      (service as unknown as { pendingRuntimeConfigDiscovery: unknown })
+        .pendingRuntimeConfigDiscovery
+    ).toBeNull()
+    expect(config.config.rpcProxyBaseUrl).toBe('https://durable-rpc.example.test')
+    expect(service.getCachedUserId()).toBeNull()
+    await service.getDependenciesHealth()
+    expect(config.config.rpcProxyBaseUrl).toBe('https://durable-rpc.example.test')
+  })
+
   it('drops discovery for A that settles after native setup has selected B', async () => {
     const { service, config, rest, rpc, discovery } = await fixture()
     await service.googleLogin('synthetic-google-token')
