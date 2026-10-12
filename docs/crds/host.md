@@ -56,13 +56,13 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 
 | Field | Description |
 |-------|-------------|
-| `guardrails.rules[]` | Ordered tool-lane rules evaluated top-down: `{id, action: allow\|ask\|deny, reasonCode, match: {tool, arguments[]}}`. |
-| `guardrails.hooks.<phase>[]` | Installed [LlmHook](llmhook.md) references `{id, digest}` per phase: `preToolUse`, `postToolUse`, `preCall`, `moderate`, `postCallSuccess`, `onError`. |
+| `guardrails.rules[]` | Tool-lane rules `{id, action: allow\|ask\|deny, reasonCode, match: {tool, arguments[]}}`. Every matching rule contributes and the strictest decision wins; array order is not precedence. Once any rule exists, a call that matches none resolves to `ask`. |
+| `guardrails.hooks.<phase>[]` | Installed [LlmHook](llmhook.md) references `{id, digest}` per phase: `preToolUse`, `postToolUse`, `preCall`, `moderate`, `postCallSuccess`, `onError`. A referenced hook runs at every point in its own `lifecyclePoints`. |
 | `guardrails.builtins[]` | First-party hooks compiled into mcp-host (e.g. `prompt-shaping`, `token-trim`). |
-| `guardrails.minInstalledHookTrustLevel` | `low` \| `mid` \| `high`: minimum platform-assigned trust level an installed hook needs to run on this Host. |
-| `guardrails.capabilityCeiling[]` | Upper bound on hook capabilities: `may_deny`, `may_rewrite`, `may_substitute_result`, `may_add_context`. |
-| `guardrails.approvalPolicies[]` | Approval policies available to `ask` decisions: `cli_only`, `channel_users`, `designated_approvers`. |
-| `guardrails.limits` | `maxRules` (100), `maxHooksPerPhase` (8), `maxHookTimeoutMs` (5000), `maxHookOutputBytes` (65536). |
+| `guardrails.minInstalledHookTrustLevel` | `low` \| `mid` \| `high`: minimum trust level for hooks installed onto this Host. Checked by control-api when a hook is installed or upgraded, not at runtime. |
+| `guardrails.capabilityCeiling[]` | Upper bound on the capabilities an install may grant: `may_deny`, `may_rewrite`, `may_substitute_result`, `may_add_context`. Checked at install/upgrade, not at runtime, so a hand-edited LlmHook is not re-validated against it. |
+| `guardrails.approvalPolicies[]` | Accepted by the schema (`cli_only`, `channel_users`, `designated_approvers`) but not read by mcp-host today; `ask` decisions use `spec.approval`. |
+| `guardrails.limits` | `maxRules` (100) and `maxHookTimeoutMs` (5000, the deadline for every hook call) are enforced. `maxHookOutputBytes` (65536 when a `limits` object is present; otherwise mcp-host allows 1 MiB, and 5 MiB for `preCall` rewrites) applies to LLM-lane hooks. `maxHooksPerPhase` is accepted but not enforced. |
 
 Apply the CRD before any component writes `spec.guardrails`: the API server
 silently prunes fields an older CRD does not know.

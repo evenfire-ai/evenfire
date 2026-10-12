@@ -116,5 +116,6 @@ See [stdio-bridge README](../../stdio-bridge/README.md) and
 
 ## Related
 
+- [Connect an OAuth connector](connect-oauth-connector.md): remote MCP servers, OAuth sign-in, and updating connector credentials
 - [CRD index](../crds/README.md)
 - [Architecture overview](../architecture/overview.md)

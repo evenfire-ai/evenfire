@@ -119,14 +119,16 @@ authenticates with an `api-key` header instead of `Authorization: Bearer`, and
 | Grok subscription            | `grok-subscription`  | OAuth sign-in held by control-api, no Secret slot | `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `GROK_LLM_PROXY_EXECUTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` (recipes); mcp-host's flag is injected per Host |
 
 These providers use a subscription account instead of an API key. An admin
-signs in from Control UI (**Secrets → LLM → Subscriptions**,
+signs in from Control UI (**Secrets → LLM Subscriptions**,
 `/secrets/llm/subscriptions`); control-api
 keeps the OAuth tokens, and model traffic goes through the in-cluster
 `codex-llm-proxy` / `grok-llm-proxy`. A Host selects a sign-in with
 `spec.model.connectionRef` and needs no `secretRef` when every target is
 the same subscription provider. A Host may use at most one subscription
 provider. They are **off in `deploy/base`** and switched on in the minikube
-overlay. Wire-level details:
+overlay. Setup guide:
+[Use a ChatGPT or Grok subscription](../how-to/connect-llm-subscription.md).
+Wire-level details:
 [Codex transport contract](../architecture/codex-subscription-transport-contract.md),
 [Grok transport contract](../architecture/grok-subscription-transport-contract.md).
 

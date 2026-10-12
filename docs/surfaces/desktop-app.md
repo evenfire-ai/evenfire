@@ -15,10 +15,9 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
 
 ## The daily loop
 
-1. **Log in.** Password login posts to `POST /api/v1/auth/password-login`;
-   Google login posts an already-issued `idToken` to
-   `POST /api/v1/auth/google` — the token has to already exist, since the
-   app does not drive a full OAuth browser redirect yet. Once a session is
+1. **Log in.** The sign-in screen offers email and password, posted to
+   `POST /api/v1/auth/password-login`. (The main process also exposes a
+   Google `idToken` login IPC, but no screen uses it today.) Once a session is
    established, it is restored from the OS keychain via `keytar`, with a
    local file fallback when no keychain is available.
 2. **Pick a team.** Team listing and switching read the access catalog:
@@ -100,7 +99,8 @@ The app's top-level routes (`DESKTOP_ROUTES` in
 **Apps** (`sandbox-ui`), **Agents** (`agents`), **Connectors**
 (`mcp-servers`), **Plugins** (`workflows`), **EvenDrive** (`files`), a file
 `preview` view, and **Settings**. Inside an agent, the workspace has
-Connectors, Members, Shared files and Activity sub-routes. Outside that
+Connectors, Members and Activity sub-routes (plus **Agent Files** when the
+app is built with `VITE_SHOW_AGENT_FILES_UI`). Outside that
 authenticated shell sit the first-run onboarding flow, the auth page (login),
 and `UnavailablePage`, shown instead of login when a required backend
 dependency is unreachable.
@@ -117,7 +117,7 @@ Two screens worth calling out specifically:
   fourth top-level product.
 
   Below, the LeadForge recipe's own dashboard runs inside the Desktop App's
-  frame — the app's rail and its "Back to apps" bar are still in charge, and
+  frame — the Desktop App's own navigation stays in charge, and
   everything the plugin's UI loads comes through `rpc-proxy`. The plugin gets
   a real interface; it does not get a second client to install.
 
@@ -240,8 +240,8 @@ above for why leaving it unset is silently wrong rather than loudly broken.
 
 ## Limits
 
-- The Google login path expects an already-issued `idToken`; there is no
-  full OAuth browser redirect yet.
+- There is no Google or SSO sign-in screen; members sign in with email and
+  password.
 - The activity stream never carries internal reasoning / chain-of-thought
   content, and it is read-only — message submission always goes through the
   `/messages` endpoint, never the stream.
@@ -255,6 +255,7 @@ above for why leaving it unset is silently wrong rather than loudly broken.
 
 ## Next
 
+- [Use the Desktop App](../how-to/use-the-desktop-app.md) — the end-user guide: chat, attachments, EvenDrive, shortcuts, deep links
 - [UI Surfaces](README.md) — the persona matrix across all three consoles
 - [Control UI](control-ui.md) — the admin console
 - [Profile UI](profile-ui.md) — the invited member's front door

@@ -46,27 +46,31 @@ minikube overlays ship; features that are off by default say so.
 
 ## How-to guides
 
-| Doc                                                                           | Description                                                    |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| [Connect Telegram](how-to/connect-telegram.md)                                | Minikube env or CRD channel path                               |
-| [Connect Slack](how-to/connect-slack.md)                                      | Slack app scopes, request URL, conversation verification       |
-| [Connect Microsoft Teams](how-to/connect-teams.md)                            | Teams CLI bot registration, endpoint, conversation verify      |
-| [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                                   |
-| [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON, CRD, or Control UI path                         |
-| [Desktop setup & updates](how-to/desktop-setup-and-updates.md)                | Environments, invitation setup, updates                        |
-| [Member invitations on self-hosted](how-to/member-invitations-self-hosted.md) | Hosted mode zero-config emails vs running your own service     |
-| [Track usage & set budgets](how-to/token-budgets-and-usage.md)                | Enable budgets, scope, block vs warn                           |
-| [Connect to the registry](how-to/connect-to-registry.md)                      | Self-hosted registry connect flow                              |
-| [Publish a plugin](how-to/publish-plugin-to-registry.md)                      | Publish under your org with an `efrk_` key                     |
-| [Shared & global files](how-to/shared-and-global-files.md)                    | Team workspaces (SFS) and the brokered drive (EvenDrive / GFS) |
+| Doc                                                                           | Description                                                               |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| [Connect Telegram](how-to/connect-telegram.md)                                | Minikube env or CRD channel path                                          |
+| [Connect Slack](how-to/connect-slack.md)                                      | Slack app scopes, request URL, conversation verification                  |
+| [Connect Microsoft Teams](how-to/connect-teams.md)                            | Teams CLI bot registration, endpoint, conversation verify                 |
+| [Use the Desktop App](how-to/use-the-desktop-app.md)                          | Daily use: chat, attachments, approvals, EvenDrive, shortcuts, deep links |
+| [Configure guardrails](how-to/configure-guardrails.md)                        | Tool-call rules, installed guardrail hooks, built-ins                     |
+| [Connect an OAuth connector](how-to/connect-oauth-connector.md)               | Remote and OAuth MCP servers, user authorization, connector credentials   |
+| [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                                              |
+| [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON, CRD, or Control UI path                                    |
+| [Desktop setup & updates](how-to/desktop-setup-and-updates.md)                | Environments, invitation setup, updates                                   |
+| [Member invitations on self-hosted](how-to/member-invitations-self-hosted.md) | Hosted mode zero-config emails vs running your own service                |
+| [Track usage & set budgets](how-to/token-budgets-and-usage.md)                | Enable budgets, scope, block vs warn                                      |
+| [Connect to the registry](how-to/connect-to-registry.md)                      | Self-hosted registry connect flow                                         |
+| [Publish a plugin](how-to/publish-plugin-to-registry.md)                      | Publish under your org with an `efrk_` key                                |
+| [Shared & global files](how-to/shared-and-global-files.md)                    | Team workspaces (SFS) and the brokered drive (EvenDrive / GFS)            |
 
 ## LLM providers
 
-| Doc                                                       | Description                                                            |
-| --------------------------------------------------------- | ---------------------------------------------------------------------- |
-| [LLM providers overview](llm-providers/README.md)         | The 24 providers, mental model, support matrix, request flow, fallback |
-| [Configure LLM providers](deploy/llm-providers.md)        | Operator guide: credentials, Vertex/Bedrock/Azure, allowlist, selector |
-| [Add an LLM provider](llm-providers/adding-a-provider.md) | Data-only vs driver-based integration paths                            |
+| Doc                                                                      | Description                                                            |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| [LLM providers overview](llm-providers/README.md)                        | The 24 providers, mental model, support matrix, request flow, fallback |
+| [Configure LLM providers](deploy/llm-providers.md)                       | Operator guide: credentials, Vertex/Bedrock/Azure, allowlist, selector |
+| [Use a ChatGPT or Grok subscription](how-to/connect-llm-subscription.md) | Sign in with a subscription instead of an API key (off by default)     |
+| [Add an LLM provider](llm-providers/adding-a-provider.md)                | Data-only vs driver-based integration paths                            |
 
 ## Deploy & operate
 

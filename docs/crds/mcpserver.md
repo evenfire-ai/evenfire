@@ -71,7 +71,7 @@ after creation:
 |-------|-----------|-------------|
 | `oauth.id` | all | Stable client identifier; also the callback path segment. Immutable. |
 | `oauth.provider` | built-in | `salesforce`, `slack`, `notion`, `microsoft-graph`, `google`, `monday`, `clickup`, `vercel`. Immutable. |
-| `oauth.clientIdRef` / `oauth.clientSecretRef` | all | `{name, key}` of Secrets in the `mcp-servers` namespace holding the client id / secret. |
+| `oauth.clientIdRef` / `oauth.clientSecretRef` | all | `{name, key}` of Secrets in the `mcp-server` namespace holding the client id / secret. |
 | `oauth.scopes[]` | all | Scopes to request. Include the provider's offline/refresh scope when `backgroundAccess` is true. |
 | `oauth.backgroundAccess` | all | Allow use by a workload with no live human session. |
 | `oauth.grantScope` | all | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context, which one member bootstraps and others inherit. Immutable. |
@@ -91,7 +91,9 @@ after creation:
   With dynamic registration, the install id is appended and registered
   automatically.
 
-The Control UI wizard shows the exact URI.
+The remote-connector wizard in Control UI shows the exact URI. See
+[Connect an OAuth connector](../how-to/connect-oauth-connector.md) for the
+full walkthrough.
 
 ### Server Configuration
 

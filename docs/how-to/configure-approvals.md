@@ -118,6 +118,7 @@ Cluster E2E coverage: [E2E guide](../testing/e2e-guide.md).
 
 ## Related
 
+- [Configure guardrails](configure-guardrails.md): rules whose `ask` decision uses this approval flow
 - Root [Security model](../../README.md#security-model)
 - [Host CRD](../crds/host.md)
 - [Connect Telegram](connect-telegram.md)
