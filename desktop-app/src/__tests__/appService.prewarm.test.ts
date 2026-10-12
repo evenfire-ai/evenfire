@@ -7,6 +7,7 @@ import { ApiError } from '../httpClient.js'
 // ── mock dependencies before AppService is imported ──────────────────────────
 
 vi.mock('../config.js', () => ({
+  getActiveRuntimeConfigOptionId: () => 'test-profile',
   getActiveEnvKey: () => 'test-env',
   getActiveLegacyEnvKeys: () => [],
   getDesktopRuntimeConfigState: () => ({ activeOptionId: 'test-profile' }),

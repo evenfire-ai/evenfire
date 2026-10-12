@@ -139,6 +139,7 @@ vi.mock('../config.js', async importOriginal => {
   }
   return {
     validateRpcProxyBaseUrl,
+    getActiveRuntimeConfigOptionId: () => null,
     getActiveEnvKey: () => 'test-env',
     getActiveLegacyEnvKeys: () => [],
     hydrateDesktopRuntimeConfig: () => undefined,

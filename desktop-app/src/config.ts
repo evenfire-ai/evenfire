@@ -838,6 +838,12 @@ export function resolveEnvKey(externalRestApiBaseUrl: string, rpcProxyBaseUrl = 
   return `${slug || 'env'}-${hash}`
 }
 
+/** Hydrated active profile identity without constructing the diagnostics projection. */
+export function getActiveRuntimeConfigOptionId(): string | null {
+  hydrateDesktopRuntimeConfig()
+  return activeRuntimeOptionId
+}
+
 /** Env key for the CURRENTLY active runtime config (main-process surfaces). */
 export function getActiveEnvKey(): string {
   hydrateDesktopRuntimeConfig()

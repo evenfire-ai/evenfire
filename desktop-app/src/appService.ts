@@ -9,6 +9,7 @@ import {
   deleteDesktopRuntimeConfigOption,
   getActiveEnvKey,
   getActiveLegacyEnvKeys,
+  getActiveRuntimeConfigOptionId,
   getDesktopRuntimeConfigState,
   hydrateDesktopRuntimeConfig,
   isDesktopRuntimeConfigured,
@@ -1103,10 +1104,9 @@ export class AppService {
     profileId: string | null
     restBaseUrl: string
   } {
-    const runtimeConfig = getDesktopRuntimeConfigState()
     return {
       environmentKey: getActiveEnvKey(),
-      profileId: runtimeConfig.activeOptionId,
+      profileId: getActiveRuntimeConfigOptionId(),
       restBaseUrl: canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl),
     }
   }
