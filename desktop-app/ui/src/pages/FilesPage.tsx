@@ -894,6 +894,8 @@ export function FilesPage({
     const opened = await ctrl.openUri(uri)
     if (opened === false) return false
     if (typeof opened === 'object' && opened.kind === 'file') {
+      const sidebarActionOwnsFile = pendingResourceAction?.targetUri === uri
+      if (sidebarActionOwnsFile) return true
       const previewOpened = openFilePreview(opened)
       ctrl.restoreCrumbs(returnCrumbs)
       if (!previewOpened) await handleDownload(opened.gfsUri, opened.name)

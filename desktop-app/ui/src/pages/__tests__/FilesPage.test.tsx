@@ -350,6 +350,56 @@ describe('FilesPage', () => {
     expect(handled).toHaveBeenCalledWith(12)
   })
 
+  it('runs a seeded previewable file action in Files without handing the file to Preview', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'report.md')
+    )
+    const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const onOpenPreview = vi.fn()
+    const handled = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download, getPathForFile: vi.fn() } },
+    })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:gfs-download'),
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    let setCrumbs: (crumbs: GfsCrumb[]) => void = () => undefined
+    const openUri = vi.fn(async () => {
+      setCrumbs([fileCrumb])
+      return fileCrumb
+    })
+    function useSeededFileController() {
+      const [crumbs, updateCrumbs] = useState<GfsCrumb[]>([])
+      setCrumbs = updateCrumbs
+      return {
+        ...baseController(),
+        crumbs,
+        current: crumbs.at(-1) ?? null,
+        openUri,
+      }
+    }
+    hookMock.useGfsBrowserController.mockImplementation(useSeededFileController)
+
+    renderFilesPage(
+      undefined,
+      onOpenPreview,
+      file.gfsUri,
+      undefined,
+      { id: 13, targetUri: file.gfsUri, actionId: 'download' },
+      handled
+    )
+
+    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
+    expect(openUri).toHaveBeenCalledWith(file.gfsUri)
+    expect(onOpenPreview).not.toHaveBeenCalled()
+    expect(handled).toHaveBeenCalledWith(13)
+  })
+
   it.each([
     ['initial GFS discovery', { loadingAccessible: true }],
     [
