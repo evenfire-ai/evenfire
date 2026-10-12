@@ -70,15 +70,16 @@ Follow-up implementation tracked separately (`fix/codeql-control-api-rate-limit-
 
 ### False positive — PG limiter or non-route sink present
 
-| Alert                                                                        | Location                 | Evidence                                                                 |
-| ---------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------ |
-| [#57](https://github.com/evenfire-ai/evenfire/security/code-scanning/57)     | `app.ts:131`             | Middleware mount only; per-route limiters apply downstream               |
-| [#58](https://github.com/evenfire-ai/evenfire/security/code-scanning/58)     | `app.ts:219`             | 404 guard for unknown `/gfs/*`; no expensive work                        |
-| [#60](https://github.com/evenfire-ai/evenfire/security/code-scanning/60)     | `auth.ts:572`            | Handler under `publicAdminTokenRateLimit()` (`adminPublicTokenRlPerMin`) |
-| [#171](https://github.com/evenfire-ai/evenfire/security/code-scanning/171)   | `registry.ts:24`         | `rateLimitMiddleware` 30/min at `:28-35`                                 |
-| [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826)   | `registryConnect.ts:321` | `rateLimitMiddleware` 3/min at `:329-336`                                |
-| [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803)   | `gfs/grants.ts:849`      | Internal DB helper, not an HTTP route handler                            |
-| [#1767](https://github.com/evenfire-ai/evenfire/security/code-scanning/1767) | `app.ts:73`              | False positive — invitation error-response middleware; evidence below    |
+| Alert                                                                        | Location                                                                  | Evidence                                                                 |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| [#57](https://github.com/evenfire-ai/evenfire/security/code-scanning/57)     | `app.ts:131`                                                              | Middleware mount only; per-route limiters apply downstream               |
+| [#58](https://github.com/evenfire-ai/evenfire/security/code-scanning/58)     | `app.ts:219`                                                              | 404 guard for unknown `/gfs/*`; no expensive work                        |
+| [#60](https://github.com/evenfire-ai/evenfire/security/code-scanning/60)     | `auth.ts:572`                                                             | Handler under `publicAdminTokenRateLimit()` (`adminPublicTokenRlPerMin`) |
+| [#171](https://github.com/evenfire-ai/evenfire/security/code-scanning/171)   | `registry.ts:24`                                                          | `rateLimitMiddleware` 30/min at `:28-35`                                 |
+| [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826)   | `registryConnect.ts:321`                                                  | `rateLimitMiddleware` 3/min at `:329-336`                                |
+| [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803)   | `gfs/grants.ts:849`                                                       | Internal DB helper, not an HTTP route handler                            |
+| [#1767](https://github.com/evenfire-ai/evenfire/security/code-scanning/1767) | `app.ts:73`                                                               | False positive — invitation error-response middleware; evidence below    |
+| [#1769](https://github.com/evenfire-ai/evenfire/security/code-scanning/1769) | `r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts` | False positive — Supertest-only invitation app; evidence below           |
 
 Alert #1767 is attached to the invitation error-response middleware mount, which maps upstream
 failures to bounded public responses. External REST token lookup is limited to 30 requests/minute
@@ -89,6 +90,15 @@ fallback. Cost-12 password work remains behind the shared durable owner. CodeQL'
 dataflow points through error presentation and does not model this custom and cross-service limiter
 chain. `external-rest-api/test/routes.invitations.test.ts` asserts the 429 and `Retry-After`
 contract; `external-rest-api/test/middleware.rateLimit.test.ts` verifies trusted-source bucketing.
+
+Alert #1769 points to the error-response middleware in a test-only Express app. That app is
+passed directly to Supertest and is never bound to a listening server. It mounts the real
+`createInvitationsRouter()`, whose `POST /invitations/password` handler has the existing
+`acceptRateLimit` limit of 10 requests per minute. The upstream Control API password-token route
+also has trusted-source edge limiters and its 10/minute admission bucket. The alert does not
+identify an unbounded deployed route; the response-proxy regression preserves the route's
+observable retry and cookie headers while using a fixed header allowlist. Focused invitation and
+trusted-source tests verify the existing 429/`Retry-After` behavior.
 
 ### Won't fix (accepted) — real gap, follow-up backstop PR
 
