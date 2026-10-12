@@ -113,10 +113,10 @@ authenticates with an `api-key` header instead of `Authorization: Bearer`, and
 
 ### Group D — subscription sign-in, no API key (2)
 
-| Provider                     | id                   | Credential                                        | Feature flags (all default `false` in `deploy/base`)                                                                     |
-| ---------------------------- | -------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| ChatGPT (Codex) subscription | `codex-subscription` | OAuth sign-in held by control-api, no Secret slot | `CONTROL_API_CODEX_SUBSCRIPTION_ENABLED`, `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED`                                          |
-| Grok subscription            | `grok-subscription`  | OAuth sign-in held by control-api, no Secret slot | `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` (recipes) |
+| Provider                     | id                   | Credential                                        | Feature flags (all default `false` in `deploy/base`)                                                                                                         |
+| ---------------------------- | -------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ChatGPT (Codex) subscription | `codex-subscription` | OAuth sign-in held by control-api, no Secret slot | `CONTROL_API_CODEX_SUBSCRIPTION_ENABLED`, `CODEX_LLM_PROXY_EXECUTION_ENABLED`, `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED`                                         |
+| Grok subscription            | `grok-subscription`  | OAuth sign-in held by control-api, no Secret slot | `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `GROK_LLM_PROXY_EXECUTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` (recipes); mcp-host's flag is injected per Host |
 
 These providers use a subscription account instead of an API key. An admin
 signs in from Control UI (**Secrets → LLM → Subscriptions**,

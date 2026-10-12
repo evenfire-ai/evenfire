@@ -128,9 +128,9 @@ resources and grants inside it — it never writes that CR.
 | Cost & Usage          | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets`   | cost (non-CRD)                                        |
 | Settings              | `/settings/ui`                                                                           | settings (non-CRD)                                    |
 
-Contexts no longer have their own screen: the agent wizard and connector
-installs create and maintain a private `Context` per agent, and old `/contexts`
-links redirect to Agents. The former **Publisher** screens now live under
+Contexts no longer have their own screen: the agent wizard creates a private
+`Context` per agent, connector installs create their own private access scope,
+and old `/contexts` links redirect to Agents. The former **Publisher** screens now live under
 **Marketplace › your org** (`/publisher/*` redirects there). A **Traces**
 section (`/traces/*`) exists but is hidden from the sidebar.
 
