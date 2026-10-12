@@ -4,6 +4,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { testLoginResult, testSessionMe } from '../../testSupport/authTestFixtures.js'
 
+function pending<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+  return { promise, resolve, reject }
+}
+
 const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
 let directory = ''
 let closeStore: (() => void) | undefined
@@ -62,6 +72,80 @@ async function fixture() {
 }
 
 describe('RPC discovery lifecycle through native producers', () => {
+  it('retires pending A metadata when native setup saves B after a failed team transition', async () => {
+    const { service, config, AuthClient, discovery } = await fixture()
+    await service.googleLogin('synthetic-google-token')
+    await service.getDependenciesHealth()
+    vi.spyOn(AuthClient.prototype, 'switchTeam').mockResolvedValue({
+      token: 'synthetic-team-b',
+      team: { id: 'team-b', name: 'B', role: 'member' },
+    })
+    vi.spyOn(AuthClient.prototype, 'getMe').mockRejectedValue(
+      new Error('fixture team refresh failed')
+    )
+    await expect(service.switchTeam('team-b')).rejects.toThrow('team refresh failed')
+    const { MemberRegistrationServiceClient } =
+      await import('../memberRegistrationServiceClient.js')
+    const restB = 'https://api-b.example.test'
+    vi.spyOn(MemberRegistrationServiceClient.prototype, 'completeDesktopSetup').mockResolvedValue({
+      valid: true,
+      email: 'user-a@example.test',
+      externalRestApiBaseUrl: restB,
+      rpcProxyBaseUrl: 'https://rpc-b.example.test',
+      appName: 'B',
+    } as never)
+    discovery.mockRejectedValue(new Error('B discovery unavailable'))
+    await service.completeDesktopSetup('user-a@example.test', 'synthetic-setup-token')
+    expect(
+      (service as unknown as { pendingRuntimeConfigDiscovery: unknown })
+        .pendingRuntimeConfigDiscovery
+    ).toBeNull()
+    vi.spyOn(AuthClient.prototype, 'googleLogin').mockRejectedValue(
+      new Error('fixture B login rejected')
+    )
+    await expect(service.googleLogin('synthetic-B-google')).rejects.toThrow('B login rejected')
+    expect(config.config.externalRestApiBaseUrl).toBe(restB)
+    expect(config.config.rpcProxyBaseUrl).toBe('')
+  })
+
+  it('drops discovery for A that settles after native setup has selected B', async () => {
+    const { service, config, rest, rpc, discovery } = await fixture()
+    await service.googleLogin('synthetic-google-token')
+    const response = pending<{
+      externalRestApiBaseUrl: string
+      rpcProxyBaseUrl: string
+      appName: string
+    }>()
+    const started = pending<void>()
+    discovery.mockImplementationOnce(() => {
+      started.resolve()
+      return response.promise
+    })
+    const health = service.getDependenciesHealth()
+    await started.promise
+    await service.logout()
+    const { MemberRegistrationServiceClient } =
+      await import('../memberRegistrationServiceClient.js')
+    const restB = 'https://api-b.example.test'
+    vi.spyOn(MemberRegistrationServiceClient.prototype, 'completeDesktopSetup').mockResolvedValue({
+      valid: true,
+      email: 'user-a@example.test',
+      externalRestApiBaseUrl: restB,
+      rpcProxyBaseUrl: 'https://rpc-b.example.test',
+      appName: 'B',
+    } as never)
+    discovery.mockRejectedValue(new Error('B discovery unavailable'))
+    await service.completeDesktopSetup('user-a@example.test', 'synthetic-setup-token')
+    const bindingB = config.getActiveEnvKey()
+    response.resolve({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
+    await health
+    expect(config.config.externalRestApiBaseUrl).toBe(restB)
+    expect(config.getActiveEnvKey()).toBe(bindingB)
+    expect(config.config.rpcProxyBaseUrl).toBe('')
+    await service.getDependenciesHealth()
+    expect(config.config.externalRestApiBaseUrl).toBe(restB)
+  })
+
   it('retries discovery persistence after logout ends auth but its config write fails', async () => {
     const { service, config, configPath, store, rest, rpc, discovery, chat } = await fixture()
     await service.googleLogin('synthetic-google-token')

@@ -2372,6 +2372,7 @@ export class AppService {
           rpcProxyBaseUrl: '',
           appName: activation.appName,
         })
+        this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
         this.assertSessionGeneration(setupGeneration)
         this.sessionGeneration += 1
         return this.sessionGeneration
