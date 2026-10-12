@@ -136,6 +136,7 @@ beforeEach(async () => {
   vi.doUnmock('electron')
   vi.resetModules()
   vi.doMock('electron', () => ({
+    safeStorage: { isEncryptionAvailable: () => false },
     app: {
       getPath: vi.fn(() => runtimeConfigDirectory),
       isPackaged: true,
@@ -265,6 +266,53 @@ describe('Desktop environment handoff', () => {
       )
     }
   )
+
+  it('rejects confirmation when native login completes after selection of a newly saved profile', async () => {
+    const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linked)
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      ...linked,
+      rpcProxyBaseUrl: 'https://rpc-new.example.test',
+    })
+    const other = runtimeConfigModule!
+      .getDesktopRuntimeConfigState()
+      .options.find(
+        option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+      )!
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(other.id)
+    const { AuthClient } = await import('../../../../../src/authClient')
+    vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue({
+      token: 'synthetic-new-session',
+      me: {
+        id: 'new-user',
+        email: 'new@example.test',
+        name: 'New',
+        picture: null,
+        teamId: 'team-a',
+        teamName: 'A',
+        role: 'member',
+      },
+    })
+    const { TokenStore } = await import('../../../../../src/tokenStore')
+    ;(nativeAppService as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore =
+      new TokenStore({ isolatedUserDataPath: runtimeConfigDirectory })
+    mocks.selectRuntimeConfigForHandoff.mockImplementationOnce(async (id, generation) => {
+      const selection = await nativeAppService!.selectRuntimeConfigForHandoff(id, generation)
+      await nativeAppService!.googleLogin('synthetic-google')
+      return selection
+    })
+    mocks.loadSession.mockClear()
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+    expect(nativeAppService!.getCachedUserId()).toBe('new-user')
+    expect(mocks.loadSession).not.toHaveBeenCalled()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'The desktop session changed while processing this link. Open it again.',
+      'info'
+    )
+  })
 
   it('preserves a native login that starts while setup confirmation rereads configuration', async () => {
     const linkedEnvironment = {
