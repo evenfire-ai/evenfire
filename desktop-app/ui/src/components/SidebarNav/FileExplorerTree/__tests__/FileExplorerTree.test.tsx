@@ -313,6 +313,84 @@ describe('FileExplorerTree — resource action menus', () => {
     await waitFor(() => expect(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeNull())
     expect(affordances).toHaveBeenCalledTimes(2)
   })
+
+  it('hides cached permission actions after the refreshed affordance request is denied', async () => {
+    const affordances = vi
+      .fn()
+      .mockResolvedValueOnce(resourceAffordances(['read', 'write']))
+      .mockRejectedValueOnce(new Error('403 Forbidden: httpStatus=403'))
+    const resource = accessibleResource('folder', 'Reports', 'directory')
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances,
+    })
+
+    const { queryClient } = renderTree()
+    const row = (await screen.findByRole('button', { name: 'Reports' })).closest(
+      '[role="treeitem"]'
+    ) as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Options for Reports' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for Reports' })
+    expect(await within(menu).findByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsAffordances('test:user-1:team-1', 'folder', 'main'),
+        exact: true,
+      })
+    })
+
+    await waitFor(() => expect(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeNull())
+    expect(affordances).toHaveBeenCalledTimes(2)
+  })
+
+  it('revokes shared tree access when the per-row affordance refresh returns 401', async () => {
+    function AccessStateProbe() {
+      const ctrl = useGfsBrowserController()
+      return <div data-testid="probe-access">{ctrl.accessState}</div>
+    }
+
+    const affordances = vi
+      .fn()
+      .mockResolvedValueOnce(resourceAffordances(['read', 'write']))
+      .mockRejectedValueOnce(new Error('401 Unauthorized'))
+    const resource = accessibleResource('folder', 'Reports', 'directory')
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances,
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FileExplorerTree
+          onOpenFolder={vi.fn()}
+          onOpenPreview={vi.fn()}
+          onResourceAction={vi.fn()}
+          pushToast={vi.fn()}
+        />
+        <AccessStateProbe />
+      </QueryClientProvider>
+    )
+    const row = (await screen.findByRole('button', { name: 'Reports' })).closest(
+      '[role="treeitem"]'
+    ) as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Options for Reports' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for Reports' })
+    expect(await within(menu).findByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsAffordances('test:user-1:team-1', 'folder', 'main'),
+        exact: true,
+      })
+    })
+
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    await waitFor(() => expect(screen.getByTestId('probe-access').textContent).toBe('revoked'))
+    expect(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
+    expect(affordances).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('FileExplorerTree — sanitizes externally-controlled GFS names in chrome', () => {

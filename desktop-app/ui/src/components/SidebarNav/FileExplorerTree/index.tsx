@@ -95,9 +95,15 @@ function FileExplorerNode({
     staleTime: 0,
   })
   // Do not expose permission-gated operations from cached bits while a fresh
-  // menu-open/focus revalidation is still in flight. Move remains available
-  // because its authority is parent-relative and enforced by the server.
-  const affordances = affordancesQuery.isFetching ? undefined : affordancesQuery.data
+  // menu-open/focus revalidation is in flight or after it fails. Move remains
+  // available because its authority is parent-relative and enforced by server.
+  const affordances =
+    affordancesQuery.isFetching || affordancesQuery.error ? undefined : affordancesQuery.data
+  useEffect(() => {
+    if (!affordancesQuery.error) return
+    const message = errorMessage(affordancesQuery.error)
+    if (message) onAuthorityFailure(message)
+  }, [affordancesQuery.error, onAuthorityFailure])
   const preview = useMemo(() => resolveGfsPreview(node), [node])
   const canPreview = Boolean(preview && !isUnreadable)
   const canCopyContent = Boolean(
