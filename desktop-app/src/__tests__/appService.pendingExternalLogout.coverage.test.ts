@@ -130,6 +130,33 @@ function deferred() {
 
 // These characterize current accepted marker cells and kill targeted guard mutants.
 describe('pending logout accepted lifecycle coverage', () => {
+  it('removes stale active Keytar on canceled-quit retry before safeStorage restart', async () => {
+    const { service, tokenStore, state } = createService()
+    const freshToken = 'fixture-fresh-safe-storage'
+    await tokenStore.setSessionToken('fixture-stale-logged-out', activeEnvKey)
+    await tokenStore.setSafeStorageSessionToken(freshToken, activeEnvKey)
+    markerStore.recordPendingKeytarCleanup(runtime.directory, activeEnvKey, 'safe-storage')
+    state.sessionToken = freshToken
+    state.me = loginResult.me
+    await service.prepareForQuit()
+    service.cancelQuitPreparation()
+
+    await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(false)
+    expect(state.sessionToken).toBe(freshToken)
+    expect(state.me).toEqual(loginResult.me)
+    expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
+    expect(markerStore.readPendingExternalLogoutMarker(runtime.directory, activeEnvKey)).toBeNull()
+
+    const restarted = createService()
+    vi.spyOn(restarted.state.authClient, 'getMe').mockResolvedValue(loginResult.me)
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+    expect(restarted.state.sessionToken).toBe(freshToken)
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(freshToken)
+  })
+
   it.each(['retire', 'convert'] as const)(
     'rejects a login racing a newer same-intent logout during %s',
     async mode => {
