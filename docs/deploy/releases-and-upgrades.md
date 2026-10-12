@@ -109,12 +109,12 @@ private pipeline. That pipeline is not part of this repository.
 
 ### What is fixed and what moves
 
-| Tag                   | Moves?                                                                                 |
-| --------------------- | -------------------------------------------------------------------------------------- |
-| `:latest`, `:sha-<7>` | `:latest` moves on every `dev` build of that image. `:sha-<7>` names one build.        |
-| `:vX.Y.Z`             | Written by the release workflow for that tag. Nothing in normal operation rewrites it. |
-| `:stable`             | Moves to the newest strict `vX.Y.Z` release.                                           |
-| `@sha256:…` digest    | Never moves. Use a digest when you need a byte-for-byte guarantee.                     |
+| Tag                   | Moves?                                                                                             |
+| --------------------- | -------------------------------------------------------------------------------------------------- |
+| `:latest`, `:sha-<7>` | `:latest` moves on every `dev` build of that image. `:sha-<7>` names one build.                    |
+| `:vX.Y.Z`             | Written by the release workflow for that tag. Nothing in normal operation rewrites it.             |
+| `:stable`             | Moves to whichever strict `vX.Y.Z` tag was promoted last (a patch to an older line moves it back). |
+| `@sha256:…` digest    | Never moves. Use a digest when you need a byte-for-byte guarantee.                                 |
 
 The release workflow has no guard that stops a second run from writing
 `:vX.Y.Z` again. If you need an image that cannot change, pin the digest.
@@ -147,8 +147,9 @@ MINIKUBE_IMAGE_TAG=v0.9.0 make minikube-setup   # an older release
 ```
 
 On a branch where the release-prep commit has landed but the tag has not been
-promoted yet, the pin names images that do not exist yet. That is why
-[the quickstart](../get-started/quickstart.md) uses `MINIKUBE_IMAGE_TAG=latest`.
+promoted yet, the pin names images that do not exist yet. In that window,
+re-run with `MINIKUBE_IMAGE_TAG=latest`, as
+[the quickstart](../get-started/quickstart.md) explains.
 To build every image from source instead, use `make minikube-setup-local`.
 See [minikube.md](minikube.md) for the full setup.
 
@@ -179,7 +180,7 @@ from the same checkout as your images.
 The Desktop App version is the release version, and its GitHub release tag is
 the same `vX.Y.Z` tag. There is no separate `desktop-app-<version>` tag.
 
-The External REST API serves `GET /desktop/release` (authenticated). It returns
+The External REST API serves `GET /api/v1/desktop/release` (authenticated). It returns
 the values in `releaseManifest.ts` plus `releaseTag` (`v<desktopVersion>`) and
 `releaseUrl`. `releaseUrl` is built from `EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL`,
 which defaults to `https://github.com/evenfire-ai/evenfire/releases`. Point it

@@ -17,7 +17,7 @@ CLERUM_TELEGRAM_USER_ID=<your-numeric-user-id>
 5. Re-apply secrets and redeploy:
 
 ```bash
-make minikube-setup ARGS="--skip-build"
+make minikube-setup REUSE_DB=true ARGS="--skip-build"
 ```
 
 6. Message the bot from the allowed user account.

@@ -6,7 +6,10 @@ native tool, guardrails or an MCP server.
 
 > **Dev mode is not full platform security.** It turns off JWT verification
 > and runs without NetworkPolicies, CRDs, host-context-controller, control-api
-> or the UIs. Do not expose a dev-mode process to a network you do not trust.
+> or the UIs. mcp-host listens on all interfaces, and anyone who can reach the
+> port can forge the edge headers and drive the agent, including the shell
+> tool. Run it only on a machine and network you control; with Docker, publish
+> the port on `127.0.0.1` only.
 > For the full platform, use the [Quickstart](quickstart.md).
 
 ## Run mcp-host locally
@@ -90,7 +93,8 @@ for the other routes.
   it, the approval resolver allows no approver, and `CLERUM_APPROVAL_TIMEOUT`
   defaults to `0` (never time out), so a tool that needs approval waits
   forever. For local iteration, either set `CLERUM_APPROVAL_CONFIG` or turn
-  the gate off with `CLERUM_ENABLE_APPROVAL=false`. Decisions go to
+  the gate off with `CLERUM_ENABLE_APPROVAL=false`. With the gate off, shell
+  commands run without review; never do this on a reachable port. Decisions go to
   `POST /v1/runtime/approvals/approve` and `POST /v1/runtime/approvals/deny`,
   which need the same edge headers as messages. See
   [Configure approvals](../how-to/configure-approvals.md).
@@ -129,7 +133,7 @@ shared packages from `packages/`:
 ```bash
 # from the repository root
 docker build -f mcp-host/Dockerfile -t mcp-host-dev .
-docker run --rm -p 8080:8080 \
+docker run --rm -p 127.0.0.1:8080:8080 \
   -e CLERUM_DEV_MODE=true \
   -e CLERUM_ENABLE_AUTH=false \
   -e OPENAI_API_KEY=sk-... \

@@ -48,7 +48,7 @@ Details (category-level, no product rankings):
 
 - The #1 cause: no real LLM API key in `.env`. With no key, setup gives the
   Host `openai/gpt-5.4-mini` with a placeholder key and warns that the agent
-  will not reply. Fix `.env`, then `make minikube-setup ARGS="--skip-build"`.
+  will not reply. Fix `.env`, then `make minikube-setup REUSE_DB=true ARGS="--skip-build"`.
 - How setup picks the Host model: an explicit `CLERUM_MODEL_PROVIDER` wins
   (with `CLERUM_MODEL_NAME`, or that provider's default model). Without it,
   setup takes the provider of the first key present, in the order

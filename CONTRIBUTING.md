@@ -5,7 +5,7 @@ Thanks for your interest! evenfire is **open source** under the
 
 ## Set up
 
-- **Node.js 24.** `.nvmrc` pins `24`, every service declares
+- **Node.js 24.** `.nvmrc` pins `24`, most services declare
   `"node": ">=24"`, `desktop-app` declares `24.x`, and CI uses Node 24.
 - Install dependencies across the repo:
 
@@ -13,8 +13,10 @@ Thanks for your interest! evenfire is **open source** under the
   make install-all
   ```
 
-  This runs `npm install` at the root, then in every service in parallel, then
-  in `tests/e2e`. The root install's `postinstall` sets
+  This runs `npm install` at the root, then in each directory listed in
+  `SERVICES` in the Makefile, in parallel, then in `tests/e2e`. Directories not
+  in that list, such as `control-ui`, `gfs-controller` and
+  `workspace-files-controller`, need their own `npm install`. The root install's `postinstall` sets
   `git config core.hooksPath .githooks`, so the git hooks below are active from
   then on. `make install-git-hooks` does the same on its own.
 

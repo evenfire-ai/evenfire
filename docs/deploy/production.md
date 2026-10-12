@@ -111,7 +111,8 @@ certificates for these Services:
 | Slack, Teams, webhook triggers | `webhook-proxy` (`webhook-ingress`, 8095)         | Inbound only if you use them. See [Slack](../how-to/connect-slack.md) and [Teams](../how-to/connect-teams.md). |
 
 **The NetworkPolicies decide which ingress works.** Base admits public traffic
-to `control-ui`, `profile-ui`, `rpc-proxy` and `webhook-proxy` only from pods
+to `control-ui`, `profile-ui`, `external-rest-api`, `rpc-proxy` and
+`webhook-proxy` only from pods
 labeled `app: cloudflared` in a namespace named `ingress`. That matches the
 optional Cloudflare Tunnel stack in [`deploy/base/ingress`](../../deploy/base/ingress),
 which `deploy/base/kustomization.yaml` deliberately does not include. To use it,
@@ -120,8 +121,9 @@ tunnel credentials Secret yourself. To use any other ingress controller, either
 run it so it matches those selectors or patch those NetworkPolicies in your
 overlay.
 
-Then point the platform at your public URLs. In base these default to
-`127.0.0.1`/`localhost` values that only work with port-forwards:
+Then point the platform at your public URLs. In base and the minikube configs
+these are unset or `127.0.0.1`/`localhost` values that only work with
+port-forwards; set them in your overlay:
 
 | Variable                                                                                                                              | Where                |
 | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
@@ -196,6 +198,7 @@ of copying minikube's choices.
 | `storageClassName` on `control-postgres-data` and `clerum-workflow-output`          | unset                     | Patch, or rely on your default StorageClass.                                                                                                                                                                                                 |
 | `CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET` (HCC)                                       | `clerum`                  | Name your pull Secret in `mcp-host`, or set `""` if none is needed (minikube sets `""`).                                                                                                                                                     |
 | `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST` (HCC)                                      | `"false"` (audit)         | Set `"true"`, and narrow `CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES` (base includes `clerum/`).                                                                                                                                                  |
+| `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST` (control-api) | `"false"` (audit) | Set `"true"` so control-api refuses non-allowlisted connector images up front, not only HCC at reconcile. |
 
 For a read-only check of API-server and DNS egress before you rely on
 enforcement, see [`deploy/scripts/np-enforce-preflight.sh`](../../deploy/scripts/np-enforce-preflight.sh).
@@ -243,13 +246,17 @@ exact allowlist of kube-contexts they may touch.
    - Set `ADMIN_BOOTSTRAP_PASSWORD_HASH` (a bcrypt hash) before you run it.
      Otherwise it writes a placeholder hash.
    - It writes the `control-postgres` Secret with user `postgres` and password
-     `postgres`. Replace it before Postgres first starts.
-   - Base ships placeholder values for the `control-api-public-key` and
-     `clerum-wrc-public-key` ConfigMaps, and `mcp-host-config` must carry the
-     RPC public key as `CLERUM_AUTH_JWT_PUBLIC_KEY`. A later
-     `kubectl apply -k` resets anything your overlay still holds as a
-     placeholder, so put the real public keys in your overlay. (Minikube
-     re-runs its key script after every apply for this reason.)
+     `postgres`. Replace it before Postgres first starts. A re-run resets that
+     Secret to `postgres`/`postgres`, and the admin hash to the placeholder
+     unless you set `ADMIN_BOOTSTRAP_PASSWORD_HASH` again.
+   - `mcp-host-config` must carry the RPC public key as
+     `CLERUM_AUTH_JWT_PUBLIC_KEY`. `gen-jwt-keys.sh` patches it only if the
+     ConfigMap already exists, so after your first overlay apply (and after
+     any apply that rewrites it) copy `RPC_PROXY_JWT_PUBLIC_KEY` from Secret
+     `rpc-proxy-secrets` (namespace `rpc-proxy`) into it. Never keep the key
+     from the minikube copy. `control-api-public-key` and
+     `clerum-wrc-public-key` are not in base: `gen-jwt-keys.sh` creates them
+     and `kubectl apply -k` leaves them alone.
    - `apply-inter-service-tokens.sh` creates any missing Secret and then
      writes with `kubectl patch`, so later `kubectl apply -k` runs do not wipe
      the tokens. It keeps existing values. Minikube runs it again after every
@@ -328,8 +335,10 @@ runbooks are in [releases and upgrades](releases-and-upgrades.md#upgrade-notes):
   port beyond the NetworkPolicy-allowed edge services. The edge trust headers
   it accepts are forgeable by anyone who can reach the port.
 - Keep default-deny NetworkPolicies; only open (context, server) pairs you intend.
-- Switch the connector-image allowlist to enforce
-  (`CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true`).
+- Switch both connector-image allowlists to enforce
+  (`CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true` for HCC and
+  `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST=true` for control-api), and narrow both
+  allowed-prefix lists.
 - Custom workflow coordinator images are off by default
   (`WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE=false`). If you turn them on, keep
   `WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST=true` (the default), which requires a

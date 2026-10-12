@@ -74,7 +74,8 @@ helm install grafana grafana/grafana -n monitoring \
   --set persistence.storageClassName=standard
 
 make -C monitoring status
-make -C monitoring port_forward_grafana   # http://localhost:3000
+# Control UI already uses localhost:3000 on minikube, so forward Grafana elsewhere:
+kubectl port-forward -n monitoring svc/grafana 3001:80   # http://localhost:3001
 ```
 
 The admin user is `admin`. The values file does not set a password. Set
