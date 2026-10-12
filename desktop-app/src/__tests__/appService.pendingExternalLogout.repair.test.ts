@@ -265,6 +265,83 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
 })
 
 describe('team persistence respects pending-marker authority', () => {
+  it.each([
+    { keytarState: 'failed', safeStorageAvailable: true },
+    { keytarState: 'failed', safeStorageAvailable: false },
+    { keytarState: 'absent', safeStorageAvailable: true },
+    { keytarState: 'absent', safeStorageAvailable: false },
+  ])(
+    'rejects an active-Keytar team write with $keytarState Keytar and safeStorage=$safeStorageAvailable',
+    async ({ keytarState, safeStorageAvailable }) => {
+      const harness = await createService()
+      await harness.login()
+      const { safeStorage } = await import('electron')
+      vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(safeStorageAvailable)
+      harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
+      if (keytarState === 'absent') {
+        vi.doMock('keytar', () => ({}))
+      } else {
+        keytarMock.setPassword.mockRejectedValue(new Error('fixture-team Keytar write failed'))
+      }
+      vi.spyOn(harness.authClient, 'switchTeam').mockResolvedValue({
+        token: 'fixture-other-team-session',
+      })
+
+      await expect(harness.service.switchTeam('fixture-other-team')).rejects.toThrow(/Keytar/)
+
+      expect(harness.service.getCachedUserId()).toBeNull()
+      expect(harness.reportFailure).toHaveBeenCalled()
+      expect(notifySessionChanged).toHaveBeenCalledWith(false)
+      expect(
+        harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
+      ).toEqual({
+        intent: 'keytar-cleanup-pending',
+        credentialSource: 'active-keytar',
+      })
+      expect(await fs.readdir(runtime.directory)).not.toContain(
+        `session-token-${harness.envKey}.enc`
+      )
+      expect(await fs.readdir(runtime.directory)).not.toContain(
+        `session-token-${harness.envKey}.json`
+      )
+    }
+  )
+
+  // Characterization: successful source-bound team writes retain the established restore path.
+  it('restores a successful active-Keytar team switch instead of an unrelated safeStorage token', async () => {
+    const harness = await createService()
+    await harness.login()
+    harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
+    await harness.tokenStore.setSafeStorageSessionToken(
+      'fixture-unrelated-file-token',
+      harness.envKey
+    )
+    const switchedMe = { ...me, teamId: 'fixture-other-team', teamName: 'Fixture other team' }
+    vi.mocked(harness.authClient.getMe).mockResolvedValue(switchedMe)
+    vi.spyOn(harness.authClient, 'switchTeam').mockResolvedValue({
+      token: 'fixture-other-team-session',
+    })
+
+    await expect(harness.service.switchTeam('fixture-other-team')).resolves.toEqual({
+      authenticated: true,
+      me: switchedMe,
+    })
+
+    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
+      'fixture-other-team-session'
+    )
+    expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
+      'fixture-unrelated-file-token'
+    )
+    const restarted = await createService()
+    vi.mocked(restarted.authClient.getMe).mockResolvedValue(switchedMe)
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: switchedMe,
+    })
+    expect(restarted.authClient.getMe).toHaveBeenCalledWith('fixture-other-team-session')
+  })
+
   it('reports marker corruption and clears runtime authentication before team persistence', async () => {
     const harness = await createService()
     await harness.login()

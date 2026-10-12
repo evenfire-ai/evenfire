@@ -1221,6 +1221,15 @@ export class AppService {
         // A safe-storage cleanup marker makes the encrypted file authoritative
         // until Keytar cleanup is verified. Team switches must update that file.
         await this.tokenStore.setSafeStorageSessionToken(token, envKey)
+      } else if (pendingMarker?.intent.intent === 'keytar-cleanup-pending') {
+        try {
+          // Restart reads only this active account while its cleanup marker
+          // remains. A fallback write would lose the switched token on restart.
+          await this.tokenStore.setSessionToken(token, envKey, { requireKeytar: true })
+        } catch (error) {
+          await this.failClosedForPendingLogout(error)
+          throw error
+        }
       } else {
         await this.tokenStore.setSessionToken(token, envKey)
       }
