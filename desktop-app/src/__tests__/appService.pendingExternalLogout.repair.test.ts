@@ -364,6 +364,147 @@ describe('team persistence respects pending-marker authority', () => {
 })
 
 describe('durable logout failure policy', () => {
+  it.each(['read-back', 'conversion-rename'] as const)(
+    'blocks rejected login restore when its original cleanup marker survives a %s failure',
+    async failureStage => {
+      const harness = await createService()
+      await harness.tokenStore.setSafeStorageSessionToken(
+        'fixture-previous-session',
+        harness.envKey
+      )
+      harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'safe-storage')
+      keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+      keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+      keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+      let failureInjected = false
+      if (failureStage === 'read-back') {
+        const { safeStorage } = await import('electron')
+        vi.mocked(safeStorage.decryptString).mockImplementationOnce(() => {
+          failureInjected = true
+          throw new Error('fixture-owned cleanup read-back failed')
+        })
+      } else {
+        const rename = fsSync.renameSync.bind(fsSync)
+        vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
+          if (!failureInjected && String(destination) === harness.markerPath) {
+            failureInjected = true
+            throw new Error('fixture-owned cleanup conversion rename failed')
+          }
+          rename(source, destination)
+        })
+      }
+      const unlink = fs.unlink.bind(fs)
+      vi.spyOn(fs, 'unlink').mockImplementation(async file => {
+        if (failureInjected && String(file).endsWith(`session-token-${harness.envKey}.enc`)) {
+          throw Object.assign(new Error('fixture-fresh credential rollback failed'), {
+            code: 'EACCES',
+          })
+        }
+        return unlink(file)
+      })
+
+      await expect(harness.login()).rejects.toThrow('fixture-owned cleanup')
+
+      expect(failureInjected).toBe(true)
+      expect(harness.service.getCachedUserId()).toBeNull()
+      const restarted = await createService()
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+      })
+    }
+  )
+
+  // Ownership guard: a different producer's successful conversion must survive rollback.
+  it('preserves a newer cleanup revision when its own conversion durability fails', async () => {
+    const harness = await createService()
+    harness.markers.recordPendingExternalLogout(runtime.directory, harness.envKey)
+    keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    let conversionFailed = false
+    let newerMarker: ReturnType<typeof harness.markers.readPendingExternalLogoutMarker> | undefined
+    const sync = fsSync.fsyncSync.bind(fsSync)
+    vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
+      const current = harness.markers.readPendingExternalLogoutMarker(
+        runtime.directory,
+        harness.envKey
+      )
+      if (
+        !conversionFailed &&
+        fsSync.fstatSync(descriptor).isDirectory() &&
+        current?.intent.intent === 'keytar-cleanup-pending'
+      ) {
+        conversionFailed = true
+        harness.markers.recordPendingKeytarCleanupIfUnchanged(
+          runtime.directory,
+          harness.envKey,
+          current,
+          'safe-storage'
+        )
+        newerMarker = harness.markers.readPendingExternalLogoutMarker(
+          runtime.directory,
+          harness.envKey
+        )
+        throw new Error('fixture-cleanup conversion fsync failed')
+      }
+      return sync(descriptor)
+    })
+
+    await expect(harness.login()).rejects.toThrow('fixture-cleanup conversion fsync failed')
+
+    expect(conversionFailed).toBe(true)
+    expect(newerMarker?.intent).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'safe-storage',
+    })
+    expect(
+      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
+    ).toEqual(newerMarker)
+    expect(harness.service.getCachedUserId()).toBeNull()
+  })
+
+  it('preserves logout intent when cleanup conversion and rollback durability fail', async () => {
+    const harness = await createService()
+    harness.markers.recordPendingExternalLogout(runtime.directory, harness.envKey)
+    keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    let conversionFailed = false
+    const sync = fsSync.fsyncSync.bind(fsSync)
+    vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
+      if (
+        !conversionFailed &&
+        fsSync.fstatSync(descriptor).isDirectory() &&
+        harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
+          ?.intent === 'keytar-cleanup-pending'
+      ) {
+        conversionFailed = true
+        throw new Error('fixture-cleanup conversion fsync failed')
+      }
+      return sync(descriptor)
+    })
+    const unlink = fs.unlink.bind(fs)
+    vi.spyOn(fs, 'unlink').mockImplementation(async file => {
+      if (conversionFailed && String(file).endsWith(`session-token-${harness.envKey}.enc`)) {
+        throw Object.assign(new Error('fixture-fresh credential rollback failed'), {
+          code: 'EACCES',
+        })
+      }
+      return unlink(file)
+    })
+
+    await expect(harness.login()).rejects.toThrow('fixture-cleanup conversion fsync failed')
+
+    expect(harness.service.getCachedUserId()).toBeNull()
+    expect(conversionFailed).toBe(true)
+    const restarted = await createService()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+  })
+
   it('keeps logout durable when a concurrent login retires its upgraded marker', async () => {
     const harness = await createService()
     await harness.login()
