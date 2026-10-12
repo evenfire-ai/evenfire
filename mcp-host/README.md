@@ -346,8 +346,10 @@ from the env var shown; in a cluster it comes from the Secret named by
 | `grok-subscription`  | xAI Grok subscription     | none; set a model                                   | none (OAuth sign-in)                          |
 
 Vertex AI, Bedrock and Azure also need the non-secret settings listed under
-[LLM and models](#llm-and-models). The two subscription providers are off unless
-their `MCP_HOST_*_SUBSCRIPTION_ENABLED` flag is set; see
+[LLM and models](#llm-and-models). The two subscription providers are off by default.
+For Codex, set `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED=true` in `mcp-host-config`.
+For Grok, set nothing here: HCC adds `MCP_HOST_GROK_SUBSCRIPTION_ENABLED` to each
+Host that is eligible for Grok. See
 [Use a ChatGPT or Grok subscription](../docs/how-to/connect-llm-subscription.md).
 Which providers work in which runtime, and how the model allowlist applies, is
 in [LLM providers](../docs/llm-providers/README.md).

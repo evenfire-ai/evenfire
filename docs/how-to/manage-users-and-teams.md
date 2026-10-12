@@ -31,19 +31,18 @@ pages redirect to the **Agents** tab.
 Every team membership has one of three roles. The API and database store the
 value; the Control UI shows a label.
 
-| Stored value | Control UI label | Invite members | Invite someone as `admin` | Change roles, remove members |
-| ------------ | ---------------- | -------------- | ------------------------- | ---------------------------- |
-| `admin`      | Leader           | Yes            | Yes                       | Yes                          |
-| `inviter`    | Inviter          | Yes            | No                        | No                           |
-| `member`     | Participant      | No             | No                        | No                           |
+| Stored value | Control UI label | Invite members | Change roles, remove members |
+| ------------ | ---------------- | -------------- | ---------------------------- |
+| `admin`      | Leader           | Yes            | Yes                          |
+| `inviter`    | Inviter          | Yes            | No                           |
+| `member`     | Participant      | No             | No                           |
 
 The team detail Members table shows the same thing as two read-only columns,
 **Can Invite Members** and **Can Delete Members**. The role editor sets the
 role through those two checkboxes: delete implies invite.
 
-These roles govern what a member can do **for their own teams** through the
-member-facing API (`/external/members/*` and `/external/teams/*`), which the
-[profile UI](../surfaces/profile-ui.md) uses. In that API:
+These roles govern what a member can do **for their own teams** from the
+[profile UI](../surfaces/profile-ui.md). There:
 
 - An `admin` or `inviter` can send, resend, and revoke member invitations for
   teams where they hold that role.
