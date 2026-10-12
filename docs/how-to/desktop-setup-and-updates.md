@@ -38,6 +38,15 @@ or selected. Startup also retries discovery for a saved profile without an RPC
 URL. Discovery can happen before sign-in; there is no second URL to type or
 include in a Profile UI link.
 
+If discovery fails before sign-in, authentication can still succeed. A later
+health check can discover and use RPC for the live session without changing its
+saved environment, credential slot, chat binding, or GFS scope. Settings shows
+the saved RPC URL and display name, so it may still show an empty RPC URL while
+RPC health is healthy. The discovered URL and name are saved at the next safe
+signed-out boundary. If that optional save fails, authentication still ends and
+a later health check retries discovery and persistence. A failed team switch
+that clears the session also clears its live RPC override.
+
 ## Setup paths
 
 Three ways to add an environment; all of them end with the same saved
