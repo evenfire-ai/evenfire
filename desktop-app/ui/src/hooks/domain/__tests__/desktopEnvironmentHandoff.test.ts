@@ -253,7 +253,7 @@ describe('Desktop environment handoff concurrency', () => {
     )
   })
 
-  it('clears a prior setup confirmation when environment verification fails', async () => {
+  it('requests setup confirmation cleanup when environment verification fails', async () => {
     const refreshRuntimeConfigState = vi.fn(async () => {
       throw new Error('runtime config unavailable')
     })
