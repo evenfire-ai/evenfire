@@ -95,11 +95,15 @@ link.
 
 ## Screens
 
-The app's top-level navigation (`NavItem` in
-`desktop-app/ui/src/uiTypes.ts`) covers: chat, agents, mcp-servers, contexts,
-teams, workflows, sandbox-ui, files, and settings. Outside that authenticated
-shell sit two more states: the auth page (login) and `UnavailablePage`, shown
-instead of login when a required backend dependency is unreachable.
+The app's top-level routes (`DESKTOP_ROUTES` in
+`desktop-app/ui/src/constants/navigation.ts`) are: **Chat** (`chat`),
+**Apps** (`sandbox-ui`), **Agents** (`agents`), **Connectors**
+(`mcp-servers`), **Plugins** (`workflows`), **EvenDrive** (`files`), a file
+`preview` view, and **Settings**. Inside an agent, the workspace has
+Connectors, Members, Shared files and Activity sub-routes. Outside that
+authenticated shell sit the first-run onboarding flow, the auth page (login),
+and `UnavailablePage`, shown instead of login when a required backend
+dependency is unreachable.
 
 Two screens worth calling out specifically:
 

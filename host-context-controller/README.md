@@ -188,7 +188,7 @@ GET /health
 { "status": "ok", "ready": true }
 ```
 
-The server also exposes `GET /` (API information), `GET /ready` (readiness; 503 until the controller has started), `GET /metrics` (Prometheus), and `GET /api/v1/desktop/:hostRef` (desktop status; requires the `CONTEXT_MAPPER_DESKTOP_API_TOKEN` bearer token — the check is skipped when that variable is empty).
+The server also exposes `GET /` (API information), `GET /ready` (readiness: `200` once the controller is running and its McpServer, Context and Host watches are synced; otherwise `503` with a `reasons[]` list such as `controller_stopped`, `mcp_watch_unsynced`, `context_watch_unsynced`, `host_watch_unsynced`), `GET /metrics` (Prometheus), and `GET /api/v1/desktop/:hostRef` (desktop status; requires the `CONTEXT_MAPPER_DESKTOP_API_TOKEN` bearer token — the check is skipped when that variable is empty).
 
 ### Temporary system inventory (PR 2 compatibility)
 

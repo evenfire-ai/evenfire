@@ -4,8 +4,10 @@
 service, deny-all NetworkPolicies, the JWT chain, and a seeded agent named
 `chatllm`. It starts with an empty connector context — mcp-host's native tools
 (shell, file read/write, HTTP, memory) need no MCP server; install connectors
-from the registry when you want more. Setup infers the provider from whichever
-single LLM key you set in `.env`.
+from the registry when you want more. Setup infers the provider from the first of
+`OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY` set in
+`.env`; for any other provider also set `CLERUM_MODEL_PROVIDER` and
+`CLERUM_MODEL_NAME`.
 
 ## Prerequisites
 
@@ -24,7 +26,8 @@ runs it automatically first (bypass with `SKIP_PREREQS=true`).
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 # edit .env: set ADMIN_PASSWORD (required — no default ships) and ONE LLM key
-# (setup infers the matching provider)
+# (OpenAI/Claude/Z.AI/Bailian are auto-detected; other providers also need
+#  CLERUM_MODEL_PROVIDER + CLERUM_MODEL_NAME)
 MINIKUBE_IMAGE_TAG=latest make minikube-setup   # first run ~15 min (pulling images dominates); re-run safe
 make minikube-status                            # wait for every deployment READY
 ```

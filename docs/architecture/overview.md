@@ -12,7 +12,7 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 >
 > - For every service and which controller creates it → [/ARCHITECTURE.md](../../ARCHITECTURE.md)
 > - For namespaces, trust boundaries, NetworkPolicy layers and the WRC → [platform-topology.md](platform-topology.md)
-> - For all eight CRDs → [docs/crds/](../crds/)
+> - For all nine CRDs → [docs/crds/](../crds/)
 
 ---
 
@@ -117,9 +117,9 @@ matrix, including the Profile UI.
 
 All CRDs belong to the `clerum.io` API group, version `v1alpha1`. They are installed via the Helm chart at `charts/clerum-crds`.
 
-The platform ships **eight** CRDs. This section covers the four on the message
-path in depth. The other four — `WorkflowRecipe`, `WorkflowRecipePolicy`,
-`SharedFileSystem`, `GlobalFileSystem` — have reference pages under
+The platform ships **nine** CRDs. This section covers the four on the message
+path in depth. The other five — `LlmHook`, `WorkflowRecipe`,
+`WorkflowRecipePolicy`, `SharedFileSystem`, `GlobalFileSystem` — have reference pages under
 [docs/crds/](../crds/), which is the complete set.
 
 ### 2.1 CommunicationChannel
@@ -1386,7 +1386,7 @@ npm run dev
 
 ### Helm Chart: clerum-crds
 
-Installs the eight CRDs. Must be installed before deploying any services.
+Installs the nine CRDs. Must be installed before deploying any services.
 
 ```bash
 helm install clerum-crds ./charts/clerum-crds

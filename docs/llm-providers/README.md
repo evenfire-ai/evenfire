@@ -22,7 +22,7 @@ by (potentially) three different people.
 ```mermaid
 flowchart LR
   subgraph P["1. PROVIDER — who serves the model"]
-    P1["Host CRD spec.model.provider<br/>one of 22 ids<br/>chosen by the operator"]
+    P1["Host CRD spec.model.provider<br/>one of 24 ids<br/>chosen by the operator"]
   end
   subgraph M["2. MODEL — which model of that provider"]
     M1["allowlist llm_allowed_models<br/>operator-declared in Control UI<br/>user picks within it, per chat"]
@@ -51,7 +51,7 @@ A few rules that follow from this split, and that surprise people:
 
 ## 2. Which providers are supported
 
-**23 providers**, defined once in
+**24 providers**, defined once in
 [`packages/llm-providers/index.cjs`](../../packages/llm-providers/index.cjs) —
 the single source of truth consumed by mcp-host, control-api, the workflow
 runtime, the host controller and the Control UI.
@@ -111,12 +111,31 @@ Azure is OpenAI-shaped but has no fixed base URL (per-resource endpoint), it
 authenticates with an `api-key` header instead of `Authorization: Bearer`, and
 **its "model" is your Azure deployment name**, not a catalog id.
 
+### Group D — subscription sign-in, no API key (2)
+
+| Provider                     | id                   | Credential                                        | Feature flags (all default `false` in `deploy/base`)                                                                     |
+| ---------------------------- | -------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| ChatGPT (Codex) subscription | `codex-subscription` | OAuth sign-in held by control-api, no Secret slot | `CONTROL_API_CODEX_SUBSCRIPTION_ENABLED`, `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED`                                          |
+| Grok subscription            | `grok-subscription`  | OAuth sign-in held by control-api, no Secret slot | `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` (recipes) |
+
+These providers use a subscription account instead of an API key. An admin
+signs in from Control UI (**Secrets → LLM → Subscriptions**,
+`/secrets/llm/subscriptions`); control-api
+keeps the OAuth tokens, and model traffic goes through the in-cluster
+`codex-llm-proxy` / `grok-llm-proxy`. A Host selects a sign-in with
+`spec.model.connectionRef` and needs no `secretRef` when every target is
+the same subscription provider. A Host may use at most one subscription
+provider. They are **off in `deploy/base`** and switched on in the minikube
+overlay. Wire-level details:
+[Codex transport contract](../architecture/codex-subscription-transport-contract.md),
+[Grok transport contract](../architecture/grok-subscription-transport-contract.md).
+
 ### Important: not every provider works everywhere
 
-| Surface                       | Providers supported                     |
-| ----------------------------- | --------------------------------------- |
-| Interactive Host (chat agent) | all **22**                              |
-| WorkflowRecipe LLM steps      | **20** — `bedrock` and `azure` excluded |
+| Surface                       | Providers supported                                  |
+| ----------------------------- | ---------------------------------------------------- |
+| Interactive Host (chat agent) | all **24** (subscription providers need their flags) |
+| WorkflowRecipe LLM steps      | **22** — `bedrock` and `azure` excluded              |
 
 `bedrock` and `azure` are deliberately absent from the WorkflowRecipe CRD enum:
 the workflow `configure` transport carries a **single** credential string, so it
@@ -388,7 +407,7 @@ failing over on those would just mask bugs.
 
 ### Known sharp edge: workflow steps and the secret mapping
 
-The WorkflowRecipe CRD admits **20** providers, but the shipped
+The WorkflowRecipe CRD admits **22** providers, but the shipped
 `clerum-model-secret-mapping` ConfigMap
 ([`deploy/base/mcp-host/model-secret-mapping.yaml`](../../deploy/base/mcp-host/model-secret-mapping.yaml))
 maps only **five**: `openai`, `claude`, `zai`, `bailian`, `vertex`.

@@ -48,7 +48,7 @@ journey always runs.
 ```bash
 cd desktop-app
 # dev Evenfire must be closed (process-wide single-instance lock)
-make gcp-dev-pf-desktop          # keep control-api/external-rest/rpc-proxy forwarded
+make -C .. minikube-pf-desktop   # keep control-api/external-rest/rpc-proxy forwarded
 
 npm run qa:recorder:navigation   # one journey
 npm run qa:recorder:all          # all 13 specs / 22 tests

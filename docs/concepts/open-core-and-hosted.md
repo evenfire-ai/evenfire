@@ -12,7 +12,7 @@ Everything needed to run the full platform yourself — single-tenant, hardened,
 and not held back:
 
 - **Every service**, including the `mcp-host` agent runtime.
-- The **eight `clerum.io` CRDs** and the CRD Helm chart.
+- The **nine `clerum.io` CRDs** and the CRD Helm chart.
 - The **full security model** — default-deny NetworkPolicies, per-workload
   security contexts, the service-to-service JWT chain, and human-in-the-loop
   approvals.

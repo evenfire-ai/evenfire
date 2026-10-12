@@ -10,7 +10,5 @@ This folder is the source of truth for desktop UX decisions, with a focus on end
 
 ## Current Documents
 
-- `teams-experience-source-of-truth.md`:
-  - deep analysis of current `control-ui` and `desktop-app` teams flows
-  - endpoint mapping and reuse constraints
-  - UX requirements and implementation plan for a user-friendly desktop Teams section
+- [`control-ui-header-table-layout-inventory.md`](control-ui-header-table-layout-inventory.md):
+  point-in-time inventory of Control UI page headers and table layouts

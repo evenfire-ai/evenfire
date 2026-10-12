@@ -5,9 +5,10 @@ credentials (including the multi-slot providers **Google Vertex AI** and
 **Amazon Bedrock**), how to manage the operator-declared model allowlist, and how
 the per-session model selector behaves in the desktop app.
 
-The canonical provider set — **23 providers**, from `openai`, `claude`
+The canonical provider set — **24 providers**, from `openai`, `claude`
 (Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock` to the
-OpenAI-compatible additions and `azure` — and their credential slots live in the
+OpenAI-compatible additions, `azure`, and the two sign-in subscription providers
+(`codex-subscription`, `grok-subscription`, off by default in `deploy/base`) — and their credential slots live in the
 shared `@clerum/llm-providers` package, which the Control UI, control-api,
 mcp-host, and the workflow runtime all consume. See the
 [providers overview](../llm-providers/README.md) for the full list and the
@@ -86,7 +87,7 @@ deliberately absent from the recipe CRD's provider enum, so a recipe pinning
 either is rejected at admission. The workflow `configure` transport carries a
 single credential string, which can deliver neither Bedrock's key pair nor
 Azure's required endpoint. Both remain fully supported for interactive Hosts;
-the other 20 providers are admissible in recipes — see the
+the other 22 providers are admissible in recipes — see the
 [providers overview](../llm-providers/README.md) for the per-surface matrix and
 the `clerum-model-secret-mapping` caveat.
 

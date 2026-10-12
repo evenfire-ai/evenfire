@@ -1,0 +1,113 @@
+# LlmHook CRD Reference
+
+**API Group:** `clerum.io`
+**Version:** `v1alpha1`
+**Scope:** Namespaced (installed hooks live in the `llm-hooks` namespace)
+**Reconciled by:** host-context-controller · **Read by:** mcp-host
+
+## Purpose
+
+An LlmHook is an installed **guardrail hook**: an HTTP service that mcp-host
+calls at defined points of an agent turn, either around the LLM call (LLM lane)
+or around a tool call (tool lane). A hook can deny, rewrite, substitute a
+result, or add context, but only within the capabilities an admin granted it.
+
+A Host opts in by listing hooks under `Host.spec.guardrails.hooks.<phase>[]`
+(see [Host CRD](host.md)). A Host without a `guardrails` block runs no hooks.
+
+- **Image targets:** host-context-controller deploys a Deployment, Service,
+  and NetworkPolicy in `llm-hooks`. Hooks that share an image digest are
+  co-located on one pod and routed by `spec.path`.
+- **Service and remote targets:** nothing is deployed.
+- **Who writes what:** mcp-host only reads LlmHook CRs. Only the controller
+  writes `status`.
+
+Control UI installs hooks from the registry (**Installed Guardrails**). The
+install stamps a platform-assigned `clerum.io/trust-level` annotation (`low`,
+`mid` or `high`) that hook authors cannot set. The Host's
+`guardrails.minInstalledHookTrustLevel` is checked against that annotation.
+
+## Spec Fields
+
+| Field                                        | Type                    | Required              | Description                                                                                                                                                                                 |
+| -------------------------------------------- | ----------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.target`                                | object                  | yes                   | Exactly one of `image`, `service`, `remote`.                                                                                                                                                |
+| `spec.target.image.ref`                      | string                  | yes (image)           | Container image. Validated against the image allowlist and digest-pinned at install.                                                                                                        |
+| `spec.target.image.port`                     | int                     | yes (image)           | Port the hook HTTP server listens on (1–65535).                                                                                                                                             |
+| `spec.target.image.imagePullSecrets`         | string[]                | no                    | Pull secret names in `llm-hooks`.                                                                                                                                                           |
+| `spec.target.image.envSecret`                | string                  | no                    | The hook's own credential Secret in `llm-hooks`. It can never reference a Host or LLM-key Secret.                                                                                           |
+| `spec.target.image.egressBindings[]`         | object[]                | no                    | Allowed external egress: `toFQDN` or `cidr`, plus `ports`. Looser than McpServer egress: no private-range hardening yet.                                                                    |
+| `spec.target.image.security.addCapabilities` | string[]                | no                    | Subset of `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, `NET_BIND_SERVICE`.                                                                                                                            |
+| `spec.target.service`                        | object                  | yes (service)         | Existing in-cluster Service: `name`, `namespace`, `port`.                                                                                                                                   |
+| `spec.target.remote.baseUrl`                 | string                  | yes (remote)          | External endpoint mcp-host dials directly. Must be `https://`; SSRF-validated at dial time.                                                                                                 |
+| `spec.target.remote.authHeadersSecret`       | string                  | no                    | Secret supplying auth headers for the remote endpoint.                                                                                                                                      |
+| `spec.path`                                  | string                  | no (default `/`)      | Calls go to `{endpoint}{path}/v1/{point}`. Co-located image hooks must use distinct paths.                                                                                                  |
+| `spec.lifecyclePoints`                       | string[]                | yes (1–6)             | LLM lane: `preCall`, `moderate`, `postCallSuccess`, `onError`. Tool lane: `preToolUse`, `postToolUse`.                                                                                      |
+| `spec.contentAccess`                         | `metadata` \| `content` | no                    | What the hook receives. **Omitting it means `content`.** Only a `preCall`-only hook may declare `metadata` (model, params and usage, no message bodies).                                    |
+| `spec.order`                                 | int                     | no (default 100)      | Order within a phase; lower runs first.                                                                                                                                                     |
+| `spec.failMode`                              | `open` \| `closed`      | no (default `closed`) | Behaviour when the hook is unavailable. A hook with `may_deny` must fail closed.                                                                                                            |
+| `spec.timeoutMs`                             | int                     | no (default 5000)     | Per-call timeout.                                                                                                                                                                           |
+| `spec.onUnavailable`                         | object                  | no                    | Circuit breaker: `mode` (`strict` \| `breaker`, default `strict`), `failureThreshold` (default 5), `cooldownMs` (default 30000).                                                            |
+| `spec.capabilities`                          | string[]                | no                    | Admin-granted: `may_deny`, `may_rewrite`, `may_substitute_result`, `may_add_context`. Must fall within the Host's `guardrails.capabilityCeiling`, and is re-checked on every hook response. |
+| `spec.config`                                | object                  | no                    | Opaque hook settings. Never used as a trust input.                                                                                                                                          |
+
+### Admission rules
+
+- `remote.baseUrl` must start with `https://`.
+- A hook granted `may_deny` must use `failMode: closed`.
+- `contentAccess: metadata` is rejected for `moderate`, `postCallSuccess`,
+  `onError`, `preToolUse` and `postToolUse`, which are inherently
+  content-bearing.
+- A content-bearing hook that has `egressBindings` or a `remote` target can
+  only be installed at trust level `high`.
+
+## Status Fields
+
+| Field                   | Description                                                                                                                                              |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status.observedDigest` | Image digest actually running. mcp-host binds `Host.spec.guardrails.hooks[].digest` against this, and fails closed (or skips with an alert) on mismatch. |
+| `status.readyReplicas`  | Ready replicas (image targets only).                                                                                                                     |
+| `status.lastReconciled` | Timestamp of the last successful reconcile.                                                                                                              |
+| `status.conditions[]`   | Standard conditions (`Deployed`, `Ready`) with `observedGeneration`.                                                                                     |
+
+`kubectl get llmhooks -n llm-hooks` shows Path, Order, FailMode, Digest, and Ready.
+
+## Example
+
+```yaml
+apiVersion: clerum.io/v1alpha1
+kind: LlmHook
+metadata:
+  name: pii-redactor
+  namespace: llm-hooks
+spec:
+  target:
+    image:
+      ref: ghcr.io/example/pii-redactor@sha256:<digest>
+      port: 8080
+  path: /pii
+  lifecyclePoints: [postCallSuccess]
+  capabilities: [may_substitute_result]
+  failMode: closed
+  timeoutMs: 3000
+```
+
+Referenced from a Host:
+
+```yaml
+spec:
+  guardrails:
+    capabilityCeiling: [may_deny, may_substitute_result]
+    hooks:
+      postCallSuccess:
+        - id: pii-redactor
+          digest: sha256:<digest>
+```
+
+A zero-dependency reference implementation of the `/v1` protocol lives in
+[`hooks/reference-guardrail-hook/`](../../hooks/reference-guardrail-hook/).
+
+## Related
+
+- [Host CRD](host.md): `spec.guardrails`
+- [CRD Index](README.md)

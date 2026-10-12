@@ -52,7 +52,7 @@ NetworkPolicy owned by whichever component is responsible for that selector.
 
 | Service                                                               | Role                                                                                  |
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| [channel-reader](channel-reader/)                                     | Polls Telegram / Email / Slack, forwards messages to `mcp-host`                       |
+| [channel-reader](channel-reader/)                                     | Receives Telegram / Email / Slack / Teams messages, forwards them to `mcp-host`       |
 | [workflow-approval-request-reader](workflow-approval-request-reader/) | Inbound half of channel approvals — receives provider callbacks and submits decisions |
 
 ### Agent runtime — `mcp-host`, `mcp-server` (both deny-all)
@@ -102,14 +102,14 @@ platform's three human surfaces: [docs/surfaces/README.md](docs/surfaces/README.
 
 ## CRDs
 
-`Host`, `Context`, `McpServer`, `CommunicationChannel`, `WorkflowRecipe`,
+`Host`, `Context`, `McpServer`, `LlmHook`, `CommunicationChannel`, `WorkflowRecipe`,
 `WorkflowRecipePolicy`, `SharedFileSystem`, `GlobalFileSystem` — one reference
 page each under [docs/crds/](docs/crds/), shipped in
 [charts/clerum-crds](charts/clerum-crds/).
 
 ```mermaid
 flowchart TB
-  user[Telegram / Email / Slack] --> cr[channel-reader]
+  user[Telegram / Email / Slack / Teams] --> cr[channel-reader]
   desktop[Desktop App] --> rpc[rpc-proxy]
   cui[control-ui] --> capi
   pui[profile-ui] --> era[external-rest-api]
@@ -139,8 +139,10 @@ flowchart TB
 
 ## Swapping LLM providers
 
-Set `CLERUM_MODEL_PROVIDER` to `openai | claude | zai | bailian` and supply the
-matching API key. One interface, no code change. `CLERUM_MODEL_NAME` picks a
+Set `CLERUM_MODEL_PROVIDER` to any of the 24 provider ids in
+[`packages/llm-providers`](packages/llm-providers/index.cjs) and supply the
+matching credential. One interface, no code change. Minikube setup auto-detects
+only `openai`, `claude`, `zai` and `bailian` from their keys. `CLERUM_MODEL_NAME` picks a
 model only together with `CLERUM_MODEL_PROVIDER`; minikube setup refuses it
 alone and defaults to `openai/gpt-5.4-mini` when no key is set. See
 [mcp-host/README.md](mcp-host/README.md) and

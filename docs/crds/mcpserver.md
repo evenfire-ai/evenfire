@@ -41,9 +41,57 @@ HCC-owned servers, and exposes discovery/status for WRC-owned servers.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `spec.auth` | object | no | Authentication configuration for the mcp-host connecting to this server. |
-| `spec.auth.type` | string | no | Authentication type. One of: `none`, `bearer`, `basic`, `apiKey`. |
+| `spec.auth.type` | string | no | Authentication type. One of: `none`, `bearer`, `basic`, `apiKey`, `oauth`. `oauth` requires `spec.oauth` and forbids `secretRef`/`secretKey`. |
 | `spec.auth.secretRef` | string | no | Name of the Kubernetes Secret containing auth credentials. |
 | `spec.auth.secretKey` | string | no | Key within the secret to use (default depends on auth type). |
+
+### OAuth (`spec.oauth`)
+
+Present only when `spec.auth.type: oauth`. control-api runs the OAuth 2.1
+authorize, token and refresh flow. Tokens are resolved per connection at call
+time and are **never mounted into the connector pod**.
+
+> **Enable the broker first.** `MCP_OAUTH_BROKER_ENABLED` is **off by default**
+> in `deploy/base` (the minikube overlay turns it on). While it is off,
+> OAuth connectors keep asking for consent and never get a token. Also set
+> `CONTROL_API_OAUTH_CALLBACK_BASE_URL` to the browser-reachable control-api
+> origin; otherwise callbacks fall back to an internal hostname.
+
+There are three configuration styles, chosen by `source`, which can't change
+after creation:
+
+- **Built-in provider** (`source` absent): one of the known adapters in
+  `provider`.
+- **`remote`**: endpoints pinned from discovery when the remote-connector
+  wizard installs the server.
+- **`generic`**: an operator-configured client with explicit endpoints and
+  wire options.
+
+| Field | Applies to | Description |
+|-------|-----------|-------------|
+| `oauth.id` | all | Stable client identifier; also the callback path segment. Immutable. |
+| `oauth.provider` | built-in | `salesforce`, `slack`, `notion`, `microsoft-graph`, `google`, `monday`, `clickup`, `vercel`. Immutable. |
+| `oauth.clientIdRef` / `oauth.clientSecretRef` | all | `{name, key}` of Secrets in the `mcp-servers` namespace holding the client id / secret. |
+| `oauth.scopes[]` | all | Scopes to request. Include the provider's offline/refresh scope when `backgroundAccess` is true. |
+| `oauth.backgroundAccess` | all | Allow use by a workload with no live human session. |
+| `oauth.grantScope` | all | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context, which one member bootstraps and others inherit. Immutable. |
+| `oauth.source` | — | absent (built-in), `remote`, or `generic`. Immutable. |
+| `oauth.clientMode` | remote | `public` (PKCE, no secret) or `confidential`. |
+| `oauth.authorizationEndpoint`, `tokenEndpoint`, `resource` | remote, generic | Pinned endpoints; `resource` is the RFC 8707 resource indicator. |
+| `oauth.registrationEndpoint`, `issuer`, `issForCallback` | remote | Dynamic client registration URL, issuer, and the RFC 9207 `iss` validated on callback. |
+| `oauth.bearerInBody`, `supportsRefresh` | remote (`supportsRefresh` also generic) | Pinned at install. `bearerInBody` must be `false`. |
+| `oauth.tokenRequestFormat`, `tokenAuthMethod`, `scopeSeparator`, `sendScope`, `usePkce`, `includeResponseType`, `refreshEndpoint`, `extraAuthorizeParams` | generic | Wire options for non-standard authorization servers. |
+
+**Redirect URI to register** with the provider:
+
+- Built-in and `generic`:
+  `<CONTROL_API_OAUTH_CALLBACK_BASE_URL>/api/v1/oauth-callback/<oauth.id>`.
+- `remote`: `/api/v1/oauth-callback/remote` when the authorization server
+  advertises RFC 9207, otherwise `/api/v1/oauth-callback/remote/<serverName>`.
+  With dynamic registration, the install id is appended and registered
+  automatically.
+
+The Control UI wizard shows the exact URI.
 
 ### Server Configuration
 
@@ -182,6 +230,7 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 | `status.resolvedEgressIPs[].dns` | string | The DNS hostname that was resolved. |
 | `status.resolvedEgressIPs[].ips` | string[] | Resolved IP addresses. |
 | `status.resolvedEgressIPs[].resolvedAt` | date-time | When the resolution occurred. |
+| `status.conditions[]` | object[] | Standard conditions written by host-context-controller (e.g. `SecretResolved`, `Ready`) with `reason` (e.g. `SecretNotFound`) and `observedGeneration`. Control UI uses them to show connectors whose credentials are still missing. |
 
 ## Additional Printer Columns
 
