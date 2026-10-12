@@ -228,6 +228,44 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
+  it.each(['generation failure', 'authentication starts', 'invalid REST endpoint'])(
+    'clears the first dialog when a second link meets %s',
+    async failure => {
+      const first = { externalRestApiBaseUrl: 'https://first-api.example.test', appName: 'First' }
+      render(<Probe />)
+      await waitFor(() =>
+        expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes')
+      )
+      await dispatchDesktopEnvironmentLink(first)
+      expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+        first.externalRestApiBaseUrl
+      )
+      if (failure === 'generation failure')
+        mocks.getSessionGeneration.mockRejectedValueOnce(new Error('fixture IPC unavailable'))
+      else if (failure === 'authentication starts')
+        mocks.getSessionGeneration.mockImplementationOnce(async () => {
+          await act(async () => setBootingForTest?.(true))
+          return nativeAppService!.getSessionGeneration()
+        })
+      await dispatchDesktopEnvironmentLink({
+        externalRestApiBaseUrl:
+          failure === 'invalid REST endpoint'
+            ? 'file:///invalid'
+            : 'https://second-api.example.test',
+      })
+      expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+      expect(mocks.saveRuntimeConfig).not.toHaveBeenCalled()
+      expect(mocks.setStatus).toHaveBeenLastCalledWith(
+        failure === 'generation failure'
+          ? 'Could not verify the desktop session. Try opening the link again.'
+          : failure === 'authentication starts'
+            ? 'Finish the current authentication action, then reopen this desktop link.'
+            : expect.stringContaining('Desktop setup link rejected:'),
+        failure === 'authentication starts' ? 'info' : 'error'
+      )
+    }
+  )
+
   it('preserves a native login that starts while setup confirmation rereads configuration', async () => {
     const linkedEnvironment = {
       appName: 'New tenant',

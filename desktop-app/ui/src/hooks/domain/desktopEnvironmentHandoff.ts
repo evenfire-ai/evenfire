@@ -198,6 +198,7 @@ export function createDesktopEnvironmentSetupHandler({
         linkedConfig.externalRestApiBaseUrl
       )
     } catch (error) {
+      setPendingDesktopEnvironmentSetup(null)
       setStatus(
         `Desktop setup link rejected: ${error instanceof Error ? error.message : String(error)}`,
         'error'
@@ -209,11 +210,13 @@ export function createDesktopEnvironmentSetupHandler({
     try {
       sessionGeneration = await getSessionGeneration()
     } catch {
+      setPendingDesktopEnvironmentSetup(null)
       setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
       return
     }
 
     if (isAuthenticationOperationInProgress(getAuthState())) {
+      setPendingDesktopEnvironmentSetup(null)
       setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
       return
     }
