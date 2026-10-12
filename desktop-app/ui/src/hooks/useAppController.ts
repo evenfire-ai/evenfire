@@ -1212,7 +1212,20 @@ export function useAppController() {
           nav.selectedAgent === targetAgent &&
           nav.navItem === DESKTOP_ROUTES.chat
         ) {
-          await chat.switchToChat(targetAgent, targetChatId)
+          try {
+            await chat.switchToChat(targetAgent, targetChatId, {
+              onCurrentError: error => {
+                fullSetStatus(
+                  `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
+                  'error'
+                )
+              },
+            })
+          } catch {
+            // The request owns current feedback and still rejects to awaiters.
+            // This UI event observes that rejection without reporting it again.
+            return
+          }
           nav.activateChatTab(targetAgent, targetChatId)
           return
         }
