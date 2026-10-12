@@ -56,8 +56,8 @@ validators run in CI and will catch what the hook would have.
 
 ## CLA
 
-This project requires a signed Contributor License Agreement. The CLA-assistant
-bot will prompt you on your first PR. Contributions may be used in the project's
-commercial / managed editions.
+This project requires a signed Contributor License Agreement. There is no
+automated CLA bot; contact a maintainer to sign it before your first PR is
+merged. Contributions may be used in the project's commercial / managed editions.
 
 See [CLA.md](CLA.md) for the full agreement (draft, pending legal review).

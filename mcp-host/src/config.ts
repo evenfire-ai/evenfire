@@ -691,7 +691,8 @@ function getDevHostConfig(): HostSpec | undefined {
 
 /**
  * Parse CLERUM_MCP_SERVERS JSON for dev mode.
- * Format: [{"name": "...", "spec": {"contextRef": "...", "transport": {...}}}]
+ * Format: a flat McpServerInfo[] — [{"name": "...", "contextRef": "...", "transport": {...}}]
+ * (no `spec` wrapper; the parsed JSON is used as-is, without shape validation).
  */
 function parseDevMcpServers(): McpServerInfo[] | undefined {
   const serversJson = process.env.CLERUM_MCP_SERVERS
