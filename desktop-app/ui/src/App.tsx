@@ -30,6 +30,7 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
+import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -50,6 +51,7 @@ import {
 } from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
+import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   canProcessSandboxUiDeepLinks,
@@ -339,6 +341,9 @@ export function App() {
   const [pendingGfsDeepLinks, setPendingGfsDeepLinks] = React.useState<
     GfsResourceDeepLinkEnvelope[]
   >([])
+  const [pendingGfsResourceAction, setPendingGfsResourceAction] =
+    React.useState<GfsResourceActionRequest | null>(null)
+  const gfsResourceActionRequestIdRef = React.useRef(0)
   const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
@@ -607,6 +612,43 @@ export function App() {
 
   const handleGfsRouteDialogRequestHandled = React.useCallback((requestId: number) => {
     setGfsRouteDialogRequestId(current => (current === requestId ? 0 : current))
+  }, [])
+
+  const handleSidebarGfsResourceAction = React.useCallback(
+    (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => {
+      if (actionId === 'open-folder') {
+        vm.openFilesSection(resource.gfsUri)
+        return
+      }
+      if (actionId === 'preview') {
+        const preview = resolveGfsPreview(resource)
+        if (preview) vm.openPreviewSection(preview)
+        return
+      }
+      const request: GfsResourceActionRequest = {
+        id: ++gfsResourceActionRequestIdRef.current,
+        targetUri: resource.gfsUri,
+        actionId,
+        ...(file ? { file } : {}),
+      }
+      if (actionId === 'copy-content') {
+        const preview = resolveGfsPreview(resource)
+        if (!preview || (preview.kind !== 'image' && preview.kind !== 'markdown')) {
+          vm.pushToast('Copy content is unavailable for this resource.', 'error')
+          return
+        }
+        setPendingGfsResourceAction(request)
+        vm.openPreviewSection(preview)
+        return
+      }
+      setPendingGfsResourceAction(request)
+      vm.openFilesSection(resource.gfsUri)
+    },
+    [vm.openFilesSection, vm.openPreviewSection, vm.pushToast]
+  )
+
+  const handleGfsResourceActionHandled = React.useCallback((requestId: number) => {
+    setPendingGfsResourceAction(current => (current?.id === requestId ? null : current))
   }, [])
 
   const openChatDrawer = React.useCallback(() => {
@@ -2928,6 +2970,7 @@ export function App() {
                               onSelect={handleSidebarNavSelect}
                               onOpenFilesSection={vm.openFilesSection}
                               onOpenPreviewSection={vm.openPreviewSection}
+                              onGfsResourceAction={handleSidebarGfsResourceAction}
                               pushToast={vm.pushToast}
                               toggleRequestId={sidebarToggleRequestId}
                             />
@@ -3039,6 +3082,8 @@ export function App() {
                                     onOpenPreview={vm.openPreviewSection}
                                     routeDialogRequestId={gfsRouteDialogRequestId}
                                     onRouteDialogRequestHandled={handleGfsRouteDialogRequestHandled}
+                                    pendingResourceAction={pendingGfsResourceAction}
+                                    onPendingResourceActionHandled={handleGfsResourceActionHandled}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.preview && activePreviewPayload && (
@@ -3053,6 +3098,8 @@ export function App() {
                                     unavailable={activePreviewPayload.unavailable}
                                     pushToast={vm.pushToast}
                                     onOpenRoute={handleOpenGfsRoute}
+                                    pendingResourceAction={pendingGfsResourceAction}
+                                    onPendingResourceActionHandled={handleGfsResourceActionHandled}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}

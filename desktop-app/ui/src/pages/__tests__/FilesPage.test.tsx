@@ -7,6 +7,7 @@ import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import {
   childView,
   listChildrenPage,
@@ -104,7 +105,9 @@ function renderFilesPage(
   pushToast?: (message: string, tone: Tone) => void,
   onOpenPreview?: (preview: unknown) => void,
   pendingGfsUri?: string | null,
-  onPendingGfsUriHandled?: () => void
+  onPendingGfsUriHandled?: () => void,
+  pendingResourceAction?: GfsResourceActionRequest | null,
+  onPendingResourceActionHandled?: (requestId: number) => void
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -114,6 +117,8 @@ function renderFilesPage(
         onOpenPreview={onOpenPreview}
         pendingGfsUri={pendingGfsUri}
         onPendingGfsUriHandled={onPendingGfsUriHandled}
+        pendingResourceAction={pendingResourceAction}
+        onPendingResourceActionHandled={onPendingResourceActionHandled}
       />
     </QueryClientProvider>
   )
@@ -300,6 +305,49 @@ describe('FilesPage', () => {
     await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
     expect(openUri).toHaveBeenCalledWith(file.gfsUri)
     expect(handled).toHaveBeenCalledOnce()
+  })
+
+  it('runs a sidebar action only after Files resolves the exact requested resource', async () => {
+    const selected = await resolveResource(resolvedDirectory('selected', 'Selected folder'))
+    const target = await resolveResource(resolvedDirectory('target', 'Target folder'))
+    const handled = vi.fn()
+    const refreshCurrentLocation = vi.fn(async () => true)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: selected,
+      refreshCurrentLocation,
+    })
+
+    const mismatchView = renderFilesPage(
+      undefined,
+      undefined,
+      target.gfsUri,
+      undefined,
+      { id: 11, targetUri: target.gfsUri, actionId: 'refresh' },
+      handled
+    )
+
+    expect(refreshCurrentLocation).not.toHaveBeenCalled()
+    expect(handled).not.toHaveBeenCalled()
+    mismatchView.unmount()
+    handled.mockClear()
+
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: target,
+      refreshCurrentLocation,
+    })
+    renderFilesPage(
+      undefined,
+      undefined,
+      target.gfsUri,
+      undefined,
+      { id: 12, targetUri: target.gfsUri, actionId: 'refresh' },
+      handled
+    )
+
+    await waitFor(() => expect(refreshCurrentLocation).toHaveBeenCalledTimes(1))
+    expect(handled).toHaveBeenCalledWith(12)
   })
 
   it.each([

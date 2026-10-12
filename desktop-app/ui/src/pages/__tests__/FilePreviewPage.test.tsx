@@ -204,6 +204,45 @@ describe('FilePreviewPage', () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('data:image/png;base64,AQID'))
   })
 
+  it('runs a pending sidebar copy once, only after its exact preview is ready', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const otherUri = 'gfs://main/fedcba9876543210fedcba9876543210'
+    const markdown = '# Exact target\n\nCopy this body.'
+    const writeText = vi.fn(async () => undefined)
+    const onHandled = vi.fn()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubGfs({
+      downloadPreview: async () => ({ bytes: new TextEncoder().encode(markdown).buffer }),
+      resolve: async () => ({ kind: 'file' }),
+    })
+
+    const renderPreview = (gfsUri: string) => (
+      <FilePreviewPage
+        gfsUri={gfsUri}
+        fileName="report.md"
+        fileKind="markdown"
+        byteLength={markdown.length}
+        pendingResourceAction={{ id: 44, targetUri: uri, actionId: 'copy-content' }}
+        onPendingResourceActionHandled={onHandled}
+      />
+    )
+    const view = render(renderPreview(otherUri))
+
+    expect(await screen.findByRole('heading', { name: 'Exact target' })).toBeTruthy()
+    expect(writeText).not.toHaveBeenCalled()
+    expect(onHandled).not.toHaveBeenCalled()
+
+    view.rerender(renderPreview(uri))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(onHandled).toHaveBeenCalledTimes(1)
+    expect(onHandled).toHaveBeenCalledWith(44)
+  })
+
   it('refreshes by revalidating and reloading the exact preview resource', async () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     let downloadNumber = 0

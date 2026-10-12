@@ -1895,9 +1895,26 @@ h3 {
 .da-file-explorer__row {
   min-width: 0;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 22px minmax(0, 1fr) 28px;
   align-items: center;
   gap: var(--space-0-5);
+}
+
+.da-file-explorer__actions {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.da-file-explorer__actions .da-gfs-resource-menu__trigger.ui-icon-button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
 }
 
 .da-file-explorer__toggle.ui-icon-button {

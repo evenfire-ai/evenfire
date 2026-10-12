@@ -247,6 +247,8 @@ export function FilesPage({
   onOpenPreview,
   routeDialogRequestId = 0,
   onRouteDialogRequestHandled,
+  pendingResourceAction,
+  onPendingResourceActionHandled,
 }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
@@ -283,6 +285,28 @@ export function FilesPage({
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
+  const lastHandledResourceActionIdRef = useRef<number | null>(null)
+  const pendingResourceActionRef = useRef(pendingResourceAction)
+  pendingResourceActionRef.current =
+    pendingResourceAction?.id === lastHandledResourceActionIdRef.current
+      ? null
+      : pendingResourceAction
+
+  useEffect(
+    () => () => {
+      const request = pendingResourceActionRef.current
+      if (
+        request &&
+        request.id !== lastHandledResourceActionIdRef.current &&
+        request.actionId !== 'copy-content' &&
+        request.actionId !== 'preview' &&
+        request.actionId !== 'open-folder'
+      ) {
+        onPendingResourceActionHandled?.(request.id)
+      }
+    },
+    [onPendingResourceActionHandled]
+  )
   const draggingResourceRef = useRef<GfsDriveResource | null>(null)
   const movingResourceRef = useRef<string | null>(null)
   const hoveredFolderRef = useRef<string | null>(null)
@@ -1495,6 +1519,54 @@ export function FilesPage({
       refreshingCurrent,
     ]
   )
+
+  useEffect(() => {
+    const request = pendingResourceAction
+    if (
+      !request ||
+      request.actionId === 'copy-content' ||
+      request.actionId === 'preview' ||
+      request.actionId === 'open-folder' ||
+      lastHandledResourceActionIdRef.current === request.id
+    ) {
+      return
+    }
+    if (current?.gfsUri === request.targetUri) {
+      const action = currentResourceActions.find(candidate => candidate.id === request.actionId)
+      if (!action) {
+        lastHandledResourceActionIdRef.current = request.id
+        pendingResourceActionRef.current = null
+        onPendingResourceActionHandled?.(request.id)
+        pushToast?.('This action is no longer available for this resource.', 'error')
+        return
+      }
+      if (action.disabled) return
+      lastHandledResourceActionIdRef.current = request.id
+      pendingResourceActionRef.current = null
+      onPendingResourceActionHandled?.(request.id)
+      try {
+        action.run(request.file)
+      } catch (error) {
+        pushToast?.(error instanceof Error ? error.message : String(error), 'error')
+      }
+      return
+    }
+    if (pendingGfsUri === request.targetUri && ctrl.openError && !ctrl.resolving) {
+      lastHandledResourceActionIdRef.current = request.id
+      pendingResourceActionRef.current = null
+      onPendingResourceActionHandled?.(request.id)
+      pushToast?.(ctrl.openError, 'error')
+    }
+  }, [
+    ctrl.openError,
+    ctrl.resolving,
+    current?.gfsUri,
+    currentResourceActions,
+    onPendingResourceActionHandled,
+    pendingGfsUri,
+    pendingResourceAction,
+    pushToast,
+  ])
 
   const openResource = (resource: GfsDriveResource) => {
     // The children listing marks rows the session cannot read (e.g. a folder

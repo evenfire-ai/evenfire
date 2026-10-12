@@ -36,6 +36,7 @@
  * in a new tree/preview test.
  */
 import { createServer } from 'node:http'
+import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import {
   type GfsAccessibleResource,
   type GfsChildView,
@@ -50,6 +51,7 @@ import { requestJson } from '../../../../src/httpClient.js'
 // the renderer contract fails this module's typecheck.
 type ListChildrenPage = Awaited<ReturnType<typeof window.clerum.gfs.listChildren>>
 type ListAccessiblePage = Awaited<ReturnType<typeof window.clerum.gfs.listAccessible>>
+type Affordances = Awaited<ReturnType<typeof window.clerum.gfs.affordances>>
 // download binds to the PRODUCER's own output, not the renderer `.d.ts`: the
 // `.d.ts` declares `download.resource.pathCache` as required while the producer's
 // `ResolvedGfsResource` leaves it optional, so the mirror overstates the contract
@@ -135,6 +137,16 @@ export async function listAccessiblePage(
   const client = new GfsClient(stubTransport({ ok: true, data: { items, nextCursor } }))
   const page = await client.listAccessible(SESSION_TOKEN, { drive: 'main' })
   return structuredClone(page)
+}
+
+/** Run held bits through the real GFS client and desktop affordance mapper. */
+export async function resourceAffordances(
+  held: string[],
+  isOperator = false
+): Promise<Affordances> {
+  const client = new GfsClient(stubTransport({ held, isOperator }))
+  const result = await client.affordances('fixture-resource', SESSION_TOKEN, 'main')
+  return structuredClone(delegationAffordances(new Set(result.held), result.isOperator))
 }
 
 /** Run a resolve + byte fetch through the real `GfsClient.download` — the

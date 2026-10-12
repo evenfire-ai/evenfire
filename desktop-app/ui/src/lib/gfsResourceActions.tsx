@@ -56,6 +56,13 @@ export type GfsResourceActionHandlers = Partial<
   Record<GfsResourceActionId, GfsResourceActionHandler>
 >
 
+export type GfsResourceActionRequest = {
+  id: number
+  targetUri: string
+  actionId: GfsResourceActionId
+  file?: File
+}
+
 export type GfsResourceActionOptions = {
   kind: GfsResourceKind
   uri: string

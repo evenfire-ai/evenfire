@@ -62,13 +62,37 @@ export function FilePreviewPage({
   unavailable = false,
   pushToast,
   onOpenRoute,
+  pendingResourceAction,
+  onPendingResourceActionHandled,
 }: FilePreviewPageProps) {
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
   const [denied, setDenied] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
-  const [copyContentReady, setCopyContentReady] = useState(false)
-  const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
+  const [copyContentReadyUri, setCopyContentReadyUri] = useState<string | null>(null)
+  const copyContentRef = useRef<{ gfsUri: string; run: () => Promise<boolean> } | null>(null)
+  const lastHandledResourceActionIdRef = useRef<number | null>(null)
+  const pendingResourceActionRef = useRef(pendingResourceAction)
+  pendingResourceActionRef.current =
+    pendingResourceAction?.id === lastHandledResourceActionIdRef.current
+      ? null
+      : pendingResourceAction
+
+  useEffect(
+    () => () => {
+      const request = pendingResourceActionRef.current
+      if (
+        request &&
+        request.id !== lastHandledResourceActionIdRef.current &&
+        request.actionId === 'copy-content' &&
+        request.targetUri === gfsUri
+      ) {
+        pendingResourceActionRef.current = null
+        onPendingResourceActionHandled?.(request.id)
+      }
+    },
+    [gfsUri, onPendingResourceActionHandled]
+  )
   const accessRevoked = ctrl.accessState === 'revoked'
 
   // Each previewed resource starts from a clean per-resource verdict.
@@ -137,18 +161,28 @@ export function FilePreviewPage({
 
   const handleCopyContent = useCallback(async () => {
     const copy = copyContentRef.current
-    if (!copy) return
-    const copied = await copy()
+    if (!copy || copy.gfsUri !== gfsUri) return
+    const copied = await copy.run()
     pushToast?.(
       copied ? 'EvenDrive content copied' : 'Could not copy the EvenDrive content',
       copied ? 'success' : 'error'
     )
-  }, [pushToast])
+  }, [gfsUri, pushToast])
 
-  const handleCopyContentReady = useCallback((copy: (() => Promise<boolean>) | null) => {
-    copyContentRef.current = copy
-    setCopyContentReady(Boolean(copy))
-  }, [])
+  const handleCopyContentReady = useCallback(
+    (copy: (() => Promise<boolean>) | null) => {
+      if (copy) {
+        copyContentRef.current = { gfsUri, run: copy }
+        setCopyContentReadyUri(gfsUri)
+        return
+      }
+      if (copyContentRef.current?.gfsUri === gfsUri) copyContentRef.current = null
+      setCopyContentReadyUri(current => (current === gfsUri ? null : current))
+    },
+    [gfsUri]
+  )
+
+  const copyContentReady = copyContentReadyUri === gfsUri
 
   const toolbarActions = buildGfsResourceActions({
     kind: 'file',
@@ -169,6 +203,42 @@ export function FilePreviewPage({
     canCopyContent: copyContentReady,
     refreshing,
   })
+
+  useEffect(() => {
+    const request = pendingResourceAction
+    if (
+      !request ||
+      request.actionId !== 'copy-content' ||
+      request.targetUri !== gfsUri ||
+      lastHandledResourceActionIdRef.current === request.id
+    ) {
+      return
+    }
+    if (denied || unavailable || accessRevoked) {
+      lastHandledResourceActionIdRef.current = request.id
+      pendingResourceActionRef.current = null
+      onPendingResourceActionHandled?.(request.id)
+      pushToast?.('This file is no longer available for copying.', 'error')
+      return
+    }
+    if (!copyContentReady) return
+    const action = toolbarActions.find(candidate => candidate.id === request.actionId)
+    if (!action || action.disabled) return
+    lastHandledResourceActionIdRef.current = request.id
+    pendingResourceActionRef.current = null
+    onPendingResourceActionHandled?.(request.id)
+    action.run(request.file)
+  }, [
+    accessRevoked,
+    copyContentReady,
+    denied,
+    gfsUri,
+    onPendingResourceActionHandled,
+    pendingResourceAction,
+    pushToast,
+    toolbarActions,
+    unavailable,
+  ])
 
   const revalidateAccess = useCallback(async () => {
     if (denied || accessRevoked) return

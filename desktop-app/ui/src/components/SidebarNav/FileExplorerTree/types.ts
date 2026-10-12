@@ -1,5 +1,6 @@
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { GfsResourceActionId } from '@lib/gfsResourceActions'
 import type { Tone } from '@/uiTypes'
 
 /**
@@ -12,6 +13,8 @@ export interface FileExplorerTreeProps {
   onOpenFolder: (gfsUri: string) => void
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
+  /** Run an action for the exact tree row, independent of the main-pane selection. */
+  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
 }
@@ -30,6 +33,7 @@ export interface FileExplorerNodeProps {
   onToggle: (resourceId: string) => void
   onActivateFolder: (node: GfsBrowserChild) => void
   onActivateFile: (node: GfsBrowserChild) => void
+  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
   /** Fail-closed hook: a listing authority error revokes the session. */
   onAuthorityFailure: (message: string) => void
 }

@@ -3,6 +3,7 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { activeWorkspaceTab, openFilesTab } from '@lib/workspaceTabs'
@@ -14,6 +15,7 @@ import {
   listAccessiblePage,
   listChildrenPage,
   resolvedFile,
+  resourceAffordances,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FileExplorerTree } from '..'
 
@@ -40,6 +42,7 @@ type Producers = {
   listAccessible?: (drive?: string, cursor?: string) => Promise<unknown>
   listChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
   download?: (uri: string) => Promise<unknown>
+  affordances?: (resourceId: string, drive?: string) => Promise<unknown>
 }
 
 function installClerum(producers: Producers) {
@@ -52,6 +55,7 @@ function installClerum(producers: Producers) {
         download:
           producers.download ??
           vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),
+        affordances: producers.affordances ?? vi.fn(async () => resourceAffordances(['read'])),
       },
     },
   })
@@ -60,6 +64,7 @@ function installClerum(producers: Producers) {
 function renderTree(props: Partial<Parameters<typeof FileExplorerTree>[0]> = {}) {
   const onOpenFolder = props.onOpenFolder ?? vi.fn()
   const onOpenPreview = props.onOpenPreview ?? vi.fn()
+  const onResourceAction = props.onResourceAction ?? vi.fn()
   const pushToast = props.pushToast ?? vi.fn()
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -67,11 +72,12 @@ function renderTree(props: Partial<Parameters<typeof FileExplorerTree>[0]> = {})
       <FileExplorerTree
         onOpenFolder={onOpenFolder}
         onOpenPreview={onOpenPreview}
+        onResourceAction={onResourceAction}
         pushToast={pushToast}
       />
     </QueryClientProvider>
   )
-  return { onOpenFolder, onOpenPreview, pushToast }
+  return { onOpenFolder, onOpenPreview, onResourceAction, pushToast, queryClient }
 }
 
 beforeEach(() => {
@@ -138,6 +144,174 @@ describe('FileExplorerTree — sort ordering', () => {
       .getAllByRole('treeitem')
       .map(item => item.querySelector('.da-file-explorer__name')?.textContent)
     expect(names).toEqual(['Alpha', 'Zeta', 'a.txt', 'b.txt'])
+  })
+})
+
+describe('FileExplorerTree — resource action menus', () => {
+  it('keeps a visible, labeled menu on a long row and dispatches its exact resource without toggling', async () => {
+    const resource = accessibleResource(
+      'folder-1',
+      'A very long folder name that will be truncated in the narrow sidebar',
+      'directory'
+    )
+    const onResourceAction = vi.fn()
+    const onOpenFolder = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances: vi.fn(async () => resourceAffordances(['read', 'write'])),
+    })
+
+    renderTree({ onOpenFolder, onResourceAction })
+
+    const row = await screen.findByRole('treeitem')
+    const menuTrigger = within(row).getByRole('button', {
+      name: /^Options for A very long folder name/,
+    })
+    expect(menuTrigger.isConnected).toBe(true)
+    expect(menuTrigger.getAttribute('aria-label')).toMatch(/^Options for A very long folder name/)
+    fireEvent.click(menuTrigger)
+
+    const menu = await screen.findByRole('menu')
+    fireEvent.click(await within(menu).findByRole('menuitem', { name: 'New folder' }))
+
+    expect(onResourceAction).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'folder-1', gfsUri: resource.gfsUri }),
+      'new-folder'
+    )
+    expect(row.getAttribute('aria-expanded')).toBe('false')
+    expect(onOpenFolder).not.toHaveBeenCalled()
+  })
+
+  it('dispatches the row under its own menu even when another file is selected', async () => {
+    const first = accessibleResource('first', 'first.png', 'file')
+    const second = accessibleResource('second', 'second.png', 'file')
+    const onOpenPreview = vi.fn()
+    const onResourceAction = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([first, second])),
+      affordances: vi.fn(async () => resourceAffordances(['read'])),
+    })
+
+    renderTree({ onOpenPreview, onResourceAction })
+
+    const firstRow = (await screen.findByRole('button', { name: 'first.png' })).closest(
+      '[role="treeitem"]'
+    ) as HTMLElement
+    const secondRow = screen
+      .getByRole('button', { name: 'second.png' })
+      .closest('[role="treeitem"]') as HTMLElement
+    fireEvent.click(within(firstRow).getByRole('button', { name: 'first.png' }))
+    expect(firstRow.getAttribute('aria-selected')).toBe('true')
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      expect.objectContaining({ gfsUri: first.gfsUri, name: first.name })
+    )
+
+    fireEvent.click(within(secondRow).getByRole('button', { name: `Options for ${second.name}` }))
+    const menu = await screen.findByRole('menu', { name: `Actions for ${second.name}` })
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy route' }))
+
+    expect(onResourceAction).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'second', gfsUri: second.gfsUri }),
+      'copy-route'
+    )
+    expect(firstRow.getAttribute('aria-selected')).toBe('true')
+    expect(secondRow.getAttribute('aria-selected')).toBe('false')
+    expect(onOpenPreview).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps exact-row action dispatch connected through nested folders', async () => {
+    const root = accessibleResource('root', 'Shared', 'directory')
+    const nested = childView('nested', 'Nested folder', 'directory')
+    const onResourceAction = vi.fn()
+    const onOpenFolder = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([root])),
+      listChildren: vi.fn(async () => listChildrenPage([nested])),
+    })
+
+    renderTree({ onOpenFolder, onResourceAction })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Shared' }))
+    const nestedRow = (await screen.findByRole('button', { name: 'Nested folder' })).closest(
+      '[role="treeitem"]'
+    ) as HTMLElement
+    fireEvent.click(within(nestedRow).getByRole('button', { name: 'Options for Nested folder' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for Nested folder' })
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy route' }))
+
+    expect(onResourceAction).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'nested', gfsUri: nested.gfsUri }),
+      'copy-route'
+    )
+    expect(nestedRow.getAttribute('aria-expanded')).toBe('false')
+    expect(onOpenFolder).not.toHaveBeenCalled()
+  })
+
+  it('shows only resource-kind and held-permission actions', async () => {
+    const folder = accessibleResource('folder', 'Reports', 'directory')
+    const file = accessibleResource('file', 'report.pdf', 'file')
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([folder, file])),
+      affordances: vi.fn(async resourceId =>
+        resourceAffordances(resourceId === 'folder' ? ['read', 'write'] : ['read'])
+      ),
+    })
+
+    renderTree()
+
+    const folderRow = (await screen.findByRole('button', { name: 'Reports' })).closest(
+      '[role="treeitem"]'
+    ) as HTMLElement
+    const folderTrigger = within(folderRow).getByRole('button', { name: 'Options for Reports' })
+    fireEvent.click(folderTrigger)
+    const folderMenu = await screen.findByRole('menu', { name: 'Actions for Reports' })
+    expect(await within(folderMenu).findByRole('menuitem', { name: 'New folder' })).toBeTruthy()
+    expect(within(folderMenu).getByRole('menuitem', { name: 'Upload file' })).toBeTruthy()
+    expect(within(folderMenu).queryByRole('menuitem', { name: 'Download' })).toBeNull()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.activeElement).toBe(folderTrigger)
+    const fileRow = (await screen.findByRole('button', { name: 'report.pdf' })).closest(
+      '[role="treeitem"]'
+    ) as HTMLElement
+    fireEvent.click(within(fileRow).getByRole('button', { name: 'Options for report.pdf' }))
+    const fileMenu = await screen.findByRole('menu', { name: 'Actions for report.pdf' })
+    expect(await within(fileMenu).findByRole('menuitem', { name: 'Copy route' })).toBeTruthy()
+    expect(within(fileMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
+    expect(within(fileMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
+    expect(within(fileMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    expect(within(fileMenu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+    expect(within(fileMenu).queryByRole('menuitem', { name: 'New folder' })).toBeNull()
+    expect(within(fileMenu).queryByRole('menuitem', { name: 'Replace file' })).toBeNull()
+  })
+
+  it('revalidates held permissions while the menu stays open', async () => {
+    let held = ['read', 'write']
+    const affordances = vi.fn(async () => resourceAffordances(held))
+    const resource = accessibleResource('folder', 'Reports', 'directory')
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances,
+    })
+
+    const { queryClient } = renderTree()
+    const row = (await screen.findByRole('button', { name: 'Reports' })).closest(
+      '[role="treeitem"]'
+    ) as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Options for Reports' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for Reports' })
+    expect(await within(menu).findByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+
+    held = ['read']
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsAffordances('test:user-1:team-1', 'folder', 'main'),
+        exact: true,
+      })
+    })
+
+    await waitFor(() => expect(within(menu).queryByRole('menuitem', { name: 'Rename' })).toBeNull())
+    expect(affordances).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -423,6 +597,7 @@ describe('FileExplorerTree — folder activation focuses an existing files tab',
             )
           }
           onOpenPreview={vi.fn()}
+          onResourceAction={vi.fn()}
           pushToast={vi.fn()}
         />
       </>
@@ -502,7 +677,12 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
     const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
     render(
       <QueryClientProvider client={queryClient}>
-        <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={vi.fn()} />
+        <FileExplorerTree
+          onOpenFolder={vi.fn()}
+          onOpenPreview={vi.fn()}
+          onResourceAction={vi.fn()}
+          pushToast={vi.fn()}
+        />
       </QueryClientProvider>
     )
 
@@ -545,7 +725,12 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
     const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
     render(
       <QueryClientProvider client={queryClient}>
-        <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={vi.fn()} />
+        <FileExplorerTree
+          onOpenFolder={vi.fn()}
+          onOpenPreview={vi.fn()}
+          onResourceAction={vi.fn()}
+          pushToast={vi.fn()}
+        />
       </QueryClientProvider>
     )
 
@@ -665,7 +850,12 @@ describe('FileExplorerTree — shared revoked access across controller mounts (R
     const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
     render(
       <QueryClientProvider client={queryClient}>
-        <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={vi.fn()} />
+        <FileExplorerTree
+          onOpenFolder={vi.fn()}
+          onOpenPreview={vi.fn()}
+          onResourceAction={vi.fn()}
+          pushToast={vi.fn()}
+        />
         <AccessStateProbe />
       </QueryClientProvider>
     )

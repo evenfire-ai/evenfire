@@ -1,3 +1,4 @@
+import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import type { Tone } from '@/uiTypes'
 
 export interface FilePreviewPageProps {
@@ -15,4 +16,7 @@ export interface FilePreviewPageProps {
   unavailable?: boolean
   pushToast?: (message: string, tone: Tone) => void
   onOpenRoute?: () => void
+  /** One-shot Copy content action requested by a sidebar resource row. */
+  pendingResourceAction?: GfsResourceActionRequest | null
+  onPendingResourceActionHandled?: (requestId: number) => void
 }

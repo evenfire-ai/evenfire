@@ -1,5 +1,6 @@
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import type { Tone } from '@/uiTypes'
 
 export type GfsDriveResource = GfsBrowserChild & {
@@ -38,6 +39,9 @@ export interface FilesPageProps {
   /** Monotonic App request to open the existing route-entry dialog. */
   routeDialogRequestId?: number
   onRouteDialogRequestHandled?: (requestId: number) => void
+  /** One-shot action requested by a sidebar resource row. */
+  pendingResourceAction?: GfsResourceActionRequest | null
+  onPendingResourceActionHandled?: (requestId: number) => void
 }
 
 /**
