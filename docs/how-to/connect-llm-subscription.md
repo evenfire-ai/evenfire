@@ -52,8 +52,9 @@ control-api first, then the Host and recipe switches.
 
 Notes:
 
-- The flags accept only the exact string `true`. Any other value keeps the
-  feature off.
+- The control-api, proxy and mcp-host flags accept only the exact string
+  `true`; `WRC_GROK_SUBSCRIPTION_ENABLED` also accepts `1` and any case of
+  `true`. Any other value keeps the feature off.
 - `deploy/base` does not ship an `mcp-host-config` ConfigMap. The Host
   controller (HCC) loads it into every Host's `mcp-host` container with
   `envFrom`, so your overlay must provide it. The minikube overlay does

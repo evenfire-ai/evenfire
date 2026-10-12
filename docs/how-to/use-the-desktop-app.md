@@ -108,13 +108,13 @@ The **+** button (**Add context**) in the composer opens a menu with:
 The composer checks each message before sending it and explains anything
 that won't fit:
 
-| Limit                                               | Value                                       |
-| --------------------------------------------------- | ------------------------------------------- |
-| Attachments per message (images and files together) | 20                                          |
-| Size of each file                                   | 11 MiB                                      |
-| Size of all files in one message, once encoded      | 16 MiB                                      |
-| Image formats                                       | JPEG and PNG                                |
-| Size of each image (most models)                    | 3 MB, with up to 8 MB of images per message |
+| Limit                                               | Value                                                                                           |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Attachments per message (images and files together) | 20                                                                                              |
+| Size of each file                                   | 11 MiB                                                                                          |
+| Size of all files in one message, once encoded      | 16 MiB                                                                                          |
+| Image formats                                       | JPEG and PNG                                                                                    |
+| Size of each image (most models)                    | 3 MB, with up to 8 MB of images per message (measured after encoding, about 6 MB of image data) |
 
 Some models accept larger images. For Codex and Grok subscription models, the
 limit is 16 MiB per image and 16 MiB in total, and Codex images can be at
@@ -196,8 +196,8 @@ agent's own Connectors tab. For the full sign-in flow, see
 
 ## Apps and Plugins
 
-**Apps** lists the apps that your plugins provide, with the heading
-**Discover and launch tools to help you work smarter**. Click an app to open
+**Apps** lists the apps that your plugins provide (_Discover and launch tools to
+help you work smarter_). Click an app to open
 it in a tab inside the app window. While an app is open, the title bar has
 **Refresh app content** and **Copy current app link**. The first time a
 plugin asks to read your information, you'll see
