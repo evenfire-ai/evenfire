@@ -1361,16 +1361,13 @@ export class AppService {
 
     // A request that already targets another team reserves admission at call
     // time. Queued same-team work remains a nonproducer until it proves it
-    // needs a credential switch after reaching the head of the queue.
+    // needs a credential switch after reaching the head of the queue. A late
+    // home request queues behind the hop after quit closes; it does not join
+    // or extend that hop, and may reuse its restored home token at dispatch.
     const activeTeamId = String(this.me?.teamId || '').trim()
-    const homeTeamQueuedAfterQuitClosure =
-      Boolean(activeHop) && targetTeamId === activeHop?.homeTeamId && this.quitPreparationStarted
     const admissionTeamId = activeHop?.homeTeamId ?? activeTeamId
-    const earlyProducer =
-      !homeTeamQueuedAfterQuitClosure && targetTeamId !== admissionTeamId
-        ? this.admitCredentialProducer()
-        : null
-    if (targetTeamId !== admissionTeamId && !earlyProducer && !homeTeamQueuedAfterQuitClosure) {
+    const earlyProducer = targetTeamId !== admissionTeamId ? this.admitCredentialProducer() : null
+    if (targetTeamId !== admissionTeamId && !earlyProducer) {
       return Promise.reject(new QuitAdmissionClosedError())
     }
 
