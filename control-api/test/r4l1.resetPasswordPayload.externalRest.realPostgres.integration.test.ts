@@ -4,7 +4,12 @@ import bcrypt from 'bcryptjs'
 import { type ChildProcess, spawn } from 'node:child_process'
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { type Server, createServer, request as httpRequest } from 'node:http'
+import {
+  type IncomingHttpHeaders,
+  type Server,
+  createServer,
+  request as httpRequest,
+} from 'node:http'
 import path from 'node:path'
 import { Pool } from 'pg'
 import request from 'supertest'
@@ -95,6 +100,40 @@ async function waitForMemberRegistration(port: number, child: ChildProcess): Pro
   throw new Error('local Member Registration producer did not become ready')
 }
 
+function selectResetProxyResponseHeaders(headers: IncomingHttpHeaders) {
+  const forwardedHeaders: Record<string, string | string[]> = {}
+  const contentType = headers['content-type']
+  if (typeof contentType === 'string') {
+    forwardedHeaders['content-type'] = contentType
+  }
+  const retryAfter = headers['retry-after']
+  if (typeof retryAfter === 'string') {
+    forwardedHeaders['retry-after'] = retryAfter
+  }
+  const setCookie = headers['set-cookie']
+  if (setCookie) {
+    forwardedHeaders['set-cookie'] = setCookie
+  }
+  return forwardedHeaders
+}
+
+describe('reset response proxy headers', () => {
+  it('forwards only the fixed response contract headers', () => {
+    expect(
+      selectResetProxyResponseHeaders({
+        'content-type': 'application/json',
+        'retry-after': '2',
+        'set-cookie': ['profile_session=Synthetic-Session'],
+        'x-user-selected-header': 'ignored',
+      })
+    ).toEqual({
+      'content-type': 'application/json',
+      'retry-after': '2',
+      'set-cookie': ['profile_session=Synthetic-Session'],
+    })
+  })
+})
+
 function createDropResetResponseProxy(controlApiPort: number) {
   let resetPostCount = 0
   let droppedResolve!: () => void
@@ -122,7 +161,10 @@ function createDropResetResponseProxy(controlApiPort: number) {
         })
         return
       }
-      outgoing.writeHead(response.statusCode || 502, response.headers)
+      outgoing.writeHead(
+        response.statusCode || 502,
+        selectResetProxyResponseHeaders(response.headers)
+      )
       response.pipe(outgoing)
     })
     target.on('error', () => outgoing.destroy())
