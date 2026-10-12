@@ -14,6 +14,12 @@ async function layout(window) {
     return {
       compact: matchMedia('(max-width: 759px)').matches,
       titlebar: rect('.window-titlebar'),
+      compactToggleDisplay: getComputedStyle(
+        document.querySelector('.compact-navigation-toggle')
+      ).display,
+      compactTogglePointerEvents: getComputedStyle(
+        document.querySelector('.compact-navigation-toggle')
+      ).pointerEvents,
       sidebar: rect('.left-nav'),
       workspace: rect('.workspace-layout'),
       slot: rect('.sandbox-ui-embed-slot'),
@@ -40,7 +46,13 @@ app.whenReady().then(async () => {
     const css = readFileSync(path.join(__dirname, '../../ui/src/styles.css'), 'utf8')
     const html = `<!doctype html><html><head><style>${tokens}\n${css}</style></head>
       <body><div class="app-frame" style="--sidebar-width:328px">
-        <header class="window-titlebar"><span>Window controls</span></header>
+        <header class="window-titlebar">
+          <div class="window-titlebar__controls"><span>Window controls</span></div>
+          <div class="window-titlebar__leading">
+            <button class="ui-icon-button compact-navigation-toggle" type="button">Menu</button>
+          </div>
+          <div class="window-titlebar__actions"></div>
+        </header>
         <div class="app-root"><main class="app-shell">
           <aside id="desktop-sidebar-navigation" class="left-nav glass-card compact-open">
             <button class="sidebar-mobile-backdrop" aria-label="Close navigation"></button>
@@ -61,6 +73,12 @@ app.whenReady().then(async () => {
 
     const compact = await layout(window)
     assert.equal(compact.compact, true, '700px window uses the compact navigation breakpoint')
+    assert.notEqual(compact.compactToggleDisplay, 'none', 'compact navigation trigger is visible')
+    assert.equal(
+      compact.compactTogglePointerEvents,
+      'auto',
+      'compact navigation trigger can receive pointer input'
+    )
     assert.ok(Math.abs(compact.sidebar.x) <= 1, 'compact navigation starts at the left edge')
     assert.ok(
       Math.abs(compact.sidebar.y - compact.titlebar.height) <= 1,
@@ -91,6 +109,7 @@ app.whenReady().then(async () => {
     await waitForLayout()
     const desktop = await layout(window)
     assert.equal(desktop.compact, false, '1200px window uses desktop navigation')
+    assert.equal(desktop.compactToggleDisplay, 'none', 'desktop hides the compact trigger')
     assert.ok(Math.abs(desktop.sidebar.width - 460) <= 1, 'desktop sidebar honors its live width')
 
     const scaleFactor = screen.getDisplayMatching(window.getBounds()).scaleFactor

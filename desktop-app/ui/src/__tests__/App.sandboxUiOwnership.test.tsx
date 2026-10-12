@@ -400,6 +400,7 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     sandboxUi.setVisible.mockClear()
     sandboxUi.setBounds.mockClear()
     const trigger = await screen.findByTestId('compact-navigation-toggle')
+    expect(trigger.parentElement?.className).toBe('window-titlebar__leading')
     const returnFocus = document.createElement('button')
     document.body.append(returnFocus)
     fireEvent.click(trigger)

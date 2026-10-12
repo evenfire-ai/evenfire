@@ -2905,7 +2905,7 @@ export function App() {
                                     window title bar via the same portal — the search
                                     pill and notification bell live in the title bar on
                                     all routes, never floating inline over the panel. */}
-                                <TitlebarActionsPortal container={titlebarActionsRoot}>
+                                <TitlebarActionsPortal container={titlebarLeadingRoot}>
                                   <IconButton
                                     ref={compactSidebarTriggerRef}
                                     className="compact-navigation-toggle"
