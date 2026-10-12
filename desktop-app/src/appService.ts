@@ -1573,6 +1573,7 @@ export class AppService {
     this.stopAllStreams()
     this.sessionToken = null
     this.me = null
+    this.clearEffectiveRuntimeRpcEndpoint()
     this.profileUiBaseUrlCache = null
     this.accessCatalog = null
     this.teamDirectoryCache = null
