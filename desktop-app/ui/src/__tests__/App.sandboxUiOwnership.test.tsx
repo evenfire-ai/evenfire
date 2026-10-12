@@ -50,6 +50,8 @@ const sidebarHarness = vi.hoisted(() => ({
       defaultPath: string
       icon?: string
     }) => void
+    compactMenuOpen?: boolean
+    onCompactMenuOpenChange?: (open: boolean) => void
   },
 }))
 
@@ -374,6 +376,53 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     await handOffMarkdownFromPlugin()
 
     await waitFor(() => expect(sandboxUi.close).toHaveBeenCalledTimes(1))
+  })
+
+  it('hides and restores the native embed for the compact navigation overlay', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    await renderWithLiveApp(ALPHA)
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+
+    sandboxUi.capturePreview.mockClear()
+    sandboxUi.setVisible.mockClear()
+    sandboxUi.setBounds.mockClear()
+    const trigger = await screen.findByTestId('compact-navigation-toggle')
+    const returnFocus = document.createElement('button')
+    document.body.append(returnFocus)
+    fireEvent.click(trigger)
+
+    await waitFor(() => expect(sandboxUi.setVisible.mock.calls).toEqual([[false]]))
+    expect(sandboxUi.capturePreview).toHaveBeenCalledTimes(1)
+
+    sandboxUi.setVisible.mockClear()
+    returnFocus.focus()
+    act(() => sidebarHarness.props?.onCompactMenuOpenChange?.(false))
+    await waitFor(() => expect(sandboxUi.setVisible.mock.calls).toEqual([[true]]))
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+    returnFocus.remove()
+    expect(sandboxUi.setBounds).toHaveBeenLastCalledWith({
+      x: 16,
+      y: 12,
+      width: 400,
+      height: 300,
+      dpr: expect.any(Number),
+    })
+    expect(sandboxUi.setBounds.mock.invocationCallOrder[0]).toBeLessThan(
+      sandboxUi.setVisible.mock.invocationCallOrder[0]!
+    )
   })
 
   it('closes the embed when a relaunch fails before reaching main (slot never measured)', async () => {

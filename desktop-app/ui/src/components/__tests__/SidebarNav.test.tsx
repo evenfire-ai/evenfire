@@ -47,6 +47,19 @@ function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
   return {
     navItem: 'chat',
     collapsed: false,
+    compactMode: false,
+    compactMenuOpen: false,
+    onCompactMenuOpenChange: vi.fn(),
+    resize: {
+      width: 328,
+      maxWidth: 460,
+      onPointerDown: vi.fn(),
+      onPointerMove: vi.fn(),
+      onPointerUp: vi.fn(),
+      onPointerCancel: vi.fn(),
+      onLostPointerCapture: vi.fn(),
+      onKeyDown: vi.fn(),
+    },
     activeSandboxUiApp: null,
     availableSandboxUiApps: [],
     onCollapsedChange: vi.fn(),
@@ -157,7 +170,7 @@ describe('SidebarNav logo', () => {
     expect(onCollapsedChange).toHaveBeenCalledWith(true)
   })
 
-  it('routes a controlled palette request through the mobile drawer behavior', () => {
+  it('routes a controlled palette request through the compact overlay behavior', () => {
     vi.spyOn(window, 'matchMedia').mockImplementation(
       query =>
         ({
@@ -173,12 +186,78 @@ describe('SidebarNav logo', () => {
     )
     const onCollapsedChange = vi.fn()
     const { container, rerender } = render(
-      <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
+      <SidebarNav {...baseProps({ compactMode: true, onCollapsedChange, toggleRequestId: 0 })} />
     )
 
-    rerender(<SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 1 })} />)
+    const onCompactMenuOpenChange = vi.fn()
+    rerender(
+      <SidebarNav
+        {...baseProps({
+          compactMode: true,
+          onCollapsedChange,
+          onCompactMenuOpenChange,
+          toggleRequestId: 1,
+        })}
+      />
+    )
 
-    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(true)
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(true)
+    expect(container.querySelector('.left-nav')?.classList.contains('compact-open')).toBe(false)
+    expect(onCollapsedChange).not.toHaveBeenCalled()
+  })
+
+  it('closes the compact overlay on Escape and restores the prior body scroll style', () => {
+    document.body.style.overflow = 'clip'
+    const onCompactMenuOpenChange = vi.fn()
+    const props = baseProps({
+      compactMode: true,
+      compactMenuOpen: true,
+      onCompactMenuOpenChange,
+    })
+    const { rerender } = render(<SidebarNav {...props} />)
+
+    expect(
+      screen.getByRole('navigation').closest('aside')?.classList.contains('compact-open')
+    ).toBe(true)
+    expect(document.body.style.overflow).toBe('hidden')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
+
+    rerender(<SidebarNav {...props} compactMenuOpen={false} />)
+    expect(document.body.style.overflow).toBe('clip')
+    document.body.style.overflow = ''
+  })
+
+  it('closes the compact overlay after navigation', () => {
+    const onSelect = vi.fn()
+    const onCompactMenuOpenChange = vi.fn()
+    render(
+      <SidebarNav
+        {...baseProps({
+          compactMode: true,
+          compactMenuOpen: true,
+          onCompactMenuOpenChange,
+          onSelect,
+        })}
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('nav-files'))
+    expect(onSelect).toHaveBeenCalledWith('files')
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('shows expanded navigation in compact mode without changing the desktop collapse preference', () => {
+    const onCollapsedChange = vi.fn()
+    const { container } = render(
+      <SidebarNav
+        {...baseProps({ collapsed: true, compactMode: true, compactMenuOpen: true })}
+        onCollapsedChange={onCollapsedChange}
+      />
+    )
+
+    expect(container.querySelector('.left-nav')?.classList.contains('collapsed')).toBe(false)
+    expect(screen.getByTestId('nav-new-chat')).toBeTruthy()
     expect(onCollapsedChange).not.toHaveBeenCalled()
   })
 })

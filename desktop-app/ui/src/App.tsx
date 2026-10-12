@@ -16,7 +16,7 @@ import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatSwitcher } from '@components/ChatSwitcher'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
-import { Button, ToastStack } from '@components/Common'
+import { Button, IconButton, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
@@ -36,6 +36,7 @@ import {
   CHAT_DRAWER_EMBED_FLOOR,
   useChatDrawerResize,
 } from '@hooks/useChatDrawerResize'
+import { useSidebarResize } from '@hooks/useSidebarResize'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
@@ -301,6 +302,13 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
+  const sidebarResize = useSidebarResize()
+  const [compactNavigation, setCompactNavigation] = React.useState(() =>
+    window.matchMedia ? window.matchMedia('(max-width: 759px)').matches : window.innerWidth <= 759
+  )
+  const [compactSidebarOpen, setCompactSidebarOpen] = React.useState(false)
+  const compactSidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null)
+  const compactSidebarWasOpenRef = React.useRef(false)
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
@@ -1248,6 +1256,34 @@ export function App() {
       // Ignore storage failures in restricted environments.
     }
   }, [])
+
+  React.useEffect(() => {
+    const media = window.matchMedia?.('(max-width: 759px)')
+    if (!media) {
+      const update = () => setCompactNavigation(window.innerWidth <= 759)
+      window.addEventListener('resize', update)
+      return () => window.removeEventListener('resize', update)
+    }
+    const update = () => setCompactNavigation(media.matches)
+    update()
+    if (media.addEventListener) {
+      media.addEventListener('change', update)
+      return () => media.removeEventListener('change', update)
+    }
+    media.addListener(update)
+    return () => media.removeListener(update)
+  }, [])
+
+  React.useEffect(() => {
+    if (!compactNavigation) setCompactSidebarOpen(false)
+  }, [compactNavigation])
+
+  React.useEffect(() => {
+    if (compactSidebarWasOpenRef.current && !compactSidebarOpen && compactNavigation) {
+      compactSidebarTriggerRef.current?.focus()
+    }
+    compactSidebarWasOpenRef.current = compactSidebarOpen
+  }, [compactNavigation, compactSidebarOpen])
 
   React.useEffect(() => {
     void window.clerum.app.rendererReady().catch(error => {
@@ -2314,7 +2350,7 @@ export function App() {
     )
   }, [executeDesktopCommand])
 
-  const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
+  const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${sidebarResize.width}:${
     appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
   }:${chatDrawerVisible ? 'chat-drawer-open' : 'chat-drawer-closed'}`
 
@@ -2796,7 +2832,17 @@ export function App() {
 
   return (
     <AuthContext.Provider value={authValue}>
-      <div className="app-frame" data-sidebar-collapsed={sidebarCollapsed || undefined}>
+      <div
+        className="app-frame"
+        data-sidebar-collapsed={sidebarCollapsed || undefined}
+        style={
+          {
+            '--sidebar-width': compactNavigation
+              ? '0px'
+              : `${sidebarCollapsed ? 74 : sidebarResize.width}px`,
+          } as React.CSSProperties
+        }
+      >
         <WindowTitleBar actionsRef={setTitlebarActionsRoot} leadingRef={setTitlebarLeadingRoot} />
         <div className="app-root" inert={bootSplashLoading || undefined}>
           {vm.isAuthenticated ? (
@@ -2818,6 +2864,10 @@ export function App() {
                               activeSandboxUiApp={activeSandboxUiApp}
                               availableSandboxUiApps={availableSandboxUiApps}
                               collapsed={sidebarCollapsed}
+                              compactMode={compactNavigation}
+                              compactMenuOpen={compactSidebarOpen}
+                              onCompactMenuOpenChange={setCompactSidebarOpen}
+                              resize={sidebarResize}
                               onCollapsedChange={handleSidebarCollapsedChange}
                               onNewChat={handleNewWorkspaceChatTab}
                               onOpenSandboxUiApp={handleOpenSandboxUiApp}
@@ -2828,7 +2878,10 @@ export function App() {
                               pushToast={vm.pushToast}
                               toggleRequestId={sidebarToggleRequestId}
                             />
-                            <section className="workspace-layout">
+                            <section
+                              className="workspace-layout"
+                              inert={compactSidebarOpen || undefined}
+                            >
                               <section
                                 ref={contentPanelRef}
                                 className={`content-panel glass-card${
@@ -2852,6 +2905,21 @@ export function App() {
                                     window title bar via the same portal — the search
                                     pill and notification bell live in the title bar on
                                     all routes, never floating inline over the panel. */}
+                                <TitlebarActionsPortal container={titlebarActionsRoot}>
+                                  <IconButton
+                                    ref={compactSidebarTriggerRef}
+                                    className="compact-navigation-toggle"
+                                    data-testid="compact-navigation-toggle"
+                                    label="Open navigation"
+                                    aria-controls="desktop-sidebar-navigation"
+                                    aria-expanded={compactSidebarOpen}
+                                    onClick={() => setCompactSidebarOpen(open => !open)}
+                                  >
+                                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                                      <path d="M2 4h12M2 8h12M2 12h12" />
+                                    </svg>
+                                  </IconButton>
+                                </TitlebarActionsPortal>
                                 <TitlebarActionsPortal container={titlebarActionsRoot}>
                                   <AppHeader
                                     placement="titlebar"
@@ -2958,7 +3026,9 @@ export function App() {
                                     headerShellOverlayOpen={
                                       headerShellOverlayOpen || commandPaletteOpen
                                     }
-                                    sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                                    sidebarShellOverlayOpen={
+                                      sidebarSettingsMenuOpen || compactSidebarOpen
+                                    }
                                     toastShellOverlayOpen={vm.toasts.length > 0}
                                     deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
                                     shortcutApp={activeSandboxUiApp}

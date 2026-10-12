@@ -1,9 +1,14 @@
+import type { SidebarResizeControls } from '@hooks/useSidebarResize'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { ActiveSandboxUiApp, NavItem, Tone } from '@/uiTypes'
 
 export type SidebarNavProps = {
   navItem: NavItem
   collapsed: boolean
+  compactMode: boolean
+  compactMenuOpen: boolean
+  onCompactMenuOpenChange: (open: boolean) => void
+  resize: SidebarResizeControls
   activeSandboxUiApp: ActiveSandboxUiApp | null
   availableSandboxUiApps: ActiveSandboxUiApp[]
   onCollapsedChange: (collapsed: boolean) => void

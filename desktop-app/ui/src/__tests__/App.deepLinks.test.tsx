@@ -142,7 +142,11 @@ vi.mock('@components/CommandPalette', () => ({
   },
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
-vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
+vi.mock('@components/Common', () => ({
+  Button: () => null,
+  IconButton: () => null,
+  ToastStack: () => null,
+}))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
     title: string
