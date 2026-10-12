@@ -114,7 +114,7 @@ vi.mock('electron', () => ({
       return false
     }
   },
-  app: { getPath: vi.fn(() => tmpdir()) },
+  app: { getPath: vi.fn(() => tmpdir()), isReady: () => false },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
     encryptString: vi.fn(),
@@ -125,35 +125,49 @@ vi.mock('electron', () => ({
   shell: { openExternal: vi.fn() },
 }))
 
-vi.mock('../config.js', () => ({
-  getActiveEnvKey: () => 'test-env',
-  getActiveLegacyEnvKeys: () => [],
-  hydrateDesktopRuntimeConfig: () => undefined,
-  isDesktopRuntimeConfigured: () => true,
-  saveDesktopRuntimeConfig: vi.fn(),
-  getDesktopRuntimeConfigState: () => ({
-    configured: true,
-    isLocalhost: false,
-    selectorVisible: false,
-    activeOptionId: null,
-    currentConfig: {
-      externalRestApiBaseUrl: 'http://rest',
+vi.mock('../config.js', async importOriginal => {
+  const validatorDirectory = await mkdtemp(path.join(tmpdir(), 'sandbox-rpc-validator-'))
+  const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
+  let validateRpcProxyBaseUrl: typeof import('../config.js').validateRpcProxyBaseUrl
+  try {
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = path.join(validatorDirectory, 'runtime-config.json')
+    ;({ validateRpcProxyBaseUrl } = await importOriginal<typeof import('../config.js')>())
+  } finally {
+    if (originalConfigPath === undefined) delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+    else process.env.CLERUM_DESKTOP_CONFIG_PATH = originalConfigPath
+    await rm(validatorDirectory, { recursive: true, force: true })
+  }
+  return {
+    validateRpcProxyBaseUrl,
+    getActiveEnvKey: () => 'test-env',
+    getActiveLegacyEnvKeys: () => [],
+    hydrateDesktopRuntimeConfig: () => undefined,
+    isDesktopRuntimeConfigured: () => true,
+    saveDesktopRuntimeConfig: vi.fn(),
+    getDesktopRuntimeConfigState: () => ({
+      configured: true,
+      isLocalhost: false,
+      selectorVisible: false,
+      activeOptionId: null,
+      currentConfig: {
+        externalRestApiBaseUrl: 'http://rest',
+        rpcProxyBaseUrl: 'https://rpc.example',
+      },
+      envKey: 'test-env',
+      storagePath: '/tmp/runtime-config.json',
+      options: [],
+    }),
+    config: {
       rpcProxyBaseUrl: 'https://rpc.example',
+      externalRestApiBaseUrl: 'http://rest',
+      desktopProfileUiBaseUrl: 'https://profile.example.com',
+      desktopProfileUiBaseUrlExplicit: false,
+      enableDevLoginUi: false,
+      requestTimeoutMs: 60000,
+      appName: 'test',
     },
-    envKey: 'test-env',
-    storagePath: '/tmp/runtime-config.json',
-    options: [],
-  }),
-  config: {
-    rpcProxyBaseUrl: 'https://rpc.example',
-    externalRestApiBaseUrl: 'http://rest',
-    desktopProfileUiBaseUrl: 'https://profile.example.com',
-    desktopProfileUiBaseUrlExplicit: false,
-    enableDevLoginUi: false,
-    requestTimeoutMs: 60000,
-    appName: 'test',
-  },
-}))
+  }
+})
 
 vi.mock('../sandboxUiPartitionGc.js', () => ({
   touchSandboxUiPartition: electronMocks.touchSandboxUiPartition,

@@ -104,4 +104,34 @@ describe('RPC discovery lifecycle through native producers', () => {
     expect(config.config.rpcProxyBaseUrl).toBe(rpc)
     expect(discovery).toHaveBeenCalledTimes(3)
   })
+
+  it.each(['javascript:alert(1)', 'file:///fixture', undefined, '', 42])(
+    'rejects invalid discovered RPC %s and permits a later valid discovery',
+    async invalid => {
+      const { service, config, rpc, rest, store, discovery, rpcHealth } = await fixture()
+      await service.googleLogin('synthetic-google-token')
+      const key = config.getActiveEnvKey()
+      discovery.mockResolvedValueOnce({
+        externalRestApiBaseUrl: rest,
+        rpcProxyBaseUrl: invalid,
+        appName: 'A',
+      } as never)
+      const activeGeneration = service.getSessionGeneration()
+      await service.getDependenciesHealth()
+      expect(config.config.rpcProxyBaseUrl).toBe('')
+      await service.getDependenciesHealth()
+      expect(discovery).toHaveBeenCalledTimes(3)
+      expect(config.getActiveEnvKey()).toBe(key)
+      expect(service.getSessionGeneration()).toBe(activeGeneration)
+      expect(await store.getSessionToken(key)).toBe('synthetic-session-a')
+      expect(service.getCachedUserId()).toBe('user-a')
+      // The real transport provider must now supply the recovered endpoint.
+      rpcHealth.mockRestore()
+      const fetch = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }))
+      await service.getDependenciesHealth()
+      expect(fetch).toHaveBeenCalledWith(`${rpc}/health`, expect.any(Object))
+    }
+  )
 })

@@ -15,6 +15,7 @@ import {
   resolveEnvKey,
   saveDesktopRuntimeConfig,
   selectDesktopRuntimeConfigOption,
+  validateRpcProxyBaseUrl,
 } from './config.js'
 import {
   canonicalizeDesktopRestEndpoint,
@@ -2569,6 +2570,7 @@ export class AppService {
     }
   }): Promise<void> {
     const discovered = await this.authClient.getDesktopEnvironment()
+    const rpcProxyBaseUrl = validateRpcProxyBaseUrl(discovered.rpcProxyBaseUrl)
     if (
       !sameDesktopRestEndpoint(discovered.externalRestApiBaseUrl, request.externalRestApiBaseUrl)
     ) {
@@ -2579,7 +2581,7 @@ export class AppService {
       await this.applyRuntimeConfigDiscovery({
         profileId: request.environmentBinding.profileId,
         externalRestApiBaseUrl: request.externalRestApiBaseUrl,
-        rpcProxyBaseUrl: discovered.rpcProxyBaseUrl,
+        rpcProxyBaseUrl,
         appName: discovered.appName || request.appName,
       })
     })
