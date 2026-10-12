@@ -46,6 +46,8 @@ export function WorkspaceTabStrip({
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const stripRef = useRef<HTMLDivElement | null>(null)
   const scrollerRef = useRef<HTMLDivElement | null>(null)
+  const activeTabToRevealRef = useRef<string | null>(null)
+  const previousActiveTabIdRef = useRef<string | null>(null)
   const [scrollState, setScrollState] = useState<ScrollState>({
     hasOverflow: false,
     canScrollLeft: false,
@@ -177,9 +179,29 @@ export function WorkspaceTabStrip({
   }, [handleWheel])
 
   useLayoutEffect(() => {
-    if (!activeTabId) return
+    if (previousActiveTabIdRef.current === activeTabId) return
+    previousActiveTabIdRef.current = activeTabId
+    activeTabToRevealRef.current = activeTabId
+  }, [activeTabId])
+
+  useLayoutEffect(() => {
+    if (!activeTabId || activeTabToRevealRef.current !== activeTabId) return
+    const scroller = scrollerRef.current
+    if (!scroller) return
+    const hasMeasuredOverflow = scroller.scrollWidth - scroller.clientWidth > SCROLL_EPSILON
+    const hasScrollControls = Boolean(
+      stripRef.current?.querySelector('.chat-view-tabs__scroll-button')
+    )
+    // Wait until overflow controls have taken their space before revealing a
+    // newly active tab. Geometry changes alone must not trigger a stale reveal.
+    if (hasMeasuredOverflow !== hasScrollControls) return
     const activeTab = getTabNodes().find(node => node.dataset.workspaceTabId === activeTabId)
-    if (activeTab) scrollTabIntoView(activeTab)
+    if (!activeTab) {
+      activeTabToRevealRef.current = null
+      return
+    }
+    scrollTabIntoView(activeTab)
+    activeTabToRevealRef.current = null
   }, [activeTabId, scrollState.hasOverflow, scrollTabIntoView])
 
   // Restore keyboard focus after a close removed the active tab. The reorder path

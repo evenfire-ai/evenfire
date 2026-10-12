@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
 import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { MAX_TAB_TITLE_LEN } from '@constants/workspaceTabs'
@@ -54,29 +55,39 @@ const makeRect = (left: number, width: number): DOMRect =>
 const installTabStripLayout = (
   container: HTMLElement,
   initialWidths: number[],
-  initialViewportWidth: number
+  initialStripWidth: number
 ) => {
   const scroller = container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement
   let widths = initialWidths
-  let viewportWidth = initialViewportWidth
+  let stripWidth = initialStripWidth
   let scrollLeft = 0
   const gap = 8
+  const scrollButtonWidth = 24 // IconButton size="xs" in the live Common styles.
+  const getScrollButtonCount = () =>
+    container.querySelectorAll('.chat-view-tabs__scroll-button').length
+  const getViewportLeft = () => (getScrollButtonCount() > 0 ? scrollButtonWidth : 0)
+  const getViewportWidth = () => stripWidth - scrollButtonWidth * getScrollButtonCount()
+  const getContentWidth = () =>
+    widths.reduce((sum, width) => sum + width, 0) + gap * Math.max(0, widths.length - 1)
+  const getMaximumScrollLeft = () => Math.max(0, getContentWidth() - getViewportWidth())
   Object.defineProperties(scroller, {
     clientLeft: { configurable: true, value: 0 },
-    clientWidth: { configurable: true, get: () => viewportWidth },
+    clientWidth: { configurable: true, get: getViewportWidth },
     scrollLeft: {
       configurable: true,
       get: () => scrollLeft,
       set: (value: number) => {
-        scrollLeft = value
+        scrollLeft = Math.max(0, Math.min(getMaximumScrollLeft(), value))
       },
     },
     scrollWidth: {
       configurable: true,
-      get: () =>
-        widths.reduce((sum, width) => sum + width, 0) + gap * Math.max(0, widths.length - 1),
+      get: () => Math.max(getContentWidth(), getViewportWidth()),
     },
-    getBoundingClientRect: { configurable: true, value: () => makeRect(0, viewportWidth) },
+    getBoundingClientRect: {
+      configurable: true,
+      value: () => makeRect(getViewportLeft(), getViewportWidth()),
+    },
   })
 
   const syncTabRects = () => {
@@ -86,7 +97,8 @@ const installTabStripLayout = (
         configurable: true,
         value: () => {
           const index = tabs.indexOf(tab)
-          const left = widths.slice(0, index).reduce((sum, width) => sum + width + gap, 0)
+          const left =
+            getViewportLeft() + widths.slice(0, index).reduce((sum, width) => sum + width + gap, 0)
           return makeRect(left - scrollLeft, widths[index] ?? 120)
         },
       })
@@ -96,18 +108,44 @@ const installTabStripLayout = (
 
   return {
     resize(nextWidth: number) {
-      viewportWidth = nextWidth
+      stripWidth = nextWidth
+      scroller.scrollLeft = scrollLeft
+      fireEvent.resize(window)
+      // Overflow controls take 24px on each edge. Re-measure after React renders
+      // them (or removes them) so arrows use the remaining viewport width.
+      fireEvent.resize(window)
+    },
+    measure() {
+      scroller.scrollLeft = scrollLeft
+      fireEvent.resize(window)
       fireEvent.resize(window)
     },
     setWidths(nextWidths: number[]) {
       widths = nextWidths
       syncTabRects()
+      scroller.scrollLeft = scrollLeft
+    },
+    trackFutureTabRects() {
+      const rectSpy = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function (this: HTMLElement) {
+          if (!this.classList.contains('chat-view-tab') || !container.contains(this)) {
+            return makeRect(0, 0)
+          }
+          const tabs = Array.from(container.querySelectorAll<HTMLElement>('.chat-view-tab'))
+          const index = tabs.indexOf(this)
+          const left =
+            getViewportLeft() + widths.slice(0, index).reduce((sum, width) => sum + width + gap, 0)
+          return makeRect(left - scrollLeft, widths[index] ?? 120)
+        })
+      return () => rectSpy.mockRestore()
     },
     setScrollLeft(value: number) {
       scrollLeft = value
     },
     scrollLeft: () => scrollLeft,
-    maximumScrollLeft: () => Math.max(0, scroller.scrollWidth - scroller.clientWidth),
+    maximumScrollLeft: getMaximumScrollLeft,
+    viewportWidth: getViewportWidth,
     syncTabRects,
   }
 }
@@ -210,11 +248,13 @@ describe('WorkspaceTabStrip', () => {
       />
     )
     const layout = installTabStripLayout(view.container, [120, 120], 300)
-    fireEvent.resize(window)
+    layout.measure()
     expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
 
     state = openAppTab(state, { id: 'tab-three', appRef: 'example/app', title: 'Three' })
+    layout.setWidths([120, 120, 120])
+    const restoreFutureRects = layout.trackFutureTabRects()
     view.rerender(
       <WorkspaceTabStrip
         activeTabId={state.activeTabId}
@@ -224,9 +264,9 @@ describe('WorkspaceTabStrip', () => {
         tabs={state.tabs}
       />
     )
-    layout.setWidths([120, 120, 120])
+    restoreFutureRects()
     layout.syncTabRects()
-    fireEvent.resize(window)
+    layout.measure()
     expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
       false
     )
@@ -241,6 +281,7 @@ describe('WorkspaceTabStrip', () => {
     expect(screen.getByRole('button', { name: 'Scroll tabs left' })).toBeTruthy()
 
     onClose('tab-three')
+    layout.setWidths([120, 120])
     view.rerender(
       <WorkspaceTabStrip
         activeTabId={state.activeTabId}
@@ -250,11 +291,51 @@ describe('WorkspaceTabStrip', () => {
         tabs={state.tabs}
       />
     )
-    layout.setWidths([120, 120])
     layout.syncTabRects()
-    fireEvent.resize(window)
+    layout.measure()
     expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
+  })
+
+  it('does not reveal the unchanged active tab when resizing back into overflow', () => {
+    let state = createEmptyWorkspaceTabsState()
+    for (let index = 0; index < 3; index += 1) {
+      state = openAppTab(state, {
+        id: `resize-${index}`,
+        appRef: 'example/app',
+        title: `Resize ${index}`,
+      })
+    }
+    const view = render(
+      <WorkspaceTabStrip
+        activeTabId="resize-2"
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+        onSelect={vi.fn()}
+        tabs={state.tabs}
+      />
+    )
+    const layout = installTabStripLayout(view.container, [110, 110, 110], 300)
+    layout.measure()
+    layout.setScrollLeft(0)
+    fireEvent.scroll(view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement)
+    expect(screen.getByRole('button', { name: 'Scroll tabs right' }).hasAttribute('disabled')).toBe(
+      false
+    )
+
+    // The user moves to the left edge while the last tab stays active. Widening
+    // removes overflow and narrowing it again must preserve that edge.
+    layout.resize(400)
+    expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
+    layout.resize(300)
+
+    expect(layout.scrollLeft()).toBe(0)
+    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
+      true
+    )
+    expect(screen.getByRole('button', { name: 'Scroll tabs right' }).hasAttribute('disabled')).toBe(
+      false
+    )
   })
 
   it('reveals measured tabs, follows active changes, and leaves manual scroll alone', () => {
@@ -278,16 +359,16 @@ describe('WorkspaceTabStrip', () => {
       />
     )
     const layout = installTabStripLayout(view.container, widths, 300)
-    fireEvent.resize(window)
+    layout.measure()
     const left = screen.getByRole('button', { name: 'Scroll tabs left' })
     const right = screen.getByRole('button', { name: 'Scroll tabs right' })
     expect(left.hasAttribute('disabled')).toBe(true)
     expect(right.hasAttribute('disabled')).toBe(false)
 
     fireEvent.click(right)
-    expect(layout.scrollLeft()).toBe(56)
+    expect(layout.scrollLeft()).toBe(104)
     fireEvent.click(right)
-    expect(layout.scrollLeft()).toBe(224)
+    expect(layout.scrollLeft()).toBe(272)
     expect(onSelect).not.toHaveBeenCalled()
 
     for (let click = 0; click < 5 && !right.hasAttribute('disabled'); click += 1) {
@@ -298,7 +379,7 @@ describe('WorkspaceTabStrip', () => {
     expect(left.hasAttribute('disabled')).toBe(false)
 
     fireEvent.click(left)
-    expect(layout.scrollLeft()).toBeLessThan(layout.maximumScrollLeft())
+    expect(layout.scrollLeft()).toBe(364)
     expect(left.hasAttribute('disabled')).toBe(false)
     expect(onSelect).not.toHaveBeenCalled()
 
@@ -339,6 +420,97 @@ describe('WorkspaceTabStrip', () => {
     expect(layout.scrollLeft()).toBe(100)
   })
 
+  it('uses measured nearest-tab boundaries after reorder with edge controls present', () => {
+    let state = createEmptyWorkspaceTabsState()
+    for (const id of ['a', 'b', 'c', 'd']) {
+      state = openAppTab(state, { id, appRef: 'example/app', title: id })
+    }
+    const onSelect = vi.fn()
+    const onReorder = (fromId: string, toIndex: number) => {
+      state = reorderWorkspaceTab(state, fromId, toIndex)
+    }
+    const view = render(
+      <WorkspaceTabStrip
+        activeTabId="a"
+        onClose={vi.fn()}
+        onReorder={onReorder}
+        onSelect={onSelect}
+        tabs={state.tabs}
+      />
+    )
+    const layout = installTabStripLayout(view.container, [60, 60, 60, 60], 150)
+    layout.measure()
+    expect(layout.viewportWidth()).toBe(102)
+    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
+      true
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
+    expect(layout.scrollLeft()).toBe(26)
+
+    state = reorderWorkspaceTab(state, 'd', 0)
+    view.rerender(
+      <WorkspaceTabStrip
+        activeTabId="a"
+        onClose={vi.fn()}
+        onReorder={onReorder}
+        onSelect={onSelect}
+        tabs={state.tabs}
+      />
+    )
+    layout.syncTabRects()
+    layout.measure()
+
+    expect(
+      Array.from(view.container.querySelectorAll('.chat-view-tab')).map(
+        tab => tab.querySelector('.chat-view-tab__label')?.textContent
+      )
+    ).toEqual(['d', 'a', 'b', 'c'])
+    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
+      false
+    )
+    expect(screen.getByRole('button', { name: 'Scroll tabs right' }).hasAttribute('disabled')).toBe(
+      false
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
+    expect(layout.scrollLeft()).toBe(94)
+    fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs left' }))
+    expect(layout.scrollLeft()).toBe(68)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('keeps overflow controls keyboard reachable and scrolls on Enter', async () => {
+    let state = createEmptyWorkspaceTabsState()
+    for (let index = 0; index < 4; index += 1) {
+      state = openAppTab(state, {
+        id: `keyboard-${index}`,
+        appRef: 'example/app',
+        title: `Keyboard ${index}`,
+      })
+    }
+    const onSelect = vi.fn()
+    const view = render(
+      <WorkspaceTabStrip
+        activeTabId="keyboard-0"
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+        onSelect={onSelect}
+        tabs={state.tabs}
+      />
+    )
+    const layout = installTabStripLayout(view.container, [60, 60, 60, 60], 150)
+    layout.measure()
+    const right = screen.getByRole('button', { name: 'Scroll tabs right' })
+    expect(right.tagName).toBe('BUTTON')
+    right.focus()
+    expect(document.activeElement).toBe(right)
+
+    await userEvent.setup().keyboard('{Enter}')
+
+    expect(layout.scrollLeft()).toBe(26)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
   it('normalizes unmodified wheel input once, passes modifiers through, and refreshes manual-scroll state', () => {
     let state = createEmptyWorkspaceTabsState()
     for (let index = 0; index < 4; index += 1) {
@@ -359,7 +531,7 @@ describe('WorkspaceTabStrip', () => {
       />
     )
     const layout = installTabStripLayout(view.container, [110, 110, 110, 110], 200)
-    fireEvent.resize(window)
+    layout.measure()
     const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement
 
     const verticalWheel = createEvent.wheel(scroller, {
@@ -375,14 +547,24 @@ describe('WorkspaceTabStrip', () => {
     expect(layout.scrollLeft()).toBe(42)
     expect(diagonalTrackpad.defaultPrevented).toBe(true)
 
-    const zoomGesture = createEvent.wheel(scroller, { deltaY: 12, ctrlKey: true })
-    fireEvent(scroller, zoomGesture)
-    expect(layout.scrollLeft()).toBe(42)
-    expect(zoomGesture.defaultPrevented).toBe(false)
+    const pageWheel = createEvent.wheel(scroller, {
+      deltaY: 1,
+      deltaMode: WheelEvent.DOM_DELTA_PAGE,
+    })
+    fireEvent(scroller, pageWheel)
+    expect(layout.scrollLeft()).toBe(42 + layout.viewportWidth())
+    expect(pageWheel.defaultPrevented).toBe(true)
+
+    for (const modifier of ['altKey', 'ctrlKey', 'metaKey', 'shiftKey'] as const) {
+      const zoomGesture = createEvent.wheel(scroller, { deltaY: 12, [modifier]: true })
+      fireEvent(scroller, zoomGesture)
+      expect(layout.scrollLeft()).toBe(42 + layout.viewportWidth())
+      expect(zoomGesture.defaultPrevented).toBe(false)
+    }
 
     const outsideWheel = createEvent.wheel(document.body, { deltaY: 12 })
     fireEvent(document.body, outsideWheel)
-    expect(layout.scrollLeft()).toBe(42)
+    expect(layout.scrollLeft()).toBe(42 + layout.viewportWidth())
     expect(outsideWheel.defaultPrevented).toBe(false)
 
     scroller.scrollLeft = 100
