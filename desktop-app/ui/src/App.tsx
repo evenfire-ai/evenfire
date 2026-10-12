@@ -344,6 +344,12 @@ export function App() {
   const [pendingGfsResourceAction, setPendingGfsResourceAction] =
     React.useState<GfsResourceActionRequest | null>(null)
   const gfsResourceActionRequestIdRef = React.useRef(0)
+  const gfsResourceActionRouteRef = React.useRef<{
+    id: number
+    sourceUri: string | null
+    navigationUri: string | null
+    destinationObserved: boolean
+  } | null>(null)
   const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
@@ -614,17 +620,39 @@ export function App() {
     setGfsRouteDialogRequestId(current => (current === requestId ? 0 : current))
   }, [])
 
+  const beginFilesResourceAction = React.useCallback(
+    (request: GfsResourceActionRequest, navigationUri: string | null) => {
+      const activeTab = vm.activeWorkspaceTab
+      const sourceUri = activeTab?.kind === 'files' ? (activeTab.files?.path ?? null) : null
+      gfsResourceActionRouteRef.current = {
+        id: request.id,
+        sourceUri,
+        navigationUri,
+        destinationObserved: sourceUri === navigationUri,
+      }
+      setPendingGfsResourceAction(request)
+      vm.openFilesSection(navigationUri)
+    },
+    [vm.activeWorkspaceTab, vm.openFilesSection]
+  )
+
   const handleSidebarGfsResourceAction = React.useCallback(
     (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => {
       if (actionId === 'open-route') {
+        gfsResourceActionRouteRef.current = null
+        setPendingGfsResourceAction(null)
         handleOpenGfsRoute()
         return
       }
       if (actionId === 'open-folder') {
+        gfsResourceActionRouteRef.current = null
+        setPendingGfsResourceAction(null)
         vm.openFilesSection(resource.gfsUri)
         return
       }
       if (actionId === 'preview') {
+        gfsResourceActionRouteRef.current = null
+        setPendingGfsResourceAction(null)
         const preview = resolveGfsPreview(resource)
         if (preview) vm.openPreviewSection(preview)
         return
@@ -653,8 +681,7 @@ export function App() {
             parentResourceId: resource.parentResourceId,
           },
         }
-        setPendingGfsResourceAction(request)
-        vm.openFilesSection(navigationUri)
+        beginFilesResourceAction(request, navigationUri)
         return
       }
       const request: GfsResourceActionRequest = {
@@ -669,17 +696,26 @@ export function App() {
           vm.pushToast('Copy content is unavailable for this resource.', 'error')
           return
         }
+        gfsResourceActionRouteRef.current = null
         setPendingGfsResourceAction(request)
         vm.openPreviewSection(preview)
         return
       }
-      setPendingGfsResourceAction(request)
-      vm.openFilesSection(resource.gfsUri)
+      beginFilesResourceAction(request, resource.gfsUri)
     },
-    [handleOpenGfsRoute, vm.openFilesSection, vm.openPreviewSection, vm.pushToast]
+    [
+      beginFilesResourceAction,
+      handleOpenGfsRoute,
+      vm.openFilesSection,
+      vm.openPreviewSection,
+      vm.pushToast,
+    ]
   )
 
   const handleGfsResourceActionHandled = React.useCallback((requestId: number) => {
+    if (gfsResourceActionRouteRef.current?.id === requestId) {
+      gfsResourceActionRouteRef.current = null
+    }
     setPendingGfsResourceAction(current => (current?.id === requestId ? null : current))
   }, [])
 
@@ -1067,9 +1103,18 @@ export function App() {
     (gfsUri: string | null, name: string | null) => {
       const id = activeFilesTabIdRef.current
       if (!id) return
+      const route = gfsResourceActionRouteRef.current
+      if (route && pendingGfsResourceAction?.id === route.id) {
+        if (gfsUri === route.navigationUri) {
+          route.destinationObserved = true
+        } else if (route.destinationObserved || gfsUri !== route.sourceUri) {
+          gfsResourceActionRouteRef.current = null
+          setPendingGfsResourceAction(current => (current?.id === route.id ? null : current))
+        }
+      }
       setWorkspaceTabs(state => setFilesTabPath(state, id, gfsUri, name ?? undefined))
     },
-    [setWorkspaceTabs]
+    [pendingGfsResourceAction?.id, setWorkspaceTabs]
   )
 
   const refreshOpenPreview = React.useCallback(

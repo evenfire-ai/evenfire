@@ -85,6 +85,8 @@ const filesPageHarness = vi.hoisted(() => ({
   pendingGfsUri: null as string | null,
   routeDialogRequestId: 0,
   pendingResourceAction: null as GfsResourceActionRequest | null,
+  onLocationChange: null as ((uri: string | null, name: string | null) => void) | null,
+  onPendingResourceActionHandled: null as ((requestId: number) => void) | null,
 }))
 
 const commandPaletteHarness = vi.hoisted(() => ({
@@ -234,10 +236,14 @@ vi.mock('@pages/FilesPage', () => ({
     pendingGfsUri?: string | null
     routeDialogRequestId?: number
     pendingResourceAction?: GfsResourceActionRequest | null
+    onLocationChange?: (uri: string | null, name: string | null) => void
+    onPendingResourceActionHandled?: (requestId: number) => void
   }) => {
     filesPageHarness.pendingGfsUri = props.pendingGfsUri ?? null
     filesPageHarness.routeDialogRequestId = props.routeDialogRequestId ?? 0
     filesPageHarness.pendingResourceAction = props.pendingResourceAction ?? null
+    filesPageHarness.onLocationChange = props.onLocationChange ?? null
+    filesPageHarness.onPendingResourceActionHandled = props.onPendingResourceActionHandled ?? null
     return null
   },
 }))
@@ -484,6 +490,8 @@ describe('App deep-link orchestration', () => {
     filesPageHarness.pendingGfsUri = null
     filesPageHarness.routeDialogRequestId = 0
     filesPageHarness.pendingResourceAction = null
+    filesPageHarness.onLocationChange = null
+    filesPageHarness.onPendingResourceActionHandled = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
@@ -654,6 +662,87 @@ describe('App deep-link orchestration', () => {
       })
     )
     expect(filesPageHarness.pendingGfsUri).toBe(parentUri)
+  })
+
+  it('cancels a pending sidebar action when live navigation supersedes its route', async () => {
+    const sourceUri = 'gfs://main/11111111111111111111111111111111'
+    const target = (
+      await listChildrenPage([
+        childView('22222222222222222222222222222222', 'replacement.txt', 'file'),
+      ])
+    ).items[0]
+    if (!target) throw new Error('The producer fixture did not return the sidebar file')
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs: openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'source-files',
+        path: sourceUri,
+      }),
+    } as Partial<AppController>)
+
+    render(<App />)
+    await waitFor(() => expect(filesPageHarness.onLocationChange).not.toBeNull())
+
+    act(() =>
+      sidebarHarness.props?.onGfsResourceAction?.(
+        target,
+        'replace',
+        new File(['replacement'], 'replacement.txt')
+      )
+    )
+    const requestId = filesPageHarness.pendingResourceAction?.id
+    expect(filesPageHarness.pendingResourceAction).toMatchObject({
+      targetUri: target.gfsUri,
+      actionId: 'replace',
+    })
+    expect(filesPageHarness.pendingGfsUri).toBe(sourceUri)
+
+    act(() =>
+      filesPageHarness.onLocationChange?.('gfs://main/33333333333333333333333333333333', 'Other')
+    )
+    await waitFor(() => expect(filesPageHarness.pendingResourceAction).toBeNull())
+
+    act(() => filesPageHarness.onLocationChange?.(target.gfsUri, target.name))
+    expect(filesPageHarness.pendingResourceAction).toBeNull()
+    expect(filesPageHarness.onPendingResourceActionHandled).toBeTypeOf('function')
+    expect(requestId).toBe(1)
+  })
+
+  it('cancels after the target route is left and ignores an older action acknowledgement', async () => {
+    const sourceUri = 'gfs://main/11111111111111111111111111111111'
+    const rows = await listChildrenPage([
+      childView('22222222222222222222222222222222', 'first.txt', 'file'),
+      childView('44444444444444444444444444444444', 'second.txt', 'file'),
+    ])
+    const [first, second] = rows.items
+    if (!first || !second) throw new Error('The producer fixture did not return both sidebar files')
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs: openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'source-files',
+        path: sourceUri,
+      }),
+    } as Partial<AppController>)
+
+    render(<App />)
+    await waitFor(() => expect(filesPageHarness.onLocationChange).not.toBeNull())
+
+    act(() =>
+      sidebarHarness.props?.onGfsResourceAction?.(first, 'replace', new File(['1'], '1.txt'))
+    )
+    const firstRequestId = filesPageHarness.pendingResourceAction?.id
+    expect(firstRequestId).toBeDefined()
+
+    act(() => filesPageHarness.onLocationChange?.(first.gfsUri, first.name))
+    act(() => filesPageHarness.onLocationChange?.(sourceUri, 'Source'))
+    await waitFor(() => expect(filesPageHarness.pendingResourceAction).toBeNull())
+
+    act(() => sidebarHarness.props?.onGfsResourceAction?.(second, 'rename'))
+    const secondRequestId = filesPageHarness.pendingResourceAction?.id
+    expect(secondRequestId).toBeGreaterThan(firstRequestId ?? 0)
+
+    act(() => filesPageHarness.onPendingResourceActionHandled?.(firstRequestId ?? -1))
+    expect(filesPageHarness.pendingResourceAction?.id).toBe(secondRequestId)
   })
 
   it('routes a warm resource link to the active Files destination and acknowledges it', async () => {
