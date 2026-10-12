@@ -719,6 +719,24 @@ describe('processMaturedSchedules', () => {
       )
     })
 
+    it('restarts the skip streak when the row presents a slot this replica did not write', async () => {
+      setActiveRun()
+      maturedRows.push(scheduleRow())
+      await processMaturedSchedules() // skips 09:00, this replica expects 09:05 next
+
+      // Failover/rollback: the row now carries 09:10, not the 09:05 slot written above.
+      vi.setSystemTime(new Date('2026-04-20T09:10:05Z'))
+      maturedRows.push(scheduleRow({ next_fire_at: new Date('2026-04-20T09:10:00Z') }))
+      await processMaturedSchedules()
+
+      const forbiddenSkips = vi
+        .mocked(rootLogger.info)
+        .mock.calls.map(([fields]) => fields as Record<string, unknown>)
+        .filter(fields => fields?.event === 'workflow_schedule_worker_concurrency_forbidden')
+        .map(fields => fields.consecutiveSkips)
+      expect(forbiddenSkips).toEqual([1, 1])
+    })
+
     it('defaults a null concurrency_policy to Forbid', async () => {
       setActiveRun()
       maturedRows.push(scheduleRow({ concurrency_policy: null }))
