@@ -15,12 +15,13 @@ minikube overlays ship; features that are off by default say so.
 
 ## Get started
 
-| Doc                                                       | Description                                    |
-| --------------------------------------------------------- | ---------------------------------------------- |
-| [Quickstart](get-started/quickstart.md)                   | Full platform on minikube with one command     |
-| [Registry quickstart](get-started/registry-quickstart.md) | Connect, install, and publish as a self-hoster |
-| [Learning path](get-started/learning-path.md)             | Choose a path by role and goal                 |
-| [FAQ](faq.md)                                             | Common questions and troubleshooting           |
+| Doc                                                       | Description                                                                 |
+| --------------------------------------------------------- | --------------------------------------------------------------------------- |
+| [Quickstart](get-started/quickstart.md)                   | Full platform on minikube with one command                                  |
+| [Registry quickstart](get-started/registry-quickstart.md) | Connect, install, and publish as a self-hoster                              |
+| [Dev mode](get-started/dev-mode.md)                       | Run mcp-host alone without Kubernetes (contributors; not platform security) |
+| [Learning path](get-started/learning-path.md)             | Choose a path by role and goal                                              |
+| [FAQ](faq.md)                                             | Common questions and troubleshooting                                        |
 
 ## Concepts
 
@@ -80,6 +81,8 @@ minikube overlays ship; features that are off by default say so.
 | [Minikube full stack](deploy/minikube.md)                                        | In-depth reference for the local platform                        |
 | [Production notes](deploy/production.md)                                         | Checklist and in-repo deploy assets                              |
 | [WorkflowRecipes operations](deploy/workflow-recipes-guide.md)                   | Recipe ops, RBAC, debugging                                      |
+| [Releases and upgrades](deploy/releases-and-upgrades.md)                         | Versioning, release images, pinning a release, upgrade order     |
+| [Monitoring and observability](operations/monitoring.md)                         | Logs starter, metrics endpoints, health checks, what to alert on |
 | **Upgrade notes**                                                                |                                                                  |
 | [Workflow output PVC upgrade](deploy/workflow-output-pvc-upgrade.md)             | Per-recipe output PVC ownership change                           |
 | [Plugin Workload SDK upgrade](deploy/plugin-workload-sdk-upgrade.md)             | promptBridge / clientNotifications rollout order and migration   |
@@ -176,7 +179,7 @@ as user docs: [design/](design/README.md).
 | Pick or configure an LLM provider    | [LLM providers overview](llm-providers/README.md)        |
 | Run the full stack locally           | [Minikube](deploy/minikube.md)                           |
 | Ship to a real cluster               | [Production notes](deploy/production.md)                 |
-| Upgrade an existing install          | [Deploy & operate › Upgrade notes](#deploy--operate)     |
+| Upgrade an existing install          | [Releases and upgrades](deploy/releases-and-upgrades.md) |
 | Debug E2E                            | [E2E guide](testing/e2e-guide.md)                        |
 | Feed docs to an LLM                  | [llms.txt](llms.txt)                                     |
 | Use the admin console                | [Control UI](surfaces/control-ui.md)                     |

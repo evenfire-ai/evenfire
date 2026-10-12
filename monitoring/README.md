@@ -26,9 +26,19 @@ make setup
 # Install Loki stack (Loki + Promtail)
 make install_loki
 
+# Create the dashboards ConfigMap first: Grafana's values mount it
+kubectl create configmap grafana-dashboards \
+  --from-file=dashboards/loki-grafana-dashboard.json \
+  -n monitoring
+
 # Install Grafana
 make install_grafana
 ```
+
+On minikube, set the storage class to `standard` and reduce the 100 Gi Loki
+volume in `loki/values.yaml` before installing. See
+[Monitoring and observability](../docs/operations/monitoring.md) for what this
+starter covers (logs only; no metrics scraping is shipped).
 
 ## Makefile Targets
 
@@ -58,7 +68,7 @@ The `grafana/values.yaml` configures:
 |------|-------------|
 | `dashboards/loki-grafana-dashboard.json` | Log exploration dashboard sourced from Grafana community (gnetId 15141) |
 
-To load the dashboard, create a ConfigMap and reference it in the Grafana values:
+The setup steps above create the `grafana-dashboards` ConfigMap that Grafana's values reference. To recreate it after editing the dashboard:
 
 ```bash
 kubectl create configmap grafana-dashboards \

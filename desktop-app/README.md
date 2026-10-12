@@ -121,6 +121,34 @@ npm run build
 npm run start
 ```
 
+## Package and Sign
+
+Desktop builds need Node 24, an `npm ci` with lifecycle scripts enabled (never
+`--ignore-scripts`, never `ELECTRON_SKIP_BINARY_DOWNLOAD`), and a passing
+`npm run verify:electron` before any build or test result counts.
+
+```bash
+npm ci
+npm run verify:electron
+npm run make:mac:arm64   # or make:mac:x64, make:windows:x64, make:windows:arm64, make:linux:x64, make:linux:arm64
+```
+
+Each `make:*` script runs `electron-forge make` for one platform/arch and builds
+first via the forge `prePackage` hook (`EVENFIRE_SKIP_PACKAGE_BUILD=1` skips that).
+Output goes to `out/`. The makers are zip (all platforms), dmg (macOS), squirrel
+(Windows), and deb/rpm (Linux). This directory's `Makefile` has no packaging
+targets.
+
+macOS signing and notarization are opt-in and run only on a macOS build host:
+set `ENABLE_APPLE_CODESIGN=1`, optionally `APPLE_CODESIGN_IDENTITY` and
+`APPLE_KEYCHAIN`, plus either `APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`
+or `APPLE_KEYCHAIN_PROFILE` (the config throws if neither is set).
+`APPLE_BUNDLE_ID` overrides the default `ai.evenfire.desktop`. Windows and Linux
+packages are unsigned. No workflow in this repo builds or publishes installers.
+
+Signing details, release tags, and how the app detects required updates are in
+[Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users).
+
 ## Port-forward Remote Cluster Services
 
 The root launcher already starts the required port-forwards for normal local development.

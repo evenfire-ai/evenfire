@@ -68,7 +68,7 @@ CLERUM_MODEL_PROVIDER=openai     # optional with one key: openai | claude | zai 
 ## 2. Set up the cluster (one command)
 
 ```bash
-MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the override note below
+make minikube-setup
 ```
 
 This runs an idempotent 12-step setup: minikube cluster (Calico) → namespaces →
@@ -81,11 +81,11 @@ verify.
 instead of compiling anything. MCP servers are not loaded into the cluster at
 all — they are installed on demand from the evenfire registry.
 
-`MINIKUBE_IMAGE_TAG=latest` is required today. The cluster manifests pin the
-next release tag, whose images are created by promotion _on_ that tag, so the
-pin currently names something that does not exist yet. Without the override the
-pull fails with a message naming the image, the tag, and this variable. Drop the
-override once that release is tagged and promoted.
+The manifests pin a release tag. Right after a release bump, that tag's images
+may not be promoted yet, and the pull fails with a message naming the image, the
+tag, and `MINIKUBE_IMAGE_TAG`. In that case run
+`MINIKUBE_IMAGE_TAG=latest make minikube-setup` to use the newest `dev` images
+instead. See [Releases and upgrades](../deploy/releases-and-upgrades.md).
 
 To build every image from source instead, use `make minikube-setup-local`
 (equivalently `IMAGE_SOURCE=local`). That path needs no tag override.
@@ -191,7 +191,7 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 | Symptom                                    | Fix                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1)                                                                                                                                                                                                                           |
-| `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 MINIKUBE_IMAGE_TAG=latest make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default)                                                                                                              |
+| `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default)                                                                                                              |
 | Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                                                                                                                                                                                                                                               |
 | postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                                                                                                                                                                                                                                                        |
 | Port-forwards die                          | Re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops) |
