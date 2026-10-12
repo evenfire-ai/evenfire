@@ -1219,7 +1219,13 @@ export function useAgentChatController({
       })
       pendingChatSwitchRequestRef.current =
         readPendingSelection(agentRef)?.mode === 'specific'
-          ? { agentRef, chatId, revision: selectionIntentRevision, promise }
+          ? {
+              agentRef,
+              chatId,
+              revision: selectionIntentRevision,
+              scope: currentAuthScopeRef.current,
+              promise,
+            }
           : null
       await promise
     },
@@ -1458,6 +1464,7 @@ export function useAgentChatController({
     const sharesPendingSwitch = Boolean(
       requestedSelection?.mode === 'specific' &&
       pendingSwitch?.revision === selectionIntentRevision &&
+      pendingSwitch.scope === currentAuthScopeRef.current &&
       pendingSwitch.agentRef === selectedAgent &&
       pendingSwitch.chatId === requestedSelection.chatId
     )
