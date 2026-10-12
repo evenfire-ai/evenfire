@@ -400,6 +400,75 @@ describe('FilesPage', () => {
     expect(handled).toHaveBeenCalledWith(13)
   })
 
+  it('does not run a stale Replace request after navigation leaves and later returns to its file', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'report.md')
+    )
+    const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
+    const replacement = new File(['replacement'], 'replacement.md', { type: 'text/markdown' })
+    const handled = vi.fn()
+    const replaceFileFromPath = vi.fn(async () => undefined)
+    const getPathForFile = vi.fn(async () => '/isolated/replacement.md')
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getPathForFile } },
+    })
+
+    let setCrumbs: (crumbs: GfsCrumb[]) => void = () => undefined
+    let targetOpenCount = 0
+    const openUri = vi.fn(async (uri: string) => {
+      if (uri !== file.gfsUri || targetOpenCount === 0) {
+        if (uri === file.gfsUri) targetOpenCount += 1
+        return false
+      }
+      targetOpenCount += 1
+      setCrumbs([fileCrumb])
+      return fileCrumb
+    })
+    function useSeededFileController() {
+      const [crumbs, updateCrumbs] = useState<GfsCrumb[]>([])
+      setCrumbs = updateCrumbs
+      return {
+        ...baseController(),
+        crumbs,
+        current: crumbs.at(-1) ?? null,
+        affordances: delegationAffordances(new Set(['read', 'write']), false),
+        openUri,
+        replaceFileFromPath,
+      }
+    }
+    hookMock.useGfsBrowserController.mockImplementation(useSeededFileController)
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const action = {
+      id: 14,
+      targetUri: file.gfsUri,
+      actionId: 'replace' as const,
+      file: replacement,
+    }
+    const renderRoute = (uri: string | null) => (
+      <QueryClientProvider client={queryClient}>
+        <FilesPage
+          pendingGfsUri={uri}
+          pendingResourceAction={action}
+          onPendingResourceActionHandled={handled}
+        />
+      </QueryClientProvider>
+    )
+    const view = render(renderRoute(file.gfsUri))
+
+    await waitFor(() => expect(openUri).toHaveBeenCalledWith(file.gfsUri))
+    view.rerender(renderRoute('gfs://main/0123456789abcdef0123456789abcdef'))
+    await waitFor(() => expect(openUri).toHaveBeenCalledTimes(2))
+    view.rerender(renderRoute(file.gfsUri))
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'report.md', level: 3 })))
+    await waitFor(() => expect(openUri).toHaveBeenCalledTimes(3))
+    expect(handled).toHaveBeenCalledWith(14)
+    expect(getPathForFile).not.toHaveBeenCalled()
+    expect(replaceFileFromPath).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['initial GFS discovery', { loadingAccessible: true }],
     [

@@ -1533,6 +1533,12 @@ export function FilesPage({
     ) {
       return
     }
+    if (pendingGfsUri !== request.targetUri) {
+      lastHandledResourceActionIdRef.current = request.id
+      pendingResourceActionRef.current = null
+      onPendingResourceActionHandled?.(request.id)
+      return
+    }
     if (current?.gfsUri === request.targetUri) {
       const action = currentResourceActions.find(candidate => candidate.id === request.actionId)
       if (!action) {
