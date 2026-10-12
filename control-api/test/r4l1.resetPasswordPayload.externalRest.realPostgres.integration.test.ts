@@ -4,12 +4,7 @@ import bcrypt from 'bcryptjs'
 import { type ChildProcess, spawn } from 'node:child_process'
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import {
-  type IncomingHttpHeaders,
-  type Server,
-  createServer,
-  request as httpRequest,
-} from 'node:http'
+import { type Server, createServer, request as httpRequest } from 'node:http'
 import path from 'node:path'
 import { Pool } from 'pg'
 import request from 'supertest'
@@ -100,40 +95,6 @@ async function waitForMemberRegistration(port: number, child: ChildProcess): Pro
   throw new Error('local Member Registration producer did not become ready')
 }
 
-function selectResetProxyResponseHeaders(headers: IncomingHttpHeaders) {
-  const forwardedHeaders: Record<string, string | string[]> = {}
-  const contentType = headers['content-type']
-  if (typeof contentType === 'string') {
-    forwardedHeaders['content-type'] = contentType
-  }
-  const retryAfter = headers['retry-after']
-  if (typeof retryAfter === 'string') {
-    forwardedHeaders['retry-after'] = retryAfter
-  }
-  const setCookie = headers['set-cookie']
-  if (setCookie) {
-    forwardedHeaders['set-cookie'] = setCookie
-  }
-  return forwardedHeaders
-}
-
-describe('reset response proxy headers', () => {
-  it('forwards only the fixed response contract headers', () => {
-    expect(
-      selectResetProxyResponseHeaders({
-        'content-type': 'application/json',
-        'retry-after': '2',
-        'set-cookie': ['profile_session=Synthetic-Session'],
-        'x-user-selected-header': 'ignored',
-      })
-    ).toEqual({
-      'content-type': 'application/json',
-      'retry-after': '2',
-      'set-cookie': ['profile_session=Synthetic-Session'],
-    })
-  })
-})
-
 function createDropResetResponseProxy(controlApiPort: number) {
   let resetPostCount = 0
   let droppedResolve!: () => void
@@ -161,10 +122,8 @@ function createDropResetResponseProxy(controlApiPort: number) {
         })
         return
       }
-      outgoing.writeHead(
-        response.statusCode || 502,
-        selectResetProxyResponseHeaders(response.headers)
-      )
+      outgoing.statusCode = response.statusCode || 502
+      outgoing.setHeader('content-type', 'application/json')
       response.pipe(outgoing)
     })
     target.on('error', () => outgoing.destroy())
@@ -186,6 +145,39 @@ function createDropResetResponseProxy(controlApiPort: number) {
       ),
   }
 }
+
+describe('ambiguous reset response proxy', () => {
+  it('keeps a constant JSON header and drops upstream response headers', async () => {
+    const upstream = createServer((_incoming, outgoing) => {
+      outgoing.writeHead(429, {
+        'content-type': 'application/json',
+        'retry-after': '900',
+        'x-user-selected-header': 'must-not-cross-the-proxy',
+      })
+      outgoing.end(JSON.stringify({ error: 'synthetic upstream response' }))
+    })
+    const upstreamPort = await listen(upstream)
+    const proxy = createDropResetResponseProxy(upstreamPort)
+    const proxyUrl = await proxy.start()
+
+    try {
+      const response = await fetch(`${proxyUrl}/token-preview`, {
+        headers: { connection: 'close' },
+      })
+
+      expect(response.status).toBe(429)
+      expect(response.headers.get('content-type')).toBe('application/json')
+      expect(response.headers.get('retry-after')).toBeNull()
+      expect(response.headers.get('x-user-selected-header')).toBeNull()
+      await expect(response.json()).resolves.toEqual({ error: 'synthetic upstream response' })
+    } finally {
+      await proxy.close()
+      await new Promise<void>((resolve, reject) =>
+        upstream.close(error => (error ? reject(error) : resolve()))
+      )
+    }
+  })
+})
 
 realProducer('R4-L1 reset password payload through the public route and real producers', () => {
   const controlDatabase = `r4l1_control_${randomBytes(6).toString('hex')}`
