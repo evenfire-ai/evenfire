@@ -364,6 +364,51 @@ describe('team persistence respects pending-marker authority', () => {
 })
 
 describe('durable logout failure policy', () => {
+  it('keeps logout durable when a concurrent login retires its upgraded marker', async () => {
+    const harness = await createService()
+    await harness.login()
+    harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
+    const entered = deferred()
+    const release = deferred()
+    keytarMock.deletePassword.mockImplementationOnce(async () => {
+      entered.resolve()
+      await release.promise
+      throw new Error('fixture-logout active delete failed')
+    })
+    const originalRead = fsSync.readFileSync.bind(fsSync)
+    let reads = 0
+    vi.spyOn(fsSync, 'readFileSync').mockImplementation(((
+      file: Parameters<typeof originalRead>[0],
+      options: Parameters<typeof originalRead>[1]
+    ) => {
+      if (typeof file === 'number' && ++reads === 2) {
+        throw Object.assign(new Error('fixture-marker reread failed'), { code: 'EIO' })
+      }
+      return originalRead(file, options)
+    }) as typeof fsSync.readFileSync)
+    const logout = harness.service.logout()
+    await entered.promise
+    try {
+      await expect(harness.login('fixture-concurrent-session')).resolves.toEqual({
+        authenticated: true,
+        me,
+      })
+      expect(
+        harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
+      ).toBeNull()
+    } finally {
+      release.resolve()
+      await logout
+    }
+
+    expect(harness.service.getCachedUserId()).toBeNull()
+    const restarted = await createService()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+  })
+
   // Characterization: the owner retained this policy for ordinary UI logout too.
   it('blocks login after ordinary logout until secure storage recovers', async () => {
     const harness = await createService()
