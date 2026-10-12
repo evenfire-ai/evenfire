@@ -87,6 +87,9 @@ spec:
         action: allow
         match: { tool: { provenance: mcp } }
       # Strictest wins: this deny beats allow-native.
+      # Defence in depth only: http_request already refuses private and
+      # metadata IPs. URL predicates are lexical, and URLs with credentials
+      # never match.
       - id: no-metadata-endpoint
         action: deny
         reasonCode: metadata_blocked
@@ -129,8 +132,10 @@ predicate has a `type`, a JSON Pointer into the arguments, an `op` and a
 | `json`    | `exists`, `equals`, `one_of`, `contains`        | Canonical key order                                                                         |
 
 The CRD does not validate rule shape. mcp-host compiles the rules when a task
-starts, and a malformed set (missing provenance, duplicate id, unknown op,
-bad pointer) makes the task fail rather than run with part of the rules.
+starts, and a malformed set (missing provenance, duplicate id, invalid action
+or predicate type, bad pointer) makes the task fail rather than run with part
+of the rules. An unknown `op` is not caught at start: it throws when a call
+matching the rule's tool filter is evaluated, and the task fails then.
 
 **Built-ins** run in-process on the main model lane only, sorted by `order`
 (default 100). For each item, mcp-host reads only `type`, `order` and
@@ -168,8 +173,8 @@ the pod.
      validated;
    - checks the agent: the hook's trust level must meet the agent's floor,
      and the capabilities you selected must fall within the agent's ceiling;
-   - requires a digest-pinned image, and checks the image allowlist when
-     enforcement is on;
+   - for image hooks, requires a digest-pinned image and checks the image
+     allowlist when enforcement is on;
    - creates the `LlmHook` in `llm-hooks`, stamped with a platform-assigned
      `clerum.io/trust-level` annotation;
    - adds a reference to the agent under **every** lifecycle point the hook
@@ -206,7 +211,7 @@ the fields it does not edit when it saves.
 - **Capabilities are enforced on the response.** If a hook returns a deny
   without `may_deny`, the deny is downgraded to no decision. A rewrite
   without `may_rewrite` is dropped, and so is a substitute without
-  `may_substitute_result`. `may_add_context` is **not** enforced today.
+  `may_substitute_result`. `may_add_context` has no effect today: mcp-host does not apply context that a hook returns, whether or not the capability is granted.
   Installed hooks can never change the system prompt.
 - **`failMode` only bites with the matching capability.** If a hook is
   unavailable (timeout, 5xx, a malformed or oversized reply, or an SSRF
@@ -219,8 +224,9 @@ the fields it does not edit when it saves.
     the model output;
   - in every other case the hook contributes nothing.
 
-  The CRD defaults to `closed`, but the install route and form default to
-  `open` unless **May deny** is selected.
+  The CRD defaults to `closed`. The install route defaults to `open` unless
+  `may_deny` is requested; the form preselects the hook author's suggested
+  fail mode (or `open`), and **May deny** forces `closed`.
 
 - **Timeouts.** The per-call deadline is the Host's
   `limits.maxHookTimeoutMs`, default 5000 ms, on both lanes. mcp-host does
@@ -294,7 +300,8 @@ install-time trust-floor and ceiling checks (see Limits).
 3. For rules, trigger a matching tool call and look for the `Blocked by
 guardrail policy` result or a pending approval. The
    `clerum_mcp_host_guardrail_decisions_total` metric counts decisions by
-   lane, source, outcome and reason.
+   `lane`, `decision`, `source`, `execution_mode`, `phase`, `outcome` and
+   `reason_code`.
 
 ## Limits
 
@@ -313,27 +320,27 @@ guardrail policy` result or a pending approval. The
   are implemented for LLM-lane hooks only. Tool-lane hooks are dialed
   without them.
 - **Doom-loop guard.** It is active whenever tool-lane rules or hooks exist:
-  three consecutive identical calls are denied (`repeated_identical_call`).
+  the third consecutive identical call is denied (`repeated_identical_call`).
   It is a runaway guard, not a security control, because alternating calls
   evade it.
 - **Scope.** The aux/compaction model lane runs no guardrails.
 
 ## Troubleshooting
 
-| Symptom                                                                           | Cause / fix                                                                                                                                                                                         |
-| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.guardrails` vanishes after apply                                            | The CRD is older than the field and pruned it. Apply `charts/clerum-crds` first, then re-apply the Host.                                                                                            |
-| Every tool call now asks for approval                                             | Rules exist and nothing matched (`unmatched_ask`). Add catch-all `allow` rules per provenance.                                                                                                      |
-| Cron or workflow tasks fail with "approval required but no approver is available" | A guardrail `ask` in an unattended run. Add a rule that resolves the call to `allow` or `deny`.                                                                                                     |
-| Tasks fail right after you edit rules                                             | The rule set is malformed and rejected as a whole. Check mcp-host logs for the rule id.                                                                                                             |
-| Refusal "a required safety check is unavailable"                                  | A `may_deny` hook with `failMode: closed` is unreachable, timing out, or quarantined. Check the hook's pod and the Host `digest` against `status.observedDigest`.                                   |
-| mcp-host logs `digest mismatch ... quarantining`                                  | The hook image changed without the Host pin. Use upgrade-hook, or update the `digest` to `status.observedDigest`.                                                                                   |
-| Install: `capability_exceeds_ceiling`, or no capability can be ticked             | The Host has no `capabilityCeiling`, or the ceiling is too narrow. Set it on the Host.                                                                                                              |
-| Install: `hook_below_trust_floor`                                                 | The hook's resolved trust is below `minInstalledHookTrustLevel`.                                                                                                                                    |
-| Install: `content_egress_requires_high_trust`                                     | The hook sees content and has egress or a remote target, so it needs `high` trust, which non-curated orgs never reach. Add the org to `CONTROL_API_CURATED_HOOK_ORGS` or use a hook without egress. |
-| Install: `content_access_conflict`                                                | The entry declares `contentAccess: metadata` on a content-bearing point. The publisher must fix `hook_meta` and republish.                                                                          |
-| Install: `hook_requires_org_scope` / `image_ref_not_digest_pinned`                | Only org-owned entries with `@sha256:` image refs can be installed.                                                                                                                                 |
-| Hook installed, but it never runs                                                 | Check that a Host references the hook's id, and that the CR is not `Ready=False/DuplicatePath`. A hook that returns a deny without `may_deny` is ignored.                                           |
+| Symptom                                                                           | Cause / fix                                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.guardrails` vanishes after apply                                            | The CRD is older than the field and pruned it. Apply `charts/clerum-crds` first, then re-apply the Host.                                                                                                                        |
+| Every tool call now asks for approval                                             | Rules exist and nothing matched (`unmatched_ask`). Add catch-all `allow` rules per provenance.                                                                                                                                  |
+| Cron or workflow tasks fail with "approval required but no approver is available" | A guardrail `ask` in an unattended run. Add a rule that resolves the call to `allow` or `deny`.                                                                                                                                 |
+| Tasks fail right after you edit rules                                             | The rule set is malformed and rejected as a whole. Check mcp-host logs for the rule id.                                                                                                                                         |
+| Refusal "a required safety check is unavailable"                                  | A `may_deny` hook with `failMode: closed` is unreachable, timing out, or quarantined. Check the hook's pod and the Host `digest` against `status.observedDigest`.                                                               |
+| mcp-host logs `digest mismatch ... quarantining`                                  | The hook image changed without the Host pin. Use upgrade-hook, or update the `digest` to `status.observedDigest`.                                                                                                               |
+| Install: `capability_exceeds_ceiling`, or no capability can be ticked             | The Host has no `capabilityCeiling`, or the ceiling is too narrow. Set it on the Host.                                                                                                                                          |
+| Install: `hook_below_trust_floor`                                                 | The hook's resolved trust is below `minInstalledHookTrustLevel`.                                                                                                                                                                |
+| Install: `content_egress_requires_high_trust`                                     | The hook sees content and has egress or a remote target, so it needs `high` trust, which non-curated orgs never reach under the default `mid` cap. Add the org to `CONTROL_API_CURATED_HOOK_ORGS` or use a hook without egress. |
+| Install: `content_access_conflict`                                                | The entry declares `contentAccess: metadata` on a content-bearing point. The publisher must fix `hook_meta` and republish.                                                                                                      |
+| Install: `hook_requires_org_scope` / `image_ref_not_digest_pinned`                | Only org-owned entries can be installed, and an image-target hook must use an `@sha256:` image ref.                                                                                                                             |
+| Hook installed, but it never runs                                                 | Check that a Host references the hook's id, and that the CR is not `Ready=False/DuplicatePath`. A hook that returns a deny without `may_deny` is ignored.                                                                       |
 
 ## Related
 

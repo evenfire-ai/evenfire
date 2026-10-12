@@ -145,7 +145,8 @@ four layers constrain what it can do:
 - **Least privilege.** Each agent reaches only the connectors its `Context`
   grants, through short-lived, scope-narrowed tokens that can't widen
   themselves. Connector images are checked against an allowlist (audit mode by
-  default), and custom workflow coordinator images must be digest-pinned.
+  default), and custom workflow coordinator images must be digest-pinned (the
+  minikube overlay relaxes this for local test fixtures).
 - **Deny-all networking.** Runtime namespaces start with no connectivity, and
   access is opened per (agent, connector). A connector's egress is limited to
   the hosts and ports it declares, unless an operator approves explicit
