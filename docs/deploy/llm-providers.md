@@ -85,7 +85,7 @@ returns key names only). To rotate a key, re-enter it.
 1. In Control UI, open **Secrets → LLM**, expand the **Azure OpenAI** group,
    and enter `azure-openai-api-key`.
 2. On the Host, open **Host → Environment** and set `AZURE_OPENAI_ENDPOINT`
-   (required; the driver fails closed without it) and optionally
+   (required, must be `https://`; the driver fails closed otherwise) and optionally
    `AZURE_OPENAI_API_VERSION`.
 3. Set the Host `spec.model.provider: azure`. The model name is your **Azure
    deployment name**, not a catalog id, so allowlist the deployment name.
@@ -102,10 +102,11 @@ the other 22 providers are admissible in recipes — see the
 the `clerum-model-secret-mapping` caveat.
 
 > **Dev-mode note.** Single-service dev mode (`CLERUM_DEV_MODE=true`, no
-> Kubernetes) reads credentials from env vars and the provider from
-> `CLERUM_MODEL_PROVIDER`. Bedrock's env vars are the standard
-> `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, so a shell that already exports
-> AWS credentials can auto-select `bedrock`. See
+> Kubernetes) reads credentials from env vars. If `CLERUM_MODEL_PROVIDER` is
+> unset, mcp-host auto-detects the first provider whose keys are present.
+> Because Bedrock's env vars are the standard `AWS_ACCESS_KEY_ID` /
+> `AWS_SECRET_ACCESS_KEY`, a shell that already exports AWS credentials can
+> auto-select `bedrock`; set `CLERUM_MODEL_PROVIDER` explicitly to avoid that. See
 > [Local development](../llm-providers/README.md#46-local-development-no-kubernetes).
 
 ## 4. Extra credential slots (for provider fallback, R5)

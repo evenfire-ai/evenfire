@@ -237,6 +237,3 @@ Host or LLM Secret operation failed when the API can provide that detail.
 - The UI preserves drafts on failures and never places secret values in logs,
   analytics, documentation, or error messages.
 
-> **Notion handoff:** This Markdown file is the source draft for the requested Notion
-> page. No Notion connector is available in this workspace, so no external Notion
-> page was created from this session.

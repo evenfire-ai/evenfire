@@ -9,12 +9,16 @@ Full per-service variable lists live in each service's README (see
 [Where every variable is documented](#where-every-variable-is-documented)).
 
 > **`mcp-host-config` is not in `deploy/base`.** host-context-controller loads
-> the `mcp-host-config` ConfigMap into every agent pod, but only the minikube
-> overlay ships one (`deploy/overlays/minikube/configmaps/mcp-host-config.yaml`).
-> Without it, mcp-host uses its code defaults, so the mcp-host rows below are
-> off until your overlay provides that ConfigMap.
+> the `mcp-host-config` ConfigMap into every agent pod with a non-optional
+> `envFrom`, so agent pods fail to start (`CreateContainerConfigError`) until
+> you create it. Only the minikube overlay ships one
+> (`deploy/overlays/minikube/configmaps/mcp-host-config.yaml`); copy it and
+> review each value (see [Production deployment](../deploy/production.md)).
+> Variables you leave out take mcp-host's code defaults, so the mcp-host rows
+> below are off unless your ConfigMap sets them.
 
-Boolean switches accept only the string `true` unless noted.
+Set boolean switches to the lowercase string `true`. Some services also accept
+`1` or other casings, but `true` works everywhere.
 
 ## Off in `deploy/base`, on in the minikube overlay
 
