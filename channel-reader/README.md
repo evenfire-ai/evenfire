@@ -167,7 +167,7 @@ export CLERUM_DEV_MODE=true
 # channel-reader's own dev default is "dev", which mcp-host rejects with 403.
 export CLERUM_HOST_REF=dev-host
 # Dev mode defaults to http://localhost:8080; set this if mcp-host runs elsewhere.
-export CLERUM_MCP_HOST_URL=http://localhost:8080
+export CLERUM_MCP_HOST_URL="http://localhost:8080"
 export CLERUM_CHANNEL='{"hostRef":"dev-host","telegram":[{"channelId":"test","chatType":"private","userIds":["123"]}]}'
 export CLERUM_TELEGRAM_BOT_TOKEN="your-token"
 npm start
