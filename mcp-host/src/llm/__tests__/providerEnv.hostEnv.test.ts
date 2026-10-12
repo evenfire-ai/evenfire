@@ -67,7 +67,8 @@ function makeFakeCoreApi(
 
 const SA_JSON_NO_PROJECT = JSON.stringify({
   client_email: 'svc@example.iam.gserviceaccount.com',
-  private_key: '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----\n',
+  // Placeholder only — the driver checks presence, never parses the key.
+  private_key: 'test-placeholder-not-a-real-key',
 })
 
 describe('per-Host env (Host → Environment) reaches the provider drivers', () => {
