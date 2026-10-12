@@ -368,12 +368,13 @@ jobs:
           report="$(mktemp)"
           trap 'rm -f "$log_file" "$normalized_log" "$report"' EXIT
           test -n "${CONTROL_API_REAL_PG_ADMIN_URL}"
-          # This cross-service recovery suite uses the private Member Registration
+          # These cross-service recovery suites use the private Member Registration
           # producer and its database, neither of which is available to public CI.
-          # It is run with the real producer and PostgreSQL in the dedicated local
-          # integration lane; do not replace it with a test-only token producer.
+          # They run with the real producer and PostgreSQL in the dedicated local
+          # integration lane; do not replace them with a test-only token producer.
           FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres \
             --exclude 'test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts' \
+            --exclude 'test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts' \
             --reporter=default --reporter=json --outputFile="$report" 2>&1 | tee "$log_file"
           sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
           grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
