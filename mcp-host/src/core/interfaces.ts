@@ -44,6 +44,8 @@ export interface LlmPort {
    * absent.
    */
   getTokenCounter?(): TokenCounter
+  /** Counters for all destinations that may receive this turn's paged output. */
+  getToolTokenCounters?(): readonly TokenCounter[]
 }
 
 // ─── Reasoning ──────────────────────────────────────────────
@@ -84,11 +86,18 @@ export interface ExecutionContext {
   timeoutMs?: number
   signal?: AbortSignal
   visualInput?: VisualInputContext
+  /** Pure estimate of the complete sanitized/wrapped message for this call. */
+  measureResult?: (content: string) => number
   /**
    * Tool calls this as output becomes available (not required to be line-aligned
    * — the ring buffer handles line boundaries).
    */
   onOutput(chunk: string): void
+}
+
+export interface ToolEmissionContext {
+  measureContent(content: string): number
+  renderContent(content: string): string
 }
 
 export interface Tool {
@@ -115,6 +124,25 @@ export interface Tool {
   supportsProgressOutput?(): boolean
   /** Local implementation-owned bounded cleanup after execution is stopped. */
   timeoutCleanupMs?(): number
+  /**
+   * Optional. Return true when the tool's output is bounded by its own
+   * contract (the caller chose the page, or the output is a blob already
+   * spilled once), so the tool loop ships it inline instead of replacing it
+   * with a spillover summary. Tools that do not opt in are spilled at the
+   * configured threshold.
+   */
+  spilloverExempt?(): boolean
+  /** Final budget/revocation fence, after result transforms and before publication. */
+  finalizeResult?(
+    result: ToolResult,
+    context: ToolEmissionContext
+  ): ToolResult | Promise<ToolResult>
+  /**
+   * True when the concrete producer owns abort/timeout settlement and callers
+   * must await that promise instead of racing cancellation cleanup. Used by
+   * physical-execution tools whose late effects must be fenced before release.
+   */
+  joinsAbortSettlement?(): boolean
 }
 
 // ─── Channel ────────────────────────────────────────────────
@@ -132,6 +160,8 @@ export interface Safety {
   validateToolParams(toolName: string, params: Record<string, unknown>): ValidationResult
   sanitizeOutput(toolName: string, output: string): SanitizedOutput
   wrapForLlm(toolName: string, content: string, wasSanitized: boolean): string
+  /** Same sanitizer and wrapper, without per-call observability effects. */
+  previewOutputForLlm?(toolName: string, content: string): string
 }
 
 // ─── Storage ────────────────────────────────────────────────
@@ -163,6 +193,8 @@ export interface PromptBuilder {
 export interface ToolOutputProcessor {
   beforeExecution(toolName: string, params: Record<string, unknown>): ValidationResult
   afterExecution(toolName: string, output: ToolOutput): string
+  /** Pure preparation for bounded native tools; never executes a tool or hook. */
+  previewForLlm?(toolName: string, content: string): string
 }
 
 export interface LoopController {
@@ -252,11 +284,9 @@ export interface NativeToolConfig {
   /** Cron×stateless (CLERUM_STATELESS_LIFECYCLE): steers the cron_manage
    *  stateless notice. Optional so existing construction sites stay valid. */
   statelessLifecycle?: boolean
-  /** Per-call byte ceiling of `clerum__attachment_read` (#666). Registering the
-   *  tool for a message with `kind:'file'` attachments requires it. */
+  /** Per-call byte ceiling and default page of `clerum__attachment_read`
+   *  (#666). Registering the tool for a message with `kind:'file'` attachments
+   *  requires it. Pages are shipped inline, so the value is measured against
+   *  the context budget, not the spillover threshold. */
   attachmentTextReadMaxBytes?: number
-  /** Result size at which the tool loop spills a tool result
-   *  (`CLERUM_TOOL_SPILLOVER_THRESHOLD`). `clerum__attachment_read` states it in
-   *  its description, so registering that tool requires it too (#666). */
-  toolSpilloverThresholdBytes?: number
 }

@@ -5,14 +5,15 @@ import Link from 'next/link'
 import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { CreateLlmPriceInput, LlmModelPrice } from '@lib/api'
-import { useGrokSubscriptionEnabled } from '@lib/hooks/useGrokSubscriptionEnabled'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import {
   LLM_PROVIDER_OPTIONS,
   getModelOptions,
   isKnownProvider,
   runtimeProviderOptions,
 } from '@lib/llm'
+import { SubscriptionCapabilityNotice } from '../SubscriptionCapabilityNotice'
 import { DEFAULT_CURRENCY, PRICE_FIELDS } from './constants'
 import type { LlmPriceFormProps, PriceFieldKey } from './types'
 
@@ -66,11 +67,14 @@ export function LlmPriceForm({
   const providerIsKnown = isKnownProvider(provider)
   // Grok stays hidden until the capability probe proves the flag on; a saved
   // Grok row keeps its provider visible as "(disabled)".
-  const grokEnabled = useGrokSubscriptionEnabled()
+  const subscriptionCapabilities = useSubscriptionCapabilities()
+  const grokEnabled =
+    subscriptionCapabilities.capabilities?.providers['grok-subscription']?.enabled ?? false
   const savedProvider = initial?.provider ?? prefill?.provider
+  const grokAvailabilityKnown = subscriptionCapabilities.capabilities !== null
   const providerOptions = useMemo(
-    () => runtimeProviderOptions({ grokEnabled, saved: [savedProvider] }),
-    [grokEnabled, savedProvider]
+    () => runtimeProviderOptions({ grokEnabled, grokAvailabilityKnown, saved: [savedProvider] }),
+    [grokAvailabilityKnown, grokEnabled, savedProvider]
   )
 
   const priceErrors = useMemo(() => {
@@ -109,6 +113,7 @@ export function LlmPriceForm({
 
   return (
     <form className="cu-create-content cu-px-form" onSubmit={handleSubmit}>
+      <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
       <FormSection
         title="Model"
         description="Provider and model name must match the values reported in usage."

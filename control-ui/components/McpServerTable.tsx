@@ -3,13 +3,12 @@
 import React, { useMemo, useState } from 'react'
 import {
   DataTable,
-  MultiSelectActionDialog,
   TableRow,
   TableStateRow,
   TableViewport,
   TruncatedText,
 } from '@clerum/frontend-components'
-import { canAssignConnectorToContext } from '../lib/connectorOAuthAccess'
+import { ConnectorAgentAccessDialog } from './ConnectorAgentAccessDialog'
 import type {
   ConnectorAgentBinding,
   McpServerStatus,
@@ -110,9 +109,7 @@ export function McpServerTable({
   const [sortKey, setSortKey] = useState<ConnectorSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [serverKeyAddingAgents, setServerKeyAddingAgents] = useState<string | null>(null)
-  const [addAgentsError, setAddAgentsError] = useState('')
   const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
-  const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
   const accessDialogRef = React.useRef<HTMLElement | null>(null)
   const accessCloseButtonRef = React.useRef<HTMLButtonElement | null>(null)
   const accessOpenerRef = React.useRef<HTMLElement | null>(null)
@@ -246,16 +243,7 @@ export function McpServerTable({
     return agentBindingsByConnectorName[name] ?? []
   }
 
-  function closeAddAgents() {
-    if (updatingAgentAccessKey) return
-    setAddAgentsError('')
-    setSelectedAgentNamesToAdd([])
-    setServerKeyAddingAgents(null)
-  }
-
   function openAddAgents(key: string) {
-    setAddAgentsError('')
-    setSelectedAgentNamesToAdd([])
     setServerKeyAddingAgents(key)
   }
 
@@ -452,57 +440,18 @@ export function McpServerTable({
         ? (() => {
             const row = rows.find(candidate => candidate.key === serverKeyAddingAgents)
             if (!row || !onAddToAgents) return null
-            const boundAgentNames = new Set(
-              bindingsForConnector(row.name).flatMap(binding =>
-                binding.agents.map(agent => agent.id)
-              )
-            )
-            const agentOptions = agentTargets
-              .filter(
-                target =>
-                  !boundAgentNames.has(target.name) &&
-                  canAssignConnectorToContext(row.item.spec, target.contextRef)
-              )
-              .map(target => ({
-                id: target.name,
-                label: target.label,
-                description: target.name,
-                searchText: `${target.label} ${target.name}`,
-              }))
-            const busy = updatingAgentAccessKey === row.key
             return (
-              <MultiSelectActionDialog
-                actionLabel={selectedAgentNamesToAdd.length > 1 ? 'Add to agents' : 'Add to agent'}
-                emptyMessage="No other agents available."
-                error={addAgentsError || undefined}
-                items={agentOptions}
-                noMatchesMessage="No matching agents."
-                onAction={async selectedIds => {
-                  const selected = agentTargets.filter(target => selectedIds.includes(target.name))
-                  const added = await onAddToAgents(
-                    { namespace: row.namespace, name: row.name },
-                    selected.map(target => ({
-                      name: target.name,
-                      contextRef: target.contextRef,
-                    }))
-                  )
-                  if (!added) {
-                    setAddAgentsError(
-                      'Connector access could not be updated. Review the error and retry.'
-                    )
-                    return
-                  }
-                  setSelectedAgentNamesToAdd([])
-                  setServerKeyAddingAgents(null)
-                }}
-                onDismiss={closeAddAgents}
-                onSelectedIdsChange={setSelectedAgentNamesToAdd}
-                open
-                pending={busy}
-                searchLabel="Search agents"
-                searchPlaceholder="Search agents..."
-                selectedIds={selectedAgentNamesToAdd}
-                title="Give agents access to this connector"
+              <ConnectorAgentAccessDialog
+                key={serverKeyAddingAgents}
+                server={{ namespace: row.namespace, name: row.name }}
+                connectorSpec={row.item.spec}
+                agentTargets={agentTargets}
+                boundAgentNames={bindingsForConnector(row.name).flatMap(binding =>
+                  binding.agents.map(agent => agent.id)
+                )}
+                pending={updatingAgentAccessKey === row.key}
+                onAdd={onAddToAgents}
+                onDismiss={() => setServerKeyAddingAgents(null)}
               />
             )
           })()

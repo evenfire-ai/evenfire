@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SingleTurnProvider } from '../../../llm'
+import { PNG_2X2_BASE64 } from '../../../llm/__tests__/codexImageFixtures'
 import { FailoverEngine } from '../../../llm/failover/engine'
 import type { LlmPolicy } from '../../../llm/failover/types'
 import type { LlmUsageEvent } from '../../../usage/usageReporter'
 import type { ImageInputCapability } from '../../../visualInput/policy'
 import { LlmError, LlmErrorCode } from '../../errors'
+import type { LlmPort } from '../../interfaces'
+import type { TokenCounter } from '../../tokenizer/tokenCounter'
 import { type ChatMessage, FinishReason, type ToolCompletionRequest } from '../../types'
 import { maybeWrapFailover } from '../failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../llmPortAdapter'
@@ -235,6 +238,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
       provider,
       model,
       evidence: 'https://example.com/image-input',
+      deliveryLimits: null,
     })
 
   function visionAdapter(provider: SingleTurnProvider, model: string, providerName: string) {
@@ -277,7 +281,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
   }
 
   function imageRequest(): ToolCompletionRequest {
-    // Canonical base64 lets the transport guard reach the destination decision.
+    // Real PNG bytes and producer-measured geometry isolate destination policy.
     return {
       messages: [
         {
@@ -287,7 +291,9 @@ describe('FailoverLlmPort — visual destination failover', () => {
             {
               type: 'image',
               mimeType: 'image/png',
-              data: 'QUJD',
+              data: PNG_2X2_BASE64,
+              width: 2,
+              height: 2,
               source: GFS_SOURCE,
             },
           ],
@@ -326,7 +332,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
     expect(engine.servedBy()).toBeNull()
   })
 
-  it('reports the winner destination capability after a fallback serves the image request', async () => {
+  it('reports the winner model capability while withholding GFS pixels without its physical profile', async () => {
     // A real cross-provider fallback: the primary (Claude) proves image support
     // for its own model, and the OpenRouter entry proves it for another one.
     const imagePolicy: LlmPolicy = {
@@ -355,15 +361,21 @@ describe('FailoverLlmPort — visual destination failover', () => {
       supported('claude', 'claude-sonnet-4-6')
     )
 
-    const response = await wrapped.completeWithTools(imageRequest())
+    const canonical = imageRequest()
+    const before = structuredClone(canonical)
+    const response = await wrapped.completeWithTools(canonical)
 
     expect(response.content).toBe('served-by-meta/llama-3.2-11b-vision')
     expect(fallbackProvider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
     const [messages, , options] = fallbackProvider.completeSingleTurnWithTools.mock.calls[0]
-    expect(options.verifyImageInput).toBe(true)
+    expect(options.verifyImageInput).toBeUndefined()
     expect(
       (messages as ChatMessage[]).some(m => m.contentParts?.some(p => p.type === 'image'))
-    ).toBe(true)
+    ).toBe(false)
+    expect(JSON.stringify(messages)).not.toContain(PNG_2X2_BASE64)
+    expect(JSON.stringify(messages)).toContain('provider_visual_profile_unavailable')
+    expect(JSON.stringify(messages)).toContain(GFS_SOURCE.gfsUri)
+    expect(canonical).toEqual(before)
     expect(engine.servedBy()).toEqual({
       provider: 'openrouter',
       model: 'meta/llama-3.2-11b-vision',
@@ -422,4 +434,75 @@ describe('FailoverLlmPort — visual destination failover', () => {
       expect(engine.servedBy()).toBeNull()
     }
   )
+})
+
+/**
+ * Attachment pages are measured against every destination that may receive
+ * them, so each constructible fallback must contribute its own counter. A
+ * constructible port without one is a wiring bug and must not shrink the set.
+ */
+describe('FailoverLlmPort — tool token counters', () => {
+  const threeEntry: LlmPolicy = {
+    ...policy,
+    fallbacks: [
+      { provider: 'openai', model: 'gpt-5.4' }, // index 0
+      { provider: 'zai', model: 'glm-5.1' }, // index 1
+      { provider: 'openrouter', model: 'example/model' }, // index 2
+    ],
+  }
+
+  function counter(label: string): TokenCounter {
+    return { label } as unknown as TokenCounter
+  }
+
+  function port(model: string, tokenCounter?: TokenCounter): LlmPort {
+    return {
+      complete: vi.fn(),
+      completeWithTools: vi.fn(),
+      modelName: () => model,
+      ...(tokenCounter ? { getTokenCounter: () => tokenCounter } : {}),
+    }
+  }
+
+  function wrap(buildFallbackPort: (index: number) => LlmPort | null): LlmPort {
+    return maybeWrapFailover({
+      primaryPort: port('claude-sonnet-4-6', counter('primary')),
+      primaryPair: { provider: 'claude', model: 'claude-sonnet-4-6' },
+      engine: new FailoverEngine(threeEntry, { metricInc: () => {} }),
+      policy: threeEntry,
+      buildFallbackPort,
+    })
+  }
+
+  it('returns the primary counter and the counter of every constructible fallback', () => {
+    const builtIndexes: number[] = []
+    const wrapped = wrap(index => {
+      builtIndexes.push(index)
+      // Index 1 is unconstructible: the engine never routes to it either.
+      if (index === 1) return null
+      return port(threeEntry.fallbacks[index].model, counter(`fallback-${index}`))
+    })
+
+    expect(wrapped.getToolTokenCounters!()).toEqual([
+      counter('primary'),
+      counter('fallback-0'),
+      counter('fallback-2'),
+    ])
+    expect(builtIndexes).toEqual([0, 1, 2])
+  })
+
+  it('throws, naming the destination, when a constructible fallback has no token counter', () => {
+    const builtIndexes: number[] = []
+    const wrapped = wrap(index => {
+      builtIndexes.push(index)
+      const { model } = threeEntry.fallbacks[index]
+      return index === 1 ? port(model) : port(model, counter(`fallback-${index}`))
+    })
+
+    expect(() => wrapped.getToolTokenCounters!()).toThrow(
+      '[FailoverLlmPort] fallback 1 (zai/glm-5.1) has no token counter — wiring bug'
+    )
+    // Witness: the measurement walked the fallback list up to the faulty entry.
+    expect(builtIndexes).toEqual([0, 1])
+  })
 })

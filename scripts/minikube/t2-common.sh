@@ -351,7 +351,12 @@ t2_profile_scope() {
     "$T2_PROJECT_DIR" "$T2_BRANCH" "$T2_PROFILE"; then
     case "$PROFILE_OWNER_ERROR_CODE" in
       PROFILE_METADATA_MISSING)
-        T2_NEXT_COMMAND='restore profile.env from a backup or stop and ask; the branch profile helper never regenerates metadata for an existing profile directory' ;;
+        # A profile that was never created has no directory to restore (#1001).
+        if [ ! -e "$(dirname -- "$T2_PROFILE_ENV")" ]; then
+          T2_NEXT_COMMAND='the profile was never created; run make -f scripts/minikube-profiles/branch.mk branch-profile-start, then retry'
+        else
+          T2_NEXT_COMMAND='restore profile.env from a backup or stop and ask; the branch profile helper never regenerates metadata for an existing profile directory'
+        fi ;;
       PROFILE_PORTS_MISSING)
         T2_NEXT_COMMAND='restore the persisted profile-owned ports.env; never regenerate adopted ports' ;;
       PROFILE_PORTS_INVALID)
@@ -489,7 +494,9 @@ if data.get("gitHead") != sys.argv[3]:
     raise SystemExit("head")
 if not data.get("imagesGeneratedAt"):
     raise SystemExit("missing:imagesGeneratedAt")
-print("\t".join([
+# \x1f, not a tab: a local build has an empty imageTag, and `read` collapses
+# consecutive IFS whitespace, which would shift the next field into its slot.
+print("\x1f".join([
     data.get("clusterFingerprint", ""),
     data.get("imageSource", ""),
     data.get("imageTag", ""),
@@ -518,7 +525,7 @@ PY
     return 1
   fi
   local marker_fingerprint source_fingerprint
-  IFS=$'\t' read -r marker_fingerprint _ <<< "$marker_values"
+  IFS=$'\x1f' read -r marker_fingerprint _ <<< "$marker_values"
   # A marker for this HEAD is current only while the working tree still hashes
   # to the digest it was stamped with; NP-08 recomputes the same digest.
   if ! source_fingerprint="$(pre_gate_marker_cluster_fingerprint "$T2_PROJECT_DIR")"; then
@@ -537,7 +544,7 @@ PY
     return 1
   fi
   T2_MARKER_MATCHES_HEAD=true
-  IFS=$'\t' read -r T2_CLUSTER_FINGERPRINT T2_IMAGE_SOURCE T2_IMAGE_TAG \
+  IFS=$'\x1f' read -r T2_CLUSTER_FINGERPRINT T2_IMAGE_SOURCE T2_IMAGE_TAG \
     T2_MARKER_IMAGES_GENERATED_AT <<< "$marker_values"
 }
 
@@ -577,7 +584,8 @@ if source == "local":
     digest = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
     if any(not isinstance(name, str) or not name or not isinstance(value, str) or not digest.fullmatch(value) for name, value in images.items()):
         raise SystemExit("local-digests")
-print(source + "\t" + tag + "\t" + generated)
+# \x1f for the same reason as the marker values: tag is empty for local builds.
+print(source + "\x1f" + tag + "\x1f" + generated)
 PY
   )"; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
@@ -589,7 +597,7 @@ PY
     t2_fail IMAGE_MANIFEST_MISMATCH 'image manifest is invalid or incomplete for its image source'
   fi
   local manifest_source manifest_tag manifest_generated
-  IFS=$'\t' read -r manifest_source manifest_tag manifest_generated <<< "$manifest_values"
+  IFS=$'\x1f' read -r manifest_source manifest_tag manifest_generated <<< "$manifest_values"
   if { [ -n "$T2_IMAGE_SOURCE" ] && [ "$manifest_source" != "$T2_IMAGE_SOURCE" ]; } ||
      { [ -n "$T2_IMAGE_TAG" ] && [ "$manifest_tag" != "$T2_IMAGE_TAG" ]; }; then
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"

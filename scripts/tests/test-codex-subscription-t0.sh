@@ -12,6 +12,21 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAIL=0
 GROUPS_RUN=0
+REGISTERED=()
+
+# Read-only inventory mode for hermetic discovery tests and operator inspection.
+# It does not enter package, cluster, Electron or browser execution.
+if [[ "${1:-}" == "--discovery-only" ]]; then
+  if [[ "$#" -ne 2 ]]; then
+    echo "usage: $0 --discovery-only <registered-file>" >&2
+    exit 2
+  fi
+  node "${ROOT}/scripts/tests/lib/subscription-t0-discovery.mjs" codex "${ROOT}" "$2"
+  exit "$?"
+elif [[ "$#" -ne 0 ]]; then
+  echo "unsupported T0 argument: $1" >&2
+  exit 2
+fi
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -106,6 +121,9 @@ run_group() {
     return 1
   fi
   for rel in "${files[@]}"; do
+    REGISTERED+=("${prefix}/${rel}")
+  done
+  for rel in "${files[@]}"; do
     require_file "${prefix}/${rel}" || return 1
   done
 
@@ -141,6 +159,7 @@ run_node_group() {
   shift
   local files=()
   for rel in "$@"; do
+    REGISTERED+=("${rel}")
     require_file "$rel" || return 1
     files+=("${ROOT}/$rel")
   done
@@ -171,6 +190,22 @@ require_ci_matrix_entry() {
   pass "ci-public.yml matrix includes ${entry}"
 }
 
+# Real-Postgres suites are env-gated (skipped without a real PG), so T0 only
+# proves they exist and that the CI real-PG lane asserts each one ran.
+require_real_pg_suite() {
+  local rel="$1"
+  require_file "${rel}" || return 1
+  local suite
+  # The real-PG lane lists each suite by its file name, `.test.ts` included.
+  suite="$(basename "${rel}")"
+  if ! sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*\\$//' "${ROOT}/.github/workflows/ci-public.yml" |
+    grep -Fxq "${suite}"; then
+    fail "ci-public.yml real-PG lane does not list ${suite}"
+    return 1
+  fi
+  pass "real-PG suite present and listed in CI: ${suite}"
+}
+
 echo "Codex subscription T0 aggregator"
 
 if [[ ! -f "${ROOT}/scripts/tests/test-codex-subscription-t0.sh" ]]; then
@@ -199,7 +234,19 @@ fi
 run_group "shared-contract" "packages/llm-provider-attempt-contract" "index.test.cjs"
 run_group "codex-catalog-projection" "packages/codex-catalog-projection" "index.test.cjs"
 
+# This is a filesystem-only freeze contract, not a browser/runtime journey.
+run_group "codex-upstream-contract-freeze" "tests/e2e" "integration/codex-subscription-contract-freeze.test.ts"
+
 run_node_group "approved-tools-fixtures-and-runner" \
+  "scripts/tests/subscription-t0-discovery.test.mjs" \
+  "scripts/tests/subscription-image-runner.test.mjs" \
+  "scripts/tests/subscription-image-coordinator.test.mjs" \
+  "scripts/tests/subscription-image-coordinator-regressions.test.mjs" \
+  "scripts/tests/control-api-qa-runtime.test.mjs" \
+  "scripts/tests/subscription-private-ui-input.test.mjs" \
+  "scripts/tests/subscription-image-input-frames.test.mjs" \
+  "scripts/e2e/prepare-subscription-remaining-fixtures.test.mjs" \
+  "scripts/e2e/fixtures/subscription-image-provider.test.mjs" \
   "scripts/tests/run-node-test-files.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \
   "scripts/e2e/prepare-codex-approved-tools.test.mjs" \
@@ -220,6 +267,10 @@ run_group "control-api" "control-api" \
   "test/routes.admin.codexSubscription.test.ts" \
   "test/routes.admin.codexSubscription.hostWrite.test.ts" \
   "test/routes.auth.codexSubscriptionCallback.test.ts" \
+  "test/routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts" \
+  "test/llmProviderAttemptBodyAdmission.test.ts" \
+  "test/llmProviderAttemptAuthorizer.cancellation.test.ts" \
+  "test/helpers.realPostgresCancellation.test.ts" \
   "test/routes.mcp-host.llmProviderAttempts.test.ts" \
   "test/routes.adminRecipes.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
@@ -243,21 +294,49 @@ run_group "control-api" "control-api" \
   "test/routes.mcp-host.plugin-workload-sdk.test.ts" \
   "test/db.llmProviderAttemptMigration.test.ts" \
   "test/db.oauthGrantsOwnerGeneralization.test.ts" \
-  "test/routes.usageEvents.test.ts"
+  "test/routes.usageEvents.test.ts" \
+  "test/db.codexSubscriptionMigration.test.ts" \
+  "test/routes.admin.codexSubscription.oauthBrokerExtract.test.ts"
+
+require_real_pg_suite "control-api/test/db.codexSubscriptionConnection.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/pluginWorkloadSdkCodexDualLedger.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionCatalog.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionLifecycle.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionOAuth.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionRefreshRejected.realPostgres.integration.test.ts"
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
+  "test/abortWhenClientDisconnects.test.ts" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/bindLoopbackSetup.test.ts" \
+  "test/bodyAdmission.test.ts" \
+  "test/bodyBudget.test.ts" \
+  "test/bodyStructure.test.ts" \
   "test/catalogBounds.test.ts" \
+  "test/catalogContextWindow.test.ts" \
+  "test/chatgptUpstreamHeaders.test.ts" \
   "test/codexTransport.conformance.test.ts" \
   "test/controlApiClient.test.ts" \
+  "test/deployManifest.test.ts" \
+  "test/executionTicketVerifier.test.ts" \
+  "test/metrics.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
+  "test/releaseAtAcceptance.test.ts" \
   "test/requestLimits.test.ts" \
+  "test/runtimePath.hermetic.e2e.test.ts" \
   "test/server.security.test.ts" \
-  "test/sseBackpressure.test.ts"
+  "test/sseBackpressure.test.ts" \
+  "test/sseHeartbeat.test.ts" \
+  "test/streamGate.handoff.test.ts" \
+  "test/visualBodyReadOwnership.test.ts" \
+  "test/streamLimitsFreeze.test.ts" \
+  "test/toolNameMap.test.ts"
 
 run_group "mcp-host" "mcp-host" \
   "src/__tests__/bodylimits.test.ts" \
+  "src/llm/__tests__/attachmentBudgetRefusal.test.ts" \
+  "src/llm/__tests__/imageSource.test.ts" \
   "src/capabilities/toolCatalogTools.test.ts" \
   "src/core/orchestration/__tests__/approvedToolsLifecycle.integration.test.ts" \
   "src/core/orchestration/__tests__/toolUseLoop.spillover.test.ts" \
@@ -277,6 +356,7 @@ run_group "mcp-host" "mcp-host" \
   "src/llm/__tests__/codexSubscription.test.ts" \
   "src/llm/__tests__/codexLlmProxyClient.test.ts" \
   "src/llm/__tests__/subscriptionRequestHash.test.ts" \
+  "src/llm/failover/__tests__/subscriptionAdmission.integration.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
   "src/llm/hostLlmBinding.test.ts" \
   "src/config/configStore.test.ts" \
@@ -287,7 +367,11 @@ run_group "mcp-host" "mcp-host" \
   "src/workflow/__tests__/configureHandler.test.ts" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \
-  "src/core/adapters/__tests__/llmPortAdapter.test.ts"
+  "src/core/adapters/__tests__/llmPortAdapter.test.ts" \
+  "src/config.codexToolPresentation.test.ts" \
+  "src/llm/__tests__/codexPlatformJwt.test.ts" \
+  "src/llm/__tests__/codexPolicyBinding.test.ts" \
+  "src/pluginWorkloadSdk/sdkOnlyCodexBinding.test.ts"
 
 run_group "rpc-proxy-image-budgets" "rpc-proxy" \
   "src/__tests__/bodylimits.test.ts"
@@ -311,7 +395,8 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts" \
   "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
   "tests/unit/workflow/modelConfigHandler.test.ts" \
-  "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
+  "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts" \
+  "src/workflow/workflowReconciler.codexUncertainScope.test.ts"
 
 run_group "control-ui" "control-ui" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \
@@ -340,13 +425,30 @@ else
       "src/__tests__/devIsolation.test.ts" \
       "ui/src/components/agents/__tests__/ComposerPanel.test.tsx" \
       "ui/src/components/agents/__tests__/ModelSelector.test.tsx" \
+      "test/subscriptionImageCollection.test.ts" \
+      "test/subscriptionImageChallenge.test.ts" \
+      "test/subscriptionImageRunContract.test.ts" \
+      "test/subscriptionAdmissionGuard.test.ts" \
+      "test/subscriptionRemainingJourneyData.test.ts" \
+      "test/subscriptionRemainingJourneysContract.test.ts" \
+      "test/codexImageChallenge.test.ts" \
+      "ui/src/constants/__tests__/attachments.test.ts" \
       "ui/src/hooks/__tests__/useHostModels.test.tsx" \
       "ui/src/hooks/domain/__tests__/useAgentChatController.pendingModel.test.tsx"
   fi
 fi
 
-if [[ "${GROUPS_RUN}" -ne 12 ]]; then
-  fail "expected all 12 T0 groups, ran ${GROUPS_RUN}"
+# Every candidate is registered in T0 or has an explicit CI/PG/runtime lane.
+# Discovery never certifies those other lanes; each requires its own physical receipt.
+discovery_registry="$(mktemp)"
+printf '%s\n' "${REGISTERED[@]}" >"${discovery_registry}"
+if ! node "${ROOT}/scripts/tests/lib/subscription-t0-discovery.mjs" codex "${ROOT}" "${discovery_registry}"; then
+  FAIL=1
+fi
+rm -f "${discovery_registry}"
+
+if [[ "${GROUPS_RUN}" -ne 13 ]]; then
+  fail "expected all 13 T0 groups, ran ${GROUPS_RUN}"
 fi
 
 if [[ "${FAIL}" -ne 0 ]]; then

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useLayoutEffect } from 'react'
 import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { act, renderHook } from '@testing-library/react'
@@ -35,6 +35,11 @@ export interface RenderControllerResult {
   }
 }
 
+export interface RenderControllerOptions {
+  /** Observe committed controller state before its passive effects synchronize refs. */
+  onLayoutCommit?: (controller: ReturnType<typeof useAgentChatController>) => void
+}
+
 /**
  * Mounts `useAgentChatController` with sensible defaults. Override any param.
  *
@@ -47,7 +52,8 @@ export interface RenderControllerResult {
  * factory, so epoch comparisons in the controller are exercised for real.
  */
 export function renderController(
-  overrides: Partial<ControllerParams> = {}
+  overrides: Partial<ControllerParams> = {},
+  options: RenderControllerOptions = {}
 ): RenderControllerResult {
   const spies = {
     pushToast: vi.fn(),
@@ -93,7 +99,7 @@ export function renderController(
     (p: Partial<ControllerParams>) => {
       const hostAuthority = useHarnessHostAuthority()
       authority = hostAuthority
-      return useAgentChatController({
+      const controller = useAgentChatController({
         onHostAccessRevoked: hostAuthority.onHostAccessRevoked,
         onHostAuthorityUncertain: hostAuthority.onHostAuthorityUncertain,
         isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
@@ -101,6 +107,15 @@ export function renderController(
         hostAuthorityRevision: hostAuthority.revision,
         ...p,
       } as ControllerParams)
+      useLayoutEffect(() => {
+        options.onLayoutCommit?.(controller)
+      }, [
+        controller.activeChatId,
+        controller.chatMessages,
+        controller.chatMessagesLoading,
+        options.onLayoutCommit,
+      ])
+      return controller
     },
     {
       initialProps: params,

@@ -17,6 +17,15 @@ function signHccInternalControl(): string {
 }
 
 describe('app router wiring', () => {
+  it('requires the real admin session guard for subscription capability discovery', async () => {
+    const app = createApp(new MockGateway('mcp-server') as never)
+    await request(app).get('/api/v1/admin/llm/providers/capabilities').expect(401)
+    await request(app)
+      .get('/api/v1/admin/llm/providers/capabilities')
+      .set('Cookie', 'control_ui_admin_session=unverified-fixture')
+      .expect(401)
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
   })

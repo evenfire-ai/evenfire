@@ -81,6 +81,6 @@ export type HostWizardValidationState = {
   provider: LlmProvider
   modelName: string
   connectionRef: string
-  codexModels: string[]
-  grokModels: string[]
+  /** Models the subscription picker offers for the selected connection. */
+  brokerModelOptions: string[]
 }

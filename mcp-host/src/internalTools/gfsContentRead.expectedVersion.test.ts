@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { VISUAL_INPUT_LIMITS, VisualInputBudget } from '../visualInput/policy'
 import { readGfsContent } from './gfsContentRead'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 
 const FILE_ID = '1234567890abcdef1234567890abcdef'
 const FILE_URI = `gfs://main/${FILE_ID}`
@@ -76,7 +77,7 @@ describe('readGfsContent expectedVersion (#666)', () => {
   )
 
   it.each([
-    ['grew past the file limit', { bytes: VISUAL_INPUT_LIMITS.fileBytes + 1 }, 'limit_exceeded'],
+    ['grew past the file limit', { bytes: GFS_FILE_LIMITS.maxFileBytes + 1 }, 'limit_exceeded'],
     ['became a directory', { kind: 'directory' }, 'unsupported_format'],
   ])(
     'reports a pinned read as version_conflict when the newer version %s',

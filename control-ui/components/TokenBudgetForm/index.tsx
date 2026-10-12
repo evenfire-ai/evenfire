@@ -13,9 +13,10 @@ import {
   getLlmPrices,
   getRecipeSecrets,
 } from '@lib/api'
-import { useGrokSubscriptionEnabled } from '@lib/hooks/useGrokSubscriptionEnabled'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { budgetUnitAllowedForProviders, getAllModelOptions, runtimeProviderOptions } from '@lib/llm'
+import { SubscriptionCapabilityNotice } from '../SubscriptionCapabilityNotice'
 import { ScopeSelector } from './ScopeSelector'
 import { DEFAULT_CURRENCY, DEFAULT_TIMEZONE } from './constants'
 import type { ScopeDimensionConfig, ScopeOption, TokenBudgetFormProps } from './types'
@@ -60,11 +61,14 @@ export function TokenBudgetForm({
 
   // Grok stays out of the provider scope until the capability probe proves the
   // flag on; a saved Grok scope value keeps a "(disabled)" label.
-  const grokEnabled = useGrokSubscriptionEnabled()
+  const subscriptionCapabilities = useSubscriptionCapabilities()
+  const grokEnabled =
+    subscriptionCapabilities.capabilities?.providers['grok-subscription']?.enabled ?? false
   const savedProviders = initial?.scope?.provider
+  const grokAvailabilityKnown = subscriptionCapabilities.capabilities !== null
   const providerOptions = useMemo<ScopeOption[]>(
-    () => runtimeProviderOptions({ grokEnabled, saved: savedProviders }),
-    [grokEnabled, savedProviders]
+    () => runtimeProviderOptions({ grokEnabled, grokAvailabilityKnown, saved: savedProviders }),
+    [grokAvailabilityKnown, grokEnabled, savedProviders]
   )
 
   // Dimension option sources (best-effort; a failed fetch just leaves a
@@ -231,6 +235,7 @@ export function TokenBudgetForm({
 
   return (
     <form className="cu-create-content cu-tb-form" onSubmit={handleSubmit}>
+      <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
       <FormSection title="Budget" description="A name and the limit this budget enforces.">
         <div className="cu-form-grid cu-form-grid--2">
           <Field

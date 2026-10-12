@@ -7,6 +7,12 @@ import {
   useAgentTaskTracker,
 } from '@contexts/AgentTaskTrackerContext'
 import {
+  COMPOSER_MAX_ATTACHMENTS,
+  COMPOSER_MAX_NON_IMAGE_BODY_BYTES,
+  COMPOSER_MAX_REQUEST_BODY_BYTES,
+  COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
+} from '@constants/attachments'
+import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
 } from '@lib/chatMessageAttachments'
@@ -18,7 +24,17 @@ import {
   getComposerDraftRevision,
   setComposerDraft,
 } from '@lib/composerDraftStore'
+import {
+  composerFileBase64Bytes,
+  composerNonImageShareBytes,
+  composerRequestBodyBytes,
+  formatFileSize,
+} from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
+import {
+  composerRequestBaseContent,
+  mapComposerAttachmentsToHostRequest,
+} from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   confirmHostModelSelectionFromSend,
@@ -36,7 +52,6 @@ import type {
   ChatMessageAttachment,
   HostActivityEvent,
   HostActivityStreamEvent,
-  HostMessageAttachment,
   MessageToolStep,
   SessionMessagesQuery,
 } from '../../../../src/types'
@@ -64,6 +79,7 @@ import type {
   FailedAgentSend,
   NavItem,
   ProgressStep,
+  ReadyComposerFileAttachment,
   TaskProgress,
   Tone,
 } from '../../uiTypes'
@@ -83,7 +99,7 @@ import {
   createSessionFsmStore,
   projectSessionState,
 } from './sessionFsm'
-import { mapTrackerStatusToProgress } from './trackerToProgress'
+import { mapTrackerStatusToProgress, readApprovalInputPreview } from './trackerToProgress'
 import type { PushNotificationInput } from './types'
 import {
   type ChatListControllerHost,
@@ -128,6 +144,13 @@ const SERVER_TURN_PAGE_SIZE = 40
 const MAX_RECONCILE_DELTA_PAGES = 5
 const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
   'The Host did not receive the selected Global Files; the message was sent without them.'
+// #678 D13 — a Host that predates `kind:'file'` either rejects the attachment
+// with LLM_INVALID_ATTACHMENT or drops it and still accepts the message.
+const HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE =
+  'The Host does not accept file attachments yet; the message was not delivered with them. Your files are kept so you can retry once the Host is updated.'
+const HOST_FILE_ATTACHMENTS_DROPPED_MESSAGE =
+  'The Host does not accept file attachments yet; the message was sent without them. Recover the files to attach them again once the Host is updated.'
+const HOST_INVALID_ATTACHMENT_CODE = 'LLM_INVALID_ATTACHMENT'
 const LATEST_PAGE_FALLBACK_WINDOW = Symbol('latest-page-fallback-window')
 const DELTA_RECONCILIATION_WINDOW = Symbol('delta-reconciliation-window')
 type ReconciliationMessagesResult = SessionMessagesResult & {
@@ -425,10 +448,17 @@ export function useAgentChatController({
 
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const selectionIntentRevisionRef = useRef(0)
-  const beginSelectionIntent = useCallback(() => {
-    selectionIntentRevisionRef.current += 1
-    return selectionIntentRevisionRef.current
-  }, [])
+  // A caller that starts an imperative switch while the selection effect is
+  // replaying the same pending request owns that request's failure feedback.
+  // The controller dispatches it only while that revision is current; the
+  // effect consumes the same owner instead of presenting a duplicate toast.
+  const selectionErrorOwnerRef = useRef<{
+    revision: number
+    onCurrentError: (error: unknown) => void
+    reported: boolean
+  } | null>(null)
+  const activeChatSwitchRequestRef = useRef<symbol | null>(null)
+  const activeChatSwitchKeyRef = useRef<string | null>(null)
   // Fase 2b (§4.1): the SessionFSM is now the SINGLE writer of the per-chat
   // session projection. `sessionStateByChatKey` (the public contract) is derived
   // from the reducer's map via `useSyncExternalStore` + `projectSessionState`.
@@ -504,7 +534,51 @@ export function useAgentChatController({
     isChatDeleted,
   } = chatListCtl
   const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([])
-  const [chatMessagesLoading, setChatMessagesLoading] = useState(false)
+  const [chatMessagesLoading, setChatMessagesLoadingState] = useState(false)
+  const chatMessagesLoadingRef = useRef(false)
+  const setChatMessagesLoading = useCallback((loading: boolean) => {
+    chatMessagesLoadingRef.current = loading
+    setChatMessagesLoadingState(loading)
+  }, [])
+  const beginSelectionIntent = useCallback(
+    (startsHistoryLoad = false) => {
+      selectionIntentRevisionRef.current += 1
+      selectionErrorOwnerRef.current = null
+      if (!startsHistoryLoad) {
+        setChatMessagesLoading(false)
+        activeChatSwitchRequestRef.current = null
+        activeChatSwitchKeyRef.current = null
+      }
+      return selectionIntentRevisionRef.current
+    },
+    [setChatMessagesLoading]
+  )
+  const settleChatMessagesLoading = useCallback(
+    (selectionIntentRevision: number) => {
+      if (selectionIntentRevisionRef.current !== selectionIntentRevision) return false
+      setChatMessagesLoading(false)
+      return true
+    },
+    [setChatMessagesLoading]
+  )
+  const reportCallerOwnedSelectionError = useCallback(
+    (selectionIntentRevision: number, error: unknown) => {
+      const owner = selectionErrorOwnerRef.current
+      if (
+        !owner ||
+        owner.revision !== selectionIntentRevision ||
+        selectionIntentRevisionRef.current !== selectionIntentRevision
+      ) {
+        return false
+      }
+      if (!owner.reported) {
+        owner.reported = true
+        owner.onCurrentError(error)
+      }
+      return true
+    },
+    []
+  )
   const [hasOlderMessages, setHasOlderMessages] = useState(false)
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false)
   const chatMessagesRef = useRef<AgentChatMessage[]>([])
@@ -540,14 +614,6 @@ export function useAgentChatController({
 
   useEffect(() => {
     chatMessagesRef.current = chatMessages
-    const localPageRequest = activeChatLocalPageRequestRef.current
-    if (
-      localPageRequest &&
-      !localPageRequest.initialized &&
-      activeChatSwitchRequestRef.current === localPageRequest.request
-    ) {
-      localPageRequest.initialized = true
-    }
   }, [chatMessages])
 
   const [agentSending, setAgentSending] = useState(false)
@@ -610,13 +676,9 @@ export function useAgentChatController({
     navItem,
     selectedAgent,
   })
-  const activeChatSwitchRequestRef = useRef<symbol | null>(null)
-  const activeChatSwitchKeyRef = useRef<string | null>(null)
-  // Visible messages become reusable only after the local page has been rendered
-  // and copied into chatMessagesRef by its effect.
+  // Correlate the visible local page to the switch request that loaded it.
   const activeChatLocalPageRequestRef = useRef<{
     request: symbol
-    initialized: boolean
   } | null>(null)
   // Latest `pushToast` for the hoisted tracker callbacks (onTrackerTerminal reads
   // it) so that `tracker.setCallbacks` can run once (cross-ref D.3 M1) without
@@ -714,6 +776,8 @@ export function useAgentChatController({
 
   const {
     composerImageAttachments,
+    composerFileAttachments,
+    composerFileRefusals,
     composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,
@@ -721,9 +785,22 @@ export function useAgentChatController({
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,
     handleRemoveComposerImageAttachment,
+    handleAddComposerFiles,
+    handleRemoveComposerFileAttachment,
+    handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
+
+  // Only a fully read and hashed document can travel with a message (#678).
+  const readyComposerFiles = useMemo(
+    () =>
+      composerFileAttachments.filter(
+        (file): file is ReadyComposerFileAttachment => file.status === 'ready'
+      ),
+    [composerFileAttachments]
+  )
+  const composerFilesBlockSend = composerFileAttachments.some(file => file.status !== 'ready')
 
   const { chatEndRef, scrollChatToBottom } = useChatScroll({
     selectedAgent,
@@ -929,7 +1006,6 @@ export function useAgentChatController({
     resetReplyNotificationDedupe()
     chatStore.clearCachedRemoteData()
     setChatMessages([])
-    setChatMessagesLoading(false)
     setHasOlderMessages(false)
     cancelOlderMessagesLoad()
     loadedLocalMessageCountRef.current = 0
@@ -953,8 +1029,10 @@ export function useAgentChatController({
   // chat, and a task in flight is rejoined via the tracker D.3 already mounts.
   const switchToChatForIntent = useCallback(
     async (agentRef: string, chatId: string, selectionIntentRevision: number) => {
-      if (selectionIntentRevisionRef.current !== selectionIntentRevision) return
-      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) {
+        settleChatMessagesLoading(selectionIntentRevision)
+        return
+      }
       const key = makeTaskKey(agentRef, chatId)
       const visibleBeforeSwitch = activeChatVisibilityRef.current
       const reopeningActiveChat =
@@ -996,12 +1074,11 @@ export function useAgentChatController({
       setAgentError(null)
       setFailedAgentSend(null)
       await chatStore.setLastActive(agentRef, chatId)
-      if (
-        selectionIntentRevisionRef.current !== selectionIntentRevision ||
-        isHostAccessBlocked(agentRef) ||
-        isChatDeleted(agentRef, chatId)
-      )
+      if (selectionIntentRevisionRef.current !== selectionIntentRevision) return
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) {
+        settleChatMessagesLoading(selectionIntentRevision)
         return
+      }
 
       unfillableServerGapUpperBoundsRef.current.delete(key)
 
@@ -1013,6 +1090,7 @@ export function useAgentChatController({
       const isStillActive = () => {
         const visible = activeChatVisibilityRef.current
         return (
+          !isHostAccessBlocked(agentRef) &&
           activeChatSwitchRequestRef.current === switchRequest &&
           visible.selectedAgent === agentRef &&
           visible.activeChatId === chatId
@@ -1021,11 +1099,11 @@ export function useAgentChatController({
 
       // PHASE 1 — render only the newest local page. The authoritative reconcile
       // below requests a delta after the newest cached server turn.
+      // `setLastActive` above crosses the ChatStore boundary before this ref is
+      // read, allowing the rendered page's effect to synchronize chatMessagesRef.
       const activeLocalPage = activeChatLocalPageRequestRef.current
       const reuseVisibleMessages =
-        canReuseActiveSwitch &&
-        activeLocalPage?.request === switchRequest &&
-        activeLocalPage.initialized
+        canReuseActiveSwitch && activeLocalPage?.request === switchRequest
       let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
       let loadedLocalPage = false
       try {
@@ -1050,7 +1128,7 @@ export function useAgentChatController({
         (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
       if (!isStillActive()) return
       if (loadedLocalPage && !reuseVisibleMessages) {
-        activeChatLocalPageRequestRef.current = { request: switchRequest, initialized: false }
+        activeChatLocalPageRequestRef.current = { request: switchRequest }
       }
       loadedLocalMessageCountRef.current = cached.length
       setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
@@ -1058,7 +1136,7 @@ export function useAgentChatController({
       // Phase 1 rendered the cache → clear the blocking spinner. The reconcile
       // runs under the `syncing` indicator (RECONCILE_STARTED, dispatched by the
       // reconcile gate) instead.
-      setChatMessagesLoading(false)
+      settleChatMessagesLoading(selectionIntentRevision)
       // D.5: opening the chat clears its "completed_unread" badge. CHAT_OPENED
       // resets the FSM's `unreadTerminal` flag so a LATER hidden terminal re-marks
       // (without it the flag is write-once-true and the badge never reappears) and
@@ -1116,6 +1194,7 @@ export function useAgentChatController({
       scrollChatToBottom,
       clearUnreadInList,
       cancelOlderMessagesLoad,
+      settleChatMessagesLoading,
       chatStore.setLastActive,
       chatStore.loadMessages,
       chatStore.clearUnreadTerminal,
@@ -1123,12 +1202,44 @@ export function useAgentChatController({
   )
 
   const switchToChat = useCallback(
-    async (agentRef: string, chatId: string) => {
-      const selectionIntentRevision = beginSelectionIntent()
+    async (
+      agentRef: string,
+      chatId: string,
+      options: { onCurrentError?: (error: unknown) => void } = {}
+    ) => {
+      // A rejected target does not take ownership of the visible view. Check
+      // these guards before advancing the history-selection revision so a
+      // blocked or deleted chat cannot cancel another chat's pending load.
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
+      const selectionIntentRevision = beginSelectionIntent(true)
+      if (options.onCurrentError) {
+        selectionErrorOwnerRef.current = {
+          revision: selectionIntentRevision,
+          onCurrentError: options.onCurrentError,
+          reported: false,
+        }
+      }
       clearPendingSelection(agentRef, chatId)
-      await switchToChatForIntent(agentRef, chatId, selectionIntentRevision)
+      try {
+        await switchToChatForIntent(agentRef, chatId, selectionIntentRevision)
+        if (selectionErrorOwnerRef.current?.revision === selectionIntentRevision) {
+          selectionErrorOwnerRef.current = null
+        }
+      } catch (error) {
+        settleChatMessagesLoading(selectionIntentRevision)
+        reportCallerOwnedSelectionError(selectionIntentRevision, error)
+        throw error
+      }
     },
-    [beginSelectionIntent, clearPendingSelection, switchToChatForIntent]
+    [
+      beginSelectionIntent,
+      clearPendingSelection,
+      isChatDeleted,
+      isHostAccessBlocked,
+      reportCallerOwnedSelectionError,
+      settleChatMessagesLoading,
+      switchToChatForIntent,
+    ]
   )
 
   // §5d: chat CRUD (handleCreateChat / handleRename[ForAgent] / handleDelete[ForAgent])
@@ -1154,7 +1265,8 @@ export function useAgentChatController({
       scrollChatToBottom,
       dispatchSession,
       clearComposerDraft,
-      getActiveChatId: () => activeChatId,
+      getActiveChatId: () => activeChatVisibilityRef.current.activeChatId,
+      getChatMessagesLoading: () => chatMessagesLoadingRef.current,
       getAutoSelectedChatId: () => autoSelectedChatIdRef.current,
       markAutoSelectedChat: chatId => {
         autoSelectedChatIdRef.current = chatId
@@ -1322,6 +1434,7 @@ export function useAgentChatController({
   // Agent selection → load chats
   useEffect(() => {
     if (!selectedAgent || isHostAccessBlocked(selectedAgent)) {
+      beginSelectionIntent()
       autoSelectedChatIdRef.current = null
       activeChatVisibilityRef.current = {
         ...activeChatVisibilityRef.current,
@@ -1334,7 +1447,6 @@ export function useAgentChatController({
       setChatListLoading(false)
       activeChatLocalPageRequestRef.current = null
       setChatMessages([])
-      setChatMessagesLoading(false)
       setHasOlderMessages(false)
       cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
@@ -1375,14 +1487,14 @@ export function useAgentChatController({
       setActiveChatId(null)
       activeChatLocalPageRequestRef.current = null
       setChatMessages([])
-      setChatMessagesLoading(false)
+      settleChatMessagesLoading(selectionIntentRevision)
       setHasOlderMessages(false)
       cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
     }
     setChatListLoading(true)
     ;(async () => {
-      const result = await loadChatList(selectedAgent)
+      const result = await loadChatList(selectedAgent, selectionIntentRevision)
       if (cancelled || isHostAccessBlocked(selectedAgent)) return
       setChatListLoading(false)
       // A newer selection intent, including an explicit blank New chat, owns
@@ -1390,7 +1502,7 @@ export function useAgentChatController({
       // selection or replay this older request after the list load completes.
       if (selectionIntentRevisionRef.current !== selectionIntentRevision) return
       if (!result) {
-        setChatMessagesLoading(false)
+        settleChatMessagesLoading(selectionIntentRevision)
         return
       }
       const { merged } = result
@@ -1408,7 +1520,7 @@ export function useAgentChatController({
         if (requestedSelection) {
           clearPendingSelection(selectedAgent)
         }
-        setChatMessagesLoading(false)
+        settleChatMessagesLoading(selectionIntentRevision)
         return
       }
 
@@ -1418,7 +1530,7 @@ export function useAgentChatController({
 
       clearPendingSelection(selectedAgent)
       if (requestedSelection?.mode === 'none') {
-        setChatMessagesLoading(false)
+        settleChatMessagesLoading(selectionIntentRevision)
         return
       }
       if (requestedSelection?.mode === 'latest') {
@@ -1427,9 +1539,7 @@ export function useAgentChatController({
           autoSelectedChatIdRef.current = latest.id
           await switchToChatForIntent(selectedAgent, latest.id, selectionIntentRevision)
         }
-        if (selectionIntentRevisionRef.current === selectionIntentRevision) {
-          setChatMessagesLoading(false)
-        }
+        settleChatMessagesLoading(selectionIntentRevision)
         return
       }
       if (requestedSelection?.mode === 'specific') {
@@ -1451,34 +1561,31 @@ export function useAgentChatController({
           await switchToChatForIntent(selectedAgent, latest.id, selectionIntentRevision)
         }
       }
-      if (selectionIntentRevisionRef.current === selectionIntentRevision) {
-        setChatMessagesLoading(false)
-      }
-    })()
+      settleChatMessagesLoading(selectionIntentRevision)
+    })().catch(error => {
+      if (cancelled || selectionIntentRevisionRef.current !== selectionIntentRevision) return
+      settleChatMessagesLoading(selectionIntentRevision)
+      if (reportCallerOwnedSelectionError(selectionIntentRevision, error)) return
+      liveDepsRef.current.pushToast(
+        `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+        'error'
+      )
+    })
 
     return () => {
       cancelled = true
     }
   }, [
+    beginSelectionIntent,
     cancelOlderMessagesLoad,
     currentTeamId,
     navItem,
     selectedAgent,
     isHostAccessBlocked,
+    reportCallerOwnedSelectionError,
+    settleChatMessagesLoading,
     switchToChatForIntent,
   ])
-
-  const mapComposerAttachmentsToHostRequest = (
-    attachments: ComposerImageAttachment[]
-  ): HostMessageAttachment[] =>
-    attachments.map(att => ({
-      id: att.id,
-      kind: 'image',
-      mimeType: att.mimeType,
-      encoding: 'base64',
-      dataBase64: att.dataBase64,
-      filename: att.name,
-    }))
 
   // ─── Activity / progress state updaters (hoisted from sendAgentMessage so the
   //     tracker subscription effect and tracker callbacks can share them) ───
@@ -2021,7 +2128,12 @@ export function useAgentChatController({
       })
       if (kind === 'revoked') {
         hideAgent(agentRef)
-        const view = activeChatVisibilityRef.current
+      }
+      const view = activeChatVisibilityRef.current
+      if (view.selectedAgent === agentRef) {
+        beginSelectionIntent()
+      }
+      if (kind === 'revoked') {
         if (agentSendSetupOwnerRef.current?.agentRef === agentRef) {
           agentSendSetupOwnerRef.current = null
           agentSendInFlightRef.current = false
@@ -2035,7 +2147,6 @@ export function useAgentChatController({
           setActiveChatId(null)
           activeChatLocalPageRequestRef.current = null
           setChatMessages([])
-          setChatMessagesLoading(false)
           setHasOlderMessages(false)
           cancelOlderMessagesLoad()
         }
@@ -2051,6 +2162,7 @@ export function useAgentChatController({
       clearList,
       resetComposerAttachments,
       cancelOlderMessagesLoad,
+      beginSelectionIntent,
       onHostAccessRevoked,
       onHostAuthorityUncertain,
     ]
@@ -2293,6 +2405,7 @@ export function useAgentChatController({
             setFailedAgentSend({
               content: resend.content,
               attachments: resend.attachments,
+              files: resend.files,
               references: resend.references,
               message: result.message,
               kind: 'network',
@@ -2521,7 +2634,8 @@ export function useAgentChatController({
             // mid-reconcile — settle without re-rendering (a reopen reconcile
             // re-derives if a newer send didn't already take over via R1).
             // #654 M6 — either way this task will never produce another terminal,
-            // so its retained payload has no reader left.
+            // so its retained payload has no reader left, except documents the
+            // Host never received (kept for Recover files).
             releaseRetainedSendsForTask(state.taskId)
             dropActivity()
             setIdle()
@@ -2764,6 +2878,7 @@ export function useAgentChatController({
             // generic Approve/Deny prompt. Absent on ordinary approval suspensions.
             reason: state.pendingApproval.reason,
             mcpServerName: state.pendingApproval.mcpServerName,
+            inputPreview: readApprovalInputPreview(state.pendingApproval.inputPreview),
           }
         : activeFsmApproval
           ? {
@@ -2776,6 +2891,7 @@ export function useAgentChatController({
               // branch above and InFlightAssistantPlaceholder's fallback.
               reason: activeFsmApproval.reason,
               mcpServerName: activeFsmApproval.mcpServerName,
+              inputPreview: readApprovalInputPreview(activeFsmApproval.inputPreview),
             }
           : undefined
       updateMessageProgress(selectedAgent, state.userMessageId, () => ({
@@ -2819,6 +2935,7 @@ export function useAgentChatController({
     async (
       content: string,
       attachments: ComposerImageAttachment[] = composerImageAttachments,
+      files: ReadyComposerFileAttachment[] = readyComposerFiles,
       references: ComposerReferenceAttachment[] = composerReferenceAttachments,
       preserveComposer = false
     ) => {
@@ -2833,11 +2950,15 @@ export function useAgentChatController({
       const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
       const effectiveAttachments = [...attachments]
+      const effectiveFiles = [...files]
       const effectiveReferences = [...references]
       if (
         !selectedAgent ||
         isHostAccessBlocked(selectedAgent) ||
-        (!trimmedContent && !effectiveAttachments.length && !effectiveReferences.length)
+        (!trimmedContent &&
+          !effectiveAttachments.length &&
+          !effectiveFiles.length &&
+          !effectiveReferences.length)
       )
         return
       // Per-(agent, chat) re-entry guard: a chat with a running task can't start
@@ -2899,9 +3020,63 @@ export function useAgentChatController({
         releaseSendSetup()
         return
       }
+      // #678 — the content the Host receives is fixed before anything is created
+      // or cleared, so the shared per-message limits are checked against the
+      // exact request and a refusal leaves the composer as the user typed it.
+      const baseContentForRequest = composerRequestBaseContent(
+        trimmedContent,
+        effectiveAttachments.length,
+        effectiveFiles.length
+      )
+      const effectiveContentForRequest = buildComposerRequestContent(
+        baseContentForRequest,
+        effectiveReferences
+      )
+      // The limits rpc-proxy and mcp-host enforce, most specific first: the
+      // count, the file quota, the share left for text and attachment details,
+      // then the whole body (images included), so the reason names what to
+      // remove. The share and the whole body apply to every send, so images
+      // alone that fill the body are refused here rather than by the proxy;
+      // the count and the file quota only when files are attached.
+      const requestForBudget = {
+        content: effectiveContentForRequest,
+        fileReferences: fileReferencesForSend,
+        hostRef: sendAgent,
+        files: effectiveFiles,
+        images: effectiveAttachments,
+      }
+      const hasFiles = effectiveFiles.length > 0
+      let budgetBlocker: string | null = null
+      if (
+        hasFiles &&
+        effectiveAttachments.length + effectiveFiles.length > COMPOSER_MAX_ATTACHMENTS
+      ) {
+        budgetBlocker = `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
+      } else if (
+        hasFiles &&
+        composerFileBase64Bytes(effectiveFiles) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES
+      ) {
+        budgetBlocker = `The attached files take more than ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded. Remove a file.`
+      } else if (composerNonImageShareBytes(requestForBudget) > COMPOSER_MAX_NON_IMAGE_BODY_BYTES) {
+        budgetBlocker = `The message text and attachment details take more than ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} once encoded. Shorten the message or remove an attachment.`
+      } else if (
+        composerRequestBodyBytes(
+          requestForBudget,
+          effectiveAttachments.reduce((total, image) => total + image.dataBase64.length, 0)
+        ) > COMPOSER_MAX_REQUEST_BODY_BYTES
+      ) {
+        budgetBlocker = `The attachments and text take more than ${formatFileSize(COMPOSER_MAX_REQUEST_BODY_BYTES)} once encoded. Remove an attachment or shorten the message.`
+      }
+      if (budgetBlocker) {
+        setAgentError(budgetBlocker)
+        pushToast(budgetBlocker, 'error')
+        releaseSendSetup()
+        return
+      }
       // This ref is the synchronous authority for the send target. A blank
       // composer send also supersedes a pending latest/blank selection so an old
-      // list response cannot replace the chat created by this send.
+      // list response cannot replace the chat created by this send. Capture this
+      // intent only after validation has accepted the exact request.
       let sendChatId = currentChatId
       const sendSelectionIntentRevision = currentChatId ? null : beginSelectionIntent()
       if (sendSelectionIntentRevision !== null) clearPendingSelection(sendAgent)
@@ -2982,18 +3157,10 @@ export function useAgentChatController({
         return
       }
       const userMessageId = crypto.randomUUID()
-      const baseContentForRequest =
-        trimmedContent ||
-        (effectiveAttachments.length
-          ? 'Please analyze the attached image(s).'
-          : 'Please use the attached context.')
-      const effectiveContentForRequest = buildComposerRequestContent(
-        baseContentForRequest,
-        effectiveReferences
-      )
       const displayAttachments = buildChatMessageAttachments(
         effectiveAttachments,
-        effectiveReferences
+        effectiveReferences,
+        effectiveFiles
       )
       const userMessage: AgentChatMessage = {
         id: userMessageId,
@@ -3038,10 +3205,20 @@ export function useAgentChatController({
           chatList.find(c => c.id === sendChatId) ??
           (autoCreatedMeta && autoCreatedMeta.id === sendChatId ? autoCreatedMeta : undefined)
         if (chat && chat.title === 'New Chat') {
+          // Without text, the title names every kind of attachment the send
+          // carried: images and documents together, else the context references.
+          const attachmentTitleParts = [
+            effectiveAttachments.length > 0
+              ? `Images: ${effectiveAttachments.map(att => att.name).join(', ')}`
+              : '',
+            effectiveFiles.length > 0
+              ? `Files: ${effectiveFiles.map(file => file.filename).join(', ')}`
+              : '',
+          ].filter(Boolean)
           const autoTitleSeed =
             trimmedContent ||
-            (effectiveAttachments.length > 0
-              ? `Images: ${effectiveAttachments.map(att => att.name).join(', ')}`
+            (attachmentTitleParts.length > 0
+              ? attachmentTitleParts.join('; ')
               : effectiveReferences.length > 0
                 ? `Context: ${effectiveReferences.map(ref => ref.label).join(', ')}`
                 : '')
@@ -3086,6 +3263,7 @@ export function useAgentChatController({
         userMessageId,
         content: trimmedContent,
         attachments: effectiveAttachments,
+        files: effectiveFiles,
         references: effectiveReferences,
         model: requestModelForRetention,
         reason: 'awaiting_terminal',
@@ -3096,16 +3274,13 @@ export function useAgentChatController({
       // The accepted text belongs to its captured origin, while attachments
       // belong to the selected agent. Navigation can change the visible chat
       // without changing either owner.
-      const canConsumeComposer =
-        !preserveComposer && originalDraftAgent === sendAgent && sendStillAuthorized()
+      const canConsumeComposer = !preserveComposer && sendStillAuthorized()
       const shouldClearOriginDraft =
         canConsumeComposer &&
         getComposerDraftRevision(originalDraftChat, originalDraftAgent ?? undefined) ===
           originalDraftRevision
       const shouldResetAttachments =
-        canConsumeComposer &&
-        activeChatVisibilityRef.current.selectedAgent === sendAgent &&
-        composerAttachmentRevisionRef.current === originalAttachmentRevision
+        canConsumeComposer && composerAttachmentRevisionRef.current === originalAttachmentRevision
       if (shouldClearOriginDraft) {
         clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined)
       }
@@ -3129,8 +3304,8 @@ export function useAgentChatController({
           channelId: sendAgent,
           threadId: sendChatId || undefined,
           attachments:
-            effectiveAttachments.length > 0
-              ? mapComposerAttachmentsToHostRequest(effectiveAttachments)
+            effectiveAttachments.length > 0 || effectiveFiles.length > 0
+              ? mapComposerAttachmentsToHostRequest(effectiveAttachments, effectiveFiles)
               : undefined,
           ...(requestModel ? { model: requestModel } : {}),
           ...(visualModelRevisionForSend === undefined
@@ -3219,6 +3394,28 @@ export function useAgentChatController({
             pushToast(droppedMessage, 'error')
           }
         }
+        // #678 D13 — the same rule for documents. An ack that lists which
+        // attachments the Host admitted and omits a sent file means an older
+        // Host dropped it. Unlike a Global File reference, the document exists
+        // only in this composer, so the send keeps its snapshot and shows the
+        // failure instead of looking delivered.
+        let filesNotDeliveredMessage: string | null = null
+        let undeliveredFileIds: string[] = []
+        if (ackOk && !ackIsEmpty && effectiveFiles.length > 0) {
+          const acceptedAttachmentIds = new Set<string>(
+            Array.isArray(response.acceptedAttachmentIds) ? response.acceptedAttachmentIds : []
+          )
+          const undelivered = effectiveFiles.filter(file => !acceptedAttachmentIds.has(file.id))
+          undeliveredFileIds = undelivered.map(file => file.id)
+          if (undelivered.length > 0) {
+            filesNotDeliveredMessage =
+              undelivered.length === effectiveFiles.length
+                ? HOST_FILE_ATTACHMENTS_DROPPED_MESSAGE
+                : `The Host did not receive ${undelivered.length} of the attached files; the message was sent without them. Recover the files to attach them again.`
+            setAgentError(filesNotDeliveredMessage)
+            pushToast(filesNotDeliveredMessage, 'error')
+          }
+        }
 
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
@@ -3271,13 +3468,20 @@ export function useAgentChatController({
             // The input was cleared before the round-trip: retain it (memory
             // only) so the failure is recoverable, and restore the text into the
             // composer only when it is still the same chat with no newer draft.
-            const failureMessage =
-              typeof errorRecord?.message === 'string' ? errorRecord.message : content
+            // #678 D13 — a Host that predates `kind:'file'` rejects the send
+            // with LLM_INVALID_ATTACHMENT; say what that means for the files.
+            const hostRejectedFiles =
+              effectiveFiles.length > 0 && errorRecord?.code === HOST_INVALID_ATTACHMENT_CODE
+            const failureMessage = hostRejectedFiles
+              ? HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE
+              : typeof errorRecord?.message === 'string'
+                ? errorRecord.message
+                : content
             failRetainedSend(
               sendAgent,
               sendChatId ?? null,
               userMessageId,
-              'sync_error_envelope',
+              hostRejectedFiles ? 'host_files_unsupported' : 'sync_error_envelope',
               failureMessage,
               'upstream'
             )
@@ -3287,6 +3491,23 @@ export function useAgentChatController({
               errorMessage: failureMessage,
             }))
             pushToast(`Message to ${sendAgent} failed: ${failureMessage || 'error'}`, 'error')
+          } else if (filesNotDeliveredMessage) {
+            // The Host answered but never received the documents: keep the
+            // snapshot (and its files) with the failure instead of releasing it.
+            failRetainedSend(
+              sendAgent,
+              sendChatId ?? null,
+              userMessageId,
+              'host_files_dropped',
+              filesNotDeliveredMessage,
+              'upstream',
+              undeliveredFileIds
+            )
+            updateMessageActivity(sendAgent, userMessageId, previous => ({
+              ...previous,
+              status: 'error',
+              errorMessage: filesNotDeliveredMessage,
+            }))
           } else {
             // Terminal success: release this payload and the older failures of
             // the chat it supersedes.
@@ -3319,6 +3540,17 @@ export function useAgentChatController({
           await chatStore.upsertMessages(sendAgent, sendChatId, [persistedUserMessage])
         }
         attachTaskIdToRetainedSend(sendAgent, sendChatId ?? null, userMessageId, taskId)
+        if (filesNotDeliveredMessage) {
+          // The task runs without the documents; the snapshot survives its
+          // success (see releaseSucceededRetainedSendsForTask).
+          markRetainedSendReason(
+            taskId,
+            'host_files_dropped',
+            filesNotDeliveredMessage,
+            'upstream',
+            undeliveredFileIds
+          )
+        }
         activityTaskToMessageByAgentRef.current[sendAgent] = {
           ...(activityTaskToMessageByAgentRef.current[sendAgent] || {}),
           [taskId]: userMessageId,
@@ -3341,6 +3573,7 @@ export function useAgentChatController({
           tracker.setResend(taskId, {
             content: trimmedContent,
             attachments: effectiveAttachments,
+            files: effectiveFiles,
             references: effectiveReferences,
           })
           const taskKey = makeTaskKey(sendAgent, sendChatId)
@@ -3410,6 +3643,7 @@ export function useAgentChatController({
         setFailedAgentSend({
           content: trimmedContent,
           attachments: effectiveAttachments,
+          files: effectiveFiles,
           references: effectiveReferences,
           message,
           kind,
@@ -3468,10 +3702,12 @@ export function useAgentChatController({
       revokeHostAccess,
       holdHostAccess,
       composerImageAttachments,
+      readyComposerFiles,
       composerReferenceAttachments,
       chatList,
       chatStore,
       resetComposerAttachments,
+      markRetainedSendReason,
       fsm,
       applyLocalTitleOnly,
       pushToast,
@@ -3484,15 +3720,28 @@ export function useAgentChatController({
       appendAssistantMessage,
       appendNewEntry,
       bumpActivity,
-      selectionIntentRevisionRef,
     ]
   )
 
   const handleSendAgentMessage = useCallback(
     async (text: string) => {
-      await sendAgentMessage(text, composerImageAttachments, composerReferenceAttachments)
+      // A document still being read is not part of the message yet: sending
+      // now would silently leave it out.
+      if (composerFilesBlockSend) return
+      await sendAgentMessage(
+        text,
+        composerImageAttachments,
+        readyComposerFiles,
+        composerReferenceAttachments
+      )
     },
-    [composerImageAttachments, composerReferenceAttachments, sendAgentMessage]
+    [
+      composerFilesBlockSend,
+      composerImageAttachments,
+      readyComposerFiles,
+      composerReferenceAttachments,
+      sendAgentMessage,
+    ]
   )
 
   const visibleRetainedFailure = useMemo(() => {
@@ -3504,6 +3753,7 @@ export function useAgentChatController({
       ...snapshot,
       message: snapshot.failure.message,
       kind: snapshot.failure.kind,
+      answeredWithoutFiles: snapshot.reason === 'host_files_dropped',
     } satisfies FailedAgentSend
   }, [retainedSends, retainedRevision, selectedAgent, activeChatId])
   const visibleFailure =
@@ -3520,10 +3770,18 @@ export function useAgentChatController({
   // bytes and still answering `getLatestRetainedSendSnapshotForChat` (which picks
   // the newest snapshot *carrying a failure*).
   const handleRetryFailedAgentSend = useCallback(async () => {
-    if (!visibleFailure) return
+    // The Host already answered this text; only its documents are recoverable.
+    if (!visibleFailure || visibleFailure.answeredWithoutFiles) return
     const previous = visibleFailure
     const retainedBefore = lastRetainedSendIdRef.current
-    await sendAgentMessage(previous.content, previous.attachments, previous.references, true)
+    // The retained files are already read and hashed: a retry never reads them again.
+    await sendAgentMessage(
+      previous.content,
+      previous.attachments,
+      previous.files,
+      previous.references,
+      true
+    )
     // A retry refused before dispatch (image guard, running task, a send already
     // in flight) retained nothing, so the old snapshot is still the only copy of
     // the payload: keep it and the failure it shows. Once a newer send has
@@ -3544,11 +3802,14 @@ export function useAgentChatController({
         visibleFailure.userMessageId
       )
       // The visible failure is the newest one of this chat; the older failures
-      // behind it would otherwise resurface one by one after each discard.
+      // behind it would otherwise resurface one by one after each discard. An
+      // older snapshot holding documents the Host never received stays: those
+      // files exist nowhere else, so it resurfaces with Recover files.
       releaseRetainedFailuresForChat(
         visibleFailure.agentRef,
         visibleFailure.chatId ?? null,
-        visibleFailure.timestamp
+        visibleFailure.timestamp,
+        { keepUndeliveredFiles: true }
       )
     }
     setFailedAgentSend(null)
@@ -3562,9 +3823,27 @@ export function useAgentChatController({
       visibleFailure.chatId !== activeChatVisibilityRef.current.activeChatId
     )
       return
+    if (visibleFailure.answeredWithoutFiles) {
+      // The text and the other attachments were answered: bring back only the
+      // documents the Host never received, and send nothing. Restoring replaces
+      // the composer's documents, so only documents already there block it; a
+      // new draft or other attachments stay as they are.
+      if (composerFileAttachments.length) {
+        pushToast(
+          'Remove the documents in the composer before recovering the earlier files.',
+          'error'
+        )
+        return
+      }
+      const undelivered = new Set(visibleFailure.undeliveredFileIds ?? [])
+      handleRestoreComposerFiles(visibleFailure.files.filter(file => undelivered.has(file.id)))
+      handleDiscardFailedAgentSend()
+      return
+    }
     if (
       getComposerDraft(activeChatId, selectedAgent ?? undefined) ||
       composerImageAttachments.length ||
+      composerFileAttachments.length ||
       composerReferenceAttachments.length
     ) {
       pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
@@ -3577,14 +3856,17 @@ export function useAgentChatController({
         previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
       }))
     )
+    handleRestoreComposerFiles(visibleFailure.files)
     handleAddComposerReferenceAttachments(visibleFailure.references)
     handleDiscardFailedAgentSend()
   }, [
     visibleFailure,
     activeChatId,
     composerImageAttachments,
+    composerFileAttachments,
     composerReferenceAttachments,
     pushToast,
+    handleRestoreComposerFiles,
     handleAddComposerImageAttachments,
     handleAddComposerReferenceAttachments,
     handleDiscardFailedAgentSend,
@@ -3638,7 +3920,9 @@ export function useAgentChatController({
         await window.clerum.rpc.cancelTask(hostRef, taskId)
         markCancelled('Cancelled by user.')
         // #654 M6 — a cancel is terminal by intent: the user does not want this
-        // payload resent, so nothing will read the retained snapshot again.
+        // payload resent, so nothing will read the retained snapshot again. A
+        // snapshot holding documents the Host never received stays for Recover
+        // files (see releaseRetainedSendsForTask).
         releaseRetainedSendsForTask(taskId)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -3664,12 +3948,47 @@ export function useAgentChatController({
       options: {
         selectLatest?: boolean
         suppressAutoSelect?: boolean
+        deferSwitch?: boolean
         title?: string
         isRemote?: boolean
       } = {}
     ) => {
       if (isHostAccessBlocked(agentName) || (chatId && isChatDeleted(agentName, chatId))) return
-      beginSelectionIntent()
+      const selectsSpecificChat = Boolean(
+        chatId && !options.selectLatest && !options.suppressAutoSelect
+      )
+      const preservesCurrentChatRoute = Boolean(
+        !chatId &&
+        !options.selectLatest &&
+        selectedAgent === agentName &&
+        navItem === DESKTOP_ROUTES.chat
+      )
+      if (
+        selectsSpecificChat &&
+        !options.deferSwitch &&
+        selectedAgent === agentName &&
+        navItem === DESKTOP_ROUTES.chat
+      ) {
+        clearPendingSelection(agentName)
+        if (options.title) {
+          upsertProvisionalEntry(chatId!, options.title, options.isRemote === true)
+        }
+        void switchToChat(agentName, chatId!, {
+          onCurrentError: error => {
+            pushToast(
+              `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+              'error'
+            )
+          },
+        }).catch(() => undefined)
+        return
+      }
+      // A same-agent no-chat notification can record a pending none selection
+      // while the chat route continues an implicit/latest or visible history
+      // load. The explicit clear path owns blanking the view; do not steal its
+      // history completion here. Route/agent changes and specific/latest
+      // selections still advance selection ownership before their effects run.
+      if (!preservesCurrentChatRoute) beginSelectionIntent(selectsSpecificChat)
       if (options.selectLatest) {
         writePendingSelection(agentName, { mode: 'latest', chatId: null })
         return
@@ -3705,9 +4024,14 @@ export function useAgentChatController({
     [
       cancelOlderMessagesLoad,
       beginSelectionIntent,
+      clearPendingSelection,
       currentTeamId,
       writePendingSelection,
+      pushToast,
       upsertProvisionalEntry,
+      selectedAgent,
+      navItem,
+      switchToChat,
       isHostAccessBlocked,
       isChatDeleted,
     ]
@@ -3723,7 +4047,6 @@ export function useAgentChatController({
     setActiveChatId(null)
     activeChatLocalPageRequestRef.current = null
     setChatMessages([])
-    setChatMessagesLoading(false)
     setHasOlderMessages(false)
     cancelOlderMessagesLoad()
     loadedLocalMessageCountRef.current = 0
@@ -3776,6 +4099,8 @@ export function useAgentChatController({
     sessionFsmStore: fsm,
     progressByAgentMessage,
     composerImageAttachments,
+    composerFileAttachments,
+    composerFileRefusals,
     composerReferenceAttachments,
     agentSending,
     // A fresh send-time error (a blocked image send, a new POST failure) wins;
@@ -3812,6 +4137,9 @@ export function useAgentChatController({
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,
     handleRemoveComposerImageAttachment,
+    handleAddComposerFiles,
+    handleRemoveComposerFileAttachment,
+    handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     cancelTask,

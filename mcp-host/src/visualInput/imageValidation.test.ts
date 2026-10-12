@@ -666,7 +666,11 @@ describe('PNG stream integrity', () => {
         `colour type ${colorType} bit depth ${bitDepth}`
       ).resolves.toBeUndefined()
     }
-  })
+    // Each validateImage call spawns a validation child, and this loop makes 15
+    // of them in sequence (about 2.2 s alone). Under the full suite's worker
+    // pool the spawns are slower, so the 5 s default timed out; the budget is
+    // for the process count, not for a slow validator.
+  }, 30_000)
 
   test('rejects a PNG whose IDAT chunks are not a zlib stream', async () => {
     const png = buildPng({ width: 2, height: 2, idat: Buffer.from([0xde, 0xad, 0xbe, 0xef]) })

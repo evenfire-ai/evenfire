@@ -15,6 +15,11 @@ describe('RPCServer metrics contract', () => {
       expect(body).toContain('process_cpu_user_seconds_total')
       expect(body).toContain('clerum_mcp_status_heartbeat_runs_total')
       expect(body).toContain('clerum_mcp_status_heartbeat_in_flight')
+      expect(body).toContain('clerum_gfs_download_admissions_total')
+      expect(body).toContain('clerum_gfs_download_transfers_total')
+      expect(body).toContain('clerum_gfs_download_active')
+      expect(body).toContain('clerum_gfs_download_quota_total')
+      expect(body).toContain('clerum_gfs_download_expiry_total')
     } finally {
       await server.stop()
     }

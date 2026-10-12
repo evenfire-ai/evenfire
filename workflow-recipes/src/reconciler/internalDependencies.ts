@@ -1,3 +1,4 @@
+import { scanTemplateReferences } from '@clerum/workflow-runtime-core'
 import type { EgressBindingDef, WorkflowRecipeCRD, WorkloadDef } from '../types'
 import { parseClusterLocalFqdn, resolveWorkloadRuntimeResourceName } from './resourceBuilder'
 
@@ -48,7 +49,6 @@ interface ClusterLocalHostReference {
 
 const CLUSTER_LOCAL_HOST_REFERENCE_RE =
   /([a-z0-9](?:[-a-z0-9]*[a-z0-9])?\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\.svc\.cluster\.local\.?)(?::([0-9]{1,5}))?/gi
-const UNRESOLVED_WORKLOAD_TEMPLATE_RE = /\{\{\s*([^}:]+)\s*:\s*(host|port)\s*\}\}/g
 
 function isStdioTransport(workload: WorkloadDef): boolean {
   return workload.transport?.type === 'stdio'
@@ -81,12 +81,25 @@ function extractClusterLocalHostReferences(value: string): ClusterLocalHostRefer
   }))
 }
 
-function extractUnresolvedWorkloadTemplateReferences(
+export function extractUnresolvedWorkloadTemplateReferences(
   value: string
 ): Array<{ workloadId: string; field: string }> {
-  return [...value.matchAll(UNRESOLVED_WORKLOAD_TEMPLATE_RE)]
-    .map(match => ({ workloadId: match[1].trim(), field: match[2] }))
-    .filter(ref => Boolean(ref.workloadId))
+  const refs: Array<{ workloadId: string; field: string }> = []
+  for (const { body } of scanTemplateReferences(value)) {
+    const colon = body.lastIndexOf(':')
+    if (colon <= 0) continue
+    const field = body.slice(colon + 1).trim()
+    if (field !== 'host' && field !== 'port') continue
+    // The legacy workload-only syntax forbids colons in the identifier. If an
+    // outer opening fails that rule, it can still match a later nested opening.
+    const previousColon = body.lastIndexOf(':', colon - 1)
+    const nestedOpening = previousColon === -1 ? -1 : body.indexOf('{{', previousColon + 1)
+    if (previousColon !== -1 && (nestedOpening === -1 || nestedOpening >= colon)) continue
+    const start = previousColon === -1 ? 0 : nestedOpening + 2
+    const workloadId = body.slice(start, colon).trim()
+    if (workloadId) refs.push({ workloadId, field })
+  }
+  return refs
 }
 
 function dependencyKey(dep: Omit<InternalDependency, 'fields'>): string {

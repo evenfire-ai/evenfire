@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  LIMITS,
+  VISUAL_LIMITS,
   buildCodexProxyEnvelope,
   hashCodexCompletionRequest,
   parseCodexCompletionRequest,
@@ -8,11 +10,13 @@ import { LlmErrorCode } from '../../core/errors'
 import {
   CodexLlmProxyClient,
   CodexProxyError,
+  codexProxyErrorMessage,
   resolveCodexProxyRuntimeUrl,
 } from '../codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
+import { PNG_2X2_BASE64 } from './codexImageFixtures'
 import { closedPortUrl, fetchFailure, silentServer } from './connectFailureFixtures'
 
 function sse(frames: unknown[]): ReadableStream<Uint8Array> {
@@ -24,6 +28,49 @@ function sse(frames: unknown[]): ReadableStream<Uint8Array> {
       controller.close()
     },
   })
+}
+
+// A well-formed V2 request with one image, authorized under its own hash.
+function codexVisualInput() {
+  const parsed = parseCodexCompletionRequest({
+    schemaVersion: 'codex-completion-request.v2',
+    requestId: 'req-visual',
+    idempotencyKey: 'idem-visual',
+    provider: 'codex-subscription',
+    model: 'gpt-5.1',
+    deadlineMs: 1000,
+    messages: [
+      {
+        role: 'user',
+        content: 'Describe the attached image',
+        contentParts: [
+          { type: 'text', text: 'Describe the attached image' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: PNG_2X2_BASE64,
+            source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+          },
+        ],
+      },
+    ],
+  })
+  if (!parsed.ok) throw new Error(parsed.message)
+  return {
+    request: parsed.value,
+    requestHash: hashCodexCompletionRequest(parsed.value),
+    executionTicket: 'fixture-ticket',
+  }
+}
+type CodexVisualInput = ReturnType<typeof codexVisualInput>
+
+/** The fixture's single user message, with its parts. */
+function codexVisualMessage(input: CodexVisualInput) {
+  const [message] = input.request.messages
+  if (!message || !('contentParts' in message) || !message.contentParts) {
+    throw new Error('fixture message has no contentParts')
+  }
+  return { ...message, contentParts: message.contentParts }
 }
 
 describe('CodexLlmProxyClient', () => {
@@ -70,6 +117,77 @@ describe('CodexLlmProxyClient', () => {
       code: 'request_hash_mismatch',
       dispatched: false,
     })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  // Review R4-L6: the pre-dispatch refusals use the providers' canonical
+  // mapping, so a conversation over the non-image budget is a context-length
+  // refusal and an image count is not a size refusal.
+  it.each([
+    [
+      'text over the non-image budget',
+      (input: CodexVisualInput) => {
+        const message = codexVisualMessage(input)
+        const text = 'x'.repeat(LIMITS.maxRequestBodyBytes)
+        const parts = message.contentParts.map(part =>
+          part.type === 'text' ? { ...part, text } : part
+        )
+        return {
+          ...input,
+          request: {
+            ...input.request,
+            messages: [{ ...message, content: text, contentParts: parts }],
+          },
+        }
+      },
+      {
+        code: 'request_limit_exceeded',
+        message: 'request exceeds maxRequestBodyBytes outside image data',
+      },
+    ],
+    [
+      'more images than the contract allows',
+      (input: CodexVisualInput) => {
+        const message = codexVisualMessage(input)
+        const image = message.contentParts.find(part => part.type === 'image')
+        if (!image) throw new Error('fixture has no image part')
+        const images = Array.from({ length: VISUAL_LIMITS.maxImages + 1 }, (_, i) => ({
+          ...image,
+          source: { kind: 'attachment' as const, attachmentId: `att-${i}`, messageId: 'msg-1' },
+        }))
+        const contentParts = [{ type: 'text' as const, text: message.content }, ...images]
+        return {
+          ...input,
+          request: { ...input.request, messages: [{ ...message, contentParts }] },
+        }
+      },
+      { code: 'invalid_request', message: `request exceeds ${VISUAL_LIMITS.maxImages} images` },
+    ],
+    [
+      'an envelope over the visual ceiling',
+      (input: CodexVisualInput) => ({
+        ...input,
+        executionTicket: 't'.repeat(LIMITS.maxVisualRequestBodyBytes),
+      }),
+      { code: 'payload_too_large', message: 'proxy envelope exceeds maxVisualRequestBodyBytes' },
+    ],
+  ])('R4-L6 refuses %s before the proxy hop', async (_label, mutate, expected) => {
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(sse([{ type: 'done', outcome: 'success' }]))
+    )
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: 'http://proxy/completions',
+      readPlatformJwt: () => 'fixture-only',
+      fetchFn,
+    })
+    const input = codexVisualInput()
+    await expect(client.stream(mutate(input))).rejects.toMatchObject({
+      ...expected,
+      dispatched: false,
+    })
+    expect(fetchFn).not.toHaveBeenCalled()
+    // Witness: the unmodified request reaches the proxy.
+    await client.stream(input)
     expect(fetchFn).toHaveBeenCalledOnce()
   })
 
@@ -317,6 +435,109 @@ describe('CodexLlmProxyClient', () => {
     })
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
+
+  it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'] as const)(
+    'decodes the local %s admission code without failover and keeps the client usable',
+    async code => {
+      const input = {
+        executionTicket: 'ticket-123456',
+        requestHash: 'a'.repeat(64),
+        request: {},
+      }
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json({ error: code, reason: 'untrusted upstream prose' }, { status: 503 })
+        )
+        .mockResolvedValueOnce(new Response(sse([{ type: 'done', outcome: 'success' }])))
+      const client = new CodexLlmProxyClient({
+        runtimeUrl: 'http://proxy/internal/runtime/v1/codex/completions',
+        readPlatformJwt: () => 'platform-jwt',
+        fetchFn,
+      })
+      const err = await client.stream(input).then(
+        () => undefined,
+        (e: unknown) => e
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(CodexProxyError)
+      if (!(err instanceof CodexProxyError)) throw new Error('expected CodexProxyError')
+      expect(err).toMatchObject({
+        code,
+        message: codexProxyErrorMessage(code, 503),
+        dispatched: true,
+      })
+      expect(err.message).not.toContain('untrusted upstream prose')
+
+      const provider = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never)
+      const classified = provider.classifyError(err)
+      expect(classified.code).toBe(LlmErrorCode.ApiCallFailed)
+      expect(classified.retryable).toBe(false)
+      expect(classified.providerCode).toBe(code)
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+      const next = await client.stream(input)
+      expect(next.outcome).toBe('success')
+      expect(fetchFn).toHaveBeenCalledTimes(2)
+
+      const outage = provider.classifyError(
+        new CodexProxyError('provider_unavailable', 'real upstream outage')
+      )
+      expect(outage.code).toBe(LlmErrorCode.ModelOverloaded)
+      expect(outage.retryable).toBe(true)
+      expect(classifyFailoverClass(outage.code, outage.retryable)).toBe('provider_unavailable')
+    }
+  )
+
+  it.each([
+    [
+      'unknown_machine_code',
+      JSON.stringify({ error: 'future_proxy_error' }),
+      LlmErrorCode.ApiCallFailed,
+      false,
+      'future_proxy_error',
+    ],
+    [
+      'reason_only',
+      JSON.stringify({ reason: 'visual_gate' }),
+      LlmErrorCode.ModelOverloaded,
+      true,
+      'provider_unavailable',
+    ],
+    ['malformed_json', '{', LlmErrorCode.ModelOverloaded, true, 'provider_unavailable'],
+  ] as const)(
+    'keeps wire %s separate from trusted local refusal provenance',
+    async (_label, body, code, retryable, providerCode) => {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(body, { status: 503, headers: { 'content-type': 'application/json' } })
+        )
+      const proxy = new CodexLlmProxyClient({
+        runtimeUrl: 'http://proxy/internal/runtime/v1/codex/completions',
+        readPlatformJwt: () => 'platform-jwt',
+        fetchFn,
+      })
+      const error = await proxy
+        .stream({
+          executionTicket: 'ticket-123456',
+          requestHash: 'a'.repeat(64),
+          request: {},
+        })
+        .then(
+          () => undefined,
+          (caught: unknown) => caught
+        )
+      expect(error).toBeInstanceOf(CodexProxyError)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      const provider = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never)
+      const classified = provider.classifyError(error)
+      expect(classified).toMatchObject({ code, retryable, providerCode })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+        retryable ? 'provider_unavailable' : null
+      )
+    }
+  )
 
   // T-TE-1 (D4) — the proxy passes control-api's redeem refusal through as
   // `403 { error: 'ticket_expired' }` when the ticket died while the request

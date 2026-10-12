@@ -27,7 +27,7 @@ import {
 } from '../workflow/workflowReconciler'
 import { captureLogger, captureLoggerLevels } from './__tests__/captureLogger'
 import { defaultFqdnLookup } from './fqdnResolver'
-import { isRetryableInfraError } from './k8sErrors'
+import { ResourceVanishedAfterConflictError, isRetryableInfraError } from './k8sErrors'
 import type { NetworkPolicyFamily } from './networkPolicyConvergence'
 import * as brokerIssuer from './oauthBrokerTokenIssuerClient'
 import {
@@ -246,12 +246,20 @@ type LiveManifest = { metadata: { name: string } & Record<string, unknown> } & R
  * whose tests override `read` to supply a live object with a specific status
  * (the readiness tests): the object exists in that test's model, so its PUT
  * succeeds.
+ *
+ * `patch`, when given, merges `metadata.annotations` and the top-level `spec`
+ * keys of the body into the stored object, bumps its resourceVersion, and bumps
+ * its generation when the body carries `spec`, as the apiserver does. It is not
+ * a strategic merge: assertions about what a patch sent read the request body,
+ * not the stored object. A patch to an object the store does not hold answers
+ * 404, as the apiserver does, whatever `unseenReplace` says.
  */
 function installLiveStore(
   api: {
     read: ReturnType<typeof vi.fn>
     create: ReturnType<typeof vi.fn>
     replace: ReturnType<typeof vi.fn>
+    patch?: ReturnType<typeof vi.fn>
   },
   status: Record<string, unknown>,
   admit?: (stored: LiveManifest) => void,
@@ -305,9 +313,84 @@ function installLiveStore(
         return {}
       }
     )
+  api.patch?.mockReset().mockImplementation(
+    async ({
+      name,
+      namespace,
+      body,
+    }: {
+      name: string
+      namespace: string
+      body: {
+        metadata?: { annotations?: Record<string, string> }
+        spec?: Record<string, unknown>
+      }
+    }) => {
+      const k = key(namespace, name)
+      const current = live.get(k)
+      if (!current) throw { code: 404 }
+      const metadata = current.metadata as LiveManifest['metadata'] & {
+        annotations?: Record<string, string>
+        resourceVersion?: string
+        generation?: number
+      }
+      live.set(k, {
+        ...current,
+        metadata: {
+          ...metadata,
+          annotations: { ...metadata.annotations, ...body.metadata?.annotations },
+          resourceVersion: String(Number(metadata.resourceVersion ?? '1') + 1),
+          generation: (metadata.generation ?? 1) + (body.spec ? 1 : 0),
+        },
+        spec: { ...(current.spec as Record<string, unknown>), ...body.spec },
+      })
+      return {}
+    }
+  )
 }
 
 const LIVE_CLUSTER_IP = '10.0.0.7'
+
+// StatefulSet double used by every test unless a test overrides it: reads are
+// 404 until something creates the object, then return it with a ready status.
+const LIVE_STATEFULSET_STATUS = { observedGeneration: 1, readyReplicas: 1 }
+
+function installLiveStatefulSetStore(): void {
+  installLiveStore(
+    {
+      read: mockAppsApi.readNamespacedStatefulSet,
+      create: mockAppsApi.createNamespacedStatefulSet,
+      replace: mockAppsApi.replaceNamespacedStatefulSet,
+      patch: mockAppsApi.patchNamespacedStatefulSet,
+    },
+    LIVE_STATEFULSET_STATUS
+  )
+}
+
+/**
+ * Observe the StatefulSet WRC created with a test-chosen generation, spec and
+ * status. Reads still go through the live store, so an object WRC has not
+ * created reads as a 404 and the read before create sees what a real
+ * apiserver would.
+ */
+function observeLiveStatefulSetAs(observed: {
+  generation: number
+  spec: Record<string, unknown>
+  status: Record<string, unknown>
+}): void {
+  const storeRead = mockAppsApi.readNamespacedStatefulSet.getMockImplementation()!
+  mockAppsApi.readNamespacedStatefulSet.mockImplementation(
+    async (args: { name: string; namespace: string }) => {
+      const live = await storeRead(args)
+      return {
+        ...live,
+        metadata: { ...live.metadata, generation: observed.generation },
+        spec: { ...live.spec, ...observed.spec },
+        status: observed.status,
+      }
+    }
+  )
+}
 
 function installLiveServiceAndConfigMapStores(): void {
   installLiveStore(
@@ -368,14 +451,7 @@ describe('WorkflowRecipeReconciler', () => {
       },
       { observedGeneration: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 }
     )
-    mockAppsApi.readNamespacedStatefulSet.mockReset()
-    mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
-      metadata: { resourceVersion: '1' },
-      spec: { replicas: 1 },
-      status: { readyReplicas: 1 },
-    })
-    mockAppsApi.patchNamespacedStatefulSet.mockReset()
-    mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
+    installLiveStatefulSetStore()
     installLiveStore(
       {
         read: mockAppsApi.readNamespacedDaemonSet,
@@ -417,19 +493,25 @@ describe('WorkflowRecipeReconciler', () => {
     mockCustomApi.replaceNamespacedCustomObject.mockReset()
     mockCustomApi.replaceNamespacedCustomObject.mockResolvedValue({})
     mockCustomApi.getNamespacedCustomObject.mockReset()
-    mockCustomApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string }) =>
-      Promise.resolve({
-        metadata: {
-          uid: liveWorkflowRecipeUid(name),
-          resourceVersion: '1',
-          annotations: { 'clerum.io/network-ready': 'true' },
-          labels: { 'clerum.io/recipe': 'test-recipe' },
-        },
-        status: {
-          conditions: [{ type: 'ExternalEgressReady', status: 'True' }],
-        },
-        spec: { mcpServers: [] },
-      })
+    // No per-recipe Context exists until a test seeds one: the Context writer
+    // reads first (#760), and an object here would send every transport pass
+    // down the replace path instead of the create.
+    mockCustomApi.getNamespacedCustomObject.mockImplementation(
+      ({ name, plural }: { name?: string; plural?: string }) =>
+        plural === 'contexts'
+          ? Promise.reject({ code: 404 })
+          : Promise.resolve({
+              metadata: {
+                uid: liveWorkflowRecipeUid(name),
+                resourceVersion: '1',
+                annotations: { 'clerum.io/network-ready': 'true' },
+                labels: { 'clerum.io/recipe': 'test-recipe' },
+              },
+              status: {
+                conditions: [{ type: 'ExternalEgressReady', status: 'True' }],
+              },
+              spec: { mcpServers: [] },
+            })
     )
     mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
     mockNetworkingApi.createNamespacedNetworkPolicy.mockReset()
@@ -2272,8 +2354,8 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('treats a fully-ready StatefulSet as ready when observedGeneration transiently lags', async () => {
-    mockAppsApi.readNamespacedStatefulSet.mockRejectedValueOnce({ code: 404 }).mockResolvedValue({
-      metadata: { resourceVersion: '265', generation: 265 },
+    observeLiveStatefulSetAs({
+      generation: 265,
       spec: { replicas: 1 },
       status: { observedGeneration: 264, readyReplicas: 1 },
     })
@@ -2359,8 +2441,8 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('degrades when a child StatefulSet was externally scaled below recipe replicas', async () => {
-    mockAppsApi.readNamespacedStatefulSet.mockRejectedValueOnce({ code: 404 }).mockResolvedValue({
-      metadata: { resourceVersion: '2', generation: 2 },
+    observeLiveStatefulSetAs({
+      generation: 2,
       spec: { replicas: 0 },
       status: { observedGeneration: 2, readyReplicas: 0 },
     })
@@ -3180,12 +3262,7 @@ describe('WorkflowRecipeReconciler', () => {
         .mockReset()
         .mockResolvedValue({ metadata: { resourceVersion: '1' } })
       mockAppsApi.replaceNamespacedDeployment.mockReset().mockResolvedValue({})
-      mockAppsApi.createNamespacedStatefulSet.mockReset().mockResolvedValue({})
-      mockAppsApi.readNamespacedStatefulSet
-        .mockReset()
-        .mockResolvedValue({ metadata: { resourceVersion: '1' } })
-      mockAppsApi.patchNamespacedStatefulSet.mockReset().mockResolvedValue({})
-      mockAppsApi.replaceNamespacedStatefulSet.mockReset().mockResolvedValue({})
+      installLiveStatefulSetStore()
       mockAppsApi.createNamespacedDaemonSet.mockReset().mockResolvedValue({})
       mockAppsApi.readNamespacedDaemonSet
         .mockReset()
@@ -3993,6 +4070,176 @@ describe('WorkflowRecipeReconciler', () => {
       )
     })
 
+    // #760: the StatefulSet writer reads before it creates, so a pass over an
+    // object that already exists writes nothing. Every read and create count
+    // below is filtered by name, because the same read serves the readiness
+    // probe and the legacy checks. Patch counts stay unfiltered: nothing else
+    // patches a StatefulSet, so the unfiltered zero is the stricter assertion.
+    describe('read-first StatefulSet apply (#760)', () => {
+      type StsBody = {
+        metadata: { name: string; annotations: Record<string, string> }
+        spec: Record<string, unknown>
+      }
+      const workload = { id: 'db', type: 'statefulset' as const, image: 'postgres:16' }
+      const recipe = makeRecipe({ spec: { workloads: [workload] } })
+      const namespace = 'sandbox-recipes'
+      const ensure = () =>
+        (
+          reconciler as unknown as {
+            ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
+          }
+        ).ensureStatefulSet(workload, recipe, 'minimal', {})
+      const create = mockAppsApi.createNamespacedStatefulSet
+      const read = mockAppsApi.readNamespacedStatefulSet
+      const patch = mockAppsApi.patchNamespacedStatefulSet
+      const createdBody = (call = 0) => create.mock.calls[call][0].body as StsBody
+      const loggedFor = (level: ReturnType<typeof vi.fn>, message: string, name: string) =>
+        level.mock.calls.filter(
+          ([msg, ctx]) => msg === message && (ctx as { name?: string })?.name === name
+        ).length
+
+      it('S1: an existing StatefulSet with the same hash is read and nothing is written', async () => {
+        await ensure()
+        const name = createdBody().metadata.name
+        create.mockClear()
+        read.mockClear()
+        patch.mockClear()
+
+        const logs = captureLoggerLevels(['info', 'debug'] as const)
+        try {
+          await ensure()
+          expect(
+            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+          ).toBe(1)
+        } finally {
+          logs.restore()
+        }
+        expect(readsOf(read, name, namespace)).toBe(1)
+        expect(postsOf(create, name)).toBe(0)
+        expect(patch).toHaveBeenCalledTimes(0)
+      })
+
+      it('S2: an absent StatefulSet is read, then created', async () => {
+        const logs = captureLoggerLevels(['info', 'debug'] as const)
+        try {
+          await ensure()
+          const name = createdBody().metadata.name
+          expect(loggedFor(logs.calls.info, 'Created StatefulSet', name)).toBe(1)
+          expect(postsOf(create, name)).toBe(1)
+          expect(readsOf(read, name, namespace)).toBe(1)
+          const readOrder =
+            read.mock.invocationCallOrder[
+              read.mock.calls.findIndex(([a]) => (a as { name: string }).name === name)
+            ]
+          expect(readOrder).toBeLessThan(create.mock.invocationCallOrder[0])
+        } finally {
+          logs.restore()
+        }
+      })
+
+      it('S3: a create conflict with an identical object re-reads it and skips the update', async () => {
+        const storeCreate = create.getMockImplementation()!
+        create.mockImplementationOnce(async (args: { namespace: string; body: StsBody }) => {
+          await storeCreate(args)
+          throw { code: 409 }
+        })
+
+        const logs = captureLoggerLevels(['info', 'debug'] as const)
+        try {
+          await ensure()
+          const name = createdBody().metadata.name
+          expect(
+            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+          ).toBe(1)
+          expect(readsOf(read, name, namespace)).toBe(2)
+        } finally {
+          logs.restore()
+        }
+        expect(patch).toHaveBeenCalledTimes(0)
+      })
+
+      it('S3b: a create conflict with a drifted object re-reads it and patches it', async () => {
+        const storeCreate = create.getMockImplementation()!
+        create.mockImplementationOnce(async (args: { namespace: string; body: StsBody }) => {
+          const other = structuredClone(args.body)
+          other.metadata.annotations = {
+            ...other.metadata.annotations,
+            [SPEC_HASH]: 'other-writer',
+          }
+          other.spec = { ...other.spec, replicas: 3 }
+          await storeCreate({ namespace: args.namespace, body: other })
+          throw { code: 409 }
+        })
+
+        await ensure()
+
+        const desired = createdBody()
+        expect(readsOf(read, desired.metadata.name, namespace)).toBe(2)
+        expect(patch).toHaveBeenCalledTimes(1)
+        const sent = patch.mock.calls[0][0] as {
+          name: string
+          body: {
+            metadata: { annotations: Record<string, string> }
+            spec?: Record<string, unknown>
+          }
+        }
+        expect(sent.name).toBe(desired.metadata.name)
+        expect(sent.body.metadata.annotations[SPEC_HASH]).toBe(
+          desired.metadata.annotations[SPEC_HASH]
+        )
+        expect(sent.body.spec?.replicas).toBe(desired.spec.replicas)
+      })
+
+      it('S4: a read error other than 404 is rethrown and nothing is created', async () => {
+        const failure = { code: 500 }
+        read.mockImplementation(async () => {
+          throw failure
+        })
+
+        await expect(ensure()).rejects.toBe(failure)
+
+        // Witness: the failing read happened; the create (which would succeed) did not.
+        const writerReads = read.mock.calls.filter(
+          ([args]) => args.namespace === namespace && String(args.name).includes(workload.id)
+        )
+        expect(writerReads).toHaveLength(1)
+        expect(create).toHaveBeenCalledTimes(0)
+        expect(patch).toHaveBeenCalledTimes(0)
+      })
+
+      it('S5: an object that vanishes after the create conflict asks for a fresh reconcile', async () => {
+        create.mockRejectedValueOnce({ code: 409 })
+
+        const outcome = ensure()
+
+        await expect(outcome).rejects.toBeInstanceOf(ResourceVanishedAfterConflictError)
+        // The cause is the 404 of the re-read, as in ensureTransportService.
+        await expect(outcome).rejects.toMatchObject({ cause: { code: 404 } })
+        const name = createdBody().metadata.name
+        expect(readsOf(read, name, namespace)).toBe(2)
+        expect(patch).toHaveBeenCalledTimes(0)
+      })
+
+      it('S6: the second reconcile of a recipe whose StatefulSet exists writes no StatefulSet', async () => {
+        await reconciler.reconcile(recipe)
+        const name = createdBody().metadata.name
+        // Witness for the first pass: it did create the object.
+        expect(postsOf(create, name)).toBe(1)
+        create.mockClear()
+
+        const logs = captureLoggerLevels(['info', 'debug'] as const)
+        try {
+          await reconciler.reconcile(recipe)
+          expect(
+            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+          ).toBe(1)
+        } finally {
+          logs.restore()
+        }
+        expect(postsOf(create, name)).toBe(0)
+      })
+    })
+
     it('does NOT replace a StatefulSet whose spec-hash is unchanged', async () => {
       const workload = { id: 'db', type: 'statefulset' as const, image: 'postgres:16' }
       const recipe = makeRecipe({ spec: { workloads: [workload] } })
@@ -4010,20 +4257,42 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(workload, recipe, 'minimal', {})
       expect(createdBody!.metadata.annotations[SPEC_HASH]).toBeDefined()
 
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
         metadata: { resourceVersion: '9', annotations: createdBody!.metadata.annotations },
         spec: createdBody!.spec,
       })
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
+      mockAppsApi.readNamespacedStatefulSet.mockClear()
+      const name = (createdBody! as unknown as { metadata: { name: string } }).metadata.name
 
-      await (
-        reconciler as unknown as {
-          ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
-        }
-      ).ensureStatefulSet(workload, recipe, 'minimal', {})
+      // Liveness witnesses for the negative assertions below: the writer read
+      // this object and took the unchanged-hash branch.
+      const logs = captureLoggerLevels(['info', 'debug'] as const)
+      try {
+        await (
+          reconciler as unknown as {
+            ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
+          }
+        ).ensureStatefulSet(workload, recipe, 'minimal', {})
+        expect(
+          logs.calls.info.mock.calls.filter(
+            ([msg, ctx]) =>
+              msg === 'StatefulSet spec hash unchanged; skipping update' &&
+              (ctx as { name?: string })?.name === name
+          )
+        ).toHaveLength(1)
+      } finally {
+        logs.restore()
+      }
+      expect(readsOf(mockAppsApi.readNamespacedStatefulSet, name, 'sandbox-recipes')).toBe(1)
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -4047,10 +4316,17 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(createdBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-or-missing' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4059,6 +4335,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(workload, recipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       expect(mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body).toEqual({
         metadata: { annotations: { [SPEC_HASH]: createdBody!.metadata.annotations[SPEC_HASH] } },
@@ -4087,10 +4364,17 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(existingBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-old-template' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4099,6 +4383,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].image).toBe('postgres:16')
@@ -4153,10 +4438,17 @@ describe('WorkflowRecipeReconciler', () => {
         },
         status: { phase: 'Pending' },
       }))
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4165,6 +4457,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].image).toBe('postgres:16')
@@ -4248,10 +4541,17 @@ describe('WorkflowRecipeReconciler', () => {
         },
         status: { phase: 'Pending' },
       }))
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4260,6 +4560,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].env).toContainEqual({
@@ -4316,7 +4617,11 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(existingBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-storage' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4336,6 +4641,7 @@ describe('WorkflowRecipeReconciler', () => {
       })
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -4360,7 +4666,11 @@ describe('WorkflowRecipeReconciler', () => {
       const existing = clone(createdBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-immutable-drift' }
       existing.spec.serviceName = 'manually-mutated-headless-service'
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4380,6 +4690,7 @@ describe('WorkflowRecipeReconciler', () => {
       })
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -6839,14 +7150,21 @@ describe('WorkflowRecipeReconciler', () => {
     const expectedDb = resolveScopedStatefulSetResourceName(recipe, 'db')
 
     // Raw "db" exists and is owned by this recipe; the scoped workload is not ready
-    // yet → cleanup must defer. Reads carry the clerum.io/recipe ownership label so
-    // the owned-probe recognizes them (issue #571 S2).
-    mockAppsApi.readNamespacedStatefulSet.mockImplementation(({ name }) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'existing-db' } },
-        spec: { replicas: 1 },
-        status: { readyReplicas: name === 'db' ? 1 : 0 },
-      })
+    // yet → cleanup must defer. The raw read carries the clerum.io/recipe ownership
+    // label so the owned-probe recognizes it (issue #571 S2). The scoped name goes
+    // to the live store, so the StatefulSet WRC writes is the one it reads back.
+    const storeRead = mockAppsApi.readNamespacedStatefulSet.getMockImplementation()!
+    const ownedRawDb = () => ({
+      metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'existing-db' } },
+      spec: { replicas: 1 },
+      status: { readyReplicas: 1 },
+    })
+    mockAppsApi.readNamespacedStatefulSet.mockImplementation(
+      async (args: { name: string; namespace: string }) => {
+        if (args.name === 'db') return ownedRawDb()
+        const scoped = await storeRead(args)
+        return { ...scoped, status: { ...scoped.status, readyReplicas: 0 } }
+      }
     )
     // The legacy raw Services are live and owned by this recipe.
     for (const legacy of ['db', 'db-headless']) {
@@ -6879,12 +7197,11 @@ describe('WorkflowRecipeReconciler', () => {
     vi.clearAllMocks()
 
     // Second reconcile: scoped workload now ready, raw "db" still present and owned →
-    // teardown fires. Re-establish owned reads after clearAllMocks.
-    mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
-      metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'existing-db' } },
-      spec: { replicas: 1 },
-      status: { readyReplicas: 1 },
-    })
+    // teardown fires. The scoped read returns the stored object with its ready status.
+    mockAppsApi.readNamespacedStatefulSet.mockImplementation(
+      async (args: { name: string; namespace: string }) =>
+        args.name === 'db' ? ownedRawDb() : storeRead(args)
+    )
 
     await reconciler.reconcile(recipe)
 
@@ -7177,14 +7494,8 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
 
-    mockAppsApi.readNamespacedStatefulSet.mockImplementation(({ name }) => {
-      if (name === 'db') return Promise.reject({ code: 404 })
-      return Promise.resolve({
-        metadata: { resourceVersion: '1' },
-        spec: { replicas: 1 },
-        status: { readyReplicas: 1 },
-      })
-    })
+    // StatefulSet reads use the live store: the raw "db" was never created, so it
+    // reads as a 404, and the scoped one WRC creates reads back ready.
     mockCoreApi.readNamespacedService.mockImplementation(({ name }) => {
       if (name === 'db-headless') {
         return Promise.resolve({
@@ -7667,6 +7978,41 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('degraded')
     expect(result.message).toContain('Pre-deploy failed for WorkflowRecipe "test-recipe"')
     expect(result.message).toContain('child McpServers')
+    expect(result.workloadStatuses).toEqual([])
+  })
+
+  it('R.6.4b — a Context that vanishes after a create conflict in pre-deploy degrades the recipe', async () => {
+    // GET 404, POST 409, re-read 404: the Context writer raises
+    // ResourceVanishedAfterConflictError. The pre-deploy caller wraps every
+    // pre-deploy error as retryable, so the recipe degrades (#998 review).
+    mockCustomApi.createNamespacedCustomObject.mockImplementation(
+      ({ plural }: { plural?: string }) =>
+        plural === 'contexts' ? Promise.reject({ code: 409 }) : Promise.resolve({})
+    )
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [
+          {
+            id: 'mcp',
+            type: 'deployment',
+            image: 'mcp:latest',
+            port: 3000,
+            transport: { type: 'streamableHttp' },
+          },
+        ],
+      },
+    })
+    const result = await reconciler.reconcile(recipe)
+    expect(result.phase).toBe('degraded')
+    expect(result.message).toContain('Pre-deploy failed for WorkflowRecipe "test-recipe"')
+    expect(result.message).toContain('Pre-deploy Context allowlist failed')
+    expect(result.message).toContain('disappeared after create conflict')
+    // Witness: the writer read, created, then re-read the Context.
+    const contextReads = mockCustomApi.getNamespacedCustomObject.mock.calls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>)?.plural === 'contexts'
+    )
+    expect(contextReads).toHaveLength(2)
     expect(result.workloadStatuses).toEqual([])
   })
 
@@ -10421,6 +10767,57 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('degraded')
     expect(result.message).toContain('Pre-deploy failed for workflow "test-recipe"')
     expect(result.message).toContain('child McpServers')
+    expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  it('degrades a workflow whose pre-deploy Context vanishes after a create conflict', async () => {
+    // Same vanish as R.6.4b, on the workflow deploy path (#998 review).
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'deploying',
+      message: 'Workflow infrastructure created',
+      workflowPhase: 'initializing',
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+    mockCustomApi.createNamespacedCustomObject.mockImplementation(
+      ({ plural }: { plural?: string }) =>
+        plural === 'contexts' ? Promise.reject({ code: 409 }) : Promise.resolve({})
+    )
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          steps: [{ id: 'research', instruction: 'search', mcpServers: ['web-search'] }],
+          workloads: [
+            {
+              id: 'web-search',
+              type: 'deployment',
+              image: 'clerum/web-search:test',
+              port: 3000,
+              transport: { type: 'streamableHttp', path: '/mcp' },
+            },
+          ],
+        },
+        status: { phase: 'candidate' },
+      })
+    )
+
+    expect(result.phase).toBe('degraded')
+    expect(result.message).toContain('Pre-deploy failed for workflow "test-recipe"')
+    expect(result.message).toContain('Pre-deploy Context allowlist failed')
+    expect(result.message).toContain('disappeared after create conflict')
+    // Witness: the writer read, created, then re-read the Context.
+    const contextReads = mockCustomApi.getNamespacedCustomObject.mock.calls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>)?.plural === 'contexts'
+    )
+    expect(contextReads).toHaveLength(2)
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 

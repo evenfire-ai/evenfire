@@ -669,6 +669,7 @@ const clerum = Object.freeze({
       defaultPath?: string
       routePath?: string
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
+      launchId: string
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     close: () => ipcRenderer.invoke('sandboxUi:close'),
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
@@ -728,19 +729,29 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:deepLink', listener)
       return () => ipcRenderer.off('sandboxUi:deepLink', listener)
     },
-    onClosed: (callback: (args: { appRef: string }) => void) => {
-      const listener = (_event: unknown, args: { appRef: string }) => callback(args)
+    onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => {
+      const listener = (_event: unknown, args: { appRef: string; launchId: string }) =>
+        callback(args)
       ipcRenderer.on('sandboxUi:closed', listener)
       return () => ipcRenderer.off('sandboxUi:closed', listener)
     },
-    onRefreshError: (callback: (args: { appRef: string; message: string }) => void) => {
-      const listener = (_event: unknown, args: { appRef: string; message: string }) =>
-        callback(args)
+    onRefreshError: (
+      callback: (args: { appRef: string; launchId: string; message: string }) => void
+    ) => {
+      const listener = (
+        _event: unknown,
+        args: { appRef: string; launchId: string; message: string }
+      ) => callback(args)
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
     },
-    onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => {
-      const listener = (_event: unknown, args: { appRef: string; title: string }) => callback(args)
+    onTitleChanged: (
+      callback: (args: { appRef: string; launchId: string; title: string }) => void
+    ) => {
+      const listener = (
+        _event: unknown,
+        args: { appRef: string; launchId: string; title: string }
+      ) => callback(args)
       ipcRenderer.on('sandboxUi:titleChanged', listener)
       return () => ipcRenderer.off('sandboxUi:titleChanged', listener)
     },

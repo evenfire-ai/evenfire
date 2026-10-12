@@ -74,4 +74,31 @@ describe('mcp-host structured logger redaction', () => {
       vi.resetModules()
     }
   })
+
+  it('writes one JSON layer when the module is evaluated more than once', async () => {
+    const previousConsole = { log: console.log, error: console.error, warn: console.warn }
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.stubEnv('LOG_LEVEL', 'info')
+    try {
+      for (let load = 0; load < 3; load++) {
+        vi.resetModules()
+        await import('./logger.js')
+      }
+      console.log('[Probe] single layer')
+
+      expect(output).toHaveBeenCalledOnce()
+      expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({
+        level: 'info',
+        component: 'Probe',
+        msg: 'single layer',
+      })
+    } finally {
+      output.mockRestore()
+      console.log = previousConsole.log
+      console.error = previousConsole.error
+      console.warn = previousConsole.warn
+      vi.unstubAllEnvs()
+      vi.resetModules()
+    }
+  })
 })

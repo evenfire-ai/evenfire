@@ -142,6 +142,8 @@ require_contains "${RUNNER}" "gfsUploadV2Fixtures.test.ts" \
   "descriptor fixture suite registration"
 require_node_unit_suite "integration/codex-subscription-contract-freeze.test.ts" \
   "Codex subscription contract freeze node-unit registration"
+require_node_unit_suite "integration/chat-body-budget-parity.test.ts" \
+  "chat body budget parity node-unit registration"
 require_contains "${RUNNER}" "E2E_VITEST_SUITE_GROUP" \
   "suite-group selector"
 require_contains "${RUNNER}" "if [[ \"\${VITEST_SUITE_GROUP}\" == \"node-unit\" ]]" \

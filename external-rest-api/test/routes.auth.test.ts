@@ -43,7 +43,7 @@ describe('routes/auth password-login', () => {
       .send({ email: 'user@example.invalid', password: 'wrong-password' })
 
     expect(res.status).toBe(401)
-    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(res.body).toEqual({ error: 'invalid_credentials' })
   })
 
   it('sets an HttpOnly profile session cookie and omits bearer token body for browser login', async () => {

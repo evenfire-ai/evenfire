@@ -21,6 +21,7 @@ import { createHash } from 'crypto'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { Counter, Gauge, Histogram } from 'prom-client'
+import { logger } from '../../logger'
 import { buildSpilloverRef, parseSpilloverRef } from './refResolver'
 import { generateStructureHint, inferContentType } from './structureHints'
 import type {
@@ -163,7 +164,10 @@ export class SpilloverStorage {
    * Excludes (plan §4.1):
    *   - `isError === true` → never spill (errors are tiny and worth inlining).
    *   - `toolName === 'clerum__spillover_read'` → never spill (the user asked
-   *     for the data; persisting it again is recursion bait).
+   *     for the data; persisting it again is recursion bait). This is the
+   *     storage's own invariant for any caller; the tool loop decides by
+   *     `Tool.spilloverExempt()` before calling here, which is how
+   *     `clerum__attachment_read` pages stay inline too (#666, #678).
    */
   async maybePersist(args: MaybePersistArgs): Promise<SpilloverSummary | null> {
     const byteSize = Buffer.byteLength(args.content, 'utf8')
@@ -363,7 +367,7 @@ export class SpilloverStorage {
     if (this.gcTimer) return
     this.gcTimer = setInterval(() => {
       this.sweep().catch(err => {
-        console.error('[SpilloverStorage] GC sweep failed:', err)
+        logger.error({ component: 'SpilloverStorage', err }, 'GC sweep failed')
       })
     }, this.opts.gcIntervalMs)
     // Don't keep the process alive just for the sweep.

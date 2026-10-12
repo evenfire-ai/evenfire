@@ -320,7 +320,7 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     })
     await expect(
       passwordLoginData({ email: inviter.email, password: 'example-password' })
-    ).resolves.toEqual({ error: 'user_retired' })
+    ).resolves.toBeNull()
 
     const desktop = await testPool.query(
       `SELECT lifecycle_state, lifecycle_version, retirement_reason,

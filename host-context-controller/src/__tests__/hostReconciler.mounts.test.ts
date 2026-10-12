@@ -184,7 +184,18 @@ function deploymentWithRevision(
   replicas = 1
 ): k8s.V1Deployment {
   return {
-    metadata: { name: 'team-mission', namespace: 'mcp-host' },
+    metadata: {
+      name: 'team-mission',
+      namespace: 'mcp-host',
+      generation: 1,
+      uid: 'team-mission-deployment-uid',
+      resourceVersion: '1',
+      labels: {
+        'clerum.io/managed-by': 'host-context-controller',
+        'clerum.io/host': 'team-mission',
+      },
+      annotations: { 'clerum.io/host-uid': 'team-mission-uid' },
+    },
     spec: {
       replicas,
       template: {
@@ -194,7 +205,7 @@ function deploymentWithRevision(
         spec: { containers: [] },
       },
     },
-    status: { readyReplicas },
+    status: { observedGeneration: 1, replicas, updatedReplicas: replicas, readyReplicas },
   } as unknown as k8s.V1Deployment
 }
 
@@ -371,7 +382,15 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     expect(result.revision).toBe(currentSecretRevision)
     expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
-    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+    // Applied-target bookkeeping is one CAS write, with no credential change.
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
+    const applied = replacedRuntimeSecret(coreApi)
+    expect(applied.metadata?.annotations?.[BOOTSTRAP_STATE_KEY]).toBe('fresh')
+    expect(applied.data).toEqual(secret.data)
+    Object.assign(secret, applied, {
+      metadata: { ...applied.metadata, resourceVersion: '20' },
+    })
+    coreApi.replaceNamespacedSecret.mockClear()
 
     deployment.status!.readyReplicas = 1
     await (

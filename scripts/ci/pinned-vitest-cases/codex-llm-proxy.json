@@ -1,0 +1,110 @@
+[
+  {
+    "suite": "originPolicy.test.ts",
+    "fullName": "originPolicy wraps operational lookup codes without the host name"
+  },
+  {
+    "suite": "originPolicy.test.ts",
+    "fullName": "originPolicy rethrows a Node ERR_* lookup error as the same reference"
+  },
+  {
+    "suite": "originPolicy.test.ts",
+    "fullName": "originPolicy maps a failed lookup to its code without the host name"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-1b) answers 429 with no Retry-After header when the upstream value is invalid"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-3a) answers 422 upstream_rejected with the upstream status"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-3c) carries the upstream status on the SSE error frame after a keepalive"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-1d) delivers an upstream 429 after a keepalive as an SSE rate_limited frame"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-4a) answers 503 control_plane_unavailable when redeem cannot connect"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-5) passes a control_plane_unavailable redeem denial through as 503 with its own label"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (r4-l1a) logs a DNS lookup failure by cause code, without err or host"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (r4-l1b) logs a catalog DNS lookup failure by cause code on both admin routes"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis) visual admission overflow answers 503 visual_gate and logs visual_gate"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (l) logs the request-limit reason and labels its failure metric request_limit"
+  },
+  {
+    "suite": "bodyAdmission.test.ts",
+    "fullName": "codex-llm-proxy body admission (#731 R3-2) T-R3-2c answers proxy_capacity_exceeded once the admission queue is full"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "visual stream-gate handoff releases the visual slot for a whitespace-padded small V2"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "visual stream-gate handoff visual per-host share admits at most four visual entries per principal while another principal proceeds"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "visual stream-gate handoff visual per-host share releases the principal share when the visual queue is full before grant"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership keeps the visual slot and principal share until the timed-out parser terminates"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "visual stream-gate handoff visual slot lifetime frees the queue place of a visual request aborted while it waited"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "visual stream-gate handoff visual slot lifetime holds the queue place of a disconnected large-body waiter until its grant"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership stops the native reader independently when a non-reading peer never finishes the response"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership clears a late successful native parse after its read deadline without dispatching it"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership clears the retained parsed body after response close before its callback returns"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry normalizes real transport upstream 503 claiming visual_gate to provider_unavailable"
+  },
+  {
+    "suite": "streamLimitsFreeze.test.ts",
+    "fullName": "codex-subscription stream limits freeze rejects open or mutable admission code producers while reading the closed production union"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership eagerly releases a refused visual body before its response-close backstop"
+  }
+]

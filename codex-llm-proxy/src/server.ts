@@ -9,18 +9,24 @@ import { rateLimit } from 'express-rate-limit'
 import { type Server, createServer } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
 import { z } from 'zod'
-import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
 import {
-  isExpiredExecutionTicket,
-  verifyExecutionTicket,
-} from './auth/executionTicketVerifier.js'
+  BODY_STRUCTURE_LIMITS,
+  LIMITS,
+  SCHEMA_VERSION_V2,
+  createBodyStructureVerify,
+  measureNonImageCompletionBytes,
+  requestBodyLimitBytes,
+} from '@clerum/llm-provider-attempt-contract'
+import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
+import { isExpiredExecutionTicket, verifyExecutionTicket } from './auth/executionTicketVerifier.js'
 import { type PlatformJwtClaims, verifyPlatformJwt } from './auth/platformJwtVerifier.js'
 import {
   CodexTransportError,
+  type StreamCodexCompletionInput,
+  UpstreamTimeoutError,
   listCodexModels,
   streamCodexCompletion,
   testCodexConnection,
-  UpstreamTimeoutError,
 } from './codexTransport.js'
 import type { CodexLlmProxyConfig } from './config.js'
 import { ControlApiClient, ControlApiClientError, fetchCauseCode } from './controlApiClient.js'
@@ -32,12 +38,6 @@ import {
   defaultAddressLookup,
 } from './originPolicy.js'
 import {
-  LIMITS,
-  SCHEMA_VERSION_V2,
-  measureNonImageCompletionBytes,
-  requestBodyLimitBytes,
-} from '@clerum/llm-provider-attempt-contract'
-import {
   BODY_READ_DEADLINE_MS,
   BodyBudget,
   ENVELOPE_ALLOWANCE_BYTES,
@@ -45,6 +45,8 @@ import {
   RequestLimitError,
   STREAM_LIMITS,
   TicketLifeError,
+  VISUAL_PER_HOST_MAX_ADMITTED,
+  VISUAL_READ_CLOSE_GRACE_MS,
   streamGate,
   visualStreamGate,
 } from './requestLimits.js'
@@ -57,6 +59,12 @@ type AdmittedRequest = Request & {
    * request performs (body budget, visual gate, stream gate) ends by then.
    */
   codexAdmissionDeadlineAt?: number
+  /**
+   * The arrival instant the admission clock was stamped from, in epoch ms.
+   * The visual gate measures its own queue wait from it, so its refusal
+   * identity does not depend on when the request reached the gate.
+   */
+  codexAdmissionArrivedAt?: number
   /**
    * #739 D2 — the body's budget reservation, set once it was granted. The
    * handler releases it when the upstream accepted the request; the
@@ -77,7 +85,9 @@ const COMPLETION_PATH = '/internal/runtime/v1/codex/completions'
 
 const completionBodySchema = z
   .object({
-    executionTicket: z.string().min(1),
+    // A signed JWT of a few hundred bytes; the bound keeps an oversized
+    // string from reaching jwt.verify.
+    executionTicket: z.string().min(1).max(ENVELOPE_ALLOWANCE_BYTES),
     requestHash: z.string().regex(/^[a-f0-9]{64}$/),
     request: z.object({}).passthrough(),
     deadlineMs: z.number().int().positive().optional(),
@@ -102,29 +112,65 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function reject(res: Response, status: number, code: string): void {
+/**
+ * `type` is the fixed error type of a refused body (body-parser's or the
+ * structure scan's), never a message or any part of the body.
+ */
+function reject(res: Response, status: number, code: string, type?: string): void {
   if (res.headersSent) return
-  logger.warn({ event: 'codex_proxy_denied', code }, 'request denied')
+  logger.warn(
+    type === undefined
+      ? { event: 'codex_proxy_denied', code }
+      : { event: 'codex_proxy_denied', code, type },
+    'request denied'
+  )
   res.status(status).json({ error: code })
 }
 
+// Every JSON parser scans the raw body before JSON.parse. JSON.parse
+// allocates one heap object per container, so a body within the byte limit
+// can still exhaust the heap; the scan refuses a body denser, more nested or
+// with more containers than any request the contract accepts. Its depth bound
+// (LIMITS.maxNestingDepth + 6) also keeps JSON.stringify and the contract's
+// byte measurement from throwing RangeError on a deep body after parse.
+const verifyBodyStructure = createBodyStructureVerify(BODY_STRUCTURE_LIMITS)
+
 function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: () => void): void {
-  const typed = err as { type?: string; status?: number }
+  const typed = err as { type?: string; status?: number; body?: unknown }
+  // The refusals below share one response code per status, so the logged type
+  // is what tells a structural 413 from a byte-limit 413.
+  const type = typeof typed?.type === 'string' ? typed.type : undefined
   if (typed?.type === 'entity.too.large' || typed?.status === 413) {
-    reject(res, 413, 'payload_too_large')
+    reject(res, 413, 'payload_too_large', type)
     return
   }
   // R9-1: the parsers run with `inflate: false`, so body-parser refuses an
   // encoded body before reading it.
-  if (typed?.type === 'encoding.unsupported') {
-    reject(res, 415, 'unsupported_media_type')
+  if (typed?.type === 'encoding.unsupported' || typed?.type === 'charset.unsupported') {
+    reject(res, 415, 'unsupported_media_type', type)
     return
   }
-  if (err instanceof SyntaxError) {
-    reject(res, 400, 'invalid_request')
+  if (err instanceof SyntaxError || typed?.type === 'body.structure.too.deep') {
+    reject(res, 400, 'invalid_request', type)
     return
   }
-  logger.error({ event: 'codex_proxy_error', err }, 'unhandled request error')
+  // The client closed the connection before it sent the whole body. Nobody
+  // reads a response, so none is written; the budget or visual slot is
+  // released by the response's `close` hook.
+  if (typed?.type === 'request.aborted') {
+    logger.info({ event: 'codex_proxy_request_aborted', type }, 'client aborted the request body')
+    return
+  }
+  // body-parser attaches the raw body to an error thrown by `verify` or by
+  // JSON.parse. Such an error is logged by its type and status only.
+  if (typed?.body !== undefined) {
+    logger.error(
+      { event: 'codex_proxy_error', type: typed.type, status: typed.status },
+      'unhandled request error'
+    )
+  } else {
+    logger.error({ event: 'codex_proxy_error', err }, 'unhandled request error')
+  }
   reject(res, 500, 'internal_error')
 }
 
@@ -160,7 +206,9 @@ function bodyAdmission(
   parse: RequestHandler
 ) {
   return (req: AdmittedRequest, res: Response, next: NextFunction): void => {
-    const admissionDeadlineAt = Date.now() + STREAM_LIMITS.maxQueueWaitMs
+    const arrivedAt = Date.now()
+    const admissionDeadlineAt = arrivedAt + STREAM_LIMITS.maxQueueWaitMs
+    req.codexAdmissionArrivedAt = arrivedAt
     req.codexAdmissionDeadlineAt = admissionDeadlineAt
     if (req.headers['transfer-encoding'] !== undefined) {
       reject(res, 411, 'length_required')
@@ -218,7 +266,19 @@ function bodyAdmission(
           next(err)
           return
         }
-        if (!abort.signal.aborted) reject(res, 503, 'provider_unavailable')
+        if (abort.signal.aborted) return
+        // RequestLimitError messages are fixed strings with no request data.
+        logger.warn(
+          {
+            event: 'codex_proxy_admission_refused',
+            reason: 'body_budget',
+            code: err.code,
+            kind: err.kind,
+            detail: err.message,
+          },
+          'admission refused'
+        )
+        reject(res, 503, err.code)
       }
     )
   }
@@ -238,6 +298,8 @@ export type ProxyRuntimeDeps = {
   streamCompletion?: typeof streamCodexCompletion
   /** Test seam for the body-read deadline. Production uses `BODY_READ_DEADLINE_MS`. */
   bodyReadDeadlineMs?: number
+  /** Test seam for the bounded visual-parser close backstop. */
+  visualReadCloseGraceMs?: number
 }
 
 export type ProxyServers = {
@@ -285,12 +347,30 @@ export function createProxyApps(
   // One budget for both apps: every body this process reads counts against it.
   const bodyBudget = new BodyBudget(IN_FLIGHT_BODY_BUDGET_BODIES * config.maxBodyBytes)
   const bodyReadDeadlineMs = deps.bodyReadDeadlineMs ?? BODY_READ_DEADLINE_MS
+  const visualReadCloseGraceMs = deps.visualReadCloseGraceMs ?? VISUAL_READ_CLOSE_GRACE_MS
+  for (const [name, value] of Object.entries({ bodyReadDeadlineMs, visualReadCloseGraceMs })) {
+    if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647) {
+      throw new RangeError(`${name} must be a positive signed-32-bit integer`)
+    }
+  }
+  // Per-principal occupancy of the visual gate (running plus queued entries).
+  // Keyed on the verified platform principal: sub plus sorted hostRefs.
+  const visualPrincipalAdmissions = new Map<string, number>()
+  const visualRequestOwners = new WeakSet<GatedRequest>()
 
   const runtimeApp = express()
   // R9-1: `inflate: false` on every parser. The budgets count the declared wire
   // length, so an encoded body is refused (415) instead of inflated past it.
-  const ordinaryJson = express.json({ limit: config.maxBodyBytes, inflate: false })
-  const visualJson = express.json({ limit: config.maxVisualBodyBytes, inflate: false })
+  const ordinaryJson = express.json({
+    limit: config.maxBodyBytes,
+    inflate: false,
+    verify: verifyBodyStructure,
+  })
+  const visualJson = express.json({
+    limit: config.maxVisualBodyBytes,
+    inflate: false,
+    verify: verifyBodyStructure,
+  })
   // R9-M-B: the token is checked from the header before any budget is taken or
   // any body byte is read, so an anonymous caller cannot hold a reservation.
   // It runs after the rate limiter, so it cannot be forced ahead of the limit.
@@ -311,6 +391,9 @@ export function createProxyApps(
   // The parser behind body admission. Every request here carries a verified
   // platform JWT.
   //
+  // A granted visual slot is released only after parser completion (or by the
+  // route's stream finally); a response close starts a bounded destruction
+  // backstop instead of freeing a live parser owner.
   // schemaVersion is not known until the body is parsed, so the visual gate
   // must not be taken for every platform JWT. Only a declared Content-Length
   // above the ordinary cap can be a visual envelope. Those bodies take the
@@ -329,31 +412,150 @@ export function createProxyApps(
       ordinaryJson(req, res, next)
       return
     }
+    // One principal gets a fair share of the visual gate, so a
+    // single host cannot fill the entries every other host also needs. The
+    // share is taken before the gate wait, so queued entries count too.
+    const platform = req.codexPlatform
+    if (!platform) {
+      // Fail closed: admission without verified claims must never fall back to
+      // a shared per-principal key. platformGate runs before this middleware.
+      reject(res, 401, 'Unauthorized')
+      return
+    }
+    // bodyAdmission stamps both before it hands the request here.
+    const arrivedAt = req.codexAdmissionArrivedAt
+    const admissionDeadlineAt = req.codexAdmissionDeadlineAt
+    if (arrivedAt === undefined || admissionDeadlineAt === undefined) {
+      next(new Error('visual admission was reached without body admission'))
+      return
+    }
+    const visualPrincipal = JSON.stringify([platform.sub, ...[...platform.hostRefs].sort()])
+    const admittedByPrincipal = visualPrincipalAdmissions.get(visualPrincipal) ?? 0
+    if (admittedByPrincipal >= VISUAL_PER_HOST_MAX_ADMITTED) {
+      logger.warn(
+        {
+          event: 'codex_proxy_admission_refused',
+          reason: 'visual_host_share',
+          limit: VISUAL_PER_HOST_MAX_ADMITTED,
+          sub: platform.sub,
+          hostRefs: [...platform.hostRefs].sort(),
+        },
+        'admission refused'
+      )
+      reject(res, 503, 'visual_host_share')
+      return
+    }
+    visualPrincipalAdmissions.set(visualPrincipal, admittedByPrincipal + 1)
     void (async () => {
       let release: (() => void) | undefined
+      let principalShareHeld = true
+      const releasePrincipalShare = (): void => {
+        if (!principalShareHeld) return
+        principalShareHeld = false
+        const held = visualPrincipalAdmissions.get(visualPrincipal)
+        if (held === undefined) {
+          // A held share always has an entry, so a missing one is a counting
+          // defect. This runs from `close` handlers, where a throw has no
+          // caller to reach, so it is logged and the release completes.
+          logger.error(
+            { event: 'codex_proxy_error', reason: 'principal_share_missing', sub: platform.sub },
+            'visual principal share missing at release'
+          )
+          visualPrincipalAdmissions.delete(visualPrincipal)
+          return
+        }
+        const remaining = held - 1
+        if (remaining > 0) visualPrincipalAdmissions.set(visualPrincipal, remaining)
+        else visualPrincipalAdmissions.delete(visualPrincipal)
+      }
       const parseAbort = new AbortController()
       const abortParse = (): void => parseAbort.abort()
       req.once('aborted', abortParse)
       try {
-        release = await visualStreamGate.acquire(parseAbort.signal, req.codexAdmissionDeadlineAt)
+        // The visual gate's own wait is the admission clock: it is measured
+        // from arrival, so a waiter that waits it out is refused as
+        // `visual_gate` however many ms passed before it reached the gate.
+        release = await visualStreamGate.acquire(parseAbort.signal, admissionDeadlineAt, arrivedAt)
       } catch (err) {
         req.off('aborted', abortParse)
+        releasePrincipalShare()
+        // The client left while queued: nobody reads a refusal, and a departed
+        // client is not gate saturation, so it is not logged as `visual_gate`.
+        // Same rule as the ordinary path's `!abort.signal.aborted`.
+        if (err instanceof RequestLimitError && err.kind === 'aborted') return
         if (err instanceof RequestLimitError) {
+          logger.warn(
+            {
+              event: 'codex_proxy_admission_refused',
+              reason: 'visual_gate',
+              code: err.code,
+              detail: err.message,
+            },
+            'admission refused'
+          )
           reject(res, 503, err.code)
           return
         }
-        next()
+        next(err)
         return
       }
       req.off('aborted', abortParse)
-      req.codexStreamRelease = release
+      const releaseVisual = (): void => {
+        releasePrincipalShare()
+        release?.()
+        release = undefined
+        req.codexStreamRelease = undefined
+      }
+      req.codexStreamRelease = releaseVisual
+      let cancelled = false
+      let parserSettled = false
+      let closeGrace: ReturnType<typeof setTimeout> | undefined
+      const cancelParser = (): void => {
+        if (parserSettled || closeGrace !== undefined) return
+        closeGrace = setTimeout(() => {
+          if (!parserSettled) req.destroy()
+        }, visualReadCloseGraceMs)
+      }
+      const readDeadline = setTimeout(() => {
+        cancelled = true
+        cancelParser()
+        if (res.headersSent) return
+        // The rest of the body is never read, so the connection cannot be reused.
+        res.setHeader('connection', 'close')
+        reject(res, 408, 'request_timeout')
+      }, bodyReadDeadlineMs)
+      const onResponseClose = (): void => {
+        cancelled = true
+        clearTimeout(readDeadline)
+        cancelParser()
+      }
+      res.once('close', onResponseClose)
       visualJson(req, res, err => {
+        parserSettled = true
+        clearTimeout(readDeadline)
+        if (closeGrace !== undefined) clearTimeout(closeGrace)
+        res.off('close', onResponseClose)
+        if (cancelled || err) {
+          req.body = undefined
+          if (err !== null && typeof err === 'object' && 'body' in err) {
+            delete (err as { body?: unknown }).body
+          }
+        }
+        // Capacity remains charged until body-parser has actually unwound. On
+        // success, `req.codexStreamRelease` transfers ownership to the handler,
+        // which releases it in its outer `finally`; refusals release here.
+        if (cancelled || err) releaseVisual()
+        if (cancelled) return
         if (err) {
-          req.codexStreamRelease?.()
-          req.codexStreamRelease = undefined
           next(err)
           return
         }
+        res.once('close', () => {
+          // A synchronous handler throw can happen before its async owner
+          // installs cancellation and a finally block. Once that owner has
+          // taken over, response close must not release its live work.
+          if (!visualRequestOwners.has(req)) releaseVisual()
+        })
         next()
       })
     })()
@@ -400,9 +602,12 @@ export function createProxyApps(
     // Declaring V2 raises only the image budget. Text, tools and wrapper
     // fields stay on the contract's maxRequestBodyBytes non-image ceiling, plus
     // the same envelope allowance control-api's authorizer grants its wrapper.
+    // The min stays: `createProxyApps` accepts a config that did not pass
+    // `loadConfig` (bodyAdmission.test.ts builds one with a 16 KiB body limit).
     if (
       wholeBodyBytes > Math.min(configuredLimit, envelopeLimit) ||
-      measureNonImageCompletionBytes(req.body) > LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+      measureNonImageCompletionBytes(req.body) >
+        LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
     ) {
       releaseAdmission()
       reject(res, 413, 'payload_too_large')
@@ -456,8 +661,7 @@ export function createProxyApps(
       // to req 'close' aborts the ChatGPT hop on every call (3–12ms canceled).
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
-      const visualRequest =
-        (parsed.data.request as { schemaVersion?: unknown }).schemaVersion === SCHEMA_VERSION_V2
+      visualRequestOwners.add(gated)
       // One `codex_proxy_attempt_finished` line per attempt. Identifiers and
       // counts only: never the body, ticket, frames, tool names or arguments.
       const attempt = {
@@ -478,53 +682,76 @@ export function createProxyApps(
         // cap. Keep it for the ChatGPT stream only when the parsed V2 body still
         // exceeds that cap (image bytes stay resident). Padding, V1, and small
         // V2 release it and take the 8-wide gate.
-        if (visualRequest && wholeBodyBytes > config.maxBodyBytes) {
-          release = gated.codexStreamRelease
-          gated.codexStreamRelease = undefined
-        } else {
-          releaseAdmission()
+        // #739 D1-bis: every admission wait also ends when the ticket dies. A
+        // request still queued at `exp` could only be redeemed into
+        // ticket_expired, so it is refused here, before any redeem. The margin
+        // is zero: a ticket still alive when a slot frees is served as before.
+        const deadlineAt = Math.min(admissionDeadlineAt, ticket.expiresAtMs)
+        const refuseTicketLife = (): never => {
+          logger.warn(
+            {
+              event: 'codex_proxy_admission_refused',
+              reason: 'ticket_life',
+              providerAttemptId: ticket.providerAttemptId,
+              hostRef: ticket.hostRef,
+            },
+            'admission refused'
+          )
+          throw new TicketLifeError()
         }
-        if (!release) {
-          // #739 D1-bis: the wait also ends when the ticket dies. A request
-          // still queued at `exp` could only be redeemed into ticket_expired,
-          // so it is refused here, before any redeem. The margin is zero: a
-          // ticket still alive when a slot frees is served as before.
-          const deadlineAt = Math.min(admissionDeadlineAt, ticket.expiresAtMs)
-          const refuseTicketLife = (): never => {
-            logger.warn(
-              {
-                event: 'codex_proxy_admission_refused',
-                reason: 'ticket_life',
-                providerAttemptId: ticket.providerAttemptId,
-                hostRef: ticket.hostRef,
-              },
-              'admission refused'
-            )
-            throw new TicketLifeError()
-          }
+        const waitWithinTicketLife = async (
+          acquire: () => Promise<() => void>
+        ): Promise<() => void> => {
           if (deadlineAt <= Date.now()) {
             if (ticket.expiresAtMs <= admissionDeadlineAt) refuseTicketLife()
-            throw new RequestLimitError('admission deadline exceeded')
+            throw new RequestLimitError('admission deadline exceeded', 'deadline')
           }
           try {
-            release = await streamGate.acquire(abort.signal, deadlineAt)
+            return await acquire()
           } catch (err) {
+            // The wait ended on its own deadline, and that deadline was the
+            // ticket's expiry: comparing clocks here misses a timer that fired
+            // a millisecond early.
             if (
               err instanceof RequestLimitError &&
+              err.kind === 'deadline' &&
               !abort.signal.aborted &&
-              Date.now() >= ticket.expiresAtMs
+              ticket.expiresAtMs <= admissionDeadlineAt
             ) {
               refuseTicketLife()
             }
             throw err
           }
         }
+        if (visualDeclared && wholeBodyBytes > config.maxBodyBytes) {
+          release = gated.codexStreamRelease
+          gated.codexStreamRelease = undefined
+        } else if (gated.codexStreamRelease) {
+          // A demoted body was read through the visual gate, so it holds
+          // no body-budget reservation. It takes one for its compact size
+          // before it gives up the visual slot, so the 8-wide stream gate
+          // never holds more resident bodies than the budget admits. Every
+          // request takes its locks in the same order (visual, budget,
+          // stream), so no two requests wait on each other.
+          try {
+            gated.codexBodyRelease = await waitWithinTicketLife(() =>
+              bodyBudget.acquire(wholeBodyBytes, abort.signal, deadlineAt)
+            )
+          } finally {
+            releaseAdmission()
+          }
+        } else {
+          releaseAdmission()
+        }
+        if (!release) {
+          release = await waitWithinTicketLife(() => streamGate.acquire(abort.signal, deadlineAt))
+        }
         res.status(200)
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache')
         const started = Date.now()
         const stream = deps.streamCompletion ?? streamCodexCompletion
-        const result = await stream({
+        const streamInput: StreamCodexCompletionInput = {
           executionTicket: parsed.data.executionTicket,
           requestHash: parsed.data.requestHash,
           request: parsed.data.request,
@@ -547,12 +774,18 @@ export function createProxyApps(
             abort.signal.addEventListener('abort', stopHeartbeat, { once: true })
           },
           // #739 D2: the body has been written upstream, so its budget
-          // reservation ends here rather than with the stream. The parsed
-          // copy the transport streams from stays; the raw one is dropped.
+          // reservation ends here rather than with the stream. Both the raw
+          // body and the parsed copy are dropped below (#806 Q1).
           onUpstreamAccepted: () => {
             gated.codexBodyRelease?.()
             gated.codexBodyRelease = undefined
+            // Every reference to the parsed tree ends with the reservation: a
+            // live stream keeps this frame, `parsed` and `streamInput` for as
+            // long as the upstream answers, and an 8-wide gate of dense trees
+            // would otherwise outlast the budget that admitted them.
             req.body = undefined
+            parsed.data.request = {}
+            streamInput.request = undefined
           },
           finalize: input => client.finalize(input),
           fetchFn,
@@ -562,7 +795,8 @@ export function createProxyApps(
             else textChunks += 1
             return writeSseChunk(res, `data: ${JSON.stringify(frame)}\n\n`, abort.signal)
           },
-        })
+        }
+        const result = await stream(streamInput)
         stopHeartbeat?.()
         res.write(
           `data: ${JSON.stringify({ type: 'done', outcome: result.outcome, ...(result.usage ? { usage: result.usage } : {}) })}\n\n`
@@ -587,9 +821,9 @@ export function createProxyApps(
         stopHeartbeat?.()
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
-        // A request limit answers provider_unavailable on the wire; its own
-        // label keeps it apart from real upstream outages in the metric. A
-        // ticket that died in the queue is counted as provider_unavailable.
+        // Queue capacity has a terminal local wire code; the request_limit
+        // metric also includes abort/deadline kinds that keep their existing
+        // wire semantics. Ticket expiry remains provider_unavailable.
         metrics.observeAttemptFailure(
           err instanceof RequestLimitError && !(err instanceof TicketLifeError)
             ? 'request_limit'
@@ -597,8 +831,7 @@ export function createProxyApps(
         )
         if (err instanceof UpstreamTimeoutError) metrics.observeUpstreamTimeout(err.kind)
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
-        const causeCode =
-          err instanceof ControlApiClientError ? err.causeCode : fetchCauseCode(err)
+        const causeCode = err instanceof ControlApiClientError ? err.causeCode : fetchCauseCode(err)
         logger.warn(
           {
             event: 'codex_proxy_attempt_finished',
@@ -612,6 +845,9 @@ export function createProxyApps(
               : {}),
             // RequestLimitError messages are fixed strings with no request data.
             ...(err instanceof RequestLimitError ? { reason: err.message } : {}),
+            // An error no class above maps is a handler defect answered 503:
+            // the error itself is logged, or nothing would show it.
+            ...(isMappedError(err) ? {} : { err }),
             // G1-4: a failed fetch's cause code only, never its message or URL.
             ...(causeCode ? { causeCode } : {}),
             deliveredAs,
@@ -631,7 +867,9 @@ export function createProxyApps(
             : undefined
         const rejectedBy = typeof upstreamStatus === 'number' ? { upstreamStatus } : {}
         if (deliveredAs === 'sse_error') {
-          res.write(`data: ${JSON.stringify({ type: 'error', code: mapped.code, ...rejectedBy })}\n\n`)
+          res.write(
+            `data: ${JSON.stringify({ type: 'error', code: mapped.code, ...rejectedBy })}\n\n`
+          )
           res.end()
           return
         }
@@ -649,6 +887,14 @@ export function createProxyApps(
       } finally {
         stopHeartbeat?.()
         release?.()
+        // Defence in depth for an early throw after this async owner took over
+        // but before the visual release was moved into `release`.
+        gated.codexStreamRelease?.()
+        gated.codexStreamRelease = undefined
+        // A demoted body's reservation, when the stream ended before the body
+        // was written upstream. Budgeted bodies are also released on close.
+        gated.codexBodyRelease?.()
+        gated.codexBodyRelease = undefined
       }
     })()
   })
@@ -676,7 +922,7 @@ export function createProxyApps(
     bodyBudget,
     config.maxBodyBytes,
     bodyReadDeadlineMs,
-    express.json({ limit: config.maxBodyBytes, inflate: false })
+    express.json({ limit: config.maxBodyBytes, inflate: false, verify: verifyBodyStructure })
   )
   const adminHandler = (kind: 'models' | 'test') => (req: Request, res: Response) => {
     if (!req.is('application/json')) {
@@ -815,6 +1061,9 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // would spend the same budget again, so it is a gateway timeout, not 503.
   stream_duration_exceeded: 504,
   connection_unavailable: 503,
+  visual_host_share: 503,
+  visual_gate: 503,
+  proxy_capacity_exceeded: 503,
   provider_unavailable: 503,
   sse_buffer_exceeded: 503,
   invalid_receipt: 503,
@@ -832,13 +1081,30 @@ function failureLabel(code: string): string {
   return Object.hasOwn(ATTEMPT_ERROR_STATUS, code) ? code : 'other'
 }
 
+type MappedError =
+  | OriginDeniedError
+  | RequestLimitError
+  | CodexTransportError
+  | ControlApiClientError
+
+/**
+ * True for the errors `mapError` answers with a status of their own. Anything
+ * else is a defect in the handler; it is answered 503 like an outage, so the
+ * caller logs the error itself to keep it visible.
+ */
+function isMappedError(err: unknown): err is MappedError {
+  return (
+    err instanceof OriginDeniedError ||
+    err instanceof RequestLimitError ||
+    err instanceof CodexTransportError ||
+    err instanceof ControlApiClientError
+  )
+}
+
 function mapError(err: unknown): { status: number; code: string } {
+  if (!isMappedError(err)) return { status: 503, code: 'provider_unavailable' }
   if (err instanceof OriginDeniedError) return { status: 403, code: 'origin_denied' }
-  if (err instanceof RequestLimitError) return { status: 503, code: 'provider_unavailable' }
-  if (err instanceof CodexTransportError || err instanceof ControlApiClientError) {
-    return { status: attemptErrorStatus(err.code), code: err.code }
-  }
-  return { status: 503, code: 'provider_unavailable' }
+  return { status: attemptErrorStatus(err.code), code: err.code }
 }
 
 /**

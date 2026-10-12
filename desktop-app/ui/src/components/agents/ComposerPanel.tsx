@@ -21,8 +21,11 @@ import {
 } from '@constants/agentFeatures'
 import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
-  COMPOSER_MAX_IMAGE_ATTACHMENTS,
+  COMPOSER_MAX_ATTACHMENTS,
+  type ComposerImageBudget,
+  type ComposerImageTotalBudget,
   composerImageBudget,
+  composerImageCountedBytes,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -30,9 +33,14 @@ import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
+import { formatFileSize } from '@lib/composerFileAdmission'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
-import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
+import type {
+  ComposerFileAttachment,
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+} from '../../uiTypes'
 import { AnnotationCanvas } from './AnnotationCanvas'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
 import { ComposerGlobalFilesModal } from './ComposerGlobalFilesModal'
@@ -60,6 +68,14 @@ function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
 
 function formatComposerMebibytes(bytes: number): number {
   return Math.round(bytes / (1024 * 1024))
+}
+
+/** The label bytes travel with the total, so the impossible state is not representable. */
+function composerTotalLimitLabel(
+  total: ComposerImageTotalBudget,
+  sizeUnit: ComposerImageBudget['sizeUnit']
+): string {
+  return `${formatComposerMebibytes(total.labelBytes)} ${sizeUnit}`
 }
 
 function bytesFromBase64(data: string): Uint8Array | null {
@@ -110,10 +126,32 @@ function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
   return <IconContexts />
 }
 
+/** Status line of a document chip: what the user needs to know before sending. */
+function getComposerFileMeta(file: ComposerFileAttachment): string {
+  if (file.status !== 'ready') return 'Reading...'
+  const size = formatFileSize(file.sizeBytes)
+  if (file.classification.reader === 'none') return `${size} · No reader available`
+  return `${size} · ${file.classification.class}`
+}
+
+/** Notice shown under the chips for a document that needs attention. */
+function getComposerFileNotice(file: ComposerFileAttachment): string | null {
+  if (file.status !== 'ready') return null
+  if (file.classification.mismatch) {
+    return `${file.filename} looks like a ${file.classification.class} file, not what its name or type says. It is attached as it is.`
+  }
+  if (file.classification.reader === 'none') {
+    return `${file.filename} is attached, but the agent has no reader for this kind of file.`
+  }
+  return null
+}
+
 export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelProps) {
   const { selectedAgent } = useNavigationContext()
   const {
     composerImageAttachments,
+    composerFileAttachments,
+    composerFileRefusals,
     composerReferenceAttachments,
     agentSending,
     agentError,
@@ -127,6 +165,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     handleAddComposerImageAttachments: onAddComposerImageAttachments,
     handleUpdateComposerImageAttachment: onUpdateComposerImageAttachment,
     handleRemoveComposerImageAttachment: onRemoveComposerImageAttachment,
+    handleAddComposerFiles: onAddComposerFiles,
+    handleRemoveComposerFileAttachment: onRemoveComposerFileAttachment,
     handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment: onRemoveComposerReferenceAttachment,
     handleSendAgentMessage: onSend,
@@ -198,8 +238,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const hostModelSelection = useHostModels(selectedAgent ?? '', activeChatId ?? '')
   const imageAttachmentBlockMessage = hostModelSelection.imageBlockMessage
   // Size ceilings follow the host provider: Codex keeps #650 (16 MiB / 2048 /
-  // hop-owned aggregate). Every other image-capable host keeps #669 (3 MiB +
-  // 8 MB combined). Capability still comes from the host projection, not this.
+  // hop-owned aggregate). Grok is 16 MiB per image and 16 MiB decoded in total
+  // (#784). Every other image-capable host keeps #669 (3 MiB + 8 MB combined).
+  // Capability still comes from the host projection, not this.
   const imageBudget = composerImageBudget(hostModelSelection.data?.provider)
   const selectedAgentContext = selectedAgent
     ? String(agentContextByName[selectedAgent] || '').trim()
@@ -371,10 +412,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     composerImageAttachments.length > 0 && hostModelSelection.visualSendBlocked
   // Per-instance id: the main panel and the chat drawer can both be mounted.
   const imageNoticeId = useId()
+  // #678 — a document that is still being read is not part of the message yet.
+  // Sending now would leave it out without saying so, so send stays disabled
+  // until each chip is ready or removed.
+  const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
   const handleSend = useCallback(() => {
-    if (imagesBlockedForSend) return
+    if (imagesBlockedForSend || filesBlockedForSend) return
     void onSend(draft)
-  }, [onSend, draft, imagesBlockedForSend])
+  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -509,9 +554,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       const candidates = Array.from(files || [])
       if (!candidates.length) return
 
-      // Drop and paste can carry any file. Unsupported files are refused here,
-      // before the free image slots are counted, so they never take an image's
-      // place or inflate the skipped count.
+      // `routeComposerFiles` sends only PNG/JPEG here; documents take the file
+      // path. Images and files share one per-message count.
       const validationErrors: string[] = []
       const imageCandidates: Array<{
         file: File
@@ -521,19 +565,15 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         const mimeType = inferComposerImageMimeType(file)
         if (mimeType && COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) {
           imageCandidates.push({ file, mimeType })
-        } else {
-          validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
         }
       }
-      if (!imageCandidates.length) {
-        setComposerAttachmentError(validationErrors[0] ?? null)
-        return
-      }
+      if (!imageCandidates.length) return
 
-      const availableSlots = COMPOSER_MAX_IMAGE_ATTACHMENTS - composerImageAttachments.length
+      const availableSlots =
+        COMPOSER_MAX_ATTACHMENTS - composerImageAttachments.length - composerFileAttachments.length
       if (availableSlots <= 0) {
         setComposerAttachmentError(
-          `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message.`
+          `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
         )
         return
       }
@@ -543,17 +583,20 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       if (imageCandidates.length > availableSlots) {
         const skipped = imageCandidates.length - availableSlots
         validationErrors.push(
-          `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message; ${skipped} ${
+          `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments; ${skipped} ${
             skipped === 1 ? 'image was' : 'images were'
           } not added.`
         )
       }
-      // Non-Codex images travel inline in one 10 MB body (#669). Codex leaves
-      // the aggregate to the hop (#650).
-      let totalBase64Bytes = composerImageAttachments.reduce(
-        (total, attachment) => total + attachment.dataBase64.length,
-        0
-      )
+      // General images are counted in base64 characters (#669). Codex and Grok
+      // count decoded bytes against the 16 MiB ingress total (#650, #784).
+      const totalBudget = imageBudget.total
+      let totalCountedBytes = totalBudget
+        ? composerImageAttachments.reduce(
+            (total, attachment) => total + composerImageCountedBytes(totalBudget, attachment),
+            0
+          )
+        : 0
 
       for (const [index, { file, mimeType }] of selected.entries()) {
         if (composerImageExceedsPerImageBudget(file.size, imageBudget.maxImageBytes)) {
@@ -589,19 +632,24 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             revokePreviewUrl(previewUrl)
             continue
           }
+          const candidate = { dataBase64, sizeBytes: file.size }
           if (
-            imageBudget.maxTotalBase64Bytes != null &&
-            totalBase64Bytes + dataBase64.length > imageBudget.maxTotalBase64Bytes
+            totalBudget != null &&
+            totalCountedBytes + composerImageCountedBytes(totalBudget, candidate) >
+              totalBudget.maxBytes
           ) {
             validationErrors.push(
-              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${formatComposerMebibytes(
-                imageBudget.maxTotalBase64Bytes
-              )} ${imageBudget.sizeUnit} in total. Send the attached images first or remove one.`
+              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${composerTotalLimitLabel(
+                totalBudget,
+                imageBudget.sizeUnit
+              )} in total. Send the attached images first or remove one.`
             )
             revokePreviewUrl(previewUrl)
             continue
           }
-          totalBase64Bytes += dataBase64.length
+          if (totalBudget != null) {
+            totalCountedBytes += composerImageCountedBytes(totalBudget, candidate)
+          }
           accepted.push({
             id: crypto.randomUUID(),
             name: buildAttachmentName(file, source, mimeType, index),
@@ -625,6 +673,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     },
     [
       buildAttachmentName,
+      composerFileAttachments,
       composerImageAttachments,
       imageBudget,
       inferComposerImageMimeType,
@@ -633,6 +682,29 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       createPreviewUrl,
       revokePreviewUrl,
     ]
+  )
+
+  /**
+   * One entry point for the picker, paste and drop (#678): PNG and JPEG keep the
+   * image path with its previews and image budget; every other file is read as
+   * an inline document attachment.
+   */
+  const routeComposerFiles = useCallback(
+    (files: File[] | FileList, source: 'picker' | 'clipboard') => {
+      const images: File[] = []
+      const documents: File[] = []
+      for (const file of Array.from(files || [])) {
+        const mimeType = inferComposerImageMimeType(file)
+        if (mimeType && COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) images.push(file)
+        else documents.push(file)
+      }
+      setComposerAttachmentError(null)
+      // Called for every gesture, with `[]` when it carried only images: this
+      // is what replaces the document notices of the previous gesture.
+      onAddComposerFiles(documents, draft)
+      if (images.length > 0) void prepareComposerImageAttachments(images, source)
+    },
+    [draft, inferComposerImageMimeType, onAddComposerFiles, prepareComposerImageAttachments]
   )
 
   /**
@@ -656,22 +728,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         updated.dataBase64,
         imageBudget.maxDimension
       )
-      const otherBase64Bytes = composerImageAttachments.reduce(
-        (total, attachment) =>
-          attachment.id === updated.id ? total : total + attachment.dataBase64.length,
-        0
-      )
-      const combinedOverflow =
-        imageBudget.maxTotalBase64Bytes != null &&
-        otherBase64Bytes + updated.dataBase64.length > imageBudget.maxTotalBase64Bytes
-      if (
-        !composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes) &&
-        !dimensionError &&
-        !combinedOverflow
-      ) {
-        onUpdateComposerImageAttachment(updated)
-        return
-      }
+      const totalBudget = imageBudget.total
+      const otherCountedBytes = totalBudget
+        ? composerImageAttachments.reduce(
+            (total, attachment) =>
+              attachment.id === updated.id
+                ? total
+                : total + composerImageCountedBytes(totalBudget, attachment),
+            0
+          )
+        : 0
       if (composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes)) {
         throw new Error(
           `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
@@ -684,11 +750,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           `${updated.name || 'Image'} was kept unchanged. Max resolution is ${imageBudget.maxDimension} px.`
         )
       }
-      throw new Error(
-        `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${formatComposerMebibytes(
-          imageBudget.maxTotalBase64Bytes ?? 0
-        )} ${imageBudget.sizeUnit} in total.`
-      )
+      if (
+        totalBudget != null &&
+        otherCountedBytes + composerImageCountedBytes(totalBudget, updated) > totalBudget.maxBytes
+      ) {
+        throw new Error(
+          `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${composerTotalLimitLabel(
+            totalBudget,
+            imageBudget.sizeUnit
+          )} in total.`
+        )
+      }
+      onUpdateComposerImageAttachment(updated)
     },
     [composerImageAttachments, imageBudget, onUpdateComposerImageAttachment]
   )
@@ -708,15 +781,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           dedupedBySignature.set(signature, file)
         }
       }
-      const imageFiles = [...dedupedBySignature.values()].filter(file => {
-        const mimeType = inferComposerImageMimeType(file)
-        return mimeType ? COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType) : false
-      })
-      if (!imageFiles.length) return
+      const pastedFiles = [...dedupedBySignature.values()]
+      if (!pastedFiles.length) return
       event.preventDefault()
-      void prepareComposerImageAttachments(imageFiles, 'clipboard')
+      routeComposerFiles(pastedFiles, 'clipboard')
     },
-    [inferComposerImageMimeType, prepareComposerImageAttachments]
+    [routeComposerFiles]
   )
 
   const hasDragFiles = useCallback((event: React.DragEvent<HTMLElement>) => {
@@ -755,9 +825,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       setDragActive(false)
       const files = Array.from(event.dataTransfer.files || [])
       if (!files.length) return
-      void prepareComposerImageAttachments(files, 'picker')
+      routeComposerFiles(files, 'picker')
     },
-    [hasDragFiles, prepareComposerImageAttachments]
+    [hasDragFiles, routeComposerFiles]
   )
 
   const composerAttachmentItems = useMemo(() => {
@@ -775,10 +845,28 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       order: attachment.addedOrder ?? referenceItems.length + index,
       fallbackIndex: referenceItems.length + index,
     }))
-    return [...referenceItems, ...imageItems].sort(
+    const fileItems = composerFileAttachments.map((attachment, index) => ({
+      id: `file:${attachment.id}`,
+      kind: 'file' as const,
+      attachment,
+      order: attachment.addedOrder ?? referenceItems.length + imageItems.length + index,
+      fallbackIndex: referenceItems.length + imageItems.length + index,
+    }))
+    return [...referenceItems, ...imageItems, ...fileItems].sort(
       (a, b) => a.order - b.order || a.fallbackIndex - b.fallbackIndex
     )
-  }, [composerImageAttachments, composerReferenceAttachments])
+  }, [composerFileAttachments, composerImageAttachments, composerReferenceAttachments])
+  // Refusals come first: they name documents that were not attached at all.
+  const composerFileNotices = useMemo(
+    () => [
+      ...composerFileRefusals.map(refusal => ({ ...refusal, refused: true })),
+      ...composerFileAttachments.flatMap(file => {
+        const notice = getComposerFileNotice(file)
+        return notice ? [{ id: file.id, refused: false, text: notice }] : []
+      }),
+    ],
+    [composerFileAttachments, composerFileRefusals]
+  )
 
   const isDegraded = hostRuntimeStatus?.degraded?.reason === 'llm_key_missing'
   const hasComposerAttachments = composerAttachmentItems.length > 0
@@ -788,13 +876,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       <input
         ref={composerFileInputRef}
         type="file"
-        accept={COMPOSER_ACCEPT_IMAGE_MIME_TYPES.join(',')}
         multiple
         className="composer-file-input"
         onChange={event => {
           const selectedFiles = event.target.files
           if (selectedFiles && selectedFiles.length > 0) {
-            void prepareComposerImageAttachments(selectedFiles, 'picker')
+            routeComposerFiles(selectedFiles, 'picker')
           }
           event.currentTarget.value = ''
         }}
@@ -1033,6 +1120,40 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       </span>
                     )
                   }
+                  if (item.kind === 'file') {
+                    const attachment = item.attachment
+                    const meta = getComposerFileMeta(attachment)
+                    return (
+                      <span
+                        key={item.id}
+                        className="composer-attachment-chip"
+                        title={`${attachment.filename} - ${meta}`}
+                        data-testid="composer-file-chip"
+                        data-file-status={attachment.status}
+                      >
+                        <span
+                          className="composer-reference-icon composer-reference-icon--uploaded-file"
+                          aria-hidden="true"
+                        >
+                          <IconAttachFile />
+                        </span>
+                        <span className="composer-attachment-chip-body">
+                          <strong>{attachment.filename}</strong>
+                          <span className="composer-attachment-chip-meta">{meta}</span>
+                        </span>
+                        <IconButton
+                          className="composer-attachment-remove"
+                          onClick={() => onRemoveComposerFileAttachment(attachment.id)}
+                          aria-label={`Remove ${attachment.filename}`}
+                          label={`Remove ${attachment.filename}`}
+                          size="xs"
+                          variant="ghost"
+                        >
+                          <IconClose />
+                        </IconButton>
+                      </span>
+                    )
+                  }
                   const attachment = item.attachment
                   const tooltip = getComposerImageTooltip(attachment)
                   return (
@@ -1084,8 +1205,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 isDegraded ||
                 agentSending ||
                 imagesBlockedForSend ||
+                filesBlockedForSend ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
+                  composerFileAttachments.length === 0 &&
                   composerReferenceAttachments.length === 0)
               }
               aria-label={agentSending ? 'Sending message' : 'Send message'}
@@ -1122,6 +1245,21 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           </p>
         </div>
       ) : null}
+      {composerFileNotices.length > 0 ? (
+        <div className="composer-attachments" data-testid="composer-file-notices">
+          {composerFileNotices.map(notice => (
+            <p
+              key={notice.id}
+              className={
+                notice.refused ? 'composer-attachment-error' : 'composer-attachment-notice'
+              }
+              role={notice.refused ? 'alert' : 'status'}
+            >
+              {notice.text}
+            </p>
+          ))}
+        </div>
+      ) : null}
       {agentError ? (
         <div className="composer-footer">
           {failedAgentSend?.kind === 'waking' ? (
@@ -1152,7 +1290,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 </details>
               ) : null}
               <div className="action-row">
-                {failedAgentSend && (
+                {/* A message answered without its documents is never resent. */}
+                {failedAgentSend && !failedAgentSend.answeredWithoutFiles && (
                   <Button
                     color="neutral"
                     onClick={onRetryFailedSend}
@@ -1172,7 +1311,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         <div className="composer-footer">
           <div className="action-row">
             <Button onClick={onRecoverFailedSend} disabled={agentSending} size="xs" variant="ghost">
-              Recover input
+              {failedAgentSend.answeredWithoutFiles ? 'Recover files' : 'Recover input'}
             </Button>
             <Button onClick={onDiscardFailedSend} disabled={agentSending} size="xs" variant="ghost">
               Discard failed input
