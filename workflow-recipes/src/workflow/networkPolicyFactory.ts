@@ -1068,3 +1068,51 @@ export function buildWorkflowNetworkPolicies(
     ...pluginWorkloadSdkPolicies,
   ])
 }
+
+const RUN_LANE_CATALOG_PLACEHOLDER_SERVER = '_catalog'
+
+/**
+ * Names the run-lane factory can emit for this recipe. Outer-owned
+ * `${recipe}-coordinator-to-gfs` is never included (`includeCoordinatorGfs: false`).
+ * Catalog membership — not a GFS-name keep-list — is the prune universe.
+ *
+ * Lane flags are forced on so leftovers of unused lanes stay in the universe
+ * when this pass's applyConfig turned them off. Building the catalog from the
+ * pass config alone makes catalog == desired and prune never deletes a leftover.
+ * Awaiting-trigger already tears down the mcp-host pod unless eager SDK; pruning
+ * those NPs is the same "mcp-host is not live" decision, not an accidental retire.
+ *
+ * An empty server list is replaced by the `_catalog` placeholder so
+ * `${recipe}-mcp-host-to-servers`, which the factory emits only for a
+ * non-empty list, stays in the universe and its leftover is pruned. The
+ * per-server `${recipe}-wf-mcp-ingress-<server>` names come only from the
+ * servers passed in, so the ingress policy of a server the spec no longer
+ * lists is never in the catalog; it lives in the mcp-server namespace, which
+ * the prune does not list either, and stays until the finalizer's label sweep
+ * there. The mcp-host egress side is exact: `-mcp-host-to-servers` selects
+ * only the listed servers.
+ */
+export function buildRunLaneNetworkPolicyCatalog(
+  applyConfig: NetworkPolicyConfig,
+  mcpServerNames: string[] = [],
+  snippetMcpServerNames: string[] = []
+): Set<string> {
+  const catalogConfig: NetworkPolicyConfig = {
+    ...applyConfig,
+    includeCoordinator: true,
+    includeMcpHost: true,
+    includeCodexProxyEgress: true,
+    includeGrokProxyEgress: true,
+    includeCoordinatorGfs: false,
+    includeArtifactReader: true,
+    includeSnippetRunner: true,
+    pluginWorkloadSdkSandboxAccess: true,
+  }
+  const serverNames =
+    mcpServerNames.length > 0 ? mcpServerNames : [RUN_LANE_CATALOG_PLACEHOLDER_SERVER]
+  return new Set(
+    buildWorkflowNetworkPolicies(catalogConfig, serverNames, snippetMcpServerNames)
+      .map(policy => policy.metadata?.name)
+      .filter((name): name is string => Boolean(name))
+  )
+}

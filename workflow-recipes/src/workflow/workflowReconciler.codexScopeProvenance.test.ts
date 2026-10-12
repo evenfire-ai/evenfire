@@ -24,6 +24,10 @@ const crashRecoveryMocks = vi.hoisted(() => ({
   evaluateCrashRecovery: vi.fn().mockReturnValue({ action: 'none', message: 'Pod is healthy' }),
   getContainerWaitingReason: vi.fn().mockResolvedValue(undefined),
   getPodPhase: vi.fn().mockResolvedValue(undefined),
+  getPodPresence: vi.fn(async (api: unknown, name: string, namespace: string) => {
+    const phase = await crashRecoveryMocks.getPodPhase(api, name, namespace)
+    return phase === undefined ? { kind: 'absent' as const } : { kind: 'present' as const, phase }
+  }),
   getPodReadiness: vi.fn().mockResolvedValue({ ready: true, phase: 'Running', uid: 'pod-uid-1' }),
   isRecoverableContainerWaitingReason: vi.fn(() => false),
 }))
@@ -381,6 +385,22 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     })
     runtimeTokenIssuerMocks.issueMcpHostRuntimeTokens.mockClear()
     crashRecoveryMocks.deletePodIfExists.mockClear()
+    // B2: withdraw is LIST membership of the leftover proxy, not a named DELETE
+    // of an absent object. Seed the leftover created on the first pass.
+    networkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+      items: [
+        {
+          metadata: {
+            name: CODEX_PROXY_POLICY,
+            namespace: sandboxNamespace,
+            labels: {
+              'clerum.io/recipe': 'codex-recipe',
+              'clerum.io/managed-by': 'wrc',
+            },
+          },
+        },
+      ],
+    })
 
     await reconcileRecipe(
       reconciler,
@@ -400,6 +420,12 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     expect(
       remintPatch.body?.metadata?.annotations?.['clerum.io/mcp-host-runtime-token-generation']
     ).toBe('1')
+    expect(networkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        namespace: sandboxNamespace,
+        labelSelector: 'clerum.io/recipe=codex-recipe,clerum.io/managed-by=wrc',
+      })
+    )
     expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: CODEX_PROXY_POLICY,
       namespace: sandboxNamespace,
@@ -444,6 +470,21 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     })
     runtimeTokenIssuerMocks.issueMcpHostRuntimeTokens.mockClear()
     crashRecoveryMocks.deletePodIfExists.mockClear()
+    // B2: leftover proxy stays listed so withdraw prunes by membership, not by name.
+    networkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+      items: [
+        {
+          metadata: {
+            name: CODEX_PROXY_POLICY,
+            namespace: sandboxNamespace,
+            labels: {
+              'clerum.io/recipe': 'codex-recipe',
+              'clerum.io/managed-by': 'wrc',
+            },
+          },
+        },
+      ],
+    })
     await reconcileRecipe(reconciler, makeCodexSpec())
 
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
@@ -452,6 +493,12 @@ describe('WorkflowReconciler Codex scope provenance', () => {
       expect.anything(),
       'codex-recipe-mcp-host',
       sandboxNamespace
+    )
+    expect(networkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        namespace: sandboxNamespace,
+        labelSelector: 'clerum.io/recipe=codex-recipe,clerum.io/managed-by=wrc',
+      })
     )
     expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: CODEX_PROXY_POLICY,

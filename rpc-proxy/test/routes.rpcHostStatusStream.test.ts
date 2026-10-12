@@ -92,7 +92,10 @@ describe('routes/rpcHostStatusStream', () => {
       iat: 1,
       exp: 9999999999,
     })
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     const app = makeApp()
     await request(app)
       .get('/rpc/hosts/nope/status/stream')

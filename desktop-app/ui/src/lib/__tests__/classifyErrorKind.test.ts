@@ -5,7 +5,7 @@ describe('classifyErrorKind — host availability codes', () => {
   it('classifies host_waking messages as waking, even wrapped by Electron IPC', () => {
     expect(
       classifyErrorKind(
-        'Error invoking remote method rpc:invokeHostMessage: ' +
+        "Error invoking remote method 'rpc:invokeHostMessage': " +
           'Error: host_waking: agent host "chatllm" is waking up — retry shortly'
       )
     ).toBe('waking')

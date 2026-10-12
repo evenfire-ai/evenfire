@@ -1,9 +1,13 @@
 import { app } from 'electron'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import {
+  canonicalizeDesktopRestEndpoint,
+  sameDesktopRestEndpoint,
+} from './desktopEnvironmentUrl.js'
 import type {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigOption,
@@ -411,7 +415,8 @@ function configsMatch(a: DesktopRuntimeConfig, b: DesktopRuntimeConfig): boolean
 
 function runtimeEndpointsMatch(a: DesktopRuntimeConfig, b: DesktopRuntimeConfig): boolean {
   return (
-    a.externalRestApiBaseUrl === b.externalRestApiBaseUrl && a.rpcProxyBaseUrl === b.rpcProxyBaseUrl
+    sameDesktopRestEndpoint(a.externalRestApiBaseUrl, b.externalRestApiBaseUrl) &&
+    a.rpcProxyBaseUrl === b.rpcProxyBaseUrl
   )
 }
 
@@ -733,6 +738,9 @@ export function isDesktopRuntimeConfigured(): boolean {
 export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Promise<void> {
   hydrateDesktopRuntimeConfig()
   const validated = validateRuntimeConfig(next)
+  validated.externalRestApiBaseUrl = canonicalizeDesktopRestEndpoint(
+    validated.externalRestApiBaseUrl
+  )
   const explicitPath = explicitRuntimeConfigPath()
   if (explicitPath) {
     const timestamp = new Date().toISOString()
@@ -753,8 +761,8 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
     return
   }
 
-  const existing = storedProfiles.find(
-    profile => profile.config.externalRestApiBaseUrl === validated.externalRestApiBaseUrl
+  const existing = storedProfiles.find(profile =>
+    sameDesktopRestEndpoint(profile.config.externalRestApiBaseUrl, validated.externalRestApiBaseUrl)
   )
   if (existing) {
     existing.updatedAt = new Date().toISOString()
@@ -775,7 +783,7 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
   const filePath = nextProfileFilePath(directoryPath, validated.appName || DEFAULT_APP_NAME)
   const timestamp = new Date().toISOString()
   const profile: StoredRuntimeProfile = {
-    id: `${toAppSlug(validated.appName || DEFAULT_APP_NAME)}-${Date.now()}`,
+    id: `${toAppSlug(validated.appName || DEFAULT_APP_NAME)}-${randomUUID()}`,
     appName: validated.appName?.trim() || DEFAULT_APP_NAME,
     filePath,
     createdAt: timestamp,
@@ -876,6 +884,7 @@ export function getDesktopRuntimeConfigState(): DesktopRuntimeConfigState {
     isLocalhost,
     selectorVisible,
     activeOptionId,
+    currentConfig: current,
     envKey: resolveEnvKey(current.externalRestApiBaseUrl, current.rpcProxyBaseUrl),
     storagePath: explicitRuntimeConfigPath() || runtimeConfigDirectoryPath(),
     options,

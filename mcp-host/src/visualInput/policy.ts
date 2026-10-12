@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { VisualDeliveryLimits } from './deliveryLimits'
 
 /** Admission limits for source reads, distinct from outbound download limits. */
 export const VISUAL_INPUT_LIMITS = Object.freeze({
@@ -20,6 +21,7 @@ export type VisualInputErrorCode =
   | 'unsupported_format'
   | 'invalid_image'
   | 'version_conflict'
+  | 'identity_mismatch'
   | 'invalid_response'
   | 'incomplete_response'
   | 'cancelled'
@@ -59,6 +61,7 @@ export type ImageInputCapability =
       provider: string
       model: string
       evidence: string
+      deliveryLimits?: VisualDeliveryLimits | null
     }
   | { status: 'unsupported' | 'unknown' }
 

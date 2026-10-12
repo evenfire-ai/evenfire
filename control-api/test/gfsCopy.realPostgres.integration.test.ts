@@ -11,6 +11,7 @@ import { PgResourceStore } from '../../gfs-controller/src/db/resourceStore.js'
 import { GfsWriteService, PgTransactor } from '../../gfs-controller/src/db/writeStore.js'
 import { BlobStore } from '../../gfs-controller/src/storage/blobStore.js'
 import { initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -154,16 +155,19 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.end()
-    await rm(blobRoot, { recursive: true, force: true }).catch(() => undefined)
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(pool)
+      await rm(blobRoot, { recursive: true, force: true }).catch(() => undefined)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('publishes a recursive copy atomically, preserves the source, and records success in the publication transaction', async () => {

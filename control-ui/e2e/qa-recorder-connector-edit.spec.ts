@@ -54,9 +54,8 @@ async function createEmptyContext(page: Page, contextName: string): Promise<void
 async function createDiscoveryConnector(page: Page, connectorName: string): Promise<void> {
   await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
-  // Creation lives behind the "Connector actions" kebab (lowercase c menuitem).
-  await page.getByRole('button', { name: 'Connector actions' }).click()
-  await page.getByRole('menuitem', { name: 'Create connector', exact: true }).click()
+  // Creation is a header button next to "Add remote server" and the Marketplace CTA.
+  await page.getByRole('button', { name: 'Create connector', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors\/new$/, { timeout: 20_000 })
 
   await page.getByPlaceholder('my-mcp-server').fill(connectorName)

@@ -411,12 +411,95 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(conf).toContain('${API_KEY}')
     })
 
-    it('should omit auth header section when authHeaders is not set', () => {
+    it('omits the credential auth-header section but clears Authorization for a static remote with no authHeaders (D-2)', () => {
       const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
       const conf = cm.data['default.conf.template']
 
       expect(conf).not.toContain('Credential auth headers')
-      expect(conf).not.toContain('proxy_set_header Authorization')
+      // A static remote (no oauth, no declared Authorization) clears the header so
+      // it never forwards an incoming Authorization by accident.
+      expect(conf).toContain('proxy_set_header Authorization "";')
+    })
+
+    // ── D-2 Authorization precedence/clearing ──
+    describe('Authorization precedence (D-2)', () => {
+      const oauthRemote = (authHeaders?: Array<{ header: string; valueTemplate: string }>) =>
+        cloneServer(REMOTE_SERVER, {
+          auth: { type: 'oauth' },
+          remote: {
+            baseUrl: 'https://mcp.sentry.io/sse',
+            ...(authHeaders ? { authHeaders } : {}),
+          },
+        })
+
+      it('passes the per-user Bearer through for a remote oauth server (no authHeaders)', () => {
+        const cm = (reconciler as any).buildNginxConfigMap(oauthRemote())
+        const conf = cm.data['default.conf.template']
+
+        expect(conf).toContain('proxy_set_header Authorization $http_authorization;')
+        expect(conf).not.toContain('proxy_set_header Authorization "";')
+      })
+
+      it('clears Authorization for a static remote (no oauth, no authHeaders)', () => {
+        const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
+        const conf = cm.data['default.conf.template']
+
+        expect(conf).toContain('proxy_set_header Authorization "";')
+        expect(conf).not.toContain('proxy_set_header Authorization $http_authorization;')
+      })
+
+      it('lets the operator static credential win for a static remote declaring Authorization', () => {
+        const server = cloneServer(REMOTE_SERVER, {
+          remote: {
+            baseUrl: 'https://api.example.com/v1',
+            authHeaders: [{ header: 'Authorization', valueTemplate: 'Bearer ${API_KEY}' }],
+          },
+        })
+        const cm = (reconciler as any).buildNginxConfigMap(server)
+        const conf = cm.data['default.conf.template']
+
+        expect(conf).toContain('proxy_set_header Authorization "Bearer ${API_KEY}";')
+        // Neither the clearing form nor the passthrough form is emitted.
+        expect(conf).not.toContain('proxy_set_header Authorization "";')
+        expect(conf).not.toContain('proxy_set_header Authorization $http_authorization;')
+      })
+
+      it('clears Authorization for a static remote whose Authorization authHeader is dropped by sanitization', () => {
+        // The clear-vs-operator-wins decision keys on the SANITIZED set, not the raw
+        // list: a CR/LF value is dropped by sanitizeAuthHeader, so no static line is
+        // rendered and we must still CLEAR — otherwise the incoming Authorization
+        // would be forwarded to the upstream (the D-2 invariant hole).
+        const server = cloneServer(REMOTE_SERVER, {
+          remote: {
+            baseUrl: 'https://api.example.com/v1',
+            authHeaders: [{ header: 'Authorization', valueTemplate: 'Bearer x\nInjected: y' }],
+          },
+        })
+        const cm = (reconciler as any).buildNginxConfigMap(server)
+        const conf = cm.data['default.conf.template']
+
+        expect(conf).toContain('proxy_set_header Authorization "";')
+        // The malformed value is never rendered.
+        expect(conf).not.toContain('Injected: y')
+      })
+
+      it('throws when a remote oauth server also declares a static Authorization header (conflict)', () => {
+        const server = oauthRemote([
+          { header: 'Authorization', valueTemplate: 'Bearer ${API_KEY}' },
+        ])
+        expect(() => (reconciler as any).buildNginxConfigMap(server)).toThrow(
+          /Authorization header/
+        )
+      })
+
+      it('detects the Authorization conflict case-insensitively', () => {
+        const server = oauthRemote([
+          { header: 'authorization', valueTemplate: 'Bearer ${API_KEY}' },
+        ])
+        expect(() => (reconciler as any).buildNginxConfigMap(server)).toThrow(
+          /Authorization header/
+        )
+      })
     })
 
     // ── Codex P0 fix (PR #101) — authHeaders sanitization (nginx + HTTP injection) ──
@@ -520,7 +603,9 @@ describe('McpServerReconciler remote egress proxy', () => {
         const conf = cm.data['default.conf.template']
 
         expect(conf).not.toContain('xxxxxxxx')
-        expect(conf).not.toContain('proxy_set_header Authorization')
+        // Dropped by sanitization → the static remote clears Authorization (D-2):
+        // the rejected value is never rendered and the incoming header is not forwarded.
+        expect(conf).toContain('proxy_set_header Authorization "";')
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('too long'))
         warn.mockRestore()
       })
@@ -532,7 +617,9 @@ describe('McpServerReconciler remote egress proxy', () => {
         )
         const conf = cm.data['default.conf.template']
 
-        expect(conf).not.toContain('proxy_set_header Authorization')
+        // Dropped by sanitization → the static remote clears Authorization (D-2).
+        expect(conf).toContain('proxy_set_header Authorization "";')
+        expect(conf).not.toContain('evil')
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('CR/LF/NUL'))
         warn.mockRestore()
       })

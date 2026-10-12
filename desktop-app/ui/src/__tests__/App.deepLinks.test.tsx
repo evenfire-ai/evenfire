@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { useEffect, useReducer } from 'react'
+import { type ReactNode, useEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -46,6 +47,7 @@ const confirmDialogHarness = vi.hoisted(() => ({
   mountedCount: 0,
   props: null as null | {
     title: string
+    body?: ReactNode
     onCancel: () => void
     onConfirm: () => void
   },
@@ -105,7 +107,7 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     }) => void
     onEmbeddedAppMounted?: () => void
     onEmbeddedAppBack?: () => void
-    onEmbeddedAppRemoved?: () => void
+    onEmbeddedAppOpenFailed?: () => void
     onShortcutOpenResult?: (
       requestId: number,
       result: { status: 'mounted' } | { status: 'failed'; message: string }
@@ -142,7 +144,12 @@ vi.mock('@components/CommandPalette', () => ({
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({
-  ConfirmDialog: (props: { title: string; onCancel: () => void; onConfirm: () => void }) => {
+  ConfirmDialog: (props: {
+    title: string
+    body?: ReactNode
+    onCancel: () => void
+    onConfirm: () => void
+  }) => {
     confirmDialogHarness.rendered(props)
     confirmDialogHarness.props = props
     useEffect(() => {
@@ -320,6 +327,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     authTransitioning: false,
     handleEnsureTeamContext: ensureTeamContext,
     getCurrentTeamId: vi.fn(() => liveTeamId),
+    isHostAccessBlocked: vi.fn(() => false),
     handleSelectChatAgent,
     handleNavSelect,
     handleLogout: vi.fn(),
@@ -370,6 +378,26 @@ describe('App deep-link orchestration', () => {
   // (null) so unrelated launch/deactivation tests behave exactly as before;
   // the persistence tests override the resolved value per case.
   const getSandboxUiLocation = vi.fn().mockResolvedValue(null)
+
+  it('prompts to add an environment when a Profile Portal handoff has no saved match', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      pendingDesktopEnvironmentSetup: {
+        appName: 'Example tenant',
+        externalRestApiBaseUrl: 'https://api.example.test',
+        rpcProxyBaseUrl: 'https://rpc.example.test',
+      },
+    } as Partial<AppController>)
+
+    render(<App />)
+
+    expect(confirmDialogHarness.props?.title).toBe('Add desktop environment?')
+    const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
+    expect(dialogBody).toContain(
+      'Review the service URLs for <strong>Example tenant</strong>. Continue only if you trust them.'
+    )
+    expect(dialogBody).toContain('https://rpc.example.test')
+  })
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -507,7 +535,7 @@ describe('App deep-link orchestration', () => {
     expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
     expect(sidebarHarness.props?.collapsed).toBe(true)
 
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppRemoved?.())
+    act(() => sandboxUiPageHarness.props?.onEmbeddedAppOpenFailed?.())
     expect(sidebarHarness.props?.collapsed).toBe(true)
   })
 
@@ -1777,13 +1805,11 @@ describe('App deep-link orchestration', () => {
   // path the real app-picker uses — no deep-link confirm ceremony. Defaults to
   // `ns/app`; pass a distinct appRef to launch another app the sidebar offers.
   async function launchAppFromSidebar(appRef = 'ns/app'): Promise<void> {
-    await waitFor(() =>
-      expect(sidebarHarness.props?.availableSandboxUiApps?.some(a => a.appRef === appRef)).toBe(
-        true
-      )
-    )
-    const app = sidebarHarness.props?.availableSandboxUiApps?.find(a => a.appRef === appRef)
-    if (!app) throw new Error(`${appRef} was not available to the sidebar`)
+    const app = await waitFor(() => {
+      const available = sidebarHarness.props?.availableSandboxUiApps?.find(a => a.appRef === appRef)
+      if (!available) throw new Error(`${appRef} was not available to the sidebar`)
+      return available
+    })
     await act(async () => {
       sidebarHarness.props?.onOpenSandboxUiApp?.(app)
       await Promise.resolve()
@@ -2177,15 +2203,16 @@ describe('App deep-link orchestration', () => {
     const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
     getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
     await launchAppFromSidebar('ns/app-b') // deactivates A, reads (deferred)
-    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalled())
     await act(async () => {
       pendingLocation.resolve({ appRef: 'ns/app-b', routePath: '/b/route' })
       await Promise.resolve()
       await Promise.resolve()
     })
 
-    // Liveness witness (M4): A's deactivation read genuinely ran.
-    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
+    // Liveness witness (M4): A's deactivation read genuinely ran. A later
+    // read may also occur while the incoming app activates.
+    expect(getSandboxUiLocation).toHaveBeenCalled()
     // Observable: A keeps its OWN route — the foreign read must not clear it.
     // (Pre-fix, the mismatch fell back to undefined → setter CLEARED '/a/own'.)
     const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)

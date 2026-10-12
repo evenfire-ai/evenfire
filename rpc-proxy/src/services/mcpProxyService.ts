@@ -6,6 +6,7 @@ import {
   fetchHostConnectionFromControlApi,
   fetchUserAllowedServersFromControlApi,
 } from './controlApiRestService.js'
+import { type HostAccessDenial, isHostAccessDenied } from './hostAccessDenial.js'
 
 export { validateRpcRequest, forwardRpcToServer } from './mcpRpcService.js'
 export {
@@ -83,11 +84,11 @@ export async function resolveHostConnectionForUser(
     requestId?: string
     directRunBinding?: DirectRunBindingRequest
   }
-): Promise<ResolvedServerConnection | null> {
+): Promise<ResolvedServerConnection | HostAccessDenial> {
   const host = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
     directRunBinding: edgeContext?.directRunBinding,
   })
-  if (!host) return null
+  if (isHostAccessDenied(host)) return host
 
   const headers: Record<string, string> = {
     ...host.headers,

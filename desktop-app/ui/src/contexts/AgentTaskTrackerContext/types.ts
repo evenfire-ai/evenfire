@@ -1,4 +1,10 @@
-import type { ComposerImageAttachment, ComposerReferenceAttachment, ProgressStep } from '@/uiTypes'
+import type {
+  ApprovalInputPreview,
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+  ProgressStep,
+  ReadyComposerFileAttachment,
+} from '@/uiTypes'
 import type { ChatMessageAttachment } from '../../../../src/types'
 
 /**
@@ -41,6 +47,7 @@ export interface TaskPendingApproval {
   // completion back to this task. Absent on ordinary approval suspensions.
   reason?: string
   mcpServerName?: string
+  inputPreview?: ApprovalInputPreview
 }
 
 /**
@@ -57,7 +64,9 @@ export type TaskTerminalResult =
   | { kind: 'reply'; content: string; attachments?: ChatMessageAttachment[] }
   | {
       kind: 'error'
-      source: 'failed' | 'result_fetch' | 'stream'
+      source: 'failed' | 'result_fetch' | 'stream' | 'authority'
+      /** A final task-result read denial; no raw response body crosses this boundary. */
+      authority?: 'revoked' | 'uncertain'
       attachments?: ChatMessageAttachment[]
       message: string
       code?: string
@@ -126,6 +135,7 @@ export interface TrackerCallbacks {
 export interface ResendPayload {
   content: string
   attachments: ComposerImageAttachment[]
+  files: ReadyComposerFileAttachment[]
   references: ComposerReferenceAttachment[]
 }
 

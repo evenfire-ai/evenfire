@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { registerGfsEntityChangeRoutes } from './entityChanges.js'
 import { registerGfsGrantRoutes } from './grants.js'
 import { registerLegacyStandaloneGrantReportRoute } from './legacyStandaloneGrants.js'
 import { registerGfsProvisionerTokenRoute } from './provisionerToken.js'
@@ -19,6 +20,7 @@ import { registerGfsTreeRoutes } from './tree.js'
 export function createGfsRouter(): Router {
   const router = Router()
   registerGfsTokenRoute(router)
+  registerGfsEntityChangeRoutes(router)
   registerGfsProvisionerTokenRoute(router)
   registerGfsResolveRoutes(router)
   registerGfsTreeRoutes(router)

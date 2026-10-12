@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../config.js'
+import { apiErrorHandler } from '../errorHandler.js'
 import {
   createRpcRouter,
   respondControlApiHostAccessRejection,
@@ -70,11 +72,7 @@ function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createRpcRouter())
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Internal error' })
-    }
-  )
+  app.use(apiErrorHandler)
   return app
 }
 
@@ -103,6 +101,7 @@ function drainingResponse(): Response {
 }
 
 const originalFetch = globalThis.fetch
+const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -115,6 +114,79 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  config.upstreamTimeoutMs = originalUpstreamTimeoutMs
+})
+
+// R2-M3: deny and set-model mutate host state, so their FIRST attempt carries no
+// client-side deadline (a timeout would 504 a change the host may have applied).
+// Only the read-only artifacts list keeps a finite first-attempt deadline. The
+// real-socket versions of these (slow upstream, hung wake retry) are in
+// route-upstream-deadlines.real-http.test.ts.
+describe('first-attempt upstream deadlines', () => {
+  it.each([
+    {
+      label: 'deny approval',
+      scope: 'host:approval:write',
+      path: '/rpc/hosts/chatllm/approvals/deny',
+      body: { toolCallId: 'tc-timeout' },
+    },
+    {
+      label: 'set model',
+      scope: 'host:model:write',
+      path: '/rpc/hosts/chatllm/model',
+      body: { chatId: 'c1', model: 'claude-haiku-4-5' },
+    },
+  ])('$label sends its first attempt without a client-side deadline', async row => {
+    config.upstreamTimeoutMs = 30
+    authTokenMock.verifyRpcToken.mockReturnValue(claims([row.scope, 'host:wake:write']))
+    // The first attempt carries only the client-disconnect signal (R3-L6): it
+    // must outlive several upstream timeouts without being aborted.
+    let firstSignal: AbortSignal | undefined
+    let abortedWhenAnswered: boolean | undefined
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      firstSignal = init.signal as AbortSignal
+      await new Promise(resolve => setTimeout(resolve, config.upstreamTimeoutMs * 3))
+      abortedWhenAnswered = firstSignal.aborted
+      return mockFetchResponse(200, JSON.stringify({ ok: true }))
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .post(row.path)
+      .send(row.body)
+      .set('authorization', 'Bearer tok')
+      .expect(200)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(firstSignal).toBeInstanceOf(AbortSignal)
+    expect(abortedWhenAnswered).toBe(false)
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it('list artifacts returns 504 when the upstream deadline aborts a hung fetch', async () => {
+    config.upstreamTimeoutMs = 30
+    authTokenMock.verifyRpcToken.mockReturnValue(claims(['host:task:read', 'host:wake:write']))
+    let upstreamSignal: AbortSignal | undefined
+    const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      upstreamSignal = init.signal as AbortSignal
+      return new Promise((_resolve, reject) => {
+        upstreamSignal!.addEventListener('abort', () => reject(upstreamSignal!.reason), {
+          once: true,
+        })
+      })
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(makeApp())
+      .get('/rpc/hosts/chatllm/artifacts')
+      .set('authorization', 'Bearer tok')
+      .expect(504)
+
+    expect(res.body).toEqual({ error: 'Gateway Timeout' })
+    expect(upstreamSignal?.aborted).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
 })
 
 describe('§11.4 wake coverage — GET /rpc/hosts/:hostRef/models', () => {
@@ -552,8 +624,24 @@ describe('§11.5 route outer-catch responders guard headersSent (one-shot settle
   it('respondControlApiHostAccessRejection is a no-op once the response is committed', () => {
     const res = makeRes(true)
     expect(() =>
-      respondControlApiHostAccessRejection(res as unknown as ExpressResponse, 403)
+      respondControlApiHostAccessRejection(res as unknown as ExpressResponse, {
+        status: 403,
+        code: 'host_access_revoked',
+      })
     ).not.toThrow()
     expect(res.statusCode).toBe(0)
+  })
+
+  it('respondControlApiHostAccessRejection writes the 403 with its denial code when uncommitted', () => {
+    const res = makeRes(false)
+    respondControlApiHostAccessRejection(res as unknown as ExpressResponse, {
+      status: 403,
+      code: 'host_access_revoked',
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      error: 'Forbidden: user cannot access this host',
+      code: 'host_access_revoked',
+    })
   })
 })

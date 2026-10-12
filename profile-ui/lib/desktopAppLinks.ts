@@ -3,8 +3,30 @@ import {
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
   buildSandboxUiDeepLink,
 } from '@clerum/desktop-app-links'
+import type { DesktopEnvironmentResponse } from '@/app/types/api'
 
 const SCRIPT_NONCE_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/
+
+export function buildDesktopEnvironmentLink(
+  environment: DesktopEnvironmentResponse | null | undefined
+): string | null {
+  if (!environment?.externalRestApiBaseUrl) return null
+  const params = new URLSearchParams({
+    externalRestApiBaseUrl: environment.externalRestApiBaseUrl,
+    tenantName: environment.appName || 'Evenfire',
+  })
+  if (environment.rpcProxyBaseUrl) {
+    params.set('rpcProxyBaseUrl', environment.rpcProxyBaseUrl)
+  }
+  return `evenfire://desktop-environment?${params.toString()}`
+}
+
+export function navigateToDesktopApp(
+  href: string,
+  location: Pick<Location, 'href'> = window.location
+): void {
+  location.href = href
+}
 
 export function buildEvenfireDesktopAppLink(parts: {
   recipeNs: string

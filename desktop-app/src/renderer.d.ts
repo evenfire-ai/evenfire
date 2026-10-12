@@ -8,6 +8,9 @@ import {
   AccessCatalog,
   AgentWithMcpServers,
   ApprovalDecisionResult,
+  ChatAuthorityScope,
+  ChatDeleteFence,
+  ChatDeleteResult,
   ChatIndex,
   ChatMessage,
   ChatMetadata,
@@ -16,6 +19,7 @@ import {
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigState,
+  EntityChangeStreamEvent,
   ExternalChannelsSummary,
   HostActivitySnapshot,
   HostActivityStreamEvent,
@@ -93,7 +97,11 @@ declare global {
           callback: (payload: { email: string; authorizationToken: string }) => void
         ) => () => void
         onDesktopEnvironmentSetup: (
-          callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
+          callback: (payload: {
+            externalRestApiBaseUrl: string
+            rpcProxyBaseUrl: string
+            appName?: string
+          }) => void
         ) => () => void
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
@@ -451,6 +459,11 @@ declare global {
         onFailed: (callback: (payload: { id: string; error: string }) => void) => () => void
         ack: (notificationId: string) => Promise<{ ok: boolean; status: string }>
       }
+      entityChanges: {
+        subscribe: (
+          onEvent: (event: EntityChangeStreamEvent) => void
+        ) => Promise<() => Promise<void>>
+      }
       notificationPreferences: {
         get: () => Promise<import('./types').UserNotificationPreferences>
         update: (payload: {
@@ -695,8 +708,19 @@ declare global {
       chat: {
         list: (agentRef: string) => Promise<ChatMetadata[]>
         create: (agentRef: string, chatId: string) => Promise<ChatMetadata>
-        rename: (agentRef: string, chatId: string, title: string) => Promise<void>
-        delete: (agentRef: string, chatId: string) => Promise<void>
+        rename: (
+          agentRef: string,
+          chatId: string,
+          title: string,
+          bindingGeneration: number
+        ) => Promise<void>
+        getBindingGeneration: () => Promise<number>
+        captureDeleteFence: (expectedAuthorityScope: ChatAuthorityScope) => Promise<ChatDeleteFence>
+        delete: (
+          agentRef: string,
+          chatId: string,
+          fence: ChatDeleteFence
+        ) => Promise<ChatDeleteResult>
         loadMessages: (
           agentRef: string,
           chatId: string,
@@ -704,6 +728,7 @@ declare global {
           offset?: number
         ) => Promise<ChatMessage[]>
         appendMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
+        upsertMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
         replaceMessages: (
           agentRef: string,
           chatId: string,
@@ -737,6 +762,9 @@ declare global {
           defaultPath?: string
           routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
+          // Echoed by main on `onClosed` / `onRefreshError` / `onTitleChanged`
+          // for the view this open mounts.
+          launchId: string
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
@@ -779,11 +807,13 @@ declare global {
           }) => void
         ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
-        onClosed: (callback: (args: { appRef: string }) => void) => () => void
+        onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => () => void
         onRefreshError: (
-          callback: (args: { appRef: string; message: string }) => void
+          callback: (args: { appRef: string; launchId: string; message: string }) => void
         ) => () => void
-        onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => () => void
+        onTitleChanged: (
+          callback: (args: { appRef: string; launchId: string; title: string }) => void
+        ) => () => void
       }
       pluginSdk: {
         onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void
@@ -794,6 +824,7 @@ declare global {
             name: string
             kind: string
             bytes: number | null
+            version?: number
           }) => void
         ) => () => void
         onNotificationClicked: (

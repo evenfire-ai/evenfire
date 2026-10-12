@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { legacyAdministrativeRateLimitHashInput } from './adminSubscriptionRateLimitMigration.js'
 
 /** Longest bucket key, in UTF-8 bytes, that the rate limiters store as given. */
 export const MAX_RATE_LIMIT_BUCKET_KEY_BYTES = 512
@@ -20,5 +21,8 @@ const LONG_KEY_PREFIX = 'sha256-long-key:'
  */
 export function boundedBucketKey(key: string): string {
   if (Buffer.byteLength(key, 'utf8') <= MAX_RATE_LIMIT_BUCKET_KEY_BYTES) return key
-  return `${LONG_KEY_PREFIX}${createHash('sha256').update(key).digest('hex')}`
+  // Preserve pre-rename digests: the database cannot recover a namespace from
+  // an existing hash. Plain renamed keys are handled by the migration trigger.
+  const hashInput = legacyAdministrativeRateLimitHashInput(key)
+  return `${LONG_KEY_PREFIX}${createHash('sha256').update(hashInput).digest('hex')}`
 }

@@ -1,4 +1,5 @@
 import { config } from './config.js'
+import { boundedErrorExcerpt, hostAccessDenialMessage } from './upstreamErrors.js'
 
 export class ApiError extends Error {
   status: number
@@ -141,6 +142,11 @@ export async function requestJson<T>(
 
     const raw = await response.text()
     if (!response.ok) {
+      const retryAfter = response.headers.get('retry-after')
+      const hostAccessMessage = hostAccessDenialMessage(response.status, raw)
+      if (hostAccessMessage) {
+        throw new ApiError(hostAccessMessage, response.status, raw, retryAfter)
+      }
       let msg = raw || response.statusText
       try {
         const parsed = JSON.parse(raw) as { error?: unknown; message?: unknown }
@@ -149,11 +155,12 @@ export async function requestJson<T>(
       } catch {
         // Keep raw text as message.
       }
+      // The full body stays on `bodyText`; the message carries a bounded excerpt.
       throw new ApiError(
-        `${response.status} ${response.statusText}: ${msg}`,
+        `${response.status} ${response.statusText}: ${boundedErrorExcerpt(msg)}`,
         response.status,
         raw,
-        response.headers.get('retry-after')
+        retryAfter
       )
     }
 

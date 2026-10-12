@@ -2,6 +2,8 @@
 
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { validateDisplayField } from '@clerum/display-field'
+import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
@@ -66,10 +68,6 @@ import {
   STEP_DETAILS,
 } from './constants'
 import type { CreatedResource, HostWizardProps, HostWizardValidationState } from './types'
-
-// Stateless lifecycle support remains intact in the API and existing-agent UI;
-// only creation through this wizard is temporarily unavailable.
-const SHOW_STATELESS_AGENT_SELECTOR = false
 
 // Asymmetric save gate (spec Topic 1b): the PRIMARY provider must be usable —
 // its required credential slot(s) filled — before create is allowed. Fallbacks
@@ -201,9 +199,9 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
       isOauthBrokerProvider(state.provider) &&
       (!state.connectionRef.trim() ||
         state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY ||
-        (state.provider === GROK_SUBSCRIPTION_PROVIDER
-          ? state.grokModels.length > 0 && !state.grokModels.includes(state.modelName.trim())
-          : state.codexModels.length > 0 && !state.codexModels.includes(state.modelName.trim())))
+        // An empty picker offers nothing, so a model kept from an earlier
+        // catalog or connection cannot pass.
+        !state.brokerModelOptions.includes(state.modelName.trim()))
     ) {
       return false
     }
@@ -251,6 +249,11 @@ export function HostWizard({
   const { showToast } = useToast()
   const [step, setStep] = useState(0)
   const [busy, setBusy] = useState(false)
+  const subscriptionCapabilities = useSubscriptionCapabilities({ enabled: step === 1 })
+  const codexEnabled =
+    subscriptionCapabilities.capabilities?.providers['codex-subscription'].enabled ?? false
+  const grokEnabled =
+    subscriptionCapabilities.capabilities?.providers['grok-subscription'].enabled ?? false
   const [error, setError] = useState('')
   const [directoryLoading, setDirectoryLoading] = useState(false)
   const [directoryLoadError, setDirectoryLoadError] = useState('')
@@ -304,7 +307,10 @@ export function HostWizard({
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const [grokModels, setGrokModels] = useState<string[]>([])
   const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
-  const [grokEnabled, setGrokEnabled] = useState(false)
+  const [grantInventoryError, setGrantInventoryError] = useState('')
+  const [grantCatalogError, setGrantCatalogError] = useState('')
+  const [grantInventoryLoading, setGrantInventoryLoading] = useState(false)
+  const [inventoryRetryNonce, setInventoryRetryNonce] = useState(0)
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -419,6 +425,13 @@ export function HostWizard({
     () => getModelOptions(catalogForEditor, provider),
     [catalogForEditor, provider]
   )
+  const brokerModelOptions = useMemo(
+    () =>
+      isOauthBrokerProvider(provider)
+        ? constrainModelOptions(catalogForEditor, allowedModels, provider)
+        : [],
+    [allowedModels, catalogForEditor, provider]
+  )
   const chainRequiresSecret = llmChainRequiresSecret(provider, llmPolicy?.fallbacks)
   const handleExistingSecretChange = useCallback(
     (secretName: string) => {
@@ -446,91 +459,99 @@ export function HostWizard({
     [allowedCatalog, existingSecrets]
   )
   useEffect(() => {
-    let cancelled = false
-    void listCodexSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) setCodexConnections(rows)
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setCodexConnections([])
-          if (!isDisabledCapabilityError(err)) {
-            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
-          }
-        }
-      })
-    void listGrokSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) {
-          setGrokConnections(rows)
-          setGrokEnabled(true)
-        }
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setGrokConnections([])
-          setGrokEnabled(false)
-          if (!isDisabledCapabilityError(err)) {
-            setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
-          }
-        }
-      })
-    return () => {
-      cancelled = true
+    if (step !== 1 || !subscriptionCapabilities.capabilities) {
+      setGrantInventoryError('')
+      setGrantInventoryLoading(false)
+      return
     }
-  }, [])
+    const controller = new AbortController()
+    setGrantInventoryLoading(true)
+    const requests = [
+      codexEnabled
+        ? listCodexSubscriptionConnections({ signal: controller.signal })
+        : Promise.resolve([]),
+      ...(grokEnabled ? [listGrokSubscriptionConnections({ signal: controller.signal })] : []),
+    ]
+    Promise.allSettled(requests)
+      .then(([codexResult, grokResult]) => {
+        if (controller.signal.aborted) return
+        if (codexResult.status === 'fulfilled') setCodexConnections(codexResult.value)
+        if (grokResult?.status === 'fulfilled') setGrokConnections(grokResult.value)
+        setGrantInventoryError('')
+        const failure = [codexResult, grokResult].find(
+          result => result?.status === 'rejected' && !isDisabledCapabilityError(result.reason)
+        )
+        if (failure?.status === 'rejected') throw failure.reason
+      })
+      .catch(err => {
+        if (controller.signal.aborted || isDisabledCapabilityError(err)) return
+        setGrantInventoryError(
+          err instanceof Error && err.message ? err.message : 'Could not load subscription options'
+        )
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setGrantInventoryLoading(false)
+      })
+    return () => controller.abort()
+  }, [codexEnabled, grokEnabled, inventoryRetryNonce, step, subscriptionCapabilities.capabilities])
   useEffect(() => {
+    if (step !== 1) return
     if (!connectionRef.trim() || connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
       setCodexModels([])
       setGrokModels([])
+      setGrantCatalogError('')
       return
     }
-    let cancelled = false
+    setGrantCatalogError('')
+    // A catalog belongs to one connection: drop the previous connection's
+    // models before this load so they can never be offered under this ref.
+    setCodexModels([])
+    setGrokModels([])
+    const controller = new AbortController()
+    // The retry nonce only re-runs this load. A catalog recovered after a 429
+    // is already cached; bypassing it would spend a second read in the window.
     if (provider === GROK_SUBSCRIPTION_PROVIDER) {
-      setCodexModels([])
-      void listGrokConnectionModels(connectionRef)
+      void listGrokConnectionModels(connectionRef, { signal: controller.signal })
         .then(models => {
-          if (!cancelled) setGrokModels(offeredCodexModelNames(models))
+          if (!controller.signal.aborted) setGrokModels(offeredCodexModelNames(models))
         })
-        .catch(() => {
-          if (!cancelled) {
-            setGrokModels([])
-            setModelName('')
-            setError('Could not load Grok grant models')
+        .catch(err => {
+          if (!controller.signal.aborted) {
+            setGrantCatalogError(
+              err instanceof Error ? err.message : 'Could not load Grok grant models'
+            )
           }
         })
       return () => {
-        cancelled = true
+        controller.abort()
       }
     }
-    setGrokModels([])
-    void listCodexConnectionModels(connectionRef)
+    void listCodexConnectionModels(connectionRef, { signal: controller.signal })
       .then(models => {
-        if (!cancelled) setCodexModels(offeredCodexModelNames(models))
+        if (!controller.signal.aborted) setCodexModels(offeredCodexModelNames(models))
       })
-      .catch(() => {
-        if (!cancelled) {
-          setCodexModels([])
-          setModelName('')
-          setError('Could not load ChatGPT grant models')
+      .catch(err => {
+        if (!controller.signal.aborted) {
+          setGrantCatalogError(
+            err instanceof Error ? err.message : 'Could not load ChatGPT grant models'
+          )
         }
       })
     return () => {
-      cancelled = true
+      controller.abort()
     }
-  }, [connectionRef, provider])
+  }, [connectionRef, inventoryRetryNonce, provider, step])
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
   // switch left the model out of range.
   useEffect(() => {
     if (modelsLoading) return
     if (isOauthBrokerProvider(provider)) {
-      const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
-      if (offered.length === 0) return
+      if (brokerModelOptions.length === 0) return
       const grant = (
         provider === GROK_SUBSCRIPTION_PROVIDER ? grokConnections : codexConnections
       ).find(row => row.connectionKey === connectionRef)
-      const next = resolveCodexGrantModel(modelName, offered, grant?.defaultModel)
+      const next = resolveCodexGrantModel(modelName, brokerModelOptions, grant?.defaultModel)
       if (next !== modelName) setModelName(next)
       return
     }
@@ -539,7 +560,7 @@ export function HostWizard({
     }
     // Intentionally omit modelName: this reconciles the picker to the options.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allowedModels, catalogForEditor, modelsLoading, provider, providerModelOptions])
+  }, [brokerModelOptions, modelsLoading, provider, providerModelOptions])
 
   // Auto-derive the new Secret name from the agent name ("this agent's
   // credentials") until the operator edits it, so naming a Kubernetes Secret is
@@ -593,8 +614,7 @@ export function HostWizard({
       provider,
       modelName,
       connectionRef,
-      codexModels,
-      grokModels,
+      brokerModelOptions,
     }),
     [
       hostName,
@@ -607,8 +627,7 @@ export function HostWizard({
       provider,
       modelName,
       connectionRef,
-      codexModels,
-      grokModels,
+      brokerModelOptions,
     ]
   )
 
@@ -977,55 +996,86 @@ export function HostWizard({
               </span>
             </div>
             <div className="cu-agent-namespace">Namespace: {HOST_NAMESPACE}</div>
-            {SHOW_STATELESS_AGENT_SELECTOR ? (
-              <div className="cu-agent-access-section">
-                <strong id="agent-type-label">Agent type</strong>
-                <span className="cu-muted cu-agent-access-hint">
-                  Stateless agents suspend after the idle window and wake on demand. Communication
-                  channels keep stateless agents always-on unless the cluster explicitly enables
-                  wake-on-interaction; desktop still requires a stateful agent.
-                </span>
-                <div
-                  className="cu-agent-radio-group"
-                  role="radiogroup"
-                  aria-labelledby="agent-type-label"
-                >
-                  <label className="cu-agent-radio cu-agent-radio--card">
-                    <input
-                      type="radio"
-                      name="agent-type"
-                      checked={!stateless}
-                      onChange={() => setStateless(false)}
-                    />
-                    <span className="cu-agent-radio__copy">
-                      <span className="cu-agent-radio__title">Stateful (always on)</span>
-                      <span className="cu-agent-radio__description">
-                        The agent keeps running continuously and responds immediately.
-                      </span>
+            <div className="cu-agent-access-section">
+              <strong id="agent-type-label">Agent type</strong>
+              <span className="cu-muted cu-agent-access-hint">
+                Stateless agents suspend after the idle window and wake on demand. Communication
+                channels currently keep an agent always-on, and desktop agents still require a
+                stateful agent.
+              </span>
+              <div
+                className="cu-agent-radio-group"
+                role="radiogroup"
+                aria-labelledby="agent-type-label"
+              >
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    name="agent-type"
+                    checked={!stateless}
+                    onChange={() => setStateless(false)}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Stateful (always on)</span>
+                    <span className="cu-agent-radio__description">
+                      The agent keeps running continuously and responds immediately.
                     </span>
-                  </label>
-                  <label className="cu-agent-radio cu-agent-radio--card">
-                    <input
-                      type="radio"
-                      name="agent-type"
-                      checked={stateless}
-                      onChange={() => setStateless(true)}
-                    />
-                    <span className="cu-agent-radio__copy">
-                      <span className="cu-agent-radio__title">Stateless (suspends when idle)</span>
-                      <span className="cu-agent-radio__description">
-                        The platform suspends the agent when idle and wakes it on demand.
-                      </span>
+                  </span>
+                </label>
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    name="agent-type"
+                    checked={stateless}
+                    onChange={() => setStateless(true)}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Stateless (suspends when idle)</span>
+                    <span className="cu-agent-radio__description">
+                      The platform suspends the agent when idle and wakes it on demand.
                     </span>
-                  </label>
-                </div>
+                  </span>
+                </label>
               </div>
-            ) : null}
+            </div>
           </div>
         )}
 
         {step === 1 && (
           <div className="cu-form-stack cu-agent-form-stack">
+            {/* Capability discovery is enabled on this step, so its failure and Retry live here. */}
+            <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
+            {grantInventoryLoading ? (
+              <p className="cu-muted" role="status">
+                Loading subscription options…
+              </p>
+            ) : null}
+            {grantInventoryError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                <span>{grantInventoryError}</span>
+                <Button
+                  type="button"
+                  className="cu-btn--sm"
+                  variant="ghost"
+                  onClick={() => setInventoryRetryNonce(value => value + 1)}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : null}
+            {grantCatalogError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                {grantCatalogError}
+                <Button
+                  type="button"
+                  className="cu-btn--sm"
+                  variant="ghost"
+                  onClick={() => setInventoryRetryNonce(value => value + 1)}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : null}
             <div className="cu-agent-access-section">
               <strong>LLM credentials</strong>
               <span className="cu-muted cu-agent-access-hint">

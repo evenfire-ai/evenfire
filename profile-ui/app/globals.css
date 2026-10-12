@@ -151,10 +151,8 @@ code {
   padding: 1rem 0.75rem 3rem 1.5rem;
 }
 
-.cu-page-stack {
-  display: grid;
-  gap: 0.85rem;
-  max-width: 720px;
+.cu-home-welcome-card .cu-card__body {
+  padding-inline-start: 0;
 }
 
 .cu-card {
@@ -296,6 +294,27 @@ code {
 .text-link:focus-visible {
   color: var(--cu-link-hover);
   text-decoration: underline;
+}
+
+.cu-home-desktop-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  color: var(--cu-link);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.cu-home-desktop-link:hover,
+.cu-home-desktop-link:focus-visible {
+  color: var(--cu-link-hover);
+  text-decoration: underline;
+}
+
+.cu-home-desktop-link:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 2px;
 }
 
 .cu-auth-return-link {

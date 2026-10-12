@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ENVELOPE_ALLOWANCE_BYTES as GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES } from '@clerum/grok-provider-attempt-contract'
+import { createServer } from 'node:http'
+import {
+  ENVELOPE_ALLOWANCE_BYTES as GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
+  LIMITS as GROK_LIMITS,
+} from '@clerum/grok-provider-attempt-contract'
 import {
   ENVELOPE_ALLOWANCE_BYTES as CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
@@ -137,6 +141,159 @@ describe('ProviderAttemptAuthorizer', () => {
         policyHash: 'b'.repeat(64),
       })
     ).resolves.toMatchObject({ executionTicket: 'ticket-123456' })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  // #784: the authorize route is shared and control-api bounds a Grok request
+  // with the Grok contract, so the local check must use the same one.
+  function authorizerWith(fetchFn: unknown) {
+    return new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn: fetchFn as typeof fetch,
+    })
+  }
+  const MIB = 1024 * 1024
+  const grokRequest = (schemaVersion: string, padBytes: number) => ({
+    schemaVersion,
+    provider: 'grok-subscription',
+    pad: 'a'.repeat(padBytes),
+  })
+  // A realistic authorize body whose serialized JSON is exactly `bytes` long.
+  function envelopeOfBytes(fields: Record<string, unknown>, bytes: number): AuthorizeAttemptBody {
+    const frame = Buffer.byteLength(
+      JSON.stringify(realisticEnvelope({ ...fields, pad: '' })),
+      'utf8'
+    )
+    const body = realisticEnvelope({ ...fields, pad: 'a'.repeat(bytes - frame) })
+    expect(Buffer.byteLength(JSON.stringify(body), 'utf8')).toBe(bytes)
+    return body
+  }
+
+  it('T-G4c-1 dispatches a 30 MiB Grok V2 envelope that the Codex visual ceiling refuses', async () => {
+    const padBytes = 30 * MIB
+    expect(padBytes).toBeGreaterThan(LIMITS.maxVisualRequestBodyBytes)
+    expect(padBytes).toBeLessThan(GROK_LIMITS.maxVisualRequestBodyBytes)
+    // Witness that the size is meaningful: under the Codex contract the same
+    // bytes are over the ceiling and never leave the process.
+    const codexFetch = vi.fn()
+    await expect(
+      authorizerWith(codexFetch).authorize(
+        realisticEnvelope({
+          schemaVersion: 'codex-completion-request.v2',
+          provider: 'codex-subscription',
+          pad: 'a'.repeat(padBytes),
+        })
+      )
+    ).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: `Codex request exceeds ${LIMITS.maxVisualRequestBodyBytes / MIB} MiB; use fewer or smaller images, or reduce context`,
+    })
+    expect(codexFetch).not.toHaveBeenCalled()
+
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, json: async () => validAuthorize })
+    await expect(
+      authorizerWith(fetchFn).authorize(
+        realisticEnvelope(grokRequest('grok-completion-request.v2', padBytes))
+      )
+    ).resolves.toMatchObject({ executionTicket: 'ticket-123456' })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    [
+      'V2',
+      'grok-completion-request.v2',
+      GROK_LIMITS.maxVisualRequestBodyBytes,
+      GROK_LIMITS.maxVisualRequestBodyBytes,
+    ],
+    [
+      'V1',
+      'grok-completion-request.v1',
+      GROK_LIMITS.maxRequestBodyBytes + GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
+      GROK_LIMITS.maxRequestBodyBytes,
+    ],
+  ])(
+    'T-G4c-2 refuses a Grok %s body one byte over its Grok ceiling and names Grok',
+    async (_label, schemaVersion, bodyLimit, requestLimit) => {
+      const grok = { schemaVersion, provider: 'grok-subscription' }
+      const fetchFn = vi.fn()
+      await expect(
+        authorizerWith(fetchFn).authorize(envelopeOfBytes(grok, bodyLimit + 1))
+      ).rejects.toMatchObject({
+        code: 'payload_too_large',
+        message: `Grok request exceeds ${requestLimit / MIB} MiB; use fewer or smaller images, or reduce context`,
+      })
+      expect(fetchFn).not.toHaveBeenCalled()
+      // Witness: the same request at the ceiling exactly is dispatched.
+      const dispatched = vi.fn().mockResolvedValue({ ok: true, json: async () => validAuthorize })
+      await authorizerWith(dispatched).authorize(envelopeOfBytes(grok, bodyLimit))
+      expect(dispatched).toHaveBeenCalledOnce()
+    }
+  )
+
+  // Both contracts export 16 KiB today (T-R11-parity), so only a stubbed Grok
+  // value can show which constant bounds a Grok request.
+  it('T-G4c-6 bounds a Grok request with the Grok contract envelope allowance', async () => {
+    const grokAllowance = 64 * 1024
+    vi.resetModules()
+    vi.doMock('@clerum/grok-provider-attempt-contract', async importOriginal => ({
+      ...(await importOriginal<Record<string, unknown>>()),
+      ENVELOPE_ALLOWANCE_BYTES: grokAllowance,
+    }))
+    try {
+      const stubbedContract = await import('@clerum/grok-provider-attempt-contract')
+      expect(stubbedContract.ENVELOPE_ALLOWANCE_BYTES).toBe(grokAllowance)
+      const { ProviderAttemptAuthorizer: Stubbed } = await import('../providerAttemptAuthorizer')
+      const stubbedWith = (fetchFn: unknown) =>
+        new Stubbed({
+          authorizeUrl: 'http://gateway/authorize',
+          readPlatformJwt: () => 'test-jwt',
+          fetchFn: fetchFn as typeof fetch,
+        })
+
+      const grok = { schemaVersion: 'grok-completion-request.v1', provider: 'grok-subscription' }
+      const grokLimit = GROK_LIMITS.maxRequestBodyBytes + grokAllowance
+      const grokDispatched = vi
+        .fn()
+        .mockResolvedValue({ ok: true, json: async () => validAuthorize })
+      await stubbedWith(grokDispatched).authorize(envelopeOfBytes(grok, grokLimit))
+      expect(grokDispatched).toHaveBeenCalledOnce()
+      const grokRefused = vi.fn()
+      await expect(
+        stubbedWith(grokRefused).authorize(envelopeOfBytes(grok, grokLimit + 1))
+      ).rejects.toMatchObject({ code: 'payload_too_large' })
+      expect(grokRefused).not.toHaveBeenCalled()
+
+      // Codex keeps the Codex contract's allowance.
+      const codex = { schemaVersion: 'codex-completion-request.v1', provider: 'codex-subscription' }
+      const codexLimit = LIMITS.maxRequestBodyBytes + CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES
+      const codexRefused = vi.fn()
+      await expect(
+        stubbedWith(codexRefused).authorize(envelopeOfBytes(codex, codexLimit + 1))
+      ).rejects.toMatchObject({ code: 'payload_too_large' })
+      expect(codexRefused).not.toHaveBeenCalled()
+      const codexDispatched = vi
+        .fn()
+        .mockResolvedValue({ ok: true, json: async () => validAuthorize })
+      await stubbedWith(codexDispatched).authorize(envelopeOfBytes(codex, codexLimit))
+      expect(codexDispatched).toHaveBeenCalledOnce()
+    } finally {
+      vi.doUnmock('@clerum/grok-provider-attempt-contract')
+      vi.resetModules()
+    }
+  })
+
+  it('T-G4c-3 names Grok when the gateway answers a Grok request with 413', async () => {
+    const fetchFn = vi.fn(async () => new Response('<h1>Too large</h1>', { status: 413 }))
+    await expect(
+      authorizerWith(fetchFn).authorize(
+        realisticEnvelope(grokRequest('grok-completion-request.v1', 16))
+      )
+    ).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'Grok request is too large; use fewer or smaller images, or reduce context',
+    })
     expect(fetchFn).toHaveBeenCalledOnce()
   })
 
@@ -294,6 +451,219 @@ describe('ProviderAttemptAuthorizer', () => {
       code: 'provider_unavailable',
       message: 'authorize failed with 502',
     })
+  })
+
+  // M-B (review 5426789128): the gateway's read or send timeout on authorize
+  // is a bare 504. control-api accepted the connection and authorize outlived
+  // the gateway, so it is a terminal authorize_timeout, not a provider outage
+  // that fails over and installs a cooldown.
+  it('T-R7-1c reads an HTML 504 from the gateway as a terminal authorize_timeout', async () => {
+    const { err, fetchFn } = await authorizeFailure(nginx(504, 'Gateway Time-out'))
+    // Liveness witness: the authorize hop really ran and got the 504.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    const message =
+      'Request authorization timed out. Wait for active requests to finish, then try again.'
+    expect(err).toMatchObject({ code: 'authorize_timeout', message })
+    expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+    for (const provider of [
+      new CodexSubscriptionProvider('gpt-5.3-codex', {} as never),
+      new GrokSubscriptionProvider('grok-4.6', {} as never),
+    ]) {
+      const classified = provider.classifyError(err)
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        message,
+        providerCode: 'authorize_timeout',
+        providerDispatched: false,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  })
+
+  it('T-R7-1c keeps a coded 504 from control-api as its own code', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json({ error: 'control_plane_unavailable' }, { status: 504 })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'control_plane_unavailable' })
+  })
+
+  async function nativeAuthorizeFailure(response: Response) {
+    const responseBody = await response.text()
+    const responseHeaders: Record<string, string> = {}
+    response.headers.forEach((value, name) => {
+      responseHeaders[name] = value
+    })
+    let requests = 0
+    const observed: Array<{ method: string | undefined; path: string | undefined }> = []
+    const server = createServer((req, res) => {
+      requests += 1
+      observed.push({ method: req.method, path: req.url })
+      req.resume()
+      req.once('end', () => {
+        res.writeHead(response.status, responseHeaders)
+        res.end(responseBody)
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    try {
+      const address = server.address()
+      if (typeof address !== 'object' || address === null) {
+        throw new Error('authorize fixture has no bound address')
+      }
+      const refreshOnUnauthorized = vi.fn()
+      const authorizer = new ProviderAttemptAuthorizer({
+        authorizeUrl: resolveCodexAuthorizeUrl(`http://127.0.0.1:${address.port}`),
+        readPlatformJwt: () => 'platform-jwt',
+        refreshOnUnauthorized,
+      })
+      const err = await authorizer.authorize(realisticEnvelope({})).then(
+        () => undefined,
+        (caught: unknown) => caught
+      )
+      expect(observed).toEqual([
+        { method: 'POST', path: '/api/v1/mcp-host/llm/provider-attempts/authorize' },
+      ])
+      return { err, requests, refreshOnUnauthorized }
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => {
+        server.close(error => (error ? reject(error) : resolve()))
+      })
+    }
+  }
+
+  it.each([
+    [
+      'authorize_capacity_exceeded',
+      'Authorization is busy with other large requests, which share one capacity across all Hosts. Nothing was sent to the provider; wait for them to finish, then try again.',
+    ],
+    [
+      'authorize_timeout',
+      'Request authorization timed out. Wait for active requests to finish, then try again.',
+    ],
+  ])(
+    'T-AUTH-local-message explains %s over native HTTP without changing either provider outcome',
+    async (code, message) => {
+      const { err, requests, refreshOnUnauthorized } = await nativeAuthorizeFailure(
+        Response.json(
+          {
+            error: code,
+            reason: 'untrusted upstream reason',
+            message: 'untrusted upstream message',
+          },
+          { status: 503 }
+        )
+      )
+      expect(requests).toBe(1)
+      expect(refreshOnUnauthorized).not.toHaveBeenCalled()
+      expect(err).toBeInstanceOf(CodexAuthorizeError)
+      expect(err).toMatchObject({ code, message })
+      expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+      for (const provider of [
+        new CodexSubscriptionProvider('gpt-5.3-codex', {} as never),
+        new GrokSubscriptionProvider('grok-4.6', {} as never),
+      ]) {
+        const classified = provider.classifyError(err)
+        expect(classified).toMatchObject({
+          code: LlmErrorCode.ApiCallFailed,
+          retryable: false,
+          message,
+          providerCode: code,
+          providerDispatched: false,
+        })
+        expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+      }
+    }
+  )
+
+  it.each([
+    ['HTML', () => nginx(503, 'authorize_capacity_exceeded'), 'provider_unavailable'],
+    [
+      'uncoded JSON',
+      () =>
+        Response.json(
+          { reason: 'authorize_capacity_exceeded', message: 'authorize_timeout' },
+          { status: 503 }
+        ),
+      'provider_unavailable',
+    ],
+    [
+      'unknown code',
+      () => Response.json({ error: 'unknown_capacity_code' }, { status: 503 }),
+      'unknown_capacity_code',
+    ],
+    [
+      'non-string code',
+      () => Response.json({ error: { code: 'authorize_capacity_exceeded' } }, { status: 503 }),
+      'provider_unavailable',
+    ],
+    [
+      'malformed JSON',
+      () => new Response('{"error":"authorize_capacity_exceeded"', { status: 503 }),
+      'provider_unavailable',
+    ],
+  ] as const)(
+    'T-AUTH-local-message keeps a generic native HTTP 503 diagnosis for %s',
+    async (_label, response, code) => {
+      const { err, requests, refreshOnUnauthorized } = await nativeAuthorizeFailure(response())
+      expect(requests).toBe(1)
+      expect(refreshOnUnauthorized).not.toHaveBeenCalled()
+      expect(err).toMatchObject({ code, message: 'authorize failed with 503' })
+      expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+    }
+  )
+
+  // M-A (review 5426789128): control-api's capacity refusal carries
+  // Retry-After, and only that coded 503 has it read.
+  it.each([
+    [
+      'a capacity refusal with Retry-After',
+      () =>
+        Response.json(
+          { error: 'authorize_capacity_exceeded' },
+          { status: 503, headers: { 'retry-after': '10' } }
+        ),
+      'authorize_capacity_exceeded',
+      10_000,
+    ],
+    [
+      'a capacity refusal without Retry-After',
+      () => Response.json({ error: 'authorize_capacity_exceeded' }, { status: 503 }),
+      'authorize_capacity_exceeded',
+      undefined,
+    ],
+    [
+      'an authorize_timeout with Retry-After',
+      () =>
+        Response.json(
+          { error: 'authorize_timeout' },
+          { status: 503, headers: { 'retry-after': '10' } }
+        ),
+      'authorize_timeout',
+      undefined,
+    ],
+    [
+      'an uncoded 503 with Retry-After',
+      () =>
+        new Response('<html>503 Service Temporarily Unavailable</html>', {
+          status: 503,
+          headers: { 'content-type': 'text/html', 'retry-after': '10' },
+        }),
+      'provider_unavailable',
+      undefined,
+    ],
+  ] as const)('M-A reads Retry-After for %s', async (_label, response, code, retryAfter) => {
+    const { err, fetchFn } = await authorizeFailure(response())
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code })
+    expect((err as CodexAuthorizeError).retryAfterMs).toBe(retryAfter)
   })
 
   // G1-6 (#720): a limiter in front of control-api can answer 429 with no JSON

@@ -169,6 +169,74 @@ Resource/namespace controls:
 Auth settings:
 
 - `CONTROL_API_SESSION_JWT_PRIVATE_KEY`: RSA private key used to sign external REST API session JWTs (`/external/auth/*`) with RS256.
+
+For local development, leave the signing-key env vars unset and start
+`control-api` first, from the repository root:
+
+```bash
+CLERUM_DEV_MODE=true npm --prefix control-api run dev
+```
+
+Then start `rpc-proxy` and `external-rest-api` in separate terminals with the
+same `CLERUM_DEV_MODE=true` opt-in. This mode is rejected with
+`NODE_ENV=production`.
+
+Control API generates one RSA-2048 key per slot under the gitignored
+`control-api/.dev-keys/` directory (`0700` directory, `0600` signing files,
+`0644` derived public files) on first use, reuses it across restarts, and
+publishes each derived public half as `<slot>.public.pem`. When
+`rpc-proxy` and `external-rest-api` also run with `CLERUM_DEV_MODE=true`, they
+load `rpc.public.pem` and `session.public.pem` from that store, so a monorepo
+dev boot keeps one shared key identity. Leave `EVENFIRE_DEV_KEY_STORE` unset
+or blank for the default; a nonblank override must be an absolute path set
+consistently in all three services.
+
+An environment-supplied signing key takes precedence and does not update the
+store. If you set `CONTROL_API_RPC_JWT_PRIVATE_KEY` or
+`CONTROL_API_SESSION_JWT_PRIVATE_KEY`, explicitly configure its matching public
+key in `RPC_PROXY_JWT_PUBLIC_KEY` or `EXTERNAL_REST_API_JWT_PUBLIC_KEY`,
+respectively. A store left from an earlier run may contain a different key.
+After deleting or rotating stored keys, or switching to an environment-supplied
+key, reconfigure the affected verifiers as needed and restart them. Running
+verifiers do not silently refresh their key identity.
+
+Outside dev mode, `CONTROL_API_RPC_JWT_PRIVATE_KEY`,
+`CONTROL_API_SESSION_JWT_PRIVATE_KEY`, and `CONTROL_API_ADMIN_JWT_PRIVATE_KEY`
+are always required. Keys whose public halves were ever committed to this
+repository are rejected in every slot, including the RPC verifier public key.
+
+All three services use `@clerum/jwt-key-policy` to select one complete PEM
+object and canonicalize its identity before signing or verification. Signing
+inputs accept unencrypted RSA PKCS#8/PKCS#1 private keys. Verifier environment
+variables accept RSA SPKI/PKCS#1 public keys and X509 public-key carriers;
+private PEMs remain accepted there for legacy compatibility, but configuring
+only the public half is recommended. X509 is a key carrier here: CA trust,
+hostname and certificate expiry are not validated. A public store file must
+never contain private material. Bundles, encrypted private keys, non-RSA keys
+and historically committed identities are rejected.
+
+RSA keys must have at least 2048 bits for every RS256 signing and verification
+role, including registry vouchers and proof-of-possession. This deliberately
+rejects weak verifier keys previously accepted; see
+[RFC 7518 section 3.3](https://www.rfc-editor.org/rfc/rfc7518.html#section-3.3).
+Material and descriptor reads are limited to 64 KiB. Invalid explicit input
+fails instead of generating a replacement or changing its source.
+
+The local store requires POSIX no-follow, nonblocking and exclusive-file
+guarantees. Keep its ancestors trusted and run cooperating services with the
+same effective UID; users or containers with another UID should configure
+their keys explicitly. The store does not defend against hostile ancestors or
+processes with the same UID. On a platform without these guarantees, configure
+all signing and verifying keys through the environment; explicit keys do not
+access the store. Stored-key corruption, or a rejected persisted registry key,
+requires explicit operator repair or re-enrollment. Startup never rotates,
+rewrites or deletes those identities automatically.
+
+Build the service image from the repository root with
+`docker build -f control-api/Dockerfile .`. Its context and runtime contain
+only the shared policy's production files and declarations, not its tests or
+local key data.
+
 - `CONTROL_API_RPC_JWT_PRIVATE_KEY`: RSA private key used to sign RPC access JWTs for `rpc-proxy` (RS256).
 - `CONTROL_API_JWT_ISSUER`: expected `iss` for session token signing and verification.
 - `CONTROL_API_JWT_AUDIENCE`: expected `aud` for session token signing and verification.

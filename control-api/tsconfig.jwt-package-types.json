@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "include": [
+    "../packages/jwt-key-policy/test/policy-types.cts",
+    "../packages/jwt-key-policy/test/policy-types.mts",
+    "../packages/jwt-key-policy/test/store-types.ts"
+  ],
+  "exclude": []
+}

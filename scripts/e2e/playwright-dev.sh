@@ -2,7 +2,7 @@
 # Launches the Desktop App Playwright E2E suite against the selected cluster.
 # Assumes branch-profile port-forwards are running for the same cluster. The
 # active URLs are read from the caller environment (normally ports.env emitted
-# by Clerum's .local-notes/minikube-profiles/branch.mk); fixed shared defaults
+# by Clerum's scripts/minikube-profiles/branch.mk); fixed shared defaults
 # are retained only for the unscoped clerum-test profile.
 #
 # Visual modes:
@@ -196,6 +196,10 @@ cd "$REPO/desktop-app"
 
 if [[ "${E2E_SKIP_DESKTOP_BUILD:-0}" != "1" ]]; then
   echo "[playwright-dev] Building Desktop App before Playwright so dist/ui-dist matches the current worktree"
+  # gfs-agent-file-read.test.ts (#666) selects Global Files through the
+  # composer's "Global File System" item, which the renderer shows only when
+  # this build-time flag is set. No spec depends on the item being absent.
+  export VITE_SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM=true
   npm run build
 fi
 

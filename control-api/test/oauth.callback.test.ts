@@ -24,7 +24,7 @@ function buildInput(
   grantKind: 'user' | 'service' = 'user'
 ): CallbackInput {
   return {
-    oauthClientId: 'salesforce',
+    target: { kind: 'client', id: 'salesforce', redirectUri: REDIRECT_URI },
     code: 'AUTH_CODE_FROM_PROVIDER',
     state: signOAuthState(STATE_SECRET, {
       recipeNamespace: 'sandbox-recipes',
@@ -34,7 +34,6 @@ function buildInput(
       grantKind,
       background: false,
     }),
-    redirectUri: REDIRECT_URI,
     ...overrides,
   }
 }
@@ -206,7 +205,12 @@ describe('handleOAuthCallback (O4.1)', () => {
   it('rejects when the path oauthClientId does not match the signed state', async () => {
     const { deps } = buildDeps({ recipe: recipeWithSalesforce() })
     // State signed for salesforce; the callback path claims a different client.
-    const result = await handleOAuthCallback(buildInput({ oauthClientId: 'attacker-client' }), deps)
+    const result = await handleOAuthCallback(
+      buildInput({
+        target: { kind: 'client', id: 'attacker-client', redirectUri: REDIRECT_URI },
+      }),
+      deps
+    )
     expect(result.kind).toBe('invalid_state')
   })
 

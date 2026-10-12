@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { type ChatMessage, FinishReason, type ToolDefinition } from '../../core/types'
+import { TOOL_RESULT_IMAGE_TEXT } from '../../visualInput/messageProjection'
 import { OpenAIProvider } from '../openai'
 
 function createMockOpenAIClient() {
@@ -209,6 +210,30 @@ describe('OpenAI message conversion', () => {
     expect(assistantMsg.tool_calls[0].function.arguments).toBe('{"query":"X"}')
     expect(typeof assistantMsg.tool_calls[0].function.arguments).toBe('string')
   })
+
+  it('should omit ZAI reasoning_content from native OpenAI requests', async () => {
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('Done'))
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Continue after a ZAI fallback' },
+      {
+        role: 'assistant',
+        content: '',
+        reasoning_content: 'Prior ZAI reasoning',
+        tool_calls: [{ id: 'tc_zai', name: 'search', arguments: { query: 'fallback' } }],
+      },
+      { role: 'tool', content: 'result', tool_call_id: 'tc_zai' },
+    ]
+
+    await provider.completeSingleTurnWithTools(messages, [])
+
+    const callArgs = mockClient.chat.completions.create.mock.calls[0][0]
+    const assistantMsg = callArgs.messages.find((m: any) => m.role === 'assistant' && m.tool_calls)
+    expect(assistantMsg).toBeDefined()
+    expect(assistantMsg).not.toHaveProperty('reasoning_content')
+  })
 })
 
 describe('OpenAI contentParts in user messages (screenshot images)', () => {
@@ -232,9 +257,9 @@ describe('OpenAI contentParts in user messages (screenshot images)', () => {
       },
       {
         role: 'user',
-        content: 'Here are the screenshots from the tool results above.',
+        content: TOOL_RESULT_IMAGE_TEXT,
         contentParts: [
-          { type: 'text', text: 'Here are the screenshots from the tool results above.' },
+          { type: 'text', text: TOOL_RESULT_IMAGE_TEXT },
           { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
         ],
       },
@@ -250,7 +275,7 @@ describe('OpenAI contentParts in user messages (screenshot images)', () => {
     expect(userImgMsg.content).toHaveLength(2)
     expect(userImgMsg.content[0]).toEqual({
       type: 'text',
-      text: 'Here are the screenshots from the tool results above.',
+      text: TOOL_RESULT_IMAGE_TEXT,
     })
     expect(userImgMsg.content[1]).toEqual({
       type: 'image_url',

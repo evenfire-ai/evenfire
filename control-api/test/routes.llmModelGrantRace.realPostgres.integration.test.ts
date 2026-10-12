@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import request from 'supertest'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // R1-H3 fase 2 (llm-model reductor ↔ grant upsert) — regression test for the
 // TOCTOU race the per-MODEL advisory lock closes on the grant seam (mini-spec
@@ -137,7 +138,7 @@ describeRealPostgres('llm-model reductor ↔ grant upsert serialization (R1-H3 f
     limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
-    await migratePool.end()
+    await endPoolAndWaitForClients(migratePool)
 
     racePool = new Pool({ connectionString })
     racePool.on('error', () => {})
@@ -166,19 +167,23 @@ describeRealPostgres('llm-model reductor ↔ grant upsert serialization (R1-H3 f
   }, 60_000)
 
   afterAll(async () => {
-    if (previousPgEnv === undefined) delete process.env.CONTROL_API_PG_CONNECTION_STRING
-    else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
-    await racePool?.end().catch(() => {})
-    await corePool?.end().catch(() => {})
-    await limiterPool?.end().catch(() => {})
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      if (previousPgEnv === undefined) delete process.env.CONTROL_API_PG_CONNECTION_STRING
+      else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
+      await endPoolAndWaitForClients(racePool).catch(() => {})
+      await endPoolAndWaitForClients(corePool).catch(() => {})
+      await endPoolAndWaitForClients(limiterPool).catch(() => {})
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-    await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   beforeEach(async () => {

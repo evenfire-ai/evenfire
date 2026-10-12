@@ -4,8 +4,8 @@
  *
  * The guarantees:
  *   - `isPrivateIp` classifies an IP (v4/v6, incl. IPv4-mapped/compatible forms)
- *     as private/loopback/link-local/metadata/reserved — fail-closed on
- *     unparseable-but-v6-looking literals.
+ *     as private/loopback/link-local/metadata/reserved/special-purpose —
+ *     fail-closed on unparseable-but-v6-looking literals.
  *   - `resolvePinnedPublicIp` validates a URL's host resolves ONLY to public
  *     addresses and returns a single pinned IP, so the caller connects to the
  *     exact address that was validated (closing the DNS-rebinding window).
@@ -120,53 +120,100 @@ function isIpv4MappedBytes(bytes: Uint8Array): boolean {
   return bytes[10] === 0xff && bytes[11] === 0xff
 }
 
-function isPrivateIpv4Octets(octets: readonly number[]): boolean {
-  if (octets.length !== 4) return false
-  const [a = 0, b = 0] = octets
-  return (
-    a === 10 ||
-    a === 127 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 169 && b === 254) ||
-    a === 0
-  )
+function formatIpv6Bytes(bytes: Uint8Array): string {
+  const groups: string[] = []
+  for (let i = 0; i < 16; i += 2) {
+    groups.push((((bytes[i]! << 8) | bytes[i + 1]!) & 0xffff).toString(16))
+  }
+  return groups.join(':')
 }
 
 /**
- * Block private and metadata IP ranges (SSRF defense).
+ * Non-public IPv4 prefixes in scope for the outbound HTTP guard: the legacy
+ * private/loopback/link-local ranges plus special-purpose ranges that must
+ * not be treated as public SSRF destinations. This is a deliberate subset
+ * of the IPv4 exclusions in deploy/base/public-egress-exceptions.yaml and
+ * the IANA range list used by mcp-servers/web-search's fetch destination
+ * validator. Those policies also exclude 192.31.196/24, 192.52.193/24,
+ * 192.88.99/24, and 192.175.48/24, which stay public here by design: they
+ * are relay/service blocks handled by egress policy rather than ranges this
+ * model-facing guard needs to classify as non-public.
+ */
+const NON_PUBLIC_IPV4_PREFIXES: readonly (readonly [address: string, prefix: number])[] = [
+  ['0.0.0.0', 8], // "This network"
+  ['10.0.0.0', 8], // RFC 1918 private
+  ['100.64.0.0', 10], // CGNAT (RFC 6598)
+  ['127.0.0.0', 8], // Loopback
+  ['169.254.0.0', 16], // Link-local / cloud metadata
+  ['172.16.0.0', 12], // RFC 1918 private
+  ['192.0.0.0', 24], // IANA special purpose
+  ['192.0.2.0', 24], // TEST-NET-1 (RFC 5737)
+  ['192.168.0.0', 16], // RFC 1918 private
+  ['198.18.0.0', 15], // Benchmarking (RFC 2544)
+  ['198.51.100.0', 24], // TEST-NET-2 (RFC 5737)
+  ['203.0.113.0', 24], // TEST-NET-3 (RFC 5737)
+  ['224.0.0.0', 4], // Multicast
+  ['240.0.0.0', 4], // Reserved, including broadcast
+]
+
+/**
+ * Non-public IPv6 prefixes in scope for this change; this is not a complete
+ * IANA special-purpose list. Notably still public: 100::/64 (discard-only),
+ * 2001:1::/128, 2001:2::/48, 3fff::/20 (documentation), 5f00::/16, and
+ * ISATAP embeddings inside global prefixes. ::/128 and ::1/128 are covered
+ * by the IPv4-compatible delegation (their tails fall inside 0.0.0.0/8).
+ */
+const NON_PUBLIC_IPV6_PREFIXES: readonly (readonly [address: string, prefix: number])[] = [
+  ['64:ff9b::', 96], // NAT64 (RFC 6052)
+  ['64:ff9b:1::', 48], // Local-use NAT64 (RFC 8215)
+  ['2001::', 32], // Teredo
+  ['2001:db8::', 32], // Documentation (RFC 3849)
+  ['2002::', 16], // 6to4 (RFC 3056)
+  ['fc00::', 7], // Unique local
+  ['fe80::', 10], // Link-local
+  ['fec0::', 10], // Deprecated site-local
+  ['ff00::', 8], // Multicast
+]
+
+const nonPublicAddresses = new net.BlockList()
+for (const [address, prefix] of NON_PUBLIC_IPV4_PREFIXES) {
+  nonPublicAddresses.addSubnet(address, prefix, 'ipv4')
+}
+for (const [address, prefix] of NON_PUBLIC_IPV6_PREFIXES) {
+  nonPublicAddresses.addSubnet(address, prefix, 'ipv6')
+}
+
+function isPrivateIpv4Octets(octets: readonly number[]): boolean {
+  if (octets.length !== 4) return false
+  return nonPublicAddresses.check(`${octets[0]}.${octets[1]}.${octets[2]}.${octets[3]}`, 'ipv4')
+}
+
+/**
+ * Block private, metadata, multicast, reserved, and other special-purpose
+ * non-public IP ranges (SSRF defense).
  *
- * IPv4 ranges: 10/8, 127/8, 172.16/12, 192.168/16, 169.254/16 (metadata), 0/8.
- * IPv6 ranges: ::/128, ::1/128, fc00::/7, fe80::/10, fec0::/10, plus
- * IPv4-mapped/compatible forms delegated to the IPv4 rules.
+ * Policy notes:
+ *   - NAT64 (RFC 6052; local-use RFC 8215) and 6to4 (RFC 3056) prefixes are
+ *     blocked outright instead of extracting the embedded IPv4: translation
+ *     depends on the local gateway, and RFC 8215 embeds are not universally
+ *     IPv4 tails. Consequence: a hostname with a public A record plus a NAT64
+ *     AAAA record is still rejected (DNS64 environments may be affected).
+ *   - IPv4-mapped (::ffff:0:0/96) and IPv4-compatible (::/96) forms delegate
+ *     the embedded IPv4 tail to the IPv4 rules.
+ *   - Ordinary hostnames and non-IP strings return false; DNS verification
+ *     lives in resolvePinnedPublicIp. Only unparseable-but-IPv6-looking
+ *     literals fail closed.
  */
 export function isPrivateIp(ip: string): boolean {
   if (typeof ip !== 'string' || ip.length === 0) return false
 
-  // IPv6 path — normalize and test against known private prefixes bit-for-bit.
+  // IPv6 path — normalize and evaluate the parsed bytes against the prefix table.
   if (ip.includes(':')) {
     const bytes = parseIpv6ToBytes(ip)
     if (!bytes) {
       // Fail-closed on unparseable literal that still "looks like" IPv6.
       return true
     }
-
-    // ::/128 unspecified and ::1/128 loopback
-    let allZero = true
-    for (let i = 0; i < 15; i++) {
-      if (bytes[i] !== 0) {
-        allZero = false
-        break
-      }
-    }
-    if (allZero && (bytes[15] === 0 || bytes[15] === 1)) return true
-
-    // fc00::/7  (unique local)
-    if ((bytes[0]! & 0xfe) === 0xfc) return true
-
-    // fe80::/10 (link-local) and fec0::/10 (deprecated site-local)
-    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true
-    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0xc0) return true
 
     // ::ffff:0:0/96 IPv4-mapped — delegate to IPv4 rules.
     if (isIpv4MappedBytes(bytes)) {
@@ -176,9 +223,8 @@ export function isPrivateIp(ip: string): boolean {
     // IPv4-compatible ::x.x.x.x (bytes[0..11]==0, bytes[10..11] NOT 0xffff).
     // Form is deprecated but still parseable; attackers use it to wrap a
     // private v4 target inside a literal that survives naive v6 checks.
-    // `::` (all-zero) and `::1` were already matched by the unspecified
-    // + loopback block above, so any surviving first-12-zero address here
-    // is a genuine embedded IPv4.
+    // `::` (all-zero) and `::1` also land here; their tails (0.0.0.0/0.0.0.1)
+    // fall inside 0.0.0.0/8, preserving the unspecified + loopback block.
     let first12AllZero = true
     for (let i = 0; i < 12; i++) {
       if (bytes[i] !== 0) {
@@ -190,15 +236,16 @@ export function isPrivateIp(ip: string): boolean {
       return isPrivateIpv4Octets([bytes[12]!, bytes[13]!, bytes[14]!, bytes[15]!])
     }
 
-    return false
+    return nonPublicAddresses.check(formatIpv6Bytes(bytes), 'ipv6')
   }
 
-  // IPv4 path
+  // IPv4 path. A full dotted quad is required; hostnames and other strings
+  // fall through as non-IP (false).
   const parts = ip.split('.').map(p => Number(p))
   if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) {
     return false
   }
-  return isPrivateIpv4Octets(parts)
+  return nonPublicAddresses.check(`${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`, 'ipv4')
 }
 
 /**

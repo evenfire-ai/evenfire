@@ -18,6 +18,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   const handleCreateChat = useStableCallback(vm.handleCreateChat)
   const handleRenameChat = useStableCallback(vm.handleRenameChat)
   const handleRenameChatForAgent = useStableCallback(vm.handleRenameChatForAgent)
+  const captureChatDeleteFence = useStableCallback(vm.captureChatDeleteFence)
   const handleDeleteChat = useStableCallback(vm.handleDeleteChat)
   const handleDeleteChatForAgent = useStableCallback(vm.handleDeleteChatForAgent)
   const handleSelectChat = useStableCallback(vm.handleSelectChat)
@@ -28,6 +29,10 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   )
   const handleRemoveComposerImageAttachment = useStableCallback(
     vm.handleRemoveComposerImageAttachment
+  )
+  const handleAddComposerFiles = useStableCallback(vm.handleAddComposerFiles)
+  const handleRemoveComposerFileAttachment = useStableCallback(
+    vm.handleRemoveComposerFileAttachment
   )
   const handleAddComposerReferenceAttachments = useStableCallback(
     vm.handleAddComposerReferenceAttachments
@@ -47,6 +52,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleCreateChat,
       handleRenameChat,
       handleRenameChatForAgent,
+      captureChatDeleteFence,
       handleDeleteChat,
       handleDeleteChatForAgent,
       handleSelectChat,
@@ -54,6 +60,8 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleAddComposerImageAttachments,
       handleUpdateComposerImageAttachment,
       handleRemoveComposerImageAttachment,
+      handleAddComposerFiles,
+      handleRemoveComposerFileAttachment,
       handleAddComposerReferenceAttachments,
       handleRemoveComposerReferenceAttachment,
       handleSendAgentMessage,
@@ -67,6 +75,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleCreateChat,
       handleRenameChat,
       handleRenameChatForAgent,
+      captureChatDeleteFence,
       handleDeleteChat,
       handleDeleteChatForAgent,
       handleSelectChat,
@@ -74,6 +83,8 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleAddComposerImageAttachments,
       handleUpdateComposerImageAttachment,
       handleRemoveComposerImageAttachment,
+      handleAddComposerFiles,
+      handleRemoveComposerFileAttachment,
       handleAddComposerReferenceAttachments,
       handleRemoveComposerReferenceAttachment,
       handleSendAgentMessage,

@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { HostApprovalSection } from '../HostApprovalSection'
 import { NATIVE_TOOLS } from '../HostApprovalSection/constants'
 import { useApprovalToolsDraft } from '../HostApprovalSection/hooks'
+
+const controlUiCss = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
 
 describe('HostApprovalSection — constants', () => {
   it('contains exactly the 12 always-on native tools verified during the back-end smoke', () => {
@@ -164,6 +168,14 @@ describe('HostApprovalSection — component', () => {
 
   afterEach(() => cleanup())
 
+  it('keeps approval rows in a horizontal shared layout', () => {
+    const rowRule = controlUiCss.match(/(?:^|\n)\.cu-access-row\s*\{([^}]*)\}/)?.[1] ?? ''
+
+    expect(rowRule).toMatch(/display:\s*flex/)
+    expect(rowRule).toMatch(/align-items:\s*center/)
+    expect(rowRule).toMatch(/justify-content:\s*space-between/)
+  })
+
   describe('read-only — no overrides', () => {
     it('renders the empty state and an Edit button when canWrite=true', () => {
       render(
@@ -205,6 +217,7 @@ describe('HostApprovalSection — component', () => {
       )
       // Both overrides shown
       expect(screen.getByText('http_request')).toBeInTheDocument()
+      expect(screen.getByText('http_request').closest('.cu-access-row')).not.toBeNull()
       expect(screen.getByText('file_write')).toBeInTheDocument()
       // Tools with no override are NOT rendered
       expect(screen.queryByText('shell_exec')).not.toBeInTheDocument()

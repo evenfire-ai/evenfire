@@ -56,6 +56,8 @@ export function FilePreviewPage({
   fileKind,
   mimeType,
   byteLength,
+  reloadVersion,
+  unavailable = false,
 }: FilePreviewPageProps) {
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
@@ -66,6 +68,10 @@ export function FilePreviewPage({
   useEffect(() => {
     setDenied(null)
   }, [gfsUri])
+
+  useEffect(() => {
+    if (unavailable) setDenied(null)
+  }, [unavailable])
 
   // R-4: when the authority controller detects a revocation while this tab is
   // mounted, bump the reload token so the body re-fetches and fails closed
@@ -105,13 +111,13 @@ export function FilePreviewPage({
 
   // Remounting the body on a reload bump discards any stale bytes and re-runs the
   // fetch from scratch — the simplest correct "re-dispatch the fetch" (§3.B.3).
-  const bodyKey = `${gfsUri}:${reloadToken}`
+  const bodyKey = `${gfsUri}:${reloadToken}:${reloadVersion ?? 0}`
 
   return (
     <section className="page">
       <div className="da-gfs-preview-page">
-        {denied ? (
-          <EmptyState title="You no longer have access to this file" body={denied} />
+        {denied || unavailable || accessRevoked ? (
+          <EmptyState title="File unavailable" body="This item is no longer available." />
         ) : (
           <>
             {fileKind === 'image' ? (

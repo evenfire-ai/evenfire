@@ -135,7 +135,10 @@ describe('GET /rpc/hosts/:hostRef/models — passthrough to mcp-host', () => {
   })
 
   it('returns 403 if the user cannot access the host', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     await request(makeApp())
       .get('/rpc/hosts/other-host/models')
       .set('authorization', 'Bearer user-token')
@@ -241,7 +244,10 @@ describe('POST /rpc/hosts/:hostRef/model — set per-session model', () => {
   })
 
   it('returns 403 if the user cannot access the host', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     await request(makeApp())
       .post('/rpc/hosts/other-host/model')
       .set('authorization', 'Bearer user-token')

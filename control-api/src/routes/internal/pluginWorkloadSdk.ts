@@ -1,8 +1,11 @@
 import { Router } from 'express'
-import { rateLimit } from 'express-rate-limit'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireInternalControlJwt } from '../../middleware/internalControlJwt.js'
-import { createPluginWorkloadSdkInternalRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
+import {
+  createPluginWorkloadSdkInternalEdgeRateLimit,
+  createPluginWorkloadSdkInternalRateLimit,
+  createPluginWorkloadSdkVerificationBudgetRateLimit,
+} from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import {
   type PluginWorkloadSdkRevocationActor,
   finalizePluginWorkloadSdkRevocation,
@@ -57,13 +60,9 @@ export function createInternalPluginWorkloadSdkRouter(): Router {
   // the prefix so every current/future internal SDK route inherits the guard.
   router.use(
     '/internal/plugin-workload-sdk',
-    rateLimit({
-      windowMs: 60_000,
-      limit: 600,
-      standardHeaders: 'draft-8',
-      legacyHeaders: false,
-      message: { error: 'Too Many Requests', retryable: true },
-    }),
+    // The edge limiter verifies to pick its key; bound that work per IP first.
+    createPluginWorkloadSdkVerificationBudgetRateLimit(),
+    createPluginWorkloadSdkInternalEdgeRateLimit(),
     requireInternalControlJwt,
     createPluginWorkloadSdkInternalRateLimit()
   )

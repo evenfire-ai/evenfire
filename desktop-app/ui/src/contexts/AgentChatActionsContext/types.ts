@@ -1,5 +1,12 @@
 import type { ReactNode, RefObject } from 'react'
+import type { ChatDeleteFence } from '../../../../src/types'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
+
+export interface QueuedChatDelete {
+  agentRef: string
+  fence: ChatDeleteFence
+  hostAuthorityEpoch: number
+}
 
 /**
  * Stable, cross-cutting chat actions. These are `useCallback` handlers plus the
@@ -12,13 +19,20 @@ export interface AgentChatActionsContextValue {
   handleCreateChat: () => Promise<void>
   handleRenameChat: (chatId: string, newTitle: string) => Promise<void>
   handleRenameChatForAgent: (agentRef: string, chatId: string, newTitle: string) => Promise<void>
-  handleDeleteChat: (chatId: string) => Promise<void>
-  handleDeleteChatForAgent: (agentRef: string, chatId: string) => Promise<void>
+  captureChatDeleteFence: (agentRef: string) => Promise<QueuedChatDelete>
+  handleDeleteChat: (chatId: string, deletion: QueuedChatDelete) => Promise<void>
+  handleDeleteChatForAgent: (
+    agentRef: string,
+    chatId: string,
+    deletion: QueuedChatDelete
+  ) => Promise<void>
   handleSelectChat: (chatId: string) => Promise<void>
   clearComposerSendError: () => void
   handleAddComposerImageAttachments: (attachments: ComposerImageAttachment[]) => void
   handleUpdateComposerImageAttachment: (attachment: ComposerImageAttachment) => void
   handleRemoveComposerImageAttachment: (attachmentId: string) => void
+  handleAddComposerFiles: (files: File[], draft: string) => void
+  handleRemoveComposerFileAttachment: (attachmentId: string) => void
   handleAddComposerReferenceAttachments: (attachments: ComposerReferenceAttachment[]) => void
   handleRemoveComposerReferenceAttachment: (attachmentId: string) => void
   handleSendAgentMessage: (text: string) => Promise<void>

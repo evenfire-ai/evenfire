@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ImageInputResolver } from '../../../llm/imageInput'
 import type { ClassifiedError, SingleTurnProvider } from '../../../llm/types'
 import { logger } from '../../../logger'
+import { TOOL_RESULT_IMAGE_TEXT } from '../../../visualInput/messageProjection'
 import { LlmError, LlmErrorCode } from '../../errors'
 import { appendToolResults } from '../../orchestration/toolUseLoopMessages'
 import type { SystemPromptParts } from '../../reasoning/systemPrompt'
@@ -584,12 +585,12 @@ describe('#654 LlmPortAdapter image guard', () => {
           { role: 'tool' as const, content: 'captured', tool_call_id: 'tc_1', name: 'shot' },
           {
             role: 'user' as const,
-            content: 'Here are the screenshots from the tool results above.',
+            content: TOOL_RESULT_IMAGE_TEXT,
             imageOrigin: 'tool_result' as const,
             contentParts: [
               {
                 type: 'text' as const,
-                text: 'Here are the screenshots from the tool results above.',
+                text: TOOL_RESULT_IMAGE_TEXT,
               },
               { type: 'image' as const, mimeType: 'image/png' as const, data: 'QUJD' },
             ],
@@ -607,7 +608,7 @@ describe('#654 LlmPortAdapter image guard', () => {
       expect(messages[2].contentParts).toBeUndefined()
       expect(messages[2].imageOrigin).toBeUndefined()
       expect(messages[2].content).toContain('were not forwarded')
-      expect(messages[2].content).toContain('Here are the screenshots from the tool results above.')
+      expect(messages[2].content).toContain(TOOL_RESULT_IMAGE_TEXT)
       // The text-only messages are passed through by identity.
       expect(messages[0]).toBe(request.messages[0])
       expect(messages[1]).toBe(request.messages[1])
@@ -644,7 +645,7 @@ describe('#654 LlmPortAdapter image guard', () => {
             imageMessage(),
             {
               role: 'user',
-              content: 'Here are the screenshots from the tool results above.',
+              content: TOOL_RESULT_IMAGE_TEXT,
               imageOrigin: 'tool_result',
               contentParts: [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }],
             },

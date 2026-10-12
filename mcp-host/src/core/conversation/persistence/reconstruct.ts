@@ -15,6 +15,7 @@ import type {
   ChatMessage,
   Conversation,
   PendingApproval,
+  ResumeSourceMessage,
   TraceContextV1,
   Turn,
   TurnToolCall,
@@ -156,6 +157,14 @@ export function normalizeConnectReason(
   return raw === 'connect_required' ? 'connect_required' : undefined
 }
 
+function normalizeAuthorizationScope(
+  raw: string | null | undefined
+): PendingApproval['authorization_scope'] {
+  if (raw === null || raw === undefined) return undefined
+  if (raw === 'turn_tools' || raw === 'exact_invocation') return raw
+  throw new Error(`Invalid pending approval authorization scope: ${raw}`)
+}
+
 export function reconstructPendingApproval(row: PendingApprovalRow): PendingApproval {
   const snapshot = JSON.parse(row.context_snapshot) as ChatMessage[]
   return {
@@ -164,6 +173,7 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
         ? undefined
         : parseTaskExecutionBudget(JSON.parse(row.task_budget ?? 'null')),
     legacy_budget: row.task_budget === 'legacy',
+    authorization_scope: normalizeAuthorizationScope(row.authorization_scope),
     request_id: row.request_id,
     tool_name: row.tool_name,
     parameters: JSON.parse(row.parameters) as Record<string, unknown>,
@@ -173,11 +183,19 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
     completed_results: deserializeCompletedResults(row.completed_results),
     intent_summary: row.intent_summary ?? undefined,
     traceContext: parseTraceContext(row.trace_context),
+    sourceMessage: parseSourceMessage(row.source_message),
     // U5 — rehydrate the connect_required discriminator so a cold restart does
     // NOT degrade a reactive-consent suspension into a generic approval.
     reason: normalizeConnectReason(row.reason),
     mcpServerName: row.mcp_server_name ?? undefined,
   }
+}
+
+function parseSourceMessage(raw: string | null): ResumeSourceMessage | undefined {
+  if (!raw) return undefined
+  // A corrupt row throws, like context_snapshot, parameters and task_budget:
+  // dropping it would silently resume without the file version pins.
+  return JSON.parse(raw) as ResumeSourceMessage
 }
 
 function mapState(raw: string): ConversationState {

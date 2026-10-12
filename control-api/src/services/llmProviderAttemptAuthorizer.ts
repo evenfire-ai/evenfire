@@ -1,8 +1,11 @@
 import {
   LIMITS as GROK_LIMITS,
+  buildGrokProxyEnvelope,
   computeGrokPolicyHash,
-  hashGrokCompletionRequestV1,
-  parseGrokCompletionRequestV1,
+  requestBodyLimitBytes as grokRequestBodyLimitBytes,
+  hashGrokCompletionRequest,
+  measureNonImageAuthorizeBytes as measureGrokNonImageAuthorizeBytes,
+  parseGrokCompletionRequest,
 } from '@clerum/grok-provider-attempt-contract'
 import {
   ENVELOPE_ALLOWANCE_BYTES,
@@ -96,6 +99,8 @@ export type LlmProviderAttemptAuthorizeErrorCode =
   | 'stale_generation'
   | 'idempotency_conflict'
   | 'provider_unavailable'
+  | 'authorize_timeout'
+  | 'authorize_aborted'
 
 export class LlmProviderAttemptAuthorizeError extends Error {
   constructor(
@@ -116,6 +121,7 @@ export type AuthorizeAttemptSuccess = {
 
 export type LlmProviderAttemptAuthorizerDeps = {
   enabled: boolean
+  signal?: AbortSignal
   db: DbClient
   withTransaction: typeof withTransaction
   getConnection: typeof getSafeCodexSubscriptionConnection
@@ -124,7 +130,10 @@ export type LlmProviderAttemptAuthorizerDeps = {
    * Live oauth-broker targets on the Host/recipe. Required: a missing
    * assignment must not fall back to `request.provider` (that made D6 a no-op).
    */
-  resolveAssignment: (hostRef: string) => Promise<{
+  resolveAssignment: (
+    hostRef: string,
+    signal?: AbortSignal
+  ) => Promise<{
     liveBrokerProviders: string[]
     liveConnectionRef: string
     annotations?: Record<string, string>
@@ -174,9 +183,9 @@ const MAX_AUTHORIZE_BODY_DEPTH = Math.max(LIMITS.maxNestingDepth, GROK_LIMITS.ma
 export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 
 /**
- * Reject an over-deep body before anything serializes it. Iterative, so an
- * attacker-controlled nesting depth cannot overflow the stack here; without it
- * JSON.stringify throws a RangeError that surfaces as a 500.
+ * Reject an over-deep body before anything serializes it, including direct
+ * service calls that do not pass through the route's raw-body scan. Iterative,
+ * so attacker-controlled nesting cannot turn a refusal into a RangeError/500.
  */
 function assertBodyNestingWithinLimit(body: Record<string, unknown>): void {
   const stack: Array<[unknown, number]> = [[body, 1]]
@@ -276,11 +285,27 @@ async function authorizeGrokProviderAttempt(
   }
   assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
+  // Same budgets as the Codex path (#784): the larger of the non-image cap plus
+  // the envelope allowance and the V2 visual envelope bounds the whole body;
+  // the wrapper outside image data stays on the non-image cap.
+  const wholeBodyLimit = Math.max(
+    grokRequestBodyLimitBytes(body.request),
+    GROK_LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+  )
+  if (Buffer.byteLength(serialized, 'utf8') > wholeBodyLimit) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'payload_too_large',
+      'request body exceeds the limit'
+    )
+  }
   if (
-    Buffer.byteLength(serialized, 'utf8') >
+    measureGrokNonImageAuthorizeBytes(body) >
     GROK_LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
   ) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
+    throw new LlmProviderAttemptAuthorizeError(
+      'payload_too_large',
+      'authorize wrapper exceeds the non-image limit'
+    )
   }
   const unknown = firstUnknownKey(body)
   if (unknown) {
@@ -288,9 +313,16 @@ async function authorizeGrokProviderAttempt(
   }
   const caller = resolveCaller(claims)
   assertClaimBinding(body, claims)
-  const parsed = parseGrokCompletionRequestV1(body.request)
+  const parsed = parseGrokCompletionRequest(body.request)
   if (!parsed.ok) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', parsed.message)
+    // `kind: 'size'` is 413: the byte budgets and the container, member and
+    // element bounds. Every other refusal is 400, including the image count
+    // (`kind: 'count'`) and the message, tool-call, depth and range bounds
+    // (no kind).
+    throw new LlmProviderAttemptAuthorizeError(
+      parsed.code === 'limit' && parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
+      parsed.message
+    )
   }
   const request = parsed.value
   const invocationId = typeof body.invocationId === 'string' ? body.invocationId.trim() : ''
@@ -322,14 +354,20 @@ async function authorizeGrokProviderAttempt(
       'policyRevision and policyHash are required'
     )
   }
-  const requestHash = hashGrokCompletionRequestV1(request)
+  const requestHash = hashGrokCompletionRequest(request)
   if (typeof body.requestHash === 'string' && body.requestHash !== requestHash) {
     throw new LlmProviderAttemptAuthorizeError(
       'invalid_request',
       'requestHash does not match the canonical request'
     )
   }
-  const assignment = await resolvedDeps.resolveAssignment(caller.hostRef)
+  const assignment = await resolvedDeps
+    .resolveAssignment(caller.hostRef, resolvedDeps.signal)
+    .catch(error => {
+      resolvedDeps.signal?.throwIfAborted()
+      throw error
+    })
+  resolvedDeps.signal?.throwIfAborted()
   const liveTarget = attestLiveBrokerTarget({
     requestedProvider: GROK_PROVIDER,
     liveBrokerProviders: assignment.liveBrokerProviders,
@@ -367,256 +405,278 @@ async function authorizeGrokProviderAttempt(
       'Host has no Grok subscription assigned'
     )
   }
-  return resolvedDeps.withTransaction(async tx => {
-    const db: DbClient = tx
-    const connection = await getSafeGrokSubscriptionConnection(db, connectionKey)
-    if (
-      !connection ||
-      connection.revokedAt ||
-      connection.status === 'revoked' ||
-      connection.status === 'reauth_required' ||
-      connection.catalogStatus === 'auth-rejected'
-    ) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'no_grant',
-        'Grok subscription grant is missing, revoked, or requires re-authentication'
-      )
-    }
-    if (
-      connection.status !== 'connected' ||
-      connection.catalogStatus === 'unavailable' ||
-      connection.catalogStatus === 'never_synced'
-    ) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'connection_unavailable',
-        'Grok subscription catalog is not ready'
-      )
-    }
-    const modelState = await getGrokCatalogModelState(db, connection.id, request.model)
-    if (!modelState || !modelState.enabled || modelState.stale) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'model_not_allowed',
-        'model is disabled, stale, or absent from the Grok catalog'
-      )
-    }
-    const expectedPolicyHash = computeGrokPolicyHash({
-      model: request.model,
-      catalogRevision: connection.catalogRevision,
-      credentialRevision: connection.credentialRevision,
-      connectionKey: connection.connectionKey,
-    })
-    if (policyRevision !== connection.catalogRevision || policyHash !== expectedPolicyHash) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'no_grant',
-        'policy revision or hash does not match the current Grok catalog'
-      )
-    }
-    const maxGeneration = await resolvedDeps.getMaxGeneration(db, invocationId)
-    if (attemptGeneration < maxGeneration) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'stale_generation',
-        'attemptGeneration is older than the recorded invocation'
-      )
-    }
-    const pluginWorkloadSdkProviderAttemptId =
-      typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
-        ? body.pluginWorkloadSdkProviderAttemptId.trim()
-        : ''
-    let sdkLinkRecipe: { namespace: string; name: string } | null = null
-    if (pluginWorkloadSdkProviderAttemptId) {
-      if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'invalid_request',
-          'pluginWorkloadSdkProviderAttemptId must be a UUID'
-        )
-      }
-      if (caller.callerKind === 'host') {
-        throw new LlmProviderAttemptAuthorizeError(
-          'no_grant',
-          'host Grok chat cannot bind a Plugin Workload SDK provider attempt'
-        )
-      }
-      if (!caller.recipeNamespace || !caller.recipeName) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'no_grant',
-          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
-        )
-      }
-      sdkLinkRecipe = { namespace: caller.recipeNamespace, name: caller.recipeName }
-    }
-    if (sdkLinkRecipe) {
-      await lockPluginWorkloadSdkRecipe(db, sdkLinkRecipe.namespace, sdkLinkRecipe.name)
-    }
-    const presentedReservationId =
-      typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
-    let budgetReservationId = presentedReservationId || 'unbudgeted'
-    if (presentedReservationId) {
-      const active = await resolvedDeps.getActiveReservation(db, {
-        reservationId: presentedReservationId,
-        hostRef: caller.hostRef,
-      })
-      if (!active) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'budget_denied',
-          'budget reservation is missing or expired'
-        )
-      }
-    } else {
-      const budget = await resolvedDeps.evaluateBudget(
-        {
-          host_ref: caller.hostRef,
-          context_ref: null,
-          team_id: null,
-          user_id: null,
-          provider: GROK_PROVIDER,
-          model: request.model,
-          llm_secret_name: null,
-          source_kind: 'channel',
-          recipe_name: caller.recipeName,
-          cron_job_id: null,
-          task_ref: `${invocationId}:${attemptGeneration}:${providerAttemptIndex}`,
-        },
-        db,
-        { connect: async () => tx as never },
-        {
-          requiredUnit: 'tokens',
-          transactionClient: tx,
-          reservationTtlSeconds: GROK_ATTEMPT_RESERVATION_TTL_SECONDS,
-        }
-      )
-      if (!budget.allowed) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'budget_denied',
-          'token budget denied this attempt'
-        )
-      }
-      budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
-    }
-    const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
-    let reservedSdkAttemptToPromote: {
-      id: string
-      invocationId: string
-      recipeNamespace: string
-      recipeName: string
-      attemptGeneration: number
-      attemptIndex: number
-      model: string
-      targetRef: string
-    } | null = null
-    if (pluginWorkloadSdkProviderAttemptId) {
-      const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
-        pluginWorkloadSdkProviderAttemptId,
-        db
-      )
-      const spendExists = sdkAttempt
-        ? await pluginWorkloadSdkSpendOutcomeExists(sdkAttempt.id, db)
-        : false
+  return resolvedDeps.withTransaction(
+    async tx => {
+      resolvedDeps.signal?.throwIfAborted()
+      const db: DbClient = tx
+      const connection = await getSafeGrokSubscriptionConnection(db, connectionKey)
       if (
-        !sdkAttempt ||
-        spendExists ||
-        sdkAttempt.invocationId !== invocationId ||
-        sdkAttempt.attemptGeneration !== attemptGeneration ||
-        sdkAttempt.attemptIndex !== providerAttemptIndex ||
-        sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
-        sdkAttempt.recipeName !== caller.recipeName ||
-        sdkAttempt.provider !== GROK_PROVIDER ||
-        sdkAttempt.model !== request.model ||
-        !sdkAttempt.targetRef.trim() ||
-        (presentedTargetRef !== '' && presentedTargetRef !== sdkAttempt.targetRef) ||
-        !['reserved', 'in_progress'].includes(sdkAttempt.status)
+        !connection ||
+        connection.revokedAt ||
+        connection.status === 'revoked' ||
+        connection.status === 'reauth_required' ||
+        connection.catalogStatus === 'auth-rejected'
       ) {
         throw new LlmProviderAttemptAuthorizeError(
           'no_grant',
-          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+          'Grok subscription grant is missing, revoked, or requires re-authentication'
         )
       }
-      if (sdkAttempt.status === 'reserved') {
-        reservedSdkAttemptToPromote = {
-          id: sdkAttempt.id,
-          invocationId: sdkAttempt.invocationId,
-          recipeNamespace: sdkAttempt.recipeNamespace,
-          recipeName: sdkAttempt.recipeName,
-          attemptGeneration: sdkAttempt.attemptGeneration,
-          attemptIndex: sdkAttempt.attemptIndex,
-          model: sdkAttempt.model,
-          targetRef: sdkAttempt.targetRef,
-        }
+      if (
+        connection.status !== 'connected' ||
+        connection.catalogStatus === 'unavailable' ||
+        connection.catalogStatus === 'never_synced'
+      ) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'connection_unavailable',
+          'Grok subscription catalog is not ready'
+        )
       }
-    }
-    try {
-      const attempt = await resolvedDeps.insertAttempt(db, {
-        callerKind: caller.callerKind,
-        hostRef: caller.hostRef,
-        recipeNamespace: caller.recipeNamespace,
-        recipeName: caller.recipeName,
-        invocationId,
-        attemptGeneration,
-        providerAttemptIndex,
-        provider: GROK_PROVIDER,
+      const modelState = await getGrokCatalogModelState(db, connection.id, request.model)
+      if (!modelState || !modelState.enabled || modelState.stale) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'model_not_allowed',
+          'model is disabled, stale, or absent from the Grok catalog'
+        )
+      }
+      const expectedPolicyHash = computeGrokPolicyHash({
         model: request.model,
-        requestHash,
-        policyRevision,
-        policyHash,
-        budgetReservationId,
-        connectionRevision: connection.credentialRevision,
-        connectionId: connection.id,
-        ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
+        catalogRevision: connection.catalogRevision,
+        credentialRevision: connection.credentialRevision,
+        connectionKey: connection.connectionKey,
       })
-      if (reservedSdkAttemptToPromote) {
-        const promoted = await promoteReservedOauthBrokerProviderAttempt(
-          { ...reservedSdkAttemptToPromote, provider: GROK_PROVIDER },
-          db
+      if (policyRevision !== connection.catalogRevision || policyHash !== expectedPolicyHash) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'policy revision or hash does not match the current Grok catalog'
         )
-        if (!promoted) {
+      }
+      const maxGeneration = await resolvedDeps.getMaxGeneration(db, invocationId)
+      if (attemptGeneration < maxGeneration) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'stale_generation',
+          'attemptGeneration is older than the recorded invocation'
+        )
+      }
+      const pluginWorkloadSdkProviderAttemptId =
+        typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
+          ? body.pluginWorkloadSdkProviderAttemptId.trim()
+          : ''
+      let sdkLinkRecipe: { namespace: string; name: string } | null = null
+      if (pluginWorkloadSdkProviderAttemptId) {
+        if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
           throw new LlmProviderAttemptAuthorizeError(
-            'no_grant',
-            'pluginWorkloadSdkProviderAttemptId is no longer reserved for Grok authorize'
+            'invalid_request',
+            'pluginWorkloadSdkProviderAttemptId must be a UUID'
           )
         }
+        if (caller.callerKind === 'host') {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'host Grok chat cannot bind a Plugin Workload SDK provider attempt'
+          )
+        }
+        if (!caller.recipeNamespace || !caller.recipeName) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+          )
+        }
+        sdkLinkRecipe = { namespace: caller.recipeNamespace, name: caller.recipeName }
       }
-      const issued = await issueRegisteredGrokExecutionTicket(db, {
-        sub: claims.sub,
-        hostRef: caller.hostRef,
-        recipeNamespace: caller.recipeNamespace ?? undefined,
-        recipeName: caller.recipeName ?? undefined,
-        invocationId,
-        attemptGeneration,
-        providerAttemptId: attempt.id,
-        providerAttemptIndex,
-        model: request.model,
-        requestHash,
-        policyRevision,
-        policyHash,
-        budgetReservationId,
-        connectionRevision: connection.credentialRevision,
-        connectionId: connection.id,
-      })
-      log.info(
-        {
-          event: 'grok_attempt_authorized',
-          providerAttemptId: attempt.id,
+      if (sdkLinkRecipe) {
+        await lockPluginWorkloadSdkRecipe(db, sdkLinkRecipe.namespace, sdkLinkRecipe.name)
+      }
+      const presentedReservationId =
+        typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
+      let budgetReservationId = presentedReservationId || 'unbudgeted'
+      if (presentedReservationId) {
+        const active = await resolvedDeps.getActiveReservation(db, {
+          reservationId: presentedReservationId,
           hostRef: caller.hostRef,
-          model: request.model,
-        },
-        'authorized Grok provider attempt'
-      )
-      return {
-        providerAttemptId: attempt.id,
-        requestHash,
-        executionTicket: issued.executionTicket,
-        expiresAt: issued.expiresAt.toISOString(),
-      }
-    } catch (err) {
-      const code = (err as { code?: string }).code
-      if (code === '23505') {
-        throw new LlmProviderAttemptAuthorizeError(
-          'idempotency_conflict',
-          'an attempt with this invocation binding already exists'
+        })
+        if (!active) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'budget_denied',
+            'budget reservation is missing or expired'
+          )
+        }
+      } else {
+        const budget = await resolvedDeps.evaluateBudget(
+          {
+            host_ref: caller.hostRef,
+            context_ref: null,
+            team_id: null,
+            user_id: null,
+            provider: GROK_PROVIDER,
+            model: request.model,
+            llm_secret_name: null,
+            source_kind: 'channel',
+            recipe_name: caller.recipeName,
+            cron_job_id: null,
+            task_ref: `${invocationId}:${attemptGeneration}:${providerAttemptIndex}`,
+          },
+          db,
+          { connect: async () => tx as never },
+          {
+            requiredUnit: 'tokens',
+            transactionClient: tx,
+            reservationTtlSeconds: GROK_ATTEMPT_RESERVATION_TTL_SECONDS,
+          }
         )
+        if (!budget.allowed) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'budget_denied',
+            'token budget denied this attempt'
+          )
+        }
+        budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
       }
-      throw err
-    }
-  })
+      const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+      let reservedSdkAttemptToPromote: {
+        id: string
+        invocationId: string
+        recipeNamespace: string
+        recipeName: string
+        attemptGeneration: number
+        attemptIndex: number
+        model: string
+        targetRef: string
+      } | null = null
+      if (pluginWorkloadSdkProviderAttemptId) {
+        const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
+          pluginWorkloadSdkProviderAttemptId,
+          db
+        )
+        const spendExists = sdkAttempt
+          ? await pluginWorkloadSdkSpendOutcomeExists(sdkAttempt.id, db)
+          : false
+        if (
+          !sdkAttempt ||
+          spendExists ||
+          sdkAttempt.invocationId !== invocationId ||
+          sdkAttempt.attemptGeneration !== attemptGeneration ||
+          sdkAttempt.attemptIndex !== providerAttemptIndex ||
+          sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
+          sdkAttempt.recipeName !== caller.recipeName ||
+          sdkAttempt.provider !== GROK_PROVIDER ||
+          sdkAttempt.model !== request.model ||
+          !sdkAttempt.targetRef.trim() ||
+          (presentedTargetRef !== '' && presentedTargetRef !== sdkAttempt.targetRef) ||
+          !['reserved', 'in_progress'].includes(sdkAttempt.status)
+        ) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+          )
+        }
+        if (sdkAttempt.status === 'reserved') {
+          reservedSdkAttemptToPromote = {
+            id: sdkAttempt.id,
+            invocationId: sdkAttempt.invocationId,
+            recipeNamespace: sdkAttempt.recipeNamespace,
+            recipeName: sdkAttempt.recipeName,
+            attemptGeneration: sdkAttempt.attemptGeneration,
+            attemptIndex: sdkAttempt.attemptIndex,
+            model: sdkAttempt.model,
+            targetRef: sdkAttempt.targetRef,
+          }
+        }
+      }
+      try {
+        const attempt = await resolvedDeps.insertAttempt(db, {
+          callerKind: caller.callerKind,
+          hostRef: caller.hostRef,
+          recipeNamespace: caller.recipeNamespace,
+          recipeName: caller.recipeName,
+          invocationId,
+          attemptGeneration,
+          providerAttemptIndex,
+          provider: GROK_PROVIDER,
+          model: request.model,
+          requestHash,
+          policyRevision,
+          policyHash,
+          budgetReservationId,
+          connectionRevision: connection.credentialRevision,
+          connectionId: connection.id,
+          ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
+        })
+        if (reservedSdkAttemptToPromote) {
+          const promoted = await promoteReservedOauthBrokerProviderAttempt(
+            { ...reservedSdkAttemptToPromote, provider: GROK_PROVIDER },
+            db
+          )
+          if (!promoted) {
+            throw new LlmProviderAttemptAuthorizeError(
+              'no_grant',
+              'pluginWorkloadSdkProviderAttemptId is no longer reserved for Grok authorize'
+            )
+          }
+        }
+        const issued = await issueRegisteredGrokExecutionTicket(db, {
+          sub: claims.sub,
+          hostRef: caller.hostRef,
+          recipeNamespace: caller.recipeNamespace ?? undefined,
+          recipeName: caller.recipeName ?? undefined,
+          invocationId,
+          attemptGeneration,
+          providerAttemptId: attempt.id,
+          providerAttemptIndex,
+          model: request.model,
+          requestHash,
+          policyRevision,
+          policyHash,
+          budgetReservationId,
+          connectionRevision: connection.credentialRevision,
+          connectionId: connection.id,
+        })
+        if (request.schemaVersion === 'grok-completion-request.v2') {
+          // Measure the exact proxy envelope while the attempt, ticket and any
+          // new reservation are still transactional, as the Codex path does.
+          const envelope = buildGrokProxyEnvelope({
+            executionTicket: issued.executionTicket,
+            requestHash,
+            request,
+          })
+          if (!envelope.ok) {
+            throw new LlmProviderAttemptAuthorizeError(
+              envelope.code === 'limit' && envelope.kind === 'size'
+                ? 'payload_too_large'
+                : 'invalid_request',
+              envelope.message
+            )
+          }
+        }
+        log.info(
+          {
+            event: 'grok_attempt_authorized',
+            providerAttemptId: attempt.id,
+            hostRef: caller.hostRef,
+            model: request.model,
+          },
+          'authorized Grok provider attempt'
+        )
+        return {
+          providerAttemptId: attempt.id,
+          requestHash,
+          executionTicket: issued.executionTicket,
+          expiresAt: issued.expiresAt.toISOString(),
+        }
+      } catch (err) {
+        const code = (err as { code?: string }).code
+        if (code === '23505') {
+          throw new LlmProviderAttemptAuthorizeError(
+            'idempotency_conflict',
+            'an attempt with this invocation binding already exists'
+          )
+        }
+        throw err
+      }
+    },
+    undefined,
+    { signal: resolvedDeps.signal }
+  )
 }
 
 export async function authorizeLlmProviderAttempt(
@@ -625,6 +685,7 @@ export async function authorizeLlmProviderAttempt(
   deps: LlmProviderAttemptAuthorizerDeps | Partial<LlmProviderAttemptAuthorizerDeps> = defaultDeps()
 ): Promise<AuthorizeAttemptSuccess> {
   const resolvedDeps: LlmProviderAttemptAuthorizerDeps = { ...defaultDeps(), ...deps }
+  resolvedDeps.signal?.throwIfAborted()
   if (!isPlainObject(body)) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'body must be an object')
   }
@@ -675,7 +736,9 @@ export async function authorizeLlmProviderAttempt(
 
   const parsed = parseCodexCompletionRequest(body.request)
   if (!parsed.ok) {
-    // `kind: 'size'` is 413: byte ceilings and image geometry. Range, count and depth stay 400.
+    // `kind: 'size'` is 413: the byte budgets, the image geometry and the
+    // container, member and element bounds. `range`, `count` and `depth`
+    // stay 400.
     throw new LlmProviderAttemptAuthorizeError(
       parsed.code === 'limit' && parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
       parsed.message
@@ -727,7 +790,13 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
-  const assignment = await resolvedDeps.resolveAssignment(caller.hostRef)
+  const assignment = await resolvedDeps
+    .resolveAssignment(caller.hostRef, resolvedDeps.signal)
+    .catch(error => {
+      resolvedDeps.signal?.throwIfAborted()
+      throw error
+    })
+  resolvedDeps.signal?.throwIfAborted()
   const liveTarget = attestLiveBrokerTarget({
     requestedProvider: request.provider,
     liveBrokerProviders: assignment.liveBrokerProviders,
@@ -761,304 +830,309 @@ export async function authorizeLlmProviderAttempt(
       'Host has no ChatGPT subscription assigned'
     )
   }
-  return resolvedDeps.withTransaction(async tx => {
-    const db: DbClient = tx
-    const connection = await resolvedDeps.getConnection(db, connectionKey)
-    // Terminal grant failures must not look like a retryable proxy outage.
-    // Missing, revoked, and auth-rejected rows require a new grant or
-    // operator re-auth — failover onto another provider is the wrong recovery.
-    if (
-      !connection ||
-      connection.revokedAt ||
-      connection.status === 'revoked' ||
-      connection.status === 'reauth_required' ||
-      connection.catalogStatus === 'auth-rejected'
-    ) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'no_grant',
-        'Codex subscription grant is missing, revoked, or requires re-authentication'
-      )
-    }
-    if (
-      connection.status !== 'connected' ||
-      connection.catalogStatus === 'unavailable' ||
-      connection.catalogStatus === 'never_synced'
-    ) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'connection_unavailable',
-        'Codex subscription catalog is not ready'
-      )
-    }
-
-    const modelState = await resolvedDeps.getModelState(db, connection.id, request.model)
-    if (!modelState || !modelState.enabled || modelState.stale) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'model_not_allowed',
-        'model is disabled, stale, or absent from the Codex catalog'
-      )
-    }
-
-    const expectedPolicyHash = computeCodexPolicyHash({
-      model: request.model,
-      catalogRevision: connection.catalogRevision,
-      credentialRevision: connection.credentialRevision,
-      connectionKey: connection.connectionKey,
-    })
-    if (policyRevision !== connection.catalogRevision || policyHash !== expectedPolicyHash) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'no_grant',
-        'policy revision or hash does not match the current Codex catalog'
-      )
-    }
-
-    const maxGeneration = await resolvedDeps.getMaxGeneration(db, invocationId)
-    if (attemptGeneration < maxGeneration) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'stale_generation',
-        'attemptGeneration is older than the recorded invocation'
-      )
-    }
-
-    const pluginWorkloadSdkProviderAttemptId =
-      typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
-        ? body.pluginWorkloadSdkProviderAttemptId.trim()
-        : ''
-    let sdkLinkRecipe: { namespace: string; name: string } | null = null
-    if (pluginWorkloadSdkProviderAttemptId) {
-      if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'invalid_request',
-          'pluginWorkloadSdkProviderAttemptId must be a UUID'
-        )
-      }
-      if (caller.callerKind === 'host') {
-        throw new LlmProviderAttemptAuthorizeError(
-          'no_grant',
-          'host Codex chat cannot bind a Plugin Workload SDK provider attempt'
-        )
-      }
-      if (!caller.recipeNamespace || !caller.recipeName) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'no_grant',
-          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
-        )
-      }
-      sdkLinkRecipe = { namespace: caller.recipeNamespace, name: caller.recipeName }
-    }
-
-    // Recipe authorize and promptBridge finalize share this advisory. Take it
-    // before budget reservation work so concurrent Codex + fallback cannot
-    // deadlock (budget rows then advisory vs advisory then spend/invocation).
-    //
-    // Only an SDK-linked authorize goes on to take plugin_workload_sdk_*
-    // rows FOR UPDATE, which is the order finalize follows after this advisory.
-    // The workflow lane touches neither, so taking it for every recipe caller
-    // serialized that lane per recipe for no ordering benefit.
-    if (sdkLinkRecipe) {
-      await lockPluginWorkloadSdkRecipe(db, sdkLinkRecipe.namespace, sdkLinkRecipe.name)
-    }
-
-    const presentedReservationId =
-      typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
-    let budgetReservationId = presentedReservationId || 'unbudgeted'
-    if (presentedReservationId) {
-      const active = await resolvedDeps.getActiveReservation(db, {
-        reservationId: presentedReservationId,
-        hostRef: caller.hostRef,
-      })
-      if (!active) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'budget_denied',
-          'budget reservation is missing or expired'
-        )
-      }
-    } else {
-      const budget = await resolvedDeps.evaluateBudget(
-        {
-          host_ref: caller.hostRef,
-          context_ref: null,
-          team_id: null,
-          user_id: null,
-          provider: PROVIDER,
-          model: request.model,
-          llm_secret_name: null,
-          source_kind: 'channel',
-          recipe_name: caller.recipeName,
-          cron_job_id: null,
-          task_ref: `${invocationId}:${attemptGeneration}:${providerAttemptIndex}`,
-        },
-        db,
-        { connect: async () => tx as never },
-        {
-          requiredUnit: 'tokens',
-          transactionClient: tx,
-          reservationTtlSeconds: CODEX_ATTEMPT_RESERVATION_TTL_SECONDS,
-        }
-      )
-      if (!budget.allowed) {
-        throw new LlmProviderAttemptAuthorizeError(
-          'budget_denied',
-          budget.reason === 'cost_unit_rejected'
-            ? 'Codex attempts reject cost-unit budgets'
-            : 'token budget denied this attempt'
-        )
-      }
-      budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
-    }
-
-    const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
-    if (presentedTargetRef !== '' && !isBoundedId(presentedTargetRef)) {
-      throw new LlmProviderAttemptAuthorizeError('invalid_request', 'targetRef is invalid')
-    }
-    let reservedSdkAttemptToPromote: {
-      id: string
-      invocationId: string
-      recipeNamespace: string
-      recipeName: string
-      attemptGeneration: number
-      attemptIndex: number
-      model: string
-      targetRef: string
-    } | null = null
-    if (pluginWorkloadSdkProviderAttemptId) {
-      const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
-        pluginWorkloadSdkProviderAttemptId,
-        db
-      )
-      const spendExists = sdkAttempt
-        ? await pluginWorkloadSdkSpendOutcomeExists(sdkAttempt.id, db)
-        : false
+  return resolvedDeps.withTransaction(
+    async tx => {
+      resolvedDeps.signal?.throwIfAborted()
+      const db: DbClient = tx
+      const connection = await resolvedDeps.getConnection(db, connectionKey)
+      // Terminal grant failures must not look like a retryable proxy outage.
+      // Missing, revoked, and auth-rejected rows require a new grant or
+      // operator re-auth — failover onto another provider is the wrong recovery.
       if (
-        !sdkAttempt ||
-        spendExists ||
-        sdkAttempt.invocationId !== invocationId ||
-        sdkAttempt.attemptGeneration !== attemptGeneration ||
-        sdkAttempt.attemptIndex !== providerAttemptIndex ||
-        sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
-        sdkAttempt.recipeName !== caller.recipeName ||
-        sdkAttempt.provider !== PROVIDER ||
-        sdkAttempt.model !== request.model ||
-        !sdkAttempt.targetRef.trim() ||
-        (presentedTargetRef !== '' && presentedTargetRef !== sdkAttempt.targetRef) ||
-        !['reserved', 'in_progress'].includes(sdkAttempt.status)
+        !connection ||
+        connection.revokedAt ||
+        connection.status === 'revoked' ||
+        connection.status === 'reauth_required' ||
+        connection.catalogStatus === 'auth-rejected'
       ) {
         throw new LlmProviderAttemptAuthorizeError(
           'no_grant',
-          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+          'Codex subscription grant is missing, revoked, or requires re-authentication'
         )
       }
-      if (sdkAttempt.status === 'reserved') {
-        reservedSdkAttemptToPromote = {
-          id: sdkAttempt.id,
-          invocationId: sdkAttempt.invocationId,
-          recipeNamespace: sdkAttempt.recipeNamespace,
-          recipeName: sdkAttempt.recipeName,
-          attemptGeneration: sdkAttempt.attemptGeneration,
-          attemptIndex: sdkAttempt.attemptIndex,
-          model: sdkAttempt.model,
-          targetRef: sdkAttempt.targetRef,
-        }
+      if (
+        connection.status !== 'connected' ||
+        connection.catalogStatus === 'unavailable' ||
+        connection.catalogStatus === 'never_synced'
+      ) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'connection_unavailable',
+          'Codex subscription catalog is not ready'
+        )
       }
-    }
 
-    try {
-      const attempt = await resolvedDeps.insertAttempt(db, {
-        callerKind: caller.callerKind,
-        hostRef: caller.hostRef,
-        recipeNamespace: caller.recipeNamespace,
-        recipeName: caller.recipeName,
-        invocationId,
-        attemptGeneration,
-        providerAttemptIndex,
-        model: request.model,
-        requestHash,
-        policyRevision,
-        policyHash,
-        budgetReservationId,
-        connectionRevision: connection.credentialRevision,
-        connectionId: connection.id,
-        ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
-      })
-      if (reservedSdkAttemptToPromote) {
-        const promoted = await promoteReservedOauthBrokerProviderAttempt(
-          { ...reservedSdkAttemptToPromote, provider: PROVIDER },
-          db
+      const modelState = await resolvedDeps.getModelState(db, connection.id, request.model)
+      if (!modelState || !modelState.enabled || modelState.stale) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'model_not_allowed',
+          'model is disabled, stale, or absent from the Codex catalog'
         )
-        if (!promoted) {
+      }
+
+      const expectedPolicyHash = computeCodexPolicyHash({
+        model: request.model,
+        catalogRevision: connection.catalogRevision,
+        credentialRevision: connection.credentialRevision,
+        connectionKey: connection.connectionKey,
+      })
+      if (policyRevision !== connection.catalogRevision || policyHash !== expectedPolicyHash) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'policy revision or hash does not match the current Codex catalog'
+        )
+      }
+
+      const maxGeneration = await resolvedDeps.getMaxGeneration(db, invocationId)
+      if (attemptGeneration < maxGeneration) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'stale_generation',
+          'attemptGeneration is older than the recorded invocation'
+        )
+      }
+
+      const pluginWorkloadSdkProviderAttemptId =
+        typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
+          ? body.pluginWorkloadSdkProviderAttemptId.trim()
+          : ''
+      let sdkLinkRecipe: { namespace: string; name: string } | null = null
+      if (pluginWorkloadSdkProviderAttemptId) {
+        if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'invalid_request',
+            'pluginWorkloadSdkProviderAttemptId must be a UUID'
+          )
+        }
+        if (caller.callerKind === 'host') {
           throw new LlmProviderAttemptAuthorizeError(
             'no_grant',
-            'pluginWorkloadSdkProviderAttemptId is no longer reserved for Codex authorize'
+            'host Codex chat cannot bind a Plugin Workload SDK provider attempt'
           )
+        }
+        if (!caller.recipeNamespace || !caller.recipeName) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+          )
+        }
+        sdkLinkRecipe = { namespace: caller.recipeNamespace, name: caller.recipeName }
+      }
+
+      // Recipe authorize and promptBridge finalize share this advisory. Take it
+      // before budget reservation work so concurrent Codex + fallback cannot
+      // deadlock (budget rows then advisory vs advisory then spend/invocation).
+      //
+      // Only an SDK-linked authorize goes on to take plugin_workload_sdk_*
+      // rows FOR UPDATE, which is the order finalize follows after this advisory.
+      // The workflow lane touches neither, so taking it for every recipe caller
+      // serialized that lane per recipe for no ordering benefit.
+      if (sdkLinkRecipe) {
+        await lockPluginWorkloadSdkRecipe(db, sdkLinkRecipe.namespace, sdkLinkRecipe.name)
+      }
+
+      const presentedReservationId =
+        typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
+      let budgetReservationId = presentedReservationId || 'unbudgeted'
+      if (presentedReservationId) {
+        const active = await resolvedDeps.getActiveReservation(db, {
+          reservationId: presentedReservationId,
+          hostRef: caller.hostRef,
+        })
+        if (!active) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'budget_denied',
+            'budget reservation is missing or expired'
+          )
+        }
+      } else {
+        const budget = await resolvedDeps.evaluateBudget(
+          {
+            host_ref: caller.hostRef,
+            context_ref: null,
+            team_id: null,
+            user_id: null,
+            provider: PROVIDER,
+            model: request.model,
+            llm_secret_name: null,
+            source_kind: 'channel',
+            recipe_name: caller.recipeName,
+            cron_job_id: null,
+            task_ref: `${invocationId}:${attemptGeneration}:${providerAttemptIndex}`,
+          },
+          db,
+          { connect: async () => tx as never },
+          {
+            requiredUnit: 'tokens',
+            transactionClient: tx,
+            reservationTtlSeconds: CODEX_ATTEMPT_RESERVATION_TTL_SECONDS,
+          }
+        )
+        if (!budget.allowed) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'budget_denied',
+            budget.reason === 'cost_unit_rejected'
+              ? 'Codex attempts reject cost-unit budgets'
+              : 'token budget denied this attempt'
+          )
+        }
+        budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
+      }
+
+      const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+      if (presentedTargetRef !== '' && !isBoundedId(presentedTargetRef)) {
+        throw new LlmProviderAttemptAuthorizeError('invalid_request', 'targetRef is invalid')
+      }
+      let reservedSdkAttemptToPromote: {
+        id: string
+        invocationId: string
+        recipeNamespace: string
+        recipeName: string
+        attemptGeneration: number
+        attemptIndex: number
+        model: string
+        targetRef: string
+      } | null = null
+      if (pluginWorkloadSdkProviderAttemptId) {
+        const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
+          pluginWorkloadSdkProviderAttemptId,
+          db
+        )
+        const spendExists = sdkAttempt
+          ? await pluginWorkloadSdkSpendOutcomeExists(sdkAttempt.id, db)
+          : false
+        if (
+          !sdkAttempt ||
+          spendExists ||
+          sdkAttempt.invocationId !== invocationId ||
+          sdkAttempt.attemptGeneration !== attemptGeneration ||
+          sdkAttempt.attemptIndex !== providerAttemptIndex ||
+          sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
+          sdkAttempt.recipeName !== caller.recipeName ||
+          sdkAttempt.provider !== PROVIDER ||
+          sdkAttempt.model !== request.model ||
+          !sdkAttempt.targetRef.trim() ||
+          (presentedTargetRef !== '' && presentedTargetRef !== sdkAttempt.targetRef) ||
+          !['reserved', 'in_progress'].includes(sdkAttempt.status)
+        ) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+          )
+        }
+        if (sdkAttempt.status === 'reserved') {
+          reservedSdkAttemptToPromote = {
+            id: sdkAttempt.id,
+            invocationId: sdkAttempt.invocationId,
+            recipeNamespace: sdkAttempt.recipeNamespace,
+            recipeName: sdkAttempt.recipeName,
+            attemptGeneration: sdkAttempt.attemptGeneration,
+            attemptIndex: sdkAttempt.attemptIndex,
+            model: sdkAttempt.model,
+            targetRef: sdkAttempt.targetRef,
+          }
+        }
+      }
+
+      try {
+        const attempt = await resolvedDeps.insertAttempt(db, {
+          callerKind: caller.callerKind,
+          hostRef: caller.hostRef,
+          recipeNamespace: caller.recipeNamespace,
+          recipeName: caller.recipeName,
+          invocationId,
+          attemptGeneration,
+          providerAttemptIndex,
+          model: request.model,
+          requestHash,
+          policyRevision,
+          policyHash,
+          budgetReservationId,
+          connectionRevision: connection.credentialRevision,
+          connectionId: connection.id,
+          ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
+        })
+        if (reservedSdkAttemptToPromote) {
+          const promoted = await promoteReservedOauthBrokerProviderAttempt(
+            { ...reservedSdkAttemptToPromote, provider: PROVIDER },
+            db
+          )
+          if (!promoted) {
+            throw new LlmProviderAttemptAuthorizeError(
+              'no_grant',
+              'pluginWorkloadSdkProviderAttemptId is no longer reserved for Codex authorize'
+            )
+          }
+          log.info(
+            {
+              event: 'sdk_oauth_attempt_promoted',
+              pluginWorkloadSdkProviderAttemptId: reservedSdkAttemptToPromote.id,
+              providerAttemptId: attempt.id,
+              credentialJtiPresent: false,
+            },
+            'promoted reserved SDK oauth attempt after Codex authorize-link'
+          )
+        }
+        const issued = await resolvedDeps.issueTicket(db, {
+          sub: claims.sub,
+          hostRef: caller.hostRef,
+          recipeNamespace: caller.recipeNamespace ?? undefined,
+          recipeName: caller.recipeName ?? undefined,
+          invocationId,
+          attemptGeneration,
+          providerAttemptId: attempt.id,
+          providerAttemptIndex,
+          model: request.model,
+          requestHash,
+          policyRevision,
+          policyHash,
+          budgetReservationId,
+          connectionRevision: connection.credentialRevision,
+          connectionId: connection.id,
+        })
+        if (request.schemaVersion === 'codex-completion-request.v2') {
+          // Measure the exact proxy envelope while the attempt, ticket and any
+          // new reservation are still transactional. Pre-redeem failures cannot
+          // use the ordinary receipt-based finalizer.
+          const envelope = buildCodexProxyEnvelope({
+            executionTicket: issued.executionTicket,
+            requestHash,
+            request,
+          })
+          if (!envelope.ok) {
+            throw new LlmProviderAttemptAuthorizeError(
+              envelope.code === 'limit' && envelope.kind === 'size'
+                ? 'payload_too_large'
+                : 'invalid_request',
+              envelope.message
+            )
+          }
         }
         log.info(
           {
-            event: 'sdk_oauth_attempt_promoted',
-            pluginWorkloadSdkProviderAttemptId: reservedSdkAttemptToPromote.id,
+            event: 'codex_attempt_authorized',
             providerAttemptId: attempt.id,
-            credentialJtiPresent: false,
+            hostRef: caller.hostRef,
+            model: request.model,
           },
-          'promoted reserved SDK oauth attempt after Codex authorize-link'
+          'authorized Codex provider attempt'
         )
-      }
-      const issued = await resolvedDeps.issueTicket(db, {
-        sub: claims.sub,
-        hostRef: caller.hostRef,
-        recipeNamespace: caller.recipeNamespace ?? undefined,
-        recipeName: caller.recipeName ?? undefined,
-        invocationId,
-        attemptGeneration,
-        providerAttemptId: attempt.id,
-        providerAttemptIndex,
-        model: request.model,
-        requestHash,
-        policyRevision,
-        policyHash,
-        budgetReservationId,
-        connectionRevision: connection.credentialRevision,
-        connectionId: connection.id,
-      })
-      if (request.schemaVersion === 'codex-completion-request.v2') {
-        // Measure the exact proxy envelope while the attempt, ticket and any
-        // new reservation are still transactional. Pre-redeem failures cannot
-        // use the ordinary receipt-based finalizer.
-        const envelope = buildCodexProxyEnvelope({
-          executionTicket: issued.executionTicket,
+        return {
+          providerAttemptId: attempt.id,
           requestHash,
-          request,
-        })
-        if (!envelope.ok) {
+          executionTicket: issued.executionTicket,
+          expiresAt: issued.expiresAt.toISOString(),
+        }
+      } catch (err) {
+        const code = (err as { code?: string }).code
+        if (code === '23505') {
           throw new LlmProviderAttemptAuthorizeError(
-            envelope.code === 'limit' && envelope.kind === 'size'
-              ? 'payload_too_large'
-              : 'invalid_request',
-            envelope.message
+            'idempotency_conflict',
+            'an attempt with this invocation binding already exists'
           )
         }
+        throw err
       }
-      log.info(
-        {
-          event: 'codex_attempt_authorized',
-          providerAttemptId: attempt.id,
-          hostRef: caller.hostRef,
-          model: request.model,
-        },
-        'authorized Codex provider attempt'
-      )
-      return {
-        providerAttemptId: attempt.id,
-        requestHash,
-        executionTicket: issued.executionTicket,
-        expiresAt: issued.expiresAt.toISOString(),
-      }
-    } catch (err) {
-      const code = (err as { code?: string }).code
-      if (code === '23505') {
-        throw new LlmProviderAttemptAuthorizeError(
-          'idempotency_conflict',
-          'an attempt with this invocation binding already exists'
-        )
-      }
-      throw err
-    }
-  })
+    },
+    undefined,
+    { signal: resolvedDeps.signal }
+  )
 }

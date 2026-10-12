@@ -1,0 +1,34 @@
+{
+  "status": 200,
+  "body": {
+    "transport": {
+      "status": "alive",
+      "probedUrl": "https://mcp.linear.app/mcp",
+      "httpStatus": 401,
+      "challenge": true
+    },
+    "callback": {
+      "configured": true,
+      "variant": "per-server",
+      "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote/{serverName}"
+    },
+    "detected": {
+      "registrationMode": "manual",
+      "endpoints": {
+        "authorization": "https://mcp.linear.app/authorize",
+        "token": "https://mcp.linear.app/token"
+      },
+      "resource": "https://mcp.linear.app/mcp",
+      "issuer": "https://mcp.linear.app",
+      "asEndpointHosts": {
+        "authorization": "mcp.linear.app",
+        "token": "mcp.linear.app"
+      },
+      "scopes": ["read", "write"],
+      "quirks": {
+        "bearerInBody": false,
+        "supportsRefresh": true
+      }
+    }
+  }
+}

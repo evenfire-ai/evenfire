@@ -1,0 +1,13 @@
+{
+  "status": 201,
+  "body": {
+    "serverName": "linear",
+    "namespace": "mcp-server",
+    "contextRef": "research",
+    "contextUpdated": true,
+    "clientMode": "public",
+    "registrationMode": "cimd",
+    "callbackVariant": "shared",
+    "redirectUri": "https://control.example.com/api/v1/oauth-callback/remote"
+  }
+}

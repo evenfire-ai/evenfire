@@ -27,10 +27,14 @@ export async function executeWithTimeout(
   let stopped = false
   let stop: (reason: unknown) => void
   const deadline = new Promise<never>((_, reject) => {
+    const joinsSettlement = tool.joinsAbortSettlement?.() === true
     stop = reason => {
       if (stopped) return
       stopped = true
       controller.abort(reason)
+      // Physical producers own cancellation and resolve only after transfer or
+      // process-group cleanup; racing them could release a task during late IO.
+      if (joinsSettlement) return
       if (cleanupMs === 0) reject(reason)
       else cleanupTimer = setTimeout(() => reject(reason), cleanupMs)
     }

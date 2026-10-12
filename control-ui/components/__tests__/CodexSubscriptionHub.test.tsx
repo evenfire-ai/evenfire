@@ -19,8 +19,17 @@ import {
   revokeGrokSubscription,
   startGrokDeviceConnect,
 } from '@lib/grokSubscription'
+import { __resetReadRequestCacheForTests, setReadRequestPrincipal } from '@lib/readRequestCache'
 import { CodexSubscriptionHub } from '../CodexSubscriptionHub'
 import { ToastProvider } from '../Toast'
+
+// Capability consumers load only for a principal confirmed by /me (AuthContext).
+beforeEach(() => {
+  setReadRequestPrincipal('admin-one', 'admin')
+})
+afterEach(() => {
+  __resetReadRequestCacheForTests()
+})
 
 const confirmMock = vi.fn()
 
@@ -45,7 +54,15 @@ vi.mock('@lib/codexSubscriptionFeature', () => ({
 vi.mock('@lib/grokSubscriptionFeature', () => ({
   isGrokSubscriptionUiEnabled: (capability?: { enabled?: boolean } | null) =>
     capability?.enabled === true,
-  loadGrokSubscriptionCapability: () => capabilityProbes.grok(),
+}))
+
+vi.mock('@lib/subscriptionCapabilities', () => ({
+  loadSubscriptionCapabilities: async () => ({
+    providers: {
+      'codex-subscription': await capabilityProbes.codex(),
+      'grok-subscription': await capabilityProbes.grok(),
+    },
+  }),
 }))
 
 vi.mock('@lib/codexSubscription', async importOriginal => {
@@ -282,11 +299,21 @@ describe('CodexSubscriptionHub', () => {
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
   })
 
-  it('renders the ChatGPT verification link from the Update sign-in path', async () => {
+  it('renders the ChatGPT verification link from the Update reconnect path', async () => {
     vi.stubGlobal(
       'open',
       vi.fn(() => ({}))
     )
+    // The Update dialog only offers the sign-in entry to a grant that needs
+    // reauthorization (BUG-138); a connected grant shows the signed-in
+    // indicator instead.
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'reauth_required',
+      }),
+    ])
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'WXYZ-9876',
       verificationUri: 'https://auth.openai.com/codex/device',
@@ -303,7 +330,7 @@ describe('CodexSubscriptionHub', () => {
       await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
     )
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect ChatGPT' }))
     const link = await screen.findByTestId('codex-device-verification-link')
     expect(link).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
     expect(link.getAttribute('rel') ?? '').toContain('noopener')
@@ -311,7 +338,7 @@ describe('CodexSubscriptionHub', () => {
     expect(screen.getByTestId('codex-device-code')).toHaveTextContent('WXYZ-9876')
   })
 
-  it('opens the grant modal for reconnect and model toggles without binding hosts', async () => {
+  it('opens the connected grant modal for model toggles without binding hosts', async () => {
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
       verificationUri: CODEX_DEVICE_VERIFICATION_URI,
@@ -335,7 +362,13 @@ describe('CodexSubscriptionHub', () => {
       await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
     )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
-    expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
+    // BUG-138: a connected grant must not offer sign-in next to its CONNECTED
+    // badge; the same slot states the signed-in state instead.
+    expect(await screen.findByTestId('codex-signin-connected')).toHaveTextContent(
+      'Signed in with ChatGPT'
+    )
+    expect(screen.queryByRole('button', { name: 'Sign in with ChatGPT' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reconnect ChatGPT' })).not.toBeInTheDocument()
     // Connect syncs the catalog once; a connected grant also offers the manual
     // re-sync, because nothing refreshes it afterwards on its own.
     expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeInTheDocument()
@@ -346,7 +379,10 @@ describe('CodexSubscriptionHub', () => {
     const signInHint = screen.getByText(/Agents authorize through this subscription/)
     expect(signInHint).toHaveTextContent('use Sync catalog to pick up models published since')
     expect(signInHint).not.toHaveTextContent('refreshes automatically')
-    expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
+    expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa', {
+      refresh: true,
+      signal: expect.any(AbortSignal),
+    })
     fireEvent.click(screen.getByLabelText('gpt-5.3-codex'))
     await waitFor(() => {
       expect(patchCodexCatalogModel).toHaveBeenCalledWith('codex-aaa', 'gpt-5.3-codex', true)
@@ -363,6 +399,15 @@ describe('CodexSubscriptionHub', () => {
   it('shows the device code card with the verification link and copy actions', async () => {
     const openMock = vi.fn(() => ({}))
     vi.stubGlobal('open', openMock)
+    // The Update dialog's sign-in entry only exists for a grant that needs
+    // reauthorization (BUG-138); connected grants show the signed-in indicator.
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'reauth_required',
+      }),
+    ])
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
       verificationUri: CODEX_DEVICE_VERIFICATION_URI,
@@ -385,7 +430,7 @@ describe('CodexSubscriptionHub', () => {
       await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
     )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect ChatGPT' }))
     const card = await screen.findByTestId('codex-device-code')
     expect(card).toHaveTextContent('ABCD-1234')
     // The verification tab opens synchronously in the click handler.
@@ -431,6 +476,15 @@ describe('CodexSubscriptionHub', () => {
       'open',
       vi.fn(() => ({}))
     )
+    // The Update dialog's sign-in entry only exists for a grant that needs
+    // reauthorization (BUG-138); connected grants show the signed-in indicator.
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'reauth_required',
+      }),
+    ])
     vi.mocked(startCodexDeviceConnect).mockResolvedValue({
       userCode: 'ABCD-1234',
       verificationUri: CODEX_DEVICE_VERIFICATION_URI,
@@ -450,7 +504,7 @@ describe('CodexSubscriptionHub', () => {
       await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
     )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
-    const signIn = await screen.findByRole('button', { name: 'Sign in with ChatGPT' })
+    const signIn = await screen.findByRole('button', { name: 'Reconnect ChatGPT' })
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       fireEvent.click(signIn)
@@ -470,6 +524,119 @@ describe('CodexSubscriptionHub', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // BUG-138: the status badge and the sign-in action share one status source,
+  // so a CONNECTED badge can never sit next to a "Sign in with ChatGPT" button.
+  it('replaces the sign-in button with the connected indicator for a connected grant', async () => {
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Update ChatGPT subscription Team A',
+    })
+    expect(await within(dialog).findByText('Connected')).toBeInTheDocument()
+    expect(within(dialog).getByTestId('codex-signin-connected')).toHaveTextContent(
+      'Signed in with ChatGPT'
+    )
+    expect(
+      within(dialog).queryByRole('button', { name: 'Sign in with ChatGPT' })
+    ).not.toBeInTheDocument()
+    expect(
+      within(dialog).queryByRole('button', { name: 'Reconnect ChatGPT' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('surfaces the reconnect action only for a grant that needs reauthorization', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'codex-aaa',
+        displayName: 'Team A',
+        status: 'reauth_required',
+      }),
+    ])
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Update ChatGPT subscription Team A',
+    })
+    expect(await within(dialog).findByText('Reauthorization required')).toBeInTheDocument()
+    expect(
+      await within(dialog).findByRole('button', { name: 'Reconnect ChatGPT' })
+    ).toBeInTheDocument()
+    expect(
+      within(dialog).queryByRole('button', { name: 'Sign in with ChatGPT' })
+    ).not.toBeInTheDocument()
+    expect(within(dialog).queryByTestId('codex-signin-connected')).not.toBeInTheDocument()
+  })
+
+  it('replaces sign-in with the connected indicator after new-subscription setup connects', async () => {
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => ({}))
+    )
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-bbb',
+        displayName: 'New team',
+        status: 'disconnected',
+        defaultModel: null,
+      })
+    )
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: CODEX_DEVICE_VERIFICATION_URI,
+      intervalSeconds: 0.3,
+      state: 'state-1',
+      intent: 'connect',
+    })
+    vi.mocked(pollCodexDevice).mockResolvedValue({
+      status: 'connected',
+      connection: connection({ connectionKey: 'codex-bbb', displayName: 'New team' }),
+    })
+    vi.mocked(listCodexConnectionModels).mockResolvedValue([
+      { model: 'gpt-5.1', enabled: true, stale: false },
+    ])
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    expect(await screen.findByText('Team A')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Add subscription' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'New team' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
+    // The setup dialog remains open after the handshake, but the sign-in
+    // action must follow the same connected state as the badge.
+    await waitFor(() => {
+      expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-bbb')
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Finish setup' })).toBeInTheDocument()
+    })
+    const dialog = screen.getByRole('dialog', { name: 'New ChatGPT subscription' })
+    expect(within(dialog).getByText('Connected')).toBeInTheDocument()
+    expect(within(dialog).getByTestId('codex-signin-connected')).toHaveTextContent(
+      'Signed in with ChatGPT'
+    )
+    expect(
+      within(dialog).queryByRole('button', { name: 'Sign in with ChatGPT' })
+    ).not.toBeInTheDocument()
   })
 })
 
@@ -556,25 +723,50 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
     expect(screen.getByText('Team A')).toBeInTheDocument()
   })
 
-  it('surfaces a non-disabled Codex capability probe error while Grok is enabled', async () => {
-    capabilityProbes.codex.mockRejectedValue(new Error('codex probe boom'))
-    renderHub()
-    expect(await screen.findByText('Team Grok')).toBeInTheDocument()
-    expect(await screen.findByText(/codex probe boom/)).toBeInTheDocument()
-  })
-
-  it('surfaces a non-disabled Grok capability probe error while Codex is enabled', async () => {
-    capabilityProbes.grok.mockRejectedValue(new Error('grok probe boom'))
+  it('keeps both loaded provider inventories through a real throttle-shaped error and explicit recovery', async () => {
     renderHub()
     expect(await screen.findByText('Team A')).toBeInTheDocument()
-    expect(await screen.findByText(/grok probe boom/)).toBeInTheDocument()
+    expect(await screen.findByText('Team Grok')).toBeInTheDocument()
+    vi.mocked(listGrokSubscriptionConnections).mockRejectedValueOnce(
+      Object.assign(new Error('This request limit has been reached. Try again in 12 seconds.'), {
+        status: 429,
+        code: 'rate_limited',
+        retryAfterSeconds: 12,
+        body: { error: 'Too Many Requests', code: 'rate_limited', retryAfterSeconds: 12 },
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^Reload/ }))
+    expect(await screen.findByText(/Try again in 12 seconds/)).toBeInTheDocument()
+    expect(screen.getByText('Team A')).toBeInTheDocument()
+    expect(screen.getByText('Team Grok')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Reload/ }))
+    await waitFor(() => expect(screen.queryByText(/Try again in 12 seconds/)).toBeNull())
+    expect(screen.getByText('Team Grok')).toBeInTheDocument()
+    expect(startGrokDeviceConnect).not.toHaveBeenCalled()
+    expect(pollGrokDevice).not.toHaveBeenCalled()
+    expect(revokeGrokSubscription).not.toHaveBeenCalled()
   })
 
-  it('surfaces a non-disabled Grok capability probe error when Codex is disabled', async () => {
+  it('surfaces a shared capability read error without inventing provider connectivity', async () => {
+    capabilityProbes.codex.mockRejectedValue(new Error('codex probe boom'))
+    renderHub()
+    expect(await screen.findByText(/codex probe boom/)).toBeInTheDocument()
+    expect(screen.queryByText('Team Grok')).not.toBeInTheDocument()
+  })
+
+  it('surfaces a Grok capability read error without treating it as a confirmed disabled flag', async () => {
+    capabilityProbes.grok.mockRejectedValue(new Error('grok probe boom'))
+    renderHub()
+    expect(await screen.findByText(/grok probe boom/)).toBeInTheDocument()
+    expect(screen.queryByText('Team A')).not.toBeInTheDocument()
+  })
+
+  it('keeps a capability error distinct from both integrations being disabled', async () => {
     capabilityProbes.codex.mockResolvedValue({ enabled: false })
     capabilityProbes.grok.mockRejectedValue(new Error('grok probe boom'))
     renderHub()
     expect(await screen.findByText(/grok probe boom/)).toBeInTheDocument()
+    expect(screen.queryByText(/Coding-plan subscriptions are disabled/)).not.toBeInTheDocument()
   })
 
   it('keeps same-key Codex and Grok rows independent for keys, busy state and edit-close', async () => {
@@ -626,12 +818,46 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
     expect(revokeGrokSubscription).not.toHaveBeenCalled()
   })
 
-  it('uses Grok copy (no ChatGPT wording) across the Grok dialog, device card and models', async () => {
+  it('uses Grok copy (no ChatGPT wording) across the connected Grok dialog and models', async () => {
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Update Grok subscription Team Grok',
+    })
+    expect(await within(dialog).findByLabelText('grok-4.6')).toBeInTheDocument()
+    // BUG-138: a connected grant shows the signed-in indicator in the sign-in
+    // slot, never a sign-in button next to the CONNECTED badge.
+    expect(within(dialog).getByTestId('codex-signin-connected')).toHaveTextContent(
+      'Signed in with Grok'
+    )
+    expect(
+      within(dialog).queryByRole('button', { name: 'Sign in with Grok' })
+    ).not.toBeInTheDocument()
+    expect(within(dialog).getByText(/No longer in the Grok catalog/)).toBeInTheDocument()
+    expect(dialog.textContent ?? '').not.toMatch(/ChatGPT/)
+    expect(attributeText(dialog)).not.toMatch(/ChatGPT/)
+    expect(dialog.querySelectorAll('[data-provider="codex-subscription"]').length).toBe(0)
+  })
+
+  it('uses Grok copy (no ChatGPT wording) across the reconnect device card', async () => {
     const tab = { opener: {} as unknown, location: { replace: vi.fn() }, close: vi.fn() }
     vi.stubGlobal(
       'open',
       vi.fn(() => tab)
     )
+    // The Update dialog's sign-in entry only exists for a grant that needs
+    // reauthorization (BUG-138); connected grants show the signed-in indicator.
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'grok-aaa',
+        displayName: 'Team Grok',
+        defaultModel: 'grok-4.6',
+        status: 'reauth_required',
+      }),
+    ])
     vi.mocked(startGrokDeviceConnect).mockResolvedValue({
       userCode: 'GROK-1234',
       verificationUri: 'https://auth.x.ai/device?user_code=GROK-1234',
@@ -647,13 +873,10 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
     const dialog = await screen.findByRole('dialog', {
       name: 'Update Grok subscription Team Grok',
     })
-    expect(await within(dialog).findByLabelText('grok-4.6')).toBeInTheDocument()
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in with Grok' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Reconnect Grok' }))
     expect(await within(dialog).findByTestId('codex-device-code')).toHaveTextContent('GROK-1234')
     expect(dialog.textContent ?? '').not.toMatch(/ChatGPT/)
     expect(attributeText(dialog)).not.toMatch(/ChatGPT/)
-    expect(within(dialog).getByText(/No longer in the Grok catalog/)).toBeInTheDocument()
-    expect(dialog.querySelectorAll('[data-provider="codex-subscription"]').length).toBe(0)
   })
 
   it('titles the Grok create dialog for Grok when Grok is the selected provider', async () => {
@@ -672,6 +895,16 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
     const tab = { opener: {} as unknown, location: { replace: vi.fn() }, close: vi.fn() }
     const openMock = vi.fn(() => tab)
     vi.stubGlobal('open', openMock)
+    // BUG-138: the Update dialog's sign-in entry exists only for a grant that
+    // needs reauthorization; connected grants show the signed-in indicator.
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'grok-aaa',
+        displayName: 'Team Grok',
+        defaultModel: 'grok-4.6',
+        status: 'reauth_required',
+      }),
+    ])
     const started = deferred<{
       userCode: string
       verificationUri: string
@@ -685,7 +918,7 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
       await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
     )
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Grok' }))
     // Opened synchronously inside the click (user activation), before the start resolves.
     expect(openMock).toHaveBeenCalledTimes(1)
     expect(openMock.mock.calls[0]?.[0]).not.toBe('https://auth.x.ai')
@@ -715,13 +948,23 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
       'open',
       vi.fn(() => tab)
     )
+    // BUG-138: the Update dialog's sign-in entry exists only for a grant that
+    // needs reauthorization; connected grants show the signed-in indicator.
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'grok-aaa',
+        displayName: 'Team Grok',
+        defaultModel: 'grok-4.6',
+        status: 'reauth_required',
+      }),
+    ])
     vi.mocked(startGrokDeviceConnect).mockRejectedValue(new Error('start boom'))
     renderHub()
     fireEvent.click(
       await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
     )
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Grok' }))
     expect(await screen.findByText('start boom')).toBeInTheDocument()
     expect(tab.close).toHaveBeenCalled()
     expect(tab.location.replace).not.toHaveBeenCalled()
@@ -733,6 +976,16 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
       'open',
       vi.fn(() => null)
     )
+    // BUG-138: the Update dialog's sign-in entry exists only for a grant that
+    // needs reauthorization; connected grants show the signed-in indicator.
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'grok-aaa',
+        displayName: 'Team Grok',
+        defaultModel: 'grok-4.6',
+        status: 'reauth_required',
+      }),
+    ])
     vi.mocked(startGrokDeviceConnect).mockResolvedValue({
       userCode: 'GROK-1234',
       verificationUri: 'https://auth.x.ai/device?user_code=GROK-1234',
@@ -745,7 +998,7 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
       await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
     )
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Grok' }))
     const card = await screen.findByTestId('codex-device-code')
     expect(card).toHaveTextContent('Open the Grok verification page')
     expect(screen.getByTestId('codex-device-verification-link')).toHaveAttribute(
@@ -760,6 +1013,16 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
       'open',
       vi.fn(() => tab)
     )
+    // BUG-138: the Update dialog's sign-in entry exists only for a grant that
+    // needs reauthorization; connected grants show the signed-in indicator.
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'grok-aaa',
+        displayName: 'Team Grok',
+        defaultModel: 'grok-4.6',
+        status: 'reauth_required',
+      }),
+    ])
     vi.mocked(startGrokDeviceConnect).mockResolvedValue({
       userCode: 'GROK-1234',
       verificationUri: null as unknown as string,
@@ -772,7 +1035,7 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
       await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
     )
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Grok' }))
     const link = await screen.findByTestId('codex-device-verification-link')
     expect(link).toHaveAttribute('href', 'https://accounts.x.ai/oauth2/device')
     expect(link).not.toHaveAttribute('href', CODEX_DEVICE_VERIFICATION_URI)
@@ -790,6 +1053,16 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
       'open',
       vi.fn(() => tab)
     )
+    // BUG-138: the Update dialog's sign-in entry exists only for a grant that
+    // needs reauthorization; connected grants show the signed-in indicator.
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({
+        connectionKey: 'grok-aaa',
+        displayName: 'Team Grok',
+        defaultModel: 'grok-4.6',
+        status: 'reauth_required',
+      }),
+    ])
     vi.mocked(startGrokDeviceConnect).mockResolvedValue({
       userCode: 'GROK-1234',
       verificationUri: 'https://auth.x.ai/device?user_code=GROK-1234',
@@ -806,7 +1079,7 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
       await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
     )
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
-    const signIn = await screen.findByRole('button', { name: 'Sign in with Grok' })
+    const signIn = await screen.findByRole('button', { name: 'Reconnect Grok' })
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       fireEvent.click(signIn)
@@ -1062,7 +1335,7 @@ describe('CodexSubscriptionHub catalog re-sync', () => {
   // message by design, and for this one that produced `400 Bad Request -
   // reauth_required` — the least readable message on the most common
   // recoverable failure.
-  it('tells the operator to sign in again when the saved credentials are rejected', async () => {
+  it('shows Reconnect for Grok in the open dialog when saved credentials are rejected', async () => {
     fetchMock.mockResolvedValueOnce(makeResponse(400, { error: 'reauth_required' }))
 
     const dialog = await openGrokDialog()
@@ -1076,6 +1349,36 @@ describe('CodexSubscriptionHub catalog re-sync', () => {
     // that rendered no error at all would satisfy the absence for free.
     expect(within(dialog).queryByText(/400 Bad Request/)).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(await within(dialog).findByText('Reauthorization required')).toBeInTheDocument()
+    const reconnect = await within(dialog).findByRole('button', { name: 'Reconnect Grok' })
+    expect(reconnect).toBeVisible()
+    expect(reconnect).toBeEnabled()
+    expect(within(dialog).queryByTestId('codex-signin-connected')).not.toBeInTheDocument()
+  })
+
+  it('shows Reconnect for ChatGPT in the open dialog when saved credentials are rejected', async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(400, { error: 'reauth_required' }))
+
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Update ChatGPT subscription Team A',
+    })
+    await within(dialog).findByLabelText('gpt-5.1')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    expect(await within(dialog).findByText('Reauthorization required')).toBeInTheDocument()
+    const reconnect = await within(dialog).findByRole('button', { name: 'Reconnect ChatGPT' })
+    expect(reconnect).toBeVisible()
+    expect(reconnect).toBeEnabled()
+    expect(within(dialog).queryByTestId('codex-signin-connected')).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/codex-subscription/connections/codex-aaa/catalog/sync')
+    expect(init.method).toBe('POST')
   })
 
   it('says the provider did not answer when the credential refresh is unavailable', async () => {

@@ -144,6 +144,37 @@ export const notificationStreamSnapshotSize = getOrCreateHistogram({
   buckets: [0, 1, 2, 5, 10, 20, 50],
 })
 
+// ─── Durable entity-change feed/stream metrics ──────────────────────────
+export const entityChangeDispatchBatchesTotal = getOrCreateCounter({
+  name: 'entity_change_dispatch_batches_total',
+  help: 'Entity-change outbox dispatcher ticks by result.',
+  labelNames: ['result'] as const as Array<'result'>,
+})
+
+export const entityChangeStreamConnectionsActive = getOrCreateGauge({
+  name: 'entity_change_stream_connections_active',
+  help: 'Active authenticated entity-change stream connections.',
+  labelNames: ['principal_kind'] as const as Array<'principal_kind'>,
+})
+
+export const entityChangeStreamFramesSentTotal = getOrCreateCounter({
+  name: 'entity_change_stream_frames_sent_total',
+  help: 'Entity-change stream frames successfully handed to HTTP responses.',
+  labelNames: ['principal_kind', 'frame_type'] as const as Array<'principal_kind' | 'frame_type'>,
+})
+
+export const entityChangeStreamDisconnectsTotal = getOrCreateCounter({
+  name: 'entity_change_stream_disconnects_total',
+  help: 'Entity-change stream closures by bounded reason.',
+  labelNames: ['principal_kind', 'reason'] as const as Array<'principal_kind' | 'reason'>,
+})
+
+export const entityChangeStreamResyncRequiredTotal = getOrCreateCounter({
+  name: 'entity_change_stream_resync_required_total',
+  help: 'Entity-change streams that required a full authoritative resync.',
+  labelNames: ['principal_kind'] as const as Array<'principal_kind'>,
+})
+
 // ─── Auth token counters ──────────────────────────────────────────────────
 export const mcpHostJwtIssueTotal = getOrCreateCounter({
   name: 'workflow_auth_issue_total',
@@ -187,6 +218,19 @@ export const mcpHostJwtReissueTotal = getOrCreateCounter({
   name: 'workflow_auth_reissue_requests_total',
   help: 'Count of workflow auth re-issue attempts labelled by result.',
   labelNames: ['result'] as const as Array<'result'>,
+})
+
+// MCP server uninstall: a cleanup step failed. Every stage except
+// oauth_grants_post_delete runs before the CR delete and leaves the CR in place for a
+// retry (the request answers "repair required"); a sustained rate means uninstalls
+// that nobody repaired. oauth_grants_post_delete is the only residual after a 200 —
+// rows it leaves are inert to the uid-fenced readers. Stages: contexts |
+// dynamic_client | oauth_grants | secrets | oauth_client_secret | mcp_server |
+// oauth_grants_post_delete.
+export const mcpServerUninstallTeardownFailuresTotal = getOrCreateCounter({
+  name: 'mcp_server_uninstall_teardown_failures_total',
+  help: 'Count of MCP server uninstall cleanup steps that failed, by stage.',
+  labelNames: ['stage'] as const as Array<'stage'>,
 })
 
 // ─── HTTP counters / histograms (scoped to workflow-approvals endpoints) ──
@@ -384,6 +428,33 @@ export const pluginWorkloadSdkMaintenanceRunsTotal = getOrCreateCounter({
   name: 'clerum_plugin_workload_sdk_maintenance_runs_total',
   help: 'Plugin Workload SDK maintenance sweeps (stale-invocations + idempotency pruning).',
   labelNames: ['result'] as const as Array<'result'>, // ok | error
+})
+
+// ─── OAuth proactive-refresh cron metrics (mini-spec L) ──────────────────
+export const oauthProactiveRefreshRunsTotal = getOrCreateCounter({
+  name: 'oauth_proactive_refresh_runs_total',
+  help: 'Count of OAuth proactive-refresh cron sweeps.',
+  labelNames: ['result'] as const as Array<'result'>, // ok | error
+})
+
+export const oauthProactiveRefreshGrantsTotal = getOrCreateCounter({
+  name: 'oauth_proactive_refresh_grants_total',
+  help: 'Count of remote grants processed by the proactive-refresh cron, labelled by outcome.',
+  // ok | transient | client_invalid | no_grant | skipped | error
+  labelNames: ['outcome'] as const as Array<'outcome'>,
+})
+
+export const oauthDcrSecretStatusTotal = getOrCreateCounter({
+  name: 'oauth_dcr_secret_status_total',
+  help: 'Count of DCR confidential clients observed near/at client_secret expiry.',
+  labelNames: ['state'] as const as Array<'state'>, // expiring | expired
+})
+
+export const oauthProactiveRefreshDurationSeconds = getOrCreateHistogram({
+  name: 'oauth_proactive_refresh_duration_seconds',
+  help: 'Duration of each OAuth proactive-refresh cron sweep.',
+  labelNames: [] as string[],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
 })
 
 // ─── Governed tracing foundation ──────────────────────────────────────────

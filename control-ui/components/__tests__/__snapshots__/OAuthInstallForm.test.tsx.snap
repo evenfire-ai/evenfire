@@ -1,0 +1,258 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`OAuthInstallForm — baked path is byte-identical (F1 guard) > renders the 3-step baked wizard with no generic-only markers 1`] = `
+<div
+  class="cu-agent-create-wizard cu-create-step-flow--3"
+>
+  <aside
+    aria-label="Install OAuth connector steps"
+    class="cu-agent-step-rail"
+  >
+    <button
+      class="cu-agent-step-rail__item"
+      data-state="current"
+      type="button"
+    >
+      <span
+        class="cu-agent-step-rail__number"
+      >
+        1
+      </span>
+      <span
+        class="cu-agent-step-rail__copy"
+      >
+        <span
+          class="cu-agent-step-rail__title"
+        >
+          Provider
+        </span>
+        <span
+          class="cu-agent-step-rail__description"
+        >
+          Register the redirect URI
+        </span>
+      </span>
+    </button>
+    <button
+      class="cu-agent-step-rail__item"
+      data-state="upcoming"
+      type="button"
+    >
+      <span
+        class="cu-agent-step-rail__number"
+      >
+        2
+      </span>
+      <span
+        class="cu-agent-step-rail__copy"
+      >
+        <span
+          class="cu-agent-step-rail__title"
+        >
+          Credentials
+        </span>
+        <span
+          class="cu-agent-step-rail__description"
+        >
+          Add client credentials
+        </span>
+      </span>
+    </button>
+    <button
+      class="cu-agent-step-rail__item"
+      data-state="upcoming"
+      disabled=""
+      type="button"
+    >
+      <span
+        class="cu-agent-step-rail__number"
+      >
+        3
+      </span>
+      <span
+        class="cu-agent-step-rail__copy"
+      >
+        <span
+          class="cu-agent-step-rail__title"
+        >
+          Install
+        </span>
+        <span
+          class="cu-agent-step-rail__description"
+        >
+          Scopes and install
+        </span>
+      </span>
+    </button>
+  </aside>
+  <section
+    aria-labelledby="oauth-install-step-title"
+    class="cu-agent-step-panel"
+  >
+    <div
+      class="cu-agent-step-panel__header"
+    >
+      <h3
+        class="cu-agent-step-panel__title"
+        id="oauth-install-step-title"
+      >
+        Provider setup
+      </h3>
+      <p
+        class="cu-agent-step-panel__subtitle"
+      >
+        Register this redirect URI in the provider’s OAuth app before you continue.
+      </p>
+    </div>
+    <div
+      class="cu-agent-step-panel__body"
+    >
+      <form
+        class="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide"
+      >
+        <div
+          class="cu-form-section"
+        >
+          <div
+            class="cu-form-section__header"
+          >
+            <h3
+              class="cu-form-section__title"
+            >
+              Register the OAuth app
+            </h3>
+            <p
+              class="cu-form-section__description"
+            >
+              Create an OAuth app for 
+              <strong>
+                Google
+              </strong>
+               and register the exact redirect URI below. control-api derives the callback id from the connector name.
+            </p>
+          </div>
+          <div
+            class="cu-field"
+          >
+            <label
+              for="oauth-server-name"
+            >
+              Connector name
+            </label>
+            <input
+              class="cu-input"
+              id="oauth-server-name"
+              placeholder="my-oauth-connector"
+              value="acme"
+            />
+            <span
+              class="cu-field__hint"
+            >
+              Used to derive the OAuth callback id. Lowercase letters, digits, and hyphens.
+            </span>
+          </div>
+          <div
+            class="cu-field"
+          >
+            <label
+              for="oauth-derived-id"
+            >
+              Callback id (auto-derived)
+            </label>
+            <input
+              class="cu-input cu-input--monospace"
+              id="oauth-derived-id"
+              readonly=""
+              value="acme"
+            />
+            <span
+              class="cu-field__hint"
+            >
+              control-api owns this id and checks it is unique; it cannot be typed.
+            </span>
+          </div>
+          <div
+            class="cu-field"
+          >
+            <label>
+              Redirect URI
+            </label>
+            <div
+              class="cu-table-actions"
+            >
+              <input
+                aria-label="Redirect URI"
+                class="cu-input cu-input--monospace"
+                readonly=""
+                value="https://oauth.example.com/api/v1/oauth-callback/acme"
+              />
+              <button
+                aria-label="Copy redirect URI"
+                class="cu-btn cu-btn--ghost cu-btn--sm cu-btn--icon"
+                type="button"
+              >
+                <svg
+                  aria-hidden="true"
+                  fill="none"
+                  height="16"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="16"
+                >
+                  <rect
+                    height="14"
+                    rx="2"
+                    ry="2"
+                    width="14"
+                    x="8"
+                    y="8"
+                  />
+                  <path
+                    d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"
+                  />
+                </svg>
+              </button>
+            </div>
+            <span
+              class="cu-field__hint"
+            >
+              Register this exact URI in the provider’s OAuth app.
+            </span>
+          </div>
+          <p
+            class="cu-field__hint"
+          >
+            <a
+              href="https://console.cloud.google.com/apis/credentials"
+              rel="noreferrer noopener"
+              target="_blank"
+            >
+              Google
+               OAuth app documentation
+            </a>
+          </p>
+        </div>
+        <div
+          class="cu-create-actions"
+        >
+          <button
+            class="cu-btn cu-btn--ghost cu-btn--sm"
+            type="button"
+          >
+            Cancel
+          </button>
+          <button
+            class="cu-btn cu-btn--primary cu-btn--sm"
+            type="submit"
+          >
+            Continue
+          </button>
+        </div>
+      </form>
+    </div>
+  </section>
+</div>
+`;

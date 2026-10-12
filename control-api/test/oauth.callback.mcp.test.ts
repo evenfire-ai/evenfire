@@ -40,10 +40,9 @@ function mcpState(overrides: Partial<Parameters<typeof signOAuthState>[1]> = {})
 
 function buildInput(overrides: Partial<CallbackInput> = {}): CallbackInput {
   return {
-    oauthClientId: 'google-drive',
+    target: { kind: 'client', id: 'google-drive', redirectUri: REDIRECT_URI },
     code: 'AUTH_CODE',
     state: mcpState(),
-    redirectUri: REDIRECT_URI,
     ...overrides,
   }
 }
@@ -70,7 +69,7 @@ function gdriveSubject(
       },
     },
   }
-  const resolved = resolveServerOAuthSubject(rawServer)
+  const resolved = resolveServerOAuthSubject(rawServer, 'consent')
   if (!resolved) throw new Error('fixture: resolveServerOAuthSubject returned null')
   return { namespace: MCP_NS, ...resolved }
 }
@@ -178,10 +177,12 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
 
     expect(db.query).toHaveBeenCalledTimes(1)
     const [sql, params] = db.query.mock.calls[0] as [string, unknown[]]
-    // The shared bootstrap INSERT … ON CONFLICT DO NOTHING (first-wins).
+    // The shared bootstrap INSERT … ON CONFLICT DO UPDATE fenced by cr_uid (R3-H5):
+    // same-uid conflict no-ops (first-wins), a different uid / legacy row is replaced.
     expect(sql).toContain('INSERT INTO oauth_grants')
     expect(sql).toContain("'shared'")
-    expect(sql).toContain('DO NOTHING')
+    expect(sql).toContain('DO UPDATE SET')
+    expect(sql).toContain('oauth_grants.cr_uid IS DISTINCT FROM EXCLUDED.cr_uid')
     // owner_kind, ns, name, context_id(=contextRef), oauthClientId, bootstrappedBy
     expect(params[0]).toBe('mcpserver')
     expect(params[1]).toBe(MCP_NS)
@@ -239,7 +240,10 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
 
   it('rejects when the callback-path oauthClientId disagrees with the signed state', async () => {
     const { deps } = buildDeps({ subject: gdriveSubject() })
-    const result = await handleOAuthCallback(buildInput({ oauthClientId: 'other' }), deps)
+    const result = await handleOAuthCallback(
+      buildInput({ target: { kind: 'client', id: 'other', redirectUri: REDIRECT_URI } }),
+      deps
+    )
     expect(result.kind).toBe('invalid_state')
   })
 

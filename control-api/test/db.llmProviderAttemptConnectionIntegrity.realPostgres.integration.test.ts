@@ -75,12 +75,15 @@ describeRealPostgres('0114 llm_provider_attempts connection integrity on real Po
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.end()
-    if (adminPool) {
-      await adminPool
-        .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-        .catch(() => undefined)
-      await adminPool.end()
+    try {
+      await pool?.end()
+      if (adminPool) {
+        await adminPool
+          .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+          .catch(() => undefined)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

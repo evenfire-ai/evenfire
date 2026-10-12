@@ -22,7 +22,8 @@ beforeEach(() => {
   delete process.env.REGISTRY_CONNECTION_MODE
 })
 afterEach(() => {
-  process.env = ORIGINAL_ENV
+  process.env = { ...ORIGINAL_ENV }
+  vi.restoreAllMocks()
   vi.resetModules()
 })
 
@@ -63,10 +64,13 @@ describe('config: REGISTRY_CONNECTION_MODE discriminator', () => {
   it('logs the resolved mode at import for an enabled registry', async () => {
     enableManagedRegistryEnv()
     process.env.REGISTRY_CONNECTION_MODE = 'managed'
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const { rootLogger } = await import('../src/observability/logger.js')
+    const logSpy = vi.spyOn(rootLogger, 'info').mockImplementation(() => {})
     await import('../src/config.js')
-    const lines = logSpy.mock.calls.map(c => String(c[0]))
-    expect(lines.some(l => /Registry connection mode: managed/.test(l))).toBe(true)
+    expect(logSpy).toHaveBeenCalledWith(
+      { event: 'registry_connection_mode', mode: 'managed' },
+      'Registry connection mode'
+    )
   })
 })
 

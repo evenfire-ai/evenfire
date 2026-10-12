@@ -205,48 +205,28 @@ describe('reconcile() — B1 integration: channel-reader Deployment shape (synce
   })
 })
 
-// ── B2: unsynced cache + existing Deployment has replicas=1 → must preserve ──
-describe('reconcile() — B2 integration: replica preservation when CC cache is unsynced (409 path)', () => {
-  it('preserves replicas=1 on replaceNamespacedDeployment body when cache is unsynced and existing Deployment is live', async () => {
-    // Scenario: HCC restarts mid-flight. CC cache is still loading (unsynced).
-    // The existing live Deployment has replicas=1 (channel-reader is running).
-    // reconcile() MUST NOT scale it to 0 — that would drop inbound messages.
+// ── B2: unsynced scope with no retained observation must defer Deployment ──
+describe('reconcile() — B2 integration: Deployment is deferred without an authoritative scope observation', () => {
+  it('does not mutate Deployment when the CC cache is unsynced and scope was not retained', async () => {
+    // Scenario: HCC restarts mid-flight. CC cache is still loading (unsynced),
+    // and the runtime Secret has no trusted retained scope observation. The
+    // reconciler must wait before changing the runtime Deployment.
     const { reconciler, appsApi } = createReconciler()
 
-    // Force the 409 → read-existing → replace path ONLY for the channels namespace
-    // channel-reader Deployment. The mcp-host Deployment (mcp-host ns) must succeed
-    // so that reconcile() progresses to the channel-reader step.
+    // A Deployment create would expose the runtime to credentials minted from
+    // an incomplete channel inventory; make any attempted create fail loudly.
     appsApi.createNamespacedDeployment.mockImplementation(
       ({ body }: { namespace: string; body: k8s.V1Deployment }) => {
         const dep = body as k8s.V1Deployment
-        if (dep.metadata?.namespace === 'channels') {
-          return Promise.reject({ code: 409 })
-        }
-        // mcp-host Deployment (mcp-host ns) and everything else succeeds normally
-        return Promise.resolve({})
+        return Promise.reject(
+          new Error(`Unexpected Deployment create in ${dep.metadata?.namespace}`)
+        )
       }
     )
-    // readNamespacedDeployment is called for both the host (name=alpha-host, ns=mcp-host)
-    // and the channel-reader (name=channel-reader-alpha-host, ns=channels).
-    // Return a "live replicas=1" response for the channel-reader read; for the host
-    // deployment read, return HCC-owned labels so reconcile() continues normally.
+    // Return an existing live, HCC-owned runtime Deployment. It must remain
+    // untouched while the reconciler waits for authoritative channel scope.
     appsApi.readNamespacedDeployment.mockImplementation(
       ({ name, namespace }: { name: string; namespace: string }) => {
-        if (name === 'channel-reader-alpha-host') {
-          return Promise.resolve({
-            metadata: {
-              name: 'channel-reader-alpha-host',
-              namespace: 'channels',
-              resourceVersion: '77',
-              labels: {
-                'clerum.io/host': 'alpha-host',
-                'clerum.io/managed-by': 'host-context-controller',
-              },
-            },
-            spec: { replicas: 1 },
-          })
-        }
-        // Default: HCC-owned host Deployment (for readiness check)
         return Promise.resolve({
           status: { readyReplicas: 1 },
           metadata: {
@@ -270,15 +250,13 @@ describe('reconcile() — B2 integration: replica preservation when CC cache is 
 
     await reconciler.reconcile(makeHost())
 
-    // The replace call body must carry replicas=1, not 0
-    expect(
-      appsApi.replaceNamespacedDeployment.mock.calls.filter(
-        ([request]) => request.namespace === 'channels'
-      )
-    ).toHaveLength(1)
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
     expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
-    const replaceBody = getChannelReaderReplaceBody(appsApi)
-    expect(replaceBody.spec?.replicas).toBe(1)
+    expect(reconciler.getStatus('alpha-host')).toMatchObject({
+      deployed: true,
+      ready: false,
+      message: 'Waiting for authoritative scope observation',
+    })
   })
 })
 

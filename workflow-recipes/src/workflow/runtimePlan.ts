@@ -370,6 +370,8 @@ export function deriveWorkflowRuntimePlan(
         : undefined,
     },
     cleanup: {
+      // Awaiting-trigger tears down only coordinator + mcp-host. Snippet-runner
+      // is run-scoped and is not in this list (B3(d) does not skip it here).
       deleteBeforeTriggeredRun: [
         'workflow-coordinator',
         ...(needsMcpHost ? (['workflow-mcp-host'] as const) : []),

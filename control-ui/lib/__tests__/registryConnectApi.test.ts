@@ -53,4 +53,13 @@ describe('registry connect api — claim 401 overload', () => {
     expect(err.status).toBe(410)
     expect(err.code).toBe('claim_expired')
   })
+
+  it('surfaces registry_signing_material_unavailable (409) as a coded error', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeRes(409, { error: 'registry_signing_material_unavailable' })
+    )
+    const err = await submitRegistryClaim({ claimToken: 'x' }).catch(e => e)
+    expect(err.status).toBe(409)
+    expect(err.code).toBe('registry_signing_material_unavailable')
+  })
 })

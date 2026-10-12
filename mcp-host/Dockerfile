@@ -17,6 +17,7 @@ COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
+COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
 
 # Install dependencies (file: deps resolve to ../packages/llm-providers and
 # ../packages/llm-provider-attempt-contract)
@@ -42,6 +43,7 @@ COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
+COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 COPY --from=builder /app/mcp-host/node_modules ./node_modules

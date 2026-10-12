@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { RpcProxyClient } from '../rpcProxyClient.js'
+import { ApiError } from '../httpClient.js'
+import { RpcProxyClient, SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
 
 // Mock the config module so the module-level url() helper uses a fixed base URL
 vi.mock('../config.js', () => ({
@@ -43,6 +44,111 @@ describe('RpcProxyClient.listSessions', () => {
       expect(fetchMock).not.toHaveBeenCalled()
     }
   )
+
+  // The rpc-proxy denial bodies exactly as the contract defines them: status 403,
+  // the human `error` text, and a machine `code` that says whether access was
+  // actually removed (`host_access_revoked`) or merely refused (`host_access_denied`).
+  const rpcProxyDenial = (code?: string) =>
+    JSON.stringify({ error: 'Forbidden: user cannot access this host', ...(code ? { code } : {}) })
+
+  const stubForbidden = (body: string) => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 403, text: async () => body })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('projects a confirmed revocation (code host_access_revoked) from every raw-fetch site', async () => {
+    const fetchMock = stubForbidden(rpcProxyDenial('host_access_revoked'))
+
+    await expect(client.listSessions('token', 'host')).rejects.toThrow(
+      '403 Forbidden: host_access_revoked'
+    )
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
+      '403 Forbidden: host_access_revoked'
+    )
+    await expect(client.renameSession('token', 'host', 'agent-a', 'chat-a', 'T')).rejects.toThrow(
+      '403 Forbidden: host_access_revoked'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('projects an own-denial without revocation (code host_access_denied) as its own message', async () => {
+    const fetchMock = stubForbidden(rpcProxyDenial('host_access_denied'))
+
+    for (const call of [
+      () => client.listSessions('token', 'host'),
+      () => client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a'),
+      () => client.renameSession('token', 'host', 'agent-a', 'chat-a', 'T'),
+    ]) {
+      const error = await call().then(
+        () => null,
+        (e: unknown) => e as Error
+      )
+      expect(error?.message).toBe('403 Forbidden: host_access_denied')
+      expect(error?.message).not.toContain('host_access_revoked')
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    ['the pre-contract body (error text only, no code)', rpcProxyDenial()],
+    [
+      'a JSON body whose error is the revoked token but has no code',
+      '{"error":"host_access_revoked"}',
+    ],
+    [
+      'a JSON body carrying the revoked token in a non-code field',
+      '{"reason":"host_access_revoked"}',
+    ],
+    ['a text body ending in the revoked token', 'Forbidden: host_access_revoked'],
+    ['a code of another kind', '{"code":"missing_scope","error":"host_access_revoked"}'],
+  ])('does not forge a confirmed revocation from %s', async (_label, body) => {
+    const fetchMock = stubForbidden(body)
+
+    for (const call of [
+      () => client.listSessions('token', 'host'),
+      () => client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a'),
+      () => client.renameSession('token', 'host', 'agent-a', 'chat-a', 'T'),
+    ]) {
+      const error = await call().then(
+        () => null,
+        (e: unknown) => e as Error & { status?: number }
+      )
+      // Liveness witness: the failure path ran and kept the plain 403 text.
+      expect(error?.message).toMatch(/failed \(403\)/)
+      expect(error?.status).toBe(403)
+      expect(error?.message).not.toContain('host_access_revoked')
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('bounds an oversized upstream body in the message while ApiError keeps it whole', async () => {
+    const huge = `{"detail":"${'x'.repeat(100 * 1024)}"}`
+    stubForbidden(huge)
+
+    const error = (await client.listSessions('token', 'host').then(
+      () => null,
+      (e: unknown) => e
+    )) as Error & { status?: number; bodyText?: string }
+    expect(error).toBeInstanceOf(Error)
+    // Status stays first so the renderer's status parsing keeps working.
+    expect(error.message.startsWith('List sessions failed (403): ')).toBe(true)
+    expect(error.message.length).toBeLessThan(600)
+    expect(error.bodyText).toBe(huge)
+  })
+
+  it('keeps a generic catalog 403 uncertain', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () => JSON.stringify({ error: 'missing scope' }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).rejects.toThrow('List sessions failed (403)')
+  })
 
   it('accepts legacy session catalog responses that omit optional metadata', async () => {
     vi.stubGlobal(
@@ -108,6 +214,47 @@ describe('RpcProxyClient.listSessions', () => {
         },
       ],
     })
+  })
+
+  // R3-L10: the `rpc:listSessions` IPC handler refuses a cursor longer than
+  // 2048 characters, so a page cursor that long must never reach the renderer.
+  it.each([
+    [2048, true],
+    [3000, false],
+  ])('keeps a %s-character nextCursor only within the IPC cursor limit', async (length, kept) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const nextCursor = 'c'.repeat(length)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              agent: 'agent-a',
+              chatId: 'chat-a',
+              turnCount: 1,
+              lastActivityAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          nextCursor,
+        }),
+      })
+    )
+
+    const result = await client.listSessions('token', 'host')
+
+    // Witness: the page itself is still delivered in both cases.
+    expect(result.items.map(item => item.chatId)).toEqual(['chat-a'])
+    expect(result.nextCursor).toBe(kept ? nextCursor : undefined)
+    if (kept) {
+      expect(warn).not.toHaveBeenCalled()
+    } else {
+      expect(warn).toHaveBeenCalledTimes(1)
+      const logged = warn.mock.calls[0].map(String).join(' ')
+      expect(logged).toContain(String(length))
+      expect(logged).not.toContain('ccc')
+    }
   })
 
   it('keeps valid catalog entries when one item is malformed and omits unknown states', async () => {
@@ -655,9 +802,16 @@ describe('RpcProxyClient.requestSandboxUiOauthAuthorizeUrl', () => {
         text: async () => '{"error":"recipe_not_found"}',
       })
     )
-    await expect(client.requestSandboxUiOauthAuthorizeUrl('t', 'ns', 'r', 'cid')).rejects.toThrow(
-      /authorize-url request failed \(404\)/
+    const error = await client.requestSandboxUiOauthAuthorizeUrl('t', 'ns', 'r', 'cid').then(
+      () => null,
+      (e: unknown) => e
     )
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({
+      message: 'sandbox-ui authorize-url request failed (404): {"error":"recipe_not_found"}',
+      status: 404,
+      bodyText: '{"error":"recipe_not_found"}',
+    })
   })
 
   it('throws when the JSON response is missing authorizeUrl', async () => {
@@ -688,6 +842,76 @@ describe('RpcProxyClient.requestSandboxUiOauthAuthorizeUrl', () => {
     const url = firstCall[0] as string
     expect(url).toContain('weird%2Fns')
     expect(url).toContain('odd%20name')
+  })
+})
+
+// `AbortSignal.timeout` runs on the runtime's own timers, which fake timers do
+// not drive. The sandbox-ui bound is shrunk to a few ms instead, keyed on its
+// exact value so the app-wide 60 s default is left untouched: a call still
+// using that default stays pending and the test fails on its assertion.
+function shrinkSandboxUiBound(toMs = 25) {
+  const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+  return vi
+    .spyOn(AbortSignal, 'timeout')
+    .mockImplementation(ms => realTimeout(ms === SANDBOX_UI_MINT_TIMEOUT_MS ? toMs : ms))
+}
+
+// An rpc-proxy that accepts the request and never answers: the call can only
+// settle if the client aborts it.
+function fetchThatOnlySettlesOnAbort() {
+  return vi.fn(
+    (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+  )
+}
+
+async function outcomeWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
+  const pending = Symbol('pending')
+  const outcome = await Promise.race([
+    promise.then(
+      () => 'resolved',
+      (error: unknown) => error
+    ),
+    new Promise(resolve => setTimeout(() => resolve(pending), ms)),
+  ])
+  return outcome === pending ? 'still pending' : outcome
+}
+
+describe('RpcProxyClient sandbox-ui calls against a hung rpc-proxy', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('bounds the sandbox-ui calls well under the app-wide request timeout', () => {
+    expect(SANDBOX_UI_MINT_TIMEOUT_MS).toBeGreaterThanOrEqual(15_000)
+    expect(SANDBOX_UI_MINT_TIMEOUT_MS).toBeLessThanOrEqual(20_000)
+  })
+
+  it('rejects a session mint once its bound elapses', async () => {
+    shrinkSandboxUiBound()
+    vi.stubGlobal('fetch', fetchThatOnlySettlesOnAbort())
+
+    const outcome = await outcomeWithin(
+      new RpcProxyClient().mintSandboxUiSession('t', 'sandbox-recipes', 'crm'),
+      1_000
+    )
+
+    expect(outcome).toMatchObject({ name: 'TimeoutError' })
+  })
+
+  it('rejects an authorize-url request once its bound elapses', async () => {
+    shrinkSandboxUiBound()
+    vi.stubGlobal('fetch', fetchThatOnlySettlesOnAbort())
+
+    const outcome = await outcomeWithin(
+      new RpcProxyClient().requestSandboxUiOauthAuthorizeUrl('t', 'sandbox-recipes', 'crm', 'cid'),
+      1_000
+    )
+
+    expect(outcome).toMatchObject({ name: 'TimeoutError' })
   })
 })
 

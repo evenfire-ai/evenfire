@@ -29,6 +29,9 @@ export default defineConfig({
     // which serves an out-of-root setup file under `/@fs/` and cannot resolve
     // it from a path relative to this package.
     setupFiles: [path.resolve(__dirname, '../scripts/testing/bind-loopback-in-tests.mjs')],
+    // Owns the temporary root of the renderer chat fixture's real ChatStore
+    // directories and removes it once every test file has finished.
+    globalSetup: ['ui/src/hooks/domain/__tests__/__fixtures__/mockClerumStoreRoot.ts'],
     fileParallelism: false,
     teardownTimeout: 60_000,
     include: [

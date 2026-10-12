@@ -162,7 +162,10 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
   })
 
   it('returns 403 if the user cannot access the host', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     await request(makeApp())
       .get('/rpc/hosts/other-host/sessions')
       .set('authorization', 'Bearer user-token')
@@ -422,7 +425,10 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown — 
   })
 
   it('returns 403 if the user cannot access the host', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     await request(makeApp())
       .get('/rpc/hosts/other-host/sessions/chatllm/c1/context-breakdown')
       .set('authorization', 'Bearer user-token')

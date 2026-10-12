@@ -1,6 +1,9 @@
 # public relation<TAB>control_api_runtime access profile
 administrative_events	append
 agent_run_events	append
+entity_change_feed	none
+entity_change_outbox	none
+entity_change_watermark	none
 budget_pending_reservations	legacy_dml
 codex_subscription_connections	upsert
 codex_subscription_oauth_states	upsert
@@ -44,7 +47,11 @@ llm_provider_attempts	upsert
 member_registration_credentials	upsert
 mcp_secret_rollback_permits	legacy_dml
 notification_deliveries	legacy_dml
+dynamic_clients	legacy_dml
 oauth_grants	legacy_dml
+password_identifier_state	legacy_dml
+password_verification_pace	legacy_dml
+password_verification_work	insert_delete
 plugin_workload_sdk_credential_ticket_jtis	legacy_dml
 plugin_workload_sdk_invocation_attempts	legacy_dml
 plugin_workload_sdk_grants	legacy_dml

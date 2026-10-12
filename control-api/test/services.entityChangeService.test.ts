@@ -1,0 +1,187 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
+import {
+  dispatchEntityChangeOutbox,
+  isEntityChangeCursor,
+  readEntityChangeCheckpoint,
+  startEntityChangeDispatcher,
+  stopEntityChangeDispatcher,
+  subscribeEntityChangeFeedWake,
+} from '../src/services/entityChangeService.js'
+
+const dbMock = vi.hoisted(() => ({ query: vi.fn(), connect: vi.fn() }))
+const configMock = vi.hoisted(() => ({
+  entityChangeDispatchBatchSize: 37,
+  entityChangeDispatchIntervalMs: 100,
+  entityChangeRetentionSeconds: 86_400,
+  entityChangeMaxRecoveryEvents: 500,
+}))
+
+vi.mock('../src/db.js', () => ({ pool: dbMock }))
+vi.mock('../src/config.js', () => ({ config: configMock }))
+vi.mock('../src/observability/logger.js', () => ({
+  rootLogger: { child: () => ({ info: vi.fn(), warn: vi.fn() }) },
+}))
+
+describe('entityChangeService', () => {
+  beforeEach(() => {
+    dbMock.query.mockReset()
+    dbMock.connect.mockReset()
+  })
+
+  it('validates only canonical UUID cursors', () => {
+    expect(isEntityChangeCursor('d119f895-1ef8-4e73-8f08-f9754919682a')).toBe(true)
+    expect(isEntityChangeCursor('d119f895-1ef8-4e73-8f08-f9754919682')).toBe(false)
+  })
+
+  it('exposes only approved coarse scopes from the durable checkpoint', async () => {
+    dbMock.query.mockResolvedValueOnce({
+      rows: [
+        {
+          needs_resync: false,
+          current_cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+          invalidated_scopes: ['gfs', 'authorization', 'private-resource-id'],
+        },
+      ],
+    })
+
+    await expect(
+      readEntityChangeCheckpoint('d119f895-1ef8-4e73-8f08-f9754919682a')
+    ).resolves.toEqual({
+      resyncRequired: false,
+      cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+      scopes: ['gfs', 'authorization'],
+    })
+    expect(dbMock.query).toHaveBeenCalledWith(
+      'SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)',
+      ['d119f895-1ef8-4e73-8f08-f9754919682a', 500]
+    )
+  })
+
+  it('dispatches with the configured batch and retention bounds', async () => {
+    dbMock.query.mockResolvedValueOnce({ rows: [{ feed_sequence: 1 }] })
+    await expect(dispatchEntityChangeOutbox()).resolves.toBe(1)
+    expect(dbMock.query).toHaveBeenCalledWith(
+      'SELECT * FROM entity_change_dispatch_batch($1, $2)',
+      [37, 86_400]
+    )
+  })
+
+  it('shares one LISTEN connection among wake subscribers and releases it when empty', async () => {
+    const listener = new EventEmitter() as EventEmitter & {
+      query: ReturnType<typeof vi.fn>
+      release: ReturnType<typeof vi.fn>
+    }
+    listener.query = vi.fn().mockResolvedValue({ rows: [] })
+    listener.release = vi.fn()
+    dbMock.connect.mockResolvedValueOnce(listener)
+    const first = vi.fn()
+    const second = vi.fn()
+    const unsubscribeFirst = subscribeEntityChangeFeedWake(first)
+    const unsubscribeSecond = subscribeEntityChangeFeedWake(second)
+    await vi.waitFor(() => expect(listener.query).toHaveBeenCalledWith('LISTEN entity_change_feed'))
+    expect(dbMock.connect).toHaveBeenCalledOnce()
+
+    listener.emit('notification')
+    expect(first).toHaveBeenCalledOnce()
+    expect(second).toHaveBeenCalledOnce()
+
+    unsubscribeFirst()
+    unsubscribeSecond()
+    expect(listener.release).toHaveBeenCalledOnce()
+    expect(listener.release).toHaveBeenCalledWith(true)
+  })
+
+  it('destroys a wake connection when LISTEN setup fails', async () => {
+    const listener = new EventEmitter() as EventEmitter & {
+      query: ReturnType<typeof vi.fn>
+      release: ReturnType<typeof vi.fn>
+    }
+    listener.query = vi.fn().mockRejectedValue(new Error('database connection lost'))
+    listener.release = vi.fn()
+    dbMock.connect.mockResolvedValueOnce(listener)
+
+    const unsubscribe = subscribeEntityChangeFeedWake(vi.fn())
+    await vi.waitFor(() => expect(listener.release).toHaveBeenCalledWith(true))
+    unsubscribe()
+  })
+
+  it('destroys the dispatcher LISTEN connection during shutdown', async () => {
+    const listener = new EventEmitter() as EventEmitter & {
+      query: ReturnType<typeof vi.fn>
+      release: ReturnType<typeof vi.fn>
+    }
+    listener.query = vi.fn().mockResolvedValue({ rows: [] })
+    listener.release = vi.fn()
+    dbMock.connect.mockResolvedValueOnce(listener)
+    dbMock.query.mockResolvedValue({ rows: [] })
+
+    startEntityChangeDispatcher()
+    await vi.waitFor(() =>
+      expect(listener.query).toHaveBeenCalledWith('LISTEN entity_change_outbox')
+    )
+    stopEntityChangeDispatcher()
+    expect(listener.release).toHaveBeenCalledWith(true)
+  })
+
+  it('single-flights dispatcher LISTEN connection attempts while pool connection is pending', async () => {
+    vi.useFakeTimers()
+    type TestListener = EventEmitter & {
+      query: ReturnType<typeof vi.fn>
+      release: ReturnType<typeof vi.fn>
+    }
+    const pendingConnections: Array<{
+      resolve: (client: TestListener) => void
+      listener: TestListener
+    }> = []
+    dbMock.connect.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          const listener = new EventEmitter() as TestListener
+          listener.query = vi.fn().mockResolvedValue({ rows: [] })
+          listener.release = vi.fn()
+          pendingConnections.push({ resolve, listener })
+        })
+    )
+    dbMock.query.mockResolvedValue({ rows: [] })
+
+    try {
+      startEntityChangeDispatcher()
+      await vi.advanceTimersByTimeAsync(500)
+      expect(dbMock.connect).toHaveBeenCalledOnce()
+      stopEntityChangeDispatcher()
+      pendingConnections[0].resolve(pendingConnections[0].listener)
+      vi.useRealTimers()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(pendingConnections[0].listener.release).toHaveBeenCalledOnce()
+    } finally {
+      stopEntityChangeDispatcher()
+      for (const { resolve, listener } of pendingConnections) {
+        resolve(listener)
+      }
+      vi.useRealTimers()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+  })
+
+  it('does not bypass the bounded dispatcher listener retry delay', async () => {
+    vi.useFakeTimers()
+    dbMock.connect.mockRejectedValue(new Error('database unavailable'))
+    dbMock.query.mockResolvedValue({ rows: [] })
+
+    try {
+      startEntityChangeDispatcher()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(dbMock.connect).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(dbMock.connect).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(dbMock.connect).toHaveBeenCalledTimes(2)
+    } finally {
+      stopEntityChangeDispatcher()
+      vi.useRealTimers()
+    }
+  })
+})

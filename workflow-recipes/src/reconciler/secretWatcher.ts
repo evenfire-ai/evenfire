@@ -1,3 +1,4 @@
+import { resolveOAuthBrokerTokenWatchRecipe } from './resourceBuilder'
 import { OWNER_RECIPE_LABEL_KEY, SHARED_LABEL_KEY } from './secretOwnership'
 import { SecretReverseIndex } from './secretReverseIndex'
 
@@ -41,7 +42,8 @@ export class SecretWatcher {
   constructor(
     private readonly reverseIndex: SecretReverseIndex,
     private readonly enqueueReconcile: (recipeName: string) => void,
-    private readonly debounceMs: number = 10_000
+    private readonly debounceMs: number = 10_000,
+    private readonly onOAuthBrokerTokenAdded?: (recipeName: string) => void
   ) {}
 
   /**
@@ -57,6 +59,17 @@ export class SecretWatcher {
   handleEvent(type: SecretEventType, secret: SecretLike): void {
     const name = secret.metadata?.name
     if (!name) return
+
+    // B3(a): ADDED of the canonical broker token is reported even when the
+    // key-set matches a previous observation (dedup would drop it). This
+    // watcher never enqueues on it: a watch reconnect replays ADDED for every
+    // Secret, so the callback owner decides whether a reconcile is needed.
+    if (type === 'ADDED') {
+      const recipeName = resolveOAuthBrokerTokenWatchRecipe(name, secret.metadata?.labels)
+      if (recipeName) {
+        this.onOAuthBrokerTokenAdded?.(recipeName)
+      }
+    }
 
     const newKeys =
       type === 'DELETED'

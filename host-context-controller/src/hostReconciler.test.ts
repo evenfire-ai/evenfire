@@ -1056,12 +1056,12 @@ describe('HostReconciler Host inventory mutation authority', () => {
 
   function stubPreDeploymentReconcileEffects(reconciler: HostReconciler): void {
     vi.spyOn(reconciler as any, 'validateHostSecret').mockResolvedValue({ ok: true })
+    vi.spyOn(reconciler as any, 'ensurePvc').mockResolvedValue(true)
+    vi.spyOn(reconciler as any, 'ensureService').mockResolvedValue(true)
     for (const method of [
       'ensureHostServiceAccount',
       'ensureHostRole',
       'ensureHostRoleBinding',
-      'ensurePvc',
-      'ensureService',
       'ensureMcpHostIngressNetworkPolicy',
       'ensureMcpHostGfsEgressNetworkPolicy',
       'ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy',
@@ -1071,7 +1071,7 @@ describe('HostReconciler Host inventory mutation authority', () => {
       'ensureChannelReaderEgressNetworkPolicy',
       'ensureWorkflowApprovalReaderHostEgressNetworkPolicy',
     ]) {
-      vi.spyOn(reconciler as any, method).mockResolvedValue(undefined)
+      vi.spyOn(reconciler as any, method).mockResolvedValue('up_to_date')
     }
   }
 
@@ -1420,9 +1420,7 @@ describe('HostReconciler Host inventory mutation authority', () => {
       await releaseTokenProvision.promise
       return { revision: 'stale-revision', scopeHash: 'stale-scope' }
     })
-    const ensureDeployment = vi
-      .spyOn(reconciler as any, 'ensureDeployment')
-      .mockResolvedValue(undefined)
+    const ensureDeployment = vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(true)
 
     const pending = reconciler.reconcile(host)
     await tokenProvisionStarted.promise

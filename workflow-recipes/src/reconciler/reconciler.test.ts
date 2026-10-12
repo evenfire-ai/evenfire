@@ -15,16 +15,26 @@ import {
   WorkloadDef,
 } from '../types'
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
+import type { CodexExecutionProjection } from '../workflow/codexExecutionProjection'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
-import { captureLogger } from './__tests__/captureLogger'
+import type { NetworkPolicyPassSummary } from '../workflow/pluginWorkloadSdkProvisioner'
+import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
+import {
+  LegacyNetworkPolicyDeletePendingError,
+  WorkflowReconciler,
+  buildNetworkPolicyConvergedCondition,
+  networkPolicyMarkerConditions,
+} from '../workflow/workflowReconciler'
+import { captureLogger, captureLoggerLevels } from './__tests__/captureLogger'
 import { defaultFqdnLookup } from './fqdnResolver'
-import { isRetryableInfraError } from './k8sErrors'
+import { ResourceVanishedAfterConflictError, isRetryableInfraError } from './k8sErrors'
 import type { NetworkPolicyFamily } from './networkPolicyConvergence'
 import * as brokerIssuer from './oauthBrokerTokenIssuerClient'
 import {
   PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
 } from './pluginWorkloadSdkValidator'
+import { RecipeEventQueue } from './recipeEventQueue'
 import {
   buildUiIngressNetworkPolicy,
   buildWorkloadIngressNetworkPolicy,
@@ -80,6 +90,7 @@ const mockCoreApi = {
   readNamespacedPersistentVolumeClaim: vi.fn().mockRejectedValue({ code: 404 }),
   deleteNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
   deleteCollectionNamespacedPod: vi.fn().mockResolvedValue({}),
+  deleteNamespacedPod: vi.fn().mockResolvedValue({}),
   createNamespacedSecret: vi.fn().mockResolvedValue({}),
   readNamespacedSecret: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
   replaceNamespacedSecret: vi.fn().mockResolvedValue({}),
@@ -235,12 +246,20 @@ type LiveManifest = { metadata: { name: string } & Record<string, unknown> } & R
  * whose tests override `read` to supply a live object with a specific status
  * (the readiness tests): the object exists in that test's model, so its PUT
  * succeeds.
+ *
+ * `patch`, when given, merges `metadata.annotations` and the top-level `spec`
+ * keys of the body into the stored object, bumps its resourceVersion, and bumps
+ * its generation when the body carries `spec`, as the apiserver does. It is not
+ * a strategic merge: assertions about what a patch sent read the request body,
+ * not the stored object. A patch to an object the store does not hold answers
+ * 404, as the apiserver does, whatever `unseenReplace` says.
  */
 function installLiveStore(
   api: {
     read: ReturnType<typeof vi.fn>
     create: ReturnType<typeof vi.fn>
     replace: ReturnType<typeof vi.fn>
+    patch?: ReturnType<typeof vi.fn>
   },
   status: Record<string, unknown>,
   admit?: (stored: LiveManifest) => void,
@@ -294,9 +313,84 @@ function installLiveStore(
         return {}
       }
     )
+  api.patch?.mockReset().mockImplementation(
+    async ({
+      name,
+      namespace,
+      body,
+    }: {
+      name: string
+      namespace: string
+      body: {
+        metadata?: { annotations?: Record<string, string> }
+        spec?: Record<string, unknown>
+      }
+    }) => {
+      const k = key(namespace, name)
+      const current = live.get(k)
+      if (!current) throw { code: 404 }
+      const metadata = current.metadata as LiveManifest['metadata'] & {
+        annotations?: Record<string, string>
+        resourceVersion?: string
+        generation?: number
+      }
+      live.set(k, {
+        ...current,
+        metadata: {
+          ...metadata,
+          annotations: { ...metadata.annotations, ...body.metadata?.annotations },
+          resourceVersion: String(Number(metadata.resourceVersion ?? '1') + 1),
+          generation: (metadata.generation ?? 1) + (body.spec ? 1 : 0),
+        },
+        spec: { ...(current.spec as Record<string, unknown>), ...body.spec },
+      })
+      return {}
+    }
+  )
 }
 
 const LIVE_CLUSTER_IP = '10.0.0.7'
+
+// StatefulSet double used by every test unless a test overrides it: reads are
+// 404 until something creates the object, then return it with a ready status.
+const LIVE_STATEFULSET_STATUS = { observedGeneration: 1, readyReplicas: 1 }
+
+function installLiveStatefulSetStore(): void {
+  installLiveStore(
+    {
+      read: mockAppsApi.readNamespacedStatefulSet,
+      create: mockAppsApi.createNamespacedStatefulSet,
+      replace: mockAppsApi.replaceNamespacedStatefulSet,
+      patch: mockAppsApi.patchNamespacedStatefulSet,
+    },
+    LIVE_STATEFULSET_STATUS
+  )
+}
+
+/**
+ * Observe the StatefulSet WRC created with a test-chosen generation, spec and
+ * status. Reads still go through the live store, so an object WRC has not
+ * created reads as a 404 and the read before create sees what a real
+ * apiserver would.
+ */
+function observeLiveStatefulSetAs(observed: {
+  generation: number
+  spec: Record<string, unknown>
+  status: Record<string, unknown>
+}): void {
+  const storeRead = mockAppsApi.readNamespacedStatefulSet.getMockImplementation()!
+  mockAppsApi.readNamespacedStatefulSet.mockImplementation(
+    async (args: { name: string; namespace: string }) => {
+      const live = await storeRead(args)
+      return {
+        ...live,
+        metadata: { ...live.metadata, generation: observed.generation },
+        spec: { ...live.spec, ...observed.spec },
+        status: observed.status,
+      }
+    }
+  )
+}
 
 function installLiveServiceAndConfigMapStores(): void {
   installLiveStore(
@@ -357,14 +451,7 @@ describe('WorkflowRecipeReconciler', () => {
       },
       { observedGeneration: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 }
     )
-    mockAppsApi.readNamespacedStatefulSet.mockReset()
-    mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
-      metadata: { resourceVersion: '1' },
-      spec: { replicas: 1 },
-      status: { readyReplicas: 1 },
-    })
-    mockAppsApi.patchNamespacedStatefulSet.mockReset()
-    mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
+    installLiveStatefulSetStore()
     installLiveStore(
       {
         read: mockAppsApi.readNamespacedDaemonSet,
@@ -406,19 +493,25 @@ describe('WorkflowRecipeReconciler', () => {
     mockCustomApi.replaceNamespacedCustomObject.mockReset()
     mockCustomApi.replaceNamespacedCustomObject.mockResolvedValue({})
     mockCustomApi.getNamespacedCustomObject.mockReset()
-    mockCustomApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string }) =>
-      Promise.resolve({
-        metadata: {
-          uid: liveWorkflowRecipeUid(name),
-          resourceVersion: '1',
-          annotations: { 'clerum.io/network-ready': 'true' },
-          labels: { 'clerum.io/recipe': 'test-recipe' },
-        },
-        status: {
-          conditions: [{ type: 'ExternalEgressReady', status: 'True' }],
-        },
-        spec: { mcpServers: [] },
-      })
+    // No per-recipe Context exists until a test seeds one: the Context writer
+    // reads first (#760), and an object here would send every transport pass
+    // down the replace path instead of the create.
+    mockCustomApi.getNamespacedCustomObject.mockImplementation(
+      ({ name, plural }: { name?: string; plural?: string }) =>
+        plural === 'contexts'
+          ? Promise.reject({ code: 404 })
+          : Promise.resolve({
+              metadata: {
+                uid: liveWorkflowRecipeUid(name),
+                resourceVersion: '1',
+                annotations: { 'clerum.io/network-ready': 'true' },
+                labels: { 'clerum.io/recipe': 'test-recipe' },
+              },
+              status: {
+                conditions: [{ type: 'ExternalEgressReady', status: 'True' }],
+              },
+              spec: { mcpServers: [] },
+            })
     )
     mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
     mockNetworkingApi.createNamespacedNetworkPolicy.mockReset()
@@ -1318,7 +1411,12 @@ describe('WorkflowRecipeReconciler', () => {
         policyReady: true,
         verifiedAt: '2026-08-04T00:00:00.000Z',
       },
-      networkPolicies: { conflicts: [], retryPending: false },
+      networkPolicies: {
+        conflicts: [],
+        retryPending: false,
+        prune: 'converged',
+        legacy: 'removed',
+      },
     })
     const workflowReconcile = vi.fn()
     const setCodexReconcileContext = vi.fn()
@@ -1377,7 +1475,12 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'active',
       message: 'Plugin Workload SDK mcp-host registered',
-      networkPolicies: { conflicts: [], retryPending: false },
+      networkPolicies: {
+        conflicts: [],
+        retryPending: false,
+        prune: 'converged',
+        legacy: 'removed',
+      },
     })
     ;(
       reconciler as unknown as {
@@ -1417,7 +1520,12 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'deploying',
       message: 'Plugin Workload SDK mcp-host starting',
-      networkPolicies: { conflicts: [], retryPending: false },
+      networkPolicies: {
+        conflicts: [],
+        retryPending: false,
+        prune: 'converged',
+        legacy: 'removed',
+      },
     })
     ;(
       reconciler as unknown as {
@@ -1508,6 +1616,8 @@ describe('WorkflowRecipeReconciler', () => {
             },
           ],
           retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -1532,7 +1642,12 @@ describe('WorkflowRecipeReconciler', () => {
         phase: 'active',
         message: 'Plugin Workload SDK mcp-host registered',
         pluginWorkloadSdkBootstrapProof: bootstrapProof,
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const result = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
@@ -1573,6 +1688,8 @@ describe('WorkflowRecipeReconciler', () => {
             },
           ],
           retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -1594,7 +1711,12 @@ describe('WorkflowRecipeReconciler', () => {
       const converged = stubSdkOnly({
         phase: 'failed',
         message: 'Plugin Workload SDK mcp-host could not start',
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const failedConverged = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
@@ -1612,7 +1734,12 @@ describe('WorkflowRecipeReconciler', () => {
         phase: 'active',
         message: 'Plugin Workload SDK mcp-host registered',
         pluginWorkloadSdkBootstrapProof: bootstrapProof,
-        networkPolicies: { conflicts: [], retryPending: true },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const retrying = await reconciler.reconcile(sdkOnlyRecipe())
@@ -1635,7 +1762,12 @@ describe('WorkflowRecipeReconciler', () => {
         phase: 'active',
         message: 'Plugin Workload SDK mcp-host registered',
         pluginWorkloadSdkBootstrapProof: bootstrapProof,
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const steady = await reconciler.reconcile(sdkOnlyRecipe())
@@ -1655,7 +1787,12 @@ describe('WorkflowRecipeReconciler', () => {
       const pending = stubSdkOnly({
         phase: 'failed',
         message: 'Plugin Workload SDK mcp-host could not start',
-        networkPolicies: { conflicts: [], retryPending: true },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const retrying = await reconciler.reconcile(sdkOnlyRecipe())
@@ -1676,7 +1813,12 @@ describe('WorkflowRecipeReconciler', () => {
       const settled = stubSdkOnly({
         phase: 'failed',
         message: 'Plugin Workload SDK mcp-host could not start',
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const terminal = await reconciler.reconcile(sdkOnlyRecipe())
@@ -1717,6 +1859,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(cleanupPluginWorkloadSdk).toHaveBeenCalledTimes(1)
       expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
         preserveWorkflowRuntime: false,
+        recipeUid: 'uid-123',
       })
       expect(sdkOnly).not.toHaveBeenCalled()
       expect(result.phase).not.toBe('failed')
@@ -1738,6 +1881,121 @@ describe('WorkflowRecipeReconciler', () => {
         'WorkflowNetworkPolicyOwnership'
       )
     })
+
+    // R4-L3: the teardown removed every SDK-owned policy, including the
+    // legacy one by name, so the lane without an SDK runtime is `unmanaged`:
+    // a prune it can no longer finish is not carried as PrunePending.
+    const prunePendingMarker = () =>
+      buildNetworkPolicyConvergedCondition(
+        { apply: 'converged', prune: 'pending' },
+        '2026-09-23T10:00:00.000Z',
+        undefined
+      )!
+    const capabilityRemovedRecipe = (phase: string, conditions: unknown[]) =>
+      makeRecipe({
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        },
+        status: {
+          phase,
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+          conditions,
+        },
+      } as Partial<WorkflowRecipeCRD>)
+    const stubCapabilityRemovalTeardown = () => {
+      stubSdkOnly({})
+      const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: { cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk }
+        }
+      ).workflowReconciler.cleanupPluginWorkloadSdk = cleanupPluginWorkloadSdk
+      return cleanupPluginWorkloadSdk
+    }
+
+    it.each(['SDK-never-published', 'steps-removed'] as const)(
+      'R5-L1: %s without an SDK runtime or teardown keeps its published apply, prune and legacy facts',
+      async history => {
+        const cleanup = stubCapabilityRemovalTeardown()
+        const inner = (reconciler as unknown as { workflowReconciler: WorkflowReconciler })
+          .workflowReconciler
+        const retryLegacy = vi.fn().mockResolvedValue('pending')
+        inner.retryLegacyMcpServersInternetEgressDelete = retryLegacy
+        inner.legacyMcpServersInternetEgressRetryDelayMs = vi.fn().mockReturnValue(60_000)
+        const facts = networkPolicyMarkerConditions(
+          {
+            kind: 'reconcile',
+            summary: { conflicts: [], retryPending: true, prune: 'pending', legacy: 'pending' },
+          },
+          [],
+          '2026-09-23T10:00:00.000Z'
+        )
+        const recipe = makeRecipe({
+          spec: {
+            workloads: [
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            ],
+            ...(history === 'steps-removed' ? { steps: [] } : {}),
+          },
+          status: {
+            phase: 'active',
+            conditions: [ownershipCondition, ...facts],
+            ...(history === 'steps-removed' ? { workflowExecution: { phase: 'completed' } } : {}),
+          },
+        })
+        expect(recipe.spec.pluginWorkloadSdk).toBeUndefined()
+        expect(recipe.status?.pluginWorkloadSdk).toBeUndefined()
+
+        const result = await reconciler.reconcile(recipe)
+
+        expect(retryLegacy).toHaveBeenCalledWith('test-recipe', 'uid-123')
+        expect(cleanup).not.toHaveBeenCalled()
+        expect(result.networkPolicyOwnershipConditions).toBeUndefined()
+        expect(result.requeueAfterMs).toBe(60_000)
+        expect(result.requeueOperation).toBe('legacy-network-policy-delete')
+        await reconciler.patchStatus(recipe, result)
+        const published = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)![0].body
+          .status.conditions as StatusCondition[]
+        for (const fact of [ownershipCondition, ...facts]) {
+          expect(published).toContainEqual(fact)
+        }
+      }
+    )
+
+    it('R4-L3: clears a published PrunePending marker once the SDK capability is removed from the spec', async () => {
+      const cleanupPluginWorkloadSdk = stubCapabilityRemovalTeardown()
+      const recipe = capabilityRemovedRecipe('active', [ownershipCondition, prunePendingMarker()])
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Liveness witness: the capability-removal teardown ran.
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        preserveWorkflowRuntime: false,
+        recipeUid: 'uid-123',
+      })
+      expect(result.phase).not.toBe('failed')
+      expect(result.networkPolicyOwnershipConditions).toEqual([])
+    })
+
+    it('R4-L3: clears a published PrunePending marker when the SDK capability is removed from a failed recipe', async () => {
+      const cleanupPluginWorkloadSdk = stubCapabilityRemovalTeardown()
+      const recipe = capabilityRemovedRecipe('failed', [ownershipCondition, prunePendingMarker()])
+
+      await reconciler.reconcile(recipe)
+
+      // Liveness witness: the capability-removal teardown ran.
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        preserveWorkflowRuntime: false,
+        recipeUid: 'uid-123',
+      })
+      const conditionPatches = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls
+        .map(call => call[0].body.status)
+        .filter(status => Object.keys(status).length === 1 && 'conditions' in status)
+      expect(conditionPatches).toHaveLength(1)
+      const types = (conditionPatches[0].conditions as Array<{ type: string }>).map(c => c.type)
+      expect(types).not.toContain('WorkflowNetworkPoliciesConverged')
+      expect(types).not.toContain('WorkflowNetworkPolicyOwnership')
+    })
   })
 
   // awaiting_policy waits for an operator grant. The grant arrives by event
@@ -1749,7 +2007,12 @@ describe('WorkflowRecipeReconciler', () => {
       const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
         phase: 'awaiting_policy',
         message: 'operator policy pending (policy_not_ready)',
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
       ;(
         reconciler as unknown as {
@@ -1827,6 +2090,7 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('active')
     expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
       preserveWorkflowRuntime: false,
+      recipeUid: 'uid-123',
     })
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
@@ -1857,6 +2121,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.phase).toBe(phase)
       expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
         preserveWorkflowRuntime: false,
+        recipeUid: 'uid-123',
       })
     }
   )
@@ -1902,9 +2167,68 @@ describe('WorkflowRecipeReconciler', () => {
     })
     expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
       preserveWorkflowRuntime: false,
+      recipeUid: 'uid-123',
     })
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
+
+  it.each(['kill-switch', 'capability-removal'] as const)(
+    'R5-L2: %s cleanup passes the live UID and preserves the exact legacy backoff',
+    async branch => {
+      const cleanup = vi.fn()
+      const retry = vi.fn()
+      const delay = vi.fn()
+      const internal = reconciler as unknown as {
+        config: { pluginWorkloadSdkEnabled: boolean }
+        workflowReconciler: unknown
+      }
+      internal.config.pluginWorkloadSdkEnabled = branch !== 'kill-switch'
+      internal.workflowReconciler = {
+        cleanupPluginWorkloadSdk: cleanup,
+        retryLegacyMcpServersInternetEgressDelete: retry,
+        legacyMcpServersInternetEgressRetryDelayMs: delay,
+      }
+      const conditions = networkPolicyMarkerConditions(
+        {
+          kind: 'reconcile',
+          summary: { conflicts: [], retryPending: true, prune: 'pending', legacy: 'pending' },
+        },
+        [],
+        '2026-09-23T10:00:00.000Z'
+      )
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [],
+          ...(branch === 'kill-switch' ? { pluginWorkloadSdk: { allowedCallers: [] } } : {}),
+        },
+        status: {
+          phase: 'active',
+          conditions,
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+        },
+      })
+      for (const remaining of [60_000, 40_123, 999]) {
+        cleanup.mockRejectedValue(
+          new LegacyNetworkPolicyDeletePendingError('test-recipe', remaining)
+        )
+        const result = await reconciler.reconcile(recipe)
+        expect(cleanup).toHaveBeenLastCalledWith('test-recipe', {
+          preserveWorkflowRuntime: false,
+          recipeUid: 'uid-123',
+        })
+        expect(result.requeueAfterMs).toBe(remaining)
+        expect(result.requeueFixedInterval).toBe(true)
+        expect(result.requeueOperation).toBeUndefined()
+        expect(result.skipStatusPatch).toBe(true)
+        expect(result.networkPolicyOwnershipConditions).toBeUndefined()
+        expect(result.pluginWorkloadSdkTeardownConfirmed).toBeUndefined()
+        expect(recipe.status?.conditions).toEqual(conditions)
+      }
+      expect(retry).not.toHaveBeenCalled()
+      expect(delay).not.toHaveBeenCalled()
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+    }
+  )
 
   // The kill switch returns before the SDK-only lane, which is the only path
   // that clears the ownership condition. With the runtime torn down no policy
@@ -2030,8 +2354,8 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('treats a fully-ready StatefulSet as ready when observedGeneration transiently lags', async () => {
-    mockAppsApi.readNamespacedStatefulSet.mockRejectedValueOnce({ code: 404 }).mockResolvedValue({
-      metadata: { resourceVersion: '265', generation: 265 },
+    observeLiveStatefulSetAs({
+      generation: 265,
       spec: { replicas: 1 },
       status: { observedGeneration: 264, readyReplicas: 1 },
     })
@@ -2117,8 +2441,8 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('degrades when a child StatefulSet was externally scaled below recipe replicas', async () => {
-    mockAppsApi.readNamespacedStatefulSet.mockRejectedValueOnce({ code: 404 }).mockResolvedValue({
-      metadata: { resourceVersion: '2', generation: 2 },
+    observeLiveStatefulSetAs({
+      generation: 2,
       spec: { replicas: 0 },
       status: { observedGeneration: 2, readyReplicas: 0 },
     })
@@ -2938,12 +3262,7 @@ describe('WorkflowRecipeReconciler', () => {
         .mockReset()
         .mockResolvedValue({ metadata: { resourceVersion: '1' } })
       mockAppsApi.replaceNamespacedDeployment.mockReset().mockResolvedValue({})
-      mockAppsApi.createNamespacedStatefulSet.mockReset().mockResolvedValue({})
-      mockAppsApi.readNamespacedStatefulSet
-        .mockReset()
-        .mockResolvedValue({ metadata: { resourceVersion: '1' } })
-      mockAppsApi.patchNamespacedStatefulSet.mockReset().mockResolvedValue({})
-      mockAppsApi.replaceNamespacedStatefulSet.mockReset().mockResolvedValue({})
+      installLiveStatefulSetStore()
       mockAppsApi.createNamespacedDaemonSet.mockReset().mockResolvedValue({})
       mockAppsApi.readNamespacedDaemonSet
         .mockReset()
@@ -3266,9 +3585,13 @@ describe('WorkflowRecipeReconciler', () => {
         const deployWorkflowWorkloads = () =>
           (
             reconciler as unknown as {
-              deployWorkflowWorkloads: (r: WorkflowRecipeCRD, n: string) => Promise<unknown>
+              deployWorkflowWorkloads: (
+                r: WorkflowRecipeCRD,
+                n: string,
+                oauthBrokerTokenReapedEarly: boolean
+              ) => Promise<unknown>
             }
-          ).deployWorkflowWorkloads(recipe, recipe.metadata.name)
+          ).deployWorkflowWorkloads(recipe, recipe.metadata.name, false)
         await deployWorkflowWorkloads()
         const created = onlyPost(mockCoreApi.createNamespacedService)
         const name = created.body.metadata.name
@@ -3747,6 +4070,176 @@ describe('WorkflowRecipeReconciler', () => {
       )
     })
 
+    // #760: the StatefulSet writer reads before it creates, so a pass over an
+    // object that already exists writes nothing. Every read and create count
+    // below is filtered by name, because the same read serves the readiness
+    // probe and the legacy checks. Patch counts stay unfiltered: nothing else
+    // patches a StatefulSet, so the unfiltered zero is the stricter assertion.
+    describe('read-first StatefulSet apply (#760)', () => {
+      type StsBody = {
+        metadata: { name: string; annotations: Record<string, string> }
+        spec: Record<string, unknown>
+      }
+      const workload = { id: 'db', type: 'statefulset' as const, image: 'postgres:16' }
+      const recipe = makeRecipe({ spec: { workloads: [workload] } })
+      const namespace = 'sandbox-recipes'
+      const ensure = () =>
+        (
+          reconciler as unknown as {
+            ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
+          }
+        ).ensureStatefulSet(workload, recipe, 'minimal', {})
+      const create = mockAppsApi.createNamespacedStatefulSet
+      const read = mockAppsApi.readNamespacedStatefulSet
+      const patch = mockAppsApi.patchNamespacedStatefulSet
+      const createdBody = (call = 0) => create.mock.calls[call][0].body as StsBody
+      const loggedFor = (level: ReturnType<typeof vi.fn>, message: string, name: string) =>
+        level.mock.calls.filter(
+          ([msg, ctx]) => msg === message && (ctx as { name?: string })?.name === name
+        ).length
+
+      it('S1: an existing StatefulSet with the same hash is read and nothing is written', async () => {
+        await ensure()
+        const name = createdBody().metadata.name
+        create.mockClear()
+        read.mockClear()
+        patch.mockClear()
+
+        const logs = captureLoggerLevels(['info', 'debug'] as const)
+        try {
+          await ensure()
+          expect(
+            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+          ).toBe(1)
+        } finally {
+          logs.restore()
+        }
+        expect(readsOf(read, name, namespace)).toBe(1)
+        expect(postsOf(create, name)).toBe(0)
+        expect(patch).toHaveBeenCalledTimes(0)
+      })
+
+      it('S2: an absent StatefulSet is read, then created', async () => {
+        const logs = captureLoggerLevels(['info', 'debug'] as const)
+        try {
+          await ensure()
+          const name = createdBody().metadata.name
+          expect(loggedFor(logs.calls.info, 'Created StatefulSet', name)).toBe(1)
+          expect(postsOf(create, name)).toBe(1)
+          expect(readsOf(read, name, namespace)).toBe(1)
+          const readOrder =
+            read.mock.invocationCallOrder[
+              read.mock.calls.findIndex(([a]) => (a as { name: string }).name === name)
+            ]
+          expect(readOrder).toBeLessThan(create.mock.invocationCallOrder[0])
+        } finally {
+          logs.restore()
+        }
+      })
+
+      it('S3: a create conflict with an identical object re-reads it and skips the update', async () => {
+        const storeCreate = create.getMockImplementation()!
+        create.mockImplementationOnce(async (args: { namespace: string; body: StsBody }) => {
+          await storeCreate(args)
+          throw { code: 409 }
+        })
+
+        const logs = captureLoggerLevels(['info', 'debug'] as const)
+        try {
+          await ensure()
+          const name = createdBody().metadata.name
+          expect(
+            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+          ).toBe(1)
+          expect(readsOf(read, name, namespace)).toBe(2)
+        } finally {
+          logs.restore()
+        }
+        expect(patch).toHaveBeenCalledTimes(0)
+      })
+
+      it('S3b: a create conflict with a drifted object re-reads it and patches it', async () => {
+        const storeCreate = create.getMockImplementation()!
+        create.mockImplementationOnce(async (args: { namespace: string; body: StsBody }) => {
+          const other = structuredClone(args.body)
+          other.metadata.annotations = {
+            ...other.metadata.annotations,
+            [SPEC_HASH]: 'other-writer',
+          }
+          other.spec = { ...other.spec, replicas: 3 }
+          await storeCreate({ namespace: args.namespace, body: other })
+          throw { code: 409 }
+        })
+
+        await ensure()
+
+        const desired = createdBody()
+        expect(readsOf(read, desired.metadata.name, namespace)).toBe(2)
+        expect(patch).toHaveBeenCalledTimes(1)
+        const sent = patch.mock.calls[0][0] as {
+          name: string
+          body: {
+            metadata: { annotations: Record<string, string> }
+            spec?: Record<string, unknown>
+          }
+        }
+        expect(sent.name).toBe(desired.metadata.name)
+        expect(sent.body.metadata.annotations[SPEC_HASH]).toBe(
+          desired.metadata.annotations[SPEC_HASH]
+        )
+        expect(sent.body.spec?.replicas).toBe(desired.spec.replicas)
+      })
+
+      it('S4: a read error other than 404 is rethrown and nothing is created', async () => {
+        const failure = { code: 500 }
+        read.mockImplementation(async () => {
+          throw failure
+        })
+
+        await expect(ensure()).rejects.toBe(failure)
+
+        // Witness: the failing read happened; the create (which would succeed) did not.
+        const writerReads = read.mock.calls.filter(
+          ([args]) => args.namespace === namespace && String(args.name).includes(workload.id)
+        )
+        expect(writerReads).toHaveLength(1)
+        expect(create).toHaveBeenCalledTimes(0)
+        expect(patch).toHaveBeenCalledTimes(0)
+      })
+
+      it('S5: an object that vanishes after the create conflict asks for a fresh reconcile', async () => {
+        create.mockRejectedValueOnce({ code: 409 })
+
+        const outcome = ensure()
+
+        await expect(outcome).rejects.toBeInstanceOf(ResourceVanishedAfterConflictError)
+        // The cause is the 404 of the re-read, as in ensureTransportService.
+        await expect(outcome).rejects.toMatchObject({ cause: { code: 404 } })
+        const name = createdBody().metadata.name
+        expect(readsOf(read, name, namespace)).toBe(2)
+        expect(patch).toHaveBeenCalledTimes(0)
+      })
+
+      it('S6: the second reconcile of a recipe whose StatefulSet exists writes no StatefulSet', async () => {
+        await reconciler.reconcile(recipe)
+        const name = createdBody().metadata.name
+        // Witness for the first pass: it did create the object.
+        expect(postsOf(create, name)).toBe(1)
+        create.mockClear()
+
+        const logs = captureLoggerLevels(['info', 'debug'] as const)
+        try {
+          await reconciler.reconcile(recipe)
+          expect(
+            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+          ).toBe(1)
+        } finally {
+          logs.restore()
+        }
+        expect(postsOf(create, name)).toBe(0)
+      })
+    })
+
     it('does NOT replace a StatefulSet whose spec-hash is unchanged', async () => {
       const workload = { id: 'db', type: 'statefulset' as const, image: 'postgres:16' }
       const recipe = makeRecipe({ spec: { workloads: [workload] } })
@@ -3764,20 +4257,42 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(workload, recipe, 'minimal', {})
       expect(createdBody!.metadata.annotations[SPEC_HASH]).toBeDefined()
 
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
         metadata: { resourceVersion: '9', annotations: createdBody!.metadata.annotations },
         spec: createdBody!.spec,
       })
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
+      mockAppsApi.readNamespacedStatefulSet.mockClear()
+      const name = (createdBody! as unknown as { metadata: { name: string } }).metadata.name
 
-      await (
-        reconciler as unknown as {
-          ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
-        }
-      ).ensureStatefulSet(workload, recipe, 'minimal', {})
+      // Liveness witnesses for the negative assertions below: the writer read
+      // this object and took the unchanged-hash branch.
+      const logs = captureLoggerLevels(['info', 'debug'] as const)
+      try {
+        await (
+          reconciler as unknown as {
+            ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
+          }
+        ).ensureStatefulSet(workload, recipe, 'minimal', {})
+        expect(
+          logs.calls.info.mock.calls.filter(
+            ([msg, ctx]) =>
+              msg === 'StatefulSet spec hash unchanged; skipping update' &&
+              (ctx as { name?: string })?.name === name
+          )
+        ).toHaveLength(1)
+      } finally {
+        logs.restore()
+      }
+      expect(readsOf(mockAppsApi.readNamespacedStatefulSet, name, 'sandbox-recipes')).toBe(1)
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -3801,10 +4316,17 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(createdBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-or-missing' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -3813,6 +4335,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(workload, recipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       expect(mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body).toEqual({
         metadata: { annotations: { [SPEC_HASH]: createdBody!.metadata.annotations[SPEC_HASH] } },
@@ -3841,10 +4364,17 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(existingBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-old-template' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -3853,6 +4383,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].image).toBe('postgres:16')
@@ -3907,10 +4438,17 @@ describe('WorkflowRecipeReconciler', () => {
         },
         status: { phase: 'Pending' },
       }))
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -3919,6 +4457,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].image).toBe('postgres:16')
@@ -4002,10 +4541,17 @@ describe('WorkflowRecipeReconciler', () => {
         },
         status: { phase: 'Pending' },
       }))
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4014,6 +4560,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].env).toContainEqual({
@@ -4070,7 +4617,11 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(existingBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-storage' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4090,6 +4641,7 @@ describe('WorkflowRecipeReconciler', () => {
       })
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -4114,7 +4666,11 @@ describe('WorkflowRecipeReconciler', () => {
       const existing = clone(createdBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-immutable-drift' }
       existing.spec.serviceName = 'manually-mutated-headless-service'
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4134,6 +4690,7 @@ describe('WorkflowRecipeReconciler', () => {
       })
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -6593,14 +7150,21 @@ describe('WorkflowRecipeReconciler', () => {
     const expectedDb = resolveScopedStatefulSetResourceName(recipe, 'db')
 
     // Raw "db" exists and is owned by this recipe; the scoped workload is not ready
-    // yet → cleanup must defer. Reads carry the clerum.io/recipe ownership label so
-    // the owned-probe recognizes them (issue #571 S2).
-    mockAppsApi.readNamespacedStatefulSet.mockImplementation(({ name }) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'existing-db' } },
-        spec: { replicas: 1 },
-        status: { readyReplicas: name === 'db' ? 1 : 0 },
-      })
+    // yet → cleanup must defer. The raw read carries the clerum.io/recipe ownership
+    // label so the owned-probe recognizes it (issue #571 S2). The scoped name goes
+    // to the live store, so the StatefulSet WRC writes is the one it reads back.
+    const storeRead = mockAppsApi.readNamespacedStatefulSet.getMockImplementation()!
+    const ownedRawDb = () => ({
+      metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'existing-db' } },
+      spec: { replicas: 1 },
+      status: { readyReplicas: 1 },
+    })
+    mockAppsApi.readNamespacedStatefulSet.mockImplementation(
+      async (args: { name: string; namespace: string }) => {
+        if (args.name === 'db') return ownedRawDb()
+        const scoped = await storeRead(args)
+        return { ...scoped, status: { ...scoped.status, readyReplicas: 0 } }
+      }
     )
     // The legacy raw Services are live and owned by this recipe.
     for (const legacy of ['db', 'db-headless']) {
@@ -6633,12 +7197,11 @@ describe('WorkflowRecipeReconciler', () => {
     vi.clearAllMocks()
 
     // Second reconcile: scoped workload now ready, raw "db" still present and owned →
-    // teardown fires. Re-establish owned reads after clearAllMocks.
-    mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
-      metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'existing-db' } },
-      spec: { replicas: 1 },
-      status: { readyReplicas: 1 },
-    })
+    // teardown fires. The scoped read returns the stored object with its ready status.
+    mockAppsApi.readNamespacedStatefulSet.mockImplementation(
+      async (args: { name: string; namespace: string }) =>
+        args.name === 'db' ? ownedRawDb() : storeRead(args)
+    )
 
     await reconciler.reconcile(recipe)
 
@@ -6931,14 +7494,8 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
 
-    mockAppsApi.readNamespacedStatefulSet.mockImplementation(({ name }) => {
-      if (name === 'db') return Promise.reject({ code: 404 })
-      return Promise.resolve({
-        metadata: { resourceVersion: '1' },
-        spec: { replicas: 1 },
-        status: { readyReplicas: 1 },
-      })
-    })
+    // StatefulSet reads use the live store: the raw "db" was never created, so it
+    // reads as a 404, and the scoped one WRC creates reads back ready.
     mockCoreApi.readNamespacedService.mockImplementation(({ name }) => {
       if (name === 'db-headless') {
         return Promise.resolve({
@@ -7424,6 +7981,41 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.workloadStatuses).toEqual([])
   })
 
+  it('R.6.4b — a Context that vanishes after a create conflict in pre-deploy degrades the recipe', async () => {
+    // GET 404, POST 409, re-read 404: the Context writer raises
+    // ResourceVanishedAfterConflictError. The pre-deploy caller wraps every
+    // pre-deploy error as retryable, so the recipe degrades (#998 review).
+    mockCustomApi.createNamespacedCustomObject.mockImplementation(
+      ({ plural }: { plural?: string }) =>
+        plural === 'contexts' ? Promise.reject({ code: 409 }) : Promise.resolve({})
+    )
+    const recipe = makeRecipe({
+      spec: {
+        contextRef: 'default',
+        workloads: [
+          {
+            id: 'mcp',
+            type: 'deployment',
+            image: 'mcp:latest',
+            port: 3000,
+            transport: { type: 'streamableHttp' },
+          },
+        ],
+      },
+    })
+    const result = await reconciler.reconcile(recipe)
+    expect(result.phase).toBe('degraded')
+    expect(result.message).toContain('Pre-deploy failed for WorkflowRecipe "test-recipe"')
+    expect(result.message).toContain('Pre-deploy Context allowlist failed')
+    expect(result.message).toContain('disappeared after create conflict')
+    // Witness: the writer read, created, then re-read the Context.
+    const contextReads = mockCustomApi.getNamespacedCustomObject.mock.calls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>)?.plural === 'contexts'
+    )
+    expect(contextReads).toHaveLength(2)
+    expect(result.workloadStatuses).toEqual([])
+  })
+
   it('R.6.5 — reconcileDelete calls delegation cleanup for transport workloads', async () => {
     const recipe = makeRecipe({
       spec: {
@@ -7469,6 +8061,41 @@ describe('WorkflowRecipeReconciler', () => {
       'McpServer label sweep failed: api down'
     )
   })
+
+  // UID identifies the shared ledger. Only a real finalizer may forget it after
+  // the last-chance cleanup succeeds; a live teardown must retain that history.
+  it.each([false, true])(
+    'R5-L2: reconcileDelete identifies finalizer SDK cleanup for workflow=%s',
+    async workflow => {
+      const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+      const deleteWorkflow = vi.fn().mockResolvedValue(undefined)
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: { cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk }
+        }
+      ).workflowReconciler = { cleanupPluginWorkloadSdk, reconcileDelete: deleteWorkflow }
+      const recipe = makeRecipe({
+        metadata: { name: 'test-recipe', namespace: 'sandbox-recipes', uid: 'uid-sdk-delete' },
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          ...(workflow ? { steps: [{ id: 'task', instruction: 'run' }] } : {}),
+        },
+        status: {
+          phase: 'active',
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+        },
+      } as Partial<WorkflowRecipeCRD>)
+
+      await reconciler.reconcileDelete(recipe)
+
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledTimes(1)
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        recipeUid: 'uid-sdk-delete',
+        recipeDeleted: true,
+        ...(workflow ? { preserveWorkflowRuntime: true } : {}),
+      })
+    }
+  )
 
   // ─── Phase 8: Namespace Splitting ─────────────────────────────────
 
@@ -9153,7 +9780,12 @@ describe('WorkflowRecipeReconciler', () => {
 
     await reconciler.reconcileDelete(recipe)
 
-    expect(workflowInfraCleanup).toHaveBeenCalledWith('test-recipe', 'sandbox-recipes', recipe.spec)
+    expect(workflowInfraCleanup).toHaveBeenCalledWith(
+      'test-recipe',
+      'sandbox-recipes',
+      recipe.spec,
+      recipe.metadata.uid
+    )
     expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
       name: 'test-recipe-web-search-12345678',
       namespace: 'mcp-server',
@@ -9195,7 +9827,12 @@ describe('WorkflowRecipeReconciler', () => {
     await reconciler.reconcileDelete(recipe)
 
     expect(order).toEqual(['sdk-revoke-and-cleanup', 'workflow-cleanup'])
-    expect(workflowInfraCleanup).toHaveBeenCalledWith('test-recipe', 'sandbox-recipes', recipe.spec)
+    expect(workflowInfraCleanup).toHaveBeenCalledWith(
+      'test-recipe',
+      'sandbox-recipes',
+      recipe.spec,
+      recipe.metadata.uid
+    )
   })
 
   it('forwards custom coordinator workflow fields to the workflow reconciler', async () => {
@@ -9931,6 +10568,67 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.requeueAfterMs).toBeUndefined()
     })
 
+    // A marker naming both facts: the retry still owes an apply, and a
+    // reconcile() prune still owes a DELETE. Built by the production builder,
+    // so the fixture cannot drift from what a pass publishes.
+    const retryAndPruneMarker = buildNetworkPolicyConvergedCondition(
+      { apply: 'pending', prune: 'pending' },
+      retryMarker.lastTransitionTime
+    )!
+
+    it('R4-L5: the marker naming both facts carries its own reason', () => {
+      expect(retryAndPruneMarker.reason).toBe('RetryAndPrunePending')
+    })
+
+    it('reapplies from the active short-circuit for a marker that names both facts, and keeps the prune fact', async () => {
+      const retry = vi.fn().mockResolvedValue({ conflicts: [], retryPending: false })
+      installRunLane(retry)
+      const recipe = runningRecipe({ conditions: [unrelatedCondition, retryAndPruneMarker] })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(retry).toHaveBeenCalledTimes(1)
+      const patches = conditionPatches()
+      expect(patches).toHaveLength(1)
+      expect(patches[0].body.status.conditions).toEqual([
+        unrelatedCondition,
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'PrunePending',
+          lastTransitionTime: retryMarker.lastTransitionTime,
+        }),
+      ])
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('rewrites a marker that names both facts to PrunePending from the terminal branch', async () => {
+      const retry = vi.fn()
+      const stub = installRunLane(retry)
+      const recipe = runningRecipe({
+        execPhase: 'completed',
+        conditions: [unrelatedCondition, retryAndPruneMarker],
+      })
+
+      await reconciler.reconcile(recipe)
+
+      // Witness: the terminal branch ran.
+      expect(stub.ensureMcpHostRuntimeCredentials).toHaveBeenCalledTimes(1)
+      expect(retry).not.toHaveBeenCalled()
+      const patches = conditionPatches()
+      expect(patches).toHaveLength(1)
+      expect(Object.keys(patches[0].body.status)).toEqual(['conditions'])
+      expect(patches[0].body.status.conditions).toEqual([
+        unrelatedCondition,
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'PrunePending',
+          lastTransitionTime: retryMarker.lastTransitionTime,
+        }),
+      ])
+    })
+
     it('opens no patch from the terminal branch without the marker', async () => {
       const retry = vi.fn()
       const stub = installRunLane(retry)
@@ -10069,6 +10767,57 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('degraded')
     expect(result.message).toContain('Pre-deploy failed for workflow "test-recipe"')
     expect(result.message).toContain('child McpServers')
+    expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  it('degrades a workflow whose pre-deploy Context vanishes after a create conflict', async () => {
+    // Same vanish as R.6.4b, on the workflow deploy path (#998 review).
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'deploying',
+      message: 'Workflow infrastructure created',
+      workflowPhase: 'initializing',
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+    mockCustomApi.createNamespacedCustomObject.mockImplementation(
+      ({ plural }: { plural?: string }) =>
+        plural === 'contexts' ? Promise.reject({ code: 409 }) : Promise.resolve({})
+    )
+
+    const result = await reconciler.reconcile(
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          steps: [{ id: 'research', instruction: 'search', mcpServers: ['web-search'] }],
+          workloads: [
+            {
+              id: 'web-search',
+              type: 'deployment',
+              image: 'clerum/web-search:test',
+              port: 3000,
+              transport: { type: 'streamableHttp', path: '/mcp' },
+            },
+          ],
+        },
+        status: { phase: 'candidate' },
+      })
+    )
+
+    expect(result.phase).toBe('degraded')
+    expect(result.message).toContain('Pre-deploy failed for workflow "test-recipe"')
+    expect(result.message).toContain('Pre-deploy Context allowlist failed')
+    expect(result.message).toContain('disappeared after create conflict')
+    // Witness: the writer read, created, then re-read the Context.
+    const contextReads = mockCustomApi.getNamespacedCustomObject.mock.calls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>)?.plural === 'contexts'
+    )
+    expect(contextReads).toHaveLength(2)
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
@@ -15368,6 +16117,1787 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  describe('B3(a)(b) oauth-broker delete-on-transition ledger', () => {
+    const SECRET_NAME = 'wf-test-recipe-oauth-broker-token'
+    const POLICY_NAME = 'wf-test-recipe-oauth-broker-egress'
+
+    function reapRecipe(generation: number): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          generation,
+        },
+      })
+    }
+
+    function secretDeletes(): number {
+      return mockCoreApi.deleteNamespacedSecret.mock.calls.filter(
+        ([arg]) => arg.name === SECRET_NAME
+      ).length
+    }
+
+    function policyDeletes(): number {
+      return mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === POLICY_NAME
+      ).length
+    }
+
+    async function reapPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
+      await (
+        reconciler as unknown as {
+          reconcileOAuthBrokerEgressPolicy: (next: WorkflowRecipeCRD) => Promise<void>
+        }
+      ).reconcileOAuthBrokerEgressPolicy(recipe)
+    }
+
+    /**
+     * The Secret watch observed the recipe's token (an ADDED, or the relist
+     * that replays one). The Secret-side cases start here: without it the
+     * ledger reaps nothing, so a skipped DELETE would prove nothing.
+     */
+    function tokenSeen(recipeName = 'test-recipe'): void {
+      reconciler.invalidateOAuthBrokerSecretLedger(recipeName)
+    }
+
+    it('deletes the Secret once for the same generation and logs the skip', async () => {
+      const recipe = reapRecipe(4)
+      tokenSeen()
+      const debugSpy = captureLogger('debug')
+
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+
+      expect(secretDeletes()).toBe(1)
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-token delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      debugSpy.mockRestore()
+    })
+
+    it('deletes the Secret again when metadata.generation changes', async () => {
+      tokenSeen()
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(1)
+
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('a new process sends no token DELETE until the watch replays the token ADDED, then one', async () => {
+      tokenSeen()
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(1)
+
+      const next = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        verifyWorkflowRunProvenance: mockVerifyWorkflowRunProvenance,
+      })
+      await next.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(1)
+
+      // The Secret watch's initial list replays ADDED for a token that exists.
+      next.invalidateOAuthBrokerSecretLedger('test-recipe')
+      await next.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('deletes the Secret again after ADDED invalidation', async () => {
+      const recipe = reapRecipe(4)
+      tokenSeen()
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+
+      reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('ADDED invalidation re-arms the Secret delete but keeps the NetworkPolicy TTL', async () => {
+      const recipe = reapRecipe(4)
+      tokenSeen()
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reapPolicy(recipe)
+      expect(secretDeletes()).toBe(1)
+      expect(policyDeletes()).toBe(1)
+
+      reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reapPolicy(recipe)
+      expect(secretDeletes()).toBe(2)
+      expect(policyDeletes()).toBe(1)
+    })
+
+    function recreatedRecipe(): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-recreated',
+          generation: 1,
+        },
+      })
+    }
+
+    /** Fails only the token Secret DELETE; every other Secret DELETE succeeds. */
+    function failTokenDelete(code: number): void {
+      mockCoreApi.deleteNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+        if (name === SECRET_NAME) throw { code }
+        return {}
+      })
+    }
+
+    it.each(['2xx', '404'] as const)(
+      'R5-L6: after the finalizer observed token %s, a recreated recipe sends no DELETE until a new token ADDED, then even below the old watermark',
+      async outcome => {
+        const recipe = reapRecipe(4)
+        tokenSeen()
+        await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+        await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+        expect(secretDeletes()).toBe(1)
+
+        if (outcome === '404') failTokenDelete(404)
+        try {
+          await reconciler.reconcileDelete(recipe)
+        } finally {
+          mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+        }
+        // The real finalizer sent the token DELETE and mapped its observed result.
+        expect(secretDeletes()).toBe(2)
+        mockCoreApi.deleteNamespacedSecret.mockClear()
+
+        const debugSpy = captureLogger('debug')
+        try {
+          await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+          await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+          expect(secretDeletes()).toBe(0)
+          // Liveness witness: both passes reached the ledger and it declined.
+          expect(
+            debugSpy.mock.calls.filter(
+              ([message, fields]) =>
+                typeof message === 'string' &&
+                message.startsWith('Skipping oauth-broker-token delete') &&
+                (fields as { generation?: number }).generation === 1
+            )
+          ).toHaveLength(2)
+        } finally {
+          debugSpy.mockRestore()
+        }
+
+        // A token ADDED for a recipe under the same name: the old watermark is
+        // gone, so a lower generation deletes.
+        tokenSeen()
+        await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(3))
+        expect(secretDeletes()).toBe(1)
+      }
+    )
+
+    it('R4-L1/R5-L7: a failed finalizer token DELETE preserves its error object and keeps the token seen', async () => {
+      tokenSeen()
+      const error = { code: 500, message: 'delete failed' }
+      const errorLog = captureLogger('error')
+      mockCoreApi.deleteNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+        if (name === SECRET_NAME) throw error
+        return {}
+      })
+      try {
+        await reconciler.reconcileDelete(reapRecipe(4))
+        // Witness: the finalizer sent the token DELETE and it failed.
+        expect(secretDeletes()).toBe(1)
+        expect(errorLog).toHaveBeenCalledWith('Failed to delete resource', {
+          label: `Secret "${SECRET_NAME}" in sandbox-recipes`,
+          err: error,
+        })
+        const failure = errorLog.mock.calls.find(
+          ([message]) => message === 'Failed to delete resource'
+        )
+        expect((failure?.[1] as { err?: unknown }).err).toBe(error)
+      } finally {
+        mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+        errorLog.mockRestore()
+      }
+      mockCoreApi.deleteNamespacedSecret.mockClear()
+
+      // The recipe is recreated under the same name without backgroundAccess.
+      await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+      await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+      expect(secretDeletes()).toBe(1)
+    })
+
+    it('R4-L1: a token ADDED while the finalizer DELETE is in flight keeps the token seen', async () => {
+      tokenSeen()
+      mockCoreApi.deleteNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+        // A late ADDED delivery (or a restart's relist) was handled before the
+        // finalizer's DELETE returned; it does not imply a concurrent CR recreation.
+        if (name === SECRET_NAME) reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        return {}
+      })
+      try {
+        await reconciler.reconcileDelete(reapRecipe(4))
+        // Witness: the finalizer sent the token DELETE.
+        expect(secretDeletes()).toBe(1)
+      } finally {
+        mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+      }
+      mockCoreApi.deleteNamespacedSecret.mockClear()
+
+      await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+      await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+      expect(secretDeletes()).toBe(1)
+    })
+
+    it('G3: does not record a Secret delete after DELETE 403 or 500', async () => {
+      const recipe = reapRecipe(4)
+      tokenSeen()
+      mockCoreApi.deleteNamespacedSecret.mockRejectedValue({ code: 403 })
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+
+      mockCoreApi.deleteNamespacedSecret.mockRejectedValue({ code: 500 })
+      mockCoreApi.deleteNamespacedSecret.mockClear()
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+      mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+    })
+
+    it('G3: records a Secret delete after DELETE 404 and skips the next same-generation call', async () => {
+      mockCoreApi.deleteNamespacedSecret.mockRejectedValue({ code: 404 })
+      const recipe = reapRecipe(7)
+      tokenSeen()
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+      mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+    })
+
+    it('G3: does not start the NP TTL after DELETE 403', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-25T00:00:00.000Z'))
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockRejectedValue({ code: 403 })
+      const recipe = reapRecipe(4)
+      await reapPolicy(recipe)
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(2)
+      vi.setSystemTime(new Date('2026-09-25T01:00:00.000Z'))
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(3)
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockResolvedValue({})
+      vi.useRealTimers()
+    })
+
+    it('c3: deletes the NetworkPolicy again when metadata.generation changes', async () => {
+      await reapPolicy(reapRecipe(4))
+      await reapPolicy(reapRecipe(4))
+      expect(policyDeletes()).toBe(1)
+      await reapPolicy(reapRecipe(5))
+      expect(policyDeletes()).toBe(2)
+    })
+
+    it('c3: a recorded delete for one recipe does not skip another recipe', async () => {
+      tokenSeen()
+      tokenSeen('other-recipe')
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(0))
+      // Liveness witness: the first recipe's delete really ran.
+      expect(secretDeletes()).toBe(1)
+      const other = makeRecipe({
+        metadata: {
+          name: 'other-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-other',
+        },
+      })
+      await reconciler.ensureOAuthBrokerTokenSecret(other)
+      expect(
+        mockCoreApi.deleteNamespacedSecret.mock.calls.filter(
+          ([arg]) => arg.name === 'wf-other-recipe-oauth-broker-token'
+        )
+      ).toHaveLength(1)
+    })
+
+    it('R4-L2: deletes the NetworkPolicy once for the same generation, then again after the 1h TTL, logging the skip at debug', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-25T00:00:00.000Z'))
+      const recipe = reapRecipe(4)
+      const logs = captureLoggerLevels(['debug', 'info'] as const)
+
+      await reapPolicy(recipe)
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(1)
+      // Witness: the skip is logged, at debug.
+      expect(logs.calls.debug).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      expect(logs.calls.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.anything()
+      )
+
+      vi.setSystemTime(new Date('2026-09-25T01:00:00.000Z'))
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(2)
+      logs.restore()
+      vi.useRealTimers()
+    })
+
+    it('R1-L2: a late pass carrying an older generation does not re-delete the Secret', async () => {
+      tokenSeen()
+      const debugSpy = captureLogger('debug')
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
+      // Liveness witness: both newer-generation deletes really ran.
+      expect(secretDeletes()).toBe(2)
+
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(2)
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-token delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      debugSpy.mockRestore()
+    })
+
+    it('R1-L2: a late pass carrying an older generation does not re-delete the NetworkPolicy, and R4-L2 logs the skip at debug', async () => {
+      const logs = captureLoggerLevels(['debug', 'info'] as const)
+      await reapPolicy(reapRecipe(4))
+      await reapPolicy(reapRecipe(5))
+      // Liveness witness: both newer-generation deletes really ran.
+      expect(policyDeletes()).toBe(2)
+
+      await reapPolicy(reapRecipe(4))
+      expect(policyDeletes()).toBe(2)
+      // Witness: the skip is logged, at debug.
+      expect(logs.calls.debug).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      expect(logs.calls.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.anything()
+      )
+      logs.restore()
+    })
+
+    it('R1-L2: a recipe recreated under the same name is reaped even at a lower generation', async () => {
+      tokenSeen()
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
+      await reapPolicy(reapRecipe(5))
+      expect(secretDeletes()).toBe(1)
+      expect(policyDeletes()).toBe(1)
+
+      // The recipe DELETE event was missed, so nothing invalidated the ledger.
+      const recreated = makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-recreated',
+          generation: 1,
+        },
+      })
+      await reconciler.ensureOAuthBrokerTokenSecret(recreated)
+      await reapPolicy(recreated)
+      expect(secretDeletes()).toBe(2)
+      expect(policyDeletes()).toBe(2)
+    })
+
+    it('R1-L1: an ADDED invalidation that lands while the DELETE is in flight is not overwritten', async () => {
+      const recipe = reapRecipe(4)
+      tokenSeen()
+      mockCoreApi.deleteNamespacedSecret.mockImplementationOnce(async () => {
+        // Another writer recreated the Secret and its ADDED was handled before
+        // this DELETE returned.
+        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        throw { code: 404 }
+      })
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+
+      // Liveness witness for the ledger itself: with no racing ADDED the
+      // second delete is recorded and the next same-generation pass skips.
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('R2-L1: a stale pass of an older generation does not delete the token a newer one provisioned', async () => {
+      const issue = vi
+        .spyOn(brokerIssuer, 'issueOAuthBrokerToken')
+        .mockResolvedValue({ brokerToken: 'issued-token' } as Awaited<
+          ReturnType<typeof brokerIssuer.issueOAuthBrokerToken>
+        >)
+      const debugSpy = captureLogger('debug')
+      try {
+        tokenSeen()
+        // gen4 has no backgroundAccess: the Secret is reaped and recorded.
+        await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+        expect(secretDeletes()).toBe(1)
+
+        // gen5 turns backgroundAccess on and the token is issued.
+        const withBackgroundAccess = makeRecipe({
+          metadata: {
+            name: 'test-recipe',
+            namespace: 'sandbox-recipes',
+            uid: 'uid-123',
+            generation: 5,
+          },
+          spec: {
+            workloads: [
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            ],
+            oauthClients: [
+              {
+                id: 'gmail',
+                provider: 'google',
+                clientIdRef: { name: 'creds', key: 'client-id' },
+                clientSecretRef: { name: 'creds', key: 'client-secret' },
+                scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+                backgroundAccess: true,
+              },
+            ],
+          },
+        })
+        mockCoreApi.readNamespacedSecret.mockRejectedValueOnce({ code: 404 })
+        await reconciler.ensureOAuthBrokerTokenSecret(withBackgroundAccess)
+        // Witness that the issuance branch ran for gen5.
+        expect(issue).toHaveBeenCalledTimes(1)
+        expect(
+          mockCoreApi.createNamespacedSecret.mock.calls.filter(
+            ([arg]) => arg.body?.metadata?.name === SECRET_NAME
+          )
+        ).toHaveLength(1)
+
+        // The token's watch ADDED, then a queued pass still carrying gen4.
+        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+        expect(secretDeletes()).toBe(1)
+        expect(debugSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Skipping oauth-broker-token delete'),
+          expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+        )
+
+        // Liveness witness: a newer generation that drops backgroundAccess reaps it.
+        await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(6))
+        expect(secretDeletes()).toBe(2)
+      } finally {
+        debugSpy.mockRestore()
+        issue.mockRestore()
+      }
+    })
+
+    function shortCircuitWorkflowRecipe(
+      spec: Partial<WorkflowRecipeCRD['spec']>,
+      status: WorkflowRecipeCRD['status'],
+      labels: Record<string, string>
+    ): WorkflowRecipeCRD {
+      return makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [],
+          steps: [{ id: 'run-qa', instruction: 'Validate the QA API workload.' }],
+          ...spec,
+        },
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          generation: 4,
+          labels,
+        },
+        status,
+      })
+    }
+
+    const RUN_LABEL = { 'clerum.io/workflow-run-id': 'run-123' }
+
+    // Every workflow pass that returns before the first-deploy path. A triggered
+    // run (RUN_LABEL) has awaitsTriggeredRun=false; the onDemand recipe without
+    // one idles awaiting its trigger.
+    const WORKFLOW_SHORT_CIRCUITS = [
+      {
+        label: 'awaiting-trigger',
+        recipe: () =>
+          shortCircuitWorkflowRecipe(
+            { triggers: { onDemand: { allowedActors: ['user'] } } },
+            { phase: 'active' },
+            {}
+          ),
+        expected: { phase: 'active', message: 'Workflow trigger infrastructure registered' },
+      },
+      {
+        label: 'active',
+        recipe: () =>
+          shortCircuitWorkflowRecipe(
+            {},
+            { phase: 'active', workflowExecution: { phase: 'running' } },
+            RUN_LABEL
+          ),
+        expected: { phase: 'active', message: 'Workflow running' },
+      },
+      {
+        label: 'in-progress',
+        recipe: () =>
+          shortCircuitWorkflowRecipe(
+            {},
+            { phase: 'deploying', workflowExecution: { phase: 'running' } },
+            RUN_LABEL
+          ),
+        expected: { phase: 'active', message: 'Workflow running' },
+      },
+      {
+        label: 'terminal',
+        recipe: () =>
+          shortCircuitWorkflowRecipe(
+            {},
+            { phase: 'active', workflowExecution: { phase: 'completed' } },
+            RUN_LABEL
+          ),
+        expected: { phase: 'active', message: 'Workflow completed' },
+      },
+      {
+        label: 'dryRun',
+        recipe: () => shortCircuitWorkflowRecipe({ dryRun: true }, { phase: 'approved' }, {}),
+        expected: {
+          phase: 'candidate',
+          message: 'Dry-run: preview generated, no resources created',
+        },
+      },
+    ]
+
+    function installShortCircuitWorkflowReconciler(): ReturnType<typeof vi.fn> {
+      const workflowReconcile = vi.fn()
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcile: typeof workflowReconcile
+            validateWorkflowSpec: () => undefined
+            ensureMcpHostRuntimeCredentials?: () => Promise<void>
+          }
+        }
+      ).workflowReconciler = {
+        reconcile: workflowReconcile,
+        validateWorkflowSpec: () => undefined,
+        ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+      }
+      return workflowReconcile
+    }
+
+    // The four short-circuits the early reap in reconcileWorkflowRecipe names.
+    describe.each(WORKFLOW_SHORT_CIRCUITS.filter(({ label }) => label !== 'dryRun'))(
+      'R1-L13: the $label workflow short-circuit',
+      ({ recipe, expected }) => {
+        it('reaps a token Secret the recipe must not have, without the inner reconcile', async () => {
+          const workflowReconcile = installShortCircuitWorkflowReconciler()
+          const current = recipe()
+
+          // The watch ADDED re-arms the ledger and enqueues this reconcile.
+          reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+          const result = await reconciler.reconcile(current)
+
+          // Witness that the short-circuit was taken, not the first-deploy path.
+          expect(workflowReconcile).not.toHaveBeenCalled()
+          expect(result).toMatchObject(expected)
+          expect(secretDeletes()).toBe(1)
+
+          // The ledger still bounds it: a second pass of the same generation skips.
+          await reconciler.reconcile(current)
+          expect(secretDeletes()).toBe(1)
+        })
+      }
+    )
+
+    describe.each(WORKFLOW_SHORT_CIRCUITS)(
+      'R2-L2: the $label workflow short-circuit on a fresh process',
+      ({ recipe, expected }) => {
+        it('sends no token DELETE until a token ADDED arrives, then exactly one', async () => {
+          const workflowReconcile = installShortCircuitWorkflowReconciler()
+          const current = recipe()
+
+          // A restarted process: no token ADDED has been observed for the recipe.
+          for (let pass = 0; pass < 3; pass++) {
+            const result = await reconciler.reconcile(current)
+            // Witness that each pass took the short-circuit under test.
+            expect(result).toMatchObject(expected)
+          }
+          expect(workflowReconcile).not.toHaveBeenCalled()
+          expect(secretDeletes()).toBe(0)
+
+          // The watch relist replays ADDED for a token that really exists.
+          reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+          await reconciler.reconcile(current)
+          expect(secretDeletes()).toBe(1)
+
+          // The ledger bounds it: the next pass of the same generation skips.
+          await reconciler.reconcile(current)
+          expect(secretDeletes()).toBe(1)
+        })
+      }
+    )
+
+    function installFirstDeployWorkflow(): {
+      recipe: WorkflowRecipeCRD
+      workflowReconcile: ReturnType<typeof vi.fn>
+    } {
+      const workflowReconcile = vi.fn().mockResolvedValue({
+        phase: 'deploying',
+        message: 'Workflow infrastructure created',
+        workflowPhase: 'initializing',
+      })
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcile: typeof workflowReconcile
+            validateWorkflowSpec: () => undefined
+          }
+        }
+      ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+      const recipe = makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          generation: 4,
+        },
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          steps: [{ id: 'run', run: snippetRun() }],
+        },
+      })
+      return { recipe, workflowReconcile }
+    }
+
+    it('R3-L11: without a token ADDED the first-deploy pass sends no DELETE and logs the skip once, at debug', async () => {
+      const { recipe, workflowReconcile } = installFirstDeployWorkflow()
+      const skips = (spy: ReturnType<typeof vi.fn>) =>
+        spy.mock.calls.filter(
+          ([message]) =>
+            typeof message === 'string' && message.startsWith('Skipping oauth-broker-token delete')
+        )
+      const logs = captureLoggerLevels(['debug', 'info'] as const)
+      try {
+        await reconciler.reconcile(recipe)
+
+        // Witness that the pass went through deployWorkflowWorkloads.
+        expect(workflowReconcile).toHaveBeenCalledTimes(1)
+        // Witness that the reap ran and the ledger declined it, once per pass.
+        expect(skips(logs.calls.debug)).toHaveLength(1)
+        expect(skips(logs.calls.info)).toHaveLength(0)
+        expect(secretDeletes()).toBe(0)
+      } finally {
+        logs.restore()
+      }
+
+      // Liveness witness: once the watch replays the token ADDED, the next
+      // pass sends its one DELETE.
+      tokenSeen()
+      await reconciler.reconcile(recipe)
+      expect(workflowReconcile).toHaveBeenCalledTimes(2)
+      expect(secretDeletes()).toBe(1)
+    })
+
+    it('R2-L3: a first-deploy pass sends one token DELETE when it fails, and the next pass retries', async () => {
+      const { recipe, workflowReconcile } = installFirstDeployWorkflow()
+      let tokenDeletes = 0
+      mockCoreApi.deleteNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+        if (name !== SECRET_NAME) return {}
+        tokenDeletes += 1
+        if (tokenDeletes === 1) throw { code: 503 }
+        return {}
+      })
+      try {
+        // A token ADDED was observed, so the early reap runs in this pass.
+        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        await reconciler.reconcile(recipe)
+
+        // Witness that the pass went through deployWorkflowWorkloads.
+        expect(workflowReconcile).toHaveBeenCalledTimes(1)
+        expect(secretDeletes()).toBe(1)
+
+        // The failed DELETE was not recorded, so the next pass retries it.
+        await reconciler.reconcile(recipe)
+        expect(workflowReconcile).toHaveBeenCalledTimes(2)
+        expect(secretDeletes()).toBe(2)
+      } finally {
+        mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+      }
+    })
+  })
+
+  function ineligibleProjection(): CodexExecutionProjection {
+    return {
+      targets: [],
+      eligibleTargets: [],
+      derivedScopes: [],
+      requiresCodexProxyEgress: false,
+      driftHashInput: '',
+      catalogContentHash: null,
+      catalogRevision: null,
+      connectionRevision: null,
+      eligibility: 'ineligible',
+      reason: 'static_only',
+    }
+  }
+
+  // Replaces the WRC's inner reconciler with a real WorkflowReconciler wired
+  // to the shared API mocks.
+  function installRealInner(): WorkflowReconciler {
+    const inner = new WorkflowReconciler({
+      coreApi: mockCoreApi,
+      customApi: mockCustomApi,
+      networkingApi: mockNetworkingApi,
+      config: {
+        coordinatorImage: 'coordinator:test',
+        mcpHostImage: 'mcp-host:test',
+        wrcEndpoint: 'http://wrc.example/api',
+        sandboxNamespace: 'sandbox-recipes',
+        mcpServerNamespace: 'mcp-server',
+        imagePullPolicy: 'IfNotPresent',
+        maxWorkflowSteps: 100,
+        runtimeTokenTtlSeconds: 3600,
+        runtimeTokenRefreshBeforeSeconds: 300,
+      },
+      tokenFactory: {
+        signWrcArtifactDeleteToken: vi.fn().mockResolvedValue('t'),
+        signCoordinatorToMcpHostToken: vi.fn().mockResolvedValue('t'),
+        signCustomCoordinatorToWrcToken: vi.fn().mockResolvedValue('t'),
+        signCoordinatorToWrcToken: vi.fn().mockResolvedValue('t'),
+      },
+      pluginWorkloadSdkRevocationClient: {
+        revoke: vi.fn().mockResolvedValue({ state: 'missing', revoked: 0, fencedInvocations: 0 }),
+        finalize: vi.fn(),
+      },
+    } as never)
+    ;(reconciler as unknown as { workflowReconciler: WorkflowReconciler }).workflowReconciler =
+      inner
+    return inner
+  }
+
+  describe('G2 skipStatusPatch must not leave GFS deleted', () => {
+    const RECIPE = 'g2-recipe'
+    const GFS = `${RECIPE}-coordinator-to-gfs`
+
+    it('inner apply does not delete reserved GFS and outer skips ensure on skipStatusPatch', async () => {
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: GFS,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+          {
+            // Liveness witness: an ordinary catalog member that is not desired sits in
+            // the same LIST and must be deleted, so "GFS was not deleted" cannot hold
+            // just because the prune never iterated.
+            metadata: {
+              name: `${RECIPE}-mcp-host-to-grok-proxy`,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+        ],
+      })
+      const inner = installRealInner()
+      const apply = (
+        inner as unknown as {
+          applyWorkflowNetworkPolicies: (...args: unknown[]) => Promise<unknown>
+        }
+      ).applyWorkflowNetworkPolicies.bind(inner)
+      vi.spyOn(inner, 'reconcile').mockImplementation(async (recipeName, recipeUid, _ns, spec) => {
+        const runtime = deriveWorkflowRuntimePlan(spec as never, {
+          recipeName: String(recipeName),
+          runtimeScopeRecipeName: String(recipeName),
+          workflowRunId: 'run-g2',
+        })
+        const projection = ineligibleProjection()
+        await apply(recipeName, recipeUid, spec, runtime, false, projection, false, {
+          ...projection,
+          requiresGrokProxyEgress: false,
+        })
+        return {
+          phase: 'active',
+          message: 'transient',
+          workflowPhase: 'running',
+          skipStatusPatch: true,
+        }
+      })
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          metadata: {
+            name: RECIPE,
+            namespace: 'sandbox-recipes',
+            uid: 'uid-g2',
+            labels: { 'clerum.io/workflow-run-id': 'run-g2' },
+          },
+          spec: {
+            agent: { provider: 'openai', model: 'gpt-4o' },
+            steps: [{ id: 'publish', instruction: 'publish' }],
+            gfs: { publishTargets: [{ drive: 'main', target: 'out' }] },
+          },
+          status: { phase: 'pending' },
+        })
+      )
+
+      expect(result, result.message).toMatchObject({ skipStatusPatch: true })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: `${RECIPE}-mcp-host-to-grok-proxy` })
+      )
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: GFS })
+      )
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.some(
+          ([arg]) => arg.body?.metadata?.name === GFS
+        )
+      ).toBe(false)
+    })
+
+    it('retryRunLaneNetworkPolicies prunes nothing: no LIST and no DELETE, reserved GFS included', async () => {
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: GFS,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+          {
+            metadata: {
+              name: `${RECIPE}-snippet-runner-egress`,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+          {
+            metadata: {
+              name: `${RECIPE}-mcp-host-to-grok-proxy`,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+        ],
+      })
+      const inner = installRealInner()
+
+      await inner.retryRunLaneNetworkPolicies(
+        RECIPE,
+        'uid-g2',
+        { steps: [{ id: 'publish', instruction: 'publish' }] },
+        RECIPE,
+        'run-g2'
+      )
+
+      // Liveness witness: the retry built this agent spec and applied a lane
+      // it wants, so the absent DELETEs below are the retry declining to
+      // prune mid-run, not a retry that never ran.
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.some(
+          ([arg]) => arg.body?.metadata?.name === `${RECIPE}-coord-to-mcp-host`
+        )
+      ).toBe(true)
+      // The run's pods are live, so the retry revokes no lane: not the
+      // reserved GFS policy, not a sibling the spec no longer wants, not a
+      // Codex/Grok proxy, and not the legacy mcp-servers internet policy. It
+      // does not even LIST what a prune would find.
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+  })
+
+  // R4-L4: a legacy mcp-servers internet policy DELETE that did not land is
+  // published as WorkflowLegacyNetworkPolicyRemoved=False/DeletePending. The
+  // in-progress, active and terminal short-circuits never reach reconcile(),
+  // so the legacy-retry writer runs before them: one DELETE per backoff window
+  // (60 s, doubling up to 1 h), a fixed requeue for the rest of the window,
+  // and the marker cleared once the policy is gone.
+  describe('R4-L4: legacy internet policy DELETE retried before the short-circuits', () => {
+    const RECIPE = 'lg-recipe'
+    const RUN_ID = 'run-lg'
+    const LEGACY = `${RECIPE}-mcp-servers-egress-internet`
+    const LEGACY_TYPE = 'WorkflowLegacyNetworkPolicyRemoved'
+    const MARKER_TYPE = 'WorkflowNetworkPoliciesConverged'
+    const T0 = new Date('2026-09-23T10:00:00.000Z').getTime()
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(T0)
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockReset().mockResolvedValue({})
+    })
+
+    function runScopedRecipe(status: Record<string, unknown>): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: RECIPE,
+          namespace: 'sandbox-recipes',
+          uid: 'uid-lg',
+          labels: { 'clerum.io/workflow-run-id': RUN_ID },
+        },
+        spec: {
+          agent: { provider: 'openai', model: 'gpt-4o' },
+          steps: [{ id: 'research', instruction: 'run' }],
+        },
+        status: status as WorkflowRecipeCRD['status'],
+      })
+    }
+
+    function publishedFacts(prune: 'converged' | 'pending'): StatusCondition[] {
+      return networkPolicyMarkerConditions(
+        {
+          kind: 'reconcile',
+          summary: { conflicts: [], retryPending: false, prune, legacy: 'pending' },
+        },
+        [],
+        '2026-09-23T09:00:00.000Z'
+      )
+    }
+
+    function ofType(conditions: StatusCondition[] | undefined, type: string): StatusCondition[] {
+      return (conditions ?? []).filter(c => c.type === type)
+    }
+
+    function legacyDeletes(): number {
+      return mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => (arg as { name: string }).name === LEGACY
+      ).length
+    }
+
+    function legacyDeleteAnswers(error: { code: number; message: string }) {
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        async ({ name }: { name: string }) => {
+          if (name === LEGACY) throw error
+          return {}
+        }
+      )
+    }
+
+    function stubShortCircuits(inner: WorkflowReconciler) {
+      const ensureCredentials = vi
+        .spyOn(inner, 'ensureMcpHostRuntimeCredentials')
+        .mockResolvedValue(undefined)
+      vi.spyOn(inner, 'refreshRuntimeHttpEgressNetworkPolicies').mockResolvedValue({
+        conflicts: [],
+        retryPending: false,
+      })
+      const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun').mockResolvedValue()
+      const innerReconcile = vi.spyOn(inner, 'reconcile')
+      return { ensureCredentials, teardown, innerReconcile }
+    }
+
+    it('R4-L4: sends one legacy DELETE per backoff window from the in-progress, active and terminal short-circuits', async () => {
+      const inner = installRealInner()
+      const { ensureCredentials, teardown, innerReconcile } = stubShortCircuits(inner)
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const conditions = publishedFacts('converged')
+      // Liveness witness: the fixture publishes the legacy fact alone.
+      expect(conditions).toMatchObject([
+        { type: LEGACY_TYPE, status: 'False', reason: 'DeletePending' },
+      ])
+
+      const inProgress = runScopedRecipe({
+        phase: 'deploying',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions,
+      })
+      const first = await reconciler.reconcile(inProgress)
+
+      // Witness: the in-progress short-circuit ran.
+      expect(ensureCredentials).toHaveBeenCalled()
+      expect(legacyDeletes()).toBe(1)
+      expect(first.requeueAfterMs).toBe(60_000)
+      expect(first.requeueFixedInterval).toBe(true)
+      expect(ofType(inProgress.status?.conditions, LEGACY_TYPE)).toMatchObject([
+        { status: 'False', reason: 'DeletePending' },
+      ])
+
+      vi.setSystemTime(T0 + 20_000)
+      const active = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions,
+      })
+      const second = await reconciler.reconcile(active)
+
+      // Inside the window: no DELETE, and a requeue for the 40 s left.
+      expect(legacyDeletes()).toBe(1)
+      expect(second.requeueAfterMs).toBe(40_000)
+      expect(second.requeueFixedInterval).toBe(true)
+
+      vi.setSystemTime(T0 + 61_000)
+      const terminal = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow completed',
+        workflowExecution: { phase: 'completed' },
+        conditions,
+      })
+      const third = await reconciler.reconcile(terminal)
+
+      // Witness: the terminal branch tore the run's compute down.
+      expect(teardown).toHaveBeenCalledWith(RECIPE)
+      // Past the window: one more DELETE, and the window doubles.
+      expect(legacyDeletes()).toBe(2)
+      expect(third.requeueAfterMs).toBe(120_000)
+      expect(third.requeueFixedInterval).toBe(true)
+      expect(ofType(terminal.status?.conditions, LEGACY_TYPE)).toMatchObject([
+        { status: 'False', reason: 'DeletePending' },
+      ])
+      expect(innerReconcile).not.toHaveBeenCalled()
+    })
+
+    it('R4-L4: clears DeletePending from the active short-circuit once the legacy DELETE answers 404, and carries the prune fact', async () => {
+      const inner = installRealInner()
+      const { ensureCredentials } = stubShortCircuits(inner)
+      legacyDeleteAnswers({ code: 404, message: 'not found' })
+      const conditions = publishedFacts('pending')
+      expect(ofType(conditions, MARKER_TYPE)).toMatchObject([{ reason: 'PrunePending' }])
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+      const active = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions,
+      })
+
+      const result = await reconciler.reconcile(active)
+
+      // Witness: the active short-circuit ran and sent the DELETE.
+      expect(ensureCredentials).toHaveBeenCalled()
+      expect(legacyDeletes()).toBe(1)
+      expect(ofType(active.status?.conditions, LEGACY_TYPE)).toEqual([])
+      expect(ofType(active.status?.conditions, MARKER_TYPE)).toEqual(
+        ofType(conditions, MARKER_TYPE)
+      )
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('R4-L4: sends no legacy DELETE from a short-circuit when no DeletePending marker is published', async () => {
+      const inner = installRealInner()
+      const { ensureCredentials } = stubShortCircuits(inner)
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const active = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions: [],
+      })
+
+      const result = await reconciler.reconcile(active)
+
+      // Witness: the active short-circuit ran.
+      expect(ensureCredentials).toHaveBeenCalled()
+      expect(result.message).toBe('Workflow running')
+      expect(legacyDeletes()).toBe(0)
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('R4-L4: keeps the requeue a short-circuit already asked for while DeletePending stays published', async () => {
+      const inner = installRealInner()
+      stubShortCircuits(inner)
+      const retry = vi
+        .spyOn(inner, 'retryRunLaneNetworkPolicies')
+        .mockResolvedValue({ conflicts: [], retryPending: true })
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const conditions = networkPolicyMarkerConditions(
+        {
+          kind: 'reconcile',
+          summary: { conflicts: [], retryPending: true, prune: 'converged', legacy: 'pending' },
+        },
+        [],
+        '2026-09-23T09:00:00.000Z'
+      )
+      expect(ofType(conditions, MARKER_TYPE)).toMatchObject([{ reason: 'RetryPending' }])
+      expect(ofType(conditions, LEGACY_TYPE)).toMatchObject([{ reason: 'DeletePending' }])
+      const active = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions,
+      })
+
+      const result = await reconciler.reconcile(active)
+
+      // Witnesses: the apply retry ran and the legacy DELETE was sent.
+      expect(retry).toHaveBeenCalledTimes(1)
+      expect(legacyDeletes()).toBe(1)
+      expect(ofType(active.status?.conditions, LEGACY_TYPE)).toMatchObject([
+        { reason: 'DeletePending' },
+      ])
+      // The apply retry's progress requeue wins over the 60 s legacy window.
+      expect(result.requeueAfterMs).toBe(WORKFLOW_PROGRESS_REQUEUE_BASE_MS)
+      expect(result.requeueFixedInterval).toBe(false)
+    })
+
+    it('R5-J1: retries the legacy DELETE before a validation return, so DeletePending never requeues at 1 s', async () => {
+      const inner = installRealInner()
+      const { innerReconcile } = stubShortCircuits(inner)
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const conditions = publishedFacts('converged')
+      const overLimit = makeRecipe({
+        metadata: {
+          name: RECIPE,
+          namespace: 'sandbox-recipes',
+          uid: 'uid-lg',
+          labels: { 'clerum.io/workflow-run-id': RUN_ID },
+        },
+        spec: {
+          agent: { provider: 'openai', model: 'gpt-4o' },
+          steps: Array.from({ length: 101 }, (_, i) => ({ id: `s${i}`, instruction: 'run' })),
+        },
+        status: {
+          phase: 'active',
+          message: 'Workflow running',
+          workflowExecution: { phase: 'running' },
+          conditions,
+        } as WorkflowRecipeCRD['status'],
+      })
+
+      const result = await reconciler.reconcile(overLimit)
+
+      // Witness: the pass took the spec-limit return, before reconcile().
+      expect(result.phase).toBe('failed')
+      expect(result.message).toBe('spec.steps must contain at most 100 items')
+      expect(innerReconcile).not.toHaveBeenCalled()
+      // The DELETE was sent, so the requeue is the 60 s backoff, not the 1 s floor.
+      expect(legacyDeletes()).toBe(1)
+      expect(result.requeueAfterMs).toBe(60_000)
+      expect(result.requeueFixedInterval).toBe(true)
+    })
+
+    function realWatcherBridge(recipe: WorkflowRecipeCRD) {
+      // The surrounding ledger-only cases fake Date; this bridge drives real timers too.
+      vi.useRealTimers()
+      vi.useFakeTimers()
+      vi.setSystemTime(T0)
+      let live: WorkflowRecipeCRD | undefined = structuredClone(recipe)
+      const previousGet = mockCustomApi.getNamespacedCustomObject.getMockImplementation()!
+      mockCustomApi.getNamespacedCustomObject.mockImplementation(async args => {
+        if (args.plural !== 'workflowrecipes' || args.name !== RECIPE) return previousGet(args)
+        if (!live) throw { code: 404 }
+        return structuredClone(live)
+      })
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }) => {
+        if (!live) throw { code: 404 }
+        if (
+          body.metadata &&
+          (body.metadata.uid !== live.metadata.uid ||
+            body.metadata.resourceVersion !== live.metadata.resourceVersion)
+        ) {
+          throw { code: 409 }
+        }
+        live.status = { ...live.status, ...body.status }
+        live.metadata.resourceVersion = String(Number(live.metadata.resourceVersion) + 1)
+        return structuredClone(live)
+      })
+      const queueFailures = vi.fn()
+      const queue = new RecipeEventQueue(queueFailures)
+      const watcher = Object.create(WorkflowRecipeWatcher.prototype) as {
+        recipes: Map<string, WorkflowRecipeCRD>
+        eventQueue: RecipeEventQueue
+        transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+        handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+        clearTransientRetry: (name: string) => void
+      }
+      Object.assign(watcher, {
+        recipes: new Map(),
+        eventQueue: queue,
+        transientRetries: new Map(),
+        stopped: false,
+        traceReporter: null,
+        dbRunProcessor: null,
+        reconciler,
+        customApi: mockCustomApi,
+      })
+      return {
+        watcher,
+        queue,
+        queueFailures,
+        current: () => live,
+        replace: (next: WorkflowRecipeCRD | undefined) => {
+          live = next
+        },
+        drain: () => queue.enqueue(RECIPE, async () => {}),
+      }
+    }
+
+    function terminalRetryRecipe(): WorkflowRecipeCRD {
+      const recipe = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow completed',
+        workflowExecution: { phase: 'completed' },
+        conditions: publishedFacts('converged'),
+        workloadInstances: { 'web-search': `${RECIPE}-web-search-run` },
+      })
+      recipe.metadata.resourceVersion = '1'
+      recipe.metadata.generation = 1
+      recipe.spec.workloads = [
+        {
+          id: 'web-search',
+          type: 'deployment',
+          image: 'web-search:test',
+          transport: { type: 'streamableHttp', path: '/mcp' },
+        },
+      ]
+      return recipe
+    }
+
+    it('R5-L3: the dedicated retry retains the pipeline namespace allowlist', async () => {
+      const inner = installRealInner()
+      const retry = vi.spyOn(inner, 'retryLegacyMcpServersInternetEgressDelete')
+      const recipe = terminalRetryRecipe()
+      recipe.metadata.namespace = 'other-namespace'
+      expect(ofType(recipe.status?.conditions, LEGACY_TYPE)).toHaveLength(1)
+      mockCustomApi.getNamespacedCustomObject.mockClear()
+      const result = await reconciler.retryPendingLegacyNetworkPolicyDeleteOnly(recipe)
+      expect(result).toEqual({})
+      expect(retry).not.toHaveBeenCalled()
+      expect(mockCustomApi.getNamespacedCustomObject).not.toHaveBeenCalled()
+      expect(legacyDeletes()).toBe(0)
+    })
+
+    it('R5-L3: the real watcher, WRC and event queue retry only legacy DELETE across 60/120/240 s windows', async () => {
+      vi.useFakeTimers()
+      const inner = installRealInner()
+      vi.spyOn(inner, 'ensureMcpHostRuntimeCredentials').mockResolvedValue()
+      const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun')
+      const fullReconcile = vi.spyOn(reconciler, 'reconcile')
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const bridge = realWatcherBridge(terminalRetryRecipe())
+
+      await bridge.queue.enqueue(RECIPE, () =>
+        bridge.watcher.handleRecipeEvent('ADDED', bridge.current()!)
+      )
+
+      expect(teardown).toHaveBeenCalledTimes(1)
+      expect(legacyDeletes()).toBe(1)
+      const initialEffects = {
+        pods: mockCoreApi.deleteNamespacedPod.mock.calls.length,
+        transport: mockCustomApi.deleteNamespacedCustomObject.mock.calls.filter(
+          ([arg]) => arg.plural === 'mcpservers'
+        ).length,
+        deployments: mockAppsApi.deleteNamespacedDeployment.mock.calls.length,
+        gfs: mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(([arg]) =>
+          arg.name.endsWith('-coordinator-to-gfs')
+        ).length,
+      }
+      expect(initialEffects.pods).toBe(3)
+      expect(initialEffects.transport).toBeGreaterThan(0)
+      expect(initialEffects.deployments).toBeGreaterThan(0)
+      expect(initialEffects.gfs).toBeGreaterThan(0)
+
+      for (const [index, delay] of [60_000, 120_000, 240_000].entries()) {
+        await vi.advanceTimersByTimeAsync(delay)
+        await bridge.drain()
+        expect(legacyDeletes()).toBe(index + 2)
+        expect(fullReconcile).toHaveBeenCalledTimes(1)
+        expect(teardown).toHaveBeenCalledTimes(1)
+        expect(mockCoreApi.deleteNamespacedPod).toHaveBeenCalledTimes(initialEffects.pods)
+        expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(
+          initialEffects.deployments
+        )
+        expect(
+          mockCustomApi.deleteNamespacedCustomObject.mock.calls.filter(
+            ([arg]) => arg.plural === 'mcpservers'
+          )
+        ).toHaveLength(initialEffects.transport)
+        expect(
+          mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(([arg]) =>
+            arg.name.endsWith('-coordinator-to-gfs')
+          )
+        ).toHaveLength(initialEffects.gfs)
+      }
+
+      // Recovery performs a conditions-only patch, preserving the workflow/SDK state.
+      const beforeRecovery = structuredClone(bridge.current()!.status)
+      legacyDeleteAnswers({ code: 404, message: 'not found' })
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+      await vi.advanceTimersByTimeAsync(480_000)
+      await bridge.drain()
+      expect(legacyDeletes()).toBe(5)
+      expect(fullReconcile).toHaveBeenCalledTimes(1)
+      expect(bridge.current()!.status?.workflowExecution).toEqual(beforeRecovery?.workflowExecution)
+      expect(bridge.current()!.status?.pluginWorkloadSdk).toEqual(beforeRecovery?.pluginWorkloadSdk)
+      expect(ofType(bridge.current()!.status?.conditions, LEGACY_TYPE)).toEqual([])
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: {
+            metadata: { uid: 'uid-lg', resourceVersion: expect.any(String) },
+            status: { conditions: expect.any(Array) },
+          },
+        }),
+        expect.anything()
+      )
+      expect(bridge.queueFailures).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+
+      // Deliver the actual accepted PATCH response through the ordinary watch
+      // path. Its unchanged generation makes this a status-only MODIFIED, whose
+      // terminal cleanup remains required by the existing recovery contract.
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      const recoveryWatchObject = (await mockCustomApi.patchNamespacedCustomObjectStatus.mock
+        .results[0].value) as WorkflowRecipeCRD
+      expect(recoveryWatchObject).toEqual(bridge.current())
+      expect(recoveryWatchObject.metadata.resourceVersion).toBe('2')
+      expect(recoveryWatchObject.metadata.generation).toBe(1)
+      await bridge.queue.enqueue(RECIPE, () =>
+        bridge.watcher.handleRecipeEvent('MODIFIED', recoveryWatchObject)
+      )
+      await bridge.drain()
+      expect(fullReconcile).toHaveBeenCalledTimes(2)
+      expect(teardown).toHaveBeenCalledTimes(2)
+      expect(mockCoreApi.deleteNamespacedPod).toHaveBeenCalledTimes(initialEffects.pods * 2)
+      expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(
+        initialEffects.deployments * 2
+      )
+      expect(
+        mockCustomApi.deleteNamespacedCustomObject.mock.calls.filter(
+          ([arg]) => arg.plural === 'mcpservers'
+        )
+      ).toHaveLength(initialEffects.transport * 2)
+      expect(
+        mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(([arg]) =>
+          arg.name.endsWith('-coordinator-to-gfs')
+        )
+      ).toHaveLength(initialEffects.gfs * 2)
+      expect(legacyDeletes()).toBe(5)
+      // That ordinary pass publishes nothing, so it cannot drive another watch
+      // event. No legacy timer or continuing status-write loop remains either.
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.advanceTimersByTimeAsync(3_600_000)
+      await bridge.drain()
+      expect(fullReconcile).toHaveBeenCalledTimes(2)
+      expect(teardown).toHaveBeenCalledTimes(2)
+      expect(legacyDeletes()).toBe(5)
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      expect(bridge.queueFailures).not.toHaveBeenCalled()
+      bridge.watcher.clearTransientRetry(RECIPE)
+    })
+
+    it.each([
+      'recreated',
+      'deleted',
+      'deleting',
+      'marker-cleared',
+      'namespace-changed',
+      'name-changed',
+    ] as const)(
+      'R5-L3: a queued legacy retry drops a %s recipe after its fresh API read',
+      async change => {
+        vi.useFakeTimers()
+        const inner = installRealInner()
+        vi.spyOn(inner, 'ensureMcpHostRuntimeCredentials').mockResolvedValue()
+        const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun')
+        const fullReconcile = vi.spyOn(reconciler, 'reconcile')
+        legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+        const bridge = realWatcherBridge(terminalRetryRecipe())
+        await bridge.queue.enqueue(RECIPE, () =>
+          bridge.watcher.handleRecipeEvent('ADDED', bridge.current()!)
+        )
+        expect(legacyDeletes()).toBe(1)
+        expect(vi.getTimerCount()).toBe(1)
+        let release!: () => void
+        const blocker = bridge.queue.enqueue(
+          RECIPE,
+          () =>
+            new Promise<void>(resolve => {
+              release = resolve
+            })
+        )
+        await Promise.resolve()
+        await vi.advanceTimersByTimeAsync(60_000)
+        const next = structuredClone(bridge.current()!)
+        if (change === 'deleted') bridge.replace(undefined)
+        else {
+          if (change === 'recreated') next.metadata.uid = 'uid-new'
+          if (change === 'deleting') next.metadata.deletionTimestamp = new Date().toISOString()
+          if (change === 'marker-cleared') next.status!.conditions = []
+          if (change === 'namespace-changed') next.metadata.namespace = 'other-namespace'
+          if (change === 'name-changed') next.metadata.name = 'other-recipe'
+          bridge.replace(next)
+        }
+        // Leave the watcher's cache stale: the API read after the queue wait is authoritative.
+        release()
+        await blocker
+        await bridge.drain()
+        expect(legacyDeletes()).toBe(1)
+        expect(fullReconcile).toHaveBeenCalledTimes(1)
+        expect(teardown).toHaveBeenCalledTimes(1)
+        expect(bridge.queueFailures).not.toHaveBeenCalled()
+        expect(vi.getTimerCount()).toBe(0)
+        bridge.watcher.clearTransientRetry(RECIPE)
+      }
+    )
+
+    it.each(['recreated', 'deleting', 'marker-cleared'] as const)(
+      'R5-L3: the post-DELETE read refuses to publish on a %s recipe',
+      async change => {
+        const inner = installRealInner()
+        vi.spyOn(inner, 'ensureMcpHostRuntimeCredentials').mockResolvedValue()
+        const fullReconcile = vi.spyOn(reconciler, 'reconcile')
+        legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+        const bridge = realWatcherBridge(terminalRetryRecipe())
+        await bridge.queue.enqueue(RECIPE, () =>
+          bridge.watcher.handleRecipeEvent('ADDED', bridge.current()!)
+        )
+        expect(legacyDeletes()).toBe(1)
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+        mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
+          if (name === LEGACY) {
+            const next = structuredClone(bridge.current()!)
+            if (change === 'recreated') next.metadata.uid = 'uid-new'
+            if (change === 'deleting') next.metadata.deletionTimestamp = new Date().toISOString()
+            if (change === 'marker-cleared') next.status!.conditions = []
+            bridge.replace(next)
+          }
+          return {}
+        })
+        await vi.advanceTimersByTimeAsync(60_000)
+        await bridge.drain()
+        expect(legacyDeletes()).toBe(2)
+        expect(fullReconcile).toHaveBeenCalledTimes(1)
+        expect(mockCustomApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+        expect(vi.getTimerCount()).toBe(0)
+        expect(bridge.queueFailures).not.toHaveBeenCalled()
+      }
+    )
+
+    it.each(['recreated', 'newer-policy-facts'] as const)(
+      'R5-L3: a status conflict caused by %s retries only the fenced conditions patch',
+      async change => {
+        const inner = installRealInner()
+        vi.spyOn(inner, 'ensureMcpHostRuntimeCredentials').mockResolvedValue()
+        const fullReconcile = vi.spyOn(reconciler, 'reconcile')
+        legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+        const bridge = realWatcherBridge(terminalRetryRecipe())
+        await bridge.queue.enqueue(RECIPE, () =>
+          bridge.watcher.handleRecipeEvent('ADDED', bridge.current()!)
+        )
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+        const newerFacts = networkPolicyMarkerConditions(
+          {
+            kind: 'reconcile',
+            summary: { conflicts: [], retryPending: true, prune: 'pending', legacy: 'pending' },
+          },
+          [],
+          new Date().toISOString()
+        )
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementationOnce(async ({ body }) => {
+          expect(body.metadata).toEqual({ uid: 'uid-lg', resourceVersion: '1' })
+          const next = structuredClone(bridge.current()!)
+          next.metadata.resourceVersion = '2'
+          if (change === 'recreated') next.metadata.uid = 'uid-new'
+          else next.status!.conditions = newerFacts
+          bridge.replace(next)
+          throw { code: 409 }
+        })
+        legacyDeleteAnswers({ code: 404, message: 'not found' })
+        await vi.advanceTimersByTimeAsync(60_000)
+        await bridge.drain()
+        expect(legacyDeletes()).toBe(2)
+        expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(4_999)
+        await bridge.drain()
+        expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(1)
+        await bridge.drain()
+        expect(legacyDeletes()).toBe(2)
+        expect(fullReconcile).toHaveBeenCalledTimes(1)
+        if (change === 'recreated') {
+          expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+          expect(bridge.current()!.metadata.uid).toBe('uid-new')
+        } else {
+          expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(2)
+          expect(
+            mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[1][0].body.metadata
+          ).toEqual({ uid: 'uid-lg', resourceVersion: '2' })
+          expect(ofType(bridge.current()!.status?.conditions, LEGACY_TYPE)).toEqual([])
+          expect(ofType(bridge.current()!.status?.conditions, MARKER_TYPE)).toEqual(
+            ofType(newerFacts, MARKER_TYPE)
+          )
+          expect(bridge.current()!.status?.workflowExecution).toEqual({ phase: 'completed' })
+        }
+        expect(vi.getTimerCount()).toBe(0)
+        expect(bridge.queueFailures).not.toHaveBeenCalled()
+      }
+    )
+
+    it('R5-L3: clearing the retry while its callback waits in the real queue cancels its API work', async () => {
+      const inner = installRealInner()
+      vi.spyOn(inner, 'ensureMcpHostRuntimeCredentials').mockResolvedValue()
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const bridge = realWatcherBridge(terminalRetryRecipe())
+      await bridge.queue.enqueue(RECIPE, () =>
+        bridge.watcher.handleRecipeEvent('ADDED', bridge.current()!)
+      )
+      let release!: () => void
+      const blocker = bridge.queue.enqueue(
+        RECIPE,
+        () =>
+          new Promise<void>(resolve => {
+            release = resolve
+          })
+      )
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(60_000)
+      bridge.watcher.clearTransientRetry(RECIPE)
+      mockCustomApi.getNamespacedCustomObject.mockClear()
+      release()
+      await blocker
+      await bridge.drain()
+      expect(mockCustomApi.getNamespacedCustomObject).not.toHaveBeenCalled()
+      expect(legacyDeletes()).toBe(1)
+      expect(vi.getTimerCount()).toBe(0)
+      expect(bridge.queueFailures).not.toHaveBeenCalled()
+    })
+  })
+
+  // A reconcile() prune whose DELETE did not land publishes
+  // WorkflowNetworkPoliciesConverged=False/PrunePending. That fact is not a
+  // pending retry: the mid-run retry prunes nothing, so the short-circuits
+  // must not reapply for it, and the terminal branch must keep it, because
+  // the terminal teardown removes pods, not run-lane policies. The finalizer
+  // sweep by recipe label is what removes the leftover.
+  describe('run-lane NetworkPolicy prune-pending across a run-scoped run', () => {
+    const RECIPE = 'pp-recipe'
+    const RUN_ID = 'run-pp'
+    const GFS = `${RECIPE}-coordinator-to-gfs`
+    const LEFTOVER = `${RECIPE}-mcp-host-to-grok-proxy`
+    const WRC_LABELS = { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' }
+    const MARKER_TYPE = 'WorkflowNetworkPoliciesConverged'
+
+    function runScopedRecipe(status: Record<string, unknown>): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: RECIPE,
+          namespace: 'sandbox-recipes',
+          uid: 'uid-pp',
+          labels: { 'clerum.io/workflow-run-id': RUN_ID },
+        },
+        spec: {
+          agent: { provider: 'openai', model: 'gpt-4o' },
+          steps: [{ id: 'research', instruction: 'run' }],
+        },
+        status: status as WorkflowRecipeCRD['status'],
+      })
+    }
+
+    function markers(conditions: StatusCondition[] | undefined): StatusCondition[] {
+      return (conditions ?? []).filter(c => c.type === MARKER_TYPE)
+    }
+
+    function deletedPolicyNames(): string[] {
+      return mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.map(
+        ([arg]) => (arg as { name: string }).name
+      )
+    }
+
+    // The WRC first-deploy pass with the real inner apply and prune. The
+    // leftover is live under the recipe's labels and its DELETE answers 403.
+    // The inner reconcile() is reduced to the NetworkPolicy step: the real
+    // apply-and-prune, published through the production `reconcile` marker
+    // writer. The inner suite pins that reconcile() publishes exactly that
+    // writer's conditions for its own pass summary (nit-3), so this stub
+    // cannot drift from the translation it stands in for.
+    async function failedPrunePass(inner: WorkflowReconciler) {
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [{ metadata: { name: LEFTOVER, namespace: 'sandbox-recipes', labels: WRC_LABELS } }],
+      })
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        async ({ name }: { name: string }) => {
+          if (name === LEFTOVER) throw { code: 403, message: 'forbidden' }
+          return {}
+        }
+      )
+      const apply = (
+        inner as unknown as {
+          applyWorkflowNetworkPolicies: (...args: unknown[]) => Promise<NetworkPolicyPassSummary>
+        }
+      ).applyWorkflowNetworkPolicies.bind(inner)
+      vi.spyOn(inner, 'reconcile').mockImplementation(
+        async (recipeName, recipeUid, _ns, spec, currentStatus) => {
+          const runtime = deriveWorkflowRuntimePlan(spec as never, {
+            recipeName: String(recipeName),
+            runtimeScopeRecipeName: String(recipeName),
+            workflowRunId: RUN_ID,
+          })
+          const projection = ineligibleProjection()
+          const summary = await apply(
+            recipeName,
+            recipeUid,
+            spec,
+            runtime,
+            false,
+            projection,
+            false,
+            {
+              ...projection,
+              requiresGrokProxyEgress: false,
+            }
+          )
+          // No retry flag is owed: the pass has nothing pending but the prune.
+          expect(summary.retryPending).toBe(false)
+          return {
+            phase: 'active',
+            message: 'Workflow running',
+            workflowPhase: 'running',
+            networkPolicyOwnershipConditions: networkPolicyMarkerConditions(
+              { kind: 'reconcile', summary },
+              currentStatus?.conditions,
+              new Date().toISOString()
+            ),
+          }
+        }
+      )
+
+      const result = await reconciler.reconcile(runScopedRecipe({ phase: 'pending' }))
+      // Liveness witness: the prune reached the leftover's DELETE.
+      expect(deletedPolicyNames()).toContain(LEFTOVER)
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(async () => ({}))
+      return result
+    }
+
+    it('publishes PrunePending from a reconcile() prune that could not delete, with no requeue', async () => {
+      const inner = installRealInner()
+
+      const result = await failedPrunePass(inner)
+
+      expect(markers(result.networkPolicyOwnershipConditions)).toMatchObject([
+        { status: 'False', reason: 'PrunePending' },
+      ])
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('does not reapply from the in-progress short-circuit for a pending prune', async () => {
+      const inner = installRealInner()
+      const published = (await failedPrunePass(inner)).networkPolicyOwnershipConditions
+      const ensureCredentials = vi
+        .spyOn(inner, 'ensureMcpHostRuntimeCredentials')
+        .mockResolvedValue(undefined)
+      vi.spyOn(inner, 'refreshRuntimeHttpEgressNetworkPolicies').mockResolvedValue({
+        conflicts: [],
+        retryPending: false,
+      })
+      const retry = vi.spyOn(inner, 'retryRunLaneNetworkPolicies')
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+      const recipe = runScopedRecipe({
+        phase: 'deploying',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions: published,
+      })
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Witness: the in-progress short-circuit ran.
+      expect(ensureCredentials).toHaveBeenCalled()
+      expect(result.message).toBe('Workflow running')
+      expect(retry).not.toHaveBeenCalled()
+      expect(result.requeueAfterMs).toBeUndefined()
+      expect(markers(recipe.status?.conditions)).toMatchObject([
+        { status: 'False', reason: 'PrunePending' },
+      ])
+    })
+
+    it('keeps the PrunePending marker through the terminal teardown, which deletes no run-lane policy', async () => {
+      const inner = installRealInner()
+      const published = (await failedPrunePass(inner)).networkPolicyOwnershipConditions
+      vi.spyOn(inner, 'ensureMcpHostRuntimeCredentials').mockResolvedValue(undefined)
+      vi.spyOn(inner, 'refreshRuntimeHttpEgressNetworkPolicies').mockResolvedValue({
+        conflicts: [],
+        retryPending: false,
+      })
+      // The real teardown runs: the "no run-lane DELETE" assertion below is
+      // only meaningful if the code that could send one executes.
+      const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun')
+      const retry = vi.spyOn(inner, 'retryRunLaneNetworkPolicies')
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+      const recipe = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow completed',
+        workflowExecution: { phase: 'completed' },
+        conditions: published,
+      })
+
+      // The shared core mock has no single-Pod DELETE; the teardown deletes
+      // the run's compute pods one by one.
+      const coreApi = mockCoreApi as unknown as Record<string, unknown>
+      const deletePod = vi.fn().mockResolvedValue({})
+      coreApi.deleteNamespacedPod = deletePod
+      try {
+        await reconciler.reconcile(recipe)
+      } finally {
+        delete coreApi.deleteNamespacedPod
+      }
+
+      // Witnesses: the terminal branch ran the real teardown, which deleted
+      // the run's coordinator pod.
+      expect(teardown).toHaveBeenCalledWith(RECIPE)
+      expect(deletePod).toHaveBeenCalledWith({
+        name: `${RECIPE}-coordinator`,
+        namespace: 'sandbox-recipes',
+      })
+      expect(retry).not.toHaveBeenCalled()
+      expect(deletedPolicyNames().filter(name => name !== GFS)).toEqual([])
+      expect(markers(recipe.status?.conditions)).toMatchObject([
+        { status: 'False', reason: 'PrunePending' },
+      ])
+    })
+
+    it('removes the leftover from the finalizer sweep', async () => {
+      const inner = installRealInner()
+      await failedPrunePass(inner)
+      // Only the finalizer's own calls are asserted below.
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [{ metadata: { name: LEFTOVER, namespace: 'sandbox-recipes', labels: WRC_LABELS } }],
+      })
+
+      // The shared core mock has no single-Pod DELETE; the finalizer deletes
+      // the run's pods one by one before it answers.
+      const coreApi = mockCoreApi as unknown as Record<string, unknown>
+      const deletePod = vi.fn().mockResolvedValue({})
+      coreApi.deleteNamespacedPod = deletePod
+      try {
+        await reconciler.reconcileDelete(
+          runScopedRecipe({ phase: 'active', workflowExecution: { phase: 'completed' } })
+        )
+      } finally {
+        delete coreApi.deleteNamespacedPod
+      }
+
+      // Witness: the finalizer ran the workflow cleanup.
+      expect(deletePod).toHaveBeenCalledWith({
+        name: `${RECIPE}-coordinator`,
+        namespace: 'sandbox-recipes',
+      })
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-recipes',
+        labelSelector: `clerum.io/recipe=${RECIPE},clerum.io/managed-by=wrc`,
+      })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: LEFTOVER,
+        namespace: 'sandbox-recipes',
+      })
+    })
+  })
+
   // ─── Broker-token issuance failure is non-fatal ─────────────────────────
   //
   // A transient control-api blip during reconcile (e.g. it is mid-restart)
@@ -16182,7 +18712,12 @@ describe('WorkflowRecipeReconciler', () => {
           policyReady: true,
           verifiedAt: '2026-08-04T00:00:00.000Z',
         },
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
       ;(
         reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
@@ -16227,7 +18762,12 @@ describe('WorkflowRecipeReconciler', () => {
           policyReady: true,
           verifiedAt: new Date().toISOString(),
         },
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
       ;(
         reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }

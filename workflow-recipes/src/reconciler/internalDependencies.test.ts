@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import type { CronJobDef, DeploymentDef, WorkflowRecipeCRD, WorkloadDef } from '../types'
 import { evaluateInternalDependencies } from './internalDependencies'
 import { resolveWorkloadTemplates } from './workloadTemplates'
@@ -44,6 +45,42 @@ function resolveNamespaceForTest(r: WorkflowRecipeCRD, workload: WorkloadDef): s
 }
 
 describe('evaluateInternalDependencies', () => {
+  it('CodeQL 427 bounds malformed template scanning', () => {
+    if (process.env.TEMPLATE_REDOS_CHILD === '1') {
+      const r = recipe([
+        deployment('api', 8080, {
+          env: [{ name: 'NOTE', value: '{{{{|'.repeat(200_000) }],
+        }),
+      ])
+      process.stdout.write('TEMPLATE_SCAN_STARTED\n')
+      expect(evaluate(r)).toEqual({ issues: [], dependencies: [] })
+      return
+    }
+    const child = spawnSync(
+      process.execPath,
+      [
+        'node_modules/vitest/vitest.mjs',
+        'run',
+        'src/reconciler/internalDependencies.test.ts',
+        '--pool=threads',
+        '--maxWorkers=1',
+        '-t',
+        'CodeQL 427 bounds malformed template scanning',
+      ],
+      {
+        env: { ...process.env, TEMPLATE_REDOS_CHILD: '1' },
+        encoding: 'utf8',
+        timeout: 15_000,
+        killSignal: 'SIGKILL',
+      }
+    )
+    expect(child.stdout).toContain('TEMPLATE_SCAN_STARTED')
+    expect(
+      child.error,
+      'dependency detection must finish within the generous CPU deadline'
+    ).toBeUndefined()
+    expect(child.status, child.stdout + child.stderr).toBe(0)
+  }, 20_000)
   it('infers LeadForge-like api, worker, and cron dependencies from resolved workload hosts', () => {
     const r = recipe([
       deployment('api', 8080, {

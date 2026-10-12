@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { classifyTier } from '@hooks/useTaskTier'
+import {
+  ipcGenericForbidden,
+  ipcHostAccessDenied,
+  ipcHostAccessRevoked,
+  ipcHttpError,
+  ipcServerErrorMentioning403,
+} from '../../../hooks/domain/__tests__/__fixtures__/ipcErrors'
 import { TaskTracker } from '../taskTracker'
 import { type TaskKey, type TaskState, makeTaskKey } from '../types'
 
@@ -64,6 +71,24 @@ afterEach(() => {
 const flush = () => Promise.resolve().then(() => Promise.resolve())
 
 describe('TaskTracker', () => {
+  it('carries a pending input preview through a reconnect without starting the tool', async () => {
+    tracker.start(KEY, 'task-1', 'um-1')
+    const inputPreview = { text: 'node -e "console.log(1)"', truncated: false }
+    await rpc.emit({
+      type: 'suspended',
+      data: {
+        taskId: 'task-1',
+        requestId: 'preview-request',
+        displayName: 'Shell',
+        inputPreview: { ...inputPreview, headers: { other: 'not-for-preview' } },
+      },
+    })
+    await rpc.emit({ type: 'open', taskId: 'task-1', hostRef: 'agent-x' })
+    expect(tracker.get(KEY)?.pendingApproval?.inputPreview).toEqual(inputPreview)
+    expect(tracker.get(KEY)?.status).toBe('suspended')
+    expect(tracker.get(KEY)?.steps).toEqual([])
+    expect(rpc.cancelTask).not.toHaveBeenCalled()
+  })
   it('start() seeds connecting state, opens the SSE and emits to subscribers', () => {
     const seen: TaskState[] = []
     tracker.subscribe(KEY, s => seen.push(s))
@@ -176,6 +201,64 @@ describe('TaskTracker', () => {
     expect(state.status).toBe('failed')
     expect(state.terminalResult).toMatchObject({ kind: 'error', source: 'result_fetch' })
   })
+
+  // R2-B1 / NEW-dui-3: the result fetch fails with the real RpcProxyClient
+  // rejection wrapped the way Electron IPC wraps it.
+  it.each([
+    [
+      'confirmed revocation',
+      () => ipcHostAccessRevoked('rpc:getTaskResult'),
+      'authority',
+      'revoked',
+    ],
+    [
+      'host_access_denied',
+      () => ipcHostAccessDenied('rpc:getTaskResult'),
+      'authority',
+      'uncertain',
+    ],
+    ['generic 403', () => ipcGenericForbidden('rpc:getTaskResult'), 'authority', 'uncertain'],
+    [
+      '401',
+      () => ipcHttpError('rpc:getTaskResult', 401, 'Unauthorized', { error: 'expired' }),
+      'authority',
+      'uncertain',
+    ],
+    [
+      '503 whose body mentions 403',
+      () => ipcServerErrorMentioning403('rpc:getTaskResult'),
+      'result_fetch',
+      undefined,
+    ],
+    [
+      'waking Host named support-401',
+      // getTaskResult does not map a waking Host (only the send path does), so
+      // the renderer sees rpc-proxy's raw structured 503.
+      () =>
+        ipcHttpError('rpc:getTaskResult', 503, 'Service Unavailable', {
+          code: 'host_waking',
+          hostRef: 'support-401',
+          retryAfterMs: 2000,
+        }),
+      'result_fetch',
+      undefined,
+    ],
+  ])(
+    'IPC-wrapped %s result-fetch failure classifies authority',
+    async (_label, build, source, authority) => {
+      rpc.getTaskResult.mockRejectedValueOnce(await build())
+      const onTerminal = vi.fn()
+      tracker.setCallbacks({ onTerminal })
+      tracker.start(KEY, 'task-1', 'um-1')
+      await rpc.emit({ type: 'terminal', data: { taskId: 'task-1', status: 'completed' } })
+
+      expect(rpc.getTaskResult).toHaveBeenCalledWith('agent-x', 'task-1', ['agent-x'])
+      const [, state] = onTerminal.mock.calls[0]!
+      expect(state.status).toBe('failed')
+      expect(state.terminalResult).toMatchObject({ kind: 'error', source })
+      expect(state.terminalResult.authority).toBe(authority)
+    }
+  )
 
   it('terminal completed does NOT corrupt a task that replaced it during the result fetch (H2)', async () => {
     const onTerminal = vi.fn(async () => undefined)
@@ -856,7 +939,7 @@ describe('TaskTracker', () => {
 })
 
 describe('TaskTracker — coordinator API (spec §4.2)', () => {
-  const RESEND = { content: 'hi', attachments: [], references: [] }
+  const RESEND = { content: 'hi', attachments: [], files: [], references: [] }
 
   it('attach() is idempotent for the same (key, taskId)', () => {
     expect(tracker.attach(KEY, 'task-1', 'um-1')).toBe(true)

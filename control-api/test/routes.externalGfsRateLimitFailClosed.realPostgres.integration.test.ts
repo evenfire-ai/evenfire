@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // The external GFS limiter's Postgres backend, against real PostgreSQL at the
 // production pool bounds: the CORE_POOL_* and RATE_LIMIT_POOL_* variables are
@@ -98,7 +99,7 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
-    await migratePool.end()
+    await endPoolAndWaitForClients(migratePool)
 
     const appMod = await import('../src/app.js')
     const configMod = await import('../src/config.js')
@@ -113,21 +114,25 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
   }, 60_000)
 
   afterAll(async () => {
-    for (const key of envKeys) {
-      const value = previousEnv.get(key)
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
-    await corePool?.end().catch(() => {})
-    await limiterPool?.end().catch(() => {})
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      for (const key of envKeys) {
+        const value = previousEnv.get(key)
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      await endPoolAndWaitForClients(corePool).catch(() => {})
+      await endPoolAndWaitForClients(limiterPool).catch(() => {})
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('U1: the limiter pool runs with synchronous_commit off and a 3 s statement timeout; the core pool keeps the defaults', async () => {
@@ -275,12 +280,14 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     await corePool.query('DELETE FROM rate_limit_buckets')
 
     let grants: request.Response
+    let entityChanges: request.Response
     let ack: request.Response
     await injectLimiterFault()
     try {
       grants = await external(
         request(app).get(`/api/v1/external/gfs/grants?drive=main&resourceId=${randomUUID()}`)
       )
+      entityChanges = await external(request(app).get('/api/v1/external/entity-changes/stream'))
       ack = await external(request(app).post(`/api/v1/external/notifications/${randomUUID()}/ack`))
     } finally {
       await removeLimiterFault()
@@ -292,6 +299,12 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     expect(grants.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
     expect(grants.headers['retry-after']).toBe('2')
     expect(grants.headers['cache-control']).toBe('no-store')
+    // The entity-change stream uses the same shared rate-limit middleware but
+    // chooses fail-closed because its principal budget must remain distributed.
+    expect(entityChanges.status).toBe(503)
+    expect(entityChanges.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(entityChanges.headers['retry-after']).toBe('2')
+    expect(entityChanges.headers['cache-control']).toBe('no-store')
     // Witness for the process-memory policy under the same fault: the ack
     // route's Postgres limiter could not count either, its in-memory counter
     // admitted the first request, and its handler answered.

@@ -59,3 +59,6 @@ export {
   imageRefHost,
   isPlatformRegistryImage,
 } from './registry-image'
+
+export { scanTemplateReferences, replaceTemplateReferences } from './templateReferences'
+export type { TemplateReference } from './templateReferences'

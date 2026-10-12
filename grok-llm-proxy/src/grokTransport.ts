@@ -1,10 +1,15 @@
 import {
-  type GrokCompletionRequestV1,
+  type GrokCompletionRequest,
   LIMITS,
-  hashGrokCompletionRequestV1,
-  parseGrokCompletionRequestV1,
+  SCHEMA_VERSION_V2,
+  hashGrokCompletionRequest,
+  parseGrokCompletionRequest,
 } from '@clerum/grok-provider-attempt-contract'
-import type { FinalizeAttemptSuccess, RedeemAttemptSuccess } from './controlApiClient.js'
+import {
+  type FinalizeAttemptSuccess,
+  type RedeemAttemptSuccess,
+  fetchCauseCode,
+} from './controlApiClient.js'
 import { grokUpstreamHeaders } from './grokUpstreamHeaders.js'
 import { logger } from './logger.js'
 import {
@@ -69,11 +74,27 @@ export class GrokTransportError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly details?: Readonly<Record<string, number | string>>
+    readonly details?: Readonly<Record<string, number | string>>,
+    options?: ErrorOptions
   ) {
-    super(message)
+    super(message, options)
     this.name = 'GrokTransportError'
   }
+}
+
+/**
+ * Review R3-L1/R4-L1: a rejected undici fetch and a failed dns.lookup wrapped
+ * by origin policy both carry a code-shaped cause. It becomes a mapped
+ * transport error that keeps only the cause code, so the attempt line logs
+ * `causeCode` and never the error itself. An error with no code-shaped cause
+ * is returned undefined and stays unmapped, which logs it as a handler defect.
+ */
+function upstreamFetchFailure(err: unknown): GrokTransportError | undefined {
+  const code = fetchCauseCode(err)
+  if (code === undefined) return undefined
+  return new GrokTransportError('provider_unavailable', 'upstream fetch failed', undefined, {
+    cause: { code },
+  })
 }
 
 /**
@@ -143,15 +164,42 @@ export type StreamGrokCompletionResult = {
   usage?: SafeUsage
 }
 
-export async function streamGrokCompletion(
-  input: StreamGrokCompletionInput
-): Promise<StreamGrokCompletionResult> {
-  const parsed = parseGrokCompletionRequestV1(input.request)
+/**
+ * The validated request, handed from the pre-dispatch checks to the upstream
+ * write. It is emptied as soon as the upstream body is built, so a live stream
+ * never keeps the parsed tree (up to LIMITS.maxRequestElements values) alive.
+ */
+type HeldRequest = { request: GrokCompletionRequest | undefined }
+
+/**
+ * Every check that needs the whole request, in a synchronous function: its
+ * locals end with the call, and only the model, the bounded deadline and the
+ * holder survive into the long-lived async frame of the stream.
+ */
+function prepareGrokCompletion(input: StreamGrokCompletionInput): {
+  held: HeldRequest
+  model: string
+  boundedDeadlineMs: number
+} {
+  const parsed = parseGrokCompletionRequest(input.request)
   if (!parsed.ok) {
+    // A `size` refusal (a byte budget, or the container, member or element
+    // bound) is payload_too_large; every other contract failure, including the
+    // image, message and tool-call counts, is invalid_request. Both codes stay
+    // literal for the contract-freeze scanner.
+    if (parsed.kind === 'size') throw new GrokTransportError('payload_too_large', parsed.message)
     throw new GrokTransportError('invalid_request', parsed.message)
   }
   const request = parsed.value
-  const digest = hashGrokCompletionRequestV1(request)
+  // buildGrokProxyEnvelope never emits an outer deadline for V2: the deadline
+  // travels inside the request, bound by its hash.
+  if (request.schemaVersion === SCHEMA_VERSION_V2 && input.deadlineMs !== undefined) {
+    throw new GrokTransportError(
+      'invalid_request',
+      'Visual request deadlines must be inside the authorized request'
+    )
+  }
+  const digest = hashGrokCompletionRequest(request)
   if (digest !== input.requestHash || input.ticket.requestHash !== input.requestHash) {
     throw new GrokTransportError('request_hash_mismatch', 'request hash does not match the ticket')
   }
@@ -164,6 +212,13 @@ export async function streamGrokCompletion(
     input.deadlineMs ?? request.deadlineMs,
     input.maxDeadlineMs
   )
+  return { held: { request }, model: request.model, boundedDeadlineMs }
+}
+
+export async function streamGrokCompletion(
+  input: StreamGrokCompletionInput
+): Promise<StreamGrokCompletionResult> {
+  const { held, model, boundedDeadlineMs } = prepareGrokCompletion(input)
   // A client that disconnected before dispatch must not consume the ticket:
   // nothing was redeemed, so there is no attempt receipt to finalize.
   if (input.signal?.aborted) {
@@ -172,11 +227,11 @@ export async function streamGrokCompletion(
   const redeemed = await input.redeem({
     executionTicket: input.executionTicket,
     requestHash: input.requestHash,
-    model: request.model,
+    model,
     hostRef: input.ticket.hostRef,
     operation: 'completion_stream',
   })
-  if (redeemed.transport.servedModel !== request.model) {
+  if (redeemed.transport.servedModel !== model) {
     await finalizeQuietly(input, redeemed, 'error')
     throw new GrokTransportError('model_not_allowed', 'served model does not match the request')
   }
@@ -190,7 +245,7 @@ export async function streamGrokCompletion(
   const started = Date.now()
   try {
     const streamed = await readUpstreamStream({
-      request,
+      held,
       accessToken,
       deadlineMs,
       idleTimeoutMs,
@@ -217,7 +272,7 @@ export async function streamGrokCompletion(
       throw err
     }
     outcome = 'error'
-    throw err
+    throw upstreamFetchFailure(err) ?? err
   } finally {
     void accessToken
     await finalizeQuietly(input, redeemed, outcome, usage)
@@ -287,7 +342,7 @@ export async function readUpstreamErrorHint(response: {
 }
 
 async function readUpstreamStream(input: {
-  request: GrokCompletionRequestV1
+  held: HeldRequest
   accessToken: string
   deadlineMs: number
   idleTimeoutMs: number
@@ -372,6 +427,25 @@ class UpstreamDeadline {
   }
 }
 
+/**
+ * Serialize the upstream body and empty the holder. Synchronous, so the tree
+ * and the intermediate payload are unreachable once it returns; only the
+ * serialized string and the tool-name map outlive the call.
+ */
+function buildUpstreamBody(held: HeldRequest): { names: ToolNameMap; body: string } {
+  const request = held.request
+  if (!request) throw new Error('the upstream request was already released')
+  const names = new ToolNameMap([
+    ...(request.tools ?? []).map(tool => tool.name),
+    ...request.messages.flatMap(message =>
+      message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
+    ),
+  ])
+  const body = JSON.stringify(toUpstreamPayload(request, names))
+  held.request = undefined
+  return { names, body }
+}
+
 async function dispatchUpstreamStream(
   input: Parameters<typeof readUpstreamStream>[0],
   deadline: UpstreamDeadline
@@ -382,12 +456,7 @@ async function dispatchUpstreamStream(
     'content-type': 'application/json',
     accept: 'text/event-stream',
   })
-  const names = new ToolNameMap([
-    ...(input.request.tools ?? []).map(tool => tool.name),
-    ...input.request.messages.flatMap(message =>
-      message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
-    ),
-  ])
+  const { names, body } = buildUpstreamBody(input.held)
   const response = await deadline.waitUpstream(
     fetchFrozenOrigin({
       url,
@@ -397,7 +466,7 @@ async function dispatchUpstreamStream(
         method: 'POST',
         signal,
         headers,
-        body: JSON.stringify(toUpstreamPayload(input.request, names)),
+        body,
       },
     }),
     signal
@@ -525,7 +594,7 @@ function isContextOverflowBody(text: string): boolean {
 }
 
 function toUpstreamPayload(
-  request: GrokCompletionRequestV1,
+  request: GrokCompletionRequest,
   names: ToolNameMap
 ): Record<string, unknown> {
   const instructions = request.messages
@@ -557,7 +626,25 @@ function toUpstreamPayload(
       }
       continue
     }
-    input.push({ role: message.role, content: message.content })
+    if ('contentParts' in message && message.contentParts) {
+      // Responses content items in the original order, detail:'high' on every
+      // image (xAI documents `input_image` with a data URL). The source
+      // provenance stays bound by the local hash and never goes upstream.
+      input.push({
+        role: message.role,
+        content: message.contentParts.map(part =>
+          part.type === 'text'
+            ? { type: 'input_text', text: part.text }
+            : {
+                type: 'input_image',
+                image_url: `data:${part.mimeType};base64,${part.data}`,
+                detail: 'high',
+              }
+        ),
+      })
+    } else {
+      input.push({ role: message.role, content: message.content })
+    }
   }
   const payload: Record<string, unknown> = {
     model: request.model,
@@ -995,7 +1082,7 @@ export async function listGrokModels(input: {
     })
   } catch (err) {
     if (signal.aborted) throw catalogTimeoutError()
-    throw err
+    throw catalogFetchFailure(err)
   }
   if (response.status === 401) return { outcome: 'auth-rejected', models: [] }
   if (!response.ok) {
@@ -1006,7 +1093,16 @@ export async function listGrokModels(input: {
     return { outcome: 'unavailable', models: [] }
   }
   const raw = await readBoundedCatalogBody(response, signal)
-  const body = JSON.parse(raw) as unknown
+  let body: unknown
+  try {
+    body = JSON.parse(raw)
+  } catch {
+    logger.warn(
+      { event: 'grok_catalog_upstream', reason: 'invalid_json' },
+      'Grok catalog upstream returned a body that is not JSON'
+    )
+    throw new GrokTransportError('provider_unavailable', 'catalog upstream body is not JSON')
+  }
   return { outcome: 'ready', models: normalizeModels(body) }
 }
 
@@ -1072,6 +1168,19 @@ function normalizeModels(body: unknown): CatalogModel[] {
   return models
 }
 
+// Review R3-L9: the admin route answers a catalog failure with a refusal line
+// that carries only the code, so the cause code of a failed fetch is logged
+// here before the mapped error is thrown.
+function catalogFetchFailure(err: unknown): unknown {
+  const failure = upstreamFetchFailure(err)
+  if (!failure) return err
+  logger.warn(
+    { event: 'grok_catalog_upstream', causeCode: fetchCauseCode(err) },
+    'Grok catalog upstream fetch failed'
+  )
+  return failure
+}
+
 function catalogTimeoutError(): GrokTransportError {
   return new GrokTransportError('provider_unavailable', 'catalog upstream deadline exceeded')
 }
@@ -1103,7 +1212,7 @@ async function readBoundedCatalogBody(response: Response, signal: AbortSignal): 
     await reader.cancel().catch(() => undefined)
     if (err instanceof GrokTransportError) throw err
     if (signal.aborted) throw catalogTimeoutError()
-    throw err
+    throw catalogFetchFailure(err)
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort)
     try {

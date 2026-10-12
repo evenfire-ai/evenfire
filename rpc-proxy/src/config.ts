@@ -1,3 +1,14 @@
+import { dirname, join } from 'node:path'
+import { parseVerifierMaterial } from '@clerum/jwt-key-policy'
+import { readDevVerifierMaterial, resolveDevKeyStoreDir } from '@clerum/jwt-key-policy/dev-store'
+
+const DEV_MODE_ENABLED = process.env.CLERUM_DEV_MODE === 'true'
+if (process.env.NODE_ENV === 'production' && DEV_MODE_ENABLED) {
+  throw new Error(
+    '[SECURITY] Startup rejected: CLERUM_DEV_MODE=true is not allowed with NODE_ENV=production.'
+  )
+}
+
 type Config = {
   port: number
   corsOrigin: string[] | '*'
@@ -12,6 +23,7 @@ type Config = {
   controlApiServiceName: string
   controlApiCacheTtlMs: number
   artifactDownloadMaxBytes: number
+  artifactDownloadTimeoutMs: number
   streamMaxLifetimeMs: number
   streamIntervalMs: number
   streamKeepaliveMs: number
@@ -28,7 +40,8 @@ type Config = {
   /**
    * Stateless wake-and-hold (Stage 5): a request hitting a down/draining
    * stateless host is parked while control-api wakes the pod, bounded by
-   * `wakeMaxHoldMs`. Readiness is re-checked every `wakePollMs` and the wake
+   * `wakeMaxHoldMs` (values above MAX_REQUEST_HOLD_MS are clamped at load).
+   * Readiness is re-checked every `wakePollMs` and the wake
    * is re-triggered every `wakeRetriggerMs` (covers a dropped HCC watch
    * event). See src/services/wakeAndHold.ts.
    */
@@ -97,10 +110,6 @@ function assertNotPlaceholder(label: string, value: string): void {
   }
 }
 
-function normalizePem(value: string): string {
-  return value.replace(/\\n/g, '\n').trim()
-}
-
 export function parseSandboxUiAllowedPorts(raw: string): ReadonlySet<number> {
   const ports = new Set<number>()
   for (const token of raw.split(',')) {
@@ -135,36 +144,82 @@ export function parseArtifactDownloadMaxBytes(rawMb: string): number {
   return bytes
 }
 
+/** Largest delay setTimeout/AbortSignal.timeout accept; above it they fire immediately. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
 export function parsePositiveIntMs(name: string, raw: string): number {
   const trimmed = raw.trim()
   const n = Number(trimmed)
   if (!Number.isInteger(n) || n < 1) {
     throw new Error(`${name} contains invalid value "${trimmed}" (must be a positive integer)`)
   }
+  if (n > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `${name} contains invalid value "${trimmed}" (must be at most ${MAX_TIMER_DELAY_MS} ms)`
+    )
+  }
   return n
 }
 
-const DEV_RPC_JWT_PUBLIC_KEY = normalizePem(`-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArCIYGHehMPpGKePxaKQa
-rDX5yrzifU5i4fzpI3EtkKSU6s5ug7EkKxc2DdMekoqXe9vr7qKyVwiilUIusXLX
-iW7KPMJlD/Fd5Bo7Qxt69wYiL5I4K37eDgCN6D3LduHySEnkhdI0GDpB4LM2ASOx
-QkEabepekZTMQyExmCIn/dHJ15B+4A9tiiephYOQNr3GcnW9eDomMt6NJLypikbr
-xJO6O7Ar0G+raTbflth8EQzWnGF+WgQW4iiM3wsFhpaE0mUlEbMGDGTMAZy1KfxA
-RRu+QZm3Lo+5AiCaHkijDCglHsXLhqsYi2AdRiavD1Gk9LKP/ztKw7q/D6fYFzmO
-QwIDAQAB
------END PUBLIC KEY-----`)
+/**
+ * Upper bound of one held request: it leaves room for a final upstream attempt
+ * before Desktop's own 60s deadline. The hold budget is capped here, at config
+ * load, so the configured value is the effective one.
+ */
+export const MAX_REQUEST_HOLD_MS = 48_000
+
+/**
+ * An operator-set value above the cap is clamped and warned about at boot.
+ * The built-in default equals the cap, so it never reaches the warning.
+ */
+export function parseWakeMaxHoldMs(raw: string): number {
+  const configuredMs = parsePositiveIntMs('RPC_PROXY_WAKE_MAX_HOLD_MS', raw)
+  if (configuredMs <= MAX_REQUEST_HOLD_MS) return configuredMs
+  console.warn(
+    `[RPC_PROXY] RPC_PROXY_WAKE_MAX_HOLD_MS=${configuredMs} exceeds the request hold cap; clamped to ${MAX_REQUEST_HOLD_MS}`
+  )
+  return MAX_REQUEST_HOLD_MS
+}
+
+function serviceRoot(): string {
+  // Works in every supported runtime: CommonJS (dist and ts-node) resolves
+  // __dirname to <service>/dist or <service>/src; Vitest's ESM transform falls
+  // back to the service working directory used by every test/npm script.
+  return typeof __dirname === 'string' && __dirname ? dirname(__dirname) : process.cwd()
+}
+
+/**
+ * Env var first; explicit dev mode loads the public half published next to the
+ * control-api signing key; every other mode fails closed. The resolved key is
+ * always fingerprint-checked so a historically committed public key is never
+ * accepted as a verifier.
+ */
+function resolveRpcJwtPublicKey(): string {
+  const envName = 'RPC_PROXY_JWT_PUBLIC_KEY'
+  const fromEnv = process.env[envName]
+  if (fromEnv) return parseVerifierMaterial(fromEnv, envName).publicPem
+  if (DEV_MODE_ENABLED) {
+    const storeDir = resolveDevKeyStoreDir(
+      join(serviceRoot(), '..', 'control-api'),
+      process.env.EVENFIRE_DEV_KEY_STORE
+    )
+    return readDevVerifierMaterial('rpc', storeDir).publicPem
+  }
+  return required(envName)
+}
 
 export const config: Config = {
   port: Number(process.env.RPC_PROXY_PORT || 8094),
   corsOrigin: parseCorsOrigin(
     requiredOrDevDefault('RPC_PROXY_CORS_ORIGIN', 'http://localhost:3000')
   ),
-  jwtPublicKey: normalizePem(
-    requiredOrDevDefault('RPC_PROXY_JWT_PUBLIC_KEY', DEV_RPC_JWT_PUBLIC_KEY)
-  ),
+  jwtPublicKey: resolveRpcJwtPublicKey(),
   jwtIssuer: requiredOrDevDefault('RPC_PROXY_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('RPC_PROXY_JWT_AUDIENCE', 'rpc-proxy'),
-  upstreamTimeoutMs: Number(process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS || 8000),
+  upstreamTimeoutMs: parsePositiveIntMs(
+    'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
+    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS || '8000'
+  ),
   maxTokenLength: Number(process.env.RPC_PROXY_MAX_TOKEN_LENGTH || 4096),
   allowedMethodPattern: new RegExp(
     process.env.RPC_PROXY_ALLOWED_METHOD_PATTERN || '^[a-zA-Z0-9_./:-]{1,120}$'
@@ -182,6 +237,10 @@ export const config: Config = {
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
+  ),
+  artifactDownloadTimeoutMs: parsePositiveIntMs(
+    'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '60000'
   ),
   streamMaxLifetimeMs: Number(process.env.RPC_PROXY_STREAM_MAX_LIFETIME_MS || 600000),
   streamIntervalMs: Number(process.env.RPC_PROXY_STREAM_INTERVAL_MS || 3000),
@@ -202,10 +261,7 @@ export const config: Config = {
   activityStreamMaxPerUserHost: Number(
     process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || 1
   ),
-  wakeMaxHoldMs: parsePositiveIntMs(
-    'RPC_PROXY_WAKE_MAX_HOLD_MS',
-    process.env.RPC_PROXY_WAKE_MAX_HOLD_MS || '90000'
-  ),
+  wakeMaxHoldMs: parseWakeMaxHoldMs(process.env.RPC_PROXY_WAKE_MAX_HOLD_MS || '48000'),
   wakePollMs: parsePositiveIntMs(
     'RPC_PROXY_WAKE_POLL_MS',
     process.env.RPC_PROXY_WAKE_POLL_MS || '2000'

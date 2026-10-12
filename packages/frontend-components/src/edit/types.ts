@@ -113,6 +113,7 @@ export interface MultiSelectItem {
   id: string
   label: ReactNode
   description?: ReactNode
+  title?: string
   searchText?: string
   disabled?: boolean
 }
@@ -136,4 +137,5 @@ export interface MultiSelectActionDialogProps {
   pending?: boolean
   error?: ReactNode
   size?: DialogSize
+  optionLayout?: 'stacked' | 'inline'
 }

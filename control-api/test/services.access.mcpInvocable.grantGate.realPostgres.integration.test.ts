@@ -7,6 +7,7 @@ import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { bootstrapSharedOAuthGrant, upsertOAuthGrant } from '../src/oauth/store.js'
 import { resolveInvocableMcpServersForContexts } from '../src/services/access/mcpInvocable.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 // T1 — the rpc-proxy grant-presence gate exercised end-to-end against grant
@@ -44,15 +45,18 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 
@@ -87,6 +91,11 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
     return g
   }
 
+  // The uid the gateway assigned to the server — what the consent callback seals
+  // the grant with and what the gate reads it back by.
+  const uidOf = async (g: MockGateway, name: string) =>
+    ((await g.getResource('mcpservers', name, NS)) as { metadata: { uid: string } }).metadata.uid
+
   const list = async (g: MockGateway, userId: string) =>
     (await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], userId, db)).map(s => s.name)
 
@@ -99,6 +108,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-u',
+      crUid: await uidOf(g, 'gdrive-u'),
       userId: 'alice',
       oauthClientId: CLIENT_ID,
       provider: 'google',
@@ -118,6 +128,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-s',
+      crUid: await uidOf(g, 'gdrive-s'),
       contextId: 'ctx-1',
       oauthClientId: CLIENT_ID,
       bootstrappedByUserId: 'bob',
@@ -140,6 +151,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-w',
+      crUid: await uidOf(g, 'gdrive-w'),
       userId: 'dave',
       oauthClientId: CLIENT_ID,
       provider: 'google',
@@ -154,6 +166,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-w',
+      crUid: await uidOf(g, 'gdrive-w'),
       contextId: 'ctx-1',
       oauthClientId: CLIENT_ID,
       bootstrappedByUserId: 'erin',
@@ -171,6 +184,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-x',
+      crUid: await uidOf(g, 'gdrive-x'),
       userId: 'carol',
       oauthClientId: CLIENT_ID,
       provider: 'google',

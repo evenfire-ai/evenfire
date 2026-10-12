@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
-  type GrokCompletionRequestV1,
+  GROK_VISUAL_LIMITS,
+  type GrokCompletionRequest,
+  type GrokCompletionRequestV2,
   LIMITS,
   hashCanonicalGrokRequest,
 } from '@clerum/grok-provider-attempt-contract'
@@ -13,11 +15,16 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
+import {
+  attachmentBudgetRefusalMessageFor,
+  buildAttachmentBudgetRefusals,
+} from './attachmentBudgetRefusal'
 import { classifyUnknown } from './errorClassification'
 import { GrokLlmProxyClient, GrokProxyError } from './grokLlmProxyClient'
+import { IMAGE_SOURCE_INVALID, canonicalRefusalCode, projectMessage } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
-import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
-import type { LlmProvider } from './registryCore'
+import { authorizeRetryDelayMs, rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
+import { type LlmProvider, descriptorFor } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export type GrokAttemptContext = {
@@ -35,59 +42,23 @@ export type GrokAttemptContext = {
 }
 
 /**
- * The contract `limit` refusals that mean "this turn carries too much".
- *
- * The Grok twin of `CONTEXT_LENGTH_REFUSALS` in `codexSubscription.ts`. The two
- * are deliberate duplicates, not an accident: the header of
- * `grok-provider-attempt-contract/index.cjs` states that this package does
- * not import the Codex contract's LIMITS, and a
- * shared predicate would either recreate that coupling or pin prose rather than
- * code. The cost of the duplication is that each copy needs its own tests, which
- * is what T-C-grok, T-C2-grok, T-C3-grok and T-C5-grok are for. If you change
- * one list, read the other.
- *
- * `fail('limit', …)` guards eight checks here too, and only these are about
- * volume: the real byte bound (`parseGrokCompletionRequestV1`), the element
- * bound that proxies it (`checkStructure`), and `maxMessages` and
- * `messages[i].toolCalls` (both in `parseMessages`).
- * All four are "this conversation is too long", which is exactly what
- * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
- * Compaction reaches them unevenly. The context manager counts bytes and,
- * through the registry's `maxMessages`, the message count, so it compacts
- * before either bound; a single turn holding more than `maxMessages`
- * messages stays unshrinkable, because the cut never lands inside a turn.
- * `maxToolCalls` also bounds every response, so only history produced by
- * another provider can carry an over-long `toolCalls` array.
- *
- * The other four are not. Nesting depth (`checkStructure`, `assertFiniteTree`),
- * `generation.maxOutputTokens` (`parseGeneration`) and `deadlineMs`
- * (`parseGrokCompletionRequestV1`) out of range are malformed or out-of-range
- * parameters, and a shorter conversation fixes none of them; labelling them a
- * context-length failure would send the user into a compaction loop that
- * cannot converge. They stay `invalid_request`, which is what "fails an
- * over-deep tool schema locally without a stack overflow" in
- * `subscriptionRequestHash.test.ts` pins for the over-deep schema across both
- * providers.
- *
- * `hashCanonicalGrokRequest` returns `{ ok, code, message }` and nothing else,
- * so the message is the only discriminator available at this boundary (#731).
- * The byte pattern is a prefix so it keeps matching the element bound's own
- * distinct wording.
- *
- * `messages exceed` is defence in depth rather than a reachable branch: the
- * guard in `execute` raises that exact message with this same classification
- * before `hashCanonicalGrokRequest` runs, so the contract's own copy of it only
- * arrives here if that guard is ever removed.
+ * The Grok image budget refusals, built from the Grok contract limits (see
+ * `buildAttachmentBudgetRefusals`). Grok has no dimension or pixel limit, so
+ * the table has only the per-image, total and whole-body rows (#784).
  */
-const CONTEXT_LENGTH_REFUSALS = [
-  /^request exceeds maxRequestBodyBytes/,
-  /^messages exceed \d+$/,
-  /^messages\[\d+\]\.toolCalls exceed \d+$/,
-]
+const ATTACHMENT_BUDGET_REFUSALS = buildAttachmentBudgetRefusals({
+  maxImageBytes: GROK_VISUAL_LIMITS.maxImageBytes,
+  maxTotalImageBytes: GROK_VISUAL_LIMITS.maxTotalImageBytes,
+  maxVisualRequestBodyBytes: LIMITS.maxVisualRequestBodyBytes,
+})
 
-function isContextLengthRefusal(code: string, message: string): boolean {
-  return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
-}
+/**
+ * Pre-authorize rejections. These are known, non-retryable codes: the request
+ * itself cannot succeed, so neither may trigger a retry or a provider fallback.
+ */
+const GROK_REQUEST_INVALID = 'invalid_request'
+/** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
+const GROK_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
 
 function mapGrokUsage(usage?: { inputTokens: number; outputTokens: number }): {
   usage: { input_tokens: number; output_tokens: number; total_tokens: number }
@@ -160,6 +131,8 @@ function assertTerminalGrokOutcome(result: {
 }
 
 export class GrokSubscriptionProvider implements SingleTurnProvider {
+  readonly requiresImageSourceIdentity =
+    descriptorFor('grok-subscription').requiresImageSourceIdentity === true
   private nextProviderAttemptIndex = 1
 
   constructor(
@@ -270,6 +243,31 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
       // budget. A retry or a failover would spend it again on the same turn.
       return {
         code: LlmErrorCode.StreamDurationExceeded,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    if (code === GROK_ATTACHMENT_TOO_LARGE) {
+      // An attached image broke a contract image budget. A shorter
+      // conversation cannot fix it and neither can another provider, so it is
+      // terminal; the message already names the limit for the user.
+      return {
+        code: LlmErrorCode.InvalidAttachment,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    if (code === IMAGE_SOURCE_INVALID) {
+      // A host producer attached an image with no usable provenance source. The
+      // same messages fail the same way on every provider, so it is terminal:
+      // neither a retry nor a failover can fix it. The arm is explicit so a
+      // change to the generic arm below cannot make it retryable.
+      return {
+        code: LlmErrorCode.ApiCallFailed,
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
@@ -446,19 +444,29 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
     // requestHash mismatch. An invalid request never leaves the process.
     const canonical = hashCanonicalGrokRequest(this.buildRequest(messages, tools, options))
     if (!canonical.ok) {
-      // A size refusal (bytes, element bound, message count, tool-call count)
-      // is a context-length failure, not a malformed request; it is thrown
-      // before authorize and dispatch so no provider attempt is spent.
-      // Reported as `invalid_request` it reached the UI as "Connection Error",
-      // a label that reads as transient, and invited a retry that reproduced it
-      // (#731). The message-count guard above already used this classification, and #728
-      // left this path behind when it added that guard.
-      throw new CodexAuthorizeError(
-        isContextLengthRefusal(canonical.code, canonical.message)
-          ? 'request_limit_exceeded'
-          : 'invalid_request',
-        canonical.message
-      )
+      // A conversation-volume refusal (bytes, element bound, message count,
+      // tool-call count) is a context-length failure, not a malformed request;
+      // it is thrown before authorize and dispatch so no provider attempt is
+      // spent. Reported as `invalid_request` it reached the UI as "Connection
+      // Error", a label that reads as transient, and invited a retry that
+      // reproduced it (#731). The message-count guard above already used this
+      // classification, and #728 left this path behind when it added that
+      // guard. An image budget is an attachment failure with its own
+      // user-facing message (#784). Any other `size` refusal stays
+      // `payload_too_large`, which reaches the user as a context-length
+      // failure. The order is the Codex one.
+      const attachmentRefusal =
+        canonical.code === 'limit'
+          ? attachmentBudgetRefusalMessageFor(
+              ATTACHMENT_BUDGET_REFUSALS,
+              canonical.message,
+              messages.some(message => message.contentParts?.some(part => part.type === 'image'))
+            )
+          : undefined
+      if (attachmentRefusal !== undefined) {
+        throw new CodexAuthorizeError(GROK_ATTACHMENT_TOO_LARGE, attachmentRefusal)
+      }
+      throw new CodexAuthorizeError(canonicalRefusalCode(canonical), canonical.message)
     }
     const { request, requestHash } = canonical.value
     const context = this.deps.attemptContext({ model: this.model })
@@ -515,12 +523,17 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
       // after that delay, under a new authorize: a redeemed ticket cannot be
       // reused. The 429 may come from the proxy or from control-api's
       // authorize limiter (G1-11). A caller that pins the attempt index owns
-      // its own retries.
+      // its own retries. control-api's authorize_capacity_exceeded, refused
+      // before any read, is retried once the same way (M-A, review
+      // 5426789128); a proxy error of that name is not.
       const waitMs =
-        context.providerAttemptIndex === undefined &&
-        (err instanceof GrokProxyError || err instanceof CodexAuthorizeError)
-          ? rateLimitRetryDelayMs(err.code, err.retryAfterMs)
-          : undefined
+        context.providerAttemptIndex !== undefined
+          ? undefined
+          : err instanceof CodexAuthorizeError
+            ? authorizeRetryDelayMs(err.code, err.retryAfterMs)
+            : err instanceof GrokProxyError
+              ? rateLimitRetryDelayMs(err.code, err.retryAfterMs)
+              : undefined
       if (waitMs === undefined) throw err
       await waitBeforeRetry(waitMs, options?.signal)
       // The wait stops watching the signal once its timer fires: an abort in
@@ -534,28 +547,14 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
     messages: CoreChatMessage[],
     tools: ToolDefinition[] | undefined,
     options?: { max_tokens?: number; temperature?: number; tool_choice?: string }
-  ): GrokCompletionRequestV1 {
-    const request: GrokCompletionRequestV1 = {
-      schemaVersion: 'grok-completion-request.v1',
+  ): GrokCompletionRequest {
+    const projectedMessages = messages.map(message => projectMessage(message, GROK_REQUEST_INVALID))
+    const request: Omit<GrokCompletionRequestV2, 'schemaVersion'> = {
       requestId: randomUUID(),
       idempotencyKey: randomUUID(),
       provider: 'grok-subscription',
       model: this.model,
-      messages: messages.map(message => ({
-        role: message.role,
-        content: message.content ?? '',
-        ...(message.name ? { name: message.name } : {}),
-        ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
-        ...(message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0
-          ? {
-              toolCalls: message.tool_calls.map(call => ({
-                id: call.id,
-                name: call.name,
-                arguments: call.arguments,
-              })),
-            }
-          : {}),
-      })),
+      messages: projectedMessages,
     }
     if (tools && tools.length > 0) {
       // Presentation is owned by the agent loop. Preserve its final definitions
@@ -587,6 +586,12 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
           : {}),
       }
     }
-    return request
+    // V1 stays byte-identical for a turn with no contentParts. One message with
+    // parts, even text-only parts left by redaction, moves the whole request to
+    // V2, the only version that carries them.
+    if (!projectedMessages.some(message => message.contentParts !== undefined)) {
+      return { schemaVersion: 'grok-completion-request.v1', ...request }
+    }
+    return { schemaVersion: 'grok-completion-request.v2', ...request }
   }
 }

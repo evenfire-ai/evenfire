@@ -1,18 +1,30 @@
 import type { ReactNode } from 'react'
 import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
-import { renderHook } from '@testing-library/react'
+import { act, renderHook } from '@testing-library/react'
+import type { HostAuthorityHoldKind } from '../../../../lib/hostAuthorityStore'
 import { useAgentChatController } from '../../useAgentChatController'
+import { type HarnessHostAuthority, useHarnessHostAuthority } from './hostAuthorityHarness'
 
 type ControllerParams = Parameters<typeof useAgentChatController>[0]
 
 export interface RenderControllerResult {
   result: ReturnType<
-    typeof renderHook<ReturnType<typeof useAgentChatController>, ControllerParams>
+    typeof renderHook<ReturnType<typeof useAgentChatController>, Partial<ControllerParams>>
   >['result']
   rerender: (props?: Partial<ControllerParams>) => void
   unmount: () => void
-  params: ControllerParams
+  params: Partial<ControllerParams>
+  /**
+   * The mount's Host authority, from the production store factory. Only
+   * meaningful when the test did not override the authority params.
+   */
+  hostAuthority: {
+    hold: (agentRef: string, kind: HostAuthorityHoldKind) => void
+    release: (agentRef: string) => void
+    getEpoch: (agentRef: string) => number
+    isBlocked: (agentRef: string) => boolean
+  }
   spies: {
     pushToast: ReturnType<typeof vi.fn>
     pushNotification: ReturnType<typeof vi.fn>
@@ -30,6 +42,9 @@ export interface RenderControllerResult {
  * (`useAgentChatController.ts:492`) does NOT auto-switchToChat on mount —
  * tests that exercise `switchToChat` / `sendAgentMessage` control the chat
  * explicitly. Pass `navItem: 'chat'` to exercise the auto-select path.
+ *
+ * Host authority defaults to `useHarnessHostAuthority`, the production store
+ * factory, so epoch comparisons in the controller are exercised for real.
  */
 export function renderController(
   overrides: Partial<ControllerParams> = {}
@@ -43,10 +58,12 @@ export function renderController(
     canDeliverChatResponseNotification: vi.fn(() => true),
   }
 
-  const params = {
+  const params: Partial<ControllerParams> = {
     selectedAgent: 'agent-x',
     agentNames: ['agent-x'],
     currentTeamId: 'team-1',
+    chatAuthorityTeamId: 'team-1',
+    currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team 1',
     isAuthenticated: true,
     loadMenuData: true,
@@ -60,18 +77,38 @@ export function renderController(
     openAgentConversationFromNotification: spies.openAgentConversationFromNotification,
     decideApprovalFromNotification: spies.decideApprovalFromNotification,
     ...overrides,
-  } as ControllerParams
+  }
+
+  let authority: HarnessHostAuthority | null = null
+  const currentAuthority = (): HarnessHostAuthority => {
+    if (!authority) throw new Error('controller is not mounted')
+    return authority
+  }
 
   // Post-D.3 the controller reads the task tracker from context and registers
   // its own onTerminal/onSuspended callbacks, so the provider must wrap it. No
   // callbacks are injected here — the controller owns them (it has pushToast,
   // pushNotification, chatStore and the visibility refs).
-  const utils = renderHook((p: ControllerParams) => useAgentChatController(p), {
-    initialProps: params,
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>
-    ),
-  })
+  const utils = renderHook(
+    (p: Partial<ControllerParams>) => {
+      const hostAuthority = useHarnessHostAuthority()
+      authority = hostAuthority
+      return useAgentChatController({
+        onHostAccessRevoked: hostAuthority.onHostAccessRevoked,
+        onHostAuthorityUncertain: hostAuthority.onHostAuthorityUncertain,
+        isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
+        getHostAuthorityEpoch: hostAuthority.getHostAuthorityEpoch,
+        hostAuthorityRevision: hostAuthority.revision,
+        ...p,
+      } as ControllerParams)
+    },
+    {
+      initialProps: params,
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>
+      ),
+    }
+  )
 
   return {
     result: utils.result,
@@ -79,6 +116,20 @@ export function renderController(
       utils.rerender({ ...params, ...(props ?? {}) }),
     unmount: utils.unmount,
     params,
+    hostAuthority: {
+      hold: (agentRef, kind) =>
+        act(() => {
+          const hostAuthority = currentAuthority()
+          if (kind === 'revoked') hostAuthority.onHostAccessRevoked(agentRef)
+          else hostAuthority.onHostAuthorityUncertain(agentRef)
+        }),
+      release: agentRef =>
+        act(() => {
+          currentAuthority().release(agentRef)
+        }),
+      getEpoch: agentRef => currentAuthority().store.getEpoch(agentRef),
+      isBlocked: agentRef => currentAuthority().store.isBlocked(agentRef),
+    },
     spies,
   }
 }

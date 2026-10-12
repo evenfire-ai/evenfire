@@ -82,6 +82,44 @@ describe('tool execution deadline', () => {
     expect(await pending).toBe(reason)
     expect(vi.getTimerCount()).toBe(0)
   })
+  it.each(['task cancellation', 'tool timeout'] as const)(
+    'joins a managed producer after %s until its actual operation settles',
+    async cause => {
+      vi.useFakeTimers()
+      const parent = new AbortController()
+      let signal: AbortSignal | undefined
+      let settle!: () => void
+      const cleanup = new Promise<void>(resolve => {
+        settle = resolve
+      })
+      let finished = false
+      const pending = executeWithTimeout(
+        tool({
+          joinsAbortSettlement: () => true,
+          execute: async (_, ctx) => {
+            signal = ctx?.signal
+            await cleanup
+            return { content: 'Producer cleanup finished', is_error: true, duration_ms: 0 }
+          },
+        }),
+        {},
+        context,
+        100,
+        parent.signal
+      ).then(output => {
+        finished = true
+        return output
+      })
+
+      if (cause === 'task cancellation') parent.abort(new Error('task cancelled'))
+      await vi.advanceTimersByTimeAsync(500)
+      expect(signal?.aborted).toBe(true)
+      expect(finished).toBe(false)
+      settle()
+      await expect(pending).resolves.toMatchObject({ content: 'Producer cleanup finished' })
+      expect(vi.getTimerCount()).toBe(0)
+    }
+  )
   it.each([-1, NaN, Infinity, 2_147_483_647])(
     'rejects invalid cleanup allowance %s before execution',
     async cleanup => {

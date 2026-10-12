@@ -1,0 +1,32 @@
+{
+  "status": 200,
+  "body": {
+    "transport": {
+      "status": "alive",
+      "probedUrl": "https://mcp.linear.app/mcp",
+      "httpStatus": 401,
+      "challenge": true
+    },
+    "callback": {
+      "configured": true,
+      "variant": "shared",
+      "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote"
+    },
+    "detected": {
+      "registrationMode": "cimd",
+      "endpoints": {
+        "authorization": "https://mcp.linear.app/authorize",
+        "token": "https://mcp.linear.app/token",
+        "registration": "https://mcp.linear.app/register"
+      },
+      "resource": "https://mcp.linear.app/mcp",
+      "issuer": "https://mcp.linear.app",
+      "issForCallback": "https://mcp.linear.app",
+      "scopes": ["read", "write"],
+      "quirks": {
+        "bearerInBody": false,
+        "supportsRefresh": true
+      }
+    }
+  }
+}

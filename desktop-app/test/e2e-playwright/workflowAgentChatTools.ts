@@ -97,10 +97,6 @@ export async function captureE2eEvidence(
   await testInfo.attach(fileName, { path: screenshotPath, contentType: 'image/png' })
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 function sqlLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
@@ -286,11 +282,12 @@ export async function enterChatllmChat(page: Page): Promise<void> {
 export async function startFreshThread(page: Page): Promise<void> {
   await openAgentsPage(page)
   await humanRecordedPause([320, 780])
+  // The fleet table labels its controls with the agent display name (e.g. "chatLLM",
+  // FleetBoard.tsx), not the host ref, so find the menu inside the row that shows the ref.
   const moreActions = page
-    .getByRole('button', {
-      name: new RegExp(`^More actions for ${escapeRegExp(CHATLLM_HOST_REF)}$`),
-    })
+    .locator('.agents-table-row-clickable', { hasText: CHATLLM_HOST_REF })
     .first()
+    .getByRole('button', { name: /^More actions for / })
   await expect(moreActions).toBeVisible({ timeout: 30_000 })
   await humanClick(moreActions, { afterMs: [260, 620] })
   const newChat = page.getByRole('button', { name: /^New chat$/ }).first()

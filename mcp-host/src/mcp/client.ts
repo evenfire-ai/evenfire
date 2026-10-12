@@ -167,11 +167,39 @@ export class McpClient {
   }
 
   /**
+   * A REMOTE server (mini-spec 19 §D-2) is an off-cluster upstream reached
+   * THROUGH the HCC's own nginx egress proxy. Its `transport.url` is that
+   * proxy's in-cluster Service (http by design); the external destination lives
+   * in the CR's `spec.remote.baseUrl`, which control-api/HCC SSRF-validate and
+   * never project here. So this internal hop is trusted exactly like the
+   * MCP_PROXY_URL rail and the in-cluster DNS fallback — it is NOT SSRF-guarded
+   * or pinned. The only behavior that forks on `remote` is the MCP_PROXY_URL
+   * bypass (see usesProxyRail): a remote server egresses through the HCC proxy,
+   * not `${proxyUrl}/servers/…`.
+   */
+  private isRemoteServer(): boolean {
+    return this.serverConfig.remote === true
+  }
+
+  /**
+   * Whether this connection routes through the in-cluster MCP_PROXY_URL rail. A
+   * remote server bypasses it EXPLICITLY: its egress goes through the HCC's own
+   * nginx proxy (per-user Bearer passthrough, D-2), not `${proxyUrl}/servers/…`,
+   * and its transport type is driven by discovery — not forced to StreamableHTTP
+   * by the presence of the (unused) proxy rail.
+   */
+  private usesProxyRail(): boolean {
+    // Truthy check preserves the original `if (this.proxyUrl)` semantics (an
+    // empty proxyUrl is "no proxy"); the remote bypass is the only new condition.
+    return !!this.proxyUrl && !this.isRemoteServer()
+  }
+
+  /**
    * Create the appropriate transport based on server configuration.
    */
   private resolveUrl(): string {
     const { transport } = this.serverConfig
-    if (this.proxyUrl) {
+    if (this.usesProxyRail()) {
       const url = `${this.proxyUrl}/servers/${this.serverConfig.name}/mcp`
       console.log(`[MCP:${this.name}] Using proxy URL: ${url}`)
       return url
@@ -185,13 +213,26 @@ export class McpClient {
 
     // currentAuthToken is resolved per (re)connect in connect() below; a
     // representative (token-less) connection leaves it undefined → no header.
+    //
+    // Header vs body (mini-spec 19 §D-8, DEC-24): `serverConfig.bearerInBody`
+    // flows end-to-end (HCC → decoder → here) but the token still goes in the
+    // header for EVERY server. Body injection is deferred on purpose: a resource
+    // advertising `bearer_methods_supported:["body"]` (SEMrush) has NO defined
+    // wire shape for an MCP StreamableHTTP request — RFC 6750 §2.2 "body" is a
+    // form-encoded `access_token`, incompatible with the JSON-RPC
+    // `application/json` body the SDK sends. Committing to a field would invent
+    // SEMrush's contract; it must be pinned by a real probe first. The SDK does
+    // support the mechanism (a custom `fetch` in the transport opts could rewrite
+    // the outgoing request), so this is a contract gap, not an SDK limitation. No
+    // live pilot (Notion/Canva/Linear/Sentry) uses body-bearer, so the rail is
+    // unaffected.
     if (this.currentAuthToken) {
       headers['Authorization'] = `Bearer ${this.currentAuthToken}`
     }
 
     const targetUrl = this.resolveUrl()
 
-    if (this.proxyUrl || transport.type === 'streamableHttp') {
+    if (this.usesProxyRail() || transport.type === 'streamableHttp') {
       console.log(`[MCP:${this.name}] Using Streamable HTTP transport`)
       return new StreamableHTTPClientTransport(new URL(targetUrl), {
         requestInit: {

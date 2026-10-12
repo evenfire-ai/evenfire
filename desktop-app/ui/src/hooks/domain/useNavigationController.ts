@@ -178,6 +178,7 @@ export function useNavigationController() {
           gfsUri: preview.gfsUri,
           fileKind: preview.kind,
           byteLength: preview.bytes,
+          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
           ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
         })
       )

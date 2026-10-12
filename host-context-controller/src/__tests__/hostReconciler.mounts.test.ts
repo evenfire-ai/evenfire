@@ -172,6 +172,8 @@ function runtimeSecretAnnotations(host = makeHost(), refreshBefore = '2999-01-01
     'clerum.io/gfs-token-host-uid': host.uid!,
     'clerum.io/runtime-token-refresh-before': refreshBefore,
     'clerum.io/gfs-token-refresh-before': '2999-01-01T00:00:00.000Z',
+    'clerum.io/runtime-token-has-channel-ingress': 'false',
+    'clerum.io/runtime-token-fronts-oauth-server': 'false',
   }
 }
 
@@ -182,7 +184,18 @@ function deploymentWithRevision(
   replicas = 1
 ): k8s.V1Deployment {
   return {
-    metadata: { name: 'team-mission', namespace: 'mcp-host' },
+    metadata: {
+      name: 'team-mission',
+      namespace: 'mcp-host',
+      generation: 1,
+      uid: 'team-mission-deployment-uid',
+      resourceVersion: '1',
+      labels: {
+        'clerum.io/managed-by': 'host-context-controller',
+        'clerum.io/host': 'team-mission',
+      },
+      annotations: { 'clerum.io/host-uid': 'team-mission-uid' },
+    },
     spec: {
       replicas,
       template: {
@@ -192,7 +205,7 @@ function deploymentWithRevision(
         spec: { containers: [] },
       },
     },
-    status: { readyReplicas },
+    status: { observedGeneration: 1, replicas, updatedReplicas: replicas, readyReplicas },
   } as unknown as k8s.V1Deployment
 }
 
@@ -233,6 +246,7 @@ function runtimeSecretReconciler(opts: {
   const reconciler = new HostReconciler(makeStubKc(), {
     coreApi: coreApi as unknown as k8s.CoreV1Api,
     appsApi: appsApi as unknown as k8s.AppsV1Api,
+    isCommunicationChannelCacheSynced: () => true,
   })
   return { reconciler, coreApi, appsApi }
 }
@@ -368,7 +382,15 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     expect(result.revision).toBe(currentSecretRevision)
     expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
-    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+    // Applied-target bookkeeping is one CAS write, with no credential change.
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledOnce()
+    const applied = replacedRuntimeSecret(coreApi)
+    expect(applied.metadata?.annotations?.[BOOTSTRAP_STATE_KEY]).toBe('fresh')
+    expect(applied.data).toEqual(secret.data)
+    Object.assign(secret, applied, {
+      metadata: { ...applied.metadata, resourceVersion: '20' },
+    })
+    coreApi.replaceNamespacedSecret.mockClear()
 
     deployment.status!.readyReplicas = 1
     await (
@@ -1256,6 +1278,7 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
     const stubKc = makeStubKc()
     const reconciler = new HostReconciler(stubKc, {
       resolveContextMounts,
+      isCommunicationChannelCacheSynced: () => true,
       // Stub APIs to capture the Deployment body and ack everything.
       coreApi: {
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(),

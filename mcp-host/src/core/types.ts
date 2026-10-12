@@ -6,7 +6,10 @@
  *
  * Phase 1: Pure type definitions — no runtime behavior changes.
  */
+import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
+import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
 // ─── Message Types ──────────────────────────────────────────
@@ -32,6 +35,9 @@ export type MessageContentPart =
       data: string
       /** Extra source copy, omitted from the legacy view while another current frame represents it. */
       sourceIdentityOnly?: true
+      /** Producer-measured image shape; used by provider-attempt policy without redecoding. */
+      width?: number
+      height?: number
       /**
        * Optional so pre-#650 producers and provider translators keep compiling;
        * `codexSubscription` rejects an image part without a usable source
@@ -61,6 +67,13 @@ export interface ChatMessage {
   tool_call_id?: string
   name?: string
   tool_calls?: ToolCall[] | null
+  /**
+   * Provider reasoning that must accompany the assistant tool call on the next
+   * OpenAI-compatible request. ZAI GLM reasoning models require this field to
+   * remain on the same tool-call message; it is absent for providers that do
+   * not return reasoning.
+   */
+  reasoning_content?: string | null
   /**
    * IronClaw invariant #2 (P.3, Opción D): lateral field that points at a
    * spillover blob written by T1.5. `content` always stays a string (a rich
@@ -130,6 +143,42 @@ export interface Attachment {
   producer?: string
   /** Producer-validated provenance; never supplied by model arguments. */
   visualSource?: GfsImageSource
+  /** Inline `kind:'file'` only: media type the host detected from the bytes. */
+  detectedMediaType?: string
+  /** Inline `kind:'file'` only: digest the host recomputed and verified. */
+  digest?: FileReferenceDigest
+  /**
+   * Inline `kind:'file'` only, set by admission. Internal: it is described to
+   * the model through the turn context and never serialized as content.
+   */
+  fileReference?: FileReferenceV1
+}
+
+/** #666 R4-M2 — file-attachment metadata kept for durable resume, no bytes. */
+export type ResumeFileAttachment = Omit<Attachment, 'dataBase64'> & { kind: 'file' }
+
+/**
+ * #666 R4-M2 — the source message persisted with an approval so a cold
+ * restart rebuilds the file-reference pins and attachment lines. Image
+ * attachments are dropped (their content lives in the frozen snapshot) and
+ * inline file bytes (dataBase64) never persist.
+ */
+export type ResumeSourceMessage = Pick<
+  HostIncomingMessage,
+  | 'content'
+  | 'channelType'
+  | 'channelId'
+  | 'sender'
+  | 'timestamp'
+  | 'messageId'
+  | 'hostRef'
+  | 'threadId'
+  | 'imageModel'
+  | 'fileReferenceResolutions'
+> & {
+  /** Only the team scope survives; the channel's raw payload is not persisted. */
+  metadata?: { teamId: string }
+  attachments?: ResumeFileAttachment[]
 }
 
 // ─── Completion Types ───────────────────────────────────────
@@ -226,6 +275,7 @@ export interface ToolCompletionRequest {
 export interface ToolCompletionResponse {
   content: string | null
   tool_calls: ToolCall[] | null
+  reasoning_content?: string | null
   usage: TokenUsage
   /** True only when the provider response carried authoritative token counters. */
   usage_reported?: boolean
@@ -245,7 +295,13 @@ export interface ReasoningContext {
 
 export type RespondResult =
   | { type: 'text'; content: string }
-  | { type: 'tool_calls'; calls: ToolCall[]; content?: string; usage?: TokenUsage }
+  | {
+      type: 'tool_calls'
+      calls: ToolCall[]
+      content?: string
+      reasoning_content?: string | null
+      usage?: TokenUsage
+    }
   | { type: 'need_approval'; approval: PendingApproval }
   | { type: 'error'; error: Error }
 
@@ -258,6 +314,8 @@ export interface ToolResult {
   is_error: boolean
   attachments?: Attachment[]
   metadata?: Record<string, unknown>
+  /** Token estimate of the final model-visible message; not part of its content. */
+  emittedMessageCost?: number
   /**
    * Pre-sanitization content for user-facing output preview.
    * WARNING: bypasses the XML safety wrapper. Do NOT use in LLM messages.
@@ -270,6 +328,12 @@ export interface ToolResult {
    * resume time. Undefined for inline results.
    */
   spillover_ref?: string
+  /**
+   * Set only by a trusted tool's `finalizeResult` (after the safety transform):
+   * the turn ends after this batch with `message` as the reply, and no further
+   * model call is made. Later calls of the batch are answered without running.
+   */
+  stopTurn?: { message: string }
 }
 
 export interface ToolOutput {
@@ -381,6 +445,14 @@ export interface Conversation {
   turns: Turn[]
   pending_approval?: PendingApproval
   auto_approved_tools: Set<string>
+  /**
+   * Session-scoped tools (SESSION_SCOPED_APPROVAL_TOOLS) approved without
+   * "always" during the current task. Every later call of the task proceeds,
+   * including after resumes; `startTurn` clears it when the next user message
+   * starts a new task. Ephemeral (like `auto_approved_tools`): not persisted,
+   * so a cold resume asks again. Absent until the first such approval.
+   */
+  task_approved_tools?: Set<string>
   /**
    * Guardrail doom-loop counter (spec §6.4) — tracks consecutive identical
    * `(resolved tool, effective-input)` tool calls across turns within a task.
@@ -494,8 +566,9 @@ export interface ContextBreakdown {
      * active (the stable bridge), this reflects natives + the 3 bridge tools
      * only — deferrable MCP schemas LEAVE this array and instead appear
      * transiently in `messages` via `clerum__tool_describe` / `clerum__tool_call`
-     * outputs. So a sharp drop here when the bridge engages is expected, not a
-     * breakdown bug.
+     * outputs. With native `auto` (#1003) the natives larger than the native
+     * discovery budget leave it the same way. So a sharp drop here when either
+     * engages is expected, not a breakdown bug.
      */
     systemTools: number
     metaContext: number
@@ -577,12 +650,23 @@ export interface TaskExecutionBudgetSnapshot {
   maxIterations: number
   /** Cumulative source-read work; payloads are not durable task budget data. */
   visualReadBytes?: number
+  /**
+   * C15/C16 — the turn's attachment read ledger, carried inside this existing
+   * JSON column. Data-only counts; no file bytes, no content.
+   */
+  attachmentReadLedger?: AttachmentReadLedgerSnapshot
 }
 
 export interface PendingApproval {
   task_budget?: TaskExecutionBudgetSnapshot
   /** Set only by reconstruction of migration-marked legacy rows. */
   legacy_budget?: boolean
+  /**
+   * Consent expansion. New ordinary approvals use `turn_tools`; high-risk
+   * exact-call paths use `exact_invocation`. Legacy NULL rows are treated as
+   * exact because their original expansion cannot be proven.
+   */
+  authorization_scope?: 'turn_tools' | 'exact_invocation'
   /** Internal atomic replacement instruction; not persisted in the snapshot. */
   replaces_request_id?: string
   request_id: string
@@ -601,6 +685,12 @@ export interface PendingApproval {
   /** Attachments collected before suspension. Kept off the LLM message context
    *  but preserved across approval resume so response-file downloads survive. */
   attachments?: Attachment[]
+  /**
+   * #666 R4-M2 — the sanitized source message persisted with the approval so a
+   * cold restart rebuilds the file-reference pins and attachment metadata.
+   * Inline attachment bytes (dataBase64) are stripped before persisting.
+   */
+  sourceMessage?: ResumeSourceMessage
   /** Intent summary (LLM's explanation of why this tool was called),
    *  captured at suspend time so resumeAfterApproval can preserve it on the
    *  re-emitted tool_start event. */
@@ -627,7 +717,7 @@ export type LoopResult =
   | { type: 'error'; error: Error }
   | {
       type: 'exhaustion'
-      reason?: 'iteration_limit' | 'task_budget'
+      reason?: 'iteration_limit' | 'task_budget' | 'turn_stop'
       message: string
       iterations: number
       attachments?: Attachment[]

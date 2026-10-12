@@ -2,7 +2,225 @@ import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import { mergeAuthoritativeServerMessages, messageServerTurnNumber } from '../chatMessageMerge.js'
 import { type ServerTurn, turnsToChatMessages } from '../serverTurnAdapter.js'
-import type { ChatMessage } from '../types.js'
+import type { ChatMessage, ChatMessageAttachment } from '../types.js'
+
+const imageWithBytes: ChatMessageAttachment = {
+  id: 'local-image',
+  type: 'uploaded_file',
+  label: 'chart.png',
+  filename: 'chart.png',
+  mimeType: 'image/png',
+  encoding: 'base64',
+  dataBase64: 'AQID',
+  sizeBytes: 3,
+}
+
+describe('mergeAuthoritativeServerMessages image byte gap-fill', () => {
+  it('never duplicates same-name logical images across reconciliation or a repeated merge', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('chart.png', 'photo.png'), { minLength: 1, maxLength: 8 }),
+        names => {
+          const localImages: ChatMessageAttachment[] = names.map((label, index) => ({
+            id: `local-${index}`,
+            type: 'uploaded_file',
+            label,
+            filename: label,
+            mimeType: 'image/png',
+            encoding: 'base64',
+            dataBase64: Buffer.from([index]).toString('base64'),
+            sizeBytes: 1,
+          }))
+          const serverImages: ChatMessageAttachment[] = names.map((label, index) => ({
+            id: `parsed:uploaded_file:${index}:${label}`,
+            type: 'uploaded_file',
+            label,
+          }))
+          const server: ChatMessage = {
+            id: 'turn-1-user',
+            role: 'user',
+            content: 'Analyze',
+            timestamp: 2,
+            serverTurnNumber: 1,
+            task_id: 'task-1',
+            attachments: [
+              { id: 'server-plugin', type: 'plugin', label: 'profits/revenue' },
+              ...serverImages,
+            ],
+          }
+          const local: ChatMessage = {
+            id: 'optimistic-user',
+            role: 'user',
+            content: 'Analyze',
+            timestamp: 1,
+            task_id: 'task-1',
+            attachments: localImages,
+          }
+          const [merged] = mergeAuthoritativeServerMessages([local], [server], {
+            activeTaskIds: new Set(['task-1']),
+          })
+          const uploaded = merged?.attachments?.filter(
+            attachment => attachment.type === 'uploaded_file'
+          )
+          expect(uploaded).toHaveLength(names.length)
+          expect(uploaded?.map(attachment => attachment.dataBase64)).toEqual(
+            localImages.map(attachment => attachment.dataBase64)
+          )
+          expect(merged?.attachments?.[0]).toEqual(server.attachments?.[0])
+          expect(mergeAuthoritativeServerMessages([merged!], [server])[0]?.attachments).toEqual(
+            merged?.attachments
+          )
+        }
+      ),
+      { numRuns: 250 }
+    )
+  })
+
+  it('keeps server reference chips and enriches a matching image during live-task replacement', () => {
+    const serverPlugin: ChatMessageAttachment = {
+      id: 'server-plugin',
+      type: 'plugin',
+      label: 'profits/revenue',
+    }
+    const serverImage: ChatMessageAttachment = {
+      id: 'parsed-uploaded-file-chart',
+      type: 'uploaded_file',
+      label: 'chart.png',
+    }
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'optimistic-user',
+          role: 'user',
+          content: 'Analyze the chart',
+          timestamp: 1,
+          task_id: 'task-1',
+          attachments: [imageWithBytes, { id: 'local-plugin', type: 'plugin', label: 'revenue' }],
+        },
+      ],
+      [
+        {
+          id: 'turn-1-user',
+          role: 'user',
+          content: 'Analyze the chart',
+          timestamp: 2,
+          serverTurnNumber: 1,
+          task_id: 'task-1',
+          attachments: [serverPlugin, serverImage],
+        },
+      ],
+      { activeTaskIds: new Set(['task-1']) }
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0]?.attachments).toEqual([
+      serverPlugin,
+      {
+        ...serverImage,
+        filename: 'chart.png',
+        mimeType: 'image/png',
+        encoding: 'base64',
+        dataBase64: 'AQID',
+        sizeBytes: 3,
+      },
+    ])
+    expect(mergeAuthoritativeServerMessages(merged, [merged[0]!])).toEqual(merged)
+  })
+
+  it('matches an uploaded file by ID when its server label differs from the local name', () => {
+    const serverImage: ChatMessageAttachment = {
+      id: imageWithBytes.id,
+      type: 'uploaded_file',
+      label: 'server chart label',
+    }
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'optimistic-user',
+          role: 'user',
+          content: 'Chart',
+          timestamp: 1,
+          task_id: 'task-id',
+          attachments: [imageWithBytes],
+        },
+      ],
+      [
+        {
+          id: 'turn-1-user',
+          role: 'user',
+          content: 'Chart',
+          timestamp: 2,
+          serverTurnNumber: 1,
+          task_id: 'task-id',
+          attachments: [serverImage],
+        },
+      ],
+      { activeTaskIds: new Set(['task-id']) }
+    )
+    expect(merged[0]?.attachments).toEqual([
+      {
+        ...serverImage,
+        filename: 'chart.png',
+        mimeType: 'image/png',
+        encoding: 'base64',
+        dataBase64: 'AQID',
+        sizeBytes: 3,
+      },
+    ])
+  })
+
+  it('keeps an unproven local image on its own idle echo', () => {
+    const serverPlugin: ChatMessageAttachment = {
+      id: 'server-plugin',
+      type: 'plugin',
+      label: 'profits/revenue',
+    }
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        { id: 'turn-1-user', role: 'user', content: 'first', timestamp: 1, serverTurnNumber: 1 },
+        {
+          id: 'optimistic-user',
+          role: 'user',
+          content: 'Analyze the chart',
+          timestamp: 2,
+          task_id: 'settled-task',
+          attachments: [
+            imageWithBytes,
+            { id: 'local-only-label', type: 'agent_file', label: 'notes.md' },
+          ],
+        },
+        {
+          id: 'turn-2-user',
+          role: 'user',
+          content: 'Analyze the chart',
+          timestamp: 3,
+          serverTurnNumber: 2,
+        },
+      ],
+      [
+        { id: 'turn-1-user', role: 'user', content: 'first', timestamp: 4, serverTurnNumber: 1 },
+        {
+          id: 'turn-2-user',
+          role: 'user',
+          content: 'Analyze the chart',
+          timestamp: 5,
+          serverTurnNumber: 2,
+          attachments: [serverPlugin],
+        },
+      ],
+      { activeTaskIds: new Set() }
+    )
+
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'optimistic-user',
+      'turn-2-user',
+    ])
+    expect(merged[1]?.attachments).toContainEqual(imageWithBytes)
+    expect(merged[2]?.attachments).toEqual([serverPlugin])
+    expect(merged[2]?.task_id).toBeUndefined()
+  })
+})
 
 describe('mergeAuthoritativeServerMessages', () => {
   it('preserves a task-backed in-flight message outside the authoritative turn', () => {
@@ -134,7 +352,7 @@ describe('mergeAuthoritativeServerMessages', () => {
     expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'turn-2-user'])
   })
 
-  it('replaces completed task-backed echoes inside their authoritative turn', () => {
+  it('does not attribute an unscoped completed task ID to an authoritative turn', () => {
     const merged = mergeAuthoritativeServerMessages(
       [
         {
@@ -171,7 +389,7 @@ describe('mergeAuthoritativeServerMessages', () => {
     )
 
     expect(merged.map(message => message.id)).toEqual(['turn-4-user', 'turn-4-assistant'])
-    expect(merged.every(message => message.task_id === 'completed-task')).toBe(true)
+    expect(merged.every(message => message.task_id === undefined)).toBe(true)
   })
 
   it('preserves turnless system messages inside an authoritative range', () => {

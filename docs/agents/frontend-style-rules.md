@@ -57,12 +57,27 @@ application guidance that must be combined with this shared document.
   cancel/save, and validation for editing; plus unsafe HTML/URL/image behavior
   where content can be untrusted.
 - A different renderer/parser is an exception, not a parallel default. Keep an
-  existing specialized pipeline only when the required behavior (such as
-  transformed chat annotations or streaming semantics) cannot be preserved by
-  the standard library without regression. Record the concrete limitation and
+  existing specialized pipeline only for a documented application reason, such
+  as required streaming semantics or a stable preview integration whose
+  replacement needs a separate migration. Record the reason and the
   security/accessibility guarantees in the relevant app guidance or design
   context, and cover that behavior with tests. Do not extend an exception to
-  ordinary document preview or editing surfaces.
+  other preview or editing surfaces without a separate documented reason.
+
+Recorded exception — GFS file previews. `GfsMarkdownPreview` in Control UI
+(`control-ui/components/GfsMarkdownPreview`) and the Desktop renderer
+(`desktop-app/ui/src/components/GfsMarkdownPreview/Body.tsx`) renders read-only
+GFS Markdown/text file previews with ReactMarkdown + remark-gfm instead of
+`@uiw/react-md-editor`. This retains the established, tested read-only preview
+pipeline in both applications, including GFM tables inside a labelled,
+keyboard-focusable scrollable region. `MDEditor.Markdown` supports custom table
+components; replacing this pipeline would require a separate migration that
+revalidates rendering, keyboard operation, and untrusted-content handling.
+Guarantees: no rehype-raw, so raw HTML stays inert; `urlTransform` restricts
+image `src` to inline `data:image` URIs and link hrefs to
+`http(s):`/`mailto:`/`#` fragments; code blocks render as plain `pre` > `code`.
+The behavior is covered by the GfsMarkdownPreview test suites in both
+applications. This exception is scoped to these preview components only.
 
 ## Types, constants, and imports
 

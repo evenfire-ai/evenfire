@@ -11,6 +11,7 @@ import {
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
 import { resolveBatchGrantExistence } from '../src/routes/mcpOauth.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 // T1 — the batch grant-existence resolver (mini-spec 13 §4.1) exercised against
@@ -51,15 +52,18 @@ describeRealPostgres('resolveBatchGrantExistence (real Postgres)', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 
@@ -129,6 +133,47 @@ describeRealPostgres('resolveBatchGrantExistence (real Postgres)', () => {
     // A different user without their own grant is still false.
     expect(await resolve([{ mcpServerName: 'gdrive-u', userId: 'bob' }])).toEqual([
       { mcpServerName: 'gdrive-u', userId: 'bob', exists: false },
+    ])
+  })
+
+  // A same-name reinstall gets a new uid. A grant consented against the previous
+  // installation must read as gone, so mcp-host evicts the token it still caches.
+  it('(uid) a grant of a previous installation reports exists:false after a same-name reinstall', async () => {
+    const uidOf = async (name: string) =>
+      ((await gateway.getResource('mcpservers', name, NS)) as { metadata: { uid: string } })
+        .metadata.uid
+    const consent = (userId: string, crUid: string) =>
+      upsertOAuthGrant(db, KEY, {
+        grantKind: 'user',
+        ownerKind: 'mcpserver',
+        recipeNamespace: NS,
+        recipeName: 'gdrive-u',
+        userId,
+        oauthClientId: CLIENT_ID,
+        provider: 'google',
+        accessToken: `at-${userId}`,
+        crUid,
+      })
+
+    seedUserServer('gdrive-u')
+    await consent('alice', await uidOf('gdrive-u'))
+    expect(await resolve([{ mcpServerName: 'gdrive-u', userId: 'alice' }])).toEqual([
+      { mcpServerName: 'gdrive-u', userId: 'alice', exists: true },
+    ])
+
+    // Uninstall without purging the grant, then reinstall under the same name.
+    await gateway.deleteResource('mcpservers', 'gdrive-u', NS)
+    seedUserServer('gdrive-u')
+    await consent('bob', await uidOf('gdrive-u'))
+
+    expect(
+      await resolve([
+        { mcpServerName: 'gdrive-u', userId: 'alice' },
+        { mcpServerName: 'gdrive-u', userId: 'bob' },
+      ])
+    ).toEqual([
+      { mcpServerName: 'gdrive-u', userId: 'alice', exists: false },
+      { mcpServerName: 'gdrive-u', userId: 'bob', exists: true },
     ])
   })
 

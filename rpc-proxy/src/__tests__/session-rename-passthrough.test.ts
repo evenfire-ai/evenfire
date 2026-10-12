@@ -120,7 +120,10 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
   })
 
   it('returns 403 when the user cannot access the host', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
 

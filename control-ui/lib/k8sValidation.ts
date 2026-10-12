@@ -15,23 +15,25 @@ export function isValidK8sName(name: string): boolean {
 
 // RFC1123 DNS-SUBDOMAIN max length. K8s Secret names are validated as DNS
 // subdomains (≤253), NOT the stricter ≤63 DNS label used for hosts/contexts/
-// channels. Mirrors the server's `isValidDNSSubdomain`
-// (control-api/src/http/rfc1123.ts).
+// channels.
 export const DNS_SUBDOMAIN_MAX_LENGTH = 253
 
-// Same charset as a DNS label but up to 253 chars. Regex mirrors the server's
-// DNS_SUBDOMAIN_RE (control-api/src/http/rfc1123.ts) exactly.
-const DNS_SUBDOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,251}[a-z0-9])?$/
+// One RFC1123 DNS label: lowercase alphanumeric + interior hyphens, 1-63
+// chars, no leading/trailing hyphen.
+const DNS_LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
 /**
- * Validate a name as an RFC1123 DNS subdomain (lowercase alphanumeric + interior
- * hyphens, ≤253 chars, no leading/trailing hyphen). Client-side mirror of the
- * control-api `isValidDNSSubdomain` used to validate K8s Secret names. Returns
- * false for the empty string. Use this — not `isValidK8sName` — for Secret
- * names, which the server accepts up to 253 chars.
+ * Validate a name as an RFC1123 DNS subdomain the way the Kubernetes API
+ * server accepts Secret names (kubernetes.io names rules): dot-separated DNS
+ * labels — lowercase alphanumeric + interior hyphens — with each label at
+ * most 63 chars and the complete name at most 253 chars. `team.primary` is
+ * valid; a 64-char label, an empty label (`a..b`, leading/trailing dot), and
+ * an over-253 name are not. Returns false for the empty string. Use this —
+ * not `isValidK8sName` — for Secret names.
  */
 export function isValidDNSSubdomain(name: string): boolean {
-  return DNS_SUBDOMAIN_RE.test(name)
+  if (name.length === 0 || name.length > DNS_SUBDOMAIN_MAX_LENGTH) return false
+  return name.split('.').every(label => DNS_LABEL_RE.test(label))
 }
 
 /**

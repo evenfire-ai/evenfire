@@ -1,3 +1,4 @@
+import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { ImageInputDecision } from './imageInputDecision'
 
 export type Role = 'admin' | 'inviter' | 'member'
@@ -237,6 +238,37 @@ export type WorkflowNotificationStreamEvent =
   | {
       type: 'closed'
     }
+
+export type EntityChangeScope = 'gfs' | 'authorization'
+
+export type EntityChangeStreamEvent =
+  | { type: 'open' }
+  | {
+      type: 'resync_required'
+      schemaVersion: 1
+      cursor: string
+      scopes: EntityChangeScope[]
+    }
+  | {
+      type: 'scope.invalidated'
+      schemaVersion: 1
+      cursor: string
+      scopes: EntityChangeScope[]
+    }
+  | {
+      type: 'heartbeat'
+      schemaVersion: 1
+      cursor: string
+      observedAt: string
+    }
+  | {
+      type: 'stream.closing'
+      schemaVersion: 1
+      cursor: string
+      reason: 'max_lifetime' | 'session_expired' | 'server_shutdown' | 'slow_consumer'
+    }
+  | { type: 'error'; message: string }
+  | { type: 'closed' }
 
 export type WorkflowInputContractProperty = {
   type: 'string' | 'integer' | 'number' | 'boolean'
@@ -538,10 +570,15 @@ export type HostMessageRequest = {
   model?: string
   /** CAS base captured with a visual message's explicit model choice. */
   modelSelectionRevision?: number
+  /**
+   * Issue #666 — Global Files selected in the composer, as structured
+   * references. mcp-host re-authorizes each one before the task exists.
+   */
+  fileReferences?: FileReferenceV1[]
   [key: string]: unknown
 }
 
-export type HostMessageAttachment = {
+export type HostImageAttachment = {
   id: string
   kind: 'image'
   mimeType: 'image/jpeg' | 'image/png'
@@ -549,6 +586,26 @@ export type HostMessageAttachment = {
   dataBase64: string
   filename?: string
 }
+
+/**
+ * #678 — a document of any type sent inline. `sizeBytes` is the decoded length
+ * and `digest.hex` the sha256 of those bytes; mcp-host recomputes both and
+ * classifies the bytes itself, so `detectedMediaType` is the renderer's claim.
+ */
+export type HostFileAttachment = {
+  id: string
+  kind: 'file'
+  filename: string
+  /** Media type the OS or browser reported; empty when it reported none. */
+  mimeType: string
+  detectedMediaType: string
+  encoding: 'base64'
+  dataBase64: string
+  sizeBytes: number
+  digest: { algorithm: 'sha256'; hex: string }
+}
+
+export type HostMessageAttachment = HostImageAttachment | HostFileAttachment
 
 /**
  * Structured error returned by mcp-host when an LLM call fails.
@@ -578,6 +635,17 @@ export type HostMessageResponse = {
    * ignored the selection.
    */
   modelSelectionRevision?: number
+  /**
+   * #666 — the attachment ids the Host admitted with this message. Absent when
+   * the Host predates the field or the send carried no attachments.
+   */
+  acceptedAttachmentIds?: readonly string[]
+  /**
+   * #666 — the FileReference ids the Host admitted with this message. A sent
+   * reference whose id is missing here did not reach the Host; the message was
+   * delivered without it.
+   */
+  acceptedFileReferenceIds?: readonly string[]
   approval?: {
     taskId: string
     requestId: string
@@ -644,6 +712,7 @@ export type DesktopRuntimeConfigState = {
   isLocalhost: boolean
   selectorVisible: boolean
   activeOptionId: string | null
+  currentConfig?: DesktopRuntimeConfig
   /**
    * Stable, filesystem-safe namespacing key for the ACTIVE environment (spec
    * §5.1). Derived from `new URL(externalRestApiBaseUrl).origin`; every local
@@ -755,15 +824,16 @@ export type HostRuntimeHealth = {
  * 409 `not-stateless`). `skipped: 'cooldown'` means a recent attempt for the
  * same hostRef suppressed the HTTP call entirely; `skipped: 'in-flight'`
  * means that attempt's bounded re-emission loop is still running (structural
- * single-loop-per-host guarantee). `error` carries the failure
- * message for any other outcome — the caller treats prewarm as
+ * single-loop-per-host guarantee). `skipped: 'auth-changed'` means the
+ * authenticated owner changed or is changing before a wake can be issued.
+ * `error` carries the failure message for any other outcome — the caller treats prewarm as
  * fire-and-forget, so failures surface here (and in main-process logs), never
  * as a thrown error.
  */
 export type PrewarmHostResult = {
   requested: boolean
   status?: string
-  skipped?: 'cooldown' | 'in-flight'
+  skipped?: 'cooldown' | 'in-flight' | 'auth-changed'
   error?: string
 }
 
@@ -908,12 +978,41 @@ export interface ChatMetadata {
   lastTerminalAt?: string
 }
 
+/** The authority identity that owns a local chat deletion. */
+export interface ChatAuthorityScope {
+  environmentKey: string
+  userId: string
+  teamId: string | null
+}
+
+/** Main-issued fence captured when a delete is queued and rechecked on confirm. */
+export interface ChatDeleteFence {
+  version: 1
+  authorityScope: ChatAuthorityScope
+  bindingGeneration: number
+  sessionGeneration: number
+}
+
+/** Durable tombstone and cleanup identity for one scoped local deletion. */
+export interface ChatDeleteTombstone {
+  chatId: string
+  authorityScope: ChatAuthorityScope
+}
+
 export interface ChatIndex {
   /** v2 remains readable by pre-paging builds; v3 is accepted and normalized for compatibility. */
   version: 1 | 2 | 3
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
+  /** New deletions are isolated to their complete authority identity. */
+  deletedChatTombstones?: ChatDeleteTombstone[]
+  /** Durable artifact-cleanup work, retried only in the owning authority scope. */
+  pendingChatCleanup?: ChatDeleteTombstone[]
+}
+
+export interface ChatDeleteResult {
+  cleanupPending: boolean
 }
 
 /** Server-reported session lifecycle (D.1). `idle` once no task is in flight. */
@@ -1221,6 +1320,15 @@ export interface ChatMessageAttachment {
   encoding?: 'base64'
   dataBase64?: string
   sizeBytes?: number
+  /** Reference identity survives server-turn display parsing for Resend. */
+  filesystemName?: string
+  path?: string
+  drive?: string
+  resourceId?: string
+  gfsUri?: string
+  /** Listed GFS identity required to resend a structured global-file reference. */
+  version?: number
+  bytes?: number
 }
 
 export interface ChatFile {

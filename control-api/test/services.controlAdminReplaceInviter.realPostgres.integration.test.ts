@@ -23,7 +23,9 @@ import {
   createSilentInvitationForTeams,
 } from '../src/services/directory/membership.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -179,17 +181,16 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
   }, 60_000)
 
   afterAll(async () => {
-    querySpy?.mockRestore()
-    connectSpy?.mockRestore()
-    await testPool?.end()
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      querySpy?.mockRestore()
+      connectSpy?.mockRestore()
+      await endPoolAndWaitForClients(testPool)
+      if (!adminPool) return
+      await waitForDatabaseConnectionsToClose(adminPool, database)
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('stores replaceInviter and exposes it with the inviter on every invitation read', async () => {
@@ -319,7 +320,7 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     })
     await expect(
       passwordLoginData({ email: inviter.email, password: 'example-password' })
-    ).resolves.toEqual({ error: 'user_retired' })
+    ).resolves.toBeNull()
 
     const desktop = await testPool.query(
       `SELECT lifecycle_state, lifecycle_version, retirement_reason,

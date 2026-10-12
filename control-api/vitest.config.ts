@@ -22,6 +22,7 @@ export default defineConfig({
     environment: 'node',
     setupFiles: [
       '../scripts/testing/bind-loopback-in-tests.mjs',
+      'test/jwtKeys.setup.ts',
       'test/realPostgres.requirement.ts',
     ],
     // Control API route suites mock shared modules, env-backed config, and

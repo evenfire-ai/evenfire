@@ -435,6 +435,41 @@ export function oauthBrokerTokenSecretName(recipeName: string): string {
   return `wf-${recipeName}-oauth-broker-token`
 }
 
+const OAUTH_BROKER_TOKEN_SECRET_PREFIX = 'wf-'
+const OAUTH_BROKER_TOKEN_SECRET_SUFFIX = '-oauth-broker-token'
+
+/** Parse `wf-<recipe>-oauth-broker-token`. Rejects an empty recipe segment. */
+export function parseOAuthBrokerTokenSecretRecipe(secretName: string): string | undefined {
+  if (
+    !secretName.startsWith(OAUTH_BROKER_TOKEN_SECRET_PREFIX) ||
+    !secretName.endsWith(OAUTH_BROKER_TOKEN_SECRET_SUFFIX)
+  ) {
+    return undefined
+  }
+  const recipe = secretName.slice(
+    OAUTH_BROKER_TOKEN_SECRET_PREFIX.length,
+    secretName.length - OAUTH_BROKER_TOKEN_SECRET_SUFFIX.length
+  )
+  return recipe.length > 0 ? recipe : undefined
+}
+
+/**
+ * Watch-bind for B3(a) invalidation. Requires `clerum.io/component=oauth-broker-token`
+ * and `metadata.name === wf-${recipe}-oauth-broker-token`. A forged recipe label
+ * on a different Secret name must not invalidate.
+ */
+export function resolveOAuthBrokerTokenWatchRecipe(
+  secretName: string,
+  labels: Record<string, string> | undefined
+): string | undefined {
+  if (labels?.['clerum.io/component'] !== 'oauth-broker-token') return undefined
+  const labeled = labels['clerum.io/recipe']
+  if (labeled) {
+    return secretName === oauthBrokerTokenSecretName(labeled) ? labeled : undefined
+  }
+  return parseOAuthBrokerTokenSecretRecipe(secretName)
+}
+
 export function recipeHasBackgroundAccessClient(recipe: WorkflowRecipeCRD): boolean {
   return (recipe.spec.oauthClients ?? []).some(c => c.backgroundAccess === true)
 }

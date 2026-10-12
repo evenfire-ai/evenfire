@@ -1,3 +1,14 @@
+import { dirname, join } from 'node:path'
+import { parseVerifierMaterial } from '@clerum/jwt-key-policy'
+import { readDevVerifierMaterial, resolveDevKeyStoreDir } from '@clerum/jwt-key-policy/dev-store'
+
+const DEV_MODE_ENABLED = process.env.CLERUM_DEV_MODE === 'true'
+if (process.env.NODE_ENV === 'production' && DEV_MODE_ENABLED) {
+  throw new Error(
+    '[SECURITY] Startup rejected: CLERUM_DEV_MODE=true is not allowed with NODE_ENV=production.'
+  )
+}
+
 type Config = {
   port: number
   jsonBodyLimit: string
@@ -83,20 +94,6 @@ function assertNotPlaceholder(label: string, value: string): void {
   }
 }
 
-function normalizePem(value: string): string {
-  return value.replace(/\\n/g, '\n').trim()
-}
-
-const DEV_SESSION_JWT_PUBLIC_KEY = normalizePem(`-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwrZja9jS/r+e2YF1FqEQ
-NMLsnffebYzXrZOb7uPMKhXBoKjJh/taR9v3kX2srfVtoikcKKr0Sfa7MMSLnZWd
-ETmi7MvbeVD3HpsXpVejmw9D0zeYYSGZplLF/b6HY0Lz2XVM8WdJl3Dicyu+SZbZ
-xeHZtMCMTTjvmoI/IYmmO4N3Pgz/SGi7V3EiwoALODP4OWDvd/1xFUiMPslLPgZU
-EczQ5tIpAaD4e0om3gUNsyOKYc5igojm6ooVqI9T3TUGBVJ0uSZB7ntWxKQ39WyI
-aH+oqnwDGbDcDLQ/wTuBtcn4brWTDgW1xA73HVBSImGFvvHCWBiQBiI1nvovUP0u
-WQIDAQAB
------END PUBLIC KEY-----`)
-
 const EXTERNAL_GFS_EDGE_AGGREGATE_ENV = 'EXTERNAL_REST_API_GFS_EDGE_AGGREGATE_RL_PER_MIN'
 const EXTERNAL_GFS_EDGE_CLIENT_IP_ENV = 'EXTERNAL_REST_API_GFS_EDGE_AUTHENTICATED_IP_RL_PER_MIN'
 const EXTERNAL_GFS_EDGE_TOKEN_IP_ENV = 'EXTERNAL_REST_API_GFS_EDGE_TOKEN_IP_RL_PER_MIN'
@@ -138,6 +135,33 @@ function parseExternalGfsEdgeRateLimits() {
 
 const externalGfsEdgeRateLimits = parseExternalGfsEdgeRateLimits()
 
+function serviceRoot(): string {
+  // Works in every supported runtime: CommonJS (dist and ts-node) resolves
+  // __dirname to <service>/dist or <service>/src; Vitest's ESM transform falls
+  // back to the service working directory used by every test/npm script.
+  return typeof __dirname === 'string' && __dirname ? dirname(__dirname) : process.cwd()
+}
+
+/**
+ * Env var first; explicit dev mode loads the public half published next to the
+ * control-api signing key; every other mode fails closed. The resolved key is
+ * always fingerprint-checked so a historically committed public key is never
+ * accepted as a verifier.
+ */
+function resolveSessionJwtPublicKey(): string {
+  const envName = 'EXTERNAL_REST_API_JWT_PUBLIC_KEY'
+  const fromEnv = process.env[envName]
+  if (fromEnv) return parseVerifierMaterial(fromEnv, envName).publicPem
+  if (DEV_MODE_ENABLED) {
+    const storeDir = resolveDevKeyStoreDir(
+      join(serviceRoot(), '..', 'control-api'),
+      process.env.EVENFIRE_DEV_KEY_STORE
+    )
+    return readDevVerifierMaterial('session', storeDir).publicPem
+  }
+  return required(envName)
+}
+
 export const config: Config = {
   port: Number(process.env.EXTERNAL_REST_API_PORT || 8091),
   jsonBodyLimit: process.env.EXTERNAL_REST_API_JSON_BODY_LIMIT || '150mb',
@@ -162,9 +186,7 @@ export const config: Config = {
   })(),
   controlApiServiceName:
     process.env.EXTERNAL_REST_API_CONTROL_API_SERVICE_NAME || 'external-rest-api',
-  jwtPublicKey: normalizePem(
-    requiredOrDevDefault('EXTERNAL_REST_API_JWT_PUBLIC_KEY', DEV_SESSION_JWT_PUBLIC_KEY)
-  ),
+  jwtPublicKey: resolveSessionJwtPublicKey(),
   jwtIssuer: requiredOrDevDefault('EXTERNAL_REST_API_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('EXTERNAL_REST_API_JWT_AUDIENCE', 'profile-ui'),
   profileSessionCookieTtlSeconds: positiveIntegerFromEnv(

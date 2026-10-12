@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
+// withTransaction attaches/detaches an 'error' listener on the borrowed client
+// for its whole checkout; the fake client must expose EventEmitter surface.
+const clientOn = vi.fn()
+const clientRemoveListener = vi.fn()
 const mockConnect = vi.fn()
 const mockPoolCtor = vi.fn(function MockPool() {
   return {
@@ -21,6 +25,8 @@ describe('db.withTransaction', () => {
     mockConnect.mockResolvedValue({
       query: clientQuery,
       release: clientRelease,
+      on: clientOn,
+      removeListener: clientRemoveListener,
     })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })

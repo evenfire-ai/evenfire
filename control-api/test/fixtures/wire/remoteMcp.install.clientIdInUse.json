@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "body": {
+    "error": "oauth_client_id_in_use",
+    "conflict": "remote_server",
+    "message": "this client_id already backs another client; register a separate OAuth client for this server"
+  }
+}

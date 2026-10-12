@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getAgentNameError, isValidK8sName, toK8sName } from '../k8sValidation'
+import { getAgentNameError, isValidDNSSubdomain, isValidK8sName, toK8sName } from '../k8sValidation'
 
 describe('isValidK8sName', () => {
   it('accepts RFC 1123 DNS labels', () => {
@@ -13,6 +13,44 @@ describe('isValidK8sName', () => {
     expect(isValidK8sName('trail-')).toBe(false)
     expect(isValidK8sName('UPPER')).toBe(false)
     expect(isValidK8sName('a'.repeat(64))).toBe(false)
+  })
+})
+
+describe('isValidDNSSubdomain', () => {
+  it('accepts plain labels and dot-separated subdomains', () => {
+    expect(isValidDNSSubdomain('chatllm-api-keys')).toBe(true)
+    expect(isValidDNSSubdomain('team.primary')).toBe(true)
+    expect(isValidDNSSubdomain('a.b.c')).toBe(true)
+    expect(isValidDNSSubdomain('team-1.primary-2.keys')).toBe(true)
+  })
+
+  it('enforces DNS-label rules inside every dot-separated label', () => {
+    expect(isValidDNSSubdomain('Team.Primary')).toBe(false)
+    expect(isValidDNSSubdomain('team._primary')).toBe(false)
+    expect(isValidDNSSubdomain('team.-primary')).toBe(false)
+    expect(isValidDNSSubdomain('team.primary-')).toBe(false)
+    expect(isValidDNSSubdomain('team..primary')).toBe(false)
+    expect(isValidDNSSubdomain('.team')).toBe(false)
+    expect(isValidDNSSubdomain('team.')).toBe(false)
+    expect(isValidDNSSubdomain('')).toBe(false)
+  })
+
+  it('caps each label at 63 characters', () => {
+    expect(isValidDNSSubdomain('a'.repeat(63))).toBe(true)
+    expect(isValidDNSSubdomain('a'.repeat(64))).toBe(false)
+    expect(isValidDNSSubdomain(`${'a'.repeat(63)}.b`)).toBe(true)
+    expect(isValidDNSSubdomain(`${'a'.repeat(64)}.b`)).toBe(false)
+  })
+
+  it('caps the complete name at 253 characters', () => {
+    // 4 labels of 63/63/63/61 chars + 3 dots = 253 exactly.
+    const atLimit = `${'a'.repeat(63)}.${'a'.repeat(63)}.${'a'.repeat(63)}.${'a'.repeat(61)}`
+    expect(atLimit.length).toBe(253)
+    expect(isValidDNSSubdomain(atLimit)).toBe(true)
+    // Same shape with one more character (254 total) is over the limit.
+    const overLimit = `${'a'.repeat(63)}.${'a'.repeat(63)}.${'a'.repeat(63)}.${'a'.repeat(62)}`
+    expect(overLimit.length).toBe(254)
+    expect(isValidDNSSubdomain(overLimit)).toBe(false)
   })
 })
 

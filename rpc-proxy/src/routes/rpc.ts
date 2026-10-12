@@ -18,6 +18,12 @@ import {
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
 import {
+  type HostAccessDenialCode,
+  isHostAccessDenied,
+  respondHostAccessDenied,
+  withoutReservedHostAccessCode,
+} from '../services/hostAccessDenial.js'
+import {
   type HostRuntimeMessageRequest,
   forwardCancelToHost,
   forwardHostActivity,
@@ -31,10 +37,14 @@ import {
   resolveServerConnectionForUser,
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
+import { readMutatingResponseBody } from '../services/upstreamBody.js'
 import {
+  describeErrorForLog,
+  isHostPayloadTooLargeError,
   isUpstreamTimeoutError,
   isWakeEligibleHostError,
   respondWithWakeAndHold,
+  sanitizeHostRefForLog,
 } from '../services/wakeAndHold.js'
 import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
@@ -78,9 +88,9 @@ function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
 export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown): void {
   if (res.headersSent) {
     console.warn(
-      `[RPC_PROXY] suppressing duplicate terminal response (upstream-unavailable): ${
-        error instanceof Error ? error.message : String(error)
-      }`
+      `[RPC_PROXY] suppressing duplicate terminal response (upstream-unavailable): ${describeErrorForLog(
+        error
+      )}`
     )
     return
   }
@@ -92,6 +102,21 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
 }
 
 /**
+ * Terminal mapping for a failed Host message forward, on the first attempt and
+ * on the post-wake retry alike. A Host 413 is the client's body to fix, not an
+ * unavailable Host: it gets the same body as chatJsonBody's own 413, so the
+ * Desktop maps a Host refusal and a proxy refusal identically. Everything else
+ * keeps the respondUpstreamUnavailable mapping, including its headersSent guard.
+ */
+function respondHostMessageForwardFailure(res: ExpressResponse, error: unknown): void {
+  if (isHostPayloadTooLargeError(error) && !res.headersSent) {
+    res.status(413).json({ error: 'Payload Too Large' })
+    return
+  }
+  respondUpstreamUnavailable(res, error)
+}
+
+/**
  * Guards a `next(error)` handoff against a committed response (§11.5). Express
  * routes an error to the default handler which, when headers are already sent,
  * aborts the socket; suppress it loudly instead so a held request that already
@@ -99,14 +124,27 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
  */
 function guardedNext(res: ExpressResponse, next: NextFunction, error: unknown): void {
   if (res.headersSent) {
-    console.warn(
-      `[RPC_PROXY] suppressing post-response route error: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    )
+    console.warn(`[RPC_PROXY] suppressing post-response route error: ${describeErrorForLog(error)}`)
     return
   }
   next(error)
+}
+
+/**
+ * The single writer of a relayed mcp-host response body. Every passthrough
+ * route answers through here so an upstream 403 can never carry the reserved
+ * Host-access `code` that only respondHostAccessDenied may set. `contentType`
+ * is set only by the routes that relay the upstream content type.
+ */
+function sendUpstreamBody(
+  res: ExpressResponse,
+  status: number,
+  body: string,
+  contentType?: string
+): void {
+  res.status(status)
+  if (contentType !== undefined) res.type(contentType)
+  res.send(withoutReservedHostAccessCode(status, body))
 }
 
 /**
@@ -123,33 +161,69 @@ function sessionDrainingFence(response: Response, body: string): Error | null {
   })
 }
 
-function controlApiHostAccessRejectionStatus(error: unknown): 401 | 403 | 409 | null {
+export type ControlApiHostAccessRejection =
+  | { status: 401 | 409 }
+  | { status: 403; code: HostAccessDenialCode }
+
+function controlApiHostAccessRejection(error: unknown): ControlApiHostAccessRejection | null {
   if (!(error instanceof Error) || error.name !== 'ControlApiHostAccessRejectedError') {
     return null
   }
-  const status = (error as Error & { status?: unknown }).status
-  return status === 401 || status === 403 || status === 409 ? status : null
+  const { status, denialCode } = error as Error & { status?: unknown; denialCode?: unknown }
+  if (status === 401 || status === 409) return { status }
+  if (
+    status === 403 &&
+    (denialCode === 'host_access_revoked' || denialCode === 'host_access_denied')
+  ) {
+    return { status, code: denialCode }
+  }
+  return null
 }
 
 export function respondControlApiHostAccessRejection(
   res: ExpressResponse,
-  status: 401 | 403 | 409
+  rejection: ControlApiHostAccessRejection
 ): void {
   if (res.headersSent) {
     console.warn(
-      `[RPC_PROXY] suppressing duplicate terminal response (host-access-rejection ${status})`
+      `[RPC_PROXY] suppressing duplicate terminal response (host-access-rejection ${rejection.status})`
     )
     return
   }
-  if (status === 401) {
+  if (rejection.status === 401) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
-  if (status === 403) {
-    res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+  if (rejection.status === 403) {
+    respondHostAccessDenied(res, rejection.code)
     return
   }
   res.status(409).json({ error: 'Direct run attribution conflict' })
+}
+
+/**
+ * Abort signal for a MUTATING upstream call (approve, deny, set-model, task
+ * cancel). The first attempt has no client-side timeout by design: aborting a
+ * request the upstream may already have applied would answer 504 for a change
+ * that took effect, and the user's retry would then hit "No pending approval".
+ * Only a wake-and-hold retry passes `timeoutMs`, bounded by the hold deadline;
+ * session rename, which has no wake retry, passes its plain upstream timeout.
+ * A client that disconnects before the response is written aborts the call on
+ * every attempt, so a gone client never pins the upstream socket.
+ */
+function mutatingCallSignal(timeoutMs: number | undefined, res: ExpressResponse): AbortSignal {
+  const clientGone = new AbortController()
+  // A client can leave while the host is still being resolved; its 'close'
+  // has already fired by now, so a listener alone would never see it.
+  if (res.closed && !res.writableFinished) {
+    clientGone.abort(new Error('client disconnected'))
+  }
+  res.once('close', () => {
+    if (!res.writableFinished) clientGone.abort(new Error('client disconnected'))
+  })
+  return timeoutMs === undefined
+    ? clientGone.signal
+    : AbortSignal.any([clientGone.signal, AbortSignal.timeout(timeoutMs)])
 }
 
 class ProxyArtifactTooLargeError extends Error {
@@ -378,7 +452,7 @@ export function createRpcRouter(): Router {
         if (body.attachments != null && !Array.isArray(body.attachments)) {
           res
             .status(400)
-            .json({ error: 'invalid_attachments', message: 'Image attachments must be a list.' })
+            .json({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
           return
         }
         const forwardedBody: HostRuntimeMessageRequest = {
@@ -391,6 +465,7 @@ export function createRpcRouter(): Router {
           metadata: rpcInvocationContext(auth),
           threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
+          ...(body.fileReferences === undefined ? {} : { fileReferences: body.fileReferences }),
           ...(body.modelSelectionRevision === undefined
             ? {}
             : { modelSelectionRevision: body.modelSelectionRevision }),
@@ -403,6 +478,7 @@ export function createRpcRouter(): Router {
             : {}),
         }
 
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
           ...(traceContext.sessionId
@@ -415,8 +491,8 @@ export function createRpcRouter(): Router {
               }
             : {}),
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         if (host.attributionBindingStatus === 'unavailable') {
@@ -438,14 +514,19 @@ export function createRpcRouter(): Router {
         )
         let upstreamResponse: Record<string, unknown> | null = null
         try {
+          // Always use the configured upstream timeout for the first POST.
+          // A separate statelessness pre-check would double-charge the
+          // rate-limited wake endpoint and risk aborting a healthy send.
+          // The wake path below already checks statelessness when a
+          // connection-level failure triggers it.
           upstreamResponse = await forwardHostMessageToHost(host, forwardedBody, {
             async: isAsync,
           })
         } catch (error) {
           console.warn(
-            `[RPC_PROXY] host message forward failed host=${hostRef} error=${
-              error instanceof Error ? error.message : String(error)
-            }`
+            `[RPC_PROXY] host message forward failed host=${sanitizeHostRefForLog(hostRef)} error=${describeErrorForLog(
+              error
+            )}`
           )
           if (isWakeEligibleHostError(error)) {
             // Stateless wake-and-hold: a down or draining host triggers a
@@ -457,17 +538,22 @@ export function createRpcRouter(): Router {
               host,
               claims: auth,
               rpcAccessToken,
-              attemptUpstream: async () => {
+              deadlineMs: wakeDeadlineMs,
+              // The per-request messageId makes a re-presented POST a
+              // duplicate_delivery replay, so retrying until the deadline is safe.
+              retryUntilDeadline: true,
+              attemptUpstream: async timeoutMs => {
                 const retried = await forwardHostMessageToHost(host, forwardedBody, {
                   async: isAsync,
+                  timeoutMs,
                 })
                 res.status(200).json(retried)
               },
-              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+              respondLegacy: legacyError => respondHostMessageForwardFailure(res, legacyError),
             })
             return
           }
-          respondUpstreamUnavailable(res, error)
+          respondHostMessageForwardFailure(res, error)
           return
         }
         // The upstream accepted the message: the request is resolved. Writing
@@ -476,15 +562,15 @@ export function createRpcRouter(): Router {
         // the wake path (which would re-forward an already-delivered message).
         res.status(200).json(upstreamResponse)
       } catch (error) {
-        const rejectedStatus = controlApiHostAccessRejectionStatus(error)
-        if (rejectedStatus) {
-          respondControlApiHostAccessRejection(res, rejectedStatus)
+        const rejection = controlApiHostAccessRejection(error)
+        if (rejection) {
+          respondControlApiHostAccessRejection(res, rejection)
           return
         }
         console.warn(
-          `[RPC_PROXY] host message forward failed host=${String(req.params.hostRef || '').trim()} error=${
-            error instanceof Error ? error.message : String(error)
-          }`
+          `[RPC_PROXY] host message forward failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
+            error
+          )}`
         )
         respondUpstreamUnavailable(res, error)
       }
@@ -514,8 +600,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
 
@@ -595,11 +681,12 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -616,16 +703,17 @@ export function createRpcRouter(): Router {
         // host:approval:write; wake capability rides on the token. A suspended
         // (network-down) or draining Host triggers a wake-and-hold instead of a
         // bare next(error)/passthrough.
-        const attempt = async () => {
+        const attempt = async (timeoutMs?: number) => {
           const response = await fetch(`${baseUrl}/v1/runtime/approvals/approve`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(upstreamBody),
+            signal: mutatingCallSignal(timeoutMs, res),
           })
-          const body = await response.text()
+          const body = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res.status(response.status).send(body)
+          sendUpstreamBody(res, response.status, body)
         }
         try {
           await attempt()
@@ -637,6 +725,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -662,11 +751,12 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -679,16 +769,17 @@ export function createRpcRouter(): Router {
           requestId: parsed.toolCallId || parsed.requestId,
         }
         // Wake-eligible finite operation (§11.4): scope stays host:approval:write.
-        const attempt = async () => {
+        const attempt = async (timeoutMs?: number) => {
           const response = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(upstreamBody),
+            signal: mutatingCallSignal(timeoutMs, res),
           })
-          const body = await response.text()
+          const body = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res.status(response.status).send(body)
+          sendUpstreamBody(res, response.status, body)
         }
         try {
           await attempt()
@@ -700,6 +791,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -743,11 +835,12 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid session pagination query' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -762,19 +855,21 @@ export function createRpcRouter(): Router {
         // host:session:read; wake capability rides on the token. A suspended
         // (network-down) or draining Host triggers a wake-and-hold instead of a
         // bare next(error)/passthrough.
-        const forwardSessionList = async () => {
+        const forwardSessionList = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
-            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await forwardSessionList()
@@ -792,6 +887,9 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: forwardSessionList,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -841,11 +939,12 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid session messages pagination query' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -863,19 +962,21 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-session-messages agent=${agent} chatId=${chatId}`
         )
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
-        const forwardTranscript = async () => {
+        const forwardTranscript = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
-            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await forwardTranscript()
@@ -891,6 +992,9 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: forwardTranscript,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -924,11 +1028,12 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -936,22 +1041,24 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-context-breakdown agent=${agent} chatId=${chatId}`
         )
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
-        const attempt = async () => {
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(
             `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`,
             {
               method: 'GET',
               headers: { ...host.headers },
-              signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+              signal: AbortSignal.timeout(timeoutMs),
             }
           )
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await attempt()
@@ -963,6 +1070,9 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1008,8 +1118,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1037,14 +1147,18 @@ export function createRpcRouter(): Router {
               method: 'PATCH',
               headers: { 'content-type': 'application/json', ...host.headers },
               body: JSON.stringify(req.body),
-              signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+              // No wake retry re-issues a rename, so the timeout stays; a client
+              // that leaves still releases the upstream call.
+              signal: mutatingCallSignal(config.upstreamTimeoutMs, res),
             }
           )
           const body = await response.text()
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         } catch (error) {
           respondUpstreamUnavailable(res, error)
         }
@@ -1071,11 +1185,12 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1085,19 +1200,21 @@ export function createRpcRouter(): Router {
           : `${baseUrl}/v1/runtime/models`
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-models`)
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
-        const attempt = async () => {
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
-            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await attempt()
@@ -1109,6 +1226,9 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1136,11 +1256,12 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const body = req.body as Record<string, unknown>
@@ -1151,19 +1272,22 @@ export function createRpcRouter(): Router {
         const baseUrl = host.url.replace(/\/+$/, '')
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=set-model`)
         // Wake-eligible finite operation (§11.4): scope stays host:model:write.
-        const attempt = async () => {
+        const attempt = async (timeoutMs?: number) => {
           const response = await fetch(`${baseUrl}/v1/runtime/model`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(body),
+            signal: mutatingCallSignal(timeoutMs, res),
           })
-          const upstreamBody = await response.text()
+          const upstreamBody = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, upstreamBody)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(upstreamBody)
+          sendUpstreamBody(
+            res,
+            response.status,
+            upstreamBody,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await attempt()
@@ -1175,6 +1299,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1204,10 +1329,11 @@ export function createRpcRouter(): Router {
           return
         }
 
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
+        if (isHostAccessDenied(host)) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1215,8 +1341,8 @@ export function createRpcRouter(): Router {
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-task-result taskId=${taskId}`
         )
-        const attemptTaskResult = async () => {
-          const result = await forwardTaskResultFromHost(host, taskId)
+        const attemptTaskResult = async (timeoutMs = config.upstreamTimeoutMs) => {
+          const result = await forwardTaskResultFromHost(host, taskId, timeoutMs)
           if (!result) {
             res.status(404).json({ error: 'Task result not found' })
             return
@@ -1226,9 +1352,7 @@ export function createRpcRouter(): Router {
         try {
           await attemptTaskResult()
         } catch (error) {
-          console.warn(
-            `[RPC_PROXY] task result forward failed error=${error instanceof Error ? error.message : String(error)}`
-          )
+          console.warn(`[RPC_PROXY] task result forward failed error=${describeErrorForLog(error)}`)
           if (isWakeEligibleHostError(error)) {
             await respondWithWakeAndHold({
               res,
@@ -1236,6 +1360,9 @@ export function createRpcRouter(): Router {
               host,
               claims: auth,
               rpcAccessToken,
+              deadlineMs: wakeDeadlineMs,
+              // idempotent GET: a re-issued read cannot duplicate a side effect
+              retryUntilDeadline: true,
               attemptUpstream: attemptTaskResult,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -1244,9 +1371,7 @@ export function createRpcRouter(): Router {
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
-        console.warn(
-          `[RPC_PROXY] task result forward failed error=${error instanceof Error ? error.message : String(error)}`
-        )
+        console.warn(`[RPC_PROXY] task result forward failed error=${describeErrorForLog(error)}`)
         respondUpstreamUnavailable(res, error)
       }
     }
@@ -1271,10 +1396,11 @@ export function createRpcRouter(): Router {
           return
         }
 
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
+        if (isHostAccessDenied(host)) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1283,13 +1409,20 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=cancel-task taskId=${taskId}`
         )
 
-        const attemptCancel = async () => {
-          const result = await forwardCancelToHost(host, taskId, auth.sub)
+        const attemptCancel = async (timeoutMs?: number) => {
+          const result = await forwardCancelToHost(
+            host,
+            taskId,
+            auth.sub,
+            mutatingCallSignal(timeoutMs, res)
+          )
           if (result.body) {
-            res
-              .status(result.status)
-              .type(result.contentType || 'application/json')
-              .send(result.body)
+            sendUpstreamBody(
+              res,
+              result.status,
+              result.body,
+              result.contentType || 'application/json'
+            )
           } else {
             res.status(result.status).end()
           }
@@ -1297,9 +1430,7 @@ export function createRpcRouter(): Router {
         try {
           await attemptCancel()
         } catch (error) {
-          console.warn(
-            `[RPC_PROXY] cancel forward failed error=${error instanceof Error ? error.message : String(error)}`
-          )
+          console.warn(`[RPC_PROXY] cancel forward failed error=${describeErrorForLog(error)}`)
           if (isWakeEligibleHostError(error)) {
             await respondWithWakeAndHold({
               res,
@@ -1307,6 +1438,7 @@ export function createRpcRouter(): Router {
               host,
               claims: auth,
               rpcAccessToken,
+              deadlineMs: wakeDeadlineMs,
               attemptUpstream: attemptCancel,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -1315,9 +1447,7 @@ export function createRpcRouter(): Router {
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
-        console.warn(
-          `[RPC_PROXY] cancel forward failed error=${error instanceof Error ? error.message : String(error)}`
-        )
+        console.warn(`[RPC_PROXY] cancel forward failed error=${describeErrorForLog(error)}`)
         respondUpstreamUnavailable(res, error)
       }
     }
@@ -1341,23 +1471,29 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid host reference' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
-        const attempt = async () => {
+        // Unlike approve/deny/model this is a read-only list of small JSON: a
+        // timeout cannot leave a half-applied change, and without one a hung
+        // host would pin this socket. It therefore keeps a finite deadline on
+        // the first attempt as well.
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(`${baseUrl}/v1/runtime/artifacts`, {
             headers: { ...host.headers },
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res.status(response.status).send(body)
+          sendUpstreamBody(res, response.status, body)
         }
         try {
           await attempt()
@@ -1369,6 +1505,9 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1408,48 +1547,75 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid filename' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // The success path only commits (`res.send`) at the very end, so a
         // wake retry before that point is safe from duplicate delivery.
-        const attemptDownload = async () => {
-          const response = await fetch(
-            `${baseUrl}/v1/runtime/artifacts/${encodeURIComponent(filename)}/download`,
-            {
-              headers: { ...host.headers },
-            }
-          )
-          if (!response.ok) {
-            const errBody = await response.text()
-            const draining = sessionDrainingFence(response, errBody)
-            if (draining) throw draining
-            res.status(response.status).send(errBody)
-            return
-          }
-          const contentType = response.headers.get('content-type') || 'application/octet-stream'
-          const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_')
-          const redaction = response.headers.get('x-clerum-redaction')
-          let buffer: Buffer
+        const attemptDownload = async (
+          timeoutMs = config.upstreamTimeoutMs,
+          holdDeadlineMs?: number
+        ) => {
+          const controller = new AbortController()
+          let timeout = setTimeout(() => controller.abort(), timeoutMs)
           try {
-            buffer = await readArtifactResponseBuffer(response)
-          } catch (error) {
-            if (error instanceof ProxyArtifactTooLargeError) {
-              res.status(413).json({ error: 'Artifact too large to download' })
+            const response = await fetch(
+              `${baseUrl}/v1/runtime/artifacts/${encodeURIComponent(filename)}/download`,
+              {
+                headers: { ...host.headers },
+                signal: controller.signal,
+              }
+            )
+            // The upstream timeout protects connection and header latency. Once
+            // headers arrive, allow the separately bounded artifact transfer to
+            // finish; the small JSON-operation deadline must not truncate a
+            // valid large download while its body is streaming. On a wake retry
+            // the transfer is also bounded by what is left of the hold budget,
+            // so a stalled body cannot outlive the request deadline.
+            clearTimeout(timeout)
+            timeout = setTimeout(
+              () => controller.abort(),
+              holdDeadlineMs === undefined
+                ? config.artifactDownloadTimeoutMs
+                : Math.min(
+                    config.artifactDownloadTimeoutMs,
+                    Math.max(0, holdDeadlineMs - Date.now())
+                  )
+            )
+            if (!response.ok) {
+              const errBody = await response.text()
+              const draining = sessionDrainingFence(response, errBody)
+              if (draining) throw draining
+              sendUpstreamBody(res, response.status, errBody)
               return
             }
-            throw error
+            const contentType = response.headers.get('content-type') || 'application/octet-stream'
+            const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_')
+            const redaction = response.headers.get('x-clerum-redaction')
+            let buffer: Buffer
+            try {
+              buffer = await readArtifactResponseBuffer(response)
+            } catch (error) {
+              if (error instanceof ProxyArtifactTooLargeError) {
+                res.status(413).json({ error: 'Artifact too large to download' })
+                return
+              }
+              throw error
+            }
+            res.setHeader('Content-Type', contentType)
+            res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`)
+            if (redaction) res.setHeader('X-Clerum-Redaction', redaction)
+            res.send(buffer)
+          } finally {
+            clearTimeout(timeout)
           }
-          res.setHeader('Content-Type', contentType)
-          res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`)
-          if (redaction) res.setHeader('X-Clerum-Redaction', redaction)
-          res.send(buffer)
         }
         try {
           await attemptDownload()
@@ -1461,6 +1627,9 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: attemptDownload,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1488,8 +1657,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const limit = Number(req.query.limit || 50)
@@ -1499,9 +1668,9 @@ export function createRpcRouter(): Router {
         res.status(200).json(activity)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host activity failed host=${String(req.params.hostRef || '').trim()} error=${
-            error instanceof Error ? error.message : String(error)
-          }`
+          `[RPC_PROXY] host activity failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
+            error
+          )}`
         )
         next(error)
       }
@@ -1526,23 +1695,25 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
 
         const status = await forwardHostStatus(host)
         if (!status) {
-          console.warn(`[RPC_PROXY] host status malformed host=${hostRef} user=${auth.sub}`)
+          console.warn(
+            `[RPC_PROXY] host status malformed host=${sanitizeHostRefForLog(hostRef)} user=${auth.sub}`
+          )
           res.status(502).json({ error: 'Invalid upstream host status response' })
           return
         }
         res.status(200).json(status)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host status failed host=${String(req.params.hostRef || '').trim()} error=${
-            error instanceof Error ? error.message : String(error)
-          }`
+          `[RPC_PROXY] host status failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
+            error
+          )}`
         )
         next(error)
       }
@@ -1567,8 +1738,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
 
@@ -1576,9 +1747,9 @@ export function createRpcRouter(): Router {
         res.status(200).json(health)
       } catch (error) {
         console.warn(
-          `[RPC_PROXY] host health failed host=${String(req.params.hostRef || '').trim()} error=${
-            error instanceof Error ? error.message : String(error)
-          }`
+          `[RPC_PROXY] host health failed host=${sanitizeHostRefForLog(String(req.params.hostRef || '').trim())} error=${describeErrorForLog(
+            error
+          )}`
         )
         next(error)
       }

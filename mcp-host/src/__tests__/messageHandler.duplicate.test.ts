@@ -12,6 +12,8 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'events'
+import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
+import type { Attachment } from '../core/types'
 import { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { logger } from '../logger'
 import { IncomingMessageHandler, PendingTaskEntry } from '../messageHandler'
@@ -211,6 +213,294 @@ describe('IncomingMessageHandler — duplicate delivery suppression', () => {
     expect(deps.messageQueue.dequeue()).not.toBeNull()
     expect(deps.messageQueue.dequeue()).not.toBeNull()
     expect(deps.taskLifecycle.getStats().total).toBe(2)
+  })
+})
+
+/**
+ * #666 — rpc-proxy's wake-and-hold resends the same messageId after a socket
+ * death. The replay must name the attachments the first delivery admitted:
+ * a success without them reads as a Host that dropped them, and the client's
+ * retry under a fresh messageId would run the task twice.
+ */
+describe('IncomingMessageHandler — duplicate delivery keeps acceptedAttachmentIds', () => {
+  const attachments: Attachment[] = [
+    {
+      id: 'file-1',
+      kind: 'file',
+      mimeType: 'text/plain',
+      encoding: 'base64',
+      dataBase64: Buffer.from('notes').toString('base64'),
+    },
+    {
+      id: 'image-1',
+      kind: 'image',
+      mimeType: 'image/png',
+      encoding: 'base64',
+      dataBase64: 'iVBORw0KGgo=',
+    },
+  ]
+
+  function messageWithAttachments(messageId: string): IncomingMessage {
+    return { ...createTestMessage(messageId), attachments }
+  }
+
+  it('replays them for a duplicate of a COMPLETED task', async () => {
+    const deps = createMockDeps()
+    const message = messageWithAttachments('msg-att-completed')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+    task.result = { response: 'first answer', model: 'test-model' }
+    deps.messageQueue.completeTask(task)
+    await task.responseCallback!({ response: 'first answer' })
+    await firstPromise
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    expect(second).toMatchObject({
+      success: true,
+      status: 'completed',
+      response: 'first answer',
+      taskId: task.id,
+      acceptedAttachmentIds: ['file-1', 'image-1'],
+    })
+    expect(deps.taskLifecycle.getStats().total).toBe(1)
+  })
+
+  it('replays them for a duplicate while the original is still processing', async () => {
+    const deps = createMockDeps()
+    const message = messageWithAttachments('msg-att-inflight')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    expect(second).toMatchObject({
+      success: true,
+      status: 'pending',
+      taskId: task.id,
+      acceptedAttachmentIds: ['file-1', 'image-1'],
+    })
+    await task.responseCallback!({ response: 'done' })
+    await firstPromise
+  })
+
+  it('does not attach them to the replayed error of a FAILED task', async () => {
+    const deps = createMockDeps()
+    const message = messageWithAttachments('msg-att-failed')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+    deps.messageQueue.failTask(task, {
+      code: 'LLM_INSUFFICIENT_QUOTA',
+      message: 'out of credit',
+      retryable: false,
+      provider: 'openai',
+    })
+    await firstPromise
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    // Witnesses: this is the replayed failure of the same task, and its record
+    // holds the ids a success would have named.
+    expect(second.success).toBe(false)
+    expect(second.error?.code).toBe('LLM_INSUFFICIENT_QUOTA')
+    expect(second.taskId).toBe(task.id)
+    expect(deps.taskLifecycle.get(task.id)?.acceptedAttachmentIds).toEqual(['file-1', 'image-1'])
+    expect('acceptedAttachmentIds' in second).toBe(false)
+  })
+
+  it('adds no field for a duplicate of a message without attachments', async () => {
+    const deps = createMockDeps()
+    const message = createTestMessage('msg-att-none')
+    const first = new IncomingMessageHandler(message, deps)
+    first.executeAsync()
+    const task = deps.messageQueue.dequeue()!
+    task.result = { response: 'plain answer', model: 'test-model' }
+    deps.messageQueue.completeTask(task)
+    await task.responseCallback!({ response: 'plain answer' })
+
+    const second = new IncomingMessageHandler(message, deps).executeAsync()
+
+    // Witness: the duplicate replayed the completed outcome.
+    expect(second.status).toBe('completed')
+    expect(second.response).toBe('plain answer')
+    expect('acceptedAttachmentIds' in second).toBe(false)
+  })
+})
+
+/**
+ * #666 D13 — a replay names the file references the first delivery resolved,
+ * whatever their availability, exactly as the first response did.
+ */
+describe('IncomingMessageHandler — duplicate delivery keeps acceptedFileReferenceIds', () => {
+  function reference(resourceId: string) {
+    const built = buildGfsFileReference({
+      drive: 'main',
+      resourceId,
+      gfsUri: `gfs://main/${resourceId}`,
+      version: 3,
+      name: 'notes.md',
+      declaredMediaType: 'text/markdown',
+      byteLength: 12,
+      classification: classifyBytes({
+        bytes: new Uint8Array(0),
+        totalByteLength: 12,
+        declaredMediaType: 'text/markdown',
+        filename: 'notes.md',
+      }),
+    })
+    if (!built.ok) throw new Error(built.message)
+    return built.value
+  }
+  const available = reference('1234567890abcdef1234567890abcdef')
+  const stale = reference('abcdefabcdefabcdefabcdefabcdefab')
+
+  function resolvedMessage(messageId: string): IncomingMessage {
+    return {
+      ...createTestMessage(messageId),
+      fileReferences: [available, stale],
+      fileReferenceResolutions: [
+        { availability: 'available', reference: available },
+        { availability: 'stale', reference: stale, resolvedVersion: 4 },
+      ],
+    }
+  }
+
+  it('replays them for a duplicate of a COMPLETED task', async () => {
+    const deps = createMockDeps()
+    const message = resolvedMessage('msg-ref-completed')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+    task.result = { response: 'first answer', model: 'test-model' }
+    deps.messageQueue.completeTask(task)
+    await task.responseCallback!({ response: 'first answer' })
+    await firstPromise
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    expect(second).toMatchObject({
+      success: true,
+      status: 'completed',
+      taskId: task.id,
+      acceptedFileReferenceIds: [available.id, stale.id],
+    })
+    expect(deps.taskLifecycle.getStats().total).toBe(1)
+  })
+
+  it('replays them for a duplicate while the original is still processing', async () => {
+    const deps = createMockDeps()
+    const message = resolvedMessage('msg-ref-inflight')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    expect(second).toMatchObject({
+      success: true,
+      status: 'pending',
+      taskId: task.id,
+      acceptedFileReferenceIds: [available.id, stale.id],
+    })
+    await task.responseCallback!({ response: 'done' })
+    await firstPromise
+  })
+
+  it('does not attach them to the replayed error of a FAILED task', async () => {
+    const deps = createMockDeps()
+    const message = resolvedMessage('msg-ref-failed')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+    deps.messageQueue.failTask(task, {
+      code: 'LLM_INSUFFICIENT_QUOTA',
+      message: 'out of credit',
+      retryable: false,
+      provider: 'openai',
+    })
+    await firstPromise
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    // Witnesses: this is the replayed failure of the same task, and its record
+    // holds the ids a success would have named.
+    expect(second.success).toBe(false)
+    expect(second.error?.code).toBe('LLM_INSUFFICIENT_QUOTA')
+    expect(second.taskId).toBe(task.id)
+    expect(deps.taskLifecycle.get(task.id)?.acceptedFileReferenceIds).toEqual([
+      available.id,
+      stale.id,
+    ])
+    expect('acceptedFileReferenceIds' in second).toBe(false)
+  })
+
+  it('answers from the record admission read, even when it is evicted right after', async () => {
+    const deps = createMockDeps()
+    const message = resolvedMessage('msg-ref-evicted-after-admission')
+    const first = new IncomingMessageHandler(message, deps)
+    first.executeAsync()
+    const task = deps.messageQueue.dequeue()!
+    task.result = { response: 'first answer', model: 'test-model' }
+    deps.messageQueue.completeTask(task)
+    await task.responseCallback!({ response: 'first answer' })
+
+    // The first read of the prior record returns it; any later read finds it
+    // evicted by the lifecycle TTL.
+    const realGet = deps.taskLifecycle.get.bind(deps.taskLifecycle)
+    let priorReads = 0
+    const get = vi.spyOn(deps.taskLifecycle, 'get').mockImplementation(id => {
+      if (id !== task.id) return realGet(id)
+      priorReads += 1
+      return priorReads === 1 ? realGet(id) : null
+    })
+    const second = new IncomingMessageHandler(message, deps).executeAsync()
+
+    expect(priorReads).toBe(1)
+    expect(second).toMatchObject({
+      success: true,
+      status: 'completed',
+      taskId: task.id,
+      response: 'first answer',
+      acceptedFileReferenceIds: [available.id, stale.id],
+    })
+    get.mockRestore()
+  })
+
+  it('records only resolutions, never the raw references a caller sent', async () => {
+    const deps = createMockDeps()
+    const message: IncomingMessage = {
+      ...createTestMessage('msg-ref-unresolved'),
+      fileReferences: [available],
+    }
+    const first = new IncomingMessageHandler(message, deps)
+    first.executeAsync()
+    const task = deps.messageQueue.dequeue()!
+    task.result = { response: 'plain answer', model: 'test-model' }
+    deps.messageQueue.completeTask(task)
+    await task.responseCallback!({ response: 'plain answer' })
+
+    const second = new IncomingMessageHandler(message, deps).executeAsync()
+
+    // Witness: a message the same Host resolved records its ids.
+    new IncomingMessageHandler(resolvedMessage('msg-ref-resolved'), deps).executeAsync()
+    const resolvedTask = deps.messageQueue.dequeue()!
+    expect(deps.taskLifecycle.get(resolvedTask.id)?.acceptedFileReferenceIds).toEqual([
+      available.id,
+      stale.id,
+    ])
+    // Witness: the duplicate replayed the completed outcome.
+    expect(second.status).toBe('completed')
+    expect(deps.taskLifecycle.get(task.id)?.acceptedFileReferenceIds).toEqual([])
+    expect('acceptedFileReferenceIds' in second).toBe(false)
   })
 })
 

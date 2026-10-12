@@ -1,5 +1,17 @@
-import { createPublicKey } from 'node:crypto'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
+import {
+  type SigningMaterial,
+  parseSigningMaterial,
+  parseVerifierMaterial,
+} from '@clerum/jwt-key-policy'
+import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
+import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
+import { rootLogger } from './observability/logger.js'
+
+function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number(process.env[name])
+  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
+}
 
 type Config = {
   port: number
@@ -50,8 +62,8 @@ type Config = {
   adminJwtTtlSeconds: number
   /**
    * Optional RS256 private key used exclusively to sign registry identity
-   * vouchers (POST /api/v1/registry/identity-voucher). When unset, falls back
-   * to adminJwtPrivateKey.
+   * vouchers (POST /api/v1/registry/identity-voucher). Managed mode requires
+   * this dedicated material; self-hosted mode resolves its enrolled identity.
    *
    * Rationale: a captured admin session JWT (aud=control-ui, 1h TTL) signed by
    * the SAME key as a voucher (aud=registry-api, 60s TTL) becomes a usable
@@ -159,6 +171,18 @@ type Config = {
   // also guards implausibly-low provider counts.
   llmCatalogSyncProviderMinLive: number
   registryPullSecretReconcileIntervalMs: number
+  // OAuth proactive-refresh cron (mini-spec L). Default OFF until e2e; renews
+  // remote access tokens inside the proactive window so a background grant's
+  // rotating refresh token is exercised before it lapses, and sweeps DCR
+  // client-secret expiry (avisar/degradar only).
+  oauthProactiveRefreshCronEnabled: boolean
+  oauthProactiveRefreshIntervalMs: number
+  // Bp — proactive buffer. A grant is a candidate while its access token expires
+  // within this window. MUST be > REACTIVE_REFRESH_BUFFER_MS (Br); validated at
+  // boot (mini-spec §3 invariant `Bp > Br`).
+  oauthProactiveRefreshBufferMs: number
+  // Wc — warn window for a DCR confidential client_secret nearing expiry.
+  oauthDcrSecretWarnMs: number
   budgetReservationTtlSeconds: number
   approvalRetentionDays: number
   userApprovalRequestArchiveCronEnabled: boolean
@@ -184,6 +208,30 @@ type Config = {
   workflowArtifactDownloadMaxBytes: number
   // Per-minute rate limits (PG-backed token buckets).
   approvalRlRequestPerMin: number
+  adminSubscriptionReadPerMin: number
+  adminSubscriptionWritePerMin: number
+  subscriptionOAuthCallbackPerMin: number
+  adminWorkflowReadPerMin: number
+  adminWorkflowGrantReadPerMin: number
+  adminWorkflowGrantWritePerMin: number
+  adminWorkflowTriggerPerMin: number
+  adminOutputsReadPerMin: number
+  llmProviderAttemptAuthorizePerMin: number
+  llmProviderAttemptAuthorizeAnonymousIpPerMin: number
+  adminRegistryKeysPerMin: number
+  adminRegistryGrantsPerMin: number
+  adminRegistryConnectStatusPerMin: number
+  adminRegistryConnectRequestPerMin: number
+  adminRegistryConnectRecoveryPerMin: number
+  adminConnectorDeleteEdgePerMin: number
+  adminConnectorDeletePerMin: number
+  pluginSdkAdminRlPerMin: number
+  pluginSdkInternalRlPerMin: number
+  pluginSdkCredentialRlPerMin: number
+  pluginSdkAuthenticatedPreauthRlPerMin: number
+  adminGfsGrantsPerMin: number
+  adminGfsSharesPerMin: number
+  adminGfsLegacyGrantReportPerMin: number
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
   approvalRlExternalEdgePerMin: number
@@ -235,6 +283,16 @@ type Config = {
   notificationStreamHeartbeatMs: number
   notificationStreamMaxLifetimeMs: number
   notificationStreamSnapshotLimit: number
+  entityChangeDispatchIntervalMs: number
+  entityChangeRetentionSeconds: number
+  entityChangeDispatchBatchSize: number
+  entityChangeMaxRecoveryEvents: number
+  entityChangeStreamPollMs: number
+  entityChangeUserVisibilityRefreshMs: number
+  entityChangeStreamHeartbeatMs: number
+  entityChangeStreamMaxLifetimeMs: number
+  entityChangeStreamMaxConnections: number
+  entityChangeStreamMaxConnectionsPerPrincipal: number
   notificationsDesktopFirstEnabled: boolean
   notificationDesktopGraceSeconds: number
   // Stricter than the normal refresh limiter: a client reaching reissue has
@@ -487,10 +545,6 @@ const EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING = 180
 // 100 requests per second from one source on one public admin route.
 const ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN_CEILING = 6_000
 
-function normalizePem(value: string): string {
-  return value.replace(/\\n/g, '\n').trim()
-}
-
 function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
   const raw = process.env.REGISTRY_CONNECTION_MODE
   if (raw === undefined || raw === '') return 'managed' // default; requiredness enforced in the guard below
@@ -525,12 +579,13 @@ const externalRateLimitConfig = (() => {
     operation.value <= session.value && session.value < clientIp.value
 
   if (!followsRecommendedTopology) {
-    console.warn(
-      '[ControlAPI] External rate-limit configuration crosses the recommended operation <= session < clientIp topology; preserving exact configured values',
+    rootLogger.warn(
       {
+        event: 'external_rate_limit_topology_advisory',
         resolved: { operation, session, clientIp },
         recommendedTopology: 'operation <= session < clientIp',
-      }
+      },
+      'External rate limits cross the recommended topology; preserving configured values'
     )
   }
 
@@ -548,106 +603,62 @@ function failClosedBooleanFromEnv(name: string): boolean {
   throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
 }
 
-function publicKeyFromPrivateKey(privateKey: string): string {
-  return createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString()
+const CLERUM_DEV_MODE_ENABLED = process.env.CLERUM_DEV_MODE === 'true'
+if (process.env.NODE_ENV === 'production' && CLERUM_DEV_MODE_ENABLED) {
+  throw new Error(
+    '[SECURITY] Startup rejected: CLERUM_DEV_MODE=true is not allowed with NODE_ENV=production. ' +
+      'Provide deployment-specific JWT signing keys and unset CLERUM_DEV_MODE.'
+  )
 }
 
-const DEV_RPC_JWT_PRIVATE_KEY = normalizePem(`-----BEGIN PRIVATE KEY-----
-MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCsIhgYd6Ew+kYp
-4/FopBqsNfnKvOJ9TmLh/OkjcS2QpJTqzm6DsSQrFzYN0x6Sipd72+vuorJXCKKV
-Qi6xcteJbso8wmUP8V3kGjtDG3r3BiIvkjgrft4OAI3oPct24fJISeSF0jQYOkHg
-szYBI7FCQRpt6l6RlMxDITGYIif90cnXkH7gD22KJ6mFg5A2vcZydb14OiYy3o0k
-vKmKRuvEk7o7sCvQb6tpNt+W2HwRDNacYX5aBBbiKIzfCwWGloTSZSURswYMZMwB
-nLUp/EBFG75Bmbcuj7kCIJoeSKMMKCUexcuGqxiLYB1GJq8PUaT0so//O0rDur8P
-p9gXOY5DAgMBAAECggEAVAGPoOFBWZXLCEamWls8aS8uaTMlleHbgE7duN5TTnQD
-+VQluz+IVz9MshKGqR3aMCh0TFI6lx8vuYhDIXbamcfoCx8UE2PIXroukeGncUcd
-B/pkT1XrKQo8N0txMOO0SnNFg8nCgtBrti2//W5d4+fB7kKjRIlJ5rkcaxLAUa5z
-fpvaz+DhwBvvIi5zakhUBGVinVnQV6cKS5c52ccYikSNG9ysGBParCbVsQCwgLan
-JhWCmRYuPj5MoaELcZ7lBO2ow+SO/VSTW03fnC/cIYCxZqAEEnq3fg5/FFsy6xsB
-CbwQQaGnUrrw/LyGX3vyW7eXDL4hOYLp+l+tZklqAQKBgQDe8I4RegQ7lGvVnEoo
-xTBdZg6kgjSRRBMs67/E+HrnnHC8gMjT2MlJguYQEonFP8teDoj0l7+1Bj/LRyHv
-CyZr03EpevMQut27VdEO/qWYaGpOsXC2xkuiJWeKYvp3//lcIofXy9VhStlsisk6
-yx1LAY6iiZvptaCzJmYTU677swKBgQDFqMaLyLAAIpMcBrLDlGt8qyB6ZVaJZTHP
-vs13Md6RJPVXXyGtWRtpMwOSwHJNyy3xN23rWtlj32UE9KW/47oxjbkXfpExG/fi
-UBeA80AtjM57q66+LZ9Rs5EAFcOsNrd11XY4Y/37/MMbWQgjfW44uEeB2drx9mB0
-LU9H+1KbMQKBgFKij8Zil9cNuLrA56wdC0RTY/IOYTXHKeRorfhwsf3PuunkQoxj
-upiI8IXcmTyH3PXMJW+kH+cVnefXQfi9BUzKXxOlAxucaDvcH1WThgXsDhuFIeZd
-sgM0IiDldzmro95G3ltarokVmWnmN5iXWRBIT3pnz2bdb+d3wDZBuoaJAoGABCl9
-pMvhCN+xgVGSyhOB/+oKkQk5PUNoPRujb/MY4K2KjQBv0RqjPR/Z32k1/vVcTkwA
-gIg1M6ksk2Ija1r8PLbjQt9jZ0lTeux80jZND6h7YJdI4rBLPoktcHcE28d7LXwF
-NULFwlycLyM8zKKDg6Y9uzo/JgEuHsQlezqLjsECgYAboHrpwXg/SBatigtBvj0E
-1ccXGGLgN2dhDbAlZoSKDITOxGiOw48bOX1lT25c06muru+2mCNrsN2lMs07VGk8
-PSRsIuFZis/4vrRtjoxUB4OQ29+mfVgqGsABPugCmi/r22gWrvl1aqEEqstg3m7x
-sKRpFxViv5P5TmnxLggnhw==
------END PRIVATE KEY-----`)
-
-const DEV_SESSION_JWT_PRIVATE_KEY = normalizePem(`-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDCtmNr2NL+v57Z
-gXUWoRA0wuyd995tjNetk5vu48wqFcGgqMmH+1pH2/eRfayt9W2iKRwoqvRJ9rsw
-xIudlZ0ROaLsy9t5UPcemxelV6ObD0PTN5hhIZmmUsX9vodjQvPZdUzxZ0mXcOJz
-K75JltnF4dm0wIxNOO+agj8hiaY7g3c+DP9IaLtXcSLCgAs4M/g5YO93/XEVSIw+
-yUs+BlQRzNDm0ikBoPh7SibeBQ2zI4phzmKCiObqihWoj1PdNQYFUnS5JkHue1bE
-pDf1bIhof6iqfAMZsNwMtD/BO4G1yfhutZMOBbXEDvcdUFIiYYW+8cJYGJAGIjWe
-+i9Q/S5ZAgMBAAECggEABTd9g63SHl7sLrvqEw6C6IT58bQKxrDdtPH13TFHfq+p
-SciH6L+mYDM/p2tgcWM4Wh5Dmb/VzncAtipn6rOP2x6qE7HVCiOuEUj6udR2ptCC
-gtHUIHMV4qfIU/dzOWi5b4+13Whk53yv5oHLJf3XjRaTXoVDpQyD1+YKMrf1RxYf
-QIiI6ChaDmPmZ8mJF56vZLz1S98HBvtMlTtI+IYhhkxScSq77enb44NLZ0FInXtr
-UJ0WiJ1JYUZdESauiXFH/fTKyXF7vp5ZAIThG+hGaJ987HV8DXL0S0gmFRkw2Wj2
-44IKEC+VH60GTIysQ2HmbKExAYwngZBBCNTgoawWgQKBgQDwLLqmCVPgxZ2dkxi3
-5RlLZfhPRANQzj4GyE2oQtRwthGn30QJ3tc26WIjDt7a2vRUGiHOEONeDcJQg726
-JeBgUMDCuwA9QkdyDZhupF9Erl9f6C515k7Y2il7JX0sA1MmV5Phgh2XH+rUq6Li
-A7EFS5P1mT/J7XU842NdD+xUgQKBgQDPis0QJ/1eHY9j6pQC6d8riLEG3lRHiCVt
-94gp8YoNI6iJRl4fVUO1A4JxjNIz04g7ZXLusuFUgznXnxGv2+pju//vvVbQeyD6
-HKDvfd1Xt0xTe5Y/X5g2l7b7dvHc9o9YAhxqkMmxuusdF+z++VLWbf3T7XXAiufS
-k4thtd8N2QKBgQCnCMSqsvQF8AolS+c2BfxohruCDTAtI7LZrrbrncb3uHhhAxLj
-tnqA8yFQdoghN4QTdbUrBm3KvND2hBkQfEUnVyIojDunXxAnTzNDR8gGESu9nNGr
-J4iQonGU9sauNIXAtcngXUjNEOKWE+SNQbn8j8qQVYuamS4fMZmqYGehgQKBgHng
-kufH9BxO06PjX6QOX0YbcYoNCgUvyHs5f7bR5zYsGI70ydUwpyAnvXSdM9vHfxsS
-SloupfCRV2huO17AkHadMoFA+ThY9laqdT/u9ArM03+69dKleqeklIo7oXEXQbp3
-EuTpvegnUma1ZDGfjKvrz8GikyHM8LJSfumUejaRAoGBALaksx+nAwBqSehPEsU3
-84xsDCj0jiJy5SVlKAnyVKM4bjI8pgCHY2dD9jqCYEfRKIMB6jKZDS7ZE1n1IeIC
-aI29j2LQbxz6hwRqZisBaGgOg5GaL74Hjodh2OwWl5fGFdKXFFPSsJAYeK6sOxgB
-VUxHFu+yhYVbZ5uhL8whXgrI
------END PRIVATE KEY-----`)
-
-// Use a different dev key for admin JWT to prevent token confusion
-const DEV_ADMIN_JWT_PRIVATE_KEY = normalizePem(`-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCysO8JjPH3o4s7
-aq/fuxtlm8K6C7NH5xbHA5inHrUA/4Yv2XFXrQUkkkqO1GE78i+bqSg7OBXKWfXY
-GmGKkHScmz190vMCunF6K4pqWKCuQv1z/ZPCWOZGllqBnNkooBBHzbtvRZHP2oHr
-eeluMy//svUY3Fwy0ud7atMBhTeB7PQjumHAoBgf/Nj5PmIfaXSqm3/gjLq3ulY5
-DSqCsp4k8V7mphYrdzwFYadYmSGgsI1QJOdRrXIZoge5HArPA8f1vjvqtLvY0aoY
-LjFFlcB6Kc50jPc/Kaks3QfIiNKw8FSWF7AgvAPmNAELoPFh5ctAljRQdZEus6pB
-GQmx6nrJAgMBAAECggEAC+MGgbqDKaOy2kTgdngATG/yQhVPa63xF1PTSrG5nXuC
-CgqTVj9jn1FOfaYd4kKb/WVBMIBMfcmid6nYmYK+ySCwFF/NK94qeJOvKWAkLzd0
-XAwPMV9f0SwFEQh1rzTHpHkoefBVMPAikp8pYrvrul0lng3hob1jKfP7Haemn8E+
-mlOLlGkW3mbyAi65bOPTdaqx+uGj5q8ZY1Bz84e23xIWV0bTTsqWJ7/JBc9wG5/9
-JA2tWs4QuYhs+14n+TLpnniYUolMUyxPeoaJV81cU1UTNSUbBTZ5ndXAWoenv9Gv
-PaR7awUwTPq/qV2+ZgEoPwa9omQQNmk0ACdTNDfSsQKBgQDmtAuBJTrhoXpcPOQV
-Qz7rr1fWFvFS729AuWDNhPWaC6/Q2mkwEVB2jMCn7tZhx0M8HEO2xduDlThi0pbu
-35shxeYTwQno+SFeCG8l/AmmKp/nJpO8d7PKEwLB8IBm8WYCqIQ4gPWc958enR4Y
-2Nve0HtVlnvSSAqeZ58f8gNiEQKBgQDGSOHQ0jN/LRjchCw6QOifZgYm7nCafZuj
-G9BBXTVZBXZZlODfDH9tkZaywywuBw/cw7Rcn9k2GWoxm3WjYgQjMB45BcZIpaZo
-kLmr6ZQUzxm3JAdT2U3v0XNTD8A8oFsvlEr6/Uno/uNqQq6EufMls6gPzUaVO56Q
-AFwKO/pVOQKBgQCw96tbhZOFQLj7yDmtlcfOQtK+BxtW4xQUMh9vh25enFhhfSjz
-FlUCmzWtnCgXGSMaGRRYP64DYZO/OotM8Xmujn/O52USsQhHeXDJUmyUal3+kjkB
-eVEQ0URsQHA+hy4ZG+tQ7Jt7rPcCJMPRi4gdgw8YuDaDN3/tws7tUlgGAQKBgBY+
-Zta+PfiuXnOegDeowG/hSh9j8E3keWk63Yn3otxxuG0kPnXHOSRZiMZVDse7ExR4
-/+rEI+Hlx/v4rKG/hSdNZpaPB0dvDdP9KFcYxPvwn7nj2M6XOh8FKCLRSYeDlbco
-s6CkeX4h2fE5uco58gTwupHLPXfQUGFnKOwc/mBBAoGAZOC3cOzdROA6t12hlXBG
-nFoBPwztGGlol4VRjNHOUv21999k1s9vujmfdoEbtCT8UWR735Cmahv6Dlqhgmfz
-udFCb0WGbuF+RYuIoF3rm2aQMZoCCl5E4QlgJroKBTkfFugxZJ+1SLZJ4KKRcMrB
-gg1uS2CBS2kyMhFQcB5FLFw=
------END PRIVATE KEY-----`)
+const JWT_SIGNING_KEY_ENV_NAMES: Record<DevJwtSlot, string> = {
+  rpc: 'CONTROL_API_RPC_JWT_PRIVATE_KEY',
+  session: 'CONTROL_API_SESSION_JWT_PRIVATE_KEY',
+  admin: 'CONTROL_API_ADMIN_JWT_PRIVATE_KEY',
+}
 
 const DEV_ADMIN_PASSWORD_HASH = '$2b$12$9QdfGGp5KYg8osGa1n0.DuwQiB1RopCWIDJhmsuK4ygjTmIT8pvgy'
 
-const RPC_JWT_PRIVATE_KEY = normalizePem(
-  requiredOrDevDefault('CONTROL_API_RPC_JWT_PRIVATE_KEY', DEV_RPC_JWT_PRIVATE_KEY)
-)
-const RPC_JWT_PUBLIC_KEY = normalizePem(
-  process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY || publicKeyFromPrivateKey(RPC_JWT_PRIVATE_KEY)
-)
+// Validate every explicit input before dev-store access. A malformed configured
+// slot must not cause another slot to generate a new local identity.
+const explicitJwtSigningMaterial: Partial<Record<DevJwtSlot, SigningMaterial>> = {}
+for (const slot of ['rpc', 'session', 'admin'] as const) {
+  const envName = JWT_SIGNING_KEY_ENV_NAMES[slot]
+  const raw = process.env[envName]
+  if (raw) explicitJwtSigningMaterial[slot] = parseSigningMaterial(raw, envName)
+}
+const voucherRaw = process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY
+const voucherMaterial = voucherRaw
+  ? parseSigningMaterial(voucherRaw, 'CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY')
+  : undefined
+const rpcVerifierRaw = process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY
+const explicitRpcVerifier = rpcVerifierRaw
+  ? parseVerifierMaterial(
+      rpcVerifierRaw,
+      'effective RPC JWT verifier public key (CONTROL_API_RPC_JWT_PUBLIC_KEY)'
+    )
+  : undefined
+
+function assertRpcIdentity(signing: SigningMaterial): void {
+  if (explicitRpcVerifier && explicitRpcVerifier.fingerprint !== signing.fingerprint) {
+    throw new Error(
+      'CONTROL_API_RPC_JWT_PUBLIC_KEY must correspond to CONTROL_API_RPC_JWT_PRIVATE_KEY'
+    )
+  }
+}
+if (explicitJwtSigningMaterial.rpc) assertRpcIdentity(explicitJwtSigningMaterial.rpc)
+if (!CLERUM_DEV_MODE_ENABLED) {
+  for (const slot of ['rpc', 'session', 'admin'] as const) {
+    if (!explicitJwtSigningMaterial[slot]) required(JWT_SIGNING_KEY_ENV_NAMES[slot])
+  }
+}
+const jwtSigningMaterial = Object.fromEntries(
+  (['rpc', 'session', 'admin'] as const).map(slot => [
+    slot,
+    explicitJwtSigningMaterial[slot] ?? loadOrCreateDevJwtSigningMaterial(slot),
+  ])
+) as Record<DevJwtSlot, SigningMaterial>
+assertRpcIdentity(jwtSigningMaterial.rpc)
 
 const memberRegistrationMode: 'remote' | 'hosted' = (() => {
   const raw = (process.env.CONTROL_API_MEMBER_REGISTRATION_MODE || 'remote').trim()
@@ -680,8 +691,9 @@ if (memberRegistrationMode === 'hosted') {
     )
   }
   if (memberRegistrationEnvPresent('CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET')) {
-    console.warn(
-      '[ControlAPI] CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET is set but IGNORED in hosted member-registration mode (deploy-injected legacy value; credentials are self-enrolled and stored in Postgres)'
+    rootLogger.warn(
+      { event: 'hosted_member_registration_env_secret_ignored' },
+      'Hosted member-registration uses its enrolled credentials'
     )
   }
 }
@@ -713,6 +725,23 @@ if (
 ) {
   throw new Error(
     'LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS must be at least twice LLM_CATALOG_SYNC_INTERVAL_MS when LLM_CATALOG_SYNC_CRON_ENABLED=true'
+  )
+}
+
+// Bp (proactive buffer). Computed as a local so the `Bp > Br` invariant
+// (mini-spec L §3) is validated BEFORE the config object is built — a proactive
+// window that does not clear the reactive buffer would let the two paths compete
+// for the same row on the happy path, defeating the idempotency argument. Br is
+// the reactive buffer's single source of truth (`tokenHelper.ts`), never a
+// re-typed literal. Fail-fast (throw) rather than clamp, like every other
+// invalid config value here.
+const oauthProactiveRefreshBufferMs = positiveIntegerFromEnv(
+  'OAUTH_PROACTIVE_REFRESH_BUFFER_MS',
+  300_000
+)
+if (oauthProactiveRefreshBufferMs <= REACTIVE_REFRESH_BUFFER_MS) {
+  throw new Error(
+    `OAUTH_PROACTIVE_REFRESH_BUFFER_MS (${oauthProactiveRefreshBufferMs}) must be greater than the reactive refresh buffer (${REACTIVE_REFRESH_BUFFER_MS}ms)`
   )
 }
 
@@ -791,13 +820,11 @@ export const config: Config = {
   ),
   controlUiBaseUrl: process.env.CONTROL_API_CONTROL_UI_BASE_URL || 'http://127.0.0.1:3000',
   controlUiAppName: process.env.CONTROL_API_CONTROL_UI_APP_NAME || 'Evenfire',
-  sessionJwtPrivateKey: normalizePem(
-    requiredOrDevDefault('CONTROL_API_SESSION_JWT_PRIVATE_KEY', DEV_SESSION_JWT_PRIVATE_KEY)
-  ),
+  sessionJwtPrivateKey: jwtSigningMaterial.session.privatePem,
   jwtIssuer: requiredOrDevDefault('CONTROL_API_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('CONTROL_API_JWT_AUDIENCE', 'profile-ui'),
-  rpcJwtPrivateKey: RPC_JWT_PRIVATE_KEY,
-  rpcJwtPublicKey: RPC_JWT_PUBLIC_KEY,
+  rpcJwtPrivateKey: jwtSigningMaterial.rpc.privatePem,
+  rpcJwtPublicKey: explicitRpcVerifier?.publicPem ?? jwtSigningMaterial.rpc.publicPem,
   rpcJwtIssuer: requiredOrDevDefault('CONTROL_API_RPC_JWT_ISSUER', 'control-api'),
   rpcJwtAudience: requiredOrDevDefault('CONTROL_API_RPC_JWT_AUDIENCE', 'rpc-proxy'),
   rpcTokenTtlSeconds: Number(process.env.CONTROL_API_RPC_TOKEN_TTL_SECONDS || 300),
@@ -805,17 +832,12 @@ export const config: Config = {
   hostSecretLabelValue: process.env.CONTROL_API_HOST_SECRET_LABEL_VALUE || 'true',
   policyAuthAudience: process.env.CONTROL_API_POLICY_AUTH_AUDIENCE || 'control-api',
   googleClientId: requiredOrDevDefault('CONTROL_API_GOOGLE_CLIENT_ID', 'dev-google-client-id'),
-  adminJwtPrivateKey: normalizePem(
-    requiredOrDevDefault('CONTROL_API_ADMIN_JWT_PRIVATE_KEY', DEV_ADMIN_JWT_PRIVATE_KEY)
-  ),
+  adminJwtPrivateKey: jwtSigningMaterial.admin.privatePem,
   adminJwtIssuer: requiredOrDevDefault('CONTROL_API_ADMIN_JWT_ISSUER', 'control-api'),
   adminJwtAudience: requiredOrDevDefault('CONTROL_API_ADMIN_JWT_AUDIENCE', 'control-ui'),
   adminJwtTtlSeconds: Number(process.env.CONTROL_API_ADMIN_JWT_TTL_SECONDS || 60 * 60),
-  // Optional — empty string means "fall back to adminJwtPrivateKey" (see
-  // registry.ts). Production should set this to a dedicated RS256 key.
-  registryVoucherPrivateKey: normalizePem(
-    process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY ?? ''
-  ),
+  // No implicit admin identity substitution; managed mode requires this key.
+  registryVoucherPrivateKey: voucherMaterial?.privatePem ?? '',
   registryVoucherKid: process.env.CONTROL_API_REGISTRY_VOUCHER_KID ?? '',
   registryUrl: process.env.CLERUM_REGISTRY_URL ?? '',
   registryClientId: process.env.CLERUM_REGISTRY_CLIENT_ID ?? '',
@@ -926,6 +948,18 @@ export const config: Config = {
     600_000,
     REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS
   ),
+  // OAuth proactive-refresh cron (mini-spec L). Default OFF: `=== 'true'`, so the
+  // sweep stays dark until an operator opts in after e2e.
+  oauthProactiveRefreshCronEnabled: process.env.OAUTH_PROACTIVE_REFRESH_CRON_ENABLED === 'true',
+  oauthProactiveRefreshIntervalMs: positiveIntegerFromEnv(
+    'OAUTH_PROACTIVE_REFRESH_INTERVAL_MS',
+    60_000
+  ),
+  // Computed + validated above the literal (Bp > Br must hold before the object
+  // is built): see `oauthProactiveRefreshBufferMs` local.
+  oauthProactiveRefreshBufferMs,
+  // Wc — default 7 days.
+  oauthDcrSecretWarnMs: positiveIntegerFromEnv('OAUTH_DCR_SECRET_WARN_MS', 604_800_000),
   // Danger-zone reservation TTL (§9.8a: ~2-3× the rollup lag, ~5 min). Short
   // enough that a hung reservation auto-frees; long enough that real spend has
   // reached the rollups before it expires (no double-count on the next check).
@@ -991,8 +1025,83 @@ export const config: Config = {
     'CLERUM_ATTACHMENT_MAX_BYTES',
     50 * 1024 * 1024
   ),
-  approvalRlRequestPerMin: Number(process.env.APPROVAL_RL_REQUEST_PER_MIN || 120),
-  approvalRlRefreshPerMin: Number(process.env.APPROVAL_RL_REFRESH_PER_MIN || 20),
+  adminSubscriptionReadPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_SUBSCRIPTION_READ_PER_MIN',
+    150
+  ),
+  adminSubscriptionWritePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_SUBSCRIPTION_WRITE_PER_MIN',
+    100
+  ),
+  subscriptionOAuthCallbackPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_SUBSCRIPTION_OAUTH_CALLBACK_PER_MIN',
+    100
+  ),
+  adminWorkflowReadPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_WORKFLOW_READ_PER_MIN', 300),
+  adminWorkflowGrantReadPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_WORKFLOW_GRANT_READ_PER_MIN',
+    300
+  ),
+  adminWorkflowGrantWritePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_WORKFLOW_GRANT_WRITE_PER_MIN',
+    100
+  ),
+  adminWorkflowTriggerPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_WORKFLOW_TRIGGER_PER_MIN',
+    50
+  ),
+  adminOutputsReadPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_OUTPUTS_READ_PER_MIN', 150),
+  llmProviderAttemptAuthorizePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MIN',
+    300
+  ),
+  llmProviderAttemptAuthorizeAnonymousIpPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_ANONYMOUS_IP_PER_MIN',
+    60
+  ),
+  adminRegistryKeysPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_REGISTRY_KEYS_PER_MIN', 150),
+  adminRegistryGrantsPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_REGISTRY_GRANTS_PER_MIN',
+    150
+  ),
+  adminRegistryConnectStatusPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_REGISTRY_CONNECT_STATUS_PER_MIN',
+    150
+  ),
+  adminRegistryConnectRequestPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_REGISTRY_CONNECT_REQUEST_PER_MIN',
+    15
+  ),
+  adminRegistryConnectRecoveryPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_REGISTRY_CONNECT_RECOVERY_PER_MIN',
+    50
+  ),
+  adminConnectorDeleteEdgePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_CONNECTOR_DELETE_EDGE_PER_MIN',
+    300
+  ),
+  adminConnectorDeletePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_CONNECTOR_DELETE_PER_MIN',
+    150
+  ),
+  pluginSdkAdminRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_ADMIN_PER_MIN', 600),
+  pluginSdkInternalRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_INTERNAL_PER_MIN', 600),
+  pluginSdkCredentialRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_CREDENTIAL_PER_MIN',
+    1800
+  ),
+  pluginSdkAuthenticatedPreauthRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN',
+    6000
+  ),
+  adminGfsGrantsPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_GFS_GRANTS_PER_MIN', 150),
+  adminGfsSharesPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_GFS_SHARES_PER_MIN', 150),
+  adminGfsLegacyGrantReportPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_GFS_LEGACY_GRANT_REPORT_PER_MIN',
+    150
+  ),
+  approvalRlRequestPerMin: positiveIntegerFromEnv('APPROVAL_RL_REQUEST_PER_MIN', 600),
+  approvalRlRefreshPerMin: positiveIntegerFromEnv('APPROVAL_RL_REFRESH_PER_MIN', 100),
   approvalRlExternalPerMin: externalRateLimitConfig.operation,
   approvalRlExternalEdgePerMin: externalRateLimitConfig.session,
   // By default the source-IP backstop is wider than the per-session edge bucket
@@ -1000,7 +1109,7 @@ export const config: Config = {
   // platform-wide ceiling. Operators may override these independent scopes;
   // crossed values are preserved after the boot advisory above.
   approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
-  oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
+  oauthBrokerRlPerMin: positiveIntegerFromEnv('CONTROL_API_OAUTH_BROKER_RL_PER_MIN', 300),
   // The public control-admin token routes (password reset, invitation, email
   // confirmation) have two buckets per route. The first keys on source IP and
   // the submitted value (email, login or token prefix): one person retrying.
@@ -1020,15 +1129,15 @@ export const config: Config = {
   // would effectively fail open.
   pluginSdkNotificationsRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN',
-    150
+    750
   ),
   pluginSdkPromptBridgeRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN',
-    120
+    600
   ),
   pluginSdkRequestBucketRlPerMin: positiveIntegerFromEnv(
     'CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN',
-    600
+    6000
   ),
   pluginSdkPreauthRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN', 600),
   // External GFS authority-boundary budgets. The four keyed by source IP or
@@ -1103,11 +1212,11 @@ export const config: Config = {
   ),
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
-  // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in
+  // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=48000 (defaults in
   // rpc-proxy/src/config.ts), so one held request costs
-  // 1 + floor(90000/15000) = 7 calls per rpc-proxy instance; rpc-proxy runs
+  // 1 + floor(48000/15000) = 4 calls per rpc-proxy instance; rpc-proxy runs
   // replicas: 2 (deploy/base/rpc-proxy/rpc-proxy.yaml) with per-instance
-  // dedup, so the mechanism alone can emit 14 calls / 90s (~9.4/min) per
+  // dedup, so the mechanism alone can emit 8 calls / 48s (10.0/min) per
   // host. Desktop prewarm adds a burst of up to 3 calls per device.
   // Middleware order in routes/rpc-access/hosts.ts is limiter BEFORE
   // handler, and the hostWakeCoalesceWindowMs coalescer runs INSIDE the
@@ -1117,7 +1226,7 @@ export const config: Config = {
   // the single-hold mechanism volume and covers one held wake plus prewarm
   // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
   // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
-  hostWakeRlPerMin: Number(process.env.CONTROL_API_HOST_WAKE_RL_PER_MIN || 30),
+  hostWakeRlPerMin: positiveIntegerFromEnv('CONTROL_API_HOST_WAKE_RL_PER_MIN', 150),
   hostWakeCoalesceWindowMs: Number(process.env.CONTROL_API_HOST_WAKE_COALESCE_WINDOW_MS || 2000),
   approvalMediumChallengeTtlSec: Number(
     process.env.WORKFLOW_APPROVAL_MEDIUM_CHALLENGE_TTL_SEC || 60 * 60
@@ -1149,6 +1258,61 @@ export const config: Config = {
     process.env.NOTIFICATION_STREAM_MAX_LIFETIME_MS || 10 * 60 * 1000
   ),
   notificationStreamSnapshotLimit: Number(process.env.NOTIFICATION_STREAM_SNAPSHOT_LIMIT || 50),
+  entityChangeDispatchIntervalMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_DISPATCH_INTERVAL_MS',
+    500,
+    100,
+    5000
+  ),
+  entityChangeRetentionSeconds: boundedIntegerEnv(
+    'ENTITY_CHANGE_RETENTION_SECONDS',
+    24 * 60 * 60,
+    60 * 60,
+    30 * 24 * 60 * 60
+  ),
+  entityChangeDispatchBatchSize: boundedIntegerEnv(
+    'ENTITY_CHANGE_DISPATCH_BATCH_SIZE',
+    1000,
+    1,
+    10000
+  ),
+  entityChangeMaxRecoveryEvents: boundedIntegerEnv(
+    'ENTITY_CHANGE_MAX_RECOVERY_EVENTS',
+    10000,
+    1,
+    100000
+  ),
+  entityChangeStreamPollMs: boundedIntegerEnv('ENTITY_CHANGE_STREAM_POLL_MS', 1000, 250, 5000),
+  entityChangeUserVisibilityRefreshMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_USER_VISIBILITY_REFRESH_MS',
+    4000,
+    1000,
+    5000
+  ),
+  entityChangeStreamHeartbeatMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_HEARTBEAT_MS',
+    20 * 1000,
+    1000,
+    60 * 1000
+  ),
+  entityChangeStreamMaxLifetimeMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_LIFETIME_MS',
+    10 * 60 * 1000,
+    30 * 1000,
+    60 * 60 * 1000
+  ),
+  entityChangeStreamMaxConnections: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_CONNECTIONS',
+    256,
+    1,
+    10000
+  ),
+  entityChangeStreamMaxConnectionsPerPrincipal: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_CONNECTIONS_PER_PRINCIPAL',
+    8,
+    1,
+    1000
+  ),
   notificationsDesktopFirstEnabled:
     (process.env.NOTIFICATIONS_DESKTOP_FIRST_ENABLED ?? 'true') !== 'false',
   // Parse safely: a non-empty non-numeric env (e.g. "disabled") yields NaN,
@@ -1158,7 +1322,7 @@ export const config: Config = {
     const n = Number(process.env.NOTIFICATION_DESKTOP_GRACE_SECONDS || 90)
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 90
   })(),
-  approvalRlReissuePerMin: Number(process.env.APPROVAL_RL_REISSUE_PER_MIN || 5),
+  approvalRlReissuePerMin: positiveIntegerFromEnv('APPROVAL_RL_REISSUE_PER_MIN', 25),
   // Cleanup of stale token-bucket rows (older than 5 min — the only active
   // window). 5 min lines up with the longest bucket window we use.
   approvalRlCleanupIntervalMs: Number(process.env.APPROVAL_RL_CLEANUP_INTERVAL_MS || 5 * 60_000),
@@ -1431,7 +1595,10 @@ if (config.registryAuthEnabled) {
       'REGISTRY_CONNECTION_MODE is required (managed|self-hosted) when CLERUM_REGISTRY_AUTH_ENABLED=true'
     )
   }
-  console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
+  rootLogger.info(
+    { event: 'registry_connection_mode', mode: config.registryConnectionMode },
+    'Registry connection mode'
+  )
 
   if (config.registryConnectionMode === 'managed') {
     // Managed machine creds live in env (unchanged).
@@ -1461,28 +1628,11 @@ if (config.registryAuthEnabled) {
   // AFTER initDb (config.ts is sync and cannot query Postgres). See Task 8.
 }
 
-// Production safety check: reject known dev keys at startup
 if (process.env.NODE_ENV === 'production') {
   // NOTE: the old voucher-key fallback WARN (dedicated key unset → sign with the
   // admin JWT key) is gone. Under voucher v2 a managed prod boot without the
   // dedicated key/kid FAILS FAST in the registryAuthEnabled guard above (unless
   // break-glass), so there is no silent fallback left to warn about.
-
-  const devKeyFingerprint = 'MIIEvAIBADANBgkqhkiG9w0BAQEFAASC' // start of DEV_RPC_JWT_PRIVATE_KEY
-  const devSessionFingerprint = 'MIIEvgIBADANBgkqhkiG9w0BAQEFAASC' // start of DEV_SESSION_JWT_PRIVATE_KEY
-  const devAdminFingerprint = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCysO8J' // start of DEV_ADMIN_JWT_PRIVATE_KEY
-  if (
-    config.rpcJwtPrivateKey.includes(devKeyFingerprint) ||
-    config.sessionJwtPrivateKey.includes(devSessionFingerprint) ||
-    config.adminJwtPrivateKey.includes(devKeyFingerprint) ||
-    config.adminJwtPrivateKey.includes(devAdminFingerprint)
-  ) {
-    throw new Error(
-      '[SECURITY] Production startup rejected: hardcoded dev JWT signing keys detected. ' +
-        'Set CONTROL_API_RPC_JWT_PRIVATE_KEY, CONTROL_API_SESSION_JWT_PRIVATE_KEY, and ' +
-        'CONTROL_API_ADMIN_JWT_PRIVATE_KEY to real secrets.'
-    )
-  }
 
   for (const [serviceName, token] of Object.entries(config.internalServiceTokens)) {
     if (/^dev-/.test(token)) {

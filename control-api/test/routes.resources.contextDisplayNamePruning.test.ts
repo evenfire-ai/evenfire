@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { config } from '../src/config.js'
-import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
-import { ResourceService } from '../src/services/resourceService.js'
+
+// The McpServer uninstall tears OAuth state down before deleting the CR and answers
+// 503 when that fails, so it needs a DB that answers (empty: nothing to tear down).
+vi.mock('../src/db.js', async importActual => {
+  const actual = await importActual<typeof import('../src/db.js')>()
+  return { ...actual, pool: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } }
+})
+
+const { config } = await import('../src/config.js')
+const { createAdminResourcesRouter } = await import('../src/routes/admin/resources.js')
+const { ResourceService } = await import('../src/services/resourceService.js')
 
 // R1-M6 — deploy-order guard against silent pruning of the additive context
 // `spec.displayName` field (PR #304).
@@ -25,6 +33,7 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
     deleteResource: ResourceService['deleteResource']
     listResource: ResourceService['listResource']
     deleteSecret: ReturnType<typeof vi.fn>
+    getSecret: ReturnType<typeof vi.fn>
   }
   store: Map<string, Record<string, unknown>>
   deleteNamespacedCustomObject: ReturnType<typeof vi.fn>
@@ -106,6 +115,10 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
   // handler invokes it for the `<name>-credentials` secret. It is orthogonal to
   // the allowlist-pruning path under test, so a no-op spy suffices.
   const deleteSecret = vi.fn(async () => ({ deleted: true }))
+  // The uninstall snapshots the server's Secrets before cleaning up; none exist here.
+  const getSecret = vi.fn(async (name: string) => {
+    throw Object.assign(new Error(`secrets "${name}" not found`), { code: 404 })
+  })
   const gateway = {
     getResource: svc.getResource.bind(svc),
     updateResource: svc.updateResource.bind(svc),
@@ -113,6 +126,7 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
     deleteResource: svc.deleteResource.bind(svc),
     listResource: svc.listResource.bind(svc),
     deleteSecret,
+    getSecret,
   }
   return { gateway, store, deleteNamespacedCustomObject, deleteSecret }
 }
@@ -229,6 +243,13 @@ describe('routes/resources — context spec.displayName deploy-order guard (R1-M
         },
       },
       config.contextsNamespace
+    )
+    // A missing McpServer answers 404 without touching any Context, so the server
+    // under uninstall must exist.
+    await gateway.createResource(
+      'mcpservers',
+      { metadata: { name: 'srv-target' }, spec: {} },
+      config.mcpServersNamespace
     )
     const app = makeApp(gateway)
 

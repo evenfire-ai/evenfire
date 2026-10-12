@@ -1,10 +1,17 @@
-import { Pool, type PoolClient } from 'pg'
+import { type Client, Pool, type PoolClient } from 'pg'
 import {
   type BoundedPoolBudget,
   type PoolConstructor,
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { rootLogger } from './observability/logger.js'
+import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
+import {
+  applyPasswordAdmissionSchema,
+  applyPasswordEvaluationRetentionSchema,
+} from './services/auth/passwordAdmissionSchema.js'
+import { applyPasswordWorkOwnershipSchema } from './services/auth/passwordWorkOwnershipSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
 import {
   applyCodexChatgptAccountIdSchema,
@@ -14,6 +21,11 @@ import {
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
+import {
+  applyEntityChangeCheckpointSchema,
+  applyEntityChangeDefinerSearchPathSchema,
+  applyEntityChangeSchema,
+} from './services/entityChangeSchema.js'
 import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
@@ -6260,6 +6272,83 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0118_control_admin_replace_inviter_accept_guard',
     apply: applyControlAdminReplaceInviterAcceptGuard,
   },
+  {
+    // Renumbered twice while syncing onto dev: 0116 -> 0117 -> 0119. The first
+    // sync brought dev's 0116_mcp_secret_rollback_permits; this one brought
+    // dev's 0117/0118 control-admin replace-inviter pair, which already shipped
+    // in a release, so the oauth-19 dynamic-clients migrations move past them
+    // rather than claiming a version another migration already uses.
+    // Environments where this feature branch was already deployed (the oauth-19
+    // dev cluster) recorded it under one of the earlier names; legacyVersions
+    // lets the runner mark 0119 applied from that prior row instead of
+    // re-running the DDL and leaving an orphan schema_migrations entry. Both
+    // prior names are unique to this migration, so there is no false-skip.
+    version: '0119_dynamic_clients_table',
+    legacyVersions: ['0116_dynamic_clients_table', '0117_dynamic_clients_table'],
+    apply: applyDynamicClientsTable,
+  },
+  {
+    // Renumbered twice while syncing onto dev (0117 -> 0118 -> 0120), moving in
+    // lockstep with the table migration above. Same legacyVersions rationale:
+    // the prior names are unique to this migration.
+    version: '0120_dynamic_clients_runtime_access',
+    legacyVersions: ['0117_dynamic_clients_runtime_access', '0118_dynamic_clients_runtime_access'],
+    apply: applyDynamicClientsRuntimeAccess,
+  },
+  {
+    // Install-identity columns for the DCR/OAuth state (install_id + cr_uid on
+    // dynamic_clients, cr_uid on oauth_grants). Renumbered 0119 -> 0121 while
+    // syncing onto dev (dev's 0117/0118 pushed the oauth-19 migrations down by
+    // two); the pre-renumber name is unique to this migration, so legacyVersions
+    // marks it applied on environments that already ran it.
+    version: '0121_oauth_install_identity',
+    legacyVersions: ['0119_oauth_install_identity'],
+    apply: applyOAuthInstallIdentity,
+  },
+  {
+    version: '0122_durable_entity_change_feed',
+    // This feature was deployed both before the two replace-inviter migrations
+    // and at its original 0117 slot; it also shipped at 0119 before current dev
+    // claimed that numeric slot for dynamic clients. Preserve all identities so
+    // an upgrade records 0122 without rerunning entity-change DDL.
+    legacyVersions: [
+      '0116_durable_entity_change_feed',
+      '0117_durable_entity_change_feed',
+      '0119_durable_entity_change_feed',
+    ],
+    apply: applyEntityChangeSchema,
+  },
+  {
+    version: '0123_entity_change_checkpoint_cursor_convergence',
+    // The checkpoint fix shipped at 0120 before current dev assigned that slot
+    // to dynamic-client runtime grants. This migration only replaces the
+    // checkpoint function; retain the old identity so deployed databases skip
+    // duplicate DDL while recording the new monotonic version.
+    legacyVersions: ['0120_entity_change_checkpoint_cursor_convergence'],
+    apply: applyEntityChangeCheckpointSchema,
+  },
+  {
+    version: '0124_entity_change_definer_search_path',
+    apply: applyEntityChangeDefinerSearchPathSchema,
+  },
+  {
+    version: '0125_admin_subscription_rate_limit_namespace',
+    apply: applyAdminSubscriptionRateLimitNamespace,
+  },
+  {
+    version: '0126_bug192_password_admission',
+    // Preserve the deployed identity after dev assigned slot 0125 to admin admission.
+    legacyVersions: ['0125_bug192_password_admission'],
+    apply: applyPasswordAdmissionSchema,
+  },
+  {
+    version: '0127_password_evaluation_retention',
+    apply: applyPasswordEvaluationRetentionSchema,
+  },
+  {
+    version: '0128_password_work_ownership',
+    apply: applyPasswordWorkOwnershipSchema,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6436,6 +6525,120 @@ async function applyOAuthGrantsOwnerGeneralization(db: DbClient): Promise<void> 
   `)
 }
 
+async function applyDynamicClientsTable(db: DbClient): Promise<void> {
+  // DCR (RFC 7591) dynamic clients — sibling of `oauth_grants` (spec 02 C2,
+  // D-5, DEC-18). When an AS supports neither a pre-registered client nor CIMD,
+  // control-api registers a client dynamically and persists its credentials
+  // here, with the same at-rest guarantees as oauth_grants: client_secret and
+  // the RFC 7592 registration_access_token are AES-256-GCM encrypted via
+  // `encryptOAuthSecret` (never stored in the clear); client_id is the AS's
+  // public assignment and is mirrored into `spec.oauth.id` on the CR.
+  //
+  // Keyed per-server-CR: (owner_kind, server_namespace, server_name) mirror the
+  // exact coordinates of the pre-registered `${serverName}-oauth-client` Secret
+  // and of oauth_grants — the AS (untrusted) never names the primary key. The
+  // `issuer` column is indexed for audit and a possible additive per-issuer
+  // dedup later; it is deliberately NOT part of the uniqueness key.
+  //
+  // Additive + idempotent (CREATE TABLE IF NOT EXISTS): control-api-only, no CRD.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS dynamic_clients (
+      id BIGSERIAL PRIMARY KEY,
+      owner_kind TEXT NOT NULL DEFAULT 'mcpserver',
+      server_namespace TEXT NOT NULL,
+      server_name TEXT NOT NULL,
+      issuer TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      client_mode TEXT NOT NULL,
+      client_secret_encrypted TEXT,
+      registration_access_token_encrypted TEXT,
+      registration_client_uri TEXT,
+      client_id_issued_at TIMESTAMPTZ,
+      client_secret_expires_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT dynamic_clients_owner_unique UNIQUE (owner_kind, server_namespace, server_name)
+    );
+    CREATE INDEX IF NOT EXISTS dynamic_clients_issuer_idx ON dynamic_clients (issuer);
+  `)
+}
+
+async function applyDynamicClientsRuntimeAccess(db: DbClient): Promise<void> {
+  // `dynamic_clients` was created (0119) after the base migration's
+  // `GRANT ... ON ALL TABLES IN SCHEMA public`, which only reaches tables that
+  // existed when it ran. Without this the runtime role has f/f/f/f on the table
+  // and no USAGE/SELECT/UPDATE on its identity sequence, so dynamicClientStore's
+  // upsert/select/delete fail and the deploy access-contract verifier aborts on
+  // a coverage violation. dynamicClientStore runs INSERT ... ON CONFLICT DO
+  // UPDATE, SELECT and DELETE → the legacy_dml (S/I/U/D) relation profile and
+  // the legacy_rw (USAGE/SELECT/UPDATE) sequence profile, matching oauth_grants.
+  // Plain GRANTs are idempotent; the table is freshly created with no PUBLIC
+  // grant, so no REVOKE is needed to keep the least-privilege envelope exact.
+  await db.query(`
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE dynamic_clients TO control_api_runtime;
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCE dynamic_clients_id_seq TO control_api_runtime;
+  `)
+}
+
+async function applyOAuthInstallIdentity(db: DbClient): Promise<void> {
+  // Install identity for the DCR/OAuth Postgres state. Rows in dynamic_clients
+  // and oauth_grants were keyed only by (owner_kind, server_namespace,
+  // server_name), so no row knew WHICH installation of the McpServer it belonged
+  // to. Two columns give each row a lifetime owner:
+  //   - install_id: a token the remote-install saga mints before the CR exists,
+  //     so its own compensations only touch its own row.
+  //   - cr_uid: the apiserver's metadata.uid of the owning McpServer (unique per
+  //     object; a same-name reinstall gets a different uid), so post-uninstall
+  //     teardown and orphan reclaim can fence by the exact installation.
+  //
+  // A bound row (cr_uid set) must carry an install_id — the saga always mints one
+  // before binding the CR uid, so a bound-but-install-less row is impossible.
+  //
+  // Greenfield/additive: dynamic_clients ships only on this branch, so no
+  // backfill is possible or needed (legacy rows keep both columns NULL and the
+  // decision logic treats them as name-only). ADD COLUMN is covered by the table
+  // GRANTs from 0119/0120 (legacy_dml), so no new runtime-access grant is needed.
+  // Idempotent: ADD COLUMN IF NOT EXISTS, and each CHECK is guarded on
+  // pg_constraint (Postgres has no ADD CONSTRAINT IF NOT EXISTS).
+  await db.query(`
+    ALTER TABLE dynamic_clients ADD COLUMN IF NOT EXISTS install_id UUID;
+    ALTER TABLE dynamic_clients ADD COLUMN IF NOT EXISTS cr_uid TEXT;
+    ALTER TABLE oauth_grants ADD COLUMN IF NOT EXISTS cr_uid TEXT;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'dynamic_clients'::regclass
+           AND conname = 'dynamic_clients_cr_uid_len'
+      ) THEN
+        ALTER TABLE dynamic_clients
+          ADD CONSTRAINT dynamic_clients_cr_uid_len
+          CHECK (cr_uid IS NULL OR char_length(cr_uid) <= 128);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'dynamic_clients'::regclass
+           AND conname = 'dynamic_clients_bound_needs_install'
+      ) THEN
+        ALTER TABLE dynamic_clients
+          ADD CONSTRAINT dynamic_clients_bound_needs_install
+          CHECK (cr_uid IS NULL OR install_id IS NOT NULL);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'oauth_grants'::regclass
+           AND conname = 'oauth_grants_cr_uid_len'
+      ) THEN
+        ALTER TABLE oauth_grants
+          ADD CONSTRAINT oauth_grants_cr_uid_len
+          CHECK (cr_uid IS NULL OR char_length(cr_uid) <= 128);
+      END IF;
+    END $$;
+  `)
+}
+
 async function ensureSchemaMigrationsTable(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -6497,7 +6700,7 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query('ROLLBACK')
       } catch (rollbackError) {
-        console.warn('[ControlAPI] initDb rollback failed:', rollbackError)
+        rootLogger.warn({ err: rollbackError }, 'Control API migration rollback failed')
       }
     }
     throw error
@@ -6506,7 +6709,7 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query(`SELECT pg_advisory_unlock(${INIT_DB_LOCK_KEY_SQL})`)
       } catch (unlockError) {
-        console.warn('[ControlAPI] initDb advisory unlock failed:', unlockError)
+        rootLogger.warn({ err: unlockError }, 'Control API migration advisory unlock failed')
       }
     }
     client.release()
@@ -6527,22 +6730,148 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
+export type DbTransactionOptions = { signal?: AbortSignal }
+
 export async function withTransaction<T>(
-  work: (db: DbTransactionClient) => Promise<T>
+  work: (db: DbTransactionClient) => Promise<T>,
+  // Injectable only so the carrier's client lifecycle can be unit-tested against
+  // a fake Pool; production always uses the module-level core pool.
+  txPool: Pool = pool,
+  options: DbTransactionOptions = {}
 ): Promise<T> {
-  const client = (await pool.connect()) as PoolClient
+  const signal = options.signal
+  signal?.throwIfAborted()
+  // The pool's existing finite connection timeout owns a pending borrow. An
+  // abort cannot release its caller until acquisition has settled, including
+  // disposal of a client delivered after the signal fired.
+  let client: PoolClient & Pick<Client, 'end' | 'connection'>
+  try {
+    client = (await txPool.connect()) as typeof client
+  } catch (error) {
+    signal?.throwIfAborted()
+    throw error
+  }
   let transactionStarted = false
   let commitSent = false
+  let transactionFinished = false
+  let originalIdleTimeout: string | undefined
   let releaseError: Error | boolean | undefined
+
+  // pg-pool detaches its own idle 'error' listener from a client while it is
+  // checked out, so an out-of-band backend error on the borrowed client (e.g.
+  // Postgres terminating the backend on idle_in_transaction_session_timeout,
+  // 25P03, while the transaction awaits an external POST with no query running)
+  // arrives with NO 'error' listener. Node's EventEmitter then THROWS in that
+  // tick — an async event outside any await stack, so no try/catch here or in a
+  // caller can catch it — and with no process-level handler it exits the process.
+  // The carrier owns the client for the whole checkout, so it holds the listener:
+  // capture the async error and fold it into releaseError so pg-pool DESTROYS the
+  // poisoned connection instead of returning it to the pool.
+  let asyncClientError: Error | undefined
+  const onClientError = (err: unknown): void => {
+    asyncClientError ??= err instanceof Error ? err : new Error(String(err))
+  }
+  client.on('error', onClientError)
+
+  let termination: Promise<void> | undefined
+  const terminateClient = (reason: Error | boolean): void => {
+    releaseError ??= reason
+    if (termination) return
+    termination = client.end().catch(error => {
+      releaseError = error instanceof Error ? error : true
+    })
+    // pg Client.end() destroys an active query's socket, but an idle client
+    // waits for the peer's EOF. Explicit cancellation must also end a half-open
+    // idle checkout. Client.connection.stream is the pinned driver's typed
+    // transport; Duplex.destroy() is idempotent and its socket close drives the
+    // driver's connection end event awaited by Client.end(). Do not evict or
+    // finish the caller ahead of that event.
+    client.connection.stream.destroy()
+  }
+  const onAbort = (): void => {
+    terminateClient(signal?.reason instanceof Error ? signal.reason : true)
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
+  if (signal?.aborted) onAbort()
+
   try {
+    signal?.throwIfAborted()
+    if (signal) {
+      // Read normalized milliseconds from this backend, not from client startup
+      // options: a role/database default or a reused session can be different.
+      const settings = await client.query<{
+        statement_timeout_ms: string | null
+        idle_timeout_ms: string | null
+      }>(`SELECT
+        (SELECT setting FROM pg_settings WHERE name = 'statement_timeout') AS statement_timeout_ms,
+        (SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout') AS idle_timeout_ms`)
+      signal.throwIfAborted()
+      const setting = settings.rows[0]
+      const statementTimeout = setting?.statement_timeout_ms
+      const idleTimeout = setting?.idle_timeout_ms
+      const statementMs = Number(statementTimeout)
+      const idleMs = Number(idleTimeout)
+      // These are the existing createBoundedPgPoolForConnection startup bounds.
+      // An unbounded or invalid effective server setting cannot supply a finite
+      // remote cleanup backstop, so this cancellable transaction must fail loud.
+      if (
+        typeof statementTimeout !== 'string' ||
+        !/^\d+$/.test(statementTimeout) ||
+        !Number.isInteger(statementMs) ||
+        statementMs < 100 ||
+        statementMs > 30_000 ||
+        typeof idleTimeout !== 'string' ||
+        !/^\d+$/.test(idleTimeout) ||
+        !Number.isSafeInteger(idleMs)
+      ) {
+        throw new Error('Invalid effective PostgreSQL cancellation timeout bounds')
+      }
+      if (idleMs === 0 || idleMs > statementMs) {
+        // This must be SESSION scope before BEGIN. AbortTransaction restores a
+        // SET LOCAL value before entering idle-in-transaction (aborted), which
+        // would remove the very backstop needed when a blackhole hides our FIN.
+        // Record the original before sending: a missing set_config reply is also
+        // uncertain, and that checkout must be ended rather than returned healthy.
+        originalIdleTimeout = idleTimeout
+        await client.query('SELECT set_config($1, $2, false)', [
+          'idle_in_transaction_session_timeout',
+          statementTimeout,
+        ])
+        signal.throwIfAborted()
+      }
+    }
     await client.query('BEGIN')
     transactionStarted = true
+    if (signal) {
+      signal.throwIfAborted()
+      // PostgreSQL 16 on the service's Linux runtime supports socket polling
+      // during queries. Its default (0) can leave a disconnected writer running
+      // until statement_timeout; this scoped setting detects our transport stop
+      // promptly. Unsupported servers fail this transaction instead of silently
+      // omitting cancellation. The existing statement_timeout stays in force.
+      await client.query("SET LOCAL client_connection_check_interval = '100ms'")
+    }
     // The brand is nominal-only (a declared unique symbol); the checked-out
     // client IS the transaction session, so this cast is the single blessed
     // point where the brand is minted (issue #375 M3).
-    const result = await work(client as unknown as DbTransactionClient)
+    signal?.throwIfAborted()
+    const transaction = signal
+      ? ({
+          query: async (text: string, values?: unknown[]) => {
+            signal.throwIfAborted()
+            const result = await client.query(text, values)
+            signal.throwIfAborted()
+            return result
+          },
+        } as unknown as DbTransactionClient)
+      : (client as unknown as DbTransactionClient)
+    const result = await work(transaction)
+    signal?.throwIfAborted()
     commitSent = true
     await client.query('COMMIT')
+    transactionFinished = true
+    // An acknowledged COMMIT is the outcome, even if the signal aborted
+    // meanwhile: the finally still evicts the session instead of restoring it.
     return result
   } catch (error) {
     if (commitSent || !transactionStarted) {
@@ -6550,12 +6879,61 @@ export async function withTransaction<T>(
     } else {
       try {
         await client.query('ROLLBACK')
+        transactionFinished = true
       } catch (rollbackError) {
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
     }
+    // Once COMMIT was sent, a missing reply is an unknown durable outcome.
+    // Cancellation does not establish rollback, no spend or no dispatch.
+    signal?.throwIfAborted()
     throw error
   } finally {
+    // Work (including its own finally) and any rollback have already unwound.
+    // Only an acknowledged, healthy transaction may restore session state and
+    // return to the pool. Lost COMMIT/ROLLBACK replies leave the server backstop
+    // installed; local transport completion is not remote cleanup observation.
+    if (
+      originalIdleTimeout !== undefined &&
+      transactionFinished &&
+      !releaseError &&
+      !asyncClientError &&
+      !signal?.aborted
+    ) {
+      try {
+        await client.query('SELECT set_config($1, $2, false)', [
+          'idle_in_transaction_session_timeout',
+          originalIdleTimeout,
+        ])
+      } catch (restoreError) {
+        // Do not replace the work outcome or relabel an acknowledged COMMIT as
+        // a rollback. A session that failed restoration is physically ended.
+        releaseError = restoreError instanceof Error ? restoreError : true
+      }
+    }
+    if (signal && (releaseError || asyncClientError || signal.aborted)) {
+      terminateClient(
+        signal.aborted
+          ? signal.reason instanceof Error
+            ? signal.reason
+            : true
+          : (releaseError ?? asyncClientError ?? true)
+      )
+    }
+    // Keep both listeners and the checkout until physical termination completes.
+    if (termination) await termination
+    signal?.removeEventListener('abort', onAbort)
+    client.removeListener('error', onClientError)
+    // A client that emitted 'error' mid-checkout is poisoned; destroy it. Keep an
+    // existing releaseError (the primary failure from work/commit/rollback) and
+    // adopt the async one only when the sync path saw none, so a truthy value
+    // always reaches release() and pg-pool never recycles the bad connection.
+    if (asyncClientError && !releaseError) {
+      releaseError = asyncClientError
+    }
+    if (signal?.aborted) {
+      releaseError = signal.reason instanceof Error ? signal.reason : true
+    }
     client.release(releaseError)
   }
 }
@@ -6580,6 +6958,18 @@ const LLM_MODEL_LOCK_NAMESPACE = 'llm-model:'
 export const HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
   'CONTROL_API_HOST_MODEL_WRITE_LOCK_IDLE_TIMEOUT_MS',
   DEFAULT_CARRIER_IDLE_TIMEOUT_MS,
+  MIN_CARRIER_IDLE_TIMEOUT_MS,
+  MAX_CARRIER_IDLE_TIMEOUT_MS
+)
+
+// Idle-in-transaction bound for the REACTIVE OAuth-refresh carrier transaction —
+// the one that holds a per-grant `FOR UPDATE` row lock across the refresh POST.
+// Default 20s > the 15s HTTP AbortSignal so the client aborts a hung AS first;
+// the GUC is only the backstop for a wedged abort. Same [1s, 60s] bounds as the
+// host↔model carrier.
+export const OAUTH_REFRESH_LOCK_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
+  'CONTROL_API_OAUTH_REFRESH_LOCK_IDLE_TIMEOUT_MS',
+  20_000,
   MIN_CARRIER_IDLE_TIMEOUT_MS,
   MAX_CARRIER_IDLE_TIMEOUT_MS
 )
@@ -6626,4 +7016,17 @@ export async function boundCarrierTransactionIdleTimeout(
   ms: number = HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS
 ): Promise<void> {
   await db.query(`SELECT set_config('idle_in_transaction_session_timeout', $1, true)`, [String(ms)])
+}
+
+/**
+ * Bound the idle-in-transaction tenancy of the reactive OAuth-refresh carrier
+ * transaction — the one that HOLDS the per-grant `FOR UPDATE` row lock across the
+ * refresh POST (mini-spec 16, R2-M1). While that POST is awaited no statement
+ * runs, so this GUC is the only timeout that can release the row lock + pool
+ * connection if the AS hangs. Thin wrapper over
+ * {@link boundCarrierTransactionIdleTimeout} pinned to the OAuth carrier's own
+ * env-bounded value.
+ */
+export async function boundOAuthRefreshLockIdleTimeout(db: DbTransactionClient): Promise<void> {
+  await boundCarrierTransactionIdleTimeout(db, OAUTH_REFRESH_LOCK_CARRIER_IDLE_TIMEOUT_MS)
 }

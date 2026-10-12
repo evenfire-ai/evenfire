@@ -151,6 +151,29 @@ export function getManagedAgentPodIdentity(agent: ManagedGfsAgent): string {
   return identity
 }
 
+/**
+ * The label the Desktop renders for an agent: the Host CRD `spec.host`
+ * (FleetBoard rows, the "Switch chat agent" menu, the chat breadcrumb).
+ * `name` stays the identity for grants, subjects and pods; the two differ in
+ * the Minikube profile (`chatllm` vs `chatLLM`). `spec.host` is required by
+ * the CRD, so an empty value is a broken fixture and fails the suite.
+ */
+export function getManagedAgentDisplayName(agent: ManagedGfsAgent): string {
+  const display = kubectlOut([
+    '-n',
+    agent.namespace,
+    'get',
+    'host',
+    agent.name,
+    '-o',
+    'jsonpath={.spec.host}',
+  ]).trim()
+  if (!display) {
+    throw new Error(`Host ${agent.namespace}/${agent.name} has no spec.host display name`)
+  }
+  return display
+}
+
 export function discoverManagedGfsAgent(): ManagedGfsAgent {
   const { candidates, candidateErrors } = discoverManagedGfsAgentCandidates()
   const agent = chooseManagedGfsAgent(candidates, candidateErrors, process.env.E2E_GFS_AGENT_A)

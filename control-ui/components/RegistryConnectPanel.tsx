@@ -34,6 +34,7 @@ type View =
   | { kind: 'rejected'; requestedOrgName?: string }
   | { kind: 'connected'; org?: string; authEnabled?: boolean }
   | { kind: 'not-self-hosted' }
+  | { kind: 'signing-material-unavailable' }
   | { kind: 'error' }
 
 function viewForRegistryStatus(s: RegistryConnectionStatus): View {
@@ -107,7 +108,10 @@ export default function RegistryConnectPanel() {
     } catch (e) {
       const code = (e as { code?: string }).code
       if (code === 'not_self_hosted') setView({ kind: 'not-self-hosted' })
-      else setView({ kind: 'error' })
+      else if (code === 'registry_signing_material_unavailable') {
+        setFormError(null)
+        setView({ kind: 'signing-material-unavailable' })
+      } else setView({ kind: 'error' })
       return null
     }
   }, [])
@@ -189,7 +193,9 @@ export default function RegistryConnectPanel() {
         )
       else if (code === 'jti_replayed')
         setFormError('That registration attempt could not be completed. Try again.')
-      else setFormError('Could not request registration. Try again shortly.')
+      else if (code === 'registry_signing_material_unavailable') {
+        setView({ kind: 'signing-material-unavailable' })
+      } else setFormError('Could not request registration. Try again shortly.')
     } finally {
       setBusy(false)
     }
@@ -223,7 +229,10 @@ export default function RegistryConnectPanel() {
         )
       else if (code === 'not_pending')
         await loadAfterRegistryStateChange() // server state moved on — re-sync
-      else setFormError('Could not complete the claim. Try again shortly.')
+      else if (code === 'registry_signing_material_unavailable') {
+        setClaimToken('')
+        setView({ kind: 'signing-material-unavailable' })
+      } else setFormError('Could not complete the claim. Try again shortly.')
     } finally {
       setBusy(false)
     }
@@ -258,7 +267,9 @@ export default function RegistryConnectPanel() {
       else if (code === 'client_unavailable')
         setFormError('This deployment can no longer authenticate. Contact support.')
       else if (code === 'not_recoverable') await loadAfterRegistryStateChange()
-      else setFormError('Could not finish connecting. Try again shortly.')
+      else if (code === 'registry_signing_material_unavailable') {
+        setView({ kind: 'signing-material-unavailable' })
+      } else setFormError('Could not finish connecting. Try again shortly.')
     } finally {
       setBusy(false)
     }
@@ -281,13 +292,10 @@ export default function RegistryConnectPanel() {
     setView({ kind: 'request' })
   }
 
-  // From the `connecting` view: with re-registration blocked server-side by
-  // recovery_in_progress, this DELETE is the ONLY remaining path that can
-  // destroy a recoverable deployment — it deletes the keypair and permanently
-  // squats the org name at the registry. It is a broken-state recovery action
-  // (the connection never completed), so unlike the removed connected-state
-  // Disconnect it is kept — but gated behind a danger confirm, never a bare button.
-  async function handleStartOverFromConnecting() {
+  // From a broken pre-connection state: this DELETE is the operator-owned path
+  // that can destroy a recoverable deployment's keypair. It is never automatic
+  // and always gated by the danger confirmation above.
+  async function handleConfirmedStartOver() {
     const ok = await confirm({
       title: 'Start over',
       message:
@@ -301,7 +309,10 @@ export default function RegistryConnectPanel() {
       await disconnectRegistryConnection()
       void refreshPublishScope({ force: true })
     } catch {
-      /* best-effort — the next GET reports disconnected once the row is gone */
+      setFormError(
+        'Could not remove the stored registry credentials. Try again to continue starting over.'
+      )
+      return
     } finally {
       setBusy(false)
     }
@@ -334,6 +345,25 @@ export default function RegistryConnectPanel() {
                 Retry
               </Button>
             </p>
+          ) : null}
+
+          {view.kind === 'signing-material-unavailable' ? (
+            <div className="cu-form-stack">
+              <p className="cu-banner cu-banner--warn">
+                The stored registry signing material is unavailable. Retrying cannot repair this
+                connection; start over to remove the stored credentials and register again.
+              </p>
+              {formError ? <p className="cu-banner cu-banner--warn">{formError}</p> : null}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() => void handleConfirmedStartOver()}
+              >
+                Start over
+              </Button>
+            </div>
           ) : null}
 
           {view.kind === 'request' ? (
@@ -430,7 +460,7 @@ export default function RegistryConnectPanel() {
                   variant="ghost"
                   size="sm"
                   disabled={busy}
-                  onClick={() => void handleStartOverFromConnecting()}
+                  onClick={() => void handleConfirmedStartOver()}
                 >
                   Start over
                 </Button>

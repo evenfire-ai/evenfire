@@ -17,6 +17,7 @@ import { useComposerDraft } from '@hooks/useComposerDraft'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
 import { resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { TaskProgressStreamEvent } from '../../../../../src/types'
+import { useHarnessHostAuthority } from './__fixtures__/hostAuthorityHarness'
 
 type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
 
@@ -63,12 +64,25 @@ function installClerumHarness() {
           return meta
         }),
         rename: vi.fn(async () => undefined),
-        delete: vi.fn(async () => undefined),
+        getBindingGeneration: vi.fn(async () => 1),
+        captureDeleteFence: vi.fn(async (authorityScope: unknown) => ({
+          version: 1,
+          authorityScope,
+          bindingGeneration: 1,
+          sessionGeneration: 1,
+        })),
+        delete: vi.fn(async () => ({ cleanupPending: false })),
         loadMessages: vi.fn(
           async (_agentRef: string, chatId: string) => messagesByChat.get(chatId) || []
         ),
         appendMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
           messagesByChat.set(chatId, [...(messagesByChat.get(chatId) || []), ...messages])
+        }),
+        upsertMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
+          const existing = messagesByChat.get(chatId) || []
+          const byId = new Map(existing.map(message => [(message as { id: string }).id, message]))
+          for (const message of messages) byId.set((message as { id: string }).id, message)
+          messagesByChat.set(chatId, [...byId.values()])
         }),
         replaceMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
           messagesByChat.set(chatId, [...messages])
@@ -113,14 +127,22 @@ function installClerumHarness() {
 }
 
 function AgentChatHarness() {
+  const hostAuthority = useHarnessHostAuthority()
   const vm = useAgentChatController({
     selectedAgent: 'trader',
     agentNames: ['trader'],
     currentTeamId: 'team-1',
+    chatAuthorityTeamId: 'team-1',
+    currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team One',
     isAuthenticated: true,
     loadMenuData: true,
     navItem: 'chat',
+    onHostAccessRevoked: hostAuthority.onHostAccessRevoked,
+    onHostAuthorityUncertain: hostAuthority.onHostAuthorityUncertain,
+    isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
+    getHostAuthorityEpoch: hostAuthority.getHostAuthorityEpoch,
+    hostAuthorityRevision: hostAuthority.revision,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,

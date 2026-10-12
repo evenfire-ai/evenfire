@@ -5,8 +5,6 @@ import { useParams, useRouter } from 'next/navigation'
 import {
   DataTable,
   DialogShell,
-  RecordList,
-  RecordListRow,
   RowActionMenu,
   SingleValueEditDialog,
   TableViewport,
@@ -970,77 +968,96 @@ export default function TeamDetailsPage() {
             {activeTab === 'agents' && (
               <>
                 <p className="cu-muted cu-detail-section-copy">Agents this team may use.</p>
-                {initialLoading ? (
-                  <div role="list">
-                    {[1, 2, 3].map(i => (
-                      <div key={i} className="cu-skeleton--row" role="listitem">
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '10rem' }}
-                        ></div>
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '4rem' }}
-                        ></div>
-                      </div>
-                    ))}
-                  </div>
-                ) : effectiveAgentNames.length === 0 ? (
-                  <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-                    No agent access yet.
-                  </div>
-                ) : (
-                  <RecordList>
-                    {effectiveAgentNames.map(agentName => {
-                      // Rename propagation: display name (spec.host) — same
-                      // resolution as the add-agent picker on this page. Links
-                      // and actions stay keyed by the immutable slug.
-                      // Review R1-H1: display names are not unique, so the slug
-                      // stays visible as secondary identity whenever it differs,
-                      // and the action label carries it to keep duplicates
-                      // distinguishable and correctly targeted.
-                      const agentDisplayName = getAgentDisplayName(agentName, hosts)
-                      const agentRowLabel =
-                        agentDisplayName === agentName
-                          ? agentDisplayName
-                          : `${agentDisplayName} (${agentName})`
-                      return (
-                        <RecordListRow key={agentName} className="cu-access-row">
-                          <div className="cu-access-agent-copy">
-                            <button
-                              type="button"
-                              className="cu-link"
-                              onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
-                            >
-                              {agentDisplayName}
-                            </button>
-                            {agentDisplayName !== agentName ? (
-                              <span className="cu-access-agent-id">{agentName}</span>
-                            ) : null}
-                          </div>
-                          <RowActionMenu
-                            ariaLabel={`Actions for agent ${agentRowLabel}`}
-                            actions={[
-                              {
-                                key: 'view',
-                                label: 'View agent details',
-                                onSelect: () =>
-                                  router.push(CONTROL_ROUTES.agents.detail(agentName)),
-                              },
-                              {
-                                key: 'revoke',
-                                label: 'Revoke agent access',
-                                danger: true,
-                                disabled: busy,
-                                onSelect: () => void revokeAgentAccess(agentName),
-                              },
-                            ]}
-                          />
-                        </RecordListRow>
-                      )
-                    })}
-                  </RecordList>
-                )}
+                <TableViewport className="cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
+                    <thead>
+                      <tr>
+                        <th>Agent</th>
+                        <th>Agent ID</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {initialLoading ? (
+                        [1, 2, 3].map(i => (
+                          <tr key={i}>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '10rem' }}
+                              ></div>
+                            </td>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '8rem' }}
+                              ></div>
+                            </td>
+                            <td></td>
+                          </tr>
+                        ))
+                      ) : effectiveAgentNames.length === 0 ? (
+                        <tr>
+                          <td colSpan={3}>
+                            <div className="cu-empty cu-empty--compact">No agent access yet.</div>
+                          </td>
+                        </tr>
+                      ) : (
+                        effectiveAgentNames.map(agentName => {
+                          // Rename propagation: display name (spec.host) — same
+                          // resolution as the add-agent picker on this page. Links
+                          // and actions stay keyed by the immutable slug.
+                          // Review R1-H1: display names are not unique, so keep
+                          // the slug visible as the stable identity and include
+                          // it in the action label to target duplicates safely.
+                          const agentDisplayName = getAgentDisplayName(agentName, hosts)
+                          const agentRowLabel =
+                            agentDisplayName === agentName
+                              ? agentDisplayName
+                              : `${agentDisplayName} (${agentName})`
+                          return (
+                            <tr key={agentName}>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="cu-link"
+                                  onClick={() =>
+                                    router.push(CONTROL_ROUTES.agents.detail(agentName))
+                                  }
+                                >
+                                  {agentDisplayName}
+                                </button>
+                              </td>
+                              <td>
+                                <span className="cu-access-agent-id">{agentName}</span>
+                              </td>
+                              <td className="cu-table__cell-actions">
+                                <RowActionMenu
+                                  ariaLabel={`Actions for agent ${agentRowLabel}`}
+                                  actions={[
+                                    {
+                                      key: 'view',
+                                      label: 'View agent details',
+                                      onSelect: () =>
+                                        router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                                    },
+                                    {
+                                      key: 'revoke',
+                                      label: 'Revoke agent access',
+                                      danger: true,
+                                      disabled: busy,
+                                      onSelect: () => void revokeAgentAccess(agentName),
+                                    },
+                                  ]}
+                                />
+                              </td>
+                            </tr>
+                          )
+                        })
+                      )}
+                    </tbody>
+                  </DataTable>
+                </TableViewport>
               </>
             )}
           </>

@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react'
 import type {
+  ComposerFileAttachment,
+  ComposerFileRefusal,
   ComposerImageAttachment,
   ComposerReferenceAttachment,
   FailedAgentSend,
@@ -14,12 +16,21 @@ import type {
 export interface ChatComposerStateContextValue {
   activeChatId: string | null
   composerImageAttachments: ComposerImageAttachment[]
+  composerFileAttachments: ComposerFileAttachment[]
+  /** Why the documents of the last attach were not attached (#678). */
+  composerFileRefusals: ComposerFileRefusal[]
   composerReferenceAttachments: ComposerReferenceAttachment[]
   agentSending: boolean
   agentError: string | null
   failedAgentSend: FailedAgentSend | null
   activeMessageCount: number
   composerFocusRequestId: number
+  /**
+   * Bumps `composerFocusRequestId` so the mounted composer focuses (and
+   * scrolls) itself. Stable identity — safe in deps. Used by surfaces outside
+   * the composer (e.g. TASK-42 resend) to draw attention to a repopulated draft.
+   */
+  requestComposerFocus: () => void
 }
 
 export interface ChatComposerStateProviderProps {

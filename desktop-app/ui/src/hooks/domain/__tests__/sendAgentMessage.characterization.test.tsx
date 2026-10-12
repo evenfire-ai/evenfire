@@ -49,8 +49,16 @@ describe('sendAgentMessage — synchronous (non-async) response', () => {
 
     // No async task → no progress subscription was ever opened.
     expect(clerum.rpc.subscribeTaskProgress).not.toHaveBeenCalled()
-    // user message + assistant reply persisted.
-    expect(clerum.chat.appendMessages).toHaveBeenCalledTimes(2)
+    // user message (upserted before the POST) + assistant reply (appended) are
+    // both in the store.
+    const chatId = result.current.activeChatId!
+    expect(
+      (await clerum.persistedMessages('agent-x', chatId)).map(m => [m.role, m.content])
+    ).toEqual([
+      ['user', 'quick question'],
+      ['assistant', 'direct answer'],
+    ])
+    expect(clerum.chat.appendMessages).toHaveBeenCalledTimes(1)
     const assistant = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
       | Array<{ role?: string; content?: string; isError?: boolean }>
       | undefined
@@ -96,7 +104,7 @@ describe('sendAgentMessage — POST failure', () => {
     expect(result.current.failedAgentSend?.kind).toBe('network')
     // Late persist: the POST threw before the single post-taskId persist, so the
     // user's typed input is still written to the store (best-effort durability).
-    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.upsertMessages).toHaveBeenCalledWith(
       'agent-x',
       expect.any(String),
       expect.arrayContaining([
@@ -218,8 +226,45 @@ describe('sendAgentMessage — auto-title on send (B10)', () => {
       expect(clerum.chat.rename).toHaveBeenCalledWith(
         'agent-x',
         createdChatId,
-        'summarize the quarterly report'
+        'summarize the quarterly report',
+        1
       )
     )
+  })
+})
+
+// R1-M11: the fake store must merge a second write of the same turn the way
+// `ChatStore.upsertMessages` does. The send path persists the user turn before
+// the POST and again with its task_id once the Host accepts it; a fake that
+// drops the second write hides a lost task_id.
+describe('sendAgentMessage — outgoing user turn persistence', () => {
+  it('keeps the task_id the acknowledgement adds to the persisted user turn', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-77' })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('hello')
+    })
+
+    // Witness: the same turn was written twice, the second time with its task.
+    await waitFor(() => expect(clerum.chat.upsertMessages).toHaveBeenCalledTimes(2))
+    const [agentRef, chatId, firstWrite] = clerum.chat.upsertMessages.mock.calls[0] as [
+      string,
+      string,
+      Array<{ id: string }>,
+    ]
+    const turnId = firstWrite[0]?.id
+    expect(clerum.chat.upsertMessages.mock.calls[1]?.[2]?.[0]).toMatchObject({
+      id: turnId,
+      task_id: 'task-77',
+    })
+
+    const persistedUserTurns = (await clerum.persistedMessages(agentRef, chatId)).filter(
+      message => message.role === 'user'
+    )
+    expect(persistedUserTurns).toEqual([
+      expect.objectContaining({ id: turnId, content: 'hello', task_id: 'task-77' }),
+    ])
   })
 })

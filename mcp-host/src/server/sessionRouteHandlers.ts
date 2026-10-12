@@ -4,6 +4,7 @@ import type {
   ConversationSessionSummary,
 } from '../core/conversation/conversationStore'
 import { type Conversation, ConversationState } from '../core/types'
+import { projectApprovalInputPreview } from '../progress/approvalInputPreview'
 import { getDisplayName } from '../progress/intentExtraction'
 import {
   decodeSessionsCursor,
@@ -55,6 +56,18 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
       'pendingApproval' in session
         ? session.pendingApproval
         : (session as Conversation).pending_approval
+    // Summaries intentionally omit raw parameters. Pending sessions are pinned
+    // in the cache (including cold-start rehydration); derive the preview only
+    // from that same live task and request, without widening the summary DTO.
+    const liveSession =
+      'key' in session ? getConversationManager().getSessionByKey(session.key) : session
+    const previewApproval =
+      activeTaskId &&
+      liveSession?.activeTaskId === activeTaskId &&
+      liveSession.pending_approval?.request_id === approval?.request_id &&
+      liveSession.pending_approval?.tool_name === approval?.tool_name
+        ? liveSession.pending_approval
+        : undefined
     const pendingApproval =
       session.state === ConversationState.AwaitingApproval && approval
         ? {
@@ -66,6 +79,15 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
             // the default HITL gate (reason undefined ⇒ fields omitted).
             ...(approval.reason ? { reason: approval.reason } : {}),
             ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
+            ...(approval.reason !== 'connect_required' && previewApproval
+              ? {
+                  inputPreview: projectApprovalInputPreview(
+                    previewApproval.tool_name,
+                    previewApproval.parameters,
+                    redactTitle
+                  ),
+                }
+              : {}),
           }
         : undefined
     // Lifetime token totals — projected to the wire shape (omitted until the
@@ -91,6 +113,12 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     const keyPrefix = agent ? `${userSub}:rpc:${agent}:` : `${userSub}:rpc:`
     const cursorScope = sessionsCursorScope(userSub, agent)
     const cursor = decodeSessionsCursor(query.cursor, cursorScope)
+    // A cursor that does not decode for this scope is a caller error. Treating
+    // it as "no cursor" would silently restart the listing at page 1. The HTTP
+    // route rejects it with 400 before reaching here; this guards other callers.
+    if (query.cursor !== undefined && cursor === null) {
+      throw new Error('Invalid sessions cursor')
+    }
     const entries = await convManager.listSessionSummariesForUserAsync(keyPrefix, {
       limit: query.limit === undefined ? undefined : query.limit + 1,
       cursor: cursor

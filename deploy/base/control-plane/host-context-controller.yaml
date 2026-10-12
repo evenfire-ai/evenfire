@@ -76,6 +76,16 @@ spec:
           value: "8081"
         - name: CONTEXT_MAPPER_NAMESPACE
           value: mcp-server
+        # Product baseline for stateless Hosts. HCC uses the effective idle window
+        # max(idleMinutes, idleFloorMinutes), then drains active work before scale-to-zero.
+        - name: CONTEXT_MAPPER_STATELESS_IDLE_MINUTES
+          value: "30"
+        - name: CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES
+          value: "15"
+        - name: CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS
+          value: "60000"
+        - name: CONTEXT_MAPPER_HEARTBEAT_POLL_MS
+          value: "10000"
         - name: CONTEXT_MAPPER_HOST_NAMESPACE
           value: mcp-host
         - name: CONTEXT_MAPPER_HOST_IMAGE

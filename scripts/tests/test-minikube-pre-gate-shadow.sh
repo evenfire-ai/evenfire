@@ -127,7 +127,9 @@ exit 0
 STUB
   cat > "$d/bin/make" <<'STUB'
 #!/usr/bin/env bash
-printf 'make %s\n' "$*" >>"${TEST_LOG_FILE:?}"
+printf 'make %s T2_SKIP_LOCK=%s T2_LOCK_TOKEN_SET=%s\n' \
+  "$*" "${T2_SKIP_LOCK:-false}" "$([ -n "${T2_LOCK_TOKEN:-}" ] && printf true || printf false)" \
+  >>"${TEST_LOG_FILE:?}"
 exit 0
 STUB
   chmod +x "$d/bin/docker" "$d/bin/minikube" "$d/bin/kubectl" "$d/bin/make"
@@ -366,12 +368,13 @@ assert_a_full_sync_in_ghcr_mode_repulls_instead_of_building_everything() {
   prepare_repo "$d"
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
-    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" \
+      IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" T2_LOCK_TOKEN=test-token \
       run_incremental "$d" 'INCREMENTAL_REPULL_ALL=true; INCREMENTAL_TARGETS=("control-api|control-plane|control-api"); incremental_build_images'
   )"
   rc=$?
   if [ "$rc" -eq 0 ] \
      && grep -Fq "make minikube-pull-images" "$d/ops.log" \
+     && grep -Fq 'make minikube-pull-images T2_SKIP_LOCK=true T2_LOCK_TOKEN_SET=true' "$d/ops.log" \
      && ! grep -Fq "make minikube-build-images" "$d/ops.log" \
      && grep -Fq "docker tag $(local_ref_for_image control-api) ghcr.io/evenfire-ai/control-api:${PIN_TAG}" "$d/ops.log"; then
     pass "a ghcr full sync re-pulls the release set, then shadows the changed set on top"
@@ -388,16 +391,110 @@ assert_local_mode_still_builds_everything_on_a_full_image_build() {
   prepare_repo "$d"
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
-    IMAGE_SOURCE=local IMAGE_TAG="" \
+      IMAGE_SOURCE=local IMAGE_TAG="" T2_LOCK_TOKEN=test-token \
       run_incremental "$d" 'INCREMENTAL_FULL_IMAGE_BUILD=true; incremental_build_images'
   )"
   rc=$?
   if [ "$rc" -eq 0 ] \
      && grep -Fq "make minikube-build-images" "$d/ops.log" \
+     && grep -Fq 'make minikube-build-images T2_SKIP_LOCK=true T2_LOCK_TOKEN_SET=true' "$d/ops.log" \
      && ! grep -Fq "make minikube-pull-images" "$d/ops.log"; then
     pass "local mode still builds every image when the change cannot be targeted"
   else
     fail "expected a full local build and no pull; rc=$rc log=$(cat "$d/ops.log") out=$out"
+  fi
+  cleanup_fixture "$d"
+}
+
+# pre-gate-sync acquires the profile lock itself before it sources this file.
+# minikube-build-images and minikube-pull-images wrap their body in
+# with-t2-mutation-lock.sh, which acquires the lock unless T2_SKIP_LOCK=true;
+# called without the inherited lease they find the lock held by their own
+# parent and refuse with PROFILE_BUSY. Both calls must pass the parent's lease,
+# exactly as the minikube-deploy-crds / minikube-deploy-all calls do.
+assert_full_image_calls_inherit_the_parent_profile_lock() {
+  local d out_local out_ghcr rc_local rc_ghcr build_line pull_line
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  cat > "$d/bin/make" <<'STUB'
+#!/usr/bin/env bash
+printf 'make %s T2_SKIP_LOCK=%s T2_LOCK_TOKEN=%s\n' "$*" "${T2_SKIP_LOCK:-}" "${T2_LOCK_TOKEN:-}" >>"${TEST_LOG_FILE:?}"
+exit 0
+STUB
+  chmod +x "$d/bin/make"
+  # The parent's state after t2_lock_acquire: it owns the lock, so its own
+  # T2_SKIP_LOCK is empty and its token is exported.
+  out_local="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    IMAGE_SOURCE=local IMAGE_TAG="" T2_SKIP_LOCK="" T2_LOCK_TOKEN="parent-lease-token" \
+      run_incremental "$d" 'INCREMENTAL_FULL_IMAGE_BUILD=true; incremental_build_images'
+  )"
+  rc_local=$?
+  out_ghcr="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" T2_SKIP_LOCK="" T2_LOCK_TOKEN="parent-lease-token" \
+      run_incremental "$d" 'INCREMENTAL_REPULL_ALL=true; INCREMENTAL_TARGETS=(); incremental_build_images'
+  )"
+  rc_ghcr=$?
+  build_line="$(grep -c '^make minikube-build-images ' "$d/ops.log")"
+  pull_line="$(grep -c '^make minikube-pull-images ' "$d/ops.log")"
+  # Liveness: each lock-wrapped target was called exactly once. Only then does
+  # the lease assertion mean anything.
+  if [ "$rc_local" -eq 0 ] && [ "$rc_ghcr" -eq 0 ] \
+     && [ "$build_line" = 1 ] && [ "$pull_line" = 1 ] \
+     && grep -Fqx "make minikube-build-images T2_SKIP_LOCK=true T2_LOCK_TOKEN=parent-lease-token" "$d/ops.log" \
+     && grep -Fqx "make minikube-pull-images T2_SKIP_LOCK=true T2_LOCK_TOKEN=parent-lease-token" "$d/ops.log"; then
+    pass "full-image build and re-pull inherit the parent's profile lock"
+  else
+    fail "expected build/pull to carry T2_SKIP_LOCK=true and the parent token; rc_local=$rc_local rc_ghcr=$rc_ghcr log=$(cat "$d/ops.log") out_local=$out_local out_ghcr=$out_ghcr"
+  fi
+  cleanup_fixture "$d"
+}
+
+# The minikube-verify-images recipe runs `build-images.sh --verify-only` with no
+# mutation-lock wrapper, and build-images.sh returns from
+# require_inherited_mutation_lease before any lease check when --verify-only is
+# set. T2_SKIP_LOCK / T2_LOCK_TOKEN on that call would therefore be ignored and
+# would read as if it needed the lease, so it is called without them. This test
+# checks the call sites and the Makefile recipe text only (the --verify-only
+# flag is present and no mutation-lock wrapper is); it does not run
+# build-images.sh, so the script-side skip is not asserted here. If the recipe
+# ever gains a lock wrapper, the recipe check below fails and the call must pass
+# the lease like the build and pull calls above.
+assert_verify_images_is_called_without_the_lock_lease() {
+  local d out_local out_ghcr rc_local rc_ghcr verify_calls bare_calls recipe
+  recipe="$(awk '/^minikube-verify-images:/{f=1;next} f&&/^[^\t]/{exit} f' "$REPO_ROOT/Makefile")"
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  cat > "$d/bin/make" <<'STUB'
+#!/usr/bin/env bash
+printf 'make %s T2_SKIP_LOCK=%s\n' "$*" "${T2_SKIP_LOCK:-}" >>"${TEST_LOG_FILE:?}"
+exit 0
+STUB
+  chmod +x "$d/bin/make"
+  out_local="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    IMAGE_SOURCE=local IMAGE_TAG="" T2_SKIP_LOCK="" T2_LOCK_TOKEN="parent-lease-token" \
+      run_incremental "$d" 'INCREMENTAL_FULL_IMAGE_BUILD=true; incremental_build_images'
+  )"
+  rc_local=$?
+  out_ghcr="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" T2_SKIP_LOCK="" T2_LOCK_TOKEN="parent-lease-token" \
+      run_incremental "$d" 'INCREMENTAL_REPULL_ALL=true; INCREMENTAL_TARGETS=(); incremental_build_images'
+  )"
+  rc_ghcr=$?
+  verify_calls="$(grep -c '^make minikube-verify-images ' "$d/ops.log")"
+  bare_calls="$(grep -Fxc 'make minikube-verify-images T2_SKIP_LOCK=' "$d/ops.log")"
+  # Liveness: one verify call per path (full build and re-pull), and the recipe
+  # is the verify-only build script, before the absence of a lease means anything.
+  if [ "$rc_local" -eq 0 ] && [ "$rc_ghcr" -eq 0 ] \
+     && [ "$verify_calls" = 2 ] && [ "$bare_calls" = 2 ] \
+     && grep -Fq 'build-images.sh --verify-only' <<< "$recipe" \
+     && ! grep -Fq 'mutation-lock' <<< "$recipe"; then
+    pass "verify-images takes no lock and is called without the lock lease"
+  else
+    fail "expected two verify-images calls without T2_SKIP_LOCK and a lock-free recipe; rc_local=$rc_local rc_ghcr=$rc_ghcr verify=$verify_calls bare=$bare_calls log=$(cat "$d/ops.log") recipe=$recipe out_local=$out_local out_ghcr=$out_ghcr"
   fi
   cleanup_fixture "$d"
 }
@@ -1076,6 +1173,8 @@ assert_an_empty_shadow_set_is_reported_as_release_only
 assert_a_failed_retag_fails_the_pre_gate
 assert_a_full_sync_in_ghcr_mode_repulls_instead_of_building_everything
 assert_local_mode_still_builds_everything_on_a_full_image_build
+assert_full_image_calls_inherit_the_parent_profile_lock
+assert_verify_images_is_called_without_the_lock_lease
 assert_an_unmapped_change_hard_fails_in_ghcr_mode_with_a_remedy
 assert_an_unresolvable_baseline_hard_fails_in_ghcr_mode
 assert_the_release_image_revision_label_supplies_the_missing_baseline

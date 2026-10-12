@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express, { type Request as ExpressRequest } from 'express'
+import { execFileSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -30,6 +33,8 @@ import { PostgresGovernedSessionReplayRepository } from '../src/services/tracing
 import { projectAcceptedUsageEvents } from '../src/services/tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from '../src/services/usageEvents.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
+import './realPostgres.requirement.ts'
 
 type PrivilegeExpectation = Record<string, Set<string>>
 
@@ -54,6 +59,108 @@ function quoteIdent(value: string): string {
 function expectPrivileges(actual: string[], expected: string[]): void {
   expect([...actual].sort()).toEqual([...expected].sort())
 }
+
+function deploymentRuntimeAccessQueries(): string[] {
+  const script = readFileSync(
+    new URL('../../deploy/scripts/run-control-api-db-migration.sh', import.meta.url),
+    'utf8'
+  )
+  const start = script.indexOf('\nruntime_access_contract_values() {')
+  const end = script.indexOf('\nverify_trace_maintenance_access_contract() {', start)
+  if (start < 0 || end < 0) throw new Error('Deployment runtime access verifier is missing')
+
+  // Execute the real profile parser and verifier to capture their SQL, without
+  // entering the migration script's Kubernetes operations or copying its policy.
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+RUNTIME_ACCESS_PROFILES_FILE="$1"
+RUNTIME_SEQUENCE_ACCESS_PROFILES_FILE="$2"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+assert_db_query_equals() { printf '%s\\0' "$3"; }
+${script.slice(start, end)}
+verify_runtime_access_contract`,
+      'deployment-runtime-access',
+      fileURLToPath(
+        new URL('../../deploy/scripts/control-api-runtime-access-profiles.tsv', import.meta.url)
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/control-api-runtime-sequence-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+    ],
+    { encoding: 'utf8', timeout: 10_000 }
+  )
+  const queries = output.split('\0').filter(Boolean)
+  expect(queries).toHaveLength(2)
+  return queries
+}
+
+function traceMaintenanceRuntimeAccessQueries(): string[] {
+  const script = readFileSync(
+    new URL('../../deploy/scripts/run-control-api-db-migration.sh', import.meta.url),
+    'utf8'
+  )
+  const start = script.indexOf('\nmaintenance_access_contract_values() {')
+  const end = script.indexOf('\nverify_workflow_recipes_runtime_boundary() {', start)
+  if (start < 0 || end < 0) throw new Error('Trace maintenance access verifier is missing')
+
+  // Capture SQL from the production profile parser and verifier without entering Kubernetes.
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+MAINTENANCE_ACCESS_PROFILES_FILE="$1"
+MAINTENANCE_SEQUENCE_ACCESS_PROFILES_FILE="$2"
+MAINTENANCE_FUNCTION_ACCESS_PROFILES_FILE="$3"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+assert_db_query_equals() { printf '%s\\0' "$3"; }
+${script.slice(start, end)}
+verify_trace_maintenance_access_contract`,
+      'trace-maintenance-runtime-access',
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-sequence-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-function-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+    ],
+    { encoding: 'utf8', timeout: 10_000 }
+  )
+  const queries = output.split('\0').filter(Boolean)
+  expect(queries).toHaveLength(3)
+  return queries
+}
+
+const deniedRuntimeColumnPrivileges = [
+  { privilege: 'SELECT', relation: 'gfs_blob_manifests', column: 'blob_key' },
+  { privilege: 'INSERT', relation: 'gfs_blob_manifests', column: 'blob_key' },
+  { privilege: 'UPDATE', relation: 'password_verification_work', column: 'owner_instance' },
+  { privilege: 'REFERENCES', relation: 'gfs_blob_manifests', column: 'blob_key' },
+] as const
+
+const columnPrivilegeFixtures = deniedRuntimeColumnPrivileges.flatMap(grant => [
+  { ...grant, principal: 'direct' as const },
+  { ...grant, principal: 'public' as const },
+  { ...grant, principal: 'inherited' as const },
+])
 
 async function relationPrivileges(pool: Pool, roleName: string): Promise<PrivilegeExpectation> {
   const result = await pool.query<{
@@ -138,19 +245,171 @@ describeRealPostgres('control-api real Postgres migrations', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
-           FROM pg_stat_activity
-          WHERE datname = $1
-            AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-      await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
+
+  it('verifies the deployment access contract against migrated schema and rejects drift', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+    const [relationQuery, sequenceQuery] = deploymentRuntimeAccessQueries()
+    const violations = async (sql: string) =>
+      Number((await dbPool.query({ text: sql, rowMode: 'array' })).rows[0][0])
+
+    expect(await violations(relationQuery)).toBe(0)
+    expect(await violations(sequenceQuery)).toBe(0)
+    const privileges = await relationPrivileges(dbPool, 'control_api_runtime')
+    for (const relation of ['password_identifier_state', 'password_verification_pace']) {
+      expectPrivileges([...privileges[relation]], ['SELECT', 'INSERT', 'UPDATE', 'DELETE'])
+    }
+    expectPrivileges([...privileges.password_verification_work], ['SELECT', 'INSERT', 'DELETE'])
+
+    try {
+      await dbPool.query('GRANT UPDATE ON password_verification_work TO control_api_runtime')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('REVOKE UPDATE ON password_verification_work FROM control_api_runtime')
+    }
+    try {
+      await dbPool.query('REVOKE DELETE ON password_verification_work FROM control_api_runtime')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('GRANT DELETE ON password_verification_work TO control_api_runtime')
+    }
+    try {
+      await dbPool.query('CREATE TABLE runtime_access_contract_probe (id INTEGER)')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('DROP TABLE IF EXISTS runtime_access_contract_probe')
+    }
+    expect(await violations(relationQuery)).toBe(0)
+  }, 60_000)
+
+  it.each(columnPrivilegeFixtures)(
+    'rejects $principal column-level $privilege on $relation',
+    async ({ privilege, relation, column, principal }) => {
+      const { initDb } = await import('../src/db.js')
+      await initDb({ connect: () => dbPool.connect() })
+      const [relationQuery] = deploymentRuntimeAccessQueries()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `runtime_column_acl_probe_${randomBytes(6).toString('hex')}`
+      const grantee = principal === 'public' ? 'PUBLIC' : quoteIdent('control_api_runtime')
+      const inherited = principal === 'inherited'
+      const assertClean = async () => {
+        const result = await dbPool.query<{ table_access: boolean; column_access: boolean }>(
+          `SELECT has_table_privilege('control_api_runtime', $1, $2) AS table_access,
+                  has_any_column_privilege('control_api_runtime', $1, $2) AS column_access`,
+          [relation, privilege]
+        )
+        expect(result.rows[0]).toEqual({ table_access: false, column_access: true })
+        const violationCount = Number(
+          (await dbPool.query({ text: relationQuery, rowMode: 'array' })).rows[0][0]
+        )
+        expect(violationCount).toBe(1)
+      }
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT ${privilege} (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO control_api_runtime`)
+        }
+
+        await assertClean()
+      } finally {
+        if (inherited) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM control_api_runtime`)
+          await dbPool.query(
+            `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${quoteIdent(inheritedRole)}`
+          )
+          await dbPool.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`)
+        } else {
+          await dbPool.query(
+            `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${grantee}`
+          )
+        }
+      }
+    }
+  )
+
+  it.each(['direct', 'public', 'inherited'] as const)(
+    'rejects %s column-level UPDATE on governed_event_stream for trace maintenance',
+    async principal => {
+      const { initDb } = await import('../src/db.js')
+      await initDb({ connect: () => dbPool.connect() })
+      const [relationQuery, sequenceQuery, functionQuery] = traceMaintenanceRuntimeAccessQueries()
+      const relation = 'governed_event_stream'
+      const column = 'event_id'
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `trace_maintenance_acl_probe_${randomBytes(6).toString('hex')}`
+      const grantee = principal === 'public' ? 'PUBLIC' : quoteIdent('trace_maintenance_runtime')
+      const inherited = principal === 'inherited'
+      const violationCount = async (query: string) =>
+        Number((await dbPool.query({ text: query, rowMode: 'array' })).rows[0][0])
+
+      expect(await violationCount(relationQuery)).toBe(0)
+      expect(await violationCount(sequenceQuery)).toBe(0)
+      expect(await violationCount(functionQuery)).toBe(0)
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT UPDATE (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO trace_maintenance_runtime`)
+        }
+
+        const privileges = await dbPool.query<{
+          table_access: boolean
+          column_access: boolean
+        }>(
+          `SELECT has_table_privilege('trace_maintenance_runtime', $1, 'UPDATE') AS table_access,
+                  has_any_column_privilege('trace_maintenance_runtime', $1, 'UPDATE') AS column_access`,
+          [relation]
+        )
+        expect(privileges.rows[0]).toEqual({ table_access: false, column_access: true })
+        expect(await violationCount(relationQuery)).toBe(1)
+        expect(await violationCount(sequenceQuery)).toBe(0)
+        expect(await violationCount(functionQuery)).toBe(0)
+      } finally {
+        if (inherited) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM trace_maintenance_runtime`)
+          await dbPool.query(
+            `REVOKE UPDATE (${columnName}) ON TABLE ${relationName} FROM ${quoteIdent(inheritedRole)}`
+          )
+          await dbPool.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`)
+        } else {
+          await dbPool.query(
+            `REVOKE UPDATE (${columnName}) ON TABLE ${relationName} FROM ${grantee}`
+          )
+        }
+      }
+    }
+  )
 
   it('applies initDb twice and leaves the exact runtime privilege envelopes', async () => {
     const { initDb } = await import('../src/db.js')
@@ -458,6 +717,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'codex_subscription_oauth_states',
       'gfs_desktop_operator_links',
       'desktop_user_retirement_operations',
+      'dynamic_clients',
     ] as const
     const controlApiRelations = await relationPrivileges(dbPool, 'control_api_runtime')
     const expectedControlApiRelations: Record<string, string[]> = {
@@ -480,6 +740,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       codex_subscription_oauth_states: ['INSERT', 'SELECT', 'UPDATE'],
       gfs_desktop_operator_links: ['INSERT', 'SELECT', 'UPDATE'],
       desktop_user_retirement_operations: ['INSERT', 'SELECT', 'UPDATE'],
+      // dynamicClientStore does INSERT ... ON CONFLICT DO UPDATE, SELECT and
+      // DELETE, so the runtime role needs the full legacy_dml envelope.
+      dynamic_clients: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
     }
     for (const relation of exactControlApiRelations) {
       expectPrivileges(
@@ -490,6 +753,14 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expectPrivileges([...(controlApiRelations.gfs_blob_manifests ?? new Set())], [])
     expectPrivileges([...(controlApiRelations.gfs_upload_parts ?? new Set())], [])
     expectPrivileges([...(controlApiRelations.gfs_upload_sessions ?? new Set())], [])
+
+    // The identity sequence must carry the legacy_rw (USAGE/SELECT/UPDATE)
+    // envelope; without it BIGSERIAL default fails on INSERT under the role.
+    const controlApiSequences = await sequencePrivileges(dbPool, 'control_api_runtime')
+    expectPrivileges(
+      [...(controlApiSequences.dynamic_clients_id_seq ?? new Set())],
+      ['SELECT', 'UPDATE', 'USAGE']
+    )
 
     const linkUserId = randomUUID()
     const linkAdminId = randomUUID()
@@ -1719,6 +1990,286 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [auditId]
     )
     expect(stored.rows).toEqual([{ sequence_no: auditId, subject: 'host:1st:mcp-host/chatllm' }])
+  })
+
+  it('recognizes deployed entity-change aliases without replaying migration DDL', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const connector = { connect: () => dbPool.connect() }
+    await initDb(connector)
+
+    const feedMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0122_durable_entity_change_feed'
+    )
+    const checkpointMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0123_entity_change_checkpoint_cursor_convergence'
+    )
+    expect(feedMigration?.legacyVersions).toEqual([
+      '0116_durable_entity_change_feed',
+      '0117_durable_entity_change_feed',
+      '0119_durable_entity_change_feed',
+    ])
+    expect(checkpointMigration?.legacyVersions).toEqual([
+      '0120_entity_change_checkpoint_cursor_convergence',
+    ])
+    if (!feedMigration || !checkpointMigration) return
+
+    const captureDefinition = await dbPool.query<{ definition: string }>(
+      `SELECT pg_get_functiondef('entity_change_capture_resource()'::regprocedure) AS definition`
+    )
+    const checkpointDefinition = await dbPool.query<{ definition: string }>(
+      `SELECT pg_get_functiondef(
+         'entity_change_read_checkpoint(uuid,integer)'::regprocedure
+       ) AS definition`
+    )
+
+    const setLegacyVersion = async (legacyVersion: string, versions: readonly string[]) => {
+      await dbPool.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
+        versions,
+      ])
+      await dbPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [legacyVersion])
+    }
+
+    try {
+      for (const legacyVersion of feedMigration.legacyVersions ?? []) {
+        await setLegacyVersion(legacyVersion, [
+          feedMigration.version,
+          ...(feedMigration.legacyVersions ?? []),
+        ])
+        await dbPool.query(`
+          CREATE OR REPLACE FUNCTION entity_change_capture_resource() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+          BEGIN
+            RAISE EXCEPTION 'legacy entity-change feed migration was reapplied';
+          END;
+          $$
+        `)
+
+        await initDb(connector)
+
+        const recorded = await dbPool.query<{ version: string }>(
+          `SELECT version FROM schema_migrations
+            WHERE version = ANY($1::text[]) ORDER BY version`,
+          [[feedMigration.version, legacyVersion]]
+        )
+        expect(recorded.rows.map(row => row.version)).toContain(feedMigration.version)
+        await expect(
+          dbPool.query(
+            `INSERT INTO gfs_resources (drive, name, kind)
+             VALUES ($1, 'legacy-alias-probe', 'file')`,
+            [`legacy-alias-${randomUUID()}`]
+          )
+        ).rejects.toThrow('legacy entity-change feed migration was reapplied')
+
+        await dbPool.query(captureDefinition.rows[0]!.definition)
+      }
+
+      await setLegacyVersion(checkpointMigration.legacyVersions?.[0] ?? '', [
+        checkpointMigration.version,
+        ...(checkpointMigration.legacyVersions ?? []),
+      ])
+      await dbPool.query(`
+        CREATE OR REPLACE FUNCTION entity_change_read_checkpoint(
+          requested_cursor UUID,
+          maximum_recovery_events INTEGER
+        ) RETURNS TABLE (
+          needs_resync BOOLEAN,
+          current_cursor UUID,
+          current_sequence BIGINT,
+          invalidated_scopes TEXT[]
+        ) LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'legacy entity-change checkpoint migration was reapplied';
+        END;
+        $$
+      `)
+
+      await initDb(connector)
+
+      const checkpointVersions = await dbPool.query<{ version: string }>(
+        `SELECT version FROM schema_migrations
+          WHERE version = ANY($1::text[]) ORDER BY version`,
+        [[checkpointMigration.version, ...(checkpointMigration.legacyVersions ?? [])]]
+      )
+      expect(checkpointVersions.rows.map(row => row.version)).toContain(checkpointMigration.version)
+      await expect(
+        dbPool.query(
+          `SELECT * FROM entity_change_read_checkpoint(
+             '00000000-0000-0000-0000-000000000000'::uuid, 100
+           )`
+        )
+      ).rejects.toThrow('legacy entity-change checkpoint migration was reapplied')
+    } finally {
+      await dbPool.query(captureDefinition.rows[0]!.definition)
+      await dbPool.query(checkpointDefinition.rows[0]!.definition)
+      await dbPool.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
+        [
+          feedMigration.version,
+          ...(feedMigration.legacyVersions ?? []),
+          checkpointMigration.version,
+          ...(checkpointMigration.legacyVersions ?? []),
+        ],
+      ])
+      await dbPool.query('INSERT INTO schema_migrations(version) VALUES ($1), ($2)', [
+        feedMigration.version,
+        checkpointMigration.version,
+      ])
+    }
+  })
+
+  it('applies checkpoint convergence after a legacy feed-only migration record', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const connector = { connect: () => dbPool.connect() }
+    await initDb(connector)
+
+    const feedMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0122_durable_entity_change_feed'
+    )
+    const checkpointMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0123_entity_change_checkpoint_cursor_convergence'
+    )
+    expect(feedMigration?.legacyVersions).toContain('0116_durable_entity_change_feed')
+    expect(checkpointMigration?.legacyVersions).toEqual([
+      '0120_entity_change_checkpoint_cursor_convergence',
+    ])
+    if (!feedMigration || !checkpointMigration) return
+
+    const oldVersions = [
+      feedMigration.version,
+      ...(feedMigration.legacyVersions ?? []),
+      checkpointMigration.version,
+      ...(checkpointMigration.legacyVersions ?? []),
+    ]
+    try {
+      await dbPool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
+        oldVersions,
+      ])
+      await dbPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+        '0116_durable_entity_change_feed',
+      ])
+      await dbPool.query(`
+        CREATE OR REPLACE FUNCTION entity_change_read_checkpoint(
+          requested_cursor UUID,
+          maximum_recovery_events INTEGER
+        ) RETURNS TABLE (
+          needs_resync BOOLEAN,
+          current_cursor UUID,
+          current_sequence BIGINT,
+          invalidated_scopes TEXT[]
+        ) LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'checkpoint convergence migration was not applied';
+        END;
+        $$
+      `)
+
+      await initDb(connector)
+
+      const recordedVersions = await dbPool.query<{ version: string }>(
+        `SELECT version FROM schema_migrations WHERE version = ANY($1::text[]) ORDER BY version`,
+        [oldVersions]
+      )
+      expect(recordedVersions.rows.map(row => row.version)).toEqual([
+        '0116_durable_entity_change_feed',
+        feedMigration.version,
+        checkpointMigration.version,
+      ])
+      const checkpoint = await dbPool.query(
+        `SELECT * FROM entity_change_read_checkpoint(
+           '00000000-0000-0000-0000-000000000000'::uuid, 100
+         )`
+      )
+      expect(checkpoint.rows).toHaveLength(1)
+      expect(typeof checkpoint.rows[0]?.needs_resync).toBe('boolean')
+      expect(checkpoint.rows[0]?.current_cursor).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      )
+    } finally {
+      await dbPool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
+        oldVersions,
+      ])
+      await dbPool.query('INSERT INTO schema_migrations(version) VALUES ($1), ($2)', [
+        feedMigration.version,
+        checkpointMigration.version,
+      ])
+    }
+  })
+
+  it('prevents temp-type shadowing in entity-change SECURITY DEFINER triggers', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+
+    const attackerRole = `entity_change_shadow_${randomBytes(5).toString('hex')}`
+    const attackerPassword = randomBytes(24).toString('hex')
+    let attackerPool: Pool | undefined
+    try {
+      await adminPool.query(
+        `CREATE ROLE ${quoteIdent(attackerRole)} LOGIN PASSWORD '${attackerPassword}'`
+      )
+      await adminPool.query(`GRANT gfs_controller TO ${quoteIdent(attackerRole)}`)
+      const attackerUrl = new URL(connectionString)
+      attackerUrl.username = attackerRole
+      attackerUrl.password = attackerPassword
+      attackerPool = new Pool({ connectionString: attackerUrl.toString(), max: 1 })
+
+      const attacker = await attackerPool.connect()
+      try {
+        await attacker.query('CREATE TEMP TABLE temp_schema_bootstrap (id INTEGER)')
+        await attacker.query(`
+          CREATE FUNCTION pg_temp.entity_change_shadow_check(value pg_catalog.text)
+          RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+          BEGIN
+            RAISE EXCEPTION 'temporary type shadow executed as %', current_user;
+          END;
+          $$
+        `)
+        await attacker.query(`
+          CREATE DOMAIN pg_temp.text AS pg_catalog.text
+            CHECK (pg_temp.entity_change_shadow_check(VALUE))
+        `)
+
+        const resourceId = randomUUID()
+        await expect(
+          attacker.query(
+            `INSERT INTO gfs_resources (resource_id, drive, name, kind, path_cache)
+             VALUES ($1, $2, 'shadow-probe', 'file', '/shadow-probe')`,
+            [resourceId, `shadow-${randomUUID()}`]
+          )
+        ).resolves.toBeDefined()
+        const stored = await dbPool.query('SELECT 1 FROM gfs_resources WHERE resource_id = $1', [
+          resourceId,
+        ])
+        expect(stored.rowCount).toBe(1)
+      } finally {
+        attacker.release()
+      }
+
+      const migrationVersions = await dbPool.query<{ version: string }>(
+        `SELECT version FROM schema_migrations WHERE version = $1`,
+        ['0124_entity_change_definer_search_path']
+      )
+      expect(migrationVersions.rows).toHaveLength(1)
+
+      const functionPaths = await dbPool.query<{ function_name: string; config: string[] | null }>(`
+        SELECT procedure.proname AS function_name, procedure.proconfig AS config
+          FROM pg_proc procedure
+          JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+         WHERE namespace.nspname = 'public'
+           AND procedure.proname IN (
+             'entity_change_capture_resource',
+             'entity_change_capture_scope',
+             'entity_change_dispatch_batch',
+             'entity_change_read_checkpoint'
+           )
+      `)
+      expect(functionPaths.rows).toHaveLength(4)
+      for (const { config } of functionPaths.rows) {
+        expect(config).toContain('search_path=pg_catalog, public, pg_temp')
+      }
+    } finally {
+      await endPoolAndWaitForClients(attackerPool)
+      await dbPool.query(`DROP OWNED BY ${quoteIdent(attackerRole)}`)
+      await adminPool.query(`DROP ROLE IF EXISTS ${quoteIdent(attackerRole)}`)
+    }
   })
 
   it('commits GFS grant/share batches atomically and invalidates only after commit', async () => {

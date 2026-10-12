@@ -25,8 +25,10 @@ import {
   buildUiEgressNetworkPolicy,
   oauthBrokerEgressPolicyName,
   oauthBrokerTokenSecretName,
+  parseOAuthBrokerTokenSecretRecipe,
   recipeHasBackgroundAccessClient,
   resolveCronJobResourceName,
+  resolveOAuthBrokerTokenWatchRecipe,
   resolveResourceName,
   resolveScopedCronJobResourceName,
   resolveScopedResourceName,
@@ -2076,6 +2078,30 @@ describe('recipe OAuth broker token', () => {
       oauthClientRefs: ['not-a-client'],
     }
     expect(workloadUsesBackgroundOauth(danglingRef, recipe)).toBe(false)
+  })
+
+  it('resolves watch ADDED only for the canonical oauth-broker-token Secret name', () => {
+    const recipe = 'test-recipe'
+    // The Secret WRC itself writes: the resolver must bind it, so a drift in
+    // the builder's name or labels fails here.
+    const built = buildOAuthBrokerTokenSecret(recipe, 'jwt', 'sandbox-recipes')
+    const canonical = built.metadata?.name ?? ''
+    const labels = built.metadata?.labels ?? {}
+    expect(canonical).toBe(oauthBrokerTokenSecretName(recipe))
+    expect(parseOAuthBrokerTokenSecretRecipe(canonical)).toBe(recipe)
+    expect(parseOAuthBrokerTokenSecretRecipe('wf--oauth-broker-token')).toBeUndefined()
+    expect(resolveOAuthBrokerTokenWatchRecipe(canonical, labels)).toBe(recipe)
+    const withoutRecipeLabel = Object.fromEntries(
+      Object.entries(labels).filter(([key]) => key !== 'clerum.io/recipe')
+    )
+    expect(resolveOAuthBrokerTokenWatchRecipe(canonical, withoutRecipeLabel)).toBe(recipe)
+    expect(resolveOAuthBrokerTokenWatchRecipe('forged-name', labels)).toBeUndefined()
+    expect(
+      resolveOAuthBrokerTokenWatchRecipe(canonical, {
+        ...labels,
+        'clerum.io/component': 'other',
+      })
+    ).toBeUndefined()
   })
 
   it('buildOAuthBrokerTokenSecret stores the token base64-encoded under broker-token', () => {

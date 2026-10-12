@@ -149,6 +149,7 @@ function createReconciler() {
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
+    isCommunicationChannelCacheSynced: () => true,
   })
   return { reconciler, appsApi, coreApi, networkingApi, rbacApi }
 }

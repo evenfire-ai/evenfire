@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { buildConnectRequiredApproval } from '../../core/extensions/mcpApprovalGateController'
 import { BasicSafety } from '../../core/safety/safety'
@@ -110,6 +110,54 @@ describe('createSessionRouteHandlers — handleSessionsList (R1-L2)', () => {
     // (agent scope), which fail-closed to an empty catalog — so the two diverged.
     expect(empty).toEqual(absent)
   })
+})
+
+describe('createSessionRouteHandlers — handleSessionsList cursor validation', () => {
+  it('serves the next page for a valid cursor with exactly one store read (control)', async () => {
+    const { convManager, handleSessionsList } = makeHandlersUnderTest()
+    await seed(convManager, 'user-A:rpc:agent-x:chat-1')
+    await seed(convManager, 'user-A:rpc:agent-x:chat-2')
+    const first = await handleSessionsList('user-A', { agent: 'agent-x', limit: 1 })
+    expect(first.items).toHaveLength(1)
+    expect(first.nextCursor).toEqual(expect.any(String))
+
+    const listSpy = vi.spyOn(convManager, 'listSessionSummariesForUserAsync')
+    const second = await handleSessionsList('user-A', {
+      agent: 'agent-x',
+      limit: 1,
+      cursor: first.nextCursor,
+    })
+
+    expect(listSpy).toHaveBeenCalledTimes(1)
+    expect(second.items).toHaveLength(1)
+    expect(second.items[0]?.chatId).not.toBe(first.items[0]?.chatId)
+  })
+
+  it.each([
+    ['a malformed cursor', () => 'not-a-cursor'],
+    ['a cursor minted for another agent scope', (otherScopeCursor: string) => otherScopeCursor],
+  ])(
+    'rejects %s instead of silently serving page 1, without reading the store',
+    async (_label, pick) => {
+      const { convManager, handleSessionsList } = makeHandlersUnderTest()
+      await seed(convManager, 'user-A:rpc:agent-x:chat-1')
+      await seed(convManager, 'user-A:rpc:agent-x:chat-2')
+      await seed(convManager, 'user-A:rpc:agent-y:chat-3')
+      await seed(convManager, 'user-A:rpc:agent-y:chat-4')
+      const otherScope = await handleSessionsList('user-A', { agent: 'agent-y', limit: 1 })
+      expect(otherScope.nextCursor).toEqual(expect.any(String))
+
+      const listSpy = vi.spyOn(convManager, 'listSessionSummariesForUserAsync')
+      await expect(
+        handleSessionsList('user-A', {
+          agent: 'agent-x',
+          limit: 1,
+          cursor: pick(otherScope.nextCursor as string),
+        })
+      ).rejects.toThrow('Invalid sessions cursor')
+      expect(listSpy).toHaveBeenCalledTimes(0)
+    }
+  )
 })
 
 describe('createSessionRouteHandlers — handleSessionsList title projection (spec 15 A12)', () => {

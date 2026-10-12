@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import {
   useInfiniteQuery,
@@ -35,6 +36,7 @@ import { desktopQueryKeys } from './queryKeys'
  */
 
 const DRIVE = 'main'
+export const GFS_UNAVAILABLE_LOCATION_MESSAGE = 'This folder or file is no longer available.'
 
 type GfsAccessState = 'active' | 'revoked'
 
@@ -299,9 +301,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const { grantsListEnabled = false } = options
   const queryClient = useQueryClient()
   const { isAuthenticated, me, runtimeConfigState } = useAuthContext()
-  const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
+  const [crumbs, setCrumbsState] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
+  const openUriGenerationRef = useRef(0)
+  const foregroundOpenUriPendingRef = useRef<number | null>(null)
+  const backgroundOpenUriGenerationRef = useRef(0)
+  const backgroundOpenErrorRef = useRef(false)
+  const pendingDeniedResourceIdRef = useRef<string | null>(null)
+  const backgroundLocationRetryRef = useRef<(uri: string) => void>(() => undefined)
+  const backgroundLocationRetryTimerRef = useRef<number | null>(null)
+  const backgroundLocationRetryAttemptRef = useRef(0)
+  // Any browser-location update supersedes an in-flight URI resolution. This
+  // includes navigation through the tree/crumbs as well as metadata updates,
+  // so an older refresh (including a late 403/404) cannot overwrite a newer
+  // location or clear its state.
+  const setCrumbs = useCallback<Dispatch<SetStateAction<GfsCrumb[]>>>(next => {
+    openUriGenerationRef.current += 1
+    foregroundOpenUriPendingRef.current = null
+    setResolving(false)
+    setCrumbsState(next)
+  }, [])
   const previousSessionScopeRef = useRef<string | null>(null)
   // Per controller-mount timestamp: discovery (`refetchOnMount: 'always'`) must
   // land a response newer than this before cached GFS state may render again.
@@ -310,6 +330,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const authorityEpochRef = useRef(Date.now())
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
+  const currentCrumbRef = useRef<GfsCrumb | null>(current)
+  currentCrumbRef.current = current
   const currentIsDirectory = current?.kind === 'directory'
   // Scope gfs cache/crumbs by environment too (spec §5.2): the same user/team
   // pair addresses different resources across clusters, so an env switch must
@@ -565,6 +587,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     setOpenError(null)
     queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
   }, [queryClient])
+  const clearInaccessibleGfsLocation = useCallback(() => {
+    const resourceId = currentCrumbRef.current?.resourceId
+    pendingDeniedResourceIdRef.current = resourceId ?? null
+    // A resource-scoped denial is not loss of the authenticated session.
+    // Keep accessible roots and other GFS scopes intact, and avoid the
+    // foreground navigation setter so a background denial cannot advance it.
+    setCrumbsState([])
+    setOpenError(GFS_UNAVAILABLE_LOCATION_MESSAGE)
+  }, [])
+  useEffect(() => {
+    const resourceId = pendingDeniedResourceIdRef.current
+    if (!resourceId || current?.resourceId === resourceId) return
+    pendingDeniedResourceIdRef.current = null
+    if (!sessionScope) return
+    // Remove the denied query after its observer has left the current folder;
+    // removing an active infinite query can transiently expose an empty page.
+    queryClient.removeQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, DRIVE),
+    })
+  }, [current?.resourceId, queryClient, sessionScope])
   const revokeAccess = useCallback(() => {
     setAccessState('revoked')
     clearGfsState()
@@ -585,6 +628,22 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
     [revokeAccess]
   )
+  const scheduleBackgroundLocationRetry = useCallback((uri: string, error: unknown) => {
+    const message = toMessage(error)
+    const status = parseHttpStatus(message)
+    if (status !== null && status !== 429 && status < 500) return
+    if (backgroundLocationRetryTimerRef.current !== null) return
+    const attempt = backgroundLocationRetryAttemptRef.current + 1
+    backgroundLocationRetryAttemptRef.current = attempt
+    const retryAfterSeconds = parseRetryAfterSeconds(message)
+    const delayMs = retryAfterSeconds
+      ? Math.min(retryAfterSeconds * 1000, 60_000)
+      : Math.min(500 * 2 ** Math.min(attempt - 1, 4), 8_000)
+    backgroundLocationRetryTimerRef.current = window.setTimeout(() => {
+      backgroundLocationRetryTimerRef.current = null
+      backgroundLocationRetryRef.current(uri)
+    }, delayMs)
+  }, [])
   // All GFS mutations share the central fail-closed boundary: an authority
   // rejection (401 / typed lifecycle code) revokes the session even when the
   // caller would only have toasted. Policy verdicts (403/412) stay local.
@@ -793,6 +852,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (!queryAuthorizationError || accessState === 'revoked') return
     revokeAccess()
   }, [accessState, queryAuthorizationError, revokeAccess])
+  const currentFolderUnavailable =
+    currentIsDirectory &&
+    childrenQuery.error !== null &&
+    [403, 404].includes(parseHttpStatus(toMessage(childrenQuery.error)) ?? 0)
+  useEffect(() => {
+    if (!currentFolderUnavailable) return
+    // A soft scope invalidation preserves rows while the authoritative read is
+    // pending. Once that read proves this open folder is denied or gone, none
+    // of its cached descendants may remain visible in this browser session.
+    clearInaccessibleGfsLocation()
+  }, [clearInaccessibleGfsLocation, currentFolderUnavailable])
   const accessibleResources = useMemo<GfsAccessibleResource[]>(
     () =>
       authorityPending
@@ -890,11 +960,33 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : null
 
   const openUri = useCallback(
-    async (uri: string) => {
-      setOpenError(null)
-      setResolving(true)
+    async (uri: string, options?: { clearIfUnavailable?: boolean; background?: boolean }) => {
+      const background = options?.background === true
+      // User navigation owns the location until its authoritative resolution
+      // settles. A background refresh that starts before React commits that
+      // navigation must not read/commit the old location in the meantime.
+      if (background && foregroundOpenUriPendingRef.current !== null) return false
+      const generation = background ? openUriGenerationRef.current : ++openUriGenerationRef.current
+      const backgroundGeneration = background ? ++backgroundOpenUriGenerationRef.current : undefined
+      const isCurrent = () =>
+        openUriGenerationRef.current === generation &&
+        (!background ||
+          (backgroundOpenUriGenerationRef.current === backgroundGeneration &&
+            currentCrumbRef.current?.gfsUri === uri))
+      if (!background) {
+        if (backgroundLocationRetryTimerRef.current !== null) {
+          window.clearTimeout(backgroundLocationRetryTimerRef.current)
+          backgroundLocationRetryTimerRef.current = null
+        }
+        backgroundLocationRetryAttemptRef.current = 0
+        foregroundOpenUriPendingRef.current = generation
+        backgroundOpenErrorRef.current = false
+        setOpenError(null)
+        setResolving(true)
+      }
       try {
         const resource = await window.clerum.gfs.resolve(uri.trim())
+        if (!isCurrent()) return false
         const crumb: GfsCrumb = {
           resourceId: resource.resourceId,
           gfsUri: resource.gfsUri,
@@ -915,6 +1007,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           try {
             const parentRid = parentResourceId.replace(/-/g, '').toLowerCase()
             const parent = await window.clerum.gfs.resolve(`gfs://${resource.drive}/${parentRid}`)
+            if (!isCurrent()) return false
             if (parent.kind !== 'directory') break
             if (parent.name) {
               ancestors.push({
@@ -927,16 +1020,46 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
               })
             }
             parentResourceId = parent.parentResourceId
-          } catch {
+          } catch (error) {
+            const status = parseHttpStatus(toMessage(error))
+            if (status === 403 || status === 404) {
+              // The leaf already resolved authoritatively. A denied or deleted
+              // ancestor must disappear from its path without closing a leaf
+              // that remains directly readable; a later scope tick can restore
+              // the breadcrumb if visibility returns.
+              break
+            }
+            if (background) {
+              backgroundOpenErrorRef.current = true
+              setOpenError(toPresentedMessage(error))
+              scheduleBackgroundLocationRetry(uri, error)
+              return false
+            }
             // A direct file grant can be readable while its parent is not. Keep
             // the file open and show only the ancestors the caller may resolve.
             break
           }
         }
 
-        setCrumbs([...ancestors.reverse(), crumb])
+        if (!isCurrent()) return false
+        // A background resolve may recover its own transient error, but it
+        // must not erase a foreground link/navigation error being shown for a
+        // separate user action.
+        if (!background || backgroundOpenErrorRef.current) {
+          backgroundOpenErrorRef.current = false
+          setOpenError(null)
+        }
+        if (background) {
+          if (backgroundLocationRetryTimerRef.current !== null) {
+            window.clearTimeout(backgroundLocationRetryTimerRef.current)
+            backgroundLocationRetryTimerRef.current = null
+          }
+          backgroundLocationRetryAttemptRef.current = 0
+        }
+        setCrumbsState([...ancestors.reverse(), crumb])
         return crumb
       } catch (error) {
+        if (!isCurrent()) return false
         const message = toMessage(error)
         // Opening a URI is an operation on one resource. A generic 403 may be
         // a per-resource policy decision; only a session-authority failure
@@ -944,13 +1067,46 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         //
         // The authority check reads the RAW message — it matches status codes
         // and lifecycle tokens — while the banner shows the presented verdict.
-        if (!handleAuthorityFailure(message, 'operation')) setOpenError(toPresentedMessage(error))
+        if (!handleAuthorityFailure(message, 'operation')) {
+          const status = parseHttpStatus(message)
+          if (options?.clearIfUnavailable && (status === 403 || status === 404)) {
+            clearInaccessibleGfsLocation()
+          } else {
+            if (background) backgroundOpenErrorRef.current = true
+            setOpenError(toPresentedMessage(error))
+            if (background) scheduleBackgroundLocationRetry(uri, error)
+          }
+        }
         return false
       } finally {
-        setResolving(false)
+        if (!background && foregroundOpenUriPendingRef.current === generation) {
+          foregroundOpenUriPendingRef.current = null
+          if (openUriGenerationRef.current === generation) setResolving(false)
+        }
       }
     },
-    [handleAuthorityFailure]
+    [clearInaccessibleGfsLocation, handleAuthorityFailure, scheduleBackgroundLocationRetry]
+  )
+  useEffect(() => {
+    backgroundLocationRetryRef.current = uri => {
+      void openUri(uri, { background: true, clearIfUnavailable: true })
+    }
+    return () => {
+      backgroundLocationRetryRef.current = () => undefined
+      if (backgroundLocationRetryTimerRef.current !== null) {
+        window.clearTimeout(backgroundLocationRetryTimerRef.current)
+        backgroundLocationRetryTimerRef.current = null
+      }
+    }
+  }, [openUri, sessionScope])
+
+  const refreshCurrentLocation = useCallback(
+    async (options?: { background?: boolean }) => {
+      const uri = current?.gfsUri
+      if (!uri) return false
+      return openUri(uri, { clearIfUnavailable: true, background: options?.background })
+    },
+    [current?.gfsUri, openUri]
   )
 
   // Move refreshes the old parent's children, the destination's children,
@@ -1156,6 +1312,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       void accessibleQuery.fetchNextPage()
     },
     openUri,
+    refreshCurrentLocation,
     openResource,
     openChild,
     goToCrumb,

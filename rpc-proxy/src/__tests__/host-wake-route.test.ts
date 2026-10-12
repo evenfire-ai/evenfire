@@ -109,12 +109,19 @@ beforeEach(() => {
 describe('POST /rpc/hosts/:hostRef/wake auth', () => {
   it('rejects a token that cannot access :hostRef exactly like the messages route (403) and never calls the wake plane', async () => {
     // Same enforcement point as the messages route: control-api refuses the
-    // host resolution for this user/token → resolveHostConnectionForUser null.
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    // host resolution for this user/token → resolveHostConnectionForUser
+    // returns the typed denial.
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const response = await postWake(makeApp()).expect(403)
 
-    expect(response.body).toEqual({ error: 'Forbidden: user cannot access this host' })
+    expect(response.body).toEqual({
+      error: 'Forbidden: user cannot access this host',
+      code: 'host_access_denied',
+    })
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 

@@ -26,6 +26,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
+  "$ROOT/scripts/tests/test-branch-profile-lifecycle.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-image-capability-fixture.sh" \
@@ -51,6 +52,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh" \
   "$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh" \
   "$ROOT/scripts/tests/test-minikube-explicit-context.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-evidence.sh" \
   "$ROOT/scripts/tests/test-minikube-targeted-health.sh" \
@@ -59,6 +61,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
 done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
+"$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
@@ -98,6 +101,22 @@ for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/
   grep -Fq 't2_worktree_id' "$identity_file"
 done
 grep -Fq 'bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"' "$T2"
+# run_t0 runs under the lease owner but does not hold the lease, so its children
+# must not inherit the pinned origin/dev: t2_resolve_origin_dev refuses a pin
+# without T2_SKIP_LOCK=true. Every child starts through t2_run_outside_lease;
+# T0 receives origin/dev explicitly as T0_ORIGIN_DEV.
+# Continuation lines are joined so a wrapped command is checked as one line.
+run_t0_body="$(awk '/^run_t0\(\) \{/{f=1} !f{next} sub(/\\$/, ""){buf=buf $0; next} {print buf $0; buf=""} /^\}/{exit}' "$T2")"
+[ -n "$run_t0_body" ] || { printf 'FAIL: run_t0 not found in t2.sh\n' >&2; exit 1; }
+unwrapped_t0_children="$(printf '%s\n' "$run_t0_body" | grep -E '^[[:space:]]*(bash |T0_PROJECT_DIR=)' | grep -Ev '^[[:space:]]*bash -n ' || true)"
+[ -z "$unwrapped_t0_children" ] || {
+  printf 'FAIL: run_t0 starts a child without t2_run_outside_lease:\n%s\n' "$unwrapped_t0_children" >&2
+  exit 1
+}
+[ "$(printf '%s\n' "$run_t0_body" | grep -Ec '^[[:space:]]*t2_run_outside_lease ')" -eq 4 ] || {
+  printf 'FAIL: run_t0 must start t0.sh, T2_T0_COMMAND, the contract test and the setup-handoff test through t2_run_outside_lease\n' >&2
+  exit 1
+}
 
 required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED REAL_PG_REPORT_INCOMPLETE UNSUPPORTED_T1_CONCURRENCY ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED PLAYWRIGHT_FAILED"
 for code in $required_codes; do
@@ -362,6 +381,24 @@ if [ -z "$post_runtime_process_check_line" ] || [ -z "$complete_pass_line" ] ||
   echo 'FAIL: T2 does not revalidate port-forward ownership before complete PASS' >&2
   exit 1
 fi
+# t2_evidence_init opens every evidence file with `preflight RUNNING`. The
+# planner closes it; each certification writer must close it too, or a PASS
+# attestation keeps a phase whose latest status reads as still running.
+preflight_plan_body="$(awk '/^run_preflight_plan\(\) \{$/,/^\}$/' "$T2")"
+if [ -z "$preflight_plan_body" ] ||
+   ! grep -Fq 't2_evidence_write preflight PASS' <<<"$preflight_plan_body"; then
+  echo 'FAIL: T2 certification evidence never closes the preflight phase opened by t2_evidence_init' >&2
+  exit 1
+fi
+# awk prints an empty line number when nothing matches, so the explicit FAIL
+# below reports the gap instead of pipefail ending the script silently.
+t1_evidence_init_line="$(awk '$0 == "  t2_evidence_init" { line = NR } END { print line }' "$T1")"
+t1_preflight_pass_line="$(awk 'index($0, "t2_evidence_write preflight PASS") { line = NR } END { print line }' "$T1")"
+if [ -z "$t1_evidence_init_line" ] || [ -z "$t1_preflight_pass_line" ] ||
+   [ "$t1_preflight_pass_line" -le "$t1_evidence_init_line" ]; then
+  echo 'FAIL: T1 certification evidence never closes the preflight phase opened by t2_evidence_init' >&2
+  exit 1
+fi
 if ! grep -Fq 'instead of already-synced' "$T2"; then
   echo 'FAIL: final T2 preflight does not require already-synced' >&2
   exit 1
@@ -410,6 +447,7 @@ bash -c '
   source "$1"
   parsed="$(t2_get_name control-plane/control-postgres)"
   test "$parsed" = "control-plane	control-postgres"
+  T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567
   t2_lock_acquire
   t2_lock_release
 ' bash "$COMMON"
@@ -428,6 +466,7 @@ T2_WORKTREE_ID=contract-worktree \
 bash -c '
   common="$1"
   source "$common"
+  T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567
   t2_lock_acquire
   token="$T2_LOCK_TOKEN"
   export T2_PROJECT_DIR T2_BRANCH T2_HEAD T2_ORIGIN_DEV T2_MERGE_BASE
@@ -461,7 +500,7 @@ EOF
 if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=busy-profile T2_CONTEXT=busy-profile \
   T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
   T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
-  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/busy.err"; then
+  bash -c 'source "$1"; T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567; t2_lock_acquire' bash "$COMMON" 2>"$tmp/busy.err"; then
   echo 'FAIL: live profile owner was replaced' >&2
   exit 1
 fi
@@ -471,12 +510,26 @@ mkdir -p "$tmp/locks/empty-profile.lock"
 if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=empty-profile T2_CONTEXT=empty-profile \
   T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
   T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
-  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/empty.err"; then
+  bash -c 'source "$1"; T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567; t2_lock_acquire' bash "$COMMON" 2>"$tmp/empty.err"; then
   echo 'FAIL: an ownerless profile lock was reclaimed' >&2
   exit 1
 fi
 grep -Fq 'PROFILE_BUSY' "$tmp/empty.err"
 grep -Fq 'orphaned' "$tmp/empty.err"
+
+# The lease owner pins origin/dev for its children, so it cannot take the
+# lease without one.
+if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=clerum-unpinned T2_CONTEXT=clerum-unpinned \
+  T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
+  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/unpinned.err"; then
+  echo 'FAIL: a lease owner without origin/dev acquired the lock' >&2
+  exit 1
+fi
+grep -Fq 'DEVELOPMENT_SCOPE_REQUIRED: the lease owner has no origin/dev to pin' "$tmp/unpinned.err"
+if [ -e "$tmp/locks/clerum-unpinned.lock" ]; then
+  echo 'FAIL: an unpinned lease owner left a lock behind' >&2
+  exit 1
+fi
 
 cert_root="$tmp/certifications"
 mkdir -p "$cert_root/prior" "$cert_root/current"
@@ -692,6 +745,39 @@ for leaked in \
     exit 1
   fi
 done
+# A key that is the content of a string literal ending in `=` or `:` is test
+# data, not an assignment: the quote after it closes that literal, so the text
+# up to the next quote is code. A real assignment later on the line, or a key
+# inside a literal of the other quote type, is still a credential.
+string_key="password="
+printf "const shape = { label: '%s', value: '%s' }\n" "$string_key" "$marker_value" >"$marker_repo/client.ts"
+if ! T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/marker-boundary.out" 2>"$tmp/marker-boundary.err"; then
+  echo 'FAIL: public boundary read a key inside a string literal as a credential assignment' >&2
+  cat "$tmp/marker-boundary.err" >&2
+  exit 1
+fi
+if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/marker-boundary.out"; then
+  echo 'FAIL: public boundary accepted the string-literal key without reporting PUBLIC_BOUNDARY_PASS' >&2
+  exit 1
+fi
+for leaked in \
+  "const shape = { label: '$string_key', password: '$marker_value' }" \
+  "const line = \"$string_key'$marker_value'\"" \
+  "// it's $string_key'$marker_value'"; do
+  printf '%s\n' "$leaked" >"$marker_repo/client.ts"
+  if T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary accepted a credential assignment ($leaked)" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- '- client.ts: credential assignment' "$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary rejected ($leaked) for another reason" >&2
+    cat "$tmp/marker-boundary.err" >&2
+    exit 1
+  fi
+done
+echo 'PASS: public boundary reads a string-literal key as data and still rejects real assignments'
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh"

@@ -105,12 +105,55 @@ if incremental_contains 'control-api/*) incremental_add_target control-api contr
    incremental_contains 'rpc-proxy/*) incremental_add_target rpc-proxy rpc-proxy rpc-proxy' &&
    incremental_contains 'host-context-controller/*) incremental_add_target host-context-controller control-plane host-context-controller' &&
    incremental_contains 'control-ui/*) incremental_add_target control-ui control-plane control-ui' &&
-   incremental_contains 'packages/gfs-interaction-policy/*) incremental_add_target control-ui control-plane control-ui' &&
+   incremental_contains 'packages/gfs-interaction-policy/*)' &&
    incremental_contains 'tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)' &&
    incremental_contains 'incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e'; then
   pass "incremental sync maps known runtime paths to their own images and deployments"
 else
   fail "incremental sync does not map known runtime paths precisely"
+fi
+
+# A two-line case body cannot be proven by grep (the mcp-host target line also
+# exists under mcp-host/*), so classify the path for real and compare targets.
+gfs_policy_targets="$(
+  PROJECT_DIR="$PWD"
+  PROFILE=fake
+  KC="kubectl --context=fake"
+  FORCE_CLUSTER_SYNC=false
+  FORCE_RESTART=false
+  IMAGE_SOURCE=local
+  IMAGE_TAG=test
+  IMAGES_GENERATED_AT=test
+  log() { :; }
+  # shellcheck source=/dev/null
+  source "$INCREMENTAL_SCRIPT"
+  incremental_classify_path packages/gfs-interaction-policy/fileClassifier.cjs
+  printf '%s\n' ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}
+)"
+if [[ "$gfs_policy_targets" == $'control-ui|control-plane|control-ui\nmcp-host|mcp-host|chatllm' ]]; then
+  pass "a gfs-interaction-policy change reshadows Control UI and mcp-host"
+else
+  fail "gfs-interaction-policy maps to the wrong consumers: ${gfs_policy_targets:-<none>}"
+fi
+
+jwt_policy_targets="$(
+  PROJECT_DIR="$PWD"
+  PROFILE=fake
+  KC="kubectl --context=fake"
+  FORCE_CLUSTER_SYNC=false
+  FORCE_RESTART=false
+  IMAGE_SOURCE=local
+  IMAGE_TAG=test
+  IMAGES_GENERATED_AT=test
+  log() { :; }
+  source "$INCREMENTAL_SCRIPT"
+  incremental_classify_path packages/jwt-key-policy/index.cjs
+  printf '%s\n' ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}
+)"
+if [[ "$jwt_policy_targets" == $'control-api|control-plane|control-api\nexternal-rest-api|profiles|external-rest-api\nrpc-proxy|rpc-proxy|rpc-proxy' ]]; then
+  pass "a JWT policy change reshadows all three signing and verifying consumers"
+else
+  fail "JWT policy maps to the wrong consumers: ${jwt_policy_targets:-<none>}"
 fi
 
 if contains 'incremental_plan' &&
@@ -276,6 +319,36 @@ else
   fail "pre-gate fingerprint no longer sees source or ignored deploy inputs"
 fi
 rm -rf "${agent_state_dir}"
+
+# Local credentials are excluded from image contexts and are not deployed
+# inputs. The package policy is a deployed input, including package-only edits.
+jwt_input_dir="$(mktemp -d)"
+mkdir -p "${jwt_input_dir}/control-api/src" "${jwt_input_dir}/rpc-proxy/src" \
+  "${jwt_input_dir}/external-rest-api/src" "${jwt_input_dir}/packages/jwt-key-policy"
+printf 'export const imageInput = 1\n' >"${jwt_input_dir}/control-api/src/index.ts"
+printf 'module.exports = { revision: 1 }\n' >"${jwt_input_dir}/packages/jwt-key-policy/index.cjs"
+jwt_input_fp() { (source "$MARKER_SCRIPT" && pre_gate_marker_cluster_fingerprint "${jwt_input_dir}"); }
+jwt_input_before="$(jwt_input_fp)"
+for service in control-api rpc-proxy external-rest-api; do
+  mkdir -p "${jwt_input_dir}/${service}/.dev-keys/nested"
+  # Non-key bytes prove input ownership; this fixture never signs or parses PEM.
+  printf 'local-only-generated-material\n' >"${jwt_input_dir}/${service}/.dev-keys/rpc.pem"
+  printf 'local-only-temporary\n' >"${jwt_input_dir}/${service}/.dev-keys/nested/stale.tmp"
+done
+jwt_input_after_store="$(jwt_input_fp)"
+printf 'module.exports = { revision: 2 }\n' >"${jwt_input_dir}/packages/jwt-key-policy/index.cjs"
+jwt_input_after_policy="$(jwt_input_fp)"
+if [[ "$jwt_input_before" =~ ^[0-9a-f]{40}$ && "$jwt_input_before" == "$jwt_input_after_store" ]]; then
+  pass "generated dev stores do not invalidate the deployed-source fingerprint"
+else
+  fail "generated dev stores changed the deployed-source fingerprint"
+fi
+if [[ "$jwt_input_after_policy" =~ ^[0-9a-f]{40}$ && "$jwt_input_after_store" != "$jwt_input_after_policy" ]]; then
+  pass "package-only JWT policy changes invalidate the deployed-source fingerprint"
+else
+  fail "deployed-source fingerprint ignores package-only JWT policy changes"
+fi
+rm -rf "${jwt_input_dir}"
 
 control_api_migration_line="$(grep -nF 'run-control-api-db-migration.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 runtime_roles_line="$(grep -nF 'provision-control-api-runtime-roles.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"

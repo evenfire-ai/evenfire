@@ -1,0 +1,9 @@
+{
+  "status": 400,
+  "body": {
+    "error": "dcr_registration_failed",
+    "detail": {
+      "kind": "redirect_uris_mismatch"
+    }
+  }
+}

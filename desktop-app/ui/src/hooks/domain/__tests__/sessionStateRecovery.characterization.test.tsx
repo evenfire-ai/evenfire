@@ -250,9 +250,12 @@ describe('onTrackerTerminal — recover via reconcile catch', () => {
       | undefined
     expect(appended?.[0]?.errorCode).toBe('BUDGET_EXCEEDED')
     expect(appended?.[0]?.content).toBe('Budget exceeded')
-    expect(spies.pushToast).toHaveBeenCalledWith(
-      'Message to agent-x failed: Budget exceeded',
-      'error'
+    // The failure toast follows the store write of the error reply.
+    await waitFor(() =>
+      expect(spies.pushToast).toHaveBeenCalledWith(
+        'Message to agent-x failed: Budget exceeded',
+        'error'
+      )
     )
     // A durable failure still retains the input for explicit recovery/retry.
     expect(result.current.failedAgentSend).toMatchObject({ content: 'spend' })

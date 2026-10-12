@@ -25,6 +25,8 @@ export type FieldProps = {
   children: ReactNode
   description?: ReactNode
   error?: ReactNode
+  /** Stable id for the rendered error span, so inputs can aria-describedby it. */
+  errorId?: string
   htmlFor?: string
   label?: ReactNode
   required?: boolean

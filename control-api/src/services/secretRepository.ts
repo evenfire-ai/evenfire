@@ -7,11 +7,36 @@ import type { SecretPreconditions } from '../types.js'
 export const RECIPE_SECRET_LABEL_KEY = 'clerum.io/recipe-secret'
 export const RECIPE_SECRET_LABEL_VALUE = 'true'
 
+// The ownership marker the install saga stamps on every Secret control-api
+// creates (see remoteMcp.ts `managedLabels`). It lives here so every route that
+// may delete a derived-name Secret reads the SAME constant and cannot drift.
+export const MANAGED_BY_LABEL_KEY = 'clerum.io/managed-by'
+export const MANAGED_BY_CONTROL_API = 'control-api'
+
 /** True when the Secret is owned by a WorkflowRecipe and must not be deleted by other routes. */
 export function isRecipeOwnedSecret(raw: unknown): boolean {
   const labels = (raw as { metadata?: { labels?: Record<string, string> } } | undefined)?.metadata
     ?.labels
   return labels?.[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE
+}
+
+/**
+ * True when the Secret carries proof that control-api's install saga created it
+ * (`clerum.io/managed-by: control-api`). A derived-name Secret like
+ * `${name}-oauth-client` can COLLIDE with an operator-owned Secret of the same
+ * name (reference mode accepts arbitrary `clientIdRef`/`clientSecretRef` names),
+ * so a name-addressed uninstall delete must confirm ownership before razing it —
+ * UID/RV fencing proves same-object, not same-owner. Reads labels from either the
+ * flat {@link SecretSnapshot} or the raw Kubernetes object, mirroring
+ * {@link secretIdentityPreconditions}, so both delete paths share one predicate.
+ */
+export function isControlApiManagedSecret(raw: unknown): boolean {
+  const value = (raw ?? {}) as {
+    labels?: Record<string, string>
+    metadata?: { labels?: Record<string, string> }
+  }
+  const labels = value.labels ?? value.metadata?.labels
+  return labels?.[MANAGED_BY_LABEL_KEY] === MANAGED_BY_CONTROL_API
 }
 
 /** The subset of a Kubernetes Secret that callers are allowed to observe. */

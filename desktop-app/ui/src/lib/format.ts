@@ -1,5 +1,6 @@
 import type { HostMessageResponse, SessionTokensLite } from '../../../src/types'
 import type { AppErrorKind } from '../uiTypes'
+import { stripIpcWrapper } from './gfsGrantErrors'
 
 export function toPrettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2)
@@ -159,22 +160,98 @@ function errorText(err: unknown): string {
 }
 
 /**
- * True when an error reflects an HTTP 404 (the server doesn't know a chat the
- * local cache references). Used by the D.4 reconcile to evict a stale local
- * chat — which is destructive, so we require the 404 status token specifically
- * rather than a generic "not found" substring (a "host/agent not found"
- * transport error must NOT evict the user's cache).
+ * Every producer puts the response status in the first few dozen characters
+ * (`NNN StatusText: …`, `List sessions failed (NNN): …`). Parsing a bounded
+ * prefix keeps the cost of a status read independent of an upstream body that
+ * an error message may echo.
  */
+const HTTP_STATUS_PARSE_MAX_CHARS = 2048
+
+/**
+ * Labeled statuses must be introduced by the start of the text, whitespace or
+ * `(`, and separated from the digits by `:`/`=` or whitespace, so a Host named
+ * `status401` or `support-http500` never yields a status. Each quantifier is
+ * followed by a disjoint token, which keeps a long whitespace run linear.
+ */
+const HTTP_STATUS_PATTERN =
+  /^(?:http\s+)?(?<leading>[1-5]\d{2})\b|(?:^|[\s(])(?:http(?:\s+status)?|status(?:\s+code)?)(?:\s*[:=]\s*|\s+)(?<labeled>[1-5]\d{2})\b|\((?<parenthesized>[1-5]\d{2})\)/i
+
+/** IPC preserves error messages but not always custom status fields. */
+export function httpErrorStatus(err: unknown): number | undefined {
+  if (err && typeof err === 'object') {
+    const status = (err as { status?: unknown; cause?: { status?: unknown } }).status
+    if (typeof status === 'number') return status
+    const causeStatus = (err as { cause?: { status?: unknown } }).cause?.status
+    if (typeof causeStatus === 'number') return causeStatus
+  }
+  const text = stripIpcWrapper(errorText(err).slice(0, HTTP_STATUS_PARSE_MAX_CHARS))
+  // AppService's Host-availability projection carries no status, only the
+  // Host reference, whose digits are never a response status.
+  if (text.startsWith('host_waking:') || text.startsWith('host_draining:')) return undefined
+  // Parse only labeled HTTP statuses so digits in a host name or body aren't
+  // mistaken for the response status.
+  const match = HTTP_STATUS_PATTERN.exec(text)
+  const status = match?.groups?.leading ?? match?.groups?.labeled ?? match?.groups?.parenthesized
+  return status ? Number(status) : undefined
+}
+
+const HOST_AVAILABILITY_BODY_PATTERN = /"code"\s*:\s*"host_(?:waking|draining)"/
+
+/**
+ * The Host is waking or draining: an expected transition, not an outage. Invoke
+ * failures arrive as AppService's `host_waking:`/`host_draining:` projection;
+ * catalog reads arrive as the rpc-proxy 503 whose body carries the same code.
+ */
+export function isHostAvailabilityError(err: unknown): boolean {
+  const text = stripIpcWrapper(errorText(err).slice(0, HTTP_STATUS_PARSE_MAX_CHARS))
+  if (text.startsWith('host_waking:') || text.startsWith('host_draining:')) return true
+  return httpErrorStatus(err) === 503 && HOST_AVAILABILITY_BODY_PATTERN.test(text)
+}
+
+/** True when the parsed response status is in the server-error range. */
+export function isHttpServerError(err: unknown): boolean {
+  const status = httpErrorStatus(err)
+  return status !== undefined && status >= 500 && status < 600
+}
+
+/** A transcript 404 is ambiguous: absence, authority and wake failure share it. */
 export function isHttp404(err: unknown): boolean {
-  const value = errorText(err)
+  return httpErrorStatus(err) === 404
+}
+
+/** Only an explicit authorization status can revoke the visible chat scope. */
+export function isAuthorizationError(err: unknown): boolean {
+  const status = httpErrorStatus(err)
+  return status === 401 || status === 403
+}
+
+/**
+ * The main process refused a sessions cursor before issuing any request
+ * (`sanitizeSessionsListQuery` in `ipc.ts`). That refusal carries no HTTP
+ * status, only its fixed message behind the IPC wrapper.
+ */
+export function isInvalidSessionsCursorError(err: unknown): boolean {
   return (
-    /\b404\b/.test(value) || value.includes('chat not found') || value.includes('session not found')
+    httpErrorStatus(err) === undefined &&
+    /(?:^|error: )invalid sessions cursor$/.test(errorText(err))
+  )
+}
+
+export function isHttp403(err: unknown): boolean {
+  return httpErrorStatus(err) === 403
+}
+
+/** Exact Host-wide denial projected by the trusted Desktop RPC client. */
+export function isConfirmedHostAccessRevoked(err: unknown): boolean {
+  return (
+    httpErrorStatus(err) === 403 &&
+    /(?:^|error: )403 forbidden: host_access_revoked$/.test(errorText(err))
   )
 }
 
 /**
- * True when an error reflects a transport/connectivity failure rather than a
- * server-side rejection. The D.4 reconcile stays in offline mode on these.
+ * True when a transcript read failed without an authority decision. The
+ * reconcile keeps the cached conversation while these errors recover.
  */
 export function isNetworkError(err: unknown): boolean {
   const value = errorText(err)
@@ -184,7 +261,8 @@ export function isNetworkError(err: unknown): boolean {
     value.includes('network') ||
     value.includes('fetch failed') ||
     value.includes('econnrefused') ||
-    value.includes('failed to fetch')
+    value.includes('failed to fetch') ||
+    [502, 503, 504].includes(httpErrorStatus(err) ?? 0)
   )
 }
 

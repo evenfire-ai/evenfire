@@ -117,11 +117,20 @@ function randomOccupiedNames(random, requestedName) {
 }
 
 it('keeps runtime exports aligned with the declaration file', () => {
-  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
-  const declared = Array.from(
-    declarations.matchAll(/export declare (?:const|function)\s+([A-Za-z0-9_]+)/g),
-    match => match[1]
-  ).sort()
+  const declaredIn = file => {
+    const declarations = fs.readFileSync(path.join(__dirname, file), 'utf8')
+    const own = Array.from(
+      declarations.matchAll(/export declare (?:const|function)\s+([A-Za-z0-9_]+)/g),
+      match => match[1]
+    )
+    const reexported = Array.from(
+      declarations.matchAll(/export \* from '\.\/([A-Za-z0-9_]+)'/g),
+      match => declaredIn(`${match[1]}.d.ts`)
+    )
+    return [...own, ...reexported.flat()]
+  }
+  const declared = declaredIn('index.d.ts').sort()
+  assert.ok(declared.includes('classifyBytes'), 'the re-exported declaration files were not read')
   assert.deepEqual(Object.keys(policy).sort(), declared)
 })
 

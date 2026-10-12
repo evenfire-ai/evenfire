@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { config } from '../config.js'
+import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
 
 // ── Hoisted mocks ───────────────────────────────────────────────────
@@ -76,12 +77,7 @@ function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createRpcRouter())
-  // Generic error handler to avoid unhandled rejections in tests
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Internal error' })
-    }
-  )
+  app.use(apiErrorHandler)
   return app
 }
 
@@ -104,6 +100,8 @@ function mockFetchResponse(
 // ── Setup / Teardown ────────────────────────────────────────────────
 const originalFetch = globalThis.fetch
 const originalArtifactDownloadMaxBytes = config.artifactDownloadMaxBytes
+const originalArtifactDownloadTimeoutMs = config.artifactDownloadTimeoutMs
+const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
 
 beforeEach(() => {
   authTokenMock.verifyRpcToken.mockReset()
@@ -123,12 +121,44 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch
   config.artifactDownloadMaxBytes = originalArtifactDownloadMaxBytes
+  config.artifactDownloadTimeoutMs = originalArtifactDownloadTimeoutMs
+  config.upstreamTimeoutMs = originalUpstreamTimeoutMs
 })
 
 // =====================================================================
 // Approval Routes
 // =====================================================================
 describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
+  // R2-M3: approve mutates state on the host. A client-side abort of the first
+  // attempt would answer 504 for an approval the host may already have applied.
+  // Real-socket coverage (slow upstream, hung retry) lives in
+  // route-upstream-deadlines.real-http.test.ts.
+  it('sends the first approval attempt without a client-side deadline', async () => {
+    config.upstreamTimeoutMs = 20
+    // The first attempt carries only the client-disconnect signal (R3-L6): it
+    // must outlive several upstream timeouts without being aborted.
+    let firstSignal: AbortSignal | undefined
+    let abortedWhenAnswered: boolean | undefined
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      firstSignal = init.signal as AbortSignal
+      await new Promise(resolve => setTimeout(resolve, config.upstreamTimeoutMs * 3))
+      abortedWhenAnswered = firstSignal.aborted
+      return mockFetchResponse(200, JSON.stringify({ ok: true }))
+    })
+    globalThis.fetch = fetchMock
+
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/approvals/approve')
+      .set('authorization', 'Bearer token')
+      .send({ toolCallId: 'tc-no-deadline' })
+      .expect(200)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(firstSignal).toBeInstanceOf(AbortSignal)
+    expect(abortedWhenAnswered).toBe(false)
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
   it('translates toolCallId to requestId in upstream body', async () => {
     let capturedBody: string | undefined
     globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
@@ -222,7 +252,10 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)
@@ -341,7 +374,10 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)
@@ -419,7 +455,10 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)
@@ -490,7 +529,8 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
     expect(serviceMock.forwardCancelToHost).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'chatllm' }),
       'abc',
-      VALID_CLAIMS.sub
+      VALID_CLAIMS.sub,
+      expect.anything()
     )
   })
 
@@ -547,7 +587,10 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
       ...VALID_CLAIMS,
       scopes: ['host:message:invoke'],
     })
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)
@@ -614,6 +657,34 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
 })
 
 describe('GET /rpc/hosts/:hostRef/artifacts/:filename/download', () => {
+  it('allows the bounded body transfer to outlast the upstream header timeout', async () => {
+    config.upstreamTimeoutMs = 5
+    config.artifactDownloadTimeoutMs = 1_000
+    let signal: AbortSignal | undefined
+    globalThis.fetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      signal = init.signal as AbortSignal
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
+        arrayBuffer: async () => {
+          await new Promise(resolve => setTimeout(resolve, 25))
+          expect(signal?.aborted).toBe(false)
+          return new TextEncoder().encode('slow-artifact').buffer as ArrayBuffer
+        },
+      } as unknown as Response)
+    })
+
+    const app = makeApp()
+    const response = await request(app)
+      .get('/rpc/hosts/chatllm/artifacts/slow.bin/download')
+      .set('authorization', 'Bearer token')
+      .expect(200)
+
+    expect(Buffer.from(response.body).toString()).toBe('slow-artifact')
+    expect(signal?.aborted).toBe(false)
+  })
+
   it("rejects filename containing '..'", async () => {
     // Express normalizes "../" in paths, so use URL-encoded dots to test
     // the validation logic when the param actually contains ".."
@@ -833,7 +904,10 @@ describe('GET /rpc/hosts/:hostRef/artifacts/:filename/download', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)

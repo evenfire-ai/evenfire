@@ -11,28 +11,10 @@
  *   chart.js + @napi-rs/canvas (PNG charts), built-in string write
  *   for markdown and the dashboard HTML wrapper.
  */
-import { type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
-import { Chart, type ChartConfiguration, type ChartType, registerables } from 'chart.js'
-import {
-  AlignmentType,
-  BorderStyle,
-  Document as DocxDocument,
-  Footer as DocxFooter,
-  Header as DocxHeader,
-  Table as DocxTable,
-  TableCell as DocxTableCell,
-  TableRow as DocxTableRow,
-  HeadingLevel,
-  ImageRun,
-  LevelFormat,
-  Packer,
-  PageNumber,
-  Paragraph,
-  ShadingType,
-  TextRun,
-  WidthType,
-} from 'docx'
-import ExcelJS from 'exceljs'
+import type { SKRSContext2D } from '@napi-rs/canvas'
+import type { Chart, ChartConfiguration, ChartType } from 'chart.js'
+import type { Table as DocxTable, Paragraph, TextRun } from 'docx'
+import type ExcelJS from 'exceljs'
 import * as fs from 'fs'
 import * as path from 'path'
 import type {
@@ -49,16 +31,14 @@ import { WorkflowTriggerTool } from '../core/tools/workflowTriggerTool'
 import { CONTEXT_FILES_TOOLS, loadContextFilesMounts } from './contextFiles'
 import type { ArtifactMetadata, InternalToolDefinition, InternalToolResult } from './types'
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const PdfPrinter = require('pdfmake')
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const PptxGenJS = require('pptxgenjs')
-
-// Register Chart.js controllers/scales/elements/plugins once. Chart.js v4 ships
-// these as separate exports so we have to opt in. `registerables` includes all
-// chart types we expose (line, bar, pie, doughnut, etc.) plus axes/legend/title.
-Chart.register(...registerables)
+type DocxModule = typeof import('docx')
+// pptxgenjs exposes these lookup tables on instances at runtime, though its
+// declaration omits them from the instance type.
+type PptxGenJS = InstanceType<typeof import('pptxgenjs').default> & {
+  charts: Record<string, string>
+  shapes: Record<string, string>
+}
+let chartRegistered = false
 
 // Accessor to the current Host CRD, injected by main (avoids a circular import).
 // Re-read on every getOutputDir() call because `currentHost` is hydrated async
@@ -746,6 +726,15 @@ const generateChart: InternalToolDefinition = {
         ],
       }
 
+      const [{ createCanvas }, { Chart, registerables }] = await Promise.all([
+        import('@napi-rs/canvas'),
+        import('chart.js'),
+      ])
+      // Chart.js controllers, scales, and plugins are needed only for PNG charts.
+      if (!chartRegistered) {
+        Chart.register(...registerables)
+        chartRegistered = true
+      }
       const canvas = createCanvas(width, height)
       const ctx = canvas.getContext('2d') as SKRSContext2D
       // Chart.js types target a browser CanvasRenderingContext2D; the Skia
@@ -1368,6 +1357,11 @@ const generatePdf: InternalToolDefinition = {
         content,
       }
 
+      // The published pdfmake types describe its browser API; this tool uses
+      // the package's Node printer constructor, as the previous require did.
+      const PdfPrinter = (await import('pdfmake')).default as unknown as new (
+        fonts: TFontDictionary
+      ) => { createPdfKitDocument: (definition: TDocumentDefinitions) => import('stream').Duplex }
       const printer = new PdfPrinter(PDF_FONTS)
       const pdfDoc = printer.createPdfKitDocument(docDef)
 
@@ -1477,7 +1471,12 @@ interface DocxTableSpec {
  * Parse inline markdown in a single line into docx TextRun objects.
  * Supports **bold**, *italic*, `code`. Falls through as plain text otherwise.
  */
-function parseInlineMarkdownToRuns(text: string, baseColor?: string): TextRun[] {
+function parseInlineMarkdownToRuns(
+  text: string,
+  baseColor: string | undefined,
+  docx: DocxModule
+): TextRun[] {
+  const { TextRun } = docx
   // Same logic as parseInlineMarkdown above: non-greedy bold so nested
   // single asterisks (italic) don't break `**bold *italic***`.
   const runs: TextRun[] = []
@@ -1521,8 +1520,19 @@ function buildDocxTable(
   headers: string[],
   rows: string[][],
   palette: DocxPalette,
-  layout: 'striped' | 'minimal' | 'grid' = 'striped'
+  layout: 'striped' | 'minimal' | 'grid',
+  docx: DocxModule
 ): DocxTable {
+  const {
+    BorderStyle,
+    Paragraph,
+    ShadingType,
+    Table: DocxTable,
+    TableCell: DocxTableCell,
+    TableRow: DocxTableRow,
+    TextRun,
+    WidthType,
+  } = docx
   // Pad/truncate each row to headers.length so ragged input doesn't
   // produce a misaligned table that Word renders silently wrong.
   const normalizedRows = rows.map(row => normalizeRowLength(row, headers.length))
@@ -1554,7 +1564,7 @@ function buildDocxTable(
               : {}),
             children: [
               new Paragraph({
-                children: parseInlineMarkdownToRuns(cell ?? '', docxHex(palette.text)),
+                children: parseInlineMarkdownToRuns(cell ?? '', docxHex(palette.text), docx),
               }),
             ],
             margins: { top: 60, bottom: 60, left: 120, right: 120 },
@@ -1624,7 +1634,12 @@ function splitTableRowDocx(line: string): string[] {
  * Convert markdown body into docx Paragraph + Table objects, applying palette
  * colors to headings. Mirrors the GFM subset supported by the PDF tool.
  */
-function bodyToDocxChildren(body: string, palette: DocxPalette): (Paragraph | DocxTable)[] {
+function bodyToDocxChildren(
+  body: string,
+  palette: DocxPalette,
+  docx: DocxModule
+): (Paragraph | DocxTable)[] {
+  const { BorderStyle, HeadingLevel, Paragraph, TextRun } = docx
   const out: (Paragraph | DocxTable)[] = []
   const lines = body.split('\n')
   let i = 0
@@ -1700,7 +1715,7 @@ function bodyToDocxChildren(body: string, palette: DocxPalette): (Paragraph | Do
         rows.push(splitTableRowDocx(lines[i]))
         i++
       }
-      out.push(buildDocxTable(headers, rows, palette, 'striped'))
+      out.push(buildDocxTable(headers, rows, palette, 'striped', docx))
       // Trailing empty paragraph for spacing.
       out.push(new Paragraph({ children: [new TextRun({ text: '' })], spacing: { before: 60 } }))
       continue
@@ -1714,7 +1729,8 @@ function bodyToDocxChildren(body: string, palette: DocxPalette): (Paragraph | Do
             numbering: { reference: 'doc-bullets', level: 0 },
             children: parseInlineMarkdownToRuns(
               lines[i].trimStart().slice(2),
-              docxHex(palette.text)
+              docxHex(palette.text),
+              docx
             ),
           })
         )
@@ -1754,7 +1770,7 @@ function bodyToDocxChildren(body: string, palette: DocxPalette): (Paragraph | Do
     out.push(
       new Paragraph({
         spacing: { after: 80 },
-        children: parseInlineMarkdownToRuns(line, docxHex(palette.text)),
+        children: parseInlineMarkdownToRuns(line, docxHex(palette.text), docx),
       })
     )
     i++
@@ -1847,6 +1863,20 @@ const generateDocx: InternalToolDefinition = {
       const branding = (args.branding ?? {}) as DocxBranding
       const images = (args.images ?? []) as DocxImageRef[]
       const tables = (args.tables ?? []) as DocxTableSpec[]
+      const docx = await import('docx')
+      const {
+        AlignmentType,
+        Document: DocxDocument,
+        Footer: DocxFooter,
+        Header: DocxHeader,
+        HeadingLevel,
+        ImageRun,
+        LevelFormat,
+        Packer,
+        PageNumber,
+        Paragraph,
+        TextRun,
+      } = docx
 
       const children: (Paragraph | DocxTable)[] = []
 
@@ -1905,13 +1935,13 @@ const generateDocx: InternalToolDefinition = {
       }
 
       // Body.
-      children.push(...bodyToDocxChildren(body, palette))
+      children.push(...bodyToDocxChildren(body, palette, docx))
 
       // Explicit tables (after body).
       for (const t of tables) {
         if (!t || !Array.isArray(t.headers) || !Array.isArray(t.rows)) continue
         const stringRows = t.rows.map(r => r.map(c => (c == null ? '' : String(c))))
-        children.push(buildDocxTable(t.headers, stringRows, palette, t.layout ?? 'striped'))
+        children.push(buildDocxTable(t.headers, stringRows, palette, t.layout ?? 'striped', docx))
         children.push(new Paragraph({ children: [new TextRun({ text: '' })] }))
       }
 
@@ -2418,6 +2448,7 @@ const generateXlsx: InternalToolDefinition = {
         return { success: false, error: 'sheets must be a non-empty array' }
       }
 
+      const { default: ExcelJS } = await import('exceljs')
       const workbook = new ExcelJS.Workbook()
       workbook.creator = branding.companyName ?? ''
       workbook.company = branding.companyName ?? ''
@@ -4987,7 +5018,7 @@ function loadSafeImage(p: string | undefined, outputDir: string): string | null 
  * Map our chart type names (matching clerum__generate_chart) to
  * pptxgenjs's internal chart-type strings.
  */
-function pptxChartTypeFromName(t: PptxChartType, pptx: typeof PptxGenJS): string {
+function pptxChartTypeFromName(t: PptxChartType, pptx: PptxGenJS): string {
   const c = pptx.charts ?? {}
   switch (t) {
     case 'line':
@@ -5032,7 +5063,7 @@ function pptxBodyRegion(dims: PptxDimensions): {
 
 /** Add the standard footer (company / footerText / page number) to every slide. */
 function addPptxFooter(
-  slide: Record<string, unknown> & { addText: (...args: unknown[]) => void },
+  slide: ReturnType<PptxGenJS['addSlide']>,
   region: ReturnType<typeof pptxBodyRegion>,
   dims: PptxDimensions,
   branding: PptxBranding,
@@ -5563,7 +5594,8 @@ const generatePptxTool: InternalToolDefinition = {
         }
       }
 
-      const pptx = new PptxGenJS()
+      const { default: PptxGenJS } = await import('pptxgenjs')
+      const pptx = new PptxGenJS() as PptxGenJS
       pptx.layout = layoutDef.name
       const dims = layoutDef.dims
       const region = pptxBodyRegion(dims)
@@ -5623,7 +5655,7 @@ interface RenderCtx {
   branding: PptxBranding
   safeLogoPath: string | null
   outputDir: string
-  pptx: typeof PptxGenJS
+  pptx: PptxGenJS
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

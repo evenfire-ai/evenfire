@@ -1,0 +1,7 @@
+{
+  "status": 400,
+  "body": {
+    "error": "mode_unsupported",
+    "message": "this authorization server supports CIMD but not RFC 9207; install with mode \"dcr\""
+  }
+}

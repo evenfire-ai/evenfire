@@ -8,6 +8,7 @@
 const { createHash } = require('node:crypto')
 
 const { VISUAL_LIMITS, inspectVisualImage } = require('./visualPayload.cjs')
+const { createBodyStructureVerify, scanJsonStructure } = require('./bodyStructure.cjs')
 
 const SCHEMA_VERSION = 'codex-completion-request.v1'
 const SCHEMA_VERSION_V2 = 'codex-completion-request.v2'
@@ -21,7 +22,7 @@ const LIMITS = Object.freeze({
   // largest listed model window; past it the model refuses on tokens first.
   // It is the V1 ceiling, and the V2 ceiling for everything that is not image
   // data; `measureNonImageRequestBytes` below enforces the second half. The
-  // element bound in checkStructure follows this value 1:1.
+  // separate element bound below limits compact arrays of primitive values.
   maxRequestBodyBytes: 8388608,
   /**
    * V2 request/envelope ceiling. It is larger than `maxRequestBodyBytes`
@@ -47,6 +48,27 @@ const LIMITS = Object.freeze({
   // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
   // nest at most this many containers. Bounds recursion before hashing.
   maxNestingDepth: 64,
+  // Objects and arrays in one request, the root included. JSON.parse
+  // allocates a heap object for each, so a request of empty containers fits
+  // maxRequestBodyBytes with about four million of them, and three such
+  // bodies at once exhaust a proxy capped at --max-old-space-size=384 (the
+  // cap when measured; the deployed cap is now 768). A conversation needs a few thousand containers; tool results are strings
+  // and never count. The memory measurement at this bound is in
+  // codex-llm-proxy/src/requestLimits.ts. Must equal the Grok contract's
+  // value.
+  maxRequestContainers: 262144,
+  // Object members in one request, counted over every object in the tree.
+  // JSON.parse keeps one property slot per member, so a body of short keys
+  // with tiny values fits the byte cap with millions of members and exhausts
+  // the proxy heap before the request is ever authorized. A request that
+  // fills a 1M-token model window is about 190k members, and this bound
+  // leaves about 1.38 times that headroom. Must equal the Grok contract's
+  // value.
+  maxRequestMembers: 262144,
+  // Total JSON values in one request, including the root. A compact array of
+  // zeros fits the byte cap while JSON.parse allocates an element per value.
+  // Must equal the Grok contract's value.
+  maxRequestElements: 1048576,
   // How long an execution ticket stays redeemable after authorize. control-api
   // signs tickets with this TTL, and the proxy bounds its admission waits
   // against the remaining ticket life, so both read it from here (#739).
@@ -68,6 +90,29 @@ const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
 // before any recursive JSON work) never rejects an acceptable request.
 const REQUEST_ENVELOPE_DEPTH = 5
 const MAX_REQUEST_DEPTH = LIMITS.maxNestingDepth + REQUEST_ENVELOPE_DEPTH
+
+// Containers a proxy envelope or an authorize body adds around its request:
+// each is one object whose other members are strings and numbers. 16 is
+// several times that.
+const ENVELOPE_CONTAINER_ALLOWANCE = 16
+
+// Object members a proxy envelope or an authorize body adds around its
+// request: ids, hashes, tickets and revisions. 64 is several times the
+// members such a wrapper actually carries.
+const ENVELOPE_MEMBER_ALLOWANCE = 64
+
+// Bounds for the raw-body scan (bodyStructure.cjs) that codex-llm-proxy and
+// control-api run before JSON.parse. Each is the matching request bound plus
+// the envelope around the request, so the scan refuses no request this
+// contract accepts: structural bytes never exceed the non-image share, and
+// the envelope adds one nesting level.
+const BODY_STRUCTURE_LIMITS = Object.freeze({
+  maxStructuralBytes: LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES,
+  maxContainers: LIMITS.maxRequestContainers + ENVELOPE_CONTAINER_ALLOWANCE,
+  maxDepth: MAX_REQUEST_DEPTH + 1,
+  maxMembers: LIMITS.maxRequestMembers + ENVELOPE_MEMBER_ALLOWANCE,
+  maxElements: LIMITS.maxRequestElements + ENVELOPE_MEMBER_ALLOWANCE,
+})
 
 const ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
 const SHA256_HEX = /^[a-f0-9]{64}$/
@@ -223,33 +268,73 @@ function requestBodyLimitBytes(request) {
 }
 
 /**
- * UTF-8 length of a request with every image payload replaced by an empty
- * string: the caller-controlled text/tool share of the body.
- *
- * V2's larger ceiling exists for image data only, so this share stays on the V1
- * budget and declaring V2 never buys 24 MiB of text or tool definitions. The
- * measurement builds a detached shadow — the input's key order, shallow copies,
- * only image `data` blanked — measures it and discards it. The original
- * request, its hash and its projection are never touched, so this cannot change
- * what is authorized or signed.
+ * Copy of `messages` holding only what the non-image budget counts. Every image
+ * part's `data` is blanked. A message's text parts are blanked too when their
+ * '\n' join equals `content`: V2 carries that text twice, in `content` and in
+ * its parts, and V1 counts it once. Text parts that do not repeat `content` are
+ * kept, so a mismatched message is measured with both copies (fail closed); the
+ * parser refuses it anyway. Only the touched objects are copied (shallow); the
+ * input is not modified.
  */
-function blankImagePayloadsInMessages(messages) {
+function nonImageShadowMessages(messages) {
   if (!Array.isArray(messages)) return messages
   return messages.map(message => {
     const parts = isPlainObject(message) ? message.contentParts : undefined
     if (!Array.isArray(parts)) return message
+    const blankText = textPartsRepeatContent(message.content, parts)
     return {
       ...message,
-      contentParts: parts.map(part =>
-        isPlainObject(part) && part.type === 'image' ? { ...part, data: '' } : part
-      ),
+      contentParts: parts.map(part => {
+        if (!isPlainObject(part)) return part
+        if (part.type === 'image') return { ...part, data: '' }
+        if (blankText && part.type === 'text') return { ...part, text: '' }
+        return part
+      }),
     }
   })
 }
 
+/**
+ * True when the text parts of `parts`, joined with '\n', equal `content`, the
+ * rule the parser enforces. Compared in place, without building the joined
+ * string. A part that is not a plain object, a text part whose `text` is not a
+ * string, or a `content` that is not a string makes it false, so a malformed
+ * message keeps its text on the budget.
+ */
+function textPartsRepeatContent(content, parts) {
+  if (typeof content !== 'string') return false
+  let offset = 0
+  let first = true
+  for (const part of parts) {
+    if (!isPlainObject(part)) return false
+    if (part.type !== 'text') continue
+    if (typeof part.text !== 'string') return false
+    if (!first) {
+      if (content.charCodeAt(offset) !== 10) return false
+      offset += 1
+    }
+    if (!content.startsWith(part.text, offset)) return false
+    offset += part.text.length
+    first = false
+  }
+  return offset === content.length
+}
+
+/**
+ * UTF-8 length of a request's non-image shadow (`nonImageShadowMessages`): the
+ * caller-controlled text/tool share of the body, with repeated V2 text counted
+ * once.
+ *
+ * V2's larger ceiling exists for image data only, so this share stays on the V1
+ * budget and declaring V2 never buys 24 MiB of text or tool definitions. The
+ * measurement builds a detached shadow — the input's key order, shallow copies,
+ * image `data` and repeated text parts blanked — measures it and discards it.
+ * The original request, its hash and its projection are never touched, so this
+ * cannot change what is authorized or signed.
+ */
 function measureNonImageRequestBytes(input) {
   return Buffer.byteLength(
-    JSON.stringify({ ...input, messages: blankImagePayloadsInMessages(input.messages) }),
+    JSON.stringify({ ...input, messages: nonImageShadowMessages(input.messages) }),
     'utf8'
   )
 }
@@ -258,7 +343,7 @@ function measureNonImageRequestBytes(input) {
  * Authorize JSON is a different document from a Codex request or proxy
  * envelope. `requestBodyLimitBytes(body.request)` still gates the whole
  * wrapper (24 MiB only when the nested request declares V2). This helper
- * blanks image payloads inside `body.request` so wrapper fields — ids,
+ * measures the non-image shadow of `body.request` so wrapper fields — ids,
  * hashes, ticket links — stay on the `maxRequestBodyBytes` non-image budget.
  */
 function measureNonImageAuthorizeBytes(body) {
@@ -272,7 +357,7 @@ function measureNonImageAuthorizeBytes(body) {
   return Buffer.byteLength(
     JSON.stringify({
       ...body,
-      request: { ...request, messages: blankImagePayloadsInMessages(request.messages) },
+      request: { ...request, messages: nonImageShadowMessages(request.messages) },
     }),
     'utf8'
   )
@@ -280,8 +365,9 @@ function measureNonImageAuthorizeBytes(body) {
 
 /**
  * Proxy completion JSON includes `executionTicket`, which authorize never
- * measured. Blank images and drop the ticket so a body that sat under the
- * `maxRequestBodyBytes` authorize budget is not 413'd on redeem by ~1 KB of JWT.
+ * measured. Measure the non-image shadow and drop the ticket so a body that sat
+ * under the `maxRequestBodyBytes` authorize budget is not 413'd on redeem by
+ * ~1 KB of JWT.
  */
 function measureNonImageCompletionBytes(body) {
   if (!isPlainObject(body)) {
@@ -309,16 +395,17 @@ function rejectUnknown(obj, allowed, label) {
 
 /**
  * Iterative structural pre-check, safe on arbitrarily deep or cyclic input.
- * Returns a failure when containers nest deeper than `maxDepth`, or when the
- * value holds more elements than a maxRequestBodyBytes JSON document can encode
- * (every encoded element takes at least one byte, so no acceptable request
- * reaches that count; shared references are counted per occurrence, as JSON
- * would serialize them).
+ * Returns a failure when containers nest deeper than `maxDepth`, when the
+ * value holds more than maxRequestElements JSON values, maxRequestContainers
+ * objects and arrays, or maxRequestMembers object members. Shared references
+ * are counted per occurrence, as JSON would serialize them.
  */
 function checkStructure(value, maxDepth) {
   if (value === null || typeof value !== 'object') return null
   const stack = [value, 1]
   let elements = 1
+  let containers = 1
+  let members = 0
   while (stack.length > 0) {
     const depth = stack.pop()
     const node = stack.pop()
@@ -331,21 +418,23 @@ function checkStructure(value, maxDepth) {
     }
     const children = Array.isArray(node) ? node : Object.values(node).filter(child => child !== undefined)
     elements += children.length
-    if (elements > LIMITS.maxRequestBodyBytes) {
-      // Named distinctly from the byte measurement below, which refuses with
-      // the bare `request exceeds maxRequestBodyBytes`. Both are `limit`
-      // failures of kind `size`, so the wording is the only thing that tells a
-      // user report which guard fired.
-      // The remedy is the same for both - compaction - and the bound is reused
-      // rather than given a constant of its own: every element serializes to
-      // at least one byte, so a request of plain JSON data with more elements
-      // than the byte cap cannot fit under it either (#731). A value that
-      // JSON.stringify drops (a function, a symbol) is still counted here, so
-      // for such input this bound can only refuse earlier, never later.
-      return fail('limit', 'request exceeds maxRequestBodyBytes element bound', 'size')
+    if (elements > LIMITS.maxRequestElements) {
+      return fail('limit', 'request exceeds maxRequestElements', 'size')
+    }
+    if (!Array.isArray(node)) {
+      members += Object.keys(node).length
+      if (members > LIMITS.maxRequestMembers) {
+        return fail('limit', 'request exceeds maxRequestMembers', 'size')
+      }
     }
     for (const child of children) {
-      if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
+      if (child !== null && typeof child === 'object') {
+        containers++
+        if (containers > LIMITS.maxRequestContainers) {
+          return fail('limit', 'request exceeds maxRequestContainers', 'size')
+        }
+        stack.push(child, depth + 1)
+      }
     }
   }
   return null
@@ -557,8 +646,9 @@ function parseTransportHints(raw) {
  * Two size gates run first, before any key, id or payload work:
  *   1. the whole body against this version's ceiling (24 MiB for V2, 8 MiB
  *      otherwise), then
- *   2. for V2 only, the body with every image payload blanked against the V1
- *      ceiling — the images, not the text, are what the larger budget buys.
+ *   2. for V2 only, the body with image data and text parts that repeat
+ *      `content` blanked against the V1 ceiling — the images, not the text,
+ *      are what the larger budget buys.
  * Both are pure measurements, so the projected value and its hash are
  * unaffected by them.
  */
@@ -791,9 +881,11 @@ function hashCodexCompletionRequest(request) {
  * A deployment that lowers that proxy limit below the contract limit is not
  * covered by this measurement.
  *
- * The request inside the envelope already passed the V2 non-image budget, so
- * the V2 headroom here can only be spent by the ticket and the digest the
- * authorizer produced; a caller cannot reach this ceiling with text.
+ * The request inside the envelope already passed the V2 non-image budget,
+ * which does not count text parts that repeat `content`. A request accepted
+ * close to the ceiling can leave less room than the authorize wrapper, the
+ * ticket and the digest need; the Host's authorize-body check or this check
+ * then refuses it.
  */
 function buildCodexProxyEnvelope(input) {
   if (!isPlainObject(input)) return fail('invalid', 'proxy envelope must be an object')
@@ -1022,6 +1114,7 @@ module.exports = {
   TICKET_TYP,
   LIMITS,
   ENVELOPE_ALLOWANCE_BYTES,
+  BODY_STRUCTURE_LIMITS,
   VISUAL_LIMITS,
   requestBodyLimitBytes,
   measureNonImageAuthorizeBytes,
@@ -1039,4 +1132,6 @@ module.exports = {
   parseCodexExecutionTicketClaims,
   parseAuthorizeAttemptResponse,
   parseCodexAttemptReceiptV1,
+  scanJsonStructure,
+  createBodyStructureVerify,
 }

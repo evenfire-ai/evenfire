@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createCanvas } from '@napi-rs/canvas'
+import { resolveOfficialVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { VisualInputBudget } from '../visualInput/policy'
 import {
   type GfscReadClient,
@@ -40,7 +41,7 @@ function client(overrides?: Partial<GfscReadClient>): GfscReadClient {
 }
 
 function toolMap(c: GfscReadClient) {
-  return new Map(buildGfsReadTools(c).map(t => [t.name, t]))
+  return new Map(buildGfsReadTools(c, { referencedFiles: new Map() }).map(t => [t.name, t]))
 }
 
 // A tool run with no caller context passes no cancel signal and no deadline to
@@ -49,7 +50,7 @@ const NO_BOUNDS = { signal: undefined, deadlineMs: undefined }
 
 describe('buildGfsReadTools', () => {
   it('exposes the read tools plus accessible-resource discovery', () => {
-    const names = buildGfsReadTools(client())
+    const names = buildGfsReadTools(client(), { referencedFiles: new Map() })
       .map(t => t.name)
       .sort()
     expect(names).toEqual([
@@ -145,6 +146,11 @@ describe('buildGfsReadTools', () => {
           resolveCapability: async () => ({
             status: 'supported',
             provider: 'openai',
+            deliveryLimits: resolveOfficialVisualDeliveryLimits(
+              'openai',
+              'https://api.openai.com/v1',
+              'completeWithTools'
+            ),
             model: 'gpt-4.1',
             evidence: 'unit',
           }),

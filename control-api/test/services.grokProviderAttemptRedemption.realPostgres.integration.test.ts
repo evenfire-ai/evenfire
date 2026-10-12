@@ -62,13 +62,16 @@ describeRealPostgres('Grok ticket redemption on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    config.grokSubscriptionEnabled = previousFlag
-    await pool?.end()
-    if (adminPool) {
-      await adminPool
-        .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-        .catch(() => undefined)
-      await adminPool.end()
+    try {
+      config.grokSubscriptionEnabled = previousFlag
+      await pool?.end()
+      if (adminPool) {
+        await adminPool
+          .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+          .catch(() => undefined)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

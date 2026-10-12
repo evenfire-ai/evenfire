@@ -40,9 +40,12 @@ real_pg_local_preflight() {
   done
 
   node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || true)"
-  if ! [[ "$node_major" =~ ^[0-9]+$ ]] || (( node_major < 24 )); then
+  # CI and the local runtime contract pin Node 24. Newer majors have already
+  # changed deep-JSON behavior and must fail before T0 rather than pass the
+  # old ">=24" check and break package suites mid-flight.
+  if ! [[ "$node_major" =~ ^[0-9]+$ ]] || (( node_major != 24 )); then
     real_pg_preflight_fail LOCAL_DEPENDENCY_MISSING \
-      "Node.js >=24 is required for T1; found ${node_major:-unknown}"
+      "Node.js 24.x is required for the canonical T0/T1/T2 harness; found ${node_major:-unknown}"
     return 1
   fi
 

@@ -52,7 +52,7 @@ const grant = (
 // ─── Issue #348 (plan D3) — platform per-minute defaults ─────────────────
 //
 // RED-FIRST (plan §6.6): these tests assert the POST-change ceilings
-// (promptBridge 120/min, clientNotifications 150/min, sourced from
+// (promptBridge 600/min, clientNotifications 750/min, sourced from
 // config.pluginSdkPromptBridgeRlPerMin / config.pluginSdkNotificationsRlPerMin).
 // Each case is POSITIVE (at the ceiling → allowed) AND NEGATIVE (one over → denied
 // with quota_exceeded). Against pre-change code the hardcoded defaults are 60/120,
@@ -71,32 +71,32 @@ describe('checkRateLimit — platform per-minute rate limits (issue #348)', () =
     vi.mocked(sdkDb.countRecentInvocations).mockReset()
   })
 
-  it('allows promptBridge at exactly 120/minute (positive) and denies at 121 (negative, platform default)', async () => {
+  it('allows promptBridge at exactly 600/minute (positive) and denies at 601 (negative, platform default)', async () => {
     const noOverrides = grant({ quotaLimits: {} })
 
     // POSITIVE: at the ceiling → allowed.
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(120)
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(600)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
     ).resolves.toEqual({ ok: true })
 
     // NEGATIVE: one over the ceiling → denied.
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(121)
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(601)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
     ).resolves.toMatchObject({
       ok: false,
       error: 'quota_exceeded',
       retryable: false,
-      message: expect.stringContaining('120/minute'),
+      message: expect.stringContaining('600/minute'),
     })
   })
 
-  it('allows clientNotifications at exactly 150/minute (positive) and denies at 151 (negative), narrowed to the eventType', async () => {
+  it('allows clientNotifications at exactly 750/minute (positive) and denies at 751 (negative), narrowed to the eventType', async () => {
     const noOverrides = grant({ capabilityFamily: 'clientNotifications', quotaLimits: {} })
 
     // POSITIVE: at the ceiling → allowed.
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(150)
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(750)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'clientNotifications', noOverrides, {
         eventType: 'lead.followup.due',
@@ -110,7 +110,7 @@ describe('checkRateLimit — platform per-minute rate limits (issue #348)', () =
     )
 
     // NEGATIVE: one over the ceiling → denied.
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(151)
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(751)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'clientNotifications', noOverrides, {
         eventType: 'lead.followup.due',
@@ -119,14 +119,14 @@ describe('checkRateLimit — platform per-minute rate limits (issue #348)', () =
       ok: false,
       error: 'quota_exceeded',
       retryable: false,
-      message: expect.stringContaining('150/minute'),
+      message: expect.stringContaining('750/minute'),
     })
   })
 
-  it('frees the recipe once the trailing window drains (deny at 121, allow at 0)', async () => {
+  it('frees the recipe once the trailing window drains (deny at 601, allow at 0)', async () => {
     const noOverrides = grant({ quotaLimits: {} })
 
-    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(121)
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(601)
     await expect(
       checkRateLimit('sandbox-recipes', 'sdk-recipe', 'promptBridge', noOverrides)
     ).resolves.toMatchObject({ ok: false, error: 'quota_exceeded' })
@@ -156,6 +156,31 @@ describe('checkRateLimit — platform per-minute rate limits (issue #348)', () =
       ok: false,
       error: 'quota_exceeded',
       message: expect.stringContaining('5/minute'),
+    })
+  })
+
+  it('lets a grant-level maxNotificationsPerMinute override win over the platform default', async () => {
+    const withOverride = grant({
+      capabilityFamily: 'clientNotifications',
+      quotaLimits: { maxNotificationsPerMinute: 9 },
+    })
+
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(9)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'clientNotifications', withOverride, {
+        eventType: 'lead.followup.due',
+      })
+    ).resolves.toEqual({ ok: true })
+
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(10)
+    await expect(
+      checkRateLimit('sandbox-recipes', 'sdk-recipe', 'clientNotifications', withOverride, {
+        eventType: 'lead.followup.due',
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      error: 'quota_exceeded',
+      message: expect.stringContaining('9/minute'),
     })
   })
 })

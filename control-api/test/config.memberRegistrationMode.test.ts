@@ -1,10 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 
+const LOG_LEVELS = ['warn', 'info', 'error', 'debug'] as const
+const loggerCalls = {
+  warn: vi.fn<(...args: unknown[]) => void>(),
+  info: vi.fn<(...args: unknown[]) => void>(),
+  error: vi.fn<(...args: unknown[]) => void>(),
+  debug: vi.fn<(...args: unknown[]) => void>(),
+}
+const IGNORED_ENV_EVENT = 'hosted_member_registration_env_secret_ignored'
+
+function ignoredEnvCalls(level: (typeof LOG_LEVELS)[number]) {
+  return loggerCalls[level].mock.calls.filter(
+    ([fields]) =>
+      typeof fields === 'object' &&
+      fields !== null &&
+      'event' in fields &&
+      fields.event === IGNORED_ENV_EVENT
+  )
+}
+
+function expectNoIgnoredEnvEvent() {
+  for (const level of LOG_LEVELS) expect(ignoredEnvCalls(level)).toEqual([])
+}
+
 function generateNonDevPem(): string {
-  // 3072-bit RSA — 2048 collides with the dev-key fingerprint check in src/config.ts.
   return generateKeyPairSync('rsa', {
-    modulusLength: 3072,
+    modulusLength: 2048,
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   }).privateKey
@@ -50,11 +72,19 @@ const MEMBER_REG_VARS = [
 describe('config: member-registration mode', () => {
   const origEnv = { ...process.env }
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
     vi.resetModules()
     process.env = { ...origEnv }
     for (const name of MEMBER_REG_VARS) delete process.env[name]
     delete process.env.NODE_ENV
+    // Attach after the reset to the same real logger instance config imports.
+    const { rootLogger } = await import('../src/observability/logger.js')
+    for (const level of LOG_LEVELS) {
+      vi.spyOn(rootLogger, level).mockImplementation((...args: unknown[]) =>
+        loggerCalls[level](...args)
+      )
+    }
   })
 
   afterEach(() => {
@@ -66,6 +96,7 @@ describe('config: member-registration mode', () => {
   it('defaults to remote', async () => {
     const { config } = await import('../src/config.js')
     expect(config.memberRegistrationMode).toBe('remote')
+    expectNoIgnoredEnvEvent()
   })
 
   it('parses hosted and defaults the external hub base URL', async () => {
@@ -75,6 +106,7 @@ describe('config: member-registration mode', () => {
     expect(config.memberRegistrationExternalHubBaseUrl).toBe(
       'https://registration.evenfire.ai/api/v1'
     )
+    expectNoIgnoredEnvEvent()
   })
 
   it('honors an explicit external hub override (staging hub)', async () => {
@@ -118,12 +150,16 @@ describe('config: member-registration mode', () => {
   })
 
   it('ignores a lone deploy-injected HMAC_SECRET in hosted mode, with a warning', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     process.env.CONTROL_API_MEMBER_REGISTRATION_MODE = 'hosted'
     process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET = 'legacy-injected-secret'
     await expect(import('../src/config.js')).resolves.toBeDefined()
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET')
+    expect(ignoredEnvCalls('warn')).toEqual([
+      [{ event: IGNORED_ENV_EVENT }, 'Hosted member-registration uses its enrolled credentials'],
+    ])
+    for (const level of ['info', 'error', 'debug'] as const)
+      expect(ignoredEnvCalls(level)).toEqual([])
+    expect(JSON.stringify(ignoredEnvCalls('warn'))).not.toContain(
+      process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET
     )
   })
 

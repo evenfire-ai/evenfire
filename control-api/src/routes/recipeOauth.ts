@@ -13,8 +13,8 @@ import {
 } from '../oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../oauth/integrationNotConfigured.js'
+import { getAccessTokenReactive } from '../oauth/reactiveTokenHelper.js'
 import { listBackgroundUserGrants } from '../oauth/store.js'
-import { getAccessToken } from '../oauth/tokenHelper.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
 
 /**
@@ -111,7 +111,7 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'unknown_oauth_client' })
         }
 
-        const result = await getAccessToken(
+        const result = await getAccessTokenReactive(
           {
             grantKind: 'service',
             recipeNamespace,
@@ -223,7 +223,7 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'unknown_oauth_client' })
         }
 
-        const result = await getAccessToken(
+        const result = await getAccessTokenReactive(
           {
             grantKind: 'user',
             recipeNamespace,

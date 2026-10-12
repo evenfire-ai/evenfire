@@ -409,7 +409,7 @@ fi
 # shellcheck disable=SC2016
 marker_bindings=(
   "$WATCH_GATE" 'CommunicationChannel watch ended;'
-  "$HCC_K8S_CLIENT" 'CommunicationChannel watch ended; holding stateless lifecycle active'
+  "$HCC_K8S_CLIENT" 'CommunicationChannel watch ended; preserving durable Host lifecycle state'
 
   "$WATCH_GATE" 'Starting CommunicationChannel watch'
   "$HCC_K8S_CLIENT" '[K8s] Starting CommunicationChannel watch'
@@ -418,7 +418,7 @@ marker_bindings=(
   "$HCC_K8S_CLIENT" 'Recovered ${snapshot.channels.length} CommunicationChannel(s) into cache'
 
   "$WATCH_GATE" 'cache recovery failed;'
-  "$HCC_K8S_CLIENT" 'CommunicationChannel cache recovery failed; stateless lifecycle remains held active'
+  "$HCC_K8S_CLIENT" 'CommunicationChannel cache recovery failed; preserving durable Host lifecycle state'
 
   "$WATCH_GATE" 'Listing all CommunicationChannels in namespace ${CHANNEL_NS}'
   "$HCC_K8S_CLIENT" 'Listing all CommunicationChannels in namespace ${config.channelsNamespace}'
@@ -436,7 +436,7 @@ marker_bindings=(
   "$HCC_K8S_CLIENT" 'CommunicationChannel watch event: ${type} for ${cc.name}'
 
   "$LOG_HELPER" 'CommunicationChannel watch ended;'
-  "$HCC_K8S_CLIENT" 'CommunicationChannel watch ended; holding stateless lifecycle active'
+  "$HCC_K8S_CLIENT" 'CommunicationChannel watch ended; preserving durable Host lifecycle state'
 
   "$LOG_HELPER" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache'
   "$HCC_K8S_CLIENT" 'Recovered ${snapshot.channels.length} CommunicationChannel(s) into cache'
@@ -1385,7 +1385,7 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
   '[K8s] Listing all Hosts in namespace mcp-host' \
   '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
   '[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery' \
@@ -1397,7 +1397,7 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
   '[K8s] Listing all Hosts in namespace mcp-host' \
   '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
   '[K8s] Reconciling 5 Host(s) after Host watch recovery convergence' \
@@ -1409,7 +1409,7 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
   '[K8s] Listing all Hosts in namespace mcp-host' \
   '[K8s] Reconciling 5 Host(s) after Host watch recovery convergence' \
   '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
@@ -1422,7 +1422,7 @@ fi
 
 printf '%s\n' \
   '[K8s] Listing all Hosts in namespace mcp-host' \
-  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
   '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
   '[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery' \
   '[K8s] Completed Host reconciliation after CommunicationChannel recovery' >"$MOCK_LOG_FILE"
@@ -1433,7 +1433,7 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
   '[K8s] Listing all Hosts in namespace mcp-host' \
   '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
   '[K8s] Reconciling 4 Host(s) for lifecycle after CommunicationChannel recovery' \
@@ -1445,12 +1445,12 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
   '[K8s] Listing all Hosts in namespace mcp-host' \
   '[K8s] Recovered 1 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
   '[K8s] Reconciling 4 Host(s) for lifecycle after CommunicationChannel recovery' \
   '[K8s] Completed Host reconciliation after CommunicationChannel recovery' \
-  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
   '[K8s] Listing all Hosts in namespace mcp-host' \
   '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
   '[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery' \

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildOAuthBrokerTokenSecret } from './resourceBuilder'
 import { OWNER_RECIPE_LABEL_KEY, SHARED_LABEL_KEY } from './secretOwnership'
 import { SecretReverseIndex } from './secretReverseIndex'
 import { SecretWatcher } from './secretWatcher'
@@ -214,5 +215,71 @@ describe('SecretWatcher', () => {
     watcher.handleEvent('ADDED', { metadata: { name: 's2' }, data: { b: 'eA==' } })
     vi.advanceTimersByTime(DEBOUNCE_MS)
     expect(enqueued.sort()).toEqual(['recipe-a', 'recipe-b'])
+  })
+
+  it('invalidates the oauth-broker-token ledger on ADDED before key-set dedup', () => {
+    const reverseIndex = new SecretReverseIndex()
+    const enqueued: string[] = []
+    const invalidated: string[] = []
+    const watcher = new SecretWatcher(
+      reverseIndex,
+      name => {
+        enqueued.push(name)
+      },
+      DEBOUNCE_MS,
+      recipeName => {
+        invalidated.push(recipeName)
+      }
+    )
+    // The Secret WRC itself writes, so a drift in the builder's labels or
+    // name breaks this test instead of passing against a hand-written copy.
+    const brokerSecret = buildOAuthBrokerTokenSecret('test-recipe', 'jwt', 'sandbox-recipes')
+
+    watcher.handleEvent('ADDED', brokerSecret)
+    watcher.handleEvent('ADDED', brokerSecret)
+    expect(invalidated).toEqual(['test-recipe', 'test-recipe'])
+    expect(enqueued).toEqual([])
+    vi.advanceTimersByTime(DEBOUNCE_MS)
+    // E.4(a): invalidate only. A watch replay must not enqueue every recipe.
+    expect(enqueued).toEqual([])
+    watcher.stop()
+  })
+
+  it('does not invalidate on forged name, wrong component, or MODIFIED', () => {
+    const reverseIndex = new SecretReverseIndex()
+    const enqueued: string[] = []
+    const invalidated: string[] = []
+    const watcher = new SecretWatcher(
+      reverseIndex,
+      name => {
+        enqueued.push(name)
+      },
+      DEBOUNCE_MS,
+      recipeName => {
+        invalidated.push(recipeName)
+      }
+    )
+    const canonical = buildOAuthBrokerTokenSecret('test-recipe', 'jwt', 'sandbox-recipes')
+
+    watcher.handleEvent('ADDED', {
+      ...canonical,
+      metadata: { ...canonical.metadata, name: 'forged-oauth-broker-token' },
+    })
+    watcher.handleEvent('ADDED', {
+      ...canonical,
+      metadata: {
+        ...canonical.metadata,
+        labels: { ...canonical.metadata?.labels, 'clerum.io/component': 'other' },
+      },
+    })
+    watcher.handleEvent('MODIFIED', canonical)
+    expect(invalidated).toEqual([])
+    // Liveness witness: the same watcher does invalidate for the canonical
+    // ADDED, so the empty list above is not the callback being unwired.
+    watcher.handleEvent('ADDED', canonical)
+    expect(invalidated).toEqual(['test-recipe'])
+    vi.advanceTimersByTime(DEBOUNCE_MS)
+    expect(enqueued).toEqual([])
+    watcher.stop()
   })
 })

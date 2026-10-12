@@ -1,4 +1,10 @@
+import {
+  type GrokCompletionRequest,
+  SCHEMA_VERSION_V2,
+  buildGrokProxyEnvelope,
+} from '@clerum/grok-provider-attempt-contract'
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
+import { canonicalRefusalCode } from './imageSource'
 import { rateLimitedCode, retryAfterMs } from './retryAfter'
 import { upstreamRejectedStatus } from './upstreamRejected'
 
@@ -9,6 +15,13 @@ export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completion
  * sentence that says what to do; everything else keeps the diagnostic shape.
  */
 export function grokProxyErrorMessage(code: string, status?: number): string {
+  if (
+    code === 'visual_host_share' ||
+    code === 'visual_gate' ||
+    code === 'proxy_capacity_exceeded'
+  ) {
+    return 'Grok proxy admission is full. Wait for an active request to finish or send fewer concurrent requests before retrying; this is not a Grok outage.'
+  }
   if (code === 'client_upgrade_required') {
     return 'Grok subscription inference is unavailable: xAI now requires a newer Grok client version than this deployment sends. An operator can set GROK_LLM_PROXY_CLIENT_VERSION to a current Grok Build release, or contact support — retrying will not help.'
   }
@@ -23,6 +36,17 @@ export function grokProxyErrorMessage(code: string, status?: number): string {
   return status === undefined
     ? `proxy stream failed with ${code}`
     : `proxy stream failed with ${status} (${code})`
+}
+
+/**
+ * The code for an envelope the contract refused: a hash mismatch keeps its own
+ * code, and every other refusal takes the providers' canonical mapping, so a
+ * `count` refusal is an invalid request and only `kind: 'size'` is
+ * `payload_too_large`.
+ */
+function envelopeRefusalCode(refusal: { code: string; message: string; kind?: string }): string {
+  if (refusal.code === 'request_hash_mismatch') return 'request_hash_mismatch'
+  return canonicalRefusalCode(refusal)
 }
 
 export type GrokProxyErrorOptions = {
@@ -112,6 +136,40 @@ export class GrokLlmProxyClient {
     },
     retryOnUnauthorized: boolean
   ): Promise<GrokProxyStreamResult> {
+    let body: unknown = {
+      executionTicket: input.executionTicket,
+      requestHash: input.requestHash,
+      request: input.request,
+      ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
+    }
+    // A V2 request carries its deadline inside the hashed request, and
+    // grok-llm-proxy refuses an outer one. The envelope is the contract's own,
+    // so a request the proxy would refuse never leaves this process (#784).
+    // The envelope builder parses and hashes the request itself, so the request
+    // is parsed once here; the deadline is compared with the parsed value.
+    if ((input.request as { schemaVersion?: string } | null)?.schemaVersion === SCHEMA_VERSION_V2) {
+      const envelope = buildGrokProxyEnvelope({
+        executionTicket: input.executionTicket,
+        requestHash: input.requestHash,
+        request: input.request as GrokCompletionRequest,
+      })
+      if (!envelope.ok) {
+        throw new GrokProxyError(envelopeRefusalCode(envelope), envelope.message, {
+          dispatched: false,
+        })
+      }
+      if (
+        input.deadlineMs !== undefined &&
+        input.deadlineMs !== envelope.value.request.deadlineMs
+      ) {
+        throw new GrokProxyError(
+          'invalid_request',
+          'Grok deadline must match the authorized request',
+          { dispatched: false }
+        )
+      }
+      body = envelope.value
+    }
     const jwt = this.options.readPlatformJwt()
     const fetchFn = this.options.fetchFn ?? fetch
     let response: Response
@@ -122,12 +180,7 @@ export class GrokLlmProxyClient {
           authorization: `Bearer ${jwt}`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({
-          executionTicket: input.executionTicket,
-          requestHash: input.requestHash,
-          request: input.request,
-          ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
-        }),
+        body: JSON.stringify(body),
         signal: input.signal,
       })
     } catch (err) {
@@ -148,7 +201,9 @@ export class GrokLlmProxyClient {
         return this.streamOnce(input, false)
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
-      // A 413 with no JSON code comes from the gateway in front of the proxy
+      // Only the proxy-owned machine `error` field identifies the outcome; an
+      // upstream `reason` string is never promoted to trusted provenance. A
+      // 413 with no JSON code comes from the gateway in front of the proxy
       // (nginx `client_max_body_size`): a size refusal of this request, never a
       // provider outage (#739). A code the 413 carries still wins. A 429 is a
       // rate limit (G1-6, G1-11, #720): the proxy answers `rate_limited`

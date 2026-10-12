@@ -18,9 +18,10 @@ import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
 import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
-import { createIncomingAdmission } from './agent/incomingAdmission'
+import { createFileReferenceGfsGate } from './agent/fileReferenceGfsGate'
+import { createIncomingAdmission, replayedIncomingMessage } from './agent/incomingAdmission'
+import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
 import { IncomingDelivery } from './agent/incomingDelivery'
-import { INCOMING_IMAGE_MAX_COUNT } from './agent/incomingImageAttachments'
 import {
   type SessionModelSelectionOptions,
   applySessionModelSelection as applySessionModelSelectionCore,
@@ -57,10 +58,13 @@ import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
+import { bootstrapGfsRuntime } from './gfsRuntime'
 import {
   resolveGuardrailHookDescriptors,
   withResolvedHookDescriptors,
 } from './guardrailHookResolver'
+import { createGfscClient, inspectGfsToolScopes } from './internalTools/gfsClient'
+import { GfsDownloadStore } from './internalTools/gfsDownloadStore'
 import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
@@ -164,6 +168,7 @@ import {
   UsageReporter,
   createGovernedRunReporter,
 } from './usage/usageReporter'
+import { VISUAL_INPUT_LIMITS } from './visualInput/policy'
 import { setOutputDirHostAccessor } from './workflow/internalTools'
 import { loadPersistedWorkflowControlToken } from './workflow/mcpHostJwtState'
 import { submitProviderWorkflowApprovalDecision } from './workflow/providerWorkflowApprovalDecisionClient'
@@ -185,6 +190,7 @@ import {
   stopRuntimeAuthProactiveRefresh,
 } from './workflow/runtimeAuthRefreshScheduler'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from './workflow/userApprovalRequester'
+import { resolveCallerRootBinding } from './workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from './workspace/scopedWorkspace'
 
 // Global state
@@ -229,6 +235,9 @@ let contextMapperClient: ContextMapperClient | null = null
 let mcpAuthorityLastSuccessAt = 0
 let activityHub: HostActivityHub | null = null
 let workspaceProvider: ScopedWorkspaceProvider | null = null
+let gfsWorkspaceProvider: ScopedWorkspaceProvider | null = null
+let gfsDownloadStore: GfsDownloadStore | null = null
+let gfsRuntimeStop: (() => Promise<void>) | null = null
 let spilloverStorage: SpilloverStorage | null = null
 let conversationStoreHandle: ConversationStoreHandle | null = null
 let promptCache: PromptCache | null = null
@@ -527,9 +536,16 @@ function currentFailoverSupport(): {
   engine: FailoverEngine
   policy: LlmPolicy
   buildProvider: (entry: FallbackEntry) => SingleTurnProvider | null
+  contextWindowForPair: (provider: string, model: string) => number | undefined
 } | null {
   if (!failoverEngine || !currentPolicy) return null
-  return { engine: failoverEngine, policy: currentPolicy, buildProvider: buildFallbackProvider }
+  return {
+    engine: failoverEngine,
+    policy: currentPolicy,
+    buildProvider: buildFallbackProvider,
+    contextWindowForPair: (provider, model) =>
+      contextWindowForModel(allowlistView(), provider, model),
+  }
 }
 
 /**
@@ -1041,7 +1057,13 @@ async function initializeMcpServers(): Promise<void> {
         new McpManager(
           config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
           undefined,
-          createMcpTokenProviderFactory()
+          createMcpTokenProviderFactory(),
+          {
+            grantExistence: (queries, { timeoutMs }) =>
+              checkGrantExistence({ ...brokerTokenProviderDeps(), timeoutMs }, queries),
+            userPartitionMax: OAUTH_USER_PARTITION_MAX,
+            catalogBootstrap: config.mcpCatalogBootstrap,
+          }
         ),
       getAuthToken: async (serverName, expectedRevision) => {
         return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
@@ -1714,6 +1736,13 @@ async function initializeAgent(): Promise<void> {
   agent.setDynamicEnvProvider(() => agentToolEnvProvider(configStore))
   agent.setSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
 
+  const gfsRuntime = await bootstrapGfsRuntime(config.nativeTool.workspacePath)
+  gfsWorkspaceProvider = gfsRuntime.workspaceProvider
+  gfsDownloadStore = gfsRuntime.store
+  gfsRuntimeStop = () => gfsRuntime.stop()
+  agent.setGfsWorkspaceProvider(gfsWorkspaceProvider)
+  agent.setGfsDownloadStore(gfsDownloadStore)
+
   // Phase 7–8: Create WorkspaceService when memory is enabled
   const memoryCfg = currentHost?.spec.memory || config.memory
   if (memoryCfg?.enabled) {
@@ -1995,12 +2024,29 @@ function handleIncomingMessage(
     message,
     messageQueue,
     () => prepareIncomingMessage(message, options),
-    () => dispatchIncomingMessage({ ...message, imageModel: undefined }, options)
+    () => dispatchIncomingMessage(replayedIncomingMessage(message), options)
   )
 }
 
+// Issue #666 — file references are re-authorized with the Host's own GFS
+// token. The scope is read per message, as the tool registry reads it per
+// registration; the retry budget is the admission deadline, not a tool timeout.
+const fileReferenceGfsEnv = { get: (key: string): string | undefined => process.env[key] }
+const fileReferenceGfsGate = createFileReferenceGfsGate({
+  inspectScopes: () => inspectGfsToolScopes(fileReferenceGfsEnv),
+  approvalTools: () => (currentHost?.spec.approval || config.approvalConfig)?.tools,
+  client: createGfscClient(fileReferenceGfsEnv, {
+    maxRetryWaitMs: VISUAL_INPUT_LIMITS.validationTimeoutMs,
+  }),
+  logger,
+})
+
 const prepareIncomingMessage = createIncomingAdmission({
-  limits: { maxCount: INCOMING_IMAGE_MAX_COUNT, maxBytes: config.attachmentMaxBytes },
+  limits: {
+    maxCount: INCOMING_ATTACHMENT_MAX_COUNT,
+    maxBytes: config.attachmentMaxBytes,
+    maxFileBytes: config.attachmentFileMaxBytes,
+  },
   queueReady: () => Boolean(messageQueue),
   degradedReason: computeDegradedReason,
   hostProvider: () => currentHost?.spec.model?.provider,
@@ -2010,6 +2056,36 @@ const prepareIncomingMessage = createIncomingAdmission({
   resolveImageInput,
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
+  fileReferenceGfs: fileReferenceGfsGate,
+  gfsSurfaceRuntimeCapability: message => {
+    const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
+    if (callerRootBinding.failureCode) {
+      logger.warn(
+        {
+          component: 'gfs-runtime',
+          event: 'gfs_caller_root_unavailable',
+          code: callerRootBinding.failureCode,
+        },
+        'GFS caller workspace unavailable; managed delivery and shell stay disabled'
+      )
+    }
+    const callerWorkspacePath = callerRootBinding.root
+    const shellApprovalEnabled =
+      (currentHost?.spec.approval || config.approvalConfig)?.tools?.shell_exec !== false
+    const workspaceFile = Boolean(
+      config.enableApproval &&
+      message.sender &&
+      gfsDownloadStore?.isAvailable() &&
+      callerWorkspacePath &&
+      shellApprovalEnabled
+    )
+    return {
+      workspaceFile,
+      localExecutor: workspaceFile,
+      // Visual support is decided per physical provider attempt, never here.
+      visual: false,
+    }
+  },
   logger,
 })
 
@@ -3027,6 +3103,16 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
+  if (gfsRuntimeStop) {
+    try {
+      await gfsRuntimeStop()
+    } catch (err) {
+      logger.warn({ err: err }, '[Main] GFS download store shutdown raised:')
+    } finally {
+      gfsRuntimeStop = null
+    }
+  }
+
   process.exit(0)
 }
 
@@ -3097,7 +3183,13 @@ async function startDevMode(): Promise<void> {
   mcpManager = new McpManager(
     config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
     undefined,
-    createMcpTokenProviderFactory()
+    createMcpTokenProviderFactory(),
+    {
+      grantExistence: (queries, { timeoutMs }) =>
+        checkGrantExistence({ ...brokerTokenProviderDeps(), timeoutMs }, queries),
+      userPartitionMax: OAUTH_USER_PARTITION_MAX,
+      catalogBootstrap: config.mcpCatalogBootstrap,
+    }
   )
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {

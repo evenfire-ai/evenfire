@@ -368,51 +368,23 @@ async function expectImageSendBlocked(
   await expect(notice).toContainText(messagePattern)
 
   // Enter must not reach the controller either: nothing is delivered, the draft
-  // survives, and the chip is still pending.
+  // survives, and the chip is still pending. `press` focuses the composer itself,
+  // so focus proves nothing here; the witness that the composer's Enter handler
+  // took the key is the unchanged draft below, since a key the handler did not
+  // consume would have inserted a newline.
   await composer(page).press('Enter')
   await expect(page.locator('[data-chat-message-id]')).toHaveCount(0)
+  await expect(sendButton(page)).toBeDisabled()
+  // Liveness witness, after the negatives: the blocked state the refusal had to
+  // leave behind is still on screen, so the empty thread is not an unmounted chat.
+  await expect(modelChip(page)).toHaveAttribute('data-model-id', model)
   await expect(composer(page)).toHaveValue(draft)
   await expect(attachmentChips(page).filter({ hasText: attachmentName })).toBeVisible()
-  await expect(sendButton(page)).toBeDisabled()
-}
-
-/**
- * A model with no image evidence must refuse the picker itself: the native file
- * chooser must never open, and the composer must say why.
- *
- * The bounded `waitForEvent('filechooser')` is a race against the product's own
- * signal, not a sleep used as readiness: if the picker opened, the event fires
- * within milliseconds and the assertion below fails.
- */
-async function expectUploadRefused(page: Page, model: string, messagePattern: RegExp) {
-  const attachButton = page.getByRole('button', { name: 'Add context' })
-  await expect(attachButton).toBeEnabled()
-  await attachButton.click()
-  const uploadItem = page.getByRole('menuitem', { name: 'Upload Files' })
-  await expect(uploadItem).toBeVisible({ timeout: 15_000 })
-
-  let chooserOpened = false
-  const chooserProbe = page.waitForEvent('filechooser', { timeout: 2_000 }).then(
-    () => {
-      chooserOpened = true
-    },
-    () => undefined
-  )
-
-  await uploadItem.click()
-  const notice = page.getByRole('alert').filter({ hasText: messagePattern })
   await expect(notice).toBeVisible()
   await expect(notice).toContainText(model)
   await expect(notice).toContainText(messagePattern)
-
-  await chooserProbe
-  expect(chooserOpened, `${model} must not open the native file picker`).toBe(false)
-  await expect(attachmentChips(page)).toHaveCount(0)
-
-  // Close the composer menu again through an ordinary click, the same way a
-  // user dismisses it, so the next step starts from a clean composer.
-  await composer(page).click()
-  await expect(uploadItem).toHaveCount(0)
+  // The witnesses above took real time; a late delivery would show up here.
+  await expect(page.locator('[data-chat-message-id]')).toHaveCount(0)
 }
 
 /** Exactly one exchange in this chat, and the answer is not empty. */
@@ -645,22 +617,38 @@ test('image-capabilities fixture: image capability gates the composer and the pr
     await assertBinding()
     await openConfiguredAgentChat(page, env.hostRef)
 
-    await test.step('a model with no image evidence refuses the picker and sends nothing', async () => {
+    await test.step('a model with no image evidence keeps the PNG and sends nothing', async () => {
       await startBlankChat(page)
       await selectModel(page, env.unknownModel, 'unknown')
       // The chip is where the capability projection is rendered (#735).
       await expect(modelChip(page)).toHaveAttribute('title', /not verified/i)
 
-      await expectUploadRefused(page, env.unknownModel, /not verified/i)
-      await expect(page.locator('[data-chat-message-id]')).toHaveCount(0)
+      // Capability gates sending, never selecting (#678): the picker attaches
+      // the PNG, and the send is refused with a notice naming the model.
+      await attachFixturePng(page, visualFixture)
+      await composer(page).fill(VISUAL_PROMPT)
+      await expectImageSendBlocked(
+        page,
+        env.unknownModel,
+        VISUAL_PROMPT,
+        visualFixture.fileName,
+        /not verified/i
+      )
 
-      // The refused picker must not have produced any provider attempt carrying
+      // The blocked send must not have produced any provider attempt carrying
       // pixels, and nothing at all may have carried an image during launch,
-      // sign-in or navigation.
+      // sign-in or navigation. The chip and notice asserted above prove the
+      // image was attached and the send was attempted.
       const afterUnknown = readImageCapabilityEvidence(env)
       const appended = appendedAttempts(baseline, afterUnknown)
       expect(appended.filter(row => row.imageSha256 !== null)).toHaveLength(0)
       expect(afterUnknown.counters.imageAttempts - baseline.counters.imageAttempts).toBe(0)
+
+      // Leave a clean composer for the next step.
+      await page.getByRole('button', { name: `Remove ${visualFixture.fileName}` }).click()
+      await expect(attachmentChips(page)).toHaveCount(0)
+      await composer(page).fill('')
+      await expect(capabilityNotice(page)).toHaveCount(0)
     })
 
     await test.step('an image-capable model accepts the PNG while a text-only model refuses to send it', async () => {

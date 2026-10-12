@@ -2,7 +2,9 @@ import { app } from 'electron'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { ChatStore } from './chatStore.js'
+import { resolveDevIsolation } from './devIsolation.js'
 import { assertSafeFilesystemSegment } from './pathSafety.js'
+import type { ChatAuthorityScope } from './types.js'
 
 /**
  * Keep the shared catalog at v2 so pre-paging desktop builds can read the
@@ -13,12 +15,14 @@ const PREVIOUS_PAGED_INDEX_VERSION = 3
 const LEGACY_INDEX_VERSIONS = new Set([1])
 const CORRUPT_QUARANTINE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
-// Default base dir derived from Electron's userData path. Tests override via
+// Default base dir derived from the user's home. Tests override via
 // __setChatStoreBaseDirForTests to point at a tmpdir, which means the
 // app.getPath call below is only reached in production.
 let baseDirOverride: string | null = null
 function currentBaseDir(): string {
   if (baseDirOverride !== null) return baseDirOverride
+  const isolation = resolveDevIsolation(process.env, process.argv, app.isPackaged)
+  if (isolation.mode === 'isolated') return join(isolation.plan.runDir, 'chats')
   return join(app.getPath('home'), '.clerum', 'chats')
 }
 
@@ -49,7 +53,7 @@ const PRE_ENV_MIGRATION_MARKER = '.env-scoped'
 export async function bindChatStoreForUser(
   userId: string,
   envKey: string,
-  options: { legacyEnvKeys?: readonly string[] } = {}
+  options: { legacyEnvKeys?: readonly string[]; teamId?: string | null } = {}
 ): Promise<void> {
   assertSafeFilesystemSegment('userId', userId)
   assertSafeFilesystemSegment('envKey', envKey)
@@ -60,9 +64,23 @@ export async function bindChatStoreForUser(
   // refreshes re-call this with an unchanged `me.id`; tearing the store down
   // just to rebuild it opens a window where every concurrent chat IPC fails
   // with "Not authenticated" (seen as an empty "Latest sessions" at boot).
-  if (activeChatStore && activeUserId === userId && activeEnvKey === envKey) return
+  const authorityScope: ChatAuthorityScope = {
+    environmentKey: envKey,
+    userId,
+    teamId: String(options.teamId || '').trim() || null,
+  }
+  if (activeChatStore && activeUserId === userId && activeEnvKey === envKey) {
+    activeChatStore.setAuthorityScope(authorityScope)
+    return
+  }
   const bindKey = `${envKey}::${userId}`
-  if (bindInFlight?.key === bindKey) return bindInFlight.promise
+  if (bindInFlight?.key === bindKey) {
+    await bindInFlight.promise
+    if (activeChatStore && activeUserId === userId && activeEnvKey === envKey) {
+      activeChatStore.setAuthorityScope(authorityScope)
+    }
+    return
+  }
   const generation = ++bindingGeneration
 
   const promise = (async () => {
@@ -84,6 +102,7 @@ export async function bindChatStoreForUser(
     await sweepExpiredCorruptQuarantines(userDir)
     if (generation !== bindingGeneration) return
     activeChatStore = new ChatStore(userDir)
+    activeChatStore.setAuthorityScope(authorityScope)
     activeUserId = userId
     activeEnvKey = envKey
   })()
@@ -341,6 +360,19 @@ export function unbindChatStore(): void {
 export function requireChatStore(): ChatStore {
   if (!activeChatStore) throw new Error('Not authenticated')
   return activeChatStore
+}
+
+/** Fences destructive IPC work to the store binding that issued the request. */
+export function getChatStoreBindingGeneration(): number {
+  requireChatStore()
+  return bindingGeneration
+}
+
+export function requireChatStoreForBindingGeneration(expectedGeneration: number): ChatStore {
+  if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration !== bindingGeneration) {
+    throw new Error('Chat store binding changed')
+  }
+  return requireChatStore()
 }
 
 /** Test-only helper. Do not call from production code. */

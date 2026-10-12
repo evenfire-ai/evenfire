@@ -10,14 +10,20 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
+import { resolveOfficialVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
+import type { ImageTransportOperation } from './imageInput'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export class OpenAIProvider implements SingleTurnProvider {
   private client: OpenAI
   private defaultModel: string
+
+  getVisualDeliveryLimits(operation: ImageTransportOperation) {
+    return resolveOfficialVisualDeliveryLimits('openai', this.client.baseURL, operation)
+  }
 
   constructor(apiKeyOrClient: string | OpenAI, defaultModel: string = 'gpt-5.4-mini') {
     if (typeof apiKeyOrClient === 'string') {
@@ -47,6 +53,15 @@ export class OpenAIProvider implements SingleTurnProvider {
     return /^(?:gpt-5(?:[.-]|$)|o[1-9](?:[.-]|$))/i.test(this.defaultModel)
   }
 
+  /**
+   * ZAI requires reasoning to remain on assistant tool-call messages across a
+   * tool turn. Native OpenAI and Azure keep the standard message shape, so a
+   * provider-specific field from prior ZAI history must not leak during failover.
+   */
+  protected supportsReasoningContent(): boolean {
+    return false
+  }
+
   private tokenLimitOptions(maxTokens: number | undefined): {
     max_tokens?: number
     max_completion_tokens?: number
@@ -67,6 +82,7 @@ export class OpenAIProvider implements SingleTurnProvider {
     messages: CoreChatMessage[],
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
   ): Promise<CompletionResponse> {
+    assertVisualRequestFits(messages, messages, false, this.getVisualDeliveryLimits('complete'))
     const openaiMessages = messages.map(m => ({
       role: m.role as 'system' | 'user' | 'assistant',
       content: m.content,
@@ -137,7 +153,12 @@ export class OpenAIProvider implements SingleTurnProvider {
       ...this.tokenLimitOptions(options?.max_tokens),
       temperature: options?.temperature,
     }
-    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    assertVisualRequestFits(
+      messages,
+      request,
+      options?.verifyImageInput === true,
+      this.getVisualDeliveryLimits('completeWithTools')
+    )
     const response = await this.client.chat.completions.create(request, { signal: options?.signal })
 
     const choice = response.choices[0]
@@ -149,6 +170,7 @@ export class OpenAIProvider implements SingleTurnProvider {
         name: tc.function.name,
         arguments: this.parseArguments(tc.function.arguments),
       })) ?? null
+    const reasoningContent = (message as { reasoning_content?: unknown }).reasoning_content
 
     const usageReported =
       response.usage != null &&
@@ -159,6 +181,7 @@ export class OpenAIProvider implements SingleTurnProvider {
     return {
       content: message.content,
       tool_calls: toolCalls && toolCalls.length > 0 ? toolCalls : null,
+      reasoning_content: typeof reasoningContent === 'string' ? reasoningContent : null,
       usage: {
         input_tokens: response.usage?.prompt_tokens ?? 0,
         output_tokens: response.usage?.completion_tokens ?? 0,
@@ -197,7 +220,7 @@ export class OpenAIProvider implements SingleTurnProvider {
       }
       if (m.role === 'assistant') {
         if (m.tool_calls) {
-          return {
+          const assistantMessage = {
             role: 'assistant' as const,
             content: m.content || null,
             tool_calls: m.tool_calls.map(tc => ({
@@ -208,7 +231,11 @@ export class OpenAIProvider implements SingleTurnProvider {
                 arguments: JSON.stringify(tc.arguments),
               },
             })),
+          } as Record<string, unknown>
+          if (m.reasoning_content && this.supportsReasoningContent()) {
+            assistantMessage.reasoning_content = m.reasoning_content
           }
+          return assistantMessage as unknown as OpenAI.ChatCompletionAssistantMessageParam
         }
         return { role: 'assistant' as const, content: m.content }
       }

@@ -16,6 +16,10 @@ const crashRecoveryMocks = vi.hoisted(() => ({
   evaluateCrashRecovery: vi.fn().mockReturnValue({ action: 'none', message: 'Pod is healthy' }),
   getContainerWaitingReason: vi.fn().mockResolvedValue(undefined),
   getPodPhase: vi.fn().mockResolvedValue(undefined),
+  getPodPresence: vi.fn(async (api: unknown, name: string, namespace: string) => {
+    const phase = await crashRecoveryMocks.getPodPhase(api, name, namespace)
+    return phase === undefined ? { kind: 'absent' as const } : { kind: 'present' as const, phase }
+  }),
   getPodReadiness: vi.fn().mockResolvedValue({ ready: true, phase: 'Running', uid: 'pod-uid-1' }),
   isRecoverableContainerWaitingReason: vi.fn(() => false),
 }))

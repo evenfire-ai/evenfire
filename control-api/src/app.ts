@@ -1,4 +1,5 @@
 import express from 'express'
+import { posix } from 'node:path'
 import { config } from './config.js'
 import type { DbClient } from './db.js'
 import { clerumErrorHandler } from './http/errorHandler.js'
@@ -10,6 +11,7 @@ import {
   createTracingInFlightLimiter,
   getTracingMaxInFlight,
 } from './middleware/tracingSubmitterAuth.js'
+import { createCimdRouter } from './oauth/cimd.js'
 import { createAdminAuthRouter } from './routes/admin/auth.js'
 import { createAdminRouter } from './routes/admin/index.js'
 import { createWorkflowsAdminRouter } from './routes/admin/workflows/index.js'
@@ -66,9 +68,25 @@ const RPC_HOST_ACCESS_PATH = /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/
 // byte or buffer the whole part in the control plane.
 const GFS_UPLOAD_PART_PATH =
   /^\/api\/v1\/(?:gfs\/proxy\/v1|external\/gfs)\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/parts\/[0-9]+$/i
-// Authorize parses its own 24 MiB JSON after the cheap limiter and JWT.
+// Authorize parses its own JSON, up to the larger of the Codex and Grok visual
+// envelopes (35 MiB), after the cheap limiter and JWT.
 // The global 150mb parser must not buffer an unauthenticated body.
 const LLM_AUTHORIZE_PATH = /^\/api\/v1\/mcp-host\/llm\/provider-attempts\/authorize\/?$/i
+
+// nginx selects the authorize location on the percent-decoded, dot-resolved,
+// slash-collapsed URI. Apply the same canonicalization here, so an alias that
+// nginx admitted with the 35 MiB allowance cannot reach the global parser.
+// Returns null when the path holds a malformed percent escape.
+function canonicalRequestPath(path: string): string | null {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(path)
+  } catch (err) {
+    if (err instanceof URIError) return null
+    throw err
+  }
+  return posix.normalize(decoded).replace(/\/+/g, '/')
+}
 
 export function createApp(gateway: K8sGateway) {
   const traceIngestDb: DbClient = meterTracingDbClient({
@@ -76,7 +94,9 @@ export function createApp(gateway: K8sGateway) {
   })
   const app = express()
   app.set('trust proxy', 1)
-  const jsonBodyParser = express.json({ limit: config.jsonBodyLimit })
+  // Reject compressed JSON before inflation: this parser runs before
+  // authentication, and a small encoded body can allocate a much larger one.
+  const jsonBodyParser = express.json({ limit: config.jsonBodyLimit, inflate: false })
   const tracingInFlightLimiter = createTracingInFlightLimiter(getTracingMaxInFlight())
   app.use((req, res, next) => {
     if (req.method === 'POST' && req.path.startsWith(TRACING_INTERNAL_PATH_PREFIX)) {
@@ -91,9 +111,23 @@ export function createApp(gateway: K8sGateway) {
       next()
       return
     }
-    if (req.method === 'POST' && LLM_AUTHORIZE_PATH.test(req.path)) {
-      next()
-      return
+    // Match the exemption on the canonical path without changing request
+    // routing. An alias that is not the routed path gets no body parser at
+    // all and ends in the routing 401/404; only the exact route parses its
+    // body, after the limiter and JWT. Express also permits repeated
+    // separators at router mount boundaries, which the canonical form covers.
+    if (req.method === 'POST') {
+      const canonicalPath = canonicalRequestPath(req.path)
+      if (canonicalPath === null) {
+        // The path cannot be classified, so its body is not parsed. The raw
+        // URI is not logged: it is caller-controlled.
+        res.status(400).json({ error: 'invalid_request' })
+        return
+      }
+      if (LLM_AUTHORIZE_PATH.test(canonicalPath)) {
+        next()
+        return
+      }
     }
     jsonBodyParser(req, res, next)
   })
@@ -201,6 +235,10 @@ export function createApp(gateway: K8sGateway) {
   // parameter, not a Clerum cookie or service token. Mounted BEFORE
   // requireInternalToken so the public can hit it.
   api.use(createOAuthCallbackRouter(gateway))
+  // CIMD (SEP-991): public GET of the platform's OAuth Client ID Metadata
+  // Document for the remote MCP-OAuth lane. Read-only, no auth — a remote AS
+  // fetches it. Mounted BEFORE requireInternalToken so it stays public.
+  api.use(createCimdRouter())
   api.use(createAuthRoutes(gateway))
   // Recipe OAuth broker — background workloads present a per-recipe broker
   // token (Bearer, aud=oauth-broker). Auth is the broker token itself, not a

@@ -213,7 +213,7 @@ describe('NativeToolRegistry', () => {
         undefined,
         undefined,
         mcpManagerStub,
-        dynamicToolsEnabled
+        { mcpDiscovery: dynamicToolsEnabled, nativeDiscovery: false }
       )
     }
 
@@ -231,16 +231,18 @@ describe('NativeToolRegistry', () => {
       // Both prompt paths gate the discovery guidance on the presence of
       // clerum__tool_search; with the flag OFF that tool is absent, so neither
       // path emits TOOL_DISCOVERY_TEXT.
-      const prompt = new DefaultPromptBuilder().buildSystemPrompt(registry.listDefinitions())
-        .content as string
+      const prompt = new DefaultPromptBuilder({
+        nativeToolPresentation: 'direct',
+      }).buildSystemPrompt(registry.listDefinitions()).content as string
       expect(prompt).not.toContain(TOOL_DISCOVERY_TEXT)
     })
 
     it('flag ON ⇒ all 3 bridge tools registered and discovery guidance emitted', () => {
       const registry = buildRegistry(true)
       expect(bridgeToolNames(registry).sort()).toEqual([...BRIDGE_TOOLS].sort())
-      const prompt = new DefaultPromptBuilder().buildSystemPrompt(registry.listDefinitions())
-        .content as string
+      const prompt = new DefaultPromptBuilder({
+        nativeToolPresentation: 'direct',
+      }).buildSystemPrompt(registry.listDefinitions()).content as string
       expect(prompt).toContain(TOOL_DISCOVERY_TEXT)
     })
   })

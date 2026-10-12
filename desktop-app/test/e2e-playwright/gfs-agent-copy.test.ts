@@ -6,7 +6,7 @@
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
 import { exactNameFilter } from './helpers/agentLocators'
-import { getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
+import { getManagedAgentDisplayName, getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
 import {
   type AgentGfsCopyFixtures,
   assertGfsInfraHealthy,
@@ -31,12 +31,13 @@ const SENSITIVE_OUTPUT =
 
 async function openExactAgent(
   page: Page,
+  // The rendered label (Host `spec.host`), not the CRD name.
   agentName: string,
   opts: { reuseThread?: boolean } = {}
 ): Promise<void> {
   await openAgentsPage(page)
   await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-  const row = page.getByLabel(`Open details for ${agentName}`, { exact: true })
+  const row = page.getByLabel(`Open agent ${agentName}`, { exact: true })
   await expect(row).toBeVisible({ timeout: 30_000 })
   await row.click()
   await expect(page.getByText(agentName, { exact: true }).first()).toBeVisible({ timeout: 15_000 })
@@ -255,10 +256,14 @@ async function browseDestinationTree(page: Page, fixtures: AgentGfsCopyFixtures)
 test.describe('GFS per-agent native Copy and immediate grant enforcement (issue #797)', () => {
   test.describe.configure({ mode: 'serial' })
   let fixtures: AgentGfsCopyFixtures
+  let labelA: string
+  let labelB: string
 
   test.beforeAll(() => {
     assertGfsInfraHealthy()
     fixtures = seedAgentGfsCopyFixtures(OWNER_EMAIL)
+    labelA = getManagedAgentDisplayName(fixtures.agentA)
+    labelB = getManagedAgentDisplayName(fixtures.agentB)
   })
 
   test.afterAll(() => fixtures?.cleanup())
@@ -292,7 +297,7 @@ test.describe('GFS per-agent native Copy and immediate grant enforcement (issue 
     try {
       await test.step('Agent A copies one file through the native tool', async () => {
         await browseSourceTree(page, fixtures)
-        await openExactAgent(page, fixtures.agentA.name)
+        await openExactAgent(page, labelA)
         const steps = await sendAgentTurn(
           page,
           `In drive main, open the folder named "${fixtures.tree.sourceName}" and read the file ` +
@@ -393,7 +398,7 @@ test.describe('GFS per-agent native Copy and immediate grant enforcement (issue 
         // Fresh thread on purpose: A has no memory of the earlier copy, so it
         // must actually re-attempt the copy by name and surface the tool's real
         // result rather than answering "already done" from context.
-        await openExactAgent(page, fixtures.agentA.name)
+        await openExactAgent(page, labelA)
         const steps = await sendAgentTurn(
           page,
           `In drive main, copy the file "${fixtures.tree.standaloneFileName}" from the folder ` +
@@ -419,7 +424,7 @@ test.describe('GFS per-agent native Copy and immediate grant enforcement (issue 
       })
 
       await test.step('Agent B passes root/destination grants but unreadable child denies the tree', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const steps = await sendAgentTurn(
           page,
           `Copy the folder named "${fixtures.tree.sourceName}" from drive main into the folder ` +
@@ -437,7 +442,7 @@ test.describe('GFS per-agent native Copy and immediate grant enforcement (issue 
       })
 
       await test.step('audited revoke denies Agent A immediately in the same runtime', async () => {
-        await openExactAgent(page, fixtures.agentA.name, { reuseThread: true })
+        await openExactAgent(page, labelA, { reuseThread: true })
         const runtimeBefore = getManagedAgentPodIdentity(fixtures.agentA)
         const auditBefore = gfsGrantRevokeAuditCount(fixtures.agentA)
         await revokeGfsGrantViaControlApi(fixtures.destinationGrantId)

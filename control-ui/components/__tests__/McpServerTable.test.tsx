@@ -569,3 +569,62 @@ describe('McpServerTable — row actions kebab', () => {
     ).toBeInTheDocument()
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Header actions
+// ─────────────────────────────────────────────────────────────────────────────
+describe('McpServerTable — header actions', () => {
+  function renderWithActions(options: { loading?: boolean; empty?: boolean } = {}) {
+    const onCreate = vi.fn()
+    const onAddRemote = vi.fn()
+    const onInstallFromRegistry = vi.fn()
+    render(
+      <McpServerTable
+        items={options.empty ? [] : [makeItem({})]}
+        loading={options.loading}
+        onCreate={onCreate}
+        onAddRemote={onAddRemote}
+        onInstallFromRegistry={onInstallFromRegistry}
+      />
+    )
+    return { onCreate, onAddRemote, onInstallFromRegistry }
+  }
+
+  it('offers create, add remote and marketplace as header buttons, not a kebab menu', () => {
+    const { onCreate, onAddRemote, onInstallFromRegistry } = renderWithActions()
+
+    expect(screen.queryByRole('button', { name: 'Connector actions' })).not.toBeInTheDocument()
+
+    const create = screen.getByRole('button', { name: 'Create connector' })
+    const addRemote = screen.getByRole('button', { name: 'Add remote server' })
+    const marketplace = screen.getByRole('button', { name: 'Install from Marketplace' })
+    // One primary CTA; the other two are secondary buttons of the same size.
+    expect(marketplace).toHaveClass('cu-btn--primary')
+    for (const secondary of [create, addRemote]) {
+      expect(secondary).not.toHaveClass('cu-btn--primary')
+      expect(secondary).toHaveClass('cu-btn', 'cu-btn--sm', 'cu-btn--mcp-install')
+    }
+
+    fireEvent.click(create)
+    fireEvent.click(addRemote)
+    fireEvent.click(marketplace)
+    expect(onCreate).toHaveBeenCalledTimes(1)
+    expect(onAddRemote).toHaveBeenCalledTimes(1)
+    expect(onInstallFromRegistry).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables every header CTA during the initial load', () => {
+    renderWithActions({ loading: true, empty: true })
+
+    for (const name of ['Create connector', 'Add remote server', 'Install from Marketplace']) {
+      expect(screen.getByRole('button', { name })).toBeDisabled()
+    }
+  })
+
+  it('omits a header button whose handler is not provided', () => {
+    render(<McpServerTable items={[makeItem({})]} onAddRemote={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: 'Add remote server' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Create connector' })).not.toBeInTheDocument()
+  })
+})

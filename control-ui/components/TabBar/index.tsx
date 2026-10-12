@@ -26,6 +26,17 @@ export function TabBar<T extends string>({
               data-active={isActive ? 'true' : 'false'}
               aria-selected={isActive}
               aria-current={isActive ? 'page' : undefined}
+              onClick={event => {
+                if (
+                  event.button === 0 &&
+                  !event.altKey &&
+                  !event.ctrlKey &&
+                  !event.metaKey &&
+                  !event.shiftKey
+                ) {
+                  option.onLinkActivate?.()
+                }
+              }}
             >
               {option.label}
             </Link>

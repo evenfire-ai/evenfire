@@ -95,6 +95,21 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft('chat-1')).toBe('')
   })
 
+  it('isolates no-chat drafts by agent while preserving the legacy unscoped bucket', () => {
+    setComposerDraft(null, 'agent-a draft', 'agent-a')
+    setComposerDraft(null, 'agent-b draft', 'agent-b')
+    setComposerDraft(null, 'legacy draft')
+
+    expect(getComposerDraft(null, 'agent-a')).toBe('agent-a draft')
+    expect(getComposerDraft(null, 'agent-b')).toBe('agent-b draft')
+    expect(getComposerDraft(null)).toBe('legacy draft')
+
+    clearComposerDraftAfterSend(null, 'agent-a')
+    expect(getComposerDraft(null, 'agent-a')).toBe('')
+    expect(getComposerDraft(null, 'agent-b')).toBe('agent-b draft')
+    expect(getComposerDraft(null)).toBe('legacy draft')
+  })
+
   it('resetComposerDraftStore wipes all drafts and listeners', () => {
     const listener = vi.fn()
     subscribeComposerDraft('chat-1', listener)

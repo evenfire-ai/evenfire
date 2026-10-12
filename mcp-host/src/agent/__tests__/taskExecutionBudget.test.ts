@@ -8,6 +8,26 @@ import {
 
 afterEach(() => vi.useRealTimers())
 describe('TaskExecutionBudget', () => {
+  it('reports the same remaining active deadline across approval pause and restore', () => {
+    vi.useFakeTimers()
+    let now = 0
+    const first = new TaskExecutionBudget(100, 2, () => now)
+    first.start(new AbortController())
+    now = 25
+    expect(first.remainingDurationMs).toBe(75)
+    const saved = first.pause()
+    now = 10000
+    expect(first.remainingDurationMs).toBe(75)
+    const restored = new TaskExecutionBudget(200, 4, () => now)
+    restored.restore(saved)
+    expect(restored.remainingDurationMs).toBe(75)
+    restored.start(new AbortController())
+    now += 20
+    expect(restored.remainingDurationMs).toBe(55)
+    now += 80
+    expect(restored.remainingDurationMs).toBe(0)
+    restored.pause()
+  })
   it('retains consumption across approvals and restart, excluding approval wait', async () => {
     vi.useFakeTimers()
     let now = 0
