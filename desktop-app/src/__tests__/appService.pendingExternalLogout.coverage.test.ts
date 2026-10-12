@@ -207,6 +207,115 @@ describe('pending logout accepted lifecycle coverage', () => {
     }
   )
 
+  it('rewrites source-bound cleanup after restore retirement unlinks then fails directory sync', async () => {
+    const { service, tokenStore, state, reportFailure } = createService()
+    await tokenStore.setSafeStorageSessionToken(loginResult.token, activeEnvKey)
+    markerStore.recordPendingKeytarCleanup(runtime.directory, activeEnvKey, 'safe-storage')
+    vi.spyOn(state.authClient, 'getMe').mockResolvedValue(loginResult.me)
+    const sync = fsSync.fsyncSync.bind(fsSync)
+    let failed = false
+    vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
+      if (
+        !failed &&
+        fsSync.fstatSync(descriptor).isDirectory() &&
+        !fsSync.existsSync(markerPath())
+      ) {
+        failed = true
+        throw new Error('retirement directory sync failed')
+      }
+      return sync(descriptor)
+    })
+
+    await expect(service.initialize()).resolves.toEqual({ authenticated: true, me: loginResult.me })
+    expect(failed).toBe(true)
+    expect(state.sessionToken).toBe(loginResult.token)
+    expect(markerStore.readPendingExternalLogoutIntent(runtime.directory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'safe-storage',
+    })
+    expect(reportFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'retirement directory sync failed' })
+    )
+    await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBe(
+      loginResult.token
+    )
+  })
+
+  it('uses verified safeStorage after an active-Keytar cleanup login cannot write Keytar', async () => {
+    const { service, tokenStore, state } = createService()
+    await tokenStore.setSessionToken('fixture-stale-keytar', activeEnvKey)
+    markerStore.recordPendingKeytarCleanup(runtime.directory, activeEnvKey, 'active-keytar')
+    const keytar = await import('keytar')
+    vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain write denied'))
+
+    await expect(state.installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+    expect(markerStore.readPendingExternalLogoutIntent(runtime.directory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'safe-storage',
+    })
+    const restarted = createService()
+    vi.spyOn(restarted.state.authClient, 'getMe').mockResolvedValue(loginResult.me)
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+    expect(restarted.state.sessionToken).toBe(loginResult.token)
+  })
+
+  it('replaces an unavailable cleanup credential with a verified encrypted login and retains cleanup', async () => {
+    const { service, state, tokenStore } = createService()
+    markerStore.recordPendingKeytarCleanup(runtime.directory, activeEnvKey, 'safe-storage')
+    const keytar = await import('keytar')
+    vi.mocked(keytar.getPassword).mockRejectedValue(new Error('keychain unavailable'))
+    vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain unavailable'))
+    vi.mocked(keytar.deletePassword).mockRejectedValue(new Error('keychain unavailable'))
+
+    await expect(state.installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+    expect(markerStore.readPendingExternalLogoutIntent(runtime.directory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'safe-storage',
+    })
+    await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBe(
+      loginResult.token
+    )
+    const restarted = createService()
+    vi.spyOn(restarted.state.authClient, 'getMe').mockResolvedValue(loginResult.me)
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: loginResult.me,
+    })
+    expect(restarted.state.sessionToken).toBe(loginResult.token)
+  })
+
+  it('rejects isolated default-store recovery when its fresh persisted token cannot be read back', async () => {
+    const tokenStore = new TokenStoreClass({ isolatedUserDataPath: runtime.directory })
+    const { service, state } = createService(tokenStore)
+    markerStore.recordPendingExternalLogout(runtime.directory, activeEnvKey)
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const originalRead = fs.readFile.bind(fs)
+    vi.spyOn(fs, 'readFile').mockImplementation((...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]).endsWith(`session-token-${activeEnvKey}.json`))
+        return Promise.resolve('{not-json') as ReturnType<typeof fs.readFile>
+      return originalRead(...args)
+    })
+
+    await expect(state.installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
+      'Fresh session token could not be verified'
+    )
+    expect(state.sessionToken).toBeNull()
+    expect(state.me).toBeNull()
+    expect(markerStore.readPendingExternalLogoutIntent(runtime.directory, activeEnvKey)).toEqual({
+      intent: 'logout-pending',
+    })
+  })
+
   it('rejects ordinary logout when strict deletion and durable marker persistence both fail', async () => {
     const { service, tokenStore, state, reportFailure } = createService()
     await tokenStore.setSessionToken('fixture-stale-logged-out', activeEnvKey)

@@ -50,6 +50,29 @@ async function createService() {
 
 // Characterization of the accepted missing-Keytar trade-off, not a new storage policy.
 describe('pending logout without a Keytar module', () => {
+  it('retains logout intent after canceled-quit file cleanup when Keytar cleanup cannot be verified', async () => {
+    const { service, tokenStore, envKey, markers } = await createService()
+    await tokenStore.setSafeStorageSessionToken('fixture-stale-file-session', envKey)
+    markers.recordPendingExternalLogout(runtime.directory, envKey)
+    await service.prepareForQuit()
+    service.cancelQuitPreparation()
+
+    await expect(service.applyPendingExternalLogoutIntent()).resolves.toBe(true)
+    await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBeNull()
+    expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toEqual({
+      intent: 'logout-pending',
+    })
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    const restarted = await createService()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toEqual({
+      intent: 'logout-pending',
+    })
+  })
+
   it('allows ordinary no-marker logout after file cleanup when Keytar is missing', async () => {
     const { service, tokenStore, envKey, markers } = await createService()
     await tokenStore.setSafeStorageSessionToken('fixture-file-session', envKey)
