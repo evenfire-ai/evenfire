@@ -263,3 +263,25 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
   })
 })
+
+describe('team persistence respects pending-marker authority', () => {
+  it('reports marker corruption and clears runtime authentication before team persistence', async () => {
+    const harness = await createService()
+    await harness.login()
+    await fs.writeFile(harness.markerPath, '{malformed')
+    const writeToken = vi.spyOn(harness.tokenStore, 'setSessionToken')
+    vi.spyOn(harness.authClient, 'switchTeam').mockResolvedValue({
+      token: 'fixture-other-team-session',
+    })
+
+    await expect(harness.service.switchTeam('fixture-other-team')).rejects.toThrow('invalid format')
+
+    expect(harness.service.getCachedUserId()).toBeNull()
+    expect(writeToken).not.toHaveBeenCalled()
+    expect(harness.reportFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Pending logout marker has an invalid format' })
+    )
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    expect(await fs.readFile(harness.markerPath, 'utf8')).toBe('{malformed')
+  })
+})

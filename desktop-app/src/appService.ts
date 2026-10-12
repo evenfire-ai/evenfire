@@ -1198,14 +1198,22 @@ export class AppService {
     options: { refreshMe?: boolean } = {}
   ): Promise<void> {
     const tokenChanged = token !== this.sessionToken
+    const envKey = getActiveEnvKey()
+    let pendingMarker: PendingExternalLogoutMarker | null = null
+    if (tokenChanged) {
+      try {
+        pendingMarker = readPendingExternalLogoutMarker(this.getUserDataDirectory(), envKey)
+      } catch (error) {
+        await this.failClosedForPendingLogout(error)
+        throw error
+      }
+    }
     if (tokenChanged) this.sessionGeneration += 1
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
       this.profileUiBaseUrlCache = null
       this.accessCatalog = null
-      const envKey = getActiveEnvKey()
-      const pendingMarker = readPendingExternalLogoutMarker(this.getUserDataDirectory(), envKey)
       if (
         pendingMarker?.intent.intent === 'keytar-cleanup-pending' &&
         pendingMarker.intent.credentialSource === 'safe-storage'
