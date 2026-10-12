@@ -57,6 +57,7 @@ minikube overlays ship; features that are off by default say so.
 | [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                                              |
 | [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON, CRD, or Control UI path                                    |
 | [Desktop setup & updates](how-to/desktop-setup-and-updates.md)                | Environments, invitation setup, updates                                   |
+| [Manage users and teams](how-to/manage-users-and-teams.md)                    | Members, teams, roles, control admins, agent access                       |
 | [Member invitations on self-hosted](how-to/member-invitations-self-hosted.md) | Hosted mode zero-config emails vs running your own service                |
 | [Track usage & set budgets](how-to/token-budgets-and-usage.md)                | Enable budgets, scope, block vs warn                                      |
 | [Connect to the registry](how-to/connect-to-registry.md)                      | Self-hosted registry connect flow                                         |
@@ -90,12 +91,14 @@ minikube overlays ship; features that are off by default say so.
 
 ## Reference
 
-| Doc                                                | Description                                                                                       |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| [CRD index](crds/README.md)                        | All 9 `clerum.io` CRDs                                                                            |
-| [Workflow SDK](../packages/workflow-sdk/README.md) | `@clerum/workflow-sdk` — build custom workflow coordinator images                                 |
-| [llms.txt](llms.txt)                               | Machine-readable doc map for coding agents                                                        |
-| Service READMEs                                    | One-line map per component in the root [README components list](../README.md#docs-and-components) |
+| Doc                                                  | Description                                                                                                     |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| [Configuration switches](reference/configuration.md) | Feature flags that differ between `deploy/base` and minikube, and where each service's variables are documented |
+| [Plugin UI SDK](reference/plugin-ui-sdk.md)          | `window.clerum` API for plugin apps embedded in the Desktop App                                                 |
+| [CRD index](crds/README.md)                          | All 9 `clerum.io` CRDs                                                                                          |
+| [Workflow SDK](../packages/workflow-sdk/README.md)   | `@clerum/workflow-sdk` — build custom workflow coordinator images                                               |
+| [llms.txt](llms.txt)                                 | Machine-readable doc map for coding agents                                                                      |
+| Service READMEs                                      | One-line map per component in the root [README components list](../README.md#docs-and-components)               |
 
 ## Architecture deep dives
 

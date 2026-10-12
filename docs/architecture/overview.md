@@ -8,7 +8,7 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 > `channel-reader` → `mcp-host` → MCP servers, plus the `host-context-controller`
 > that provisions them — and on the end-to-end message lifecycle, dev mode, and
 > the tool approval system. It is **not** a complete service reference: the
-> platform has ~18 services, and this document details four of them.
+> platform has more than 20 services, and this document details four of them.
 >
 > - For every service and which controller creates it → [/ARCHITECTURE.md](../../ARCHITECTURE.md)
 > - For namespaces, trust boundaries, NetworkPolicy layers and the WRC → [platform-topology.md](platform-topology.md)
@@ -36,7 +36,7 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 
 ### System Diagram
 
-Scoped to the four services this document covers — for the full 12-namespace platform (all ~18 services), see [platform-topology.md §1](platform-topology.md#1-platform-architecture-12-namespaces).
+Scoped to the four services this document covers — for the full 13-namespace platform (every service), see [platform-topology.md §1](platform-topology.md#1-platform-architecture-13-namespaces).
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
@@ -87,6 +87,19 @@ validation flow are documented in [Desktop GFS operator parity](gfs-desktop-oper
 | **mcp-host**                | `/mcp-host`                | `mcp-host`      | 8080 | Central LLM service with agent state machine, message queue, and MCP tool calling                    |
 | **host-context-controller** | `/host-context-controller` | `control-plane` | 8081 | K8s operator managing MCP server Deployments/Services/NetworkPolicies; REST API for server discovery |
 | **MCP Servers**             | `/mcp-servers`             | `mcp-server`    | 3000 | First-party MCP servers (airtable, alphavantage, doc-generator, mongodb, playwright, web-search)     |
+
+Other services and directories this document does not detail (full list in
+[/ARCHITECTURE.md](../../ARCHITECTURE.md)):
+
+| Service                                                  | Namespace         | Role                                                                                                     |
+| -------------------------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------- |
+| [webhook-proxy](../../webhook-proxy/README.md)           | `webhook-ingress` | Shared public webhook router; looks the webhook up in control-api and streams it to the recipe's gateway |
+| [webhook-gateway](../../webhook-gateway/README.md)       | `sandbox-recipes` | Per-recipe webhook signature verifier; WRC creates one per recipe, no static manifest                    |
+| [nginx-egress-proxy](../../nginx-egress-proxy/README.md) | `mcp-server`      | Image only: the `egress-proxy` container HCC adds to remote (`spec.remote`) McpServer pods               |
+| [profile-ui](../../profile-ui/README.md)                 | `profiles`        | End-user profile, invitations, Desktop App setup and app-link handoff                                    |
+| [codex-llm-proxy](../../codex-llm-proxy/README.md)       | `control-plane`   | Broker for `codex-subscription` model calls; off by default (`CODEX_LLM_PROXY_EXECUTION_ENABLED`)        |
+| [grok-llm-proxy](../../grok-llm-proxy/README.md)         | `control-plane`   | Broker for `grok-subscription` model calls; off by default (`GROK_LLM_PROXY_EXECUTION_ENABLED`)          |
+| [monitoring](../../monitoring/README.md)                 | `monitoring`      | Not a service: optional Helm values and dashboards for Grafana and Loki, installed with its own Makefile |
 
 ### Human surfaces
 
@@ -853,7 +866,7 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Purpose
 
-Kubernetes operator that manages the full lifecycle of MCP servers. When an McpServer CRD appears, it creates the corresponding Deployment and Service. When a Context CRD changes, it regenerates NetworkPolicies. Also provides a REST API for mcp-host to discover available servers.
+Kubernetes operator that manages the full lifecycle of MCP servers. When an McpServer CRD appears, it creates the corresponding Deployment and Service. When a Context CRD changes, it regenerates NetworkPolicies. Also provides a REST API for mcp-host to discover available servers. Beyond MCP servers, it creates the `mcp-host` pod for each Host, the file controllers for SharedFileSystem and GlobalFileSystem, and guardrail hook pods for image-target LlmHooks.
 
 ### Source Structure
 
@@ -869,6 +882,7 @@ host-context-controller/
 │   ├── hostReconciler.ts            # Host CRD → mcp-host Deployment
 │   ├── sharedFileSystemReconciler.ts # SharedFileSystem → PVC + workspace-files-controller
 │   ├── gfsReconciler.ts             # GlobalFileSystem → gfs-controller writer/reader roles
+│   ├── llmHookReconciler.ts         # LlmHook (image target) → hook Deployment/Service/NetworkPolicy in llm-hooks
 │   ├── bindingPolicyReconciler.ts   # Binding policy reconciliation
 │   ├── secretFactory.ts             # Secret projection for reconciled workloads
 │   ├── metrics.ts                   # Prometheus metrics
@@ -882,8 +896,8 @@ host-context-controller/
 > [`deploy/base/`](../../deploy/base/), grouped by namespace — HCC's are in
 > `deploy/base/control-plane/host-context-controller.yaml`.
 
-The controller reconciles five CRDs: `McpServer`, `Context`, `Host`,
-`SharedFileSystem`, and `GlobalFileSystem`.
+The controller reconciles six CRDs: `McpServer`, `Context`, `Host`,
+`SharedFileSystem`, `GlobalFileSystem`, and `LlmHook`.
 
 ### Operator Reconciliation
 

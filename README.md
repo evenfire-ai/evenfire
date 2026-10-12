@@ -264,6 +264,8 @@ Contributor loop: [CONTRIBUTING.md](CONTRIBUTING.md).
 | [webhook-gateway](webhook-gateway/README.md)                                   | Per-recipe webhook signature verifier                 |
 | [webhook-proxy](webhook-proxy/README.md)                                       | Stateless public webhook router                       |
 | [workflow-approval-request-reader](workflow-approval-request-reader/README.md) | Inbound Telegram/Slack approval callbacks             |
+| [codex-llm-proxy](codex-llm-proxy/README.md)                                   | ChatGPT/Codex subscription broker (off by default)    |
+| [grok-llm-proxy](grok-llm-proxy/README.md)                                     | Grok subscription broker (off by default)             |
 
 Ops & platform directories:
 
