@@ -843,7 +843,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     it('creates the snippet runner when the Secret is owned by the parent scope recipe', async () => {
       mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
         metadata: { labels: { 'clerum.io/owner-recipe': parentScopeRecipeName } },
-        data: { token: 'cmVkYWN0ZWQ=' },
+        data: { token: 'fixture-token' },
       })
 
       const result = await reconcileTriggeredChild()
@@ -871,7 +871,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     it('fails before pod creation when the Secret is owned by another recipe, naming the parent scope', async () => {
       mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
         metadata: { labels: { 'clerum.io/owner-recipe': 'other-recipe' } },
-        data: { token: 'cmVkYWN0ZWQ=' },
+        data: { token: 'fixture-token' },
       })
 
       const result = await reconcileTriggeredChild()
@@ -887,7 +887,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     it('fails before pod creation when the Secret is owned by the run-scoped child name', async () => {
       mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
         metadata: { labels: { 'clerum.io/owner-recipe': childRecipeName } },
-        data: { token: 'cmVkYWN0ZWQ=' },
+        data: { token: 'fixture-token' },
       })
 
       const result = await reconcileTriggeredChild()
@@ -908,7 +908,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
             'clerum.io/shared': 'true',
           },
         },
-        data: { token: 'cmVkYWN0ZWQ=' },
+        data: { token: 'fixture-token' },
       })
 
       const result = await reconcileTriggeredChild()
@@ -924,7 +924,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     it('fails closed when the Secret carries no ownership label', async () => {
       mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
         metadata: { labels: {} },
-        data: { token: 'cmVkYWN0ZWQ=' },
+        data: { token: 'fixture-token' },
       })
 
       const result = await reconcileTriggeredChild()
@@ -940,7 +940,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     it('keeps shared=true Secrets accessible to the triggered run', async () => {
       mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
         metadata: { labels: { 'clerum.io/shared': 'true' } },
-        data: { token: 'cmVkYWN0ZWQ=' },
+        data: { token: 'fixture-token' },
       })
 
       const result = await reconcileTriggeredChild()
@@ -955,13 +955,13 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       // resource id resolves to the PARENT's instance Secret, owned by the parent.
       mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
         metadata: { labels: { 'clerum.io/owner-recipe': parentScopeRecipeName } },
-        data: { token: 'cmVkYWN0ZWQ=' },
+        data: { token: 'fixture-token' },
       })
 
       const result = await reconcileTriggeredChild(
         {
           ...snippetSecretSpec('gh-auth'),
-          resources: [{ id: 'gh-auth', type: 'secret' as const, data: { token: 'redacted' } }],
+          resources: [{ id: 'gh-auth', type: 'secret' as const, data: { token: 'fixture-token' } }],
         },
         { resourceInstances: { 'gh-auth': 'pr-review-gh-auth-d07f008b65ec' } }
       )
