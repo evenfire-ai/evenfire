@@ -218,6 +218,9 @@ describe('WorkspaceTabStrip', () => {
       /\.chat-view-tab\.is-active\s*\{[^}]*box-shadow:\s*inset 0 2px 0 0 var\(--accent\);/s
     )
     expect(styles).toMatch(/\.ui-button:focus-visible,[\s\S]*outline:\s*1px solid var\(--accent\);/)
+    expect(styles).toMatch(
+      /\.ui-icon-button:focus-visible,[^{}]*\{[^}]*outline:\s*1px solid var\(--accent\);/
+    )
     const activeRule = styles.match(/\.chat-view-tab\.is-active\s*\{([^}]*)\}/s)?.[1] ?? ''
     expect(activeRule).not.toMatch(/outline\s*:/)
     expect(styles).toMatch(/\.chat-view-tabs::after\s*\{[^}]*z-index:\s*-1;/s)
@@ -266,7 +269,6 @@ describe('WorkspaceTabStrip', () => {
     )
     restoreFutureRects()
     layout.syncTabRects()
-    layout.measure()
     expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
       false
     )
@@ -292,7 +294,6 @@ describe('WorkspaceTabStrip', () => {
       />
     )
     layout.syncTabRects()
-    layout.measure()
     expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
   })
@@ -459,7 +460,6 @@ describe('WorkspaceTabStrip', () => {
       />
     )
     layout.syncTabRects()
-    layout.measure()
 
     expect(
       Array.from(view.container.querySelectorAll('.chat-view-tab')).map(
