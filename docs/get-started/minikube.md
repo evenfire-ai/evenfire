@@ -7,7 +7,8 @@ service, deny-all NetworkPolicies, the JWT chain, and a seeded agent named
 from the registry when you want more. Setup infers the provider from the first of
 `OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY` set in
 `.env`; for any other provider also set `CLERUM_MODEL_PROVIDER` and
-`CLERUM_MODEL_NAME`.
+`CLERUM_MODEL_NAME`, then run `make minikube-apply-secrets` after setup (setup
+itself writes only those four keys).
 
 ## Prerequisites
 

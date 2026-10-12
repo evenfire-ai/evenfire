@@ -49,7 +49,6 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `spec.personalization.soul` | string | no | Content of `SOUL.md` (system-prompt section "## Core Values"). |
 | `spec.personalization.agents` | string | no | Content of `AGENTS.md` (system-prompt section "## Agent Instructions"). |
 | `spec.personalization.user` | string | no | Content of `USER.md` (system-prompt section "## User Context"). |
-
 | `spec.guardrails` | object | no | Opt-in guardrail policy. A Host without it runs no rules or hooks. See [Guardrails](#guardrails). |
 
 ### Guardrails
