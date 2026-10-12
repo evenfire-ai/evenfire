@@ -242,7 +242,7 @@ describe('pending logout accepted lifecycle coverage', () => {
   })
 
   it('uses verified safeStorage after an active-Keytar cleanup login cannot write Keytar', async () => {
-    const { service, tokenStore, state } = createService()
+    const { tokenStore, state } = createService()
     await tokenStore.setSessionToken('fixture-stale-keytar', activeEnvKey)
     markerStore.recordPendingKeytarCleanup(runtime.directory, activeEnvKey, 'active-keytar')
     const keytar = await import('keytar')
@@ -266,7 +266,7 @@ describe('pending logout accepted lifecycle coverage', () => {
   })
 
   it('replaces an unavailable cleanup credential with a verified encrypted login and retains cleanup', async () => {
-    const { service, state, tokenStore } = createService()
+    const { state, tokenStore } = createService()
     markerStore.recordPendingKeytarCleanup(runtime.directory, activeEnvKey, 'safe-storage')
     const keytar = await import('keytar')
     vi.mocked(keytar.getPassword).mockRejectedValue(new Error('keychain unavailable'))
@@ -295,7 +295,7 @@ describe('pending logout accepted lifecycle coverage', () => {
 
   it('rejects isolated default-store recovery when its fresh persisted token cannot be read back', async () => {
     const tokenStore = new TokenStoreClass({ isolatedUserDataPath: runtime.directory })
-    const { service, state } = createService(tokenStore)
+    const { state } = createService(tokenStore)
     markerStore.recordPendingExternalLogout(runtime.directory, activeEnvKey)
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
