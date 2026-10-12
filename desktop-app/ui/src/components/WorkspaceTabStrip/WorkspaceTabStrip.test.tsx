@@ -38,6 +38,80 @@ const twoChatTabs = newChatTab(
   'alpha'
 ).tabs
 
+const makeRect = (left: number, width: number): DOMRect =>
+  ({
+    left,
+    right: left + width,
+    top: 0,
+    bottom: 28,
+    width,
+    height: 28,
+    x: left,
+    y: 0,
+    toJSON: () => ({}),
+  }) as DOMRect
+
+const installTabStripLayout = (
+  container: HTMLElement,
+  initialWidths: number[],
+  initialViewportWidth: number
+) => {
+  const scroller = container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement
+  let widths = initialWidths
+  let viewportWidth = initialViewportWidth
+  let scrollLeft = 0
+  const gap = 8
+  Object.defineProperties(scroller, {
+    clientLeft: { configurable: true, value: 0 },
+    clientWidth: { configurable: true, get: () => viewportWidth },
+    scrollLeft: {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => {
+        scrollLeft = value
+      },
+    },
+    scrollWidth: {
+      configurable: true,
+      get: () =>
+        widths.reduce((sum, width) => sum + width, 0) + gap * Math.max(0, widths.length - 1),
+    },
+    getBoundingClientRect: { configurable: true, value: () => makeRect(0, viewportWidth) },
+  })
+
+  const syncTabRects = () => {
+    const tabs = Array.from(container.querySelectorAll<HTMLElement>('.chat-view-tab'))
+    tabs.forEach(tab => {
+      Object.defineProperty(tab, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => {
+          const index = tabs.indexOf(tab)
+          const left = widths.slice(0, index).reduce((sum, width) => sum + width + gap, 0)
+          return makeRect(left - scrollLeft, widths[index] ?? 120)
+        },
+      })
+    })
+  }
+  syncTabRects()
+
+  return {
+    resize(nextWidth: number) {
+      viewportWidth = nextWidth
+      fireEvent.resize(window)
+    },
+    setWidths(nextWidths: number[]) {
+      widths = nextWidths
+      syncTabRects()
+    },
+    setScrollLeft(value: number) {
+      scrollLeft = value
+    },
+    scrollLeft: () => scrollLeft,
+    maximumScrollLeft: () => Math.max(0, scroller.scrollWidth - scroller.clientWidth),
+    syncTabRects,
+  }
+}
+
 describe('WorkspaceTabStrip', () => {
   it('renders the tab order and exposes non-destructive view actions', () => {
     const onSelect = vi.fn()
@@ -92,18 +166,232 @@ describe('WorkspaceTabStrip', () => {
 
     const styles = readFileSync(path.join(process.cwd(), 'ui', 'src', 'styles.css'), 'utf8')
     expect(styles).toMatch(/\.chat-view-tabs\s*\{[^}]*padding:\s*var\(--space-2\) 0 0;/s)
-    expect(styles).toMatch(/\.chat-view-tabs__scroller\s*\{[^}]*width:\s*100%;/s)
+    expect(styles).toMatch(/\.chat-view-tabs__scroller\s*\{[^}]*overflow-x:\s*auto;/s)
+    expect(styles).toMatch(/\.chat-view-tabs__scroller\s*\{[^}]*scrollbar-width:\s*none;/s)
+    expect(styles).toMatch(
+      /\.chat-view-tabs__scroller::\-webkit-scrollbar\s*\{[^}]*display:\s*none;/s
+    )
+    expect(styles).toMatch(/\.chat-view-tabs__scroll-button\s*\{[^}]*flex:\s*0 0 auto;/s)
     expect(styles).toMatch(/\.chat-view-tabs__list\s*\{[^}]*width:\s*100%;/s)
     expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*flex:\s*1 1 var\(--chat-tab-max\);/s)
     expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*max-width:\s*var\(--chat-tab-max\);/s)
     expect(styles).toMatch(/\.chat-view-tab\s*\{[^}]*min-width:\s*var\(--chat-tab-min\);/s)
-    expect(styles).toMatch(/\.chat-view-tab\.is-active\s*\{[^}]*flex-shrink:\s*0\.4;/s)
+    expect(styles).toMatch(
+      /\.chat-view-tab\.is-active\s*\{[^}]*box-shadow:\s*inset 0 2px 0 0 var\(--accent\);/s
+    )
+    expect(styles).toMatch(/\.ui-button:focus-visible,[\s\S]*outline:\s*1px solid var\(--accent\);/)
+    const activeRule = styles.match(/\.chat-view-tab\.is-active\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(activeRule).not.toMatch(/outline\s*:/)
     expect(styles).toMatch(/\.chat-view-tabs::after\s*\{[^}]*z-index:\s*-1;/s)
     expect(styles).toMatch(
       /\.chat-view-tab:not\(\.is-active\)\s*\{[^}]*border-bottom:\s*1px solid var\(--chat-view-selected-border\);/s
     )
     expect(styles).toMatch(/\.chat-view-tab__select\s*\{[^}]*flex:\s*1 1 auto;/s)
     expect(styles).toMatch(/\.chat-view-tab__label\s*\{[^}]*text-overflow:\s*ellipsis;/s)
+  })
+
+  it('shows arrows only for overflow and updates them after resize, insertion, and removal', () => {
+    let state = openAppTab(createEmptyWorkspaceTabsState(), {
+      id: 'tab-one',
+      appRef: 'example/app',
+      title: 'One',
+    })
+    state = openAppTab(state, { id: 'tab-two', appRef: 'example/app', title: 'Two' })
+    const onClose = (id: string) => {
+      state = closeWorkspaceTab(state, id)
+    }
+    const view = render(
+      <WorkspaceTabStrip
+        activeTabId={state.activeTabId}
+        onClose={onClose}
+        onReorder={vi.fn()}
+        onSelect={vi.fn()}
+        tabs={state.tabs}
+      />
+    )
+    const layout = installTabStripLayout(view.container, [120, 120], 300)
+    fireEvent.resize(window)
+    expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
+
+    state = openAppTab(state, { id: 'tab-three', appRef: 'example/app', title: 'Three' })
+    view.rerender(
+      <WorkspaceTabStrip
+        activeTabId={state.activeTabId}
+        onClose={onClose}
+        onReorder={vi.fn()}
+        onSelect={vi.fn()}
+        tabs={state.tabs}
+      />
+    )
+    layout.setWidths([120, 120, 120])
+    layout.syncTabRects()
+    fireEvent.resize(window)
+    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
+      false
+    )
+    expect(screen.getByRole('button', { name: 'Scroll tabs right' }).hasAttribute('disabled')).toBe(
+      true
+    )
+
+    layout.resize(500)
+    expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
+    layout.resize(300)
+    expect(screen.getByRole('button', { name: 'Scroll tabs left' })).toBeTruthy()
+
+    onClose('tab-three')
+    view.rerender(
+      <WorkspaceTabStrip
+        activeTabId={state.activeTabId}
+        onClose={onClose}
+        onReorder={vi.fn()}
+        onSelect={vi.fn()}
+        tabs={state.tabs}
+      />
+    )
+    layout.setWidths([120, 120])
+    layout.syncTabRects()
+    fireEvent.resize(window)
+    expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Scroll tabs right' })).toBeNull()
+  })
+
+  it('reveals measured tabs, follows active changes, and leaves manual scroll alone', () => {
+    let state = createEmptyWorkspaceTabsState()
+    const widths = [110, 135, 95, 160, 125]
+    for (let index = 0; index < widths.length; index += 1) {
+      state = openAppTab(state, {
+        id: `tab-${index}`,
+        appRef: 'example/app',
+        title: `Tab ${index}`,
+      })
+    }
+    const onSelect = vi.fn()
+    const view = render(
+      <WorkspaceTabStrip
+        activeTabId="tab-0"
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+        onSelect={onSelect}
+        tabs={state.tabs}
+      />
+    )
+    const layout = installTabStripLayout(view.container, widths, 300)
+    fireEvent.resize(window)
+    const left = screen.getByRole('button', { name: 'Scroll tabs left' })
+    const right = screen.getByRole('button', { name: 'Scroll tabs right' })
+    expect(left.hasAttribute('disabled')).toBe(true)
+    expect(right.hasAttribute('disabled')).toBe(false)
+
+    fireEvent.click(right)
+    expect(layout.scrollLeft()).toBe(56)
+    fireEvent.click(right)
+    expect(layout.scrollLeft()).toBe(224)
+    expect(onSelect).not.toHaveBeenCalled()
+
+    for (let click = 0; click < 5 && !right.hasAttribute('disabled'); click += 1) {
+      fireEvent.click(right)
+    }
+    expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
+    expect(right.hasAttribute('disabled')).toBe(true)
+    expect(left.hasAttribute('disabled')).toBe(false)
+
+    fireEvent.click(left)
+    expect(layout.scrollLeft()).toBeLessThan(layout.maximumScrollLeft())
+    expect(left.hasAttribute('disabled')).toBe(false)
+    expect(onSelect).not.toHaveBeenCalled()
+
+    layout.setScrollLeft(100)
+    fireEvent.scroll(view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement)
+    view.rerender(
+      <WorkspaceTabStrip
+        activeTabId="tab-0"
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+        onSelect={onSelect}
+        tabs={state.tabs}
+      />
+    )
+    expect(layout.scrollLeft()).toBe(100)
+
+    view.rerender(
+      <WorkspaceTabStrip
+        activeTabId="tab-4"
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+        onSelect={onSelect}
+        tabs={state.tabs}
+      />
+    )
+    expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
+    layout.setScrollLeft(100)
+    fireEvent.scroll(view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement)
+    view.rerender(
+      <WorkspaceTabStrip
+        activeTabId="tab-4"
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+        onSelect={onSelect}
+        tabs={state.tabs}
+      />
+    )
+    expect(layout.scrollLeft()).toBe(100)
+  })
+
+  it('normalizes unmodified wheel input once, passes modifiers through, and refreshes manual-scroll state', () => {
+    let state = createEmptyWorkspaceTabsState()
+    for (let index = 0; index < 4; index += 1) {
+      state = openAppTab(state, {
+        id: `wheel-${index}`,
+        appRef: 'example/app',
+        title: `Wheel ${index}`,
+      })
+    }
+    const onSelect = vi.fn()
+    const view = render(
+      <WorkspaceTabStrip
+        activeTabId="wheel-0"
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+        onSelect={onSelect}
+        tabs={state.tabs}
+      />
+    )
+    const layout = installTabStripLayout(view.container, [110, 110, 110, 110], 200)
+    fireEvent.resize(window)
+    const scroller = view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement
+
+    const verticalWheel = createEvent.wheel(scroller, {
+      deltaY: 2,
+      deltaMode: WheelEvent.DOM_DELTA_LINE,
+    })
+    fireEvent(scroller, verticalWheel)
+    expect(layout.scrollLeft()).toBe(32)
+    expect(verticalWheel.defaultPrevented).toBe(true)
+
+    const diagonalTrackpad = createEvent.wheel(scroller, { deltaX: 10, deltaY: 20 })
+    fireEvent(scroller, diagonalTrackpad)
+    expect(layout.scrollLeft()).toBe(42)
+    expect(diagonalTrackpad.defaultPrevented).toBe(true)
+
+    const zoomGesture = createEvent.wheel(scroller, { deltaY: 12, ctrlKey: true })
+    fireEvent(scroller, zoomGesture)
+    expect(layout.scrollLeft()).toBe(42)
+    expect(zoomGesture.defaultPrevented).toBe(false)
+
+    const outsideWheel = createEvent.wheel(document.body, { deltaY: 12 })
+    fireEvent(document.body, outsideWheel)
+    expect(layout.scrollLeft()).toBe(42)
+    expect(outsideWheel.defaultPrevented).toBe(false)
+
+    scroller.scrollLeft = 100
+    fireEvent.scroll(scroller)
+    expect(layout.scrollLeft()).toBe(100)
+    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
+      false
+    )
+    expect(onSelect).not.toHaveBeenCalled()
   })
 
   it('associates the active tab control with its owned surface, and only that one', () => {
