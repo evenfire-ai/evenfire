@@ -64,58 +64,62 @@ describe('Round 9 selection error ownership', () => {
     expect(app.result.current.statusText).toContain('Could not open conversation')
   })
 
-  it('does not report a rejected switch after a newer conversation owns the view', async () => {
-    const { clerum } = installAppControllerClerum({ agentNames: ['agent-x'] })
-    await clerum.chat.create('agent-x', 'chat-1')
-    await clerum.chat.create('agent-x', 'chat-2')
-    await clerum.chat.create('agent-x', 'chat-3')
-    const originalSetLastActive = clerum.chat.setLastActive.getMockImplementation()
-    if (!originalSetLastActive) throw new Error('Expected the setLastActive test mock')
+  it('keeps real history and rejects to its awaiter after an ownerless successor switch', async () => {
+    const clerum = installMockClerum()
+    for (const chat of ['chat-1', 'chat-2', 'chat-3']) {
+      await clerum.chat.create('agent-x', chat)
+      await clerum.chat.upsertMessages('agent-x', chat, [
+        { id: `${chat}-history`, role: 'user', content: `${chat} real history`, timestamp: 1 },
+      ])
+    }
+    const controller = renderController({ loadMenuData: false })
+    unmount = controller.unmount
+    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+    await act(async () => controller.result.current.switchToChat('agent-x', 'chat-1'))
+    const gate = deferred<void>()
     const entered = deferred<void>()
-    const release = deferred<void>()
-    let held = false
-    clerum.chat.setLastActive.mockImplementation(async (agentRef, chatId) => {
-      if (agentRef === 'agent-x' && chatId === 'chat-2' && !held) {
-        held = true
+    const setLastActive = clerum.chat.setLastActive.getMockImplementation()!
+    clerum.chat.setLastActive.mockImplementation(async (agent, chat) => {
+      if (chat === 'chat-2') {
         entered.resolve()
-        await release.promise
-        throw new Error('stale chat store write failed')
+        await gate.promise
       }
-      return originalSetLastActive(agentRef, chatId)
+      return setLastActive(agent, chat)
     })
-    const app = renderAppController()
-    unmount = app.unmount
-
-    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
-    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+    const error = new Error('stale chat store write failed')
+    let switchPromise!: Promise<void>
     act(() => {
-      app.result.current.handleSelectChatAgent('agent-x', { chatId: 'chat-1', selectLatest: false })
+      switchPromise = controller.result.current.switchToChat('agent-x', 'chat-2', {
+        onCurrentError: controller.spies.pushToast,
+      })
     })
-    await waitFor(() => expect(app.result.current.activeChatId).toBe('chat-1'))
-    await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
-
-    act(() => {
-      app.result.current.handleSelectChatAgent('agent-x', { chatId: 'chat-2', selectLatest: false })
-    })
-    await entered.promise
-    act(() => {
-      app.result.current.handleSelectChatAgent('agent-x', { chatId: 'chat-3', selectLatest: false })
-    })
-    await waitFor(() => expect(app.result.current.activeChatId).toBe('chat-3'))
-    await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
-
-    await act(async () => {
-      release.resolve()
-    })
-    await waitFor(() =>
-      expect(
-        app.result.current.toasts.filter(toast =>
-          toast.text.includes('stale chat store write failed')
-        )
-      ).toHaveLength(0)
+    const observed = switchPromise.then(
+      () => undefined,
+      reason => reason
     )
-    expect(app.result.current.activeChatId).toBe('chat-3')
-    expect(app.result.current.statusText).not.toContain('stale chat store write failed')
+    try {
+      await entered.promise
+      await act(async () => {
+        // The successor intentionally has no error reporter (raw awaited API).
+        await controller.result.current.switchToChat('agent-x', 'chat-3')
+      })
+      expect(controller.result.current.chatMessages).toEqual([
+        expect.objectContaining({ id: 'chat-3-history' }),
+      ])
+      await act(async () => {
+        gate.reject(error)
+        expect(await observed).toBe(error)
+      })
+      expect(controller.result.current.activeChatId).toBe('chat-3')
+      expect(controller.result.current.chatMessages).toEqual([
+        expect.objectContaining({ id: 'chat-3-history' }),
+      ])
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+      expect(controller.spies.pushToast).not.toHaveBeenCalled()
+    } finally {
+      gate.resolve()
+      await observed
+    }
   })
 
   it('settles and reports a failed pending selection from the selection effect', async () => {
@@ -139,6 +143,8 @@ describe('Round 9 selection error ownership', () => {
         'Could not open conversation: chat store write failed',
         'error'
       )
+      expect(controller.spies.pushToast).toHaveBeenCalledTimes(1)
+      expect(controller.result.current.chatMessages).toEqual([])
     })
   })
 })
