@@ -38,7 +38,7 @@ Sidebar destinations map to the public routes in `app/constants/routes.ts` (`com
 | Cost & Usage          | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets` | Token usage dashboard, model prices, token budgets                                                 |
 | Settings              | `/settings/ui`                                                                         | Control settings panel                                                                             |
 
-Routes not in the sidebar: `/users-and-teams/admins/new` (invite a control admin; `/control-admins/new` redirects there), `/plugin-workload-sdk` (SDK grants and invocation search), `/traces/*` (hidden Traces section), and the public token flows listed above. Legacy paths such as `/cost/*`, `/registry`, `/publisher/*`, `/mcp-servers`, `/hosts` and `/contexts` redirect to their current locations (`next.config.js`, `components/LegacyContextRedirect`).
+Routes not in the sidebar: `/users-and-teams/admins/new` (invite a control admin; `/control-admins/new` redirects there), `/plugins/sdk` (SDK grants and invocation search), `/traces/*` (hidden Traces section), and the public token flows listed above. Legacy paths such as `/cost/*`, `/registry`, `/publisher/*`, `/mcp-servers`, `/hosts` and `/contexts` redirect to their current locations (`next.config.js`, `components/LegacyContextRedirect`).
 
 ## Notable Features
 

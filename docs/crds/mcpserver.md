@@ -55,7 +55,8 @@ time and are **never mounted into the connector pod**.
 > in `deploy/base` (the minikube overlay turns it on). While it is off,
 > OAuth connectors keep asking for consent and never get a token. Also set
 > `CONTROL_API_OAUTH_CALLBACK_BASE_URL` to the browser-reachable control-api
-> origin; otherwise callbacks fall back to an internal hostname.
+> origin; otherwise registry OAuth installs are refused, and other callbacks
+> fall back to the request host (an internal hostname behind the proxy chain).
 
 There are three configuration styles, chosen by `source`, which can't change
 after creation:
