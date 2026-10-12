@@ -1,14 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  renderHook,
-  screen,
-  waitFor,
-} from '@testing-library/react'
+import { cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { ChatThread } from '@components/agents/ChatThread'
 import { FleetBoard } from '@components/agents/FleetBoard'
 import { renderController } from '../domain/__tests__/__fixtures__/controllerHarness'
