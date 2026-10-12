@@ -1,0 +1,182 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
+import fsSync from 'node:fs'
+import { promises as fs } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+// Same real AppService/TokenStore harness as pendingExternalLogout.test.ts.
+const runtime = vi.hoisted(() => ({ directory: '', keychain: new Map<string, string>() }))
+const { notifySessionChanged } = vi.hoisted(() => ({ notifySessionChanged: vi.fn() }))
+const keyOf = (service: string, account: string) => `${service}::${account}`
+vi.mock('keytar', () => ({
+  getPassword: vi.fn(
+    async (service: string, account: string) =>
+      runtime.keychain.get(`${service}::${account}`) ?? null
+  ),
+  setPassword: vi.fn(async (service: string, account: string, token: string) => {
+    runtime.keychain.set(`${service}::${account}`, token)
+  }),
+  deletePassword: vi.fn(async (service: string, account: string) =>
+    runtime.keychain.delete(`${service}::${account}`)
+  ),
+}))
+vi.mock('electron', () => ({
+  app: { getPath: vi.fn(() => runtime.directory), isReady: vi.fn(() => true) },
+  safeStorage: {
+    isEncryptionAvailable: vi.fn(() => true),
+    encryptString: vi.fn((value: string) => Buffer.from(value)),
+    decryptString: vi.fn((value: Buffer) => value.toString()),
+  },
+}))
+vi.mock('../chatStoreBinding.js', () => ({
+  bindChatStoreForUser: vi.fn(),
+  unbindChatStore: vi.fn(),
+  __setChatStoreBaseDirForTests: vi.fn(),
+}))
+vi.mock('../pluginSdkRuntime.js', () => ({
+  tryGetPluginSdkRuntime: () => ({ notifySessionChanged, unpinAllSandboxUiSurfaces: vi.fn() }),
+}))
+
+let AppServiceClass: typeof import('../appService.js').AppService
+let TokenStoreClass: typeof import('../tokenStore.js').TokenStore
+let markerStore: typeof import('../pendingExternalLogout.js')
+let activeEnvKey = ''
+const loginResult = {
+  token: 'fixture-fresh-verified-session',
+  me: {
+    id: 'user-1',
+    email: 'user@example.com',
+    name: null,
+    picture: null,
+    teamId: 'team-1',
+    teamName: 'Team 1',
+    role: 'member' as const,
+  },
+}
+
+beforeEach(async () => {
+  vi.resetModules()
+  vi.clearAllMocks()
+  runtime.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-marker-coverage-'))
+  runtime.keychain.clear()
+  const keytar = await import('keytar')
+  vi.mocked(keytar.getPassword)
+    .mockReset()
+    .mockImplementation(
+      async (service, account) => runtime.keychain.get(keyOf(service, account)) ?? null
+    )
+  vi.mocked(keytar.setPassword)
+    .mockReset()
+    .mockImplementation(async (service, account, token) => {
+      runtime.keychain.set(keyOf(service, account), token)
+    })
+  vi.mocked(keytar.deletePassword)
+    .mockReset()
+    .mockImplementation(async (service, account) =>
+      runtime.keychain.delete(keyOf(service, account))
+    )
+  const [app, tokens, markers, config] = await Promise.all([
+    import('../appService.js'),
+    import('../tokenStore.js'),
+    import('../pendingExternalLogout.js'),
+    import('../config.js'),
+  ])
+  AppServiceClass = app.AppService
+  TokenStoreClass = tokens.TokenStore
+  markerStore = markers
+  activeEnvKey = config.getActiveEnvKey()
+  const { safeStorage } = await import('electron')
+  vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+})
+
+afterEach(async () => {
+  vi.restoreAllMocks()
+  if (runtime.directory) await fs.rm(runtime.directory, { recursive: true, force: true })
+  runtime.directory = ''
+  runtime.keychain.clear()
+  vi.resetModules()
+})
+
+function createService(tokenStore = new TokenStoreClass()) {
+  const reportFailure = vi.fn()
+  const service = new AppServiceClass({
+    tokenStore,
+    getUserDataDirectory: () => runtime.directory,
+    reportDeferredLogoutFailure: reportFailure,
+  })
+  const state = service as unknown as {
+    sessionToken: string | null
+    me: typeof loginResult.me | null
+    installAuthenticatedLogin: (result: typeof loginResult) => Promise<unknown>
+    installAuthenticatedLoginOnce: (result: typeof loginResult) => Promise<unknown>
+    authClient: { getMe: (token: string) => Promise<typeof loginResult.me> }
+  }
+  return { service, tokenStore, state, reportFailure }
+}
+
+function markerPath() {
+  const digest = createHash('sha256').update(activeEnvKey).digest('hex')
+  return path.join(runtime.directory, `pending-external-logout-${digest}`)
+}
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>(done => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+// These characterize current accepted marker cells and kill targeted guard mutants.
+describe('pending logout accepted lifecycle coverage', () => {
+  it.each(['retire', 'convert'] as const)(
+    'rejects a login racing a newer same-intent logout during %s',
+    async mode => {
+      markerStore.recordPendingExternalLogout(runtime.directory, activeEnvKey)
+      const { service, tokenStore, state } = createService()
+      const observed = markerStore.readPendingExternalLogoutMarker(runtime.directory, activeEnvKey)!
+      if (mode === 'convert') {
+        const keytar = await import('keytar')
+        vi.mocked(keytar.getPassword).mockRejectedValue(new Error('keychain locked'))
+        vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain locked'))
+        vi.mocked(keytar.deletePassword).mockRejectedValue(new Error('keychain locked'))
+      }
+      const started = deferred()
+      const release = deferred()
+      const write = mode === 'retire' ? 'setSessionToken' : 'setSafeStorageSessionToken'
+      const persist = tokenStore[write].bind(tokenStore)
+      vi.spyOn(tokenStore, write).mockImplementation(async (...args) => {
+        started.resolve()
+        await release.promise
+        return persist(...args)
+      })
+      const login = state.installAuthenticatedLogin(loginResult)
+      await started.promise
+      const draining = service.prepareForQuit()
+      await expect(service.logout()).rejects.toThrow('shutting down')
+      const newer = markerStore.readPendingExternalLogoutMarker(runtime.directory, activeEnvKey)!
+      expect(newer.intent).toEqual(observed.intent)
+      expect(newer.revision).not.toBe(observed.revision)
+      release.resolve()
+
+      await expect(login).rejects.toThrow(
+        'Pending logout intent changed while login was completing'
+      )
+      await draining
+      expect(state.sessionToken).toBeNull()
+      expect(state.me).toBeNull()
+      expect(markerStore.readPendingExternalLogoutIntent(runtime.directory, activeEnvKey)).toEqual({
+        intent: 'logout-pending',
+      })
+      const restarted = createService()
+      const authenticate = vi.spyOn(restarted.state.authClient, 'getMe')
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+      })
+      expect(authenticate).not.toHaveBeenCalled()
+      expect(restarted.state.sessionToken).toBeNull()
+    }
+  )
+})

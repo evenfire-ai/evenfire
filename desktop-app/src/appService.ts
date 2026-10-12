@@ -42,6 +42,7 @@ import {
   readPendingExternalLogoutMarker,
   recordPendingExternalLogout,
   recordPendingExternalLogoutIfContentsUnchanged,
+  recordPendingExternalLogoutIfUnchanged,
   recordPendingKeytarCleanupIfMissing,
   recordPendingKeytarCleanupIfUnchanged,
 } from './pendingExternalLogout.js'
@@ -2275,6 +2276,7 @@ export class AppService {
       let freshTokenUsesActiveKeytar = false
       let freshTokenUsesDefaultStore = false
       let credentialSource = pendingLogout.credentialSource
+      let attemptedCleanupMarker: PendingExternalLogoutMarker | null = null
       try {
         const previousToken = this.sessionToken
         const previousMe = this.me
@@ -2367,13 +2369,23 @@ export class AppService {
             throw new Error('Pending logout intent changed while login was completing')
           }
         } else if (pendingLogout.intent) {
+          const cleanupCredentialSource = credentialSource ?? 'safe-storage'
+          const cleanupRevision = randomUUID()
+          attemptedCleanupMarker = {
+            intent: {
+              intent: 'keytar-cleanup-pending',
+              credentialSource: cleanupCredentialSource,
+            },
+            revision: cleanupRevision,
+          }
           if (
             !pendingLogout.marker ||
             !recordPendingKeytarCleanupIfUnchanged(
               userDataDirectory,
               envKey,
               pendingLogout.marker,
-              credentialSource ?? 'safe-storage'
+              cleanupCredentialSource,
+              cleanupRevision
             )
           ) {
             throw new Error('Pending logout intent changed while login was completing')
@@ -2383,7 +2395,32 @@ export class AppService {
       } catch (error) {
         if (pendingLogout.intent) {
           try {
-            recordPendingExternalLogout(userDataDirectory, envKey)
+            // A failed retirement may have unlinked the observed marker, or a
+            // conversion may have renamed its cleanup record before fsync failed.
+            // Repair only absence or this attempt's converted/original cleanup
+            // record; newer producers keep their authoritative marker revision.
+            const currentMarker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
+            if (currentMarker === null) {
+              recordPendingExternalLogout(userDataDirectory, envKey)
+            } else if (currentMarker.intent.intent === 'keytar-cleanup-pending') {
+              const convertedMarkerRestored =
+                attemptedCleanupMarker &&
+                recordPendingExternalLogoutIfUnchanged(
+                  userDataDirectory,
+                  envKey,
+                  attemptedCleanupMarker
+                )
+              if (
+                !convertedMarkerRestored &&
+                pendingLogout.marker?.intent.intent === 'keytar-cleanup-pending'
+              ) {
+                recordPendingExternalLogoutIfUnchanged(
+                  userDataDirectory,
+                  envKey,
+                  pendingLogout.marker
+                )
+              }
+            }
           } catch (markerError) {
             this.reportDeferredLogoutFailureSafely(markerError)
           }

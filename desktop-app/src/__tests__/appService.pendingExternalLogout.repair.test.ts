@@ -239,4 +239,27 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     expect(marker?.intent).toEqual({ intent: 'logout-pending' })
     expect(marker?.revision).toEqual(expect.any(String))
   })
+
+  it('preserves the exact newer logout revision during a secure login write', async () => {
+    const harness = await createService()
+    await fs.writeFile(harness.markerPath, '{malformed')
+    let newerMarker: ReturnType<typeof harness.markers.readPendingExternalLogoutMarker> | undefined
+    keytarMock.setPassword.mockImplementation(async (service, account, token) => {
+      keychain.set(keyOf(service, account), token)
+      harness.markers.recordPendingExternalLogout(runtime.directory, harness.envKey)
+      newerMarker = harness.markers.readPendingExternalLogoutMarker(
+        runtime.directory,
+        harness.envKey
+      )
+    })
+
+    await expect(harness.login()).rejects.toThrow('Pending logout intent changed')
+
+    expect(
+      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
+    ).toEqual(newerMarker)
+    expect(harness.service.getCachedUserId()).toBeNull()
+    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBeNull()
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+  })
 })
