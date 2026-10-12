@@ -1,14 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, waitFor } from '@testing-library/react'
-import { DESKTOP_ROUTES } from '@constants/navigation'
 import {
   installAppControllerClerum,
   renderAppController,
 } from './__fixtures__/appControllerHarness'
 import { deferred } from './__fixtures__/catalogFixtures'
-import { renderController } from './__fixtures__/controllerHarness'
-import { installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
+import { uninstallMockClerum } from './__fixtures__/mockClerum'
 
 beforeEach(() => vi.clearAllMocks())
 afterEach(() => {
