@@ -31,6 +31,7 @@ export type SandboxUiApp = {
 }
 
 export type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
+export type { GfsResourceDeepLinkEnvelope } from '@clerum/desktop-app-links'
 
 export type SessionMe = {
   id: string

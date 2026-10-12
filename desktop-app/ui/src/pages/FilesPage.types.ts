@@ -35,6 +35,9 @@ export interface FilesPageProps {
    * callback. Absent ⇒ no preview surface is available (the file downloads).
    */
   onOpenPreview?: (preview: GfsPreviewResource) => void
+  /** Monotonic App request to open the existing route-entry dialog. */
+  routeDialogRequestId?: number
+  onRouteDialogRequestHandled?: (requestId: number) => void
 }
 
 /**

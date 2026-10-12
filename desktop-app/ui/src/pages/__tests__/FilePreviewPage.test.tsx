@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FilePreviewPage } from '../FilePreviewPage'
@@ -73,6 +74,7 @@ describe('FilePreviewPage', () => {
         fileKind="image"
         mimeType="image/png"
         byteLength={3}
+        onOpenRoute={() => undefined}
       />
     )
 
@@ -80,6 +82,11 @@ describe('FilePreviewPage', () => {
     // The preview page title is a page-level h2 (not a dialog h3).
     expect(screen.getByRole('heading', { name: 'diagram.png', level: 2 })).toBeTruthy()
     expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copy route' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copy content' })).toBeTruthy()
   })
 
   it('mounts the markdown body for a markdown preview tab', async () => {
@@ -109,10 +116,129 @@ describe('FilePreviewPage', () => {
         fileKind="video"
         mimeType="video/mp4"
         byteLength={3}
+        onOpenRoute={() => undefined}
       />
     )
 
     expect(await screen.findByLabelText('Video preview of demo.mp4')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copy route' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Copy content' })).toBeNull()
+  })
+
+  it('uses the shareable link, canonical route, and preview copy semantics from the toolbar', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const markdown = '# Hello\n\nText to copy.'
+    const copyDeepLink = vi.fn(async () => ({
+      url: buildGfsResourceWebLink('https://profile.example', uri),
+    }))
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          copyDeepLink,
+          downloadPreview: vi.fn(async () => ({
+            bytes: new TextEncoder().encode(markdown).buffer,
+          })),
+          resolve: vi.fn(async () => ({ kind: 'file' })),
+        },
+      },
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="Résumé # ? %.md"
+        fileKind="markdown"
+        byteLength={markdown.length}
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Hello' })
+    const copyContent = screen.getByRole('button', { name: 'Copy content' })
+    await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy link' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy route' }))
+    fireEvent.click(copyContent)
+
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(uri))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
+  })
+
+  it('copies the loaded image bytes through the shared preview toolbar', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubGfs({
+      downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
+      resolve: async () => ({ kind: 'file' }),
+    })
+
+    render(
+      <FilePreviewPage
+        gfsUri="gfs://main/image-1"
+        fileName="diagram.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={3}
+      />
+    )
+
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    const copyContent = screen.getByRole('button', { name: 'Copy content' })
+    await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(copyContent)
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('data:image/png;base64,AQID'))
+  })
+
+  it('refreshes by revalidating and reloading the exact preview resource', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    let downloadNumber = 0
+    const { downloadPreview, resolve } = stubGfs({
+      downloadPreview: async () => ({
+        bytes: new TextEncoder().encode(`# Load ${++downloadNumber}`).buffer,
+      }),
+      resolve: async () => ({ kind: 'file' }),
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+
+    render(<FilePreviewPage gfsUri={uri} fileName="report.md" fileKind="markdown" byteLength={7} />)
+
+    expect(await screen.findByRole('heading', { name: 'Load 1' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(uri))
+    expect(await screen.findByRole('heading', { name: 'Load 2' })).toBeTruthy()
+    expect(downloadPreview).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('heading', { name: 'report.md', level: 2 })).toBeTruthy()
+  })
+
+  it('omits Refresh while the preview is unavailable', () => {
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    render(
+      <FilePreviewPage
+        gfsUri="gfs://main/secret"
+        fileName="secret.png"
+        fileKind="image"
+        byteLength={3}
+        unavailable
+      />
+    )
+
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
   })
 
   // R-4 (spec 18 §3.B.5): the preview tab must NOT close when access is revoked;
@@ -219,8 +345,8 @@ describe('FilePreviewPage', () => {
 
     // The bytes load and Copy is enabled.
     expect(await screen.findByAltText('Preview of secret.png')).toBeTruthy()
-    const copyBefore = screen.getByRole('button', { name: 'Copy image to clipboard' })
-    expect((copyBefore as HTMLButtonElement).disabled).toBe(false)
+    const copyBefore = screen.getByRole('button', { name: 'Copy content' })
+    await waitFor(() => expect((copyBefore as HTMLButtonElement).disabled).toBe(false))
 
     // The file is unshared out-of-band → the next focus re-check 403s.
     fireEvent.focus(window)
@@ -228,7 +354,8 @@ describe('FilePreviewPage', () => {
     // The image, Copy affordance, filename, and denial details are gone; the
     // tab remains mounted behind a generic unavailable shell.
     await waitFor(() => expect(screen.queryByAltText('Preview of secret.png')).toBeNull())
-    expect(screen.queryByRole('button', { name: 'Copy image to clipboard' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Copy content' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
     expect(screen.getByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
     expect(screen.queryByText(deniedMessage)).toBeNull()
     expect(screen.queryByText('secret.png')).toBeNull()

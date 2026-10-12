@@ -3,6 +3,7 @@ import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.j
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   EntityChangeStreamEvent,
+  GfsResourceDeepLinkEnvelope,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
@@ -142,6 +143,14 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
+    acknowledgeDeepLink: (id: number) => ipcRenderer.invoke('gfs:acknowledgeDeepLink', { id }),
+    onDeepLink: (callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, payload: GfsResourceDeepLinkEnvelope) => callback(payload)
+      ipcRenderer.on('gfs:deepLink', listener)
+      return () => ipcRenderer.off('gfs:deepLink', listener)
+    },
+    copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
     download: (uri: string) => ipcRenderer.invoke('gfs:download', { uri }),
     downloadPreview: (uri: string, maxBytes: number) =>

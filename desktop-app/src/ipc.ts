@@ -543,6 +543,12 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
   })
+  ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
+    assertTrustedSender(event)
+    const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
+    clipboard.writeText(result.url)
+    return result
+  })
   ipcMain.handle('gfs:download', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.downloadGfsUri(sanitizeString(payload?.uri))

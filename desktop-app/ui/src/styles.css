@@ -15239,13 +15239,28 @@ pre {
   opacity: 1;
 }
 
-.da-gfs-drive__header-actions {
+.da-gfs-resource-toolbar {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: var(--space-1);
   flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.da-gfs-resource-toolbar__button {
+  flex: 0 0 auto;
+}
+
+.da-gfs-resource-toolbar__button > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.da-gfs-drive__upload-input {
+  display: none;
 }
 
 .da-gfs-upload-status {
@@ -15827,6 +15842,19 @@ pre {
   border: 1px solid var(--table-frame-border);
   border-radius: var(--table-radius);
   background: var(--table-frame-bg);
+}
+
+.da-gfs-preview-content {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.da-gfs-preview-page > .da-gfs-resource-toolbar {
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--table-frame-border);
 }
 
 .da-gfs-image-preview-dialog__body,
@@ -16873,10 +16901,6 @@ pre {
   .da-gfs-drive__header.page-card__header {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .da-gfs-drive__header-actions {
-    justify-content: flex-end;
   }
 
   .da-gfs-drive__grid {

@@ -19,6 +19,8 @@ import {
   verifyDevIsolationRuntime,
 } from './devIsolation.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
+import { GFS_RESOURCE_DEEP_LINK_HOST, parseGfsResourceDeepLink } from './gfsDeepLinks.js'
+import { GfsResourceDeepLinkQueue } from './gfsResourceDeepLinkQueue.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
@@ -70,6 +72,7 @@ const appService = new AppService(
     : {}
 )
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
+const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
 const mcpOauthCompletionQueue = new McpOauthCompletionQueue(completion => {
@@ -258,6 +261,18 @@ ipcMain.handle('sandboxUi:acknowledgeDeepLink', (event, payload: { id?: unknown 
   if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid app deep-link id')
   sandboxUiDeepLinkQueue.acknowledge(id)
 })
+
+ipcMain.handle('gfs:listPendingDeepLinks', event => {
+  assertTrustedSender(event)
+  return { links: gfsResourceDeepLinkQueue.list() }
+})
+
+ipcMain.handle('gfs:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
+  assertTrustedSender(event)
+  const id = Number(payload?.id)
+  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid EvenDrive deep-link id')
+  gfsResourceDeepLinkQueue.acknowledge(id)
+})
 function focusMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isMinimized()) mainWindow.restore()
@@ -293,16 +308,30 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
   return true
 }
 
+function handleGfsResourceDeepLink(rawUrl: string): boolean {
+  const target = parseGfsResourceDeepLink(rawUrl)
+  if (!target) return false
+  const envelope = gfsResourceDeepLinkQueue.enqueue(target)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('gfs:deepLink', envelope)
+  }
+  requestMainWindow()
+  return true
+}
+
 const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   appProtocol: DESKTOP_SETUP_PROTOCOL,
   focusMainWindow,
   getWindow: () => mainWindow,
   handleSandboxUiDeepLink,
+  handleGfsResourceDeepLink,
+  gfsResourceDeepLinkHost: GFS_RESOURCE_DEEP_LINK_HOST,
   isRendererReady: () => mainWindowRendererReady,
   logout: () => appService.logout(),
   requestMainWindow,
   sandboxUiDeepLinkHost: SANDBOX_UI_DEEP_LINK_HOST,
   shouldAcceptSandboxUiProtocolLink,
+  shouldAcceptGfsResourceProtocolLink: rawUrl => parseGfsResourceDeepLink(rawUrl) !== null,
 })
 
 function registerCustomProtocols(): void {

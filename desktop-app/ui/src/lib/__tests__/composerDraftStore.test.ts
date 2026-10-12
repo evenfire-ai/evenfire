@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  claimPendingNewChatDraft,
   clearComposerDraft,
   clearComposerDraftAfterSend,
   getComposerDraft,
   resetComposerDraftStore,
   setComposerDraft,
+  setPendingResourceComposerDraft,
   subscribeComposerDraft,
 } from '../composerDraftStore'
 
@@ -28,6 +30,28 @@ describe('composerDraftStore', () => {
   it('keys a null chatId under the shared no-chat bucket', () => {
     setComposerDraft(null, 'pending')
     expect(getComposerDraft(null)).toBe('pending')
+  })
+
+  it('moves a pending resource prefill into the first selected agent bucket', () => {
+    setPendingResourceComposerDraft('gfs://main/resource')
+
+    expect(getComposerDraft(null)).toBe('gfs://main/resource')
+    expect(getComposerDraft(null, 'agent-a')).toBe('gfs://main/resource')
+    claimPendingNewChatDraft('agent-a')
+
+    expect(getComposerDraft(null, 'agent-a')).toBe('gfs://main/resource')
+    expect(getComposerDraft(null, 'agent-b')).toBe('')
+    expect(getComposerDraft(null)).toBe('')
+  })
+
+  it('preserves an existing agent draft when claiming a pending resource prefill', () => {
+    setComposerDraft(null, 'existing draft', 'agent-a')
+    setPendingResourceComposerDraft('gfs://main/resource')
+
+    claimPendingNewChatDraft('agent-a')
+
+    expect(getComposerDraft(null, 'agent-a')).toBe('existing draft')
+    expect(getComposerDraft(null)).toBe('')
   })
 
   it('clears (deletes) the draft when set to an empty string', () => {

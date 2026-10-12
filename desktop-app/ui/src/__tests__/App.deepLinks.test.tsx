@@ -1,23 +1,32 @@
 // @vitest-environment jsdom
 import { type ReactNode, useEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import { resetComposerDraftStore } from '@lib/composerDraftStore'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
   openFilesTab,
+  openPreviewTab,
   openSettingsTab,
   setAppTabSavedRoutePath,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
-import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
+import type { GfsResourceDeepLinkEnvelope, SandboxUiDeepLinkEnvelope } from '@/App.types'
+import {
+  resolveResource,
+  resolvedDirectory,
+  resolvedFile,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
+import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
 
 // The universal tab store lives inside the controller; the mock reproduces that
 // contract — `navItem` is DERIVED from the store, the store is reactive, and nav
@@ -25,6 +34,12 @@ import type { DesktopCommandId } from '../../../src/desktopCommands'
 // rationale.
 let forceControllerRender: () => void = () => {}
 type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
+
+function produceGfsResourceDeepLink(uri: string): GfsResourceDeepLinkEnvelope {
+  const target = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
+  if (!target) throw new Error('The shared producer rejected the GFS resource URI fixture')
+  return new GfsResourceDeepLinkQueue().enqueue(target)
+}
 
 function useReactiveController(controller: AppController): AppController {
   const [, force] = useReducer((count: number) => count + 1, 0)
@@ -62,6 +77,7 @@ const appHeaderHarness = vi.hoisted(() => ({
 }))
 
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
+const filesPageHarness = vi.hoisted(() => ({ pendingGfsUri: null as string | null }))
 
 const commandPaletteHarness = vi.hoisted(() => ({
   props: null as null | {
@@ -142,6 +158,9 @@ vi.mock('@components/CommandPalette', () => ({
   },
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
+vi.mock('@components/ChatDrawer', () => ({
+  ChatDrawer: ({ children }: { children: ReactNode }) => <>{children}</>,
+}))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
@@ -169,8 +188,40 @@ vi.mock('@components/SidebarNav', () => ({
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
-vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
-vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
+vi.mock('@pages/FilePreviewPage', () => ({ FilePreviewPage: () => null }))
+vi.mock('@pages/ChatPage', async () => {
+  const { useEffect, useRef } = await import('react')
+  const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
+  const { useNavigationContext } = await import('@contexts/NavigationContext')
+  const { useComposerDraft } = await import('@hooks/useComposerDraft')
+  return {
+    ChatPage: () => {
+      const { composerFocusRequestId } = useChatComposerStateContext()
+      const { selectedAgent } = useNavigationContext()
+      const [draft] = useComposerDraft(null, selectedAgent ?? undefined)
+      const composerRef = useRef<HTMLTextAreaElement | null>(null)
+      useEffect(() => {
+        if (composerFocusRequestId > 0) composerRef.current?.focus()
+      }, [composerFocusRequestId])
+      return (
+        <textarea
+          data-testid="chat-page-surface"
+          data-composer-focus-request-id={composerFocusRequestId}
+          data-composer-draft={draft}
+          ref={composerRef}
+          value={draft}
+          readOnly
+        />
+      )
+    },
+  }
+})
+vi.mock('@pages/FilesPage', () => ({
+  FilesPage: (props: { pendingGfsUri?: string | null }) => {
+    filesPageHarness.pendingGfsUri = props.pendingGfsUri ?? null
+    return null
+  },
+}))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
 vi.mock('@pages/SandboxUiPage', () => ({
   SandboxUiPage: (props: NonNullable<typeof sandboxUiPageHarness.props>) => {
@@ -330,6 +381,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     isHostAccessBlocked: vi.fn(() => false),
     handleSelectChatAgent,
     handleNavSelect,
+    openFilesSection: vi.fn(),
     handleLogout: vi.fn(),
     pushToast: vi.fn(),
     setStatus: noop,
@@ -368,11 +420,14 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
 describe('App deep-link orchestration', () => {
   let currentController: AppController
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
+  let emitGfsDeepLink: ((link: GfsResourceDeepLinkEnvelope) => void) | null
   let emitCommand: ((commandId: DesktopCommandId, source?: 'host' | 'sandbox') => void) | null
   const clearPendingDeepLinks = vi.fn().mockResolvedValue(undefined)
   const acknowledgeDeepLink = vi.fn().mockResolvedValue(undefined)
   const listApps = vi.fn().mockResolvedValue({ apps: [] })
   const listPendingDeepLinks = vi.fn().mockResolvedValue({ links: [] })
+  const acknowledgeGfsDeepLink = vi.fn().mockResolvedValue(undefined)
+  const listPendingGfsDeepLinks = vi.fn().mockResolvedValue({ links: [] })
   const closeSandboxUi = vi.fn().mockResolvedValue(undefined)
   // Route-persistence read (mini-spec 05). Defaults to "on the default route"
   // (null) so unrelated launch/deactivation tests behave exactly as before;
@@ -401,20 +456,25 @@ describe('App deep-link orchestration', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    resetComposerDraftStore()
     confirmDialogHarness.props = null
     confirmDialogHarness.mountedCount = 0
     appHeaderHarness.props = null
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
+    filesPageHarness.pendingGfsUri = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
+    acknowledgeGfsDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
     listPendingDeepLinks.mockResolvedValue({ links: [] })
+    listPendingGfsDeepLinks.mockResolvedValue({ links: [] })
     closeSandboxUi.mockResolvedValue(undefined)
     getSandboxUiLocation.mockResolvedValue(null)
     emitDeepLink = null
+    emitGfsDeepLink = null
     emitCommand = null
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
@@ -446,8 +506,85 @@ describe('App deep-link orchestration', () => {
             return vi.fn()
           }),
         },
+        gfs: {
+          acknowledgeDeepLink: acknowledgeGfsDeepLink,
+          listPendingDeepLinks: listPendingGfsDeepLinks,
+          onDeepLink: vi.fn((callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
+            emitGfsDeepLink = callback
+            return vi.fn()
+          }),
+        },
       } as unknown as Window['clerum'],
     })
+  })
+
+  it('retains a cold resource link through authentication and bootstrap readiness', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const link = produceGfsResourceDeepLink(uri)
+    listPendingGfsDeepLinks.mockResolvedValueOnce({ links: [link] })
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      isAuthenticated: false,
+      authenticatedPrincipalIdentity: null,
+    } as Partial<AppController>)
+    const { rerender } = render(<App />)
+
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalledOnce())
+    expect(currentController.openFilesSection).not.toHaveBeenCalled()
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: true,
+      isAuthenticated: true,
+      authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
+    } as Partial<AppController>)
+    rerender(<App />)
+    expect(currentController.openFilesSection).not.toHaveBeenCalled()
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      isAuthenticated: true,
+      authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
+      openFilesSection: vi.fn((uri: string) => {
+        currentController.setWorkspaceTabs(state =>
+          openFilesTab(state, { id: 'cold-deep-link-files', path: uri })
+        )
+      }),
+    } as Partial<AppController>)
+    rerender(<App />)
+
+    await waitFor(() => expect(currentController.openFilesSection).toHaveBeenCalledWith(uri))
+    await waitFor(() => expect(filesPageHarness.pendingGfsUri).toBe(uri))
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id)
+  })
+
+  it('routes a warm resource link to the active Files destination and acknowledges it', async () => {
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      isAuthenticated: true,
+      authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
+      openFilesSection: vi.fn((uri: string) => {
+        currentController.setWorkspaceTabs(state =>
+          openFilesTab(state, { id: 'warm-deep-link-files', path: uri })
+        )
+      }),
+    } as Partial<AppController>)
+    render(<App />)
+    const link = produceGfsResourceDeepLink('gfs://main/abcdefabcdefabcdefabcdefabcdefab')
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+
+    act(() => {
+      emitGfsDeepLink?.(link)
+    })
+
+    await waitFor(() => expect(currentController.openFilesSection).toHaveBeenCalledWith(link.uri))
+    await waitFor(() => expect(filesPageHarness.pendingGfsUri).toBe(link.uri))
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id)
   })
 
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so
@@ -571,6 +708,90 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith('alpha', {
       selectLatest: false,
     })
+  })
+
+  it.each(['folder route', 'file preview'])(
+    'seeds the new chat composer from an active %s',
+    async source => {
+      const resource =
+        source === 'folder route'
+          ? await resolveResource(
+              resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+            )
+          : await resolveResource(
+              resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'Quarterly report.md')
+            )
+      const workspaceTabs =
+        source === 'folder route'
+          ? openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+              id: 'files-tab',
+              path: resource.gfsUri,
+            })
+          : openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
+              id: 'preview-tab',
+              title: resource.name,
+              gfsUri: resource.gfsUri,
+              fileKind: 'markdown',
+              byteLength: 4,
+            })
+
+      const sendMessage = vi.fn().mockResolvedValue(undefined)
+      currentController = makeController({
+        initialExperienceLoading: false,
+        selectedAgent: 'alpha',
+        workspaceTabs,
+        handleSendAgentMessage: sendMessage,
+      } as Partial<AppController>)
+      const view = render(<App />)
+
+      act(() => emitCommand?.('chat.newTab'))
+
+      const composerSurface = screen
+        .getAllByTestId('chat-page-surface')
+        .find(element => element.getAttribute('data-composer-draft') === resource.gfsUri) as
+        | HTMLTextAreaElement
+        | undefined
+      if (!composerSurface)
+        throw new Error('The rendered composer did not receive the resource draft')
+      expect(composerSurface.getAttribute('data-composer-draft')).toBe(resource.gfsUri)
+      expect(
+        Number(composerSurface.getAttribute('data-composer-focus-request-id'))
+      ).toBeGreaterThan(0)
+      view.rerender(<App />)
+      await waitFor(() => expect(composerSurface.value).toBe(resource.gfsUri))
+      expect(sendMessage).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps the resource draft and focuses the composer when ChatPage selects an agent', async () => {
+    const resource = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'files-tab',
+      path: resource.gfsUri,
+    })
+    const sendMessage = vi.fn().mockResolvedValue(undefined)
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs,
+      handleSendAgentMessage: sendMessage,
+    } as Partial<AppController>)
+    render(<App />)
+
+    act(() => emitCommand?.('chat.newTab'))
+    const composerSurface = screen.getByTestId('chat-page-surface') as HTMLTextAreaElement
+    expect(composerSurface.value).toBe(resource.gfsUri)
+
+    // ChatPage selects the latest agent after the route opens; model that same
+    // state transition through the controller's existing selection action.
+    act(() => currentController.handleSelectChatAgent('alpha', { selectLatest: false }))
+
+    await waitFor(() => expect(composerSurface.value).toBe(resource.gfsUri))
+    await waitFor(() =>
+      expect((document.activeElement as HTMLElement).dataset.testid).toBe('chat-page-surface')
+    )
+    expect(sendMessage).not.toHaveBeenCalled()
   })
 
   it('keeps global and contextual search commands on distinct host surfaces', () => {
@@ -773,6 +994,8 @@ describe('App deep-link orchestration', () => {
   })
 
   afterEach(() => {
+    cleanup()
+    resetComposerDraftStore()
     vi.useRealTimers()
   })
 

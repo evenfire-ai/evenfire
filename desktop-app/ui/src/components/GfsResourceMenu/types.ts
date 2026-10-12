@@ -1,5 +1,8 @@
+import type { GfsResourceAction } from '@lib/gfsResourceActions'
+
 export type GfsResourceMenuProps = {
   resourceName: string
+  actions?: GfsResourceAction[]
   onManage?: () => void
   onCopyLink?: () => void
   onCreateFolder?: () => void

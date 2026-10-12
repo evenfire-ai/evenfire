@@ -10,6 +10,7 @@ type Listener = () => void
 
 /** Legacy no-chat key retained for callers that do not yet provide an agent. */
 const NO_CHAT_DRAFT_KEY = '__no_chat__'
+const PENDING_RESOURCE_DRAFT_KEY = '__pending_resource_new_chat__'
 
 const drafts = new Map<string, string>()
 let revision = 0
@@ -33,11 +34,34 @@ export function getComposerDraftRevision(chatId: string | null, agentRef?: strin
 }
 
 export function getComposerDraft(chatId: string | null, agentRef?: string): string {
-  return drafts.get(keyFor(chatId, agentRef)) ?? ''
+  const key = keyFor(chatId, agentRef)
+  const value = drafts.get(key)
+  if (value !== undefined) return value
+  // A resource prefill may be created before ChatPage selects its initial agent.
+  // Keep that specific pending value visible until the composer claims it.
+  return !chatId ? (drafts.get(PENDING_RESOURCE_DRAFT_KEY) ?? '') : ''
+}
+
+export function setPendingResourceComposerDraft(value: string): void {
+  setDraftByKey(PENDING_RESOURCE_DRAFT_KEY, value)
+}
+
+/** Move a pre-agent resource draft into the first selected agent's bucket. */
+export function claimPendingNewChatDraft(agentRef: string): void {
+  const agent = agentRef.trim()
+  if (!agent) return
+  const pending = drafts.get(PENDING_RESOURCE_DRAFT_KEY)
+  if (!pending) return
+  const agentKey = keyFor(null, agent)
+  if (!drafts.has(agentKey)) setComposerDraft(null, pending, agent)
+  setDraftByKey(PENDING_RESOURCE_DRAFT_KEY, '')
 }
 
 export function setComposerDraft(chatId: string | null, value: string, agentRef?: string): void {
-  const key = keyFor(chatId, agentRef)
+  setDraftByKey(keyFor(chatId, agentRef), value)
+}
+
+function setDraftByKey(key: string, value: string): void {
   if ((drafts.get(key) ?? '') === value) return
   revisions.set(key, ++revision)
   if (value) drafts.set(key, value)

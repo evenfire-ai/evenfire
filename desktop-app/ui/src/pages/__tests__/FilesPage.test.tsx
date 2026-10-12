@@ -3,10 +3,19 @@ import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import {
+  childView,
+  listChildrenPage,
+  resolveResource,
+  resolvedDirectory,
+  resolvedFile,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { Tone } from '@/uiTypes'
+import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilesPage } from '../FilesPage'
 
 const hookMock = vi.hoisted(() => ({
@@ -46,6 +55,7 @@ function baseController() {
     isFetchingMore: false,
     loadMoreAccessible: vi.fn(),
     loadMore: vi.fn(),
+    refreshCurrentLocation: vi.fn(async () => true),
     openUri: vi.fn(),
     openResource: vi.fn(),
     openChild: vi.fn(),
@@ -92,17 +102,38 @@ function baseController() {
 
 function renderFilesPage(
   pushToast?: (message: string, tone: Tone) => void,
-  onOpenPreview?: (preview: unknown) => void
+  onOpenPreview?: (preview: unknown) => void,
+  pendingGfsUri?: string | null,
+  onPendingGfsUriHandled?: () => void
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
-      <FilesPage pushToast={pushToast} onOpenPreview={onOpenPreview} />
+      <FilesPage
+        pushToast={pushToast}
+        onOpenPreview={onOpenPreview}
+        pendingGfsUri={pendingGfsUri}
+        onPendingGfsUriHandled={onPendingGfsUriHandled}
+      />
     </QueryClientProvider>
   )
 }
 
+function uploadInput(): HTMLInputElement {
+  const input = document.querySelector<HTMLInputElement>('input[aria-label="Upload file"]')
+  if (!input) throw new Error('Upload file input is unavailable')
+  return input
+}
+
 async function openManageDialog(resourceName: string) {
+  const toolbar = screen.queryByRole('toolbar', { name: 'EvenDrive actions' })
+  const toolbarShare = toolbar ? within(toolbar).queryByRole('button', { name: 'Share' }) : null
+  if (toolbarShare) {
+    await act(async () => {
+      fireEvent.click(toolbarShare)
+    })
+    return
+  }
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
@@ -120,6 +151,18 @@ async function openManageDialog(resourceName: string) {
 }
 
 async function chooseResourceAction(resourceName: string, actionName: string) {
+  const toolbar = screen.queryByRole('toolbar', { name: 'EvenDrive actions' })
+  const toolbarAction = toolbar
+    ? within(toolbar).queryByRole('button', {
+        name: actionName === 'Move to…' ? 'Move to' : actionName,
+      })
+    : null
+  if (toolbarAction) {
+    await act(async () => {
+      fireEvent.click(toolbarAction)
+    })
+    return
+  }
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
@@ -184,6 +227,79 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     expect(screen.getByText('This folder or file is no longer available.')).toBeTruthy()
+  })
+
+  it('resolves a seeded folder route to the exact resource in Files', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Linked folder')
+    )
+    const folderCrumb: GfsCrumb = { ...folder, kind: 'directory', bytes: folder.bytes ?? 0 }
+    const openUri = vi.fn(async () => {
+      setCrumbs([folderCrumb])
+      return folderCrumb
+    })
+    const handled = vi.fn()
+    let setCrumbs: (crumbs: GfsCrumb[]) => void = () => undefined
+    function useSeededFolderController() {
+      const [crumbs, updateCrumbs] = useState<GfsCrumb[]>([])
+      setCrumbs = updateCrumbs
+      return {
+        ...baseController(),
+        crumbs,
+        current: crumbs.at(-1) ?? null,
+        openUri,
+        restoreCrumbs: updateCrumbs,
+      }
+    }
+    hookMock.useGfsBrowserController.mockImplementation(useSeededFolderController)
+
+    renderFilesPage(undefined, undefined, folder.gfsUri, handled)
+
+    expect(await screen.findByRole('button', { name: 'Linked folder' })).toBeTruthy()
+    expect(openUri).toHaveBeenCalledWith(folder.gfsUri)
+    expect(handled).toHaveBeenCalledOnce()
+  })
+
+  it('resolves a seeded file route and downloads that exact unpreviewable file', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'report.txt')
+    )
+    const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download, getPathForFile: vi.fn() } },
+    })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:gfs-download'),
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    const openUri = vi.fn(async () => {
+      setCrumbs([fileCrumb])
+      return fileCrumb
+    })
+    const handled = vi.fn()
+    let setCrumbs: (crumbs: GfsCrumb[]) => void = () => undefined
+    function useSeededFileController() {
+      const [crumbs, updateCrumbs] = useState<GfsCrumb[]>([])
+      setCrumbs = updateCrumbs
+      return {
+        ...baseController(),
+        crumbs,
+        current: crumbs.at(-1) ?? null,
+        openUri,
+        restoreCrumbs: updateCrumbs,
+      }
+    }
+    hookMock.useGfsBrowserController.mockImplementation(useSeededFileController)
+
+    renderFilesPage(undefined, undefined, file.gfsUri, handled)
+
+    expect(await screen.findByRole('heading', { name: 'report.txt', level: 3 })).toBeTruthy()
+    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
+    expect(openUri).toHaveBeenCalledWith(file.gfsUri)
+    expect(handled).toHaveBeenCalledOnce()
   })
 
   it.each([
@@ -705,37 +821,53 @@ describe('FilesPage', () => {
   })
 
   it('shows top-right create and upload actions for the open writable folder', async () => {
+    const gfsUri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const folderName = 'Résumé # ? % folder'
+    const current = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', folderName)
+    )
+    const copyDeepLink = vi.fn(async () => ({
+      url: buildGfsResourceWebLink('https://profile.example', gfsUri),
+    }))
+    const writeText = vi.fn(async () => undefined)
+    const refreshCurrentLocation = vi.fn(async () => true)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { copyDeepLink, getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`) } },
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
     const createFileFromPath = vi.fn(async () => undefined)
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder-1',
-        name: 'Team folder',
-        kind: 'directory',
-        version: 7,
-      },
-      affordances: {
-        held: ['read', 'write'],
-        canDelegate: false,
-        grantableBits: [],
-        canCreateShare: false,
-      },
+      refreshCurrentLocation,
+      current,
+      affordances: delegationAffordances(new Set(['read', 'write']), false),
       createFileFromPath,
     })
 
     renderFilesPage()
 
-    const toolbar = document.querySelector('.da-gfs-drive__header-actions')
+    const toolbar = document.querySelector('.da-gfs-resource-toolbar')
     const newFolderButton = screen.getByRole('button', { name: 'New folder' })
     const uploadButton = screen.getByRole('button', { name: 'Upload file' })
     expect(toolbar?.contains(newFolderButton)).toBe(true)
     expect(toolbar?.contains(uploadButton)).toBe(true)
-    expect(screen.queryByRole('button', { name: 'Open EvenDrive link' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Copy content' })).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Team folder' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
-    expect(screen.getByRole('dialog', { name: 'Open EvenDrive link' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(refreshCurrentLocation).toHaveBeenCalledOnce())
+    fireEvent.click(screen.getByRole('button', { name: 'Copy link' }))
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy route' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(gfsUri))
+
+    fireEvent.click(screen.getByRole('button', { name: `Options for ${folderName}` }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open route' }))
+    expect(screen.getByRole('dialog', { name: 'Open route' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive link dialog' }))
 
     fireEvent.click(newFolderButton)
@@ -749,11 +881,11 @@ describe('FilesPage', () => {
 
     const upload = new File(['desktop file'], 'notes.md', { type: 'text/markdown' })
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Upload file'), { target: { files: [upload] } })
+      fireEvent.change(uploadInput(), { target: { files: [upload] } })
       await Promise.resolve()
     })
 
-    expect(createFileFromPath).toHaveBeenCalledWith('folder-1', 'notes.md', '/tmp/notes.md')
+    expect(createFileFromPath).toHaveBeenCalledWith(current.resourceId, 'notes.md', '/tmp/notes.md')
   })
 
   it('hides top-right create and upload actions without write access to the open folder', () => {
@@ -955,7 +1087,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    fireEvent.change(screen.getByLabelText('Upload file'), {
+    fireEvent.change(uploadInput(), {
       target: { files: [new File(['report'], 'report.txt', { type: 'text/plain' })] },
     })
 
@@ -1487,7 +1619,7 @@ describe('FilesPage', () => {
     await waitFor(() => expect(restoreCrumbs).toHaveBeenCalledWith([]))
     expect(screen.getByRole('button', { name: 'report.txt' })).toBeTruthy()
     expect(screen.queryByText(/Preview this file again/)).toBeNull()
-    expect(screen.getByRole('button', { name: 'Options for Shared with me' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
   })
 
   it('renames the current file inline from its title menu', async () => {
@@ -1514,7 +1646,7 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
 
     const renameForm = screen.getByRole('form', { name: 'Rename resource' })
     expect(screen.getAllByRole('form', { name: 'Rename resource' })).toHaveLength(1)
@@ -1678,7 +1810,11 @@ describe('FilesPage', () => {
     const picker = await screen.findByRole('combobox', { name: 'Add people, teams, or agents' })
     fireEvent.focus(picker)
     fireEvent.click(await screen.findByRole('option', { name: /chatllm/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Share folder Team folder' })).getByRole('button', {
+        name: 'Share',
+      })
+    )
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read'], true)
@@ -1744,7 +1880,11 @@ describe('FilesPage', () => {
     })
     fireEvent.focus(subjectPicker)
     fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Share folder Team folder' })).getByRole('button', {
+        name: 'Share',
+      })
+    )
 
     // handleGrant issues the grant then MUST list-after-write (the grant PUT
     // returns no ids). Deleting `await ctrl.refreshGrants()` must fail here.
@@ -2875,7 +3015,11 @@ describe('FilesPage', () => {
     fireEvent.focus(subjectPicker)
     fireEvent.click(await screen.findByRole('option', { name: /Test Two/ }))
     fireEvent.click(await screen.findByRole('option', { name: /Test Three/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Share folder Team folder' })).getByRole('button', {
+        name: 'Share',
+      })
+    )
 
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith(['user:user-2', 'user:user-3'], ['read'], true)
@@ -3119,7 +3263,7 @@ describe('FilesPage', () => {
     )
     const { rerender } = render(makeElement())
 
-    await chooseResourceAction('Product', 'Move to…')
+    await chooseResourceAction('Product', 'Move to')
     expect(await screen.findByRole('dialog', { name: 'Move folder Product' })).toBeTruthy()
 
     controllerState.accessState = 'revoked'
@@ -3497,7 +3641,7 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
     })
     // Move is not affordance-gated (authority is parent-relative, server-side).
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
 
     // The dialog starts at the current folder and lists its subfolders, but
     // never the moved resource itself.
@@ -3970,19 +4114,15 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue({ ...baseController(), openUri })
     renderFilesPage()
 
-    expect(screen.queryByRole('button', { name: 'Open EvenDrive link' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open route' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open route' })
     fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
       target: { value: 'gfs://main/resource-1' },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
 
     await waitFor(() => expect(openUri).toHaveBeenCalledWith('gfs://main/resource-1'))
-    await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
-    )
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open route' })).toBeNull())
   })
 
   it('opens a preview tab for a markdown file (no mimeType in the descriptor)', () => {
@@ -4078,9 +4218,8 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockImplementation(useResolvedFileController)
 
     renderFilesPage(undefined, onOpenPreview)
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
-    const linkDialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open route' }))
+    const linkDialog = await screen.findByRole('dialog', { name: 'Open route' })
     fireEvent.change(within(linkDialog).getByLabelText('EvenDrive link'), {
       target: { value: 'gfs://main/svg-1' },
     })
@@ -4096,10 +4235,8 @@ describe('FilesPage', () => {
         version: 1,
       })
     )
-    await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
-    )
-    expect(screen.getByRole('button', { name: 'Options for Shared with me' })).toBeTruthy()
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open route' })).toBeNull())
+    expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
   })
 
   it('navigates through breadcrumbs and resets to Shared with me', async () => {
@@ -4150,16 +4287,26 @@ describe('FilesPage', () => {
       canCreateShare: false,
     }
     const parentViewRowOptions = [
+      'Copy route',
+      'Open route',
+      'Rename',
+      'Move to',
       'Share',
       'Open folder',
-      'Open EvenDrive link',
-      'Rename',
-      'Move to…',
       'Delete',
     ]
-    // The active folder is already open, so its menu is the row menu minus the
-    // navigation item — exactly the pre-existing beside-the-breadcrumb menu.
-    const activeFolderOptions = parentViewRowOptions.filter(option => option !== 'Open folder')
+    // The active folder menu uses the same action descriptors as its toolbar.
+    const activeFolderOptions = [
+      'Refresh',
+      'Copy route',
+      'Open route',
+      'Rename',
+      'Move to',
+      'New folder',
+      'Upload file',
+      'Share',
+      'Delete',
+    ]
 
     // Phase 1 — the parent view: a fully-permissioned folder row's ⋯ menu.
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -4290,56 +4437,44 @@ describe('FilesPage', () => {
       activeFolderOptions
     )
 
-    // "Open EvenDrive link" is present and opens the link dialog.
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
-    expect(screen.getByRole('dialog', { name: 'Open EvenDrive link' })).toBeTruthy()
+    // The active folder's menu uses the same Open route action as the toolbar.
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Actions for Nested' })).getByRole('menuitem', {
+        name: 'Open route',
+      })
+    )
+    expect(screen.getByRole('dialog', { name: 'Open route' })).toBeTruthy()
   })
 
   it('opens nested folders and exposes open and copy actions in the resource menu', async () => {
     const openChild = vi.fn()
-    const writeText = vi.fn(async () => undefined)
-    Object.defineProperty(navigator, 'clipboard', {
+    const parent = await resolveResource(
+      resolvedDirectory('22222222222222222222222222222222', 'Product')
+    )
+    const nestedFolderUri = 'gfs://main/11111111111111111111111111111111'
+    const [nestedFolder] = (
+      await listChildrenPage([
+        childView('11111111111111111111111111111111', 'Nested', 'directory', {
+          parentResourceId: parent.resourceId,
+          path: '/Product/Nested',
+        }),
+      ])
+    ).items
+    if (!nestedFolder) throw new Error('The GFS producer did not return the nested folder fixture')
+    const copyDeepLink = vi.fn(async () => ({
+      url: buildGfsResourceWebLink('https://profile.example', nestedFolderUri),
+    }))
+    Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { writeText },
+      value: { gfs: { copyDeepLink, getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`) } },
     })
-    const nestedFolder = {
-      resourceId: 'nested-1',
-      rid: 'nested-1',
-      gfsUri: 'gfs://main/nested-1',
-      drive: 'main',
-      parentResourceId: 'folder-1',
-      name: 'Nested',
-      kind: 'directory' as const,
-      path: '/Product/Nested',
-      version: 2,
-      bytes: 0,
-    }
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder-1',
-        name: 'Product',
-        kind: 'directory',
-        version: 1,
-      },
-      crumbs: [
-        {
-          resourceId: 'folder-1',
-          gfsUri: 'gfs://main/folder-1',
-          name: 'Product',
-          kind: 'directory',
-          version: 1,
-        },
-      ],
+      current: parent,
+      crumbs: [parent],
       items: [nestedFolder],
-      rowAffordancesResourceId: 'nested-1',
-      rowAffordances: {
-        held: ['read', 'write', 'manage_acl'],
-        canDelegate: false,
-        grantableBits: [],
-        canCreateShare: false,
-      },
+      rowAffordancesResourceId: nestedFolder.resourceId,
+      rowAffordances: delegationAffordances(new Set(['read', 'write', 'manage_acl']), false),
       openChild,
     })
     renderFilesPage()
@@ -4348,10 +4483,10 @@ describe('FilesPage', () => {
     expect(openChild).toHaveBeenCalledWith(nestedFolder)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    const shareItem = screen.getByRole('menuitem', { name: 'Share' })
-    await waitFor(() => expect(document.activeElement).toBe(shareItem))
-    fireEvent.keyDown(shareItem, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open folder' }))
+    const firstItem = screen.getAllByRole('menuitem')[0]!
+    await waitFor(() => expect(document.activeElement).toBe(firstItem))
+    fireEvent.keyDown(firstItem, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open route' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder' }))
     expect(openChild).toHaveBeenCalledTimes(2)
 
@@ -4362,7 +4497,7 @@ describe('FilesPage', () => {
         name: 'Copy link',
       })
     )
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith('gfs://main/nested-1'))
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(nestedFolder.gfsUri))
   })
 
   it('clears a cancelled create-folder draft before reopening the form', async () => {

@@ -9,6 +9,7 @@ import {
   NotificationsContext,
   WorkspaceActionsProvider,
 } from '@contexts/index'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { ChatDrawer } from '@components/ChatDrawer'
@@ -40,6 +41,7 @@ import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import {
   authoritativeGfsStatus,
   expireGfsPreviewTabs,
@@ -105,7 +107,11 @@ import type {
 import { SettingsPage } from '@pages/SettingsPage'
 import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
-import type { PendingSandboxUiDeepLink, SandboxUiDeepLinkEnvelope } from '@/App.types'
+import type {
+  GfsResourceDeepLinkEnvelope,
+  PendingSandboxUiDeepLink,
+  SandboxUiDeepLinkEnvelope,
+} from '@/App.types'
 import type { ActiveSandboxUiApp, NavItem, ThemeMode } from '@/uiTypes'
 import {
   type DesktopCommandId,
@@ -330,6 +336,10 @@ export function App() {
   const [pendingSandboxUiDeepLinks, setPendingSandboxUiDeepLinks] = React.useState<
     PendingSandboxUiDeepLink[]
   >([])
+  const [pendingGfsDeepLinks, setPendingGfsDeepLinks] = React.useState<
+    GfsResourceDeepLinkEnvelope[]
+  >([])
+  const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
   // is its projection). App composes the strip/reveal/reconcile over it.
@@ -391,6 +401,8 @@ export function App() {
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
   const launchingSandboxUiDeepLinkRef = React.useRef<PendingSandboxUiDeepLinkLaunch | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
+  const pendingGfsDeepLinksRef = React.useRef<GfsResourceDeepLinkEnvelope[]>([])
+  const processingGfsDeepLinkIdRef = React.useRef<number | null>(null)
   const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
@@ -557,6 +569,7 @@ export function App() {
   const handleNewWorkspaceChatTab = React.useCallback(() => {
     vm.clearAppsPicker()
     const agentRef = vm.selectedAgent
+    prefillNewConversationWithGfsResource(vm.activeWorkspaceTab, agentRef)
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
       // chat in the drawer without tearing the live embed down.
@@ -564,9 +577,8 @@ export function App() {
       if (agentRef) {
         vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
       }
-      // With no agent yet there is nothing to seed, so this INTENTIONALLY writes
-      // nothing to the store — opening/focusing the drawer is the whole action
-      // (equivalent to the old blank-seed). Do not "fix" this to always append.
+      // A resource route stays in the pending new-chat draft bucket until the
+      // composer selects an agent; a non-resource route leaves that bucket alone.
     } else {
       // No divertable drawer: full-screen chat route so the new chat is reachable.
       leaveSandboxForChat()
@@ -584,8 +596,18 @@ export function App() {
     setWorkspaceTabs,
     vm.clearAppsPicker,
     vm.handleSelectChatAgent,
+    vm.activeWorkspaceTab,
     vm.selectedAgent,
   ])
+
+  const handleOpenGfsRoute = React.useCallback(() => {
+    setGfsRouteDialogRequestId(value => value + 1)
+    vm.openFilesSection(null)
+  }, [vm.openFilesSection])
+
+  const handleGfsRouteDialogRequestHandled = React.useCallback((requestId: number) => {
+    setGfsRouteDialogRequestId(current => (current === requestId ? 0 : current))
+  }, [])
 
   const openChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(true)
@@ -1574,6 +1596,34 @@ export function App() {
     setPendingSandboxUiDeepLinks(next)
   }, [])
 
+  const setPendingGfsDeepLinkState = React.useCallback((next: GfsResourceDeepLinkEnvelope[]) => {
+    pendingGfsDeepLinksRef.current = next
+    setPendingGfsDeepLinks(next)
+  }, [])
+
+  const enqueueGfsDeepLink = React.useCallback(
+    (value: GfsResourceDeepLinkEnvelope) => {
+      const uri = normalizeGfsResourceUri(value?.uri)
+      if (!Number.isSafeInteger(value?.id) || value.id <= 0 || !uri) return
+      if (pendingGfsDeepLinksRef.current.some(item => item.id === value.id)) return
+      setPendingGfsDeepLinkState([...pendingGfsDeepLinksRef.current, { id: value.id, uri }])
+    },
+    [setPendingGfsDeepLinkState]
+  )
+
+  const acknowledgeGfsDeepLink = React.useCallback(
+    async (id: number) => {
+      setPendingGfsDeepLinkState(pendingGfsDeepLinksRef.current.filter(item => item.id !== id))
+      if (processingGfsDeepLinkIdRef.current === id) processingGfsDeepLinkIdRef.current = null
+      try {
+        await window.clerum.gfs?.acknowledgeDeepLink?.(id)
+      } catch {
+        // The route is open; main can safely replay its unacknowledged queue entry later.
+      }
+    },
+    [setPendingGfsDeepLinkState]
+  )
+
   const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId?: number) => {
     if (linkId === undefined || processingSandboxUiDeepLinkIdRef.current === linkId) {
       processingSandboxUiDeepLinkIdRef.current = null
@@ -1729,6 +1779,59 @@ export function App() {
       .catch(() => undefined)
     return unsubscribe
   }, [setPendingSandboxUiDeepLinkState])
+
+  React.useEffect(() => {
+    let cancelled = false
+    const unsubscribe = window.clerum.gfs?.onDeepLink?.(enqueueGfsDeepLink)
+    const pendingLinks = window.clerum.gfs?.listPendingDeepLinks?.()
+    void pendingLinks
+      ?.then(result => {
+        if (!cancelled) result?.links.forEach(enqueueGfsDeepLink)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [enqueueGfsDeepLink])
+
+  React.useEffect(() => {
+    if (
+      bootSplashLoading ||
+      !vm.isAuthenticated ||
+      !vm.authenticatedPrincipalIdentity ||
+      processingGfsDeepLinkIdRef.current !== null
+    ) {
+      return
+    }
+    const pending = pendingGfsDeepLinksRef.current[0]
+    if (!pending) return
+    const uri = normalizeGfsResourceUri(pending.uri)
+    if (!uri) {
+      void acknowledgeGfsDeepLink(pending.id)
+      vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
+      return
+    }
+    processingGfsDeepLinkIdRef.current = pending.id
+    try {
+      vm.openFilesSection(uri)
+      void acknowledgeGfsDeepLink(pending.id)
+    } catch (error) {
+      processingGfsDeepLinkIdRef.current = null
+      vm.pushToast(
+        `Could not open EvenDrive link: ${error instanceof Error ? error.message : String(error)}`,
+        'error'
+      )
+    }
+  }, [
+    acknowledgeGfsDeepLink,
+    bootSplashLoading,
+    pendingGfsDeepLinks,
+    vm.authenticatedPrincipalIdentity,
+    vm.isAuthenticated,
+    vm.openFilesSection,
+    vm.pushToast,
+  ])
 
   // Name the live app tab after the embed's `document.title` (mini-spec 06 §2).
   // Only the tab whose embed is live (`liveSandboxUiTabIdRef`) is renamed, and
@@ -2934,6 +3037,8 @@ export function App() {
                                     remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                     onLocationChange={handleFilesLocationChange}
                                     onOpenPreview={vm.openPreviewSection}
+                                    routeDialogRequestId={gfsRouteDialogRequestId}
+                                    onRouteDialogRequestHandled={handleGfsRouteDialogRequestHandled}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.preview && activePreviewPayload && (
@@ -2946,6 +3051,8 @@ export function App() {
                                     byteLength={activePreviewPayload.byteLength}
                                     reloadVersion={activePreviewPayload.reloadVersion}
                                     unavailable={activePreviewPayload.unavailable}
+                                    pushToast={vm.pushToast}
+                                    onOpenRoute={handleOpenGfsRoute}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}

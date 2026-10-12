@@ -10,6 +10,7 @@ export type GfsMarkdownPreviewBodyProps = {
   fileName: string
   gfsUri: string
   onDownloadError?: (error: unknown) => void
+  onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
   titleId?: string
   headerActions?: ReactNode
   headingLevel?: 2 | 3
