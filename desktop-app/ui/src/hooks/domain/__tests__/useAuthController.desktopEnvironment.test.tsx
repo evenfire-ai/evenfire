@@ -314,6 +314,34 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('reports verification failure after confirmation selects a newly saved profile', async () => {
+    const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linked)
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      ...linked,
+      rpcProxyBaseUrl: 'https://rpc-new.example.test',
+    })
+    const other = runtimeConfigModule!
+      .getDesktopRuntimeConfigState()
+      .options.find(
+        option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+      )!
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(other.id)
+    mocks.selectRuntimeConfigForHandoff.mockImplementationOnce(async (id, generation) => {
+      const selection = await nativeAppService!.selectRuntimeConfigForHandoff(id, generation)
+      mocks.getSessionGeneration.mockRejectedValueOnce(new Error('fixture IPC unavailable'))
+      return selection
+    })
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'Could not verify the desktop session. Try opening the link again.',
+      'error'
+    )
+  })
+
   it('refuses a confirmation save result for a different REST profile', async () => {
     const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
     render(<Probe />)

@@ -690,7 +690,8 @@ export function useAuthController({
         try {
           selectedSessionGeneration = await getSessionGeneration()
         } catch {
-          reportSessionChanged()
+          setPendingDesktopEnvironmentSetup(null)
+          setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
           return
         }
         if (selectedSessionGeneration !== selection.sessionGeneration) {
