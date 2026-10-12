@@ -5,8 +5,10 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
+import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { useAppController } from '@hooks/useAppController'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
+import type { GfsResourceActionId } from '@lib/gfsResourceActions'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -77,7 +79,10 @@ const appHeaderHarness = vi.hoisted(() => ({
 }))
 
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
-const filesPageHarness = vi.hoisted(() => ({ pendingGfsUri: null as string | null }))
+const filesPageHarness = vi.hoisted(() => ({
+  pendingGfsUri: null as string | null,
+  routeDialogRequestId: 0,
+}))
 
 const commandPaletteHarness = vi.hoisted(() => ({
   props: null as null | {
@@ -93,6 +98,11 @@ const sidebarHarness = vi.hoisted(() => ({
     toggleRequestId?: number
     collapsed?: boolean
     onCollapsedChange?: (next: boolean) => void
+    onGfsResourceAction?: (
+      resource: GfsBrowserChild,
+      actionId: GfsResourceActionId,
+      file?: File
+    ) => void
     availableSandboxUiApps?: SidebarLaunchApp[]
     onOpenSandboxUiApp?: (app: SidebarLaunchApp) => void
   },
@@ -217,8 +227,9 @@ vi.mock('@pages/ChatPage', async () => {
   }
 })
 vi.mock('@pages/FilesPage', () => ({
-  FilesPage: (props: { pendingGfsUri?: string | null }) => {
+  FilesPage: (props: { pendingGfsUri?: string | null; routeDialogRequestId?: number }) => {
     filesPageHarness.pendingGfsUri = props.pendingGfsUri ?? null
+    filesPageHarness.routeDialogRequestId = props.routeDialogRequestId ?? 0
     return null
   },
 }))
@@ -463,6 +474,7 @@ describe('App deep-link orchestration', () => {
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
     filesPageHarness.pendingGfsUri = null
+    filesPageHarness.routeDialogRequestId = 0
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
@@ -560,6 +572,31 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(currentController.openFilesSection).toHaveBeenCalledWith(uri))
     await waitFor(() => expect(filesPageHarness.pendingGfsUri).toBe(uri))
     expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id)
+  })
+
+  it('opens the existing route dialog from a sidebar row without selecting that row', async () => {
+    const resource = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Sidebar folder')
+    )
+    const openFilesSection = vi.fn((path: string | null) => {
+      currentController.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'sidebar-open-route-files', ...(path ? { path } : {}) })
+      )
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      openFilesSection,
+    } as Partial<AppController>)
+
+    render(<App />)
+
+    act(() => sidebarHarness.props?.onGfsResourceAction?.(resource, 'open-route'))
+
+    expect(openFilesSection).toHaveBeenCalledOnce()
+    expect(openFilesSection).toHaveBeenCalledWith(null)
+    expect(openFilesSection).not.toHaveBeenCalledWith(resource.gfsUri)
+    await waitFor(() => expect(filesPageHarness.routeDialogRequestId).toBe(1))
+    expect(filesPageHarness.pendingGfsUri).toBeNull()
   })
 
   it('routes a warm resource link to the active Files destination and acknowledges it', async () => {

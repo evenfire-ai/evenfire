@@ -616,6 +616,10 @@ export function App() {
 
   const handleSidebarGfsResourceAction = React.useCallback(
     (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => {
+      if (actionId === 'open-route') {
+        handleOpenGfsRoute()
+        return
+      }
       if (actionId === 'open-folder') {
         vm.openFilesSection(resource.gfsUri)
         return
@@ -644,7 +648,7 @@ export function App() {
       setPendingGfsResourceAction(request)
       vm.openFilesSection(resource.gfsUri)
     },
-    [vm.openFilesSection, vm.openPreviewSection, vm.pushToast]
+    [handleOpenGfsRoute, vm.openFilesSection, vm.openPreviewSection, vm.pushToast]
   )
 
   const handleGfsResourceActionHandled = React.useCallback((requestId: number) => {
