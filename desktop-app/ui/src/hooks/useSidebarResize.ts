@@ -42,13 +42,16 @@ type ActiveDrag = {
 
 export type SidebarResizeControls = ReturnType<typeof useSidebarResize>
 
-export function useSidebarResize() {
+export function useSidebarResize(compactMode = false) {
   const [viewportWidth, setViewportWidth] = React.useState(() =>
     typeof window === 'undefined' ? 1280 : window.innerWidth
   )
-  const [preferredWidth, setPreferredWidth] = React.useState(readPreferredWidth)
+  const [preferredWidth, setPreferredWidth] = React.useState(() =>
+    compactMode ? SIDEBAR_DEFAULT_WIDTH : readPreferredWidth()
+  )
   const [dragWidth, setDragWidth] = React.useState<number | null>(null)
   const activeDragRef = React.useRef<ActiveDrag | null>(null)
+  const wasCompactRef = React.useRef(compactMode)
   const width = getVisibleSidebarWidth(dragWidth ?? preferredWidth, viewportWidth)
   const widthRef = React.useRef(width)
   widthRef.current = width
@@ -62,15 +65,24 @@ export function useSidebarResize() {
     return () => window.removeEventListener('resize', updateViewportWidth)
   }, [])
 
-  const commitWidth = React.useCallback((nextWidth: number) => {
-    const next = clampSidebarWidth(Math.min(nextWidth, maxWidthRef.current))
-    setPreferredWidth(next)
-    try {
-      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(next))
-    } catch {
-      // Keep the live preference if storage is unavailable.
-    }
-  }, [])
+  React.useLayoutEffect(() => {
+    if (wasCompactRef.current && !compactMode) setPreferredWidth(readPreferredWidth())
+    wasCompactRef.current = compactMode
+  }, [compactMode])
+
+  const commitWidth = React.useCallback(
+    (nextWidth: number) => {
+      if (compactMode) return
+      const next = clampSidebarWidth(Math.min(nextWidth, maxWidthRef.current))
+      setPreferredWidth(next)
+      try {
+        window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(next))
+      } catch {
+        // Keep the live preference if storage is unavailable.
+      }
+    },
+    [compactMode]
+  )
 
   const clearDrag = React.useCallback(() => {
     activeDragRef.current = null
@@ -86,29 +98,35 @@ export function useSidebarResize() {
     []
   )
 
-  const onPointerDown = React.useCallback((event: React.PointerEvent<HTMLElement>) => {
-    if (event.button !== 0 || event.isPrimary === false) return
-    event.preventDefault()
-    const target = event.currentTarget
-    target.setPointerCapture?.(event.pointerId)
-    activeDragRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startWidth: widthRef.current,
-      candidate: null,
-    }
-    document.body.classList.add('sidebar-resizing')
-  }, [])
+  const onPointerDown = React.useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      if (compactMode || event.button !== 0 || event.isPrimary === false) return
+      event.preventDefault()
+      const target = event.currentTarget
+      target.setPointerCapture?.(event.pointerId)
+      activeDragRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startWidth: widthRef.current,
+        candidate: null,
+      }
+      document.body.classList.add('sidebar-resizing')
+    },
+    [compactMode]
+  )
 
-  const onPointerMove = React.useCallback((event: React.PointerEvent<HTMLElement>) => {
-    const drag = activeDragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
-    const candidate = clampSidebarWidth(
-      Math.min(maxWidthRef.current, drag.startWidth + event.clientX - drag.startX)
-    )
-    drag.candidate = candidate
-    setDragWidth(candidate)
-  }, [])
+  const onPointerMove = React.useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      const drag = activeDragRef.current
+      if (compactMode || !drag || drag.pointerId !== event.pointerId) return
+      const candidate = clampSidebarWidth(
+        Math.min(maxWidthRef.current, drag.startWidth + event.clientX - drag.startX)
+      )
+      drag.candidate = candidate
+      setDragWidth(candidate)
+    },
+    [compactMode]
+  )
 
   const onPointerUp = React.useCallback(
     (event: React.PointerEvent<HTMLElement>) => {

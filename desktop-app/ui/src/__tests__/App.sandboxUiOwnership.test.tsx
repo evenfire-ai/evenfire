@@ -2,7 +2,7 @@
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { DESKTOP_ROUTES } from '@constants/navigation'
+import { DESKTOP_ROUTES, SIDEBAR_WIDTH_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { toActiveSandboxUiApps } from '@lib/sandboxUiAppSelection'
@@ -424,6 +424,50 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     expect(sandboxUi.setBounds.mock.invocationCallOrder[0]).toBeLessThan(
       sandboxUi.setVisible.mock.invocationCallOrder[0]!
     )
+  })
+
+  it('defers the desktop width preference until navigation leaves compact mode', async () => {
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, '420')
+    const getItem = vi.spyOn(Storage.prototype, 'getItem')
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+    let mediaChangeListener: ((event: MediaQueryListEvent) => void) | null = null
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: EventListenerOrEventListenerObject) => {
+        mediaChangeListener = listener as (event: MediaQueryListEvent) => void
+      }),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+
+    render(<App />)
+    await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
+
+    expect(getItem).not.toHaveBeenCalledWith(SIDEBAR_WIDTH_KEY)
+    expect(setItem).not.toHaveBeenCalledWith(SIDEBAR_WIDTH_KEY, expect.any(String))
+    expect(document.querySelector('.app-frame')?.getAttribute('style')).toContain(
+      '--sidebar-width: 0px'
+    )
+
+    act(() => {
+      media.matches = false
+      mediaChangeListener?.({} as MediaQueryListEvent)
+    })
+
+    await waitFor(() => {
+      expect(document.querySelector('.app-frame')?.getAttribute('style')).toContain(
+        '--sidebar-width: 420px'
+      )
+    })
+    expect(getItem).toHaveBeenCalledWith(SIDEBAR_WIDTH_KEY)
   })
 
   it('closes the embed when a relaunch fails before reaching main (slot never measured)', async () => {

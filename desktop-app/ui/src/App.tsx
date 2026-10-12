@@ -302,10 +302,10 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
-  const sidebarResize = useSidebarResize()
   const [compactNavigation, setCompactNavigation] = React.useState(() =>
     window.matchMedia ? window.matchMedia('(max-width: 759px)').matches : window.innerWidth <= 759
   )
+  const sidebarResize = useSidebarResize(compactNavigation)
   const [compactSidebarOpen, setCompactSidebarOpen] = React.useState(false)
   const compactSidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null)
   const compactSidebarWasOpenRef = React.useRef(false)
