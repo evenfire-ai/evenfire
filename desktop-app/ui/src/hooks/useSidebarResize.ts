@@ -71,9 +71,10 @@ export function useSidebarResize(compactMode = false) {
   }, [compactMode])
 
   const commitWidth = React.useCallback(
-    (nextWidth: number) => {
+    (nextWidth: number, unchangedWidth: number) => {
       if (compactMode) return
       const next = clampSidebarWidth(Math.min(nextWidth, maxWidthRef.current))
+      if (next === unchangedWidth) return
       setPreferredWidth(next)
       try {
         window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(next))
@@ -132,7 +133,7 @@ export function useSidebarResize(compactMode = false) {
     (event: React.PointerEvent<HTMLElement>) => {
       const drag = activeDragRef.current
       if (!drag || drag.pointerId !== event.pointerId) return
-      if (drag.candidate !== null) commitWidth(drag.candidate)
+      if (drag.candidate !== null) commitWidth(drag.candidate, drag.startWidth)
       clearDrag()
     },
     [clearDrag, commitWidth]
@@ -174,7 +175,7 @@ export function useSidebarResize(compactMode = false) {
           return
       }
       event.preventDefault()
-      commitWidth(next)
+      commitWidth(next, widthRef.current)
     },
     [clearDrag, commitWidth]
   )

@@ -120,37 +120,39 @@ describe('useSidebarResize', () => {
     expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
   })
 
-  it('keeps keyboard commits within the current desktop maximum', () => {
-    vi.stubGlobal('innerWidth', 760)
+  it('preserves a wider preference when keyboard resize is blocked at the maximum', () => {
+    vi.stubGlobal('innerWidth', 900)
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '460')
     render(<SidebarResizeHandle />)
     const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
 
-    expect(handle.getAttribute('aria-valuemax')).toBe('300')
-    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+    expect(handle.getAttribute('aria-valuemax')).toBe('440')
+    expect(handle.getAttribute('aria-valuenow')).toBe('440')
     fireEvent.keyDown(handle, { key: 'ArrowRight' })
 
-    expect(handle.getAttribute('aria-valuenow')).toBe('300')
-    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('300')
+    expect(handle.getAttribute('aria-valuenow')).toBe('440')
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
 
-    vi.stubGlobal('innerWidth', 900)
+    vi.stubGlobal('innerWidth', 1200)
     fireEvent(window, new Event('resize'))
-    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+    expect(handle.getAttribute('aria-valuenow')).toBe('460')
   })
 
-  it('keeps pointer commits within the current desktop maximum', () => {
-    vi.stubGlobal('innerWidth', 760)
+  it('preserves a wider preference when pointer resize is blocked at the maximum', () => {
+    vi.stubGlobal('innerWidth', 900)
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '460')
     render(<SidebarResizeHandle />)
     const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
 
     fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 5 })
     fireEvent.pointerMove(handle, { clientX: 124, pointerId: 5 })
-    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+    expect(handle.getAttribute('aria-valuenow')).toBe('440')
     fireEvent.pointerUp(handle, { clientX: 124, pointerId: 5 })
 
-    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('300')
-    vi.stubGlobal('innerWidth', 900)
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
+    vi.stubGlobal('innerWidth', 1200)
     fireEvent(window, new Event('resize'))
-    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+    expect(handle.getAttribute('aria-valuenow')).toBe('460')
   })
 
   it('uses a valid stored preference and ignores malformed storage', () => {
