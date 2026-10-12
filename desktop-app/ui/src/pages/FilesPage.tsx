@@ -1533,25 +1533,76 @@ export function FilesPage({
     ) {
       return
     }
-    if (pendingGfsUri !== request.targetUri) {
+    const navigationUri =
+      request.navigationUri === undefined ? request.targetUri : request.navigationUri
+    const markHandled = () => {
       lastHandledResourceActionIdRef.current = request.id
       pendingResourceActionRef.current = null
       onPendingResourceActionHandled?.(request.id)
+    }
+    if (pendingGfsUri !== navigationUri) {
+      markHandled()
+      return
+    }
+    if (request.actionId === 'move' && request.targetResource) {
+      if (navigationUri === null) {
+        if (current) {
+          markHandled()
+          pushToast?.('The parent location changed before this action could run.', 'error')
+          return
+        }
+        if (loadingAccessible || ctrl.authorityPending) return
+        if (accessibleError || ctrl.discoveryFailure) {
+          markHandled()
+          pushToast?.(
+            accessibleError ??
+              ctrl.discoveryFailure?.message ??
+              'Shared files could not be loaded.',
+            'error'
+          )
+          return
+        }
+      } else if (current?.gfsUri !== navigationUri) {
+        if (ctrl.openError && !ctrl.resolving) {
+          markHandled()
+          pushToast?.(ctrl.openError, 'error')
+        }
+        return
+      } else {
+        if (loading || ctrl.authorityPending) return
+        if (error) {
+          markHandled()
+          pushToast?.(error, 'error')
+          return
+        }
+      }
+      const target = visibleResources.find(
+        resource => resource.resourceId === request.targetResource?.resourceId
+      )
+      if (!target || target.kind !== request.targetResource.kind) {
+        markHandled()
+        pushToast?.('This resource is no longer available from its parent folder.', 'error')
+        return
+      }
+      markHandled()
+      setMoveTarget({
+        resourceId: target.resourceId,
+        name: target.name,
+        kind: target.kind,
+        version: target.version,
+        parentResourceId: target.parentResourceId,
+      })
       return
     }
     if (current?.gfsUri === request.targetUri) {
       const action = currentResourceActions.find(candidate => candidate.id === request.actionId)
       if (!action) {
-        lastHandledResourceActionIdRef.current = request.id
-        pendingResourceActionRef.current = null
-        onPendingResourceActionHandled?.(request.id)
+        markHandled()
         pushToast?.('This action is no longer available for this resource.', 'error')
         return
       }
       if (action.disabled) return
-      lastHandledResourceActionIdRef.current = request.id
-      pendingResourceActionRef.current = null
-      onPendingResourceActionHandled?.(request.id)
+      markHandled()
       try {
         action.run(request.file)
       } catch (error) {
@@ -1559,21 +1610,26 @@ export function FilesPage({
       }
       return
     }
-    if (pendingGfsUri === request.targetUri && ctrl.openError && !ctrl.resolving) {
-      lastHandledResourceActionIdRef.current = request.id
-      pendingResourceActionRef.current = null
-      onPendingResourceActionHandled?.(request.id)
+    if (pendingGfsUri === navigationUri && ctrl.openError && !ctrl.resolving) {
+      markHandled()
       pushToast?.(ctrl.openError, 'error')
     }
   }, [
+    accessibleError,
     ctrl.openError,
     ctrl.resolving,
+    ctrl.authorityPending,
+    ctrl.discoveryFailure,
     current?.gfsUri,
     currentResourceActions,
+    error,
+    loading,
+    loadingAccessible,
     onPendingResourceActionHandled,
     pendingGfsUri,
     pendingResourceAction,
     pushToast,
+    visibleResources,
   ])
 
   const openResource = (resource: GfsDriveResource) => {

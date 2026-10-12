@@ -8,7 +8,7 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { useAppController } from '@hooks/useAppController'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
-import type { GfsResourceActionId } from '@lib/gfsResourceActions'
+import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -23,6 +23,8 @@ import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute
 import { App } from '@/App'
 import type { GfsResourceDeepLinkEnvelope, SandboxUiDeepLinkEnvelope } from '@/App.types'
 import {
+  childView,
+  listChildrenPage,
   resolveResource,
   resolvedDirectory,
   resolvedFile,
@@ -82,6 +84,7 @@ const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
 const filesPageHarness = vi.hoisted(() => ({
   pendingGfsUri: null as string | null,
   routeDialogRequestId: 0,
+  pendingResourceAction: null as GfsResourceActionRequest | null,
 }))
 
 const commandPaletteHarness = vi.hoisted(() => ({
@@ -227,9 +230,14 @@ vi.mock('@pages/ChatPage', async () => {
   }
 })
 vi.mock('@pages/FilesPage', () => ({
-  FilesPage: (props: { pendingGfsUri?: string | null; routeDialogRequestId?: number }) => {
+  FilesPage: (props: {
+    pendingGfsUri?: string | null
+    routeDialogRequestId?: number
+    pendingResourceAction?: GfsResourceActionRequest | null
+  }) => {
     filesPageHarness.pendingGfsUri = props.pendingGfsUri ?? null
     filesPageHarness.routeDialogRequestId = props.routeDialogRequestId ?? 0
+    filesPageHarness.pendingResourceAction = props.pendingResourceAction ?? null
     return null
   },
 }))
@@ -475,6 +483,7 @@ describe('App deep-link orchestration', () => {
     commandPaletteHarness.props = null
     filesPageHarness.pendingGfsUri = null
     filesPageHarness.routeDialogRequestId = 0
+    filesPageHarness.pendingResourceAction = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
@@ -575,9 +584,12 @@ describe('App deep-link orchestration', () => {
   })
 
   it('opens the existing route dialog from a sidebar row without selecting that row', async () => {
-    const resource = await resolveResource(
-      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Sidebar folder')
-    )
+    const resource = (
+      await listChildrenPage([
+        childView('0123456789abcdef0123456789abcdef', 'Sidebar folder', 'directory'),
+      ])
+    ).items[0]
+    if (!resource) throw new Error('The producer fixture did not return the sidebar folder')
     const openFilesSection = vi.fn((path: string | null) => {
       currentController.setWorkspaceTabs(state =>
         openFilesTab(state, { id: 'sidebar-open-route-files', ...(path ? { path } : {}) })
@@ -597,6 +609,51 @@ describe('App deep-link orchestration', () => {
     expect(openFilesSection).not.toHaveBeenCalledWith(resource.gfsUri)
     await waitFor(() => expect(filesPageHarness.routeDialogRequestId).toBe(1))
     expect(filesPageHarness.pendingGfsUri).toBeNull()
+  })
+
+  it('routes unreadable-row Move through its parent and preserves the exact target', async () => {
+    const parentResourceId = '0123456789abcdef0123456789abcdef'
+    const resource = (
+      await listChildrenPage([
+        childView('abcdefabcdefabcdefabcdefabcdefab', 'secret.pdf', 'file', {
+          parentResourceId,
+          readable: false,
+        }),
+      ])
+    ).items[0]
+    if (!resource) throw new Error('The producer fixture did not return the unreadable file')
+    const parentUri = `gfs://main/${parentResourceId}`
+    const openFilesSection = vi.fn((path: string | null) => {
+      currentController.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'sidebar-unreadable-move-files', path })
+      )
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      openFilesSection,
+    } as Partial<AppController>)
+
+    render(<App />)
+
+    act(() => sidebarHarness.props?.onGfsResourceAction?.(resource, 'move'))
+
+    await waitFor(() => expect(openFilesSection).toHaveBeenCalledWith(parentUri))
+    await waitFor(() =>
+      expect(filesPageHarness.pendingResourceAction).toMatchObject({
+        id: 1,
+        targetUri: resource.gfsUri,
+        actionId: 'move',
+        navigationUri: parentUri,
+        targetResource: {
+          resourceId: resource.resourceId,
+          name: resource.name,
+          kind: resource.kind,
+          version: resource.version,
+          parentResourceId,
+        },
+      })
+    )
+    expect(filesPageHarness.pendingGfsUri).toBe(parentUri)
   })
 
   it('routes a warm resource link to the active Files destination and acknowledges it', async () => {

@@ -891,6 +891,22 @@ describe('FileExplorerTree — unreadable rows refuse activation (R1-H1)', () =>
     expect(pushToast).toHaveBeenCalledTimes(2)
     expect(within(folderButton).getByText('No access')).toBeTruthy()
   })
+
+  it('keeps parent-authorized Move available for an unreadable row', async () => {
+    const { onResourceAction } = await renderExpandedVault()
+    const row = screen
+      .getByRole('button', { name: /secret\.pdf.*No access/ })
+      .closest('[role="treeitem"]') as HTMLElement
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Options for secret.pdf' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for secret.pdf' })
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+
+    expect(onResourceAction).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'secret', readable: false }),
+      'move'
+    )
+  })
 })
 
 describe('FileExplorerTree — shared revoked access across controller mounts (R1-H2)', () => {

@@ -61,6 +61,16 @@ export type GfsResourceActionRequest = {
   targetUri: string
   actionId: GfsResourceActionId
   file?: File
+  /** Navigation target for parent-relative actions such as Move on unreadable rows. */
+  navigationUri?: string | null
+  /** Exact row identity when the action must be resolved through its parent. */
+  targetResource?: {
+    resourceId: string
+    name: string
+    kind: GfsResourceKind
+    version: number
+    parentResourceId: string | null
+  }
 }
 
 export type GfsResourceActionOptions = {

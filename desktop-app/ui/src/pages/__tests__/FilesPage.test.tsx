@@ -469,6 +469,59 @@ describe('FilesPage', () => {
     expect(replaceFileFromPath).not.toHaveBeenCalled()
   })
 
+  it('opens Move for an unreadable row from its parent route', async () => {
+    const parentResourceId = '0123456789abcdef0123456789abcdef'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Shared folder'))
+    const child = (
+      await listChildrenPage([
+        childView('abcdefabcdefabcdefabcdefabcdefab', 'secret.pdf', 'file', {
+          parentResourceId,
+          readable: false,
+        }),
+      ])
+    ).items[0]
+    if (!child) throw new Error('The producer fixture did not return the unreadable file')
+    const parentCrumb: GfsCrumb = {
+      resourceId: parent.resourceId,
+      gfsUri: parent.gfsUri,
+      name: parent.name,
+      kind: 'directory',
+      version: parent.version,
+      bytes: 0,
+    }
+    const handled = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: parentCrumb,
+      crumbs: [parentCrumb],
+      items: [child],
+    })
+
+    renderFilesPage(
+      undefined,
+      undefined,
+      parent.gfsUri,
+      undefined,
+      {
+        id: 15,
+        targetUri: child.gfsUri,
+        actionId: 'move',
+        navigationUri: parent.gfsUri,
+        targetResource: {
+          resourceId: child.resourceId,
+          name: child.name,
+          kind: child.kind,
+          version: child.version,
+          parentResourceId,
+        },
+      },
+      handled
+    )
+
+    expect(await screen.findByRole('dialog', { name: 'Move file secret.pdf' })).toBeTruthy()
+    expect(handled).toHaveBeenCalledWith(15)
+  })
+
   it.each([
     ['initial GFS discovery', { loadingAccessible: true }],
     [

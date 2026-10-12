@@ -629,6 +629,34 @@ export function App() {
         if (preview) vm.openPreviewSection(preview)
         return
       }
+      if (actionId === 'move' && resource.readable === false) {
+        const navigationUri =
+          resource.parentResourceId === null
+            ? null
+            : normalizeGfsResourceUri(
+                `gfs://${resource.drive}/${resource.parentResourceId.replace(/-/g, '').toLowerCase()}`
+              )
+        if (resource.parentResourceId !== null && !navigationUri) {
+          vm.pushToast('This resource has an invalid parent location.', 'error')
+          return
+        }
+        const request: GfsResourceActionRequest = {
+          id: ++gfsResourceActionRequestIdRef.current,
+          targetUri: resource.gfsUri,
+          actionId,
+          navigationUri,
+          targetResource: {
+            resourceId: resource.resourceId,
+            name: resource.name,
+            kind: resource.kind,
+            version: resource.version,
+            parentResourceId: resource.parentResourceId,
+          },
+        }
+        setPendingGfsResourceAction(request)
+        vm.openFilesSection(navigationUri)
+        return
+      }
       const request: GfsResourceActionRequest = {
         id: ++gfsResourceActionRequestIdRef.current,
         targetUri: resource.gfsUri,
