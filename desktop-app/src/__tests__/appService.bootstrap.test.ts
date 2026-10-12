@@ -167,7 +167,9 @@ describe('AppService invitation configuration lookup', () => {
       import('../appService.js'),
       import('../config.js'),
     ])
-    const service = new AppService({ getUserDataDirectory: () => os.tmpdir() }) as unknown as {
+    const service = new AppService({
+      getUserDataDirectory: () => path.dirname(configPath),
+    }) as unknown as {
       authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>

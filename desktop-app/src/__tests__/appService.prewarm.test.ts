@@ -1,9 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import path from 'node:path'
 // ── import after mocks are set up ─────────────────────────────────────────────
 
 import { AppService } from '../appService.js'
 import { ApiError } from '../httpClient.js'
+import { TokenStore } from '../tokenStore.js'
+
+let userDataDirectory = ''
+const reportLogoutFailure = vi.fn()
+
+vi.mock('electron', () => ({
+  app: { getPath: () => userDataDirectory, isReady: () => true },
+  safeStorage: { isEncryptionAvailable: () => false },
+}))
+
+beforeEach(async () => {
+  userDataDirectory = await mkdtemp(path.join(tmpdir(), 'evenfire-prewarm-storage-'))
+  reportLogoutFailure.mockClear()
+})
+
+afterEach(async () => {
+  try {
+    expect(reportLogoutFailure).not.toHaveBeenCalled()
+    expect(
+      (await readdir(userDataDirectory)).filter(name => name.startsWith('pending-external-logout-'))
+    ).toEqual([])
+  } finally {
+    await rm(userDataDirectory, { recursive: true, force: true })
+  }
+})
 
 // ── mock dependencies before AppService is imported ──────────────────────────
 
@@ -50,18 +77,15 @@ vi.mock('../authClient.js', () => ({
   },
 }))
 
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
-  },
-}))
-
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function makeService(): AppService {
-  const svc = new AppService({ getUserDataDirectory: () => tmpdir() })
+  const tokenStore = new TokenStore({ isolatedUserDataPath: userDataDirectory })
+  const svc = new AppService({
+    tokenStore,
+    getUserDataDirectory: () => userDataDirectory,
+    reportDeferredLogoutFailure: reportLogoutFailure,
+  })
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
   ;(svc as unknown as { me: unknown }).me = { id: 1, teamId: 'team-1' }
   return svc

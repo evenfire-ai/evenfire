@@ -14,6 +14,7 @@ import {
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   _resetSandboxUiRefreshForTests,
 } from '../sandboxUiSessionRefresh.js'
+import { TokenStore } from '../tokenStore.js'
 
 // The open/close lifecycle is exercised end to end through the REAL AppService,
 // the REAL sandbox-ui driver, the REAL session-refresh loop, the REAL plugin
@@ -107,7 +108,7 @@ vi.mock('electron', () => ({
       return false
     }
   },
-  app: { getPath: vi.fn(() => tmpdir()) },
+  app: { getPath: vi.fn(() => userDataDir), isReady: () => true },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
     encryptString: vi.fn(),
@@ -151,29 +152,6 @@ vi.mock('../authClient.js', () => ({
   AuthClient: class {
     health = vi.fn().mockResolvedValue({ status: 'ok' })
     getMe = vi.fn()
-  },
-}))
-
-vi.mock('../tokenStore.js', () => ({
-  SessionTokenStorageClearError: class extends Error {
-    canBeReplacedByFreshLoginCredential(): boolean {
-      return false
-    }
-  },
-  TokenStore: class {
-    private safeStorageToken: string | null = null
-
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    setSafeStorageSessionToken = vi.fn(async (token: string) => {
-      this.safeStorageToken = token
-    })
-    getSafeStorageSessionToken = vi.fn(async () => this.safeStorageToken)
-    clearSessionToken = vi.fn()
-    clearSessionTokenStrictly = vi.fn().mockResolvedValue({
-      keytarAvailable: false,
-      keytarDisabled: false,
-    })
   },
 }))
 
@@ -282,8 +260,15 @@ function mintCallsFor(recipeName: string): number {
   ).length
 }
 
+function createService(): AppService {
+  return new AppService({
+    tokenStore: new TokenStore({ isolatedUserDataPath: userDataDir }),
+    getUserDataDirectory: () => userDataDir,
+  })
+}
+
 function makeService(): AppService {
-  const svc = new AppService()
+  const svc = createService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
   return svc
 }
@@ -813,7 +798,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
   })
 
   afterEach(() => {
-    vi.mocked(app.getPath).mockImplementation(() => tmpdir())
+    vi.mocked(app.getPath).mockImplementation(() => userDataDir)
   })
 
   async function loginAs(service: AppService, token: string, userId: string): Promise<void> {
@@ -841,7 +826,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
   }
 
   async function serviceLoggedInAsA(): Promise<AppService> {
-    const service = new AppService()
+    const service = createService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
     await loginAs(service, 'fake-session-token-a', 'user-a')
     return service
