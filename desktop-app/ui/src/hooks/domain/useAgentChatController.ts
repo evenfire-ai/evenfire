@@ -1277,9 +1277,16 @@ export function useAgentChatController({
       )
         return
       autoSelectedChatIdRef.current = null
-      await switchToChat(selectedAgent, chatId)
+      await switchToChat(selectedAgent, chatId, {
+        onCurrentError: error => {
+          pushToast(
+            `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+            'error'
+          )
+        },
+      }).catch(() => undefined)
     },
-    [selectedAgent, isHostAccessBlocked, isChatDeleted, switchToChat]
+    [selectedAgent, isHostAccessBlocked, isChatDeleted, switchToChat, pushToast]
   )
 
   const handleLoadOlderMessages = useCallback(async () => {

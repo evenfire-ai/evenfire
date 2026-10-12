@@ -15,7 +15,18 @@ type AppVm = ReturnType<typeof useAppController>
 export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValue {
   const chatEndRef = vm.chatEndRef
   const scrollChatToBottom = useStableCallback(vm.scrollChatToBottom)
-  const handleCreateChat = useStableCallback(vm.handleCreateChat)
+  // This context is the UI-event boundary; the underlying create API retains
+  // rejection for programmatic awaiters and restoration remains controller-owned.
+  const handleCreateChat = useStableCallback(async () => {
+    try {
+      await vm.handleCreateChat()
+    } catch (error) {
+      vm.pushToast(
+        `Could not create conversation: ${error instanceof Error ? error.message : String(error)}`,
+        'error'
+      )
+    }
+  })
   const handleRenameChat = useStableCallback(vm.handleRenameChat)
   const handleRenameChatForAgent = useStableCallback(vm.handleRenameChatForAgent)
   const captureChatDeleteFence = useStableCallback(vm.captureChatDeleteFence)
