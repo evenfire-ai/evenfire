@@ -9,6 +9,7 @@ import type { ApiRequestError, ApiRequestOptions } from './api.types'
 import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
 import type {
   McpSecretSummary,
+  OAuthCallbackConfig,
   OAuthCredentialManifest,
   OAuthInstallSubmit,
 } from './oauthInstall.types'
@@ -3740,6 +3741,15 @@ export async function getOAuthCredentialManifest(
   return apiGet(
     `/api/v1/admin/oauth/providers/${encodeURIComponent(provider)}/credential-manifest`
   ) as Promise<OAuthCredentialManifest>
+}
+
+/**
+ * The deployment's public OAuth callback for Marketplace OAuth installs. control-api
+ * owns CONTROL_API_OAUTH_CALLBACK_BASE_URL and returns the exact redirect-URI template
+ * (over `{oauthClientId}`), or `configured: false` when none is set.
+ */
+export async function getOAuthCallbackConfig(): Promise<OAuthCallbackConfig> {
+  return apiGet('/api/v1/admin/oauth/callback') as Promise<OAuthCallbackConfig>
 }
 
 /**
