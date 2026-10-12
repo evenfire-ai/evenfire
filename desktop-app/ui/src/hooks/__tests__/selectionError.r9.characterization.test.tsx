@@ -90,7 +90,7 @@ describe('Round 9 selection error ownership', () => {
     let switchPromise!: Promise<void>
     act(() => {
       switchPromise = controller.result.current.switchToChat('agent-x', 'chat-2', {
-        onCurrentError: controller.spies.pushToast,
+        onCurrentError: error => controller.spies.pushToast(String(error), 'error'),
       })
     })
     const observed = switchPromise.then(
