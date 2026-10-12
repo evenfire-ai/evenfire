@@ -58,6 +58,13 @@ vi.mock('../src/db.js', async importActual => {
     ...actual,
     pool: {
       query: async (text: string, values?: unknown[]) => {
+        // The consenting user belongs to the Context the install enables the
+        // server in: the per-user callback re-checks that access before the
+        // code exchange. Same membership stand-in as the per-server callback
+        // suite.
+        if (text.includes('FROM user_contexts')) {
+          return { rows: [{ context_id: 'default-context' }], rowCount: 1 }
+        }
         if (!dbHolder.target) throw new Error('test database not ready')
         return dbHolder.target.query(text, values)
       },

@@ -7,6 +7,7 @@ import { claimDeleteDynamicClientForResource } from '../src/oauth/dynamicClientS
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import { attachServerToContext } from '../src/services/contextAllowlist.js'
 import {
   discoverPilot,
   installRemoteServer,
@@ -434,6 +435,9 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url — remote redirect URI'
       },
       NS
     )
+    // Enabled in the member's Context, so the request reaches the redirect-URI
+    // check past the per-user access gate.
+    await attachServerToContext(gateway as never, { name: CONTEXT, namespace: NS }, 'atlassian.v2')
 
     const res = await mint('atlassian.v2')
 

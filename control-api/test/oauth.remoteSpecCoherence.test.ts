@@ -13,6 +13,7 @@ import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
 import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
+import { seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import {
   ATLASSIAN_V2_PILOT,
   DROPBOX_PILOT,
@@ -361,6 +362,10 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
     const created = (await gateway.createResource('mcpservers', crFrom(name, oauth), MCP_NS)) as {
       metadata: { uid: string }
     }
+    // The server is enabled in CONTEXT's allowlist (written by the real
+    // allowlist writer): a per-user server's connect gate is membership in a
+    // Context that allowlists it, so the member reaches the coherence check.
+    await seedAllowlistedContext(gateway, CONTEXT, [name], MCP_NS)
     gateway.seedSecret('srv-oauth-client', MCP_NS, {
       data: {
         client_id: Buffer.from(PRE_REGISTERED_CLIENT_ID).toString('base64'),

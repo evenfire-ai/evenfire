@@ -37,6 +37,7 @@ import {
   type AgentDirectoryEntry,
   buildAgentDirectoryEntry,
 } from '../directory/accessReconciliation.js'
+import { getUserContexts } from '../directory/contextAccess.js'
 
 const log = rootLogger.child({ module: 'mcpInvocable' })
 const connectorsLog = rootLogger.child({ module: 'mcp-connectors' })
@@ -154,7 +155,7 @@ function asArray<T>(value: unknown): T[] {
  * the caller authorizes by agent rather than by context.
  */
 async function loadAllowedNamesByContext(
-  gateway: K8sGateway,
+  gateway: Pick<K8sGateway, 'listResource'>,
   mcpServersNamespace: string,
   scopedContextIds?: ReadonlySet<string>
 ): Promise<Map<string, Set<string>>> {
@@ -171,6 +172,39 @@ async function loadAllowedNamesByContext(
     byContext.set(ctxId, set)
   }
   return byContext
+}
+
+/**
+ * Whether some Context the user belongs to enables `mcpServerName` through its
+ * `spec.mcpServers` allowlist. This is the access rule for consenting to (and
+ * completing consent for) a per-user OAuth server: the grant is keyed by
+ * (user, server) and serves every Context that enables the server, so access
+ * follows the same allowlist rule invoke and the catalog apply, never the
+ * server's own `spec.contextRef`.
+ *
+ * Membership is `getUserContexts` (direct `user_contexts` only, active users)
+ * so this gate stays aligned with the catalog, which reads the same source;
+ * counting team membership here alone would let a user connect servers the
+ * catalog never shows them. Deliberately ignores grant presence: the consent
+ * flow exists precisely for servers that have no grant yet.
+ */
+export async function userHasContextEnablingMcpServer(opts: {
+  gateway: Pick<K8sGateway, 'listResource'>
+  mcpServersNamespace: string
+  userId: string
+  mcpServerName: string
+}): Promise<boolean> {
+  const { contextIds } = await getUserContexts(opts.userId)
+  if (contextIds.length === 0) return false
+  const allowedByContext = await loadAllowedNamesByContext(
+    opts.gateway,
+    opts.mcpServersNamespace,
+    new Set(contextIds)
+  )
+  for (const names of allowedByContext.values()) {
+    if (names.has(opts.mcpServerName)) return true
+  }
+  return false
 }
 
 /**

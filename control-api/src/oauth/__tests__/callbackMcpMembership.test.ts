@@ -10,7 +10,7 @@ import {
 import { signOAuthState } from '../state.js'
 
 /**
- * Guards-before-exchange ordering for the mcp context-scoped callback (R3-L1).
+ * Guards-before-exchange ordering for the mcp callback (R3-L1).
  *
  * The fix moves the `server_missing_context` + `context_membership_denied`
  * guards ahead of `exchangeAuthCode`, so a user removed from the Context during
@@ -18,6 +18,10 @@ import { signOAuthState } from '../state.js'
  * (no token exchange, no secret read). These tests pin that: the `fetchFn` /
  * `secretReader` spies must stay untouched on the denied path, while the
  * happy paths (context member + per-user) still exchange and persist.
+ *
+ * The per-user flavor has its own pre-exchange guard: some Context the user
+ * belongs to must still enable the server (`userServerAccessReader`), so a user
+ * who lost that access between mint and callback cannot finish creating a grant.
  */
 
 const STATE_SECRET = 'test-state-secret-0123456789abcdef' // ≥ 32 chars
@@ -88,6 +92,7 @@ function buildDeps(
     secretReader?: CallbackDeps['secretReader']
     db?: CallbackDeps['db']
     userContextsReader?: CallbackDeps['userContextsReader']
+    userServerAccessReader?: CallbackDeps['userServerAccessReader']
   } = {}
 ): CallbackDeps {
   const secretReader =
@@ -108,6 +113,10 @@ function buildDeps(
     secretReader,
     mcpServerReader: { read: vi.fn(async () => opts.subject ?? mcpSubject()) },
     userContextsReader,
+    // Absent unless a test wires it, so the unwired (fail-closed) case is real.
+    ...('userServerAccessReader' in opts
+      ? { userServerAccessReader: opts.userServerAccessReader }
+      : {}),
     fetchFn: opts.fetchFn ?? okTokenFetch(),
     stateSecret: STATE_SECRET,
     encryptionKey: ENCRYPTION_KEY,
@@ -184,13 +193,17 @@ describe('handleOAuthCallback — mcp context membership guard (R3-L1)', () => {
     expect(String(query.mock.calls[0][0])).toContain("'shared'")
   })
 
-  it('per-user grant path is intact: exchange runs and upsert persists', async () => {
+  // The per-user happy path now requires a Context of the user that enables the
+  // server (previously the per-user path ran no access check at all).
+  it('per-user grant path: an enabled user exchanges and upserts', async () => {
     const fetchFn = okTokenFetch()
     const userContextsReader = vi.fn(async () => ({ contextIds: [] }))
+    const userServerAccessReader = vi.fn(async () => true)
     const deps = buildDeps({
       subject: mcpSubject({ grantScope: 'user', contextRef: undefined }),
       fetchFn,
       userContextsReader,
+      userServerAccessReader,
     })
 
     const result = await handleOAuthCallback(input(), deps)
@@ -200,12 +213,54 @@ describe('handleOAuthCallback — mcp context membership guard (R3-L1)', () => {
       expect(result.source).toBe('mcp')
     }
     expect(fetchFn).toHaveBeenCalledTimes(1)
-    // The per-user path never consults the membership reader (its key IS the user).
+    // Access is checked for the SIGNED initiator and the SIGNED server name.
+    expect(userServerAccessReader).toHaveBeenCalledWith(USER_ID, MCP_SERVER_NAME)
+    // The per-user path never consults the contextRef membership reader.
     expect(userContextsReader).not.toHaveBeenCalled()
     const query = deps.db.query as ReturnType<typeof vi.fn>
     expect(query).toHaveBeenCalledTimes(1)
     expect(String(query.mock.calls[0][0])).toContain('INSERT INTO oauth_grants')
     expect(String(query.mock.calls[0][0])).toContain("'user'")
+  })
+
+  it('per-user: no Context of the user enables the server → denied WITHOUT exchanging', async () => {
+    const fetchFn = okTokenFetch()
+    const secretReader = {
+      read: vi.fn(async () => ({ client_id: 'cid', client_secret: 'csec' })),
+    } as unknown as CallbackDeps['secretReader']
+    const userServerAccessReader = vi.fn(async () => false)
+    const deps = buildDeps({
+      subject: mcpSubject({ grantScope: 'user', contextRef: CONTEXT_REF }),
+      // Membership in the server's contextRef is irrelevant for this flavor.
+      contextIds: [CONTEXT_REF],
+      fetchFn,
+      secretReader,
+      userServerAccessReader,
+    })
+
+    const result = await handleOAuthCallback(input(), deps)
+
+    expect(result.kind).toBe('context_membership_denied')
+    expect(userServerAccessReader).toHaveBeenCalledWith(USER_ID, MCP_SERVER_NAME)
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(secretReader.read).not.toHaveBeenCalled()
+    expect(deps.db.query as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+  })
+
+  it('per-user: fails closed WITHOUT exchanging when no access reader is wired', async () => {
+    const fetchFn = okTokenFetch()
+    const deps = buildDeps({
+      subject: mcpSubject({ grantScope: 'user', contextRef: CONTEXT_REF }),
+      contextIds: [CONTEXT_REF],
+      fetchFn,
+      userServerAccessReader: undefined,
+    })
+
+    const result = await handleOAuthCallback(input(), deps)
+
+    expect(result.kind).toBe('context_membership_denied')
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(deps.db.query as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
   })
 
   // R3-H5 (D-T3): the subject's CR uid seals the grant so a same-name reinstall's
@@ -231,6 +286,7 @@ describe('handleOAuthCallback — mcp context membership guard (R3-L1)', () => {
     const deps = buildDeps({
       subject: mcpSubject({ grantScope: 'user', contextRef: undefined, crUid: 'uid-live-cr' }),
       userContextsReader: vi.fn(async () => ({ contextIds: [] })),
+      userServerAccessReader: vi.fn(async () => true),
     })
 
     const result = await handleOAuthCallback(input(), deps)
@@ -252,6 +308,7 @@ describe('handleOAuthCallback — mcp context membership guard (R3-L1)', () => {
     const deps = buildDeps({
       subject: mcpSubject({ grantScope: 'user', contextRef: undefined, crUid: undefined }),
       userContextsReader: vi.fn(async () => ({ contextIds: [] })),
+      userServerAccessReader: vi.fn(async () => true),
     })
 
     const result = await handleOAuthCallback(input(), deps)
