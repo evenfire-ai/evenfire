@@ -225,7 +225,7 @@ slots are all present and uses that provider's default model;
 `CLERUM_MODEL_NAME` applies only when `CLERUM_MODEL_PROVIDER` is also set.
 
 > One gotcha: because Bedrock's slots are the standard AWS variable names, a
-> shell that already exports generic AWS credentials (plus `AWS_REGION`) can
+> shell that already exports generic AWS credentials can
 > auto-select `bedrock`. Set `CLERUM_MODEL_PROVIDER` explicitly if that's not
 > what you want.
 
