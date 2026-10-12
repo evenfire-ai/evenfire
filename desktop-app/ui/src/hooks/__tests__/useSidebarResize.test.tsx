@@ -120,6 +120,39 @@ describe('useSidebarResize', () => {
     expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
   })
 
+  it('keeps keyboard commits within the current desktop maximum', () => {
+    vi.stubGlobal('innerWidth', 760)
+    render(<SidebarResizeHandle />)
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+
+    expect(handle.getAttribute('aria-valuemax')).toBe('300')
+    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+    fireEvent.keyDown(handle, { key: 'ArrowRight' })
+
+    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('300')
+
+    vi.stubGlobal('innerWidth', 900)
+    fireEvent(window, new Event('resize'))
+    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+  })
+
+  it('keeps pointer commits within the current desktop maximum', () => {
+    vi.stubGlobal('innerWidth', 760)
+    render(<SidebarResizeHandle />)
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 5 })
+    fireEvent.pointerMove(handle, { clientX: 124, pointerId: 5 })
+    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+    fireEvent.pointerUp(handle, { clientX: 124, pointerId: 5 })
+
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('300')
+    vi.stubGlobal('innerWidth', 900)
+    fireEvent(window, new Event('resize'))
+    expect(handle.getAttribute('aria-valuenow')).toBe('300')
+  })
+
   it('uses a valid stored preference and ignores malformed storage', () => {
     window.localStorage.setItem('clerum.ui.sidebarWidth', '420')
     const { unmount } = render(<SidebarResizeHandle />)

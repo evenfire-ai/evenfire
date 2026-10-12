@@ -63,7 +63,7 @@ export function useSidebarResize() {
   }, [])
 
   const commitWidth = React.useCallback((nextWidth: number) => {
-    const next = clampSidebarWidth(nextWidth)
+    const next = clampSidebarWidth(Math.min(nextWidth, maxWidthRef.current))
     setPreferredWidth(next)
     try {
       window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(next))
@@ -103,7 +103,9 @@ export function useSidebarResize() {
   const onPointerMove = React.useCallback((event: React.PointerEvent<HTMLElement>) => {
     const drag = activeDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
-    const candidate = clampSidebarWidth(drag.startWidth + event.clientX - drag.startX)
+    const candidate = clampSidebarWidth(
+      Math.min(maxWidthRef.current, drag.startWidth + event.clientX - drag.startX)
+    )
     drag.candidate = candidate
     setDragWidth(candidate)
   }, [])
