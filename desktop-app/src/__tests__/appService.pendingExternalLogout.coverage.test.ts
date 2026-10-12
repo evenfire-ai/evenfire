@@ -206,4 +206,49 @@ describe('pending logout accepted lifecycle coverage', () => {
       expect(restarted.state.sessionToken).toBeNull()
     }
   )
+
+  it('rejects ordinary logout when strict deletion and durable marker persistence both fail', async () => {
+    const { service, tokenStore, state, reportFailure } = createService()
+    await tokenStore.setSessionToken('fixture-stale-logged-out', activeEnvKey)
+    state.sessionToken = 'fixture-stale-logged-out'
+    state.me = loginResult.me
+    const keytar = await import('keytar')
+    vi.mocked(keytar.deletePassword).mockRejectedValue(new Error('keychain delete denied'))
+    const open = fsSync.openSync.bind(fsSync)
+    vi.spyOn(fsSync, 'openSync').mockImplementation((...args) => {
+      if (String(args[0]).startsWith(`${markerPath()}.`)) throw new Error('marker write denied')
+      return open(...args)
+    })
+
+    await expect(service.logout()).rejects.toThrow('marker write denied')
+    expect(state.sessionToken).toBeNull()
+    expect(state.me).toBeNull()
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    expect(reportFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'marker write denied' })
+    )
+    expect(markerStore.readPendingExternalLogoutMarker(runtime.directory, activeEnvKey)).toBeNull()
+  })
+
+  it('does not retire an observed cleanup marker after upgrading its logout intent failed', async () => {
+    const { service, tokenStore, state } = createService()
+    await tokenStore.setSafeStorageSessionToken(loginResult.token, activeEnvKey)
+    state.sessionToken = loginResult.token
+    state.me = loginResult.me
+    markerStore.recordPendingKeytarCleanup(runtime.directory, activeEnvKey, 'safe-storage')
+    const observed = markerStore.readPendingExternalLogoutMarker(runtime.directory, activeEnvKey)
+    const open = fsSync.openSync.bind(fsSync)
+    vi.spyOn(fsSync, 'openSync').mockImplementation((...args) => {
+      if (String(args[0]).startsWith(`${markerPath()}.`)) throw new Error('marker rewrite denied')
+      return open(...args)
+    })
+
+    await expect(service.logout()).resolves.toBeUndefined()
+    expect(state.sessionToken).toBeNull()
+    expect(state.me).toBeNull()
+    await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBeNull()
+    expect(markerStore.readPendingExternalLogoutMarker(runtime.directory, activeEnvKey)).toEqual(
+      observed
+    )
+  })
 })

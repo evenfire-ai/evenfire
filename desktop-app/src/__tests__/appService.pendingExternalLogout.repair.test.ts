@@ -362,3 +362,48 @@ describe('team persistence respects pending-marker authority', () => {
     expect(await fs.readFile(harness.markerPath, 'utf8')).toBe('{malformed')
   })
 })
+
+describe('durable logout failure policy', () => {
+  it('resolves logout after a durable upgrade even when reread and redundant rewrite would fail', async () => {
+    const harness = await createService()
+    await harness.login()
+    harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
+    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar cleanup failed'))
+    const originalRead = fsSync.readFileSync.bind(fsSync)
+    let markerReads = 0
+    vi.spyOn(fsSync, 'readFileSync').mockImplementation(((
+      file: Parameters<typeof originalRead>[0],
+      options: Parameters<typeof originalRead>[1]
+    ) => {
+      if (typeof file === 'number' && ++markerReads === 2) {
+        throw Object.assign(new Error('fixture-marker reread failed'), { code: 'EIO' })
+      }
+      return originalRead(file, options)
+    }) as typeof fsSync.readFileSync)
+    const originalRename = fsSync.renameSync.bind(fsSync)
+    let markerWrites = 0
+    vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
+      if (String(destination) === harness.markerPath && ++markerWrites > 1) {
+        throw Object.assign(new Error('fixture-redundant marker write failed'), { code: 'EIO' })
+      }
+      originalRename(source, destination)
+    })
+
+    await expect(harness.service.logout()).resolves.toBeUndefined()
+
+    expect(harness.service.getCachedUserId()).toBeNull()
+    expect(
+      harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
+    ).toEqual({
+      intent: 'logout-pending',
+    })
+    expect(harness.reportFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'fixture-marker reread failed' })
+    )
+    expect(harness.reportFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Failed to clear session token storage' })
+    )
+    expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    expect(markerWrites).toBe(1)
+  })
+})

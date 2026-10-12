@@ -2929,14 +2929,23 @@ export class AppService {
           // reporting success after an earlier GFS or credential-clear failure.
           // Otherwise the next launch could restore the credential that the
           // renderer was told had been logged out.
-          if (marker?.intent.intent !== 'logout-pending' || markerInspectionFailed) {
+          try {
+            // Cleanup awaited other producers: an admitted login may have
+            // retired the earlier marker. Confirm current intent before claiming
+            // success, including after unlink or a transient inspection failure.
+            let currentMarker: PendingExternalLogoutMarker | null = null
             try {
-              recordPendingExternalLogout(userDataDirectory, envKey)
+              currentMarker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
             } catch (markerError) {
               this.reportDeferredLogoutFailureSafely(markerError)
-              await this.failClosedForPendingLogout(error)
-              throw markerError
             }
+            if (currentMarker?.intent.intent !== 'logout-pending') {
+              recordPendingExternalLogout(userDataDirectory, envKey)
+            }
+          } catch (markerError) {
+            this.reportDeferredLogoutFailureSafely(markerError)
+            await this.failClosedForPendingLogout(error)
+            throw markerError
           }
           await this.failClosedForPendingLogout(error)
         }
