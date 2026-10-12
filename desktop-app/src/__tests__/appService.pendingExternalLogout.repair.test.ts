@@ -364,6 +364,47 @@ describe('team persistence respects pending-marker authority', () => {
 })
 
 describe('durable logout failure policy', () => {
+  // Characterization: the owner retained this policy for ordinary UI logout too.
+  it('blocks login after ordinary logout until secure storage recovers', async () => {
+    const harness = await createService()
+    await harness.login()
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    keytarMock.getPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+    keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
+
+    await expect(harness.service.logout()).resolves.toBeUndefined()
+    await expect(harness.login()).rejects.toThrow('safeStorage is unavailable')
+
+    expect(harness.service.getCachedUserId()).toBeNull()
+    expect(
+      harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
+    ).toEqual({
+      intent: 'logout-pending',
+    })
+    expect(await fs.readdir(runtime.directory)).not.toContain(
+      `session-token-${harness.envKey}.json`
+    )
+    keytarMock.getPassword.mockImplementation(
+      async (service, account) => keychain.get(keyOf(service, account)) ?? null
+    )
+    keytarMock.setPassword.mockImplementation(async (service, account, token) => {
+      keychain.set(keyOf(service, account), token)
+    })
+    keytarMock.deletePassword.mockImplementation(async (service, account) =>
+      keychain.delete(keyOf(service, account))
+    )
+
+    await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
+    expect(
+      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
+    ).toBeNull()
+    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
+      'fixture-fresh-session'
+    )
+  })
+
   it('resolves logout after a durable upgrade even when reread and redundant rewrite would fail', async () => {
     const harness = await createService()
     await harness.login()
