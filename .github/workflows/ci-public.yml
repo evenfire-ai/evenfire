@@ -372,6 +372,14 @@ jobs:
           # producer and its database, neither of which is available to public CI.
           # They run with the real producer and PostgreSQL in the dedicated local
           # integration lane; do not replace them with a test-only token producer.
+          for suite in \
+            test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts \
+            test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts; do
+            test -s "$suite" || {
+              echo "excluded private recovery suite is missing or empty: $suite" >&2
+              exit 1
+            }
+          done
           FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres \
             --exclude 'test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts' \
             --exclude 'test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts' \
