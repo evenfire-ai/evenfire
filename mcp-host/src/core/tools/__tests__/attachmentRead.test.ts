@@ -132,8 +132,8 @@ describe('clerum__attachment_read', () => {
   })
 
   it('returns a typed binary result for a reader=none file without decoding it', async () => {
-    const pdf = Buffer.from(`%PDF-1.7\n${SENTINEL}\n%%EOF\n`)
-    const [file] = admitted([rawFile('file-1', 'report.pdf', 'application/pdf', pdf)])
+    const blob = Buffer.concat([Buffer.from([0x00, 0x01, 0xff, 0xfe]), Buffer.from(SENTINEL)])
+    const [file] = admitted([rawFile('file-1', 'blob.bin', 'application/octet-stream', blob)])
     expect(file!.fileReference!.reader).toBe('none')
     const { output, body } = await read(toolFor([file!]), { attachmentId: 'file-1' })
     expect(output.is_error).toBe(false)
@@ -143,6 +143,22 @@ describe('clerum__attachment_read', () => {
       kind: 'binary',
       reader: 'none',
       reason: 'no_reader_for_class',
+    })
+    expect(output.content).not.toContain(SENTINEL)
+  })
+
+  it('points a reader=pdf file to clerum__document_read without decoding it', async () => {
+    const pdf = Buffer.from(`%PDF-1.7\n${SENTINEL}\n%%EOF\n`)
+    const [file] = admitted([rawFile('file-1', 'report.pdf', 'application/pdf', pdf)])
+    expect(file!.fileReference!.reader).toBe('pdf')
+    const { output, body } = await read(toolFor([file!]), { attachmentId: 'file-1' })
+    expect(output.is_error).toBe(false)
+    expect(body).toEqual({
+      attachmentId: 'file-1',
+      referenceId: file!.fileReference!.id,
+      kind: 'binary',
+      reader: 'pdf',
+      reason: 'read_with_document_read',
     })
     expect(output.content).not.toContain(SENTINEL)
   })

@@ -75,6 +75,10 @@ export interface XlsxSheetResult {
   name: string
   /** 1-based worksheet row number of `rows[0]`. */
   startRow: number
+  /**
+   * Contiguous: `rows[i]` is worksheet row `startRow + i`, and an empty row
+   * inside the returned range is `[]`. Cursors depend on this.
+   */
   rows: XlsxCellValue[][]
   /** True when rows of this sheet remain after the last returned one. */
   truncated: boolean
@@ -145,11 +149,27 @@ export type DocumentReadResult =
       limit?: DocumentLimitName
       message: string
     }
+  | {
+      /**
+       * The turn's attachment read budget (shared with
+       * `clerum__attachment_read`) cannot hold any part of the next page.
+       * `resumeCursor` is the cursor the call was made with, if any.
+       */
+      status: 'read_budget_exhausted'
+      attachmentId: string
+      referenceId?: string
+      resumeCursor?: string
+      message: string
+    }
 
 // ─── Limits ─────────────────────────────────────────────────
 
 export interface DocumentReadLimits {
-  /** Source file bytes; never above the inline attachment cap. */
+  /**
+   * Source file bytes. The default is the ceiling of the inline attachment
+   * cap (`CLERUM_ATTACHMENT_FILE_MAX_BYTES`, at most 11 MiB); chat admission
+   * already rejects larger files, and this bound holds for any other producer.
+   */
   maxSourceBytes: number
   /** Pages a document may have at all. */
   maxPageCount: number
@@ -182,7 +202,7 @@ export interface DocumentReadLimits {
 }
 
 export const DEFAULT_DOCUMENT_READ_LIMITS: Readonly<DocumentReadLimits> = Object.freeze({
-  maxSourceBytes: 52_428_800,
+  maxSourceBytes: 11_534_336,
   maxPageCount: 2_000,
   maxTextPagesPerCall: 50,
   maxExtractedChars: 400_000,
@@ -240,14 +260,21 @@ export interface PdfVisualJob {
   maxDimension: number
   maxPixelsPerCall: number
   maxImageBytes: number
+  /** Decoded PNG bytes of the whole call; split evenly across the selection. */
+  maxTotalImageBytes: number
   limits: DocumentReadLimits
 }
 
+/**
+ * `start` null means the beginning of the selection (row 1 of the named
+ * sheet, or of the first sheet); the Tool cannot know a named sheet's index
+ * before the workbook is opened. A cursor's position names its sheet by index.
+ */
 export interface XlsxJob {
   kind: 'xlsx'
   bytes: Uint8Array
   sheet: string | null
-  start: XlsxPosition
+  start: XlsxPosition | null
   limits: DocumentReadLimits
 }
 
@@ -266,12 +293,24 @@ export type DocumentJobFailure = {
  * `pages[i].lowText` marks pages below `minTextCharsPerPage`. A selection in
  * which no page has any non-whitespace text is `no_text_layer`, never an
  * empty success.
+ *
+ * Each page carries its whole text and the emitted window `[from, to)`, so
+ * the Tool computes redaction over the complete page before slicing: a
+ * secret cut by a cursor or a character limit is still matched whole.
  */
+export interface PdfTextPageOutcome {
+  page: number
+  text: string
+  from: number
+  to: number
+  lowText: boolean
+}
+
 export type PdfTextOutcome =
   | {
       ok: true
       pageCount: number
-      pages: Array<PdfTextPage & { lowText: boolean }>
+      pages: PdfTextPageOutcome[]
       next?: PdfTextPosition
       stoppedBy?: 'max_pages' | 'max_extracted_chars'
     }
