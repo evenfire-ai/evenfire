@@ -346,17 +346,16 @@ export function useAuthController({
       setRuntimeConfigSetupName('')
       setRuntimeConfigSetupExternalRestApiBaseUrl('')
       setRuntimeConfigSetupRpcProxyBaseUrl('')
-      const selected = state.options.find(option => option.id === state.activeOptionId)
-      setStatus(
-        expectedSessionGeneration !== undefined
-          ? 'Environment saved.'
-          : selected
-            ? `Environment saved: ${selected.label}.`
-            : `Environment saved: ${name}.`,
-        'success',
-        undefined,
-        { global: false, toast: true }
-      )
+      // Linked confirmation owns success feedback after verifying the active profile.
+      if (expectedSessionGeneration === undefined) {
+        const selected = state.options.find(option => option.id === state.activeOptionId)
+        setStatus(
+          selected ? `Environment saved: ${selected.label}.` : `Environment saved: ${name}.`,
+          'success',
+          undefined,
+          { global: false, toast: true }
+        )
+      }
       return state
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

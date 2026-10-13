@@ -342,6 +342,37 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('rejects a saved linked profile when another native profile becomes active before verification', async () => {
+    const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
+    const other = runtimeConfigModule!
+      .getDesktopRuntimeConfigState()
+      .options.find(
+        option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+      )!
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linked)
+    mocks.setStatus.mockClear()
+    mocks.saveRuntimeConfig.mockImplementationOnce(async (config, generation) => {
+      await nativeAppService!.saveRuntimeConfig(config, generation)
+      await nativeAppService!.selectRuntimeConfig(other.id)
+      return nativeAppService!.getRuntimeConfigState()
+    })
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+    const state = nativeAppService!.getRuntimeConfigState()
+    expect(state.activeOptionId).toBe(other.id)
+    expect(
+      state.options.some(option => option.externalRestApiBaseUrl === linked.externalRestApiBaseUrl)
+    ).toBe(true)
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(screen.getByTestId('setup-complete')).toHaveTextContent('no')
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'Desktop environment setup could not verify the confirmed REST and RPC endpoints.',
+      'error'
+    )
+    expect(mocks.setStatus.mock.calls.some(([, tone]) => tone === 'success')).toBe(false)
+  })
+
   it('refuses a confirmation save result for a different REST profile', async () => {
     const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
     render(<Probe />)
@@ -1000,7 +1031,7 @@ describe('Desktop environment handoff', () => {
     )
   })
 
-  it('uses fixed copy for the environment-saved toast after a linked setup', async () => {
+  it('does not announce an unverified linked setup or echo its untrusted label', async () => {
     const linkedEnvironment = {
       appName: 'Unverified Tenant Name',
       externalRestApiBaseUrl: 'https://new-api.example.test',
@@ -1015,10 +1046,11 @@ describe('Desktop environment handoff', () => {
 
     await act(async () => confirmDesktopEnvironmentSetupForTest?.())
 
-    expect(mocks.setStatus).toHaveBeenCalledWith('Environment saved.', 'success', undefined, {
-      global: false,
-      toast: true,
-    })
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'Desktop environment setup could not verify the confirmed REST and RPC endpoints.',
+      'error'
+    )
+    expect(mocks.setStatus.mock.calls.some(([, tone]) => tone === 'success')).toBe(false)
     expect(mocks.setStatus.mock.calls).not.toContainEqual(
       expect.arrayContaining([expect.stringContaining(linkedEnvironment.appName)])
     )
