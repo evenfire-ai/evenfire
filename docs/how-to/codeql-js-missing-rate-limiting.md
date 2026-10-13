@@ -96,9 +96,13 @@ passed directly to Supertest and is never bound to a listening server. It mounts
 `createInvitationsRouter()`, whose `POST /invitations/password` handler has the existing
 `acceptRateLimit` limit of 10 requests per minute. The upstream Control API password-token route
 also has trusted-source edge limiters and its 10/minute admission bucket. The alert does not
-identify an unbounded deployed route; the response-proxy regression preserves the route's
-observable retry and cookie headers while using a fixed header allowlist. Focused invitation and
-trusted-source tests verify the existing 429/`Retry-After` behavior.
+identify an unbounded deployed route. In the PostgreSQL integration test, the response proxy copies
+the upstream status and body, sets a constant `application/json` content type, and deliberately
+does not forward upstream response headers, including `Retry-After` or `Set-Cookie`. Separately,
+the public External REST route creates its own bounded retry response and issues its own session
+cookie only after a successful reset with a valid session token. Focused invitation and
+trusted-source tests verify the public 429/`Retry-After` behavior; they do not assert that the test
+proxy forwards those headers.
 
 ### Won't fix (accepted) — real gap, follow-up backstop PR
 
