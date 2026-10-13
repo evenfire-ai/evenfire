@@ -151,6 +151,149 @@ const installTabStripLayout = (
 }
 
 describe('WorkspaceTabStrip', () => {
+  it.each([1, 3])(
+    'retains a pending active reveal until its tab mounts (%i initial tabs)',
+    initialCount => {
+      let state = createEmptyWorkspaceTabsState()
+      for (let index = 0; index < 4; index += 1) {
+        state = openAppTab(state, {
+          id: `delayed-${index}`,
+          appRef: 'example/app',
+          title: `Delayed ${index}`,
+        })
+      }
+      const onSelect = vi.fn()
+      const props = { onClose: vi.fn(), onReorder: vi.fn(), onSelect }
+      const view = render(
+        <WorkspaceTabStrip
+          {...props}
+          activeTabId="delayed-0"
+          tabs={state.tabs.slice(0, initialCount)}
+        />
+      )
+      const layout = installTabStripLayout(view.container, Array(initialCount).fill(96), 248)
+      const restoreRects = layout.trackFutureTabRects()
+      try {
+        layout.measure()
+        view.rerender(
+          <WorkspaceTabStrip
+            {...props}
+            activeTabId="delayed-3"
+            tabs={state.tabs.slice(0, initialCount)}
+          />
+        )
+        expect(layout.scrollLeft()).toBe(0)
+        layout.setWidths([96, 96, 96, 96])
+        view.rerender(<WorkspaceTabStrip {...props} activeTabId="delayed-3" tabs={state.tabs} />)
+        expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
+        expect(onSelect).not.toHaveBeenCalled()
+
+        layout.setScrollLeft(10)
+        fireEvent.scroll(view.container.querySelector('.chat-view-tabs__scroller')!)
+        view.rerender(
+          <WorkspaceTabStrip {...props} activeTabId="delayed-3" tabs={[...state.tabs]} />
+        )
+        expect(layout.scrollLeft()).toBe(10)
+        layout.resize(600)
+        layout.resize(248)
+        expect(layout.scrollLeft()).toBe(0)
+      } finally {
+        restoreRects()
+      }
+    }
+  )
+
+  it.each([null, 'stale-0'])(
+    'cancels a pending reveal when the active ID changes to %s',
+    nextActiveId => {
+      let state = createEmptyWorkspaceTabsState()
+      for (let index = 0; index < 4; index += 1) {
+        state = openAppTab(state, {
+          id: `stale-${index}`,
+          appRef: 'example/app',
+          title: `Stale ${index}`,
+        })
+      }
+      const props = { onClose: vi.fn(), onReorder: vi.fn(), onSelect: vi.fn() }
+      const view = render(
+        <WorkspaceTabStrip {...props} activeTabId="stale-0" tabs={state.tabs.slice(0, 1)} />
+      )
+      const layout = installTabStripLayout(view.container, [96], 248)
+      const restoreRects = layout.trackFutureTabRects()
+      try {
+        layout.measure()
+        view.rerender(
+          <WorkspaceTabStrip {...props} activeTabId="stale-3" tabs={state.tabs.slice(0, 1)} />
+        )
+        view.rerender(
+          <WorkspaceTabStrip {...props} activeTabId={nextActiveId} tabs={state.tabs.slice(0, 1)} />
+        )
+        layout.setWidths([96, 96, 96, 96])
+        view.rerender(<WorkspaceTabStrip {...props} activeTabId={nextActiveId} tabs={state.tabs} />)
+        expect(layout.scrollLeft()).toBe(0)
+        expect(props.onSelect).not.toHaveBeenCalled()
+      } finally {
+        restoreRects()
+      }
+    }
+  )
+
+  it('supersedes a missing active target with the latest missing target', () => {
+    let state = createEmptyWorkspaceTabsState()
+    for (let index = 0; index < 5; index += 1) {
+      state = openAppTab(state, {
+        id: `latest-${index}`,
+        appRef: 'example/app',
+        title: `Latest ${index}`,
+      })
+    }
+    const props = { onClose: vi.fn(), onReorder: vi.fn(), onSelect: vi.fn() }
+    const view = render(
+      <WorkspaceTabStrip {...props} activeTabId="latest-0" tabs={state.tabs.slice(0, 1)} />
+    )
+    const layout = installTabStripLayout(view.container, [96], 248)
+    const restoreRects = layout.trackFutureTabRects()
+    try {
+      layout.measure()
+      view.rerender(
+        <WorkspaceTabStrip {...props} activeTabId="latest-3" tabs={state.tabs.slice(0, 1)} />
+      )
+      view.rerender(
+        <WorkspaceTabStrip {...props} activeTabId="latest-4" tabs={state.tabs.slice(0, 1)} />
+      )
+      layout.setWidths([96, 96, 96, 96])
+      view.rerender(
+        <WorkspaceTabStrip {...props} activeTabId="latest-4" tabs={state.tabs.slice(0, 4)} />
+      )
+      expect(layout.scrollLeft()).toBe(0)
+      layout.setWidths([96, 96, 96, 96, 96])
+      view.rerender(<WorkspaceTabStrip {...props} activeTabId="latest-4" tabs={state.tabs} />)
+      expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
+    } finally {
+      restoreRects()
+    }
+  })
+
+  it('waits for a measurable viewport before consuming an active reveal', () => {
+    let state = createEmptyWorkspaceTabsState()
+    for (let index = 0; index < 4; index += 1) {
+      state = openAppTab(state, {
+        id: `hidden-${index}`,
+        appRef: 'example/app',
+        title: `Hidden ${index}`,
+      })
+    }
+    const props = { onClose: vi.fn(), onReorder: vi.fn(), onSelect: vi.fn() }
+    const view = render(<WorkspaceTabStrip {...props} activeTabId={null} tabs={state.tabs} />)
+    const layout = installTabStripLayout(view.container, [96, 96, 96, 96], 48)
+    layout.measure()
+    view.rerender(<WorkspaceTabStrip {...props} activeTabId="hidden-3" tabs={state.tabs} />)
+    expect(layout.viewportWidth()).toBe(0)
+    expect(layout.scrollLeft()).toBe(0)
+    layout.resize(248)
+    expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
+  })
+
   it('renders the tab order and exposes non-destructive view actions', () => {
     const onSelect = vi.fn()
     const onClose = vi.fn()
