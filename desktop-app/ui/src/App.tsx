@@ -409,6 +409,7 @@ export function App() {
   const gfsDeepLinkGenerationRef = React.useRef(0)
   const gfsDeepLinkMinimumIdRef = React.useRef(0)
   const gfsDeepLinkAcceptingRef = React.useRef(true)
+  const gfsRouteDialogRequestSequenceRef = React.useRef(0)
   const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
@@ -607,7 +608,8 @@ export function App() {
   ])
 
   const handleOpenGfsRoute = React.useCallback(() => {
-    setGfsRouteDialogRequestId(value => value + 1)
+    const requestId = ++gfsRouteDialogRequestSequenceRef.current
+    setGfsRouteDialogRequestId(requestId)
     vm.openFilesSection(null)
   }, [vm.openFilesSection])
 

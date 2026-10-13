@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { type ReactNode, useEffect, useReducer } from 'react'
+import { type ReactNode, useEffect, useReducer, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -82,13 +82,20 @@ const appHeaderHarness = vi.hoisted(() => ({
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
 const filesPageHarness = vi.hoisted(() => ({
   pendingGfsUri: null as string | null,
+  mountCount: 0,
+  handledRouteRequestIds: [] as number[],
   props: null as null | {
     pendingGfsDeepLink?: { id: number; uri: string } | null
+    routeDialogRequestId?: number
+    onRouteDialogRequestHandled?: (requestId: number) => void
     onPendingGfsDeepLinkOutcome?: (
       id: number,
       outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
     ) => void
   },
+}))
+const previewPageHarness = vi.hoisted(() => ({
+  props: null as null | { onOpenRoute?: () => void },
 }))
 
 const commandPaletteHarness = vi.hoisted(() => ({
@@ -200,7 +207,12 @@ vi.mock('@components/SidebarNav', () => ({
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
-vi.mock('@pages/FilePreviewPage', () => ({ FilePreviewPage: () => null }))
+vi.mock('@pages/FilePreviewPage', () => ({
+  FilePreviewPage: (props: NonNullable<typeof previewPageHarness.props>) => {
+    previewPageHarness.props = props
+    return null
+  },
+}))
 vi.mock('@pages/ChatPage', async () => {
   const { useEffect, useRef } = await import('react')
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
@@ -232,13 +244,29 @@ vi.mock('@pages/FilesPage', () => ({
   FilesPage: (props: {
     pendingGfsUri?: string | null
     pendingGfsDeepLink?: { id: number; uri: string } | null
+    routeDialogRequestId?: number
+    onRouteDialogRequestHandled?: (requestId: number) => void
     onPendingGfsDeepLinkOutcome?: (
       id: number,
       outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
     ) => void
   }) => {
+    const handledRequestIdRef = useRef(0)
     filesPageHarness.pendingGfsUri = props.pendingGfsUri ?? null
     filesPageHarness.props = props
+    useEffect(() => {
+      filesPageHarness.mountCount += 1
+      return () => {
+        filesPageHarness.mountCount -= 1
+      }
+    }, [])
+    useEffect(() => {
+      const requestId = props.routeDialogRequestId ?? 0
+      if (!requestId || handledRequestIdRef.current === requestId) return
+      handledRequestIdRef.current = requestId
+      filesPageHarness.handledRouteRequestIds.push(requestId)
+      props.onRouteDialogRequestHandled?.(requestId)
+    }, [props.onRouteDialogRequestHandled, props.routeDialogRequestId])
     return null
   },
 }))
@@ -484,7 +512,10 @@ describe('App deep-link orchestration', () => {
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
     filesPageHarness.pendingGfsUri = null
+    filesPageHarness.mountCount = 0
+    filesPageHarness.handledRouteRequestIds = []
     filesPageHarness.props = null
+    previewPageHarness.props = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
@@ -778,6 +809,36 @@ describe('App deep-link orchestration', () => {
     act(() => staleOutcome?.(linkA.id, 'opened'))
     expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
     expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual(linkB)
+  })
+
+  it('handles repeated Open route requests while FilesPage remains mounted', async () => {
+    const workspaceTabs = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'preview-route-request',
+      title: 'Quarterly report.md',
+      gfsUri: 'gfs://main/77777777777777777777777777777777',
+      fileKind: 'markdown',
+      byteLength: 4,
+    })
+    const openFilesSection = vi.fn((path: string | null) => {
+      currentController.setWorkspaceTabs(state => openFilesTab(state, { id: 'files-root', path }))
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs,
+      openFilesSection,
+    })
+    render(<App />)
+
+    await waitFor(() => expect(previewPageHarness.props?.onOpenRoute).toBeTypeOf('function'))
+    const openRoute = previewPageHarness.props?.onOpenRoute
+    act(() => openRoute?.())
+    await waitFor(() => expect(filesPageHarness.handledRouteRequestIds).toEqual([1]))
+    expect(filesPageHarness.mountCount).toBe(1)
+
+    act(() => openRoute?.())
+    await waitFor(() => expect(filesPageHarness.handledRouteRequestIds).toEqual([1, 2]))
+    expect(filesPageHarness.mountCount).toBe(1)
+    expect(openFilesSection).toHaveBeenCalledTimes(2)
   })
 
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so
