@@ -741,6 +741,52 @@ describe('colors follow their points', () => {
   })
 })
 
+describe('empty state', () => {
+  /** The ids of the plugins the chart `args` is drawn with. */
+  async function pluginsOf(args: Record<string, unknown>): Promise<string[]> {
+    const seen: string[][] = []
+    const draw = Chart.prototype.draw
+    const spy = vi.spyOn(Chart.prototype, 'draw').mockImplementation(function (this: Chart) {
+      seen.push((this.config.plugins ?? []).map(plugin => plugin.id))
+      return draw.call(this)
+    })
+    try {
+      const r = await findTool('clerum__generate_chart').execute(args, outputDir)
+      expect(r.success, r.error).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+    return seen[seen.length - 1]
+  }
+
+  it.each([
+    [
+      'scatter',
+      [
+        { x: 1, y: 0 },
+        { x: 2, y: 0 },
+      ],
+    ],
+    ['bubble', [{ x: 1, y: 0, r: 5 }]],
+  ])('draws a %s whose points sit at zero without the empty-state text', async (type, data) => {
+    const plugins = await pluginsOf({
+      filename: `${type}-zero.png`,
+      type,
+      data: { datasets: [{ label: 'S', data }] },
+    })
+    expect(plugins).not.toContain('clerumEmptyState')
+  })
+
+  it('still marks a bar chart whose values are all zero as empty', async () => {
+    const plugins = await pluginsOf({
+      filename: 'bar-zero.png',
+      type: 'bar',
+      data: { labels: ['a', 'b'], datasets: [{ label: 'S', data: [0, 0] }] },
+    })
+    expect(plugins).toContain('clerumEmptyState')
+  })
+})
+
 describe('axes and points', () => {
   interface Drawn {
     scales: Record<string, { min: number; max: number }>

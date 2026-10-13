@@ -529,8 +529,22 @@ function resolveValueFormat(raw: unknown): ValueFormat {
   return allowed.includes(v) ? v : 'auto'
 }
 
-/** True when every plotted number is absent or zero, so nothing would be drawn. */
-function isVisuallyEmpty(datasets: ChartDataset[]): boolean {
+/**
+ * True when nothing would be drawn: every plotted number is absent or zero,
+ * or, on a scatter or bubble chart (`xy`), no point has both coordinates. A
+ * point is drawn wherever it sits, at zero too.
+ */
+function isVisuallyEmpty(datasets: ChartDataset[], xy: boolean): boolean {
+  if (xy) {
+    return !datasets.some(ds =>
+      (ds.data as unknown[]).some(point => {
+        const at = point as { x?: unknown; y?: unknown } | null
+        return (
+          typeof at === 'object' && at !== null && Number.isFinite(at.x) && Number.isFinite(at.y)
+        )
+      })
+    )
+  }
   let sawNumber = false
   for (const ds of datasets) {
     for (const point of ds.data as unknown[]) {
@@ -780,7 +794,7 @@ export async function runGenerateChart(
         })
       )
     }
-    if (isVisuallyEmpty(themedDatasets)) {
+    if (isVisuallyEmpty(themedDatasets, chartTypeRaw === 'scatter' || chartTypeRaw === 'bubble')) {
       plugins.push(emptyStatePlugin('No data to display', theme.textColor))
     }
 
