@@ -267,6 +267,11 @@ ipcMain.handle('gfs:listPendingDeepLinks', event => {
   return { links: gfsResourceDeepLinkQueue.list() }
 })
 
+ipcMain.handle('gfs:clearPendingDeepLinks', event => {
+  assertTrustedSender(event)
+  return gfsResourceDeepLinkQueue.clear()
+})
+
 ipcMain.handle('gfs:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
   assertTrustedSender(event)
   const id = Number(payload?.id)

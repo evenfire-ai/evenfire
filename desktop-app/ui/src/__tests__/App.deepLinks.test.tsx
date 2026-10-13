@@ -35,10 +35,13 @@ import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
 let forceControllerRender: () => void = () => {}
 type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
 
-function produceGfsResourceDeepLink(uri: string): GfsResourceDeepLinkEnvelope {
+function produceGfsResourceDeepLink(
+  uri: string,
+  queue = new GfsResourceDeepLinkQueue()
+): GfsResourceDeepLinkEnvelope {
   const target = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
   if (!target) throw new Error('The shared producer rejected the GFS resource URI fixture')
-  return new GfsResourceDeepLinkQueue().enqueue(target)
+  return queue.enqueue(target)
 }
 
 function useReactiveController(controller: AppController): AppController {
@@ -445,6 +448,7 @@ describe('App deep-link orchestration', () => {
   const listPendingDeepLinks = vi.fn().mockResolvedValue({ links: [] })
   const acknowledgeGfsDeepLink = vi.fn().mockResolvedValue(undefined)
   const listPendingGfsDeepLinks = vi.fn().mockResolvedValue({ links: [] })
+  const clearPendingGfsDeepLinks = vi.fn().mockResolvedValue(1)
   const closeSandboxUi = vi.fn().mockResolvedValue(undefined)
   // Route-persistence read (mini-spec 05). Defaults to "on the default route"
   // (null) so unrelated launch/deactivation tests behave exactly as before;
@@ -486,6 +490,7 @@ describe('App deep-link orchestration', () => {
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
     acknowledgeGfsDeepLink.mockResolvedValue(undefined)
+    clearPendingGfsDeepLinks.mockResolvedValue(1)
     listApps.mockResolvedValue({ apps: [] })
     listPendingDeepLinks.mockResolvedValue({ links: [] })
     listPendingGfsDeepLinks.mockResolvedValue({ links: [] })
@@ -526,6 +531,7 @@ describe('App deep-link orchestration', () => {
         },
         gfs: {
           acknowledgeDeepLink: acknowledgeGfsDeepLink,
+          clearPendingDeepLinks: clearPendingGfsDeepLinks,
           listPendingDeepLinks: listPendingGfsDeepLinks,
           onDeepLink: vi.fn((callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
             emitGfsDeepLink = callback
@@ -609,6 +615,169 @@ describe('App deep-link orchestration', () => {
     expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual(link)
     act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened'))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+  })
+
+  it('clears a pending resource link at logout and accepts a new link for the next principal', async () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    const linkA = produceGfsResourceDeepLink('gfs://main/11111111111111111111111111111111', queue)
+    clearPendingGfsDeepLinks.mockImplementation(() => Promise.resolve(queue.clear()))
+    const pushToast = currentController.pushToast
+    currentController = makeController({
+      booting: true,
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
+      pushToast,
+    })
+    const { rerender } = render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+    act(() => emitGfsDeepLink?.(linkA))
+
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      isAuthenticated: false,
+      authenticatedPrincipalIdentity: null,
+      pushToast,
+    })
+    rerender(<App />)
+
+    const openForB = vi.fn()
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-b:user-b@example.com',
+      openFilesSection: openForB,
+      pushToast,
+    })
+    rerender(<App />)
+    expect(openForB).not.toHaveBeenCalled()
+    await waitFor(() => expect(clearPendingGfsDeepLinks).toHaveBeenCalledOnce())
+
+    const linkB = produceGfsResourceDeepLink('gfs://main/22222222222222222222222222222222', queue)
+    act(() => emitGfsDeepLink?.(linkB))
+    await waitFor(() => expect(openForB).toHaveBeenCalledWith(linkB.uri))
+    expect(openForB).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears pending resource links on a direct principal change', async () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    const linkA = produceGfsResourceDeepLink('gfs://main/33333333333333333333333333333333', queue)
+    clearPendingGfsDeepLinks.mockImplementation(() => Promise.resolve(queue.clear()))
+    const pushToast = currentController.pushToast
+    currentController = makeController({
+      booting: true,
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
+      pushToast,
+    })
+    const { rerender } = render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+    act(() => emitGfsDeepLink?.(linkA))
+
+    const openForB = vi.fn()
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-b:user-b@example.com',
+      openFilesSection: openForB,
+      pushToast,
+    })
+    rerender(<App />)
+
+    expect(openForB).not.toHaveBeenCalled()
+    await waitFor(() => expect(clearPendingGfsDeepLinks).toHaveBeenCalledOnce())
+  })
+
+  it('ignores a cold pending-list response from the previous principal', async () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    const staleLink = produceGfsResourceDeepLink(
+      'gfs://main/44444444444444444444444444444444',
+      queue
+    )
+    let resolveColdList!: (value: { links: GfsResourceDeepLinkEnvelope[] }) => void
+    listPendingGfsDeepLinks.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveColdList = resolve
+        })
+    )
+    clearPendingGfsDeepLinks.mockImplementation(() => Promise.resolve(queue.clear()))
+    const pushToast = currentController.pushToast
+    currentController = makeController({
+      booting: true,
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
+      pushToast,
+    })
+    const { rerender } = render(<App />)
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalledOnce())
+
+    const openForB = vi.fn()
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-b:user-b@example.com',
+      openFilesSection: openForB,
+      pushToast,
+    })
+    rerender(<App />)
+
+    await act(async () => {
+      resolveColdList({ links: [staleLink] })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(openForB).not.toHaveBeenCalled()
+    await waitFor(() => expect(clearPendingGfsDeepLinks).toHaveBeenCalledOnce())
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+  })
+
+  it('deduplicates current-principal events and ignores stale acknowledgments', async () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    const linkA = produceGfsResourceDeepLink('gfs://main/55555555555555555555555555555555', queue)
+    clearPendingGfsDeepLinks.mockImplementation(() => Promise.resolve(queue.clear()))
+    const openForA = vi.fn((uri: string) => {
+      currentController.setWorkspaceTabs(state => openFilesTab(state, { id: 'files-a', path: uri }))
+    })
+    const pushToast = currentController.pushToast
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
+      openFilesSection: openForA,
+      pushToast,
+    })
+    const { rerender } = render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+    act(() => emitGfsDeepLink?.(linkA))
+    await waitFor(() => expect(openForA).toHaveBeenCalledWith(linkA.uri))
+    const staleOutcome = filesPageHarness.props?.onPendingGfsDeepLinkOutcome
+    expect(staleOutcome).toBeTypeOf('function')
+
+    const openForB = vi.fn((uri: string) => {
+      currentController.setWorkspaceTabs(state => openFilesTab(state, { id: 'files-b', path: uri }))
+    })
+    currentController = makeController({
+      booting: false,
+      initialExperienceLoading: false,
+      authenticatedPrincipalIdentity: 'user-b:user-b@example.com',
+      openFilesSection: openForB,
+      pushToast,
+    })
+    rerender(<App />)
+    await waitFor(() => expect(clearPendingGfsDeepLinks).toHaveBeenCalledOnce())
+
+    const linkB = produceGfsResourceDeepLink('gfs://main/66666666666666666666666666666666', queue)
+    act(() => {
+      emitGfsDeepLink?.(linkB)
+      emitGfsDeepLink?.(linkB)
+    })
+    await waitFor(() => expect(openForB).toHaveBeenCalledWith(linkB.uri))
+    expect(openForB).toHaveBeenCalledTimes(1)
+
+    act(() => staleOutcome?.(linkA.id, 'opened'))
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual(linkB)
   })
 
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so

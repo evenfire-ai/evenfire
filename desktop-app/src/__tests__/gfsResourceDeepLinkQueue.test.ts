@@ -34,4 +34,14 @@ describe('GfsResourceDeepLinkQueue', () => {
       'Invalid GFS resource deep link'
     )
   })
+
+  it('keeps IDs monotonic across a clear and returns the next accepted ID', () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    const first = queue.enqueue(parseProducedUri('gfs://main/00000000000000000000000000000001'))
+
+    expect(queue.clear()).toBe(first.id + 1)
+    const next = queue.enqueue(parseProducedUri('gfs://main/00000000000000000000000000000002'))
+    expect(next.id).toBe(first.id + 1)
+    expect(queue.list()).toEqual([next])
+  })
 })

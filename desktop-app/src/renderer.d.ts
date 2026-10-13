@@ -121,6 +121,7 @@ declare global {
         listPendingDeepLinks?: () => Promise<{
           links: Array<{ id: number; uri: string }>
         }>
+        clearPendingDeepLinks?: () => Promise<number>
         acknowledgeDeepLink?: (id: number) => Promise<void>
         onDeepLink?: (callback: (link: { id: number; uri: string }) => void) => () => void
         resolve: (uri: string) => Promise<{

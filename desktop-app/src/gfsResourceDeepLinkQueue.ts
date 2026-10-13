@@ -27,7 +27,10 @@ export class GfsResourceDeepLinkQueue {
     if (index >= 0) this.pending.splice(index, 1)
   }
 
-  clear(): void {
+  clear(): number {
     this.pending.splice(0)
+    // IDs never reset; the returned floor lets a renderer reject an in-flight
+    // pre-clear event while accepting links activated after this boundary.
+    return this.sequence + 1
   }
 }

@@ -405,6 +405,10 @@ export function App() {
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
   const pendingGfsDeepLinksRef = React.useRef<GfsResourceDeepLinkEnvelope[]>([])
   const processingGfsDeepLinkIdRef = React.useRef<number | null>(null)
+  const gfsDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
+  const gfsDeepLinkGenerationRef = React.useRef(0)
+  const gfsDeepLinkMinimumIdRef = React.useRef(0)
+  const gfsDeepLinkAcceptingRef = React.useRef(true)
   const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
@@ -1599,14 +1603,16 @@ export function App() {
   }, [])
 
   const setPendingGfsDeepLinkState = React.useCallback((next: GfsResourceDeepLinkEnvelope[]) => {
-    pendingGfsDeepLinksRef.current = next
-    setPendingGfsDeepLinks(next)
+    const ordered = [...next].sort((left, right) => left.id - right.id)
+    pendingGfsDeepLinksRef.current = ordered
+    setPendingGfsDeepLinks(ordered)
   }, [])
 
   const enqueueGfsDeepLink = React.useCallback(
     (value: GfsResourceDeepLinkEnvelope) => {
-      const uri = normalizeGfsResourceUri(value?.uri)
       if (!Number.isSafeInteger(value?.id) || value.id <= 0) return
+      if (!gfsDeepLinkAcceptingRef.current || value.id < gfsDeepLinkMinimumIdRef.current) return
+      const uri = normalizeGfsResourceUri(value?.uri)
       if (!uri) {
         vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
         void window.clerum.gfs?.acknowledgeDeepLink?.(value.id)?.catch(() => undefined)
@@ -1798,12 +1804,66 @@ export function App() {
   }, [setPendingSandboxUiDeepLinkState])
 
   React.useEffect(() => {
+    const identity = vm.authenticatedPrincipalIdentity
+    const previousIdentity = gfsDeepLinkIdentityRef.current
+    gfsDeepLinkIdentityRef.current = identity
+    if (!shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)) return
+
+    const generation = ++gfsDeepLinkGenerationRef.current
+    gfsDeepLinkAcceptingRef.current = false
+    setPendingGfsDeepLinkState([])
+    processingGfsDeepLinkIdRef.current = null
+    setActiveGfsDeepLink(null)
+
+    void (async () => {
+      try {
+        const minimumId = await window.clerum.gfs?.clearPendingDeepLinks?.()
+        if (generation !== gfsDeepLinkGenerationRef.current) return
+        if (!Number.isSafeInteger(minimumId) || minimumId === undefined || minimumId < 1) {
+          throw new Error('The EvenDrive deep-link queue did not return a valid reset boundary')
+        }
+        gfsDeepLinkMinimumIdRef.current = Math.max(gfsDeepLinkMinimumIdRef.current, minimumId)
+        gfsDeepLinkAcceptingRef.current = true
+
+        const pending = await window.clerum.gfs?.listPendingDeepLinks?.()
+        if (generation !== gfsDeepLinkGenerationRef.current) return
+        pending?.links
+          .filter(link => link.id >= gfsDeepLinkMinimumIdRef.current)
+          .forEach(enqueueGfsDeepLink)
+      } catch {
+        if (generation === gfsDeepLinkGenerationRef.current) {
+          vm.pushToast(
+            'Could not safely refresh pending EvenDrive links after the account changed.',
+            'error'
+          )
+        }
+      }
+    })()
+  }, [
+    enqueueGfsDeepLink,
+    setPendingGfsDeepLinkState,
+    vm.authenticatedPrincipalIdentity,
+    vm.pushToast,
+  ])
+
+  React.useEffect(() => {
     let cancelled = false
     const unsubscribe = window.clerum.gfs?.onDeepLink?.(enqueueGfsDeepLink)
-    const pendingLinks = window.clerum.gfs?.listPendingDeepLinks?.()
+    const listGeneration = gfsDeepLinkGenerationRef.current
+    const pendingLinks = gfsDeepLinkAcceptingRef.current
+      ? window.clerum.gfs?.listPendingDeepLinks?.()
+      : undefined
     void pendingLinks
       ?.then(result => {
-        if (!cancelled) result?.links.forEach(enqueueGfsDeepLink)
+        if (
+          !cancelled &&
+          listGeneration === gfsDeepLinkGenerationRef.current &&
+          gfsDeepLinkAcceptingRef.current
+        ) {
+          result?.links
+            .filter(link => link.id >= gfsDeepLinkMinimumIdRef.current)
+            .forEach(enqueueGfsDeepLink)
+        }
       })
       .catch(() => undefined)
     return () => {

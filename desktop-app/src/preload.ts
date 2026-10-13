@@ -144,6 +144,7 @@ const clerum = Object.freeze({
   },
   gfs: {
     listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
+    clearPendingDeepLinks: () => ipcRenderer.invoke('gfs:clearPendingDeepLinks'),
     acknowledgeDeepLink: (id: number) => ipcRenderer.invoke('gfs:acknowledgeDeepLink', { id }),
     onDeepLink: (callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
       const listener = (_event: unknown, payload: GfsResourceDeepLinkEnvelope) => callback(payload)
