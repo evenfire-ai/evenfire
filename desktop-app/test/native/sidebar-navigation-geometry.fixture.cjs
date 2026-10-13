@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict')
 const { readFileSync } = require('node:fs')
 const path = require('node:path')
-const { app, BrowserWindow, WebContentsView, screen } = require('electron')
+const { app, BrowserWindow } = require('electron')
 
 const waitForLayout = () => new Promise(resolve => setTimeout(resolve, 200))
 
@@ -31,19 +31,8 @@ async function layout(window) {
   })()`)
 }
 
-function nativeBounds(rect, dpr, scaleFactor) {
-  const factor = dpr / scaleFactor
-  return {
-    x: Math.round(rect.x * factor),
-    y: Math.round(rect.y * factor),
-    width: Math.round(rect.width * factor),
-    height: Math.round(rect.height * factor),
-  }
-}
-
 app.whenReady().then(async () => {
   let window
-  let view
   try {
     window = new BrowserWindow({ show: true, x: -10000, y: -10000, width: 700, height: 700 })
     const tokens = readFileSync(path.join(__dirname, '../../ui/src/styles/tokens.css'), 'utf8')
@@ -79,12 +68,6 @@ app.whenReady().then(async () => {
         trigger.focus()
       })
     })()`)
-    view = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true } })
-    await view.webContents.loadURL(
-      `data:text/html;charset=utf-8,${encodeURIComponent('<!doctype html><body>Native sandbox view</body>')}`
-    )
-    window.contentView.addChildView(view)
-
     const closed = await layout(window)
     assert.equal(closed.compact, true, '700px window uses the compact navigation breakpoint')
     assert.equal(closed.overlayOpen, false, 'compact navigation starts closed')
@@ -94,8 +77,6 @@ app.whenReady().then(async () => {
       'auto',
       'compact navigation trigger can receive pointer input'
     )
-    assert.equal(view.getVisible(), true, 'native WebContentsView starts visible')
-
     const contentBefore = closed.workspace
     await window.webContents.executeJavaScript(
       "document.querySelector('.compact-navigation-toggle').click()"
@@ -140,8 +121,6 @@ app.whenReady().then(async () => {
       "document.querySelector('.compact-navigation-toggle').click()"
     )
     await waitForLayout()
-    view.setVisible(false)
-    assert.equal(view.getVisible(), false, 'native WebContentsView is hidden for the overlay')
     assert.deepEqual(
       overlay.workspace,
       contentBefore,
@@ -173,24 +152,12 @@ app.whenReady().then(async () => {
     assert.equal(desktop.compactToggleDisplay, 'none', 'desktop hides the compact trigger')
     assert.ok(Math.abs(desktop.sidebar.width - 460) <= 1, 'desktop sidebar honors its live width')
 
-    const scaleFactor = screen.getDisplayMatching(window.getBounds()).scaleFactor
-    const dpr = await window.webContents.executeJavaScript('window.devicePixelRatio')
-    view.setBounds(nativeBounds(desktop.slot, dpr, scaleFactor))
-    view.setVisible(true)
-    assert.equal(view.getVisible(), true, 'native WebContentsView is restored after the overlay')
-    assert.deepEqual(
-      view.getBounds(),
-      nativeBounds(desktop.slot, dpr, scaleFactor),
-      'native view bounds match the live renderer slot after the viewport changes'
-    )
-
-    console.log('sidebar navigation native geometry fixture: PASS')
+    console.log('sidebar navigation CSS/BrowserWindow geometry fixture: PASS')
     app.exit(0)
   } catch (error) {
     console.error(error)
     app.exit(1)
   } finally {
-    if (window && !window.isDestroyed() && view) window.contentView.removeChildView(view)
     if (window && !window.isDestroyed()) window.close()
   }
 })

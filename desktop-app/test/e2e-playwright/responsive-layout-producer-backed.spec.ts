@@ -240,6 +240,49 @@ test('Desktop app tray layout is exercised with producer-backed notification and
         }
       })
       expect(desktopFocus).toEqual({ connected: true, visible: true, inert: false })
+      const readDesktopNativeGeometry = async () => {
+        const [slot, view, devicePixelRatio] = await Promise.all([
+          bounds(page.locator('.sandbox-ui-embed-slot')),
+          nativeSandboxViewState(app!),
+          page.evaluate(() => window.devicePixelRatio),
+        ])
+        const factor = devicePixelRatio / view.scaleFactor
+        const matchesSlot = [
+          [view.bounds.x, slot.x * factor],
+          [view.bounds.y, slot.y * factor],
+          [view.bounds.width, slot.width * factor],
+          [view.bounds.height, slot.height * factor],
+        ].every(([actual, expected]) => Math.abs(actual! - expected!) <= 2)
+        return { slot, view, factor, matchesSlot }
+      }
+      await expect
+        .poll(
+          async () => {
+            const { view, matchesSlot } = await readDesktopNativeGeometry()
+            return (
+              view.visible &&
+              view.webContentsId === nativeViewBeforeOverlay.webContentsId &&
+              matchesSlot
+            )
+          },
+          { timeout: 10_000 }
+        )
+        .toBe(true)
+      const {
+        slot: desktopSlot,
+        view: desktopView,
+        factor: desktopFactor,
+      } = await readDesktopNativeGeometry()
+      expect(desktopView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
+      expect(desktopView.visible).toBe(true)
+      for (const [actual, expected] of [
+        [desktopView.bounds.x, desktopSlot.x * desktopFactor],
+        [desktopView.bounds.y, desktopSlot.y * desktopFactor],
+        [desktopView.bounds.width, desktopSlot.width * desktopFactor],
+        [desktopView.bounds.height, desktopSlot.height * desktopFactor],
+      ]) {
+        expect(Math.abs(actual! - expected!)).toBeLessThanOrEqual(2)
+      }
       const separator = page.getByRole('separator', { name: 'Resize sidebar' })
       await expect(separator).toBeVisible()
       const desktopSidebar = page.locator('.left-nav')
