@@ -140,7 +140,7 @@ describe('R6 invitation/password producer response mappings', () => {
     vi.clearAllMocks()
     flow.validateInvitationFlowToken.mockImplementation(
       async (token: string, claimedEmail?: string) => {
-        if (token !== 'r6-reset-proof') throw new Error('invalid proof')
+        if (token !== 'r6-synthetic-reset-proof') throw new Error('invalid proof')
         if (claimedEmail && claimedEmail.toLowerCase() !== preview.email) {
           throw new Error('wrong email')
         }
@@ -183,7 +183,7 @@ describe('R6 invitation/password producer response mappings', () => {
       }
 
       const response = await request(publicApp()).post('/invitations/password').send({
-        token: 'r6-reset-proof',
+        token: 'r6-synthetic-reset-proof',
         email: preview.email,
         invitationId: preview.id,
         password: 'R6-synthetic-valid-password',
@@ -209,7 +209,7 @@ describe('R6 invitation/password producer response mappings', () => {
     )
 
     const response = await request(publicApp()).post('/invitations/password').send({
-      token: 'r6-reset-proof',
+      token: 'r6-synthetic-reset-proof',
       email: preview.email,
       invitationId: preview.id,
       password: 'R6-synthetic-valid-password',

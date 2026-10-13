@@ -45,7 +45,7 @@ describe('R6 reset completion session-token fail-closed contract', () => {
       invitationService.setupInvitationPasswordWithToken.mockResolvedValue(body)
 
       const response = await request(makeApp()).post('/invitations/password').send({
-        token: 'r6-one-use-reset-proof',
+        token: 'r6-synthetic-one-use-reset-proof',
         email: resetPreview.email,
         invitationId: resetPreview.id,
         password: 'R6-synthetic-new-password',
@@ -54,7 +54,7 @@ describe('R6 reset completion session-token fail-closed contract', () => {
       expect(response.status).toBe(502)
       expect(response.body).toEqual({ error: 'Failed to restore account session' })
       expect(response.headers['set-cookie']).toBeUndefined()
-      expect(JSON.stringify(response.body)).not.toContain('r6-one-use-reset-proof')
+      expect(JSON.stringify(response.body)).not.toContain('r6-synthetic-one-use-reset-proof')
       expect(invitationService.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
     }
   )
