@@ -120,6 +120,13 @@ const agentTag = (row: HTMLElement) =>
   row.querySelector('.reference-tag--agent .reference-tag__label')?.textContent?.trim() ?? null
 const chipText = (row: HTMLElement) =>
   row.querySelector('td:nth-child(5) .ui-pill')?.textContent?.trim() ?? null
+const cellByColumn = (container: HTMLElement, row: HTMLElement, columnName: string) => {
+  const header = within(container).getByRole('columnheader', { name: columnName })
+  const cellIndex = (header as HTMLTableCellElement).cellIndex
+  return (row as HTMLTableRowElement).cells[cellIndex]
+}
+const cellTextByColumn = (container: HTMLElement, row: HTMLElement, columnName: string) =>
+  cellByColumn(container, row, columnName)?.textContent?.trim() ?? ''
 // One row per (connector, agent): identify by BOTH so the two `monday` sibling
 // rows are addressable independently.
 const rowBy = (rows: HTMLElement[], name: string, agent: string) => {
@@ -214,7 +221,7 @@ describe('McpServersPage — da-table layout + navigation', () => {
     expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-orphan', 'mcp-servers')
   })
 
-  it('(e) distinguishes the 3 statuses and only authorized/requires_setup are actionable', () => {
+  it('(e) displays OAuth scope, authentication, and status for each connector type', () => {
     installClerum(CONNECTORS)
     const { container } = renderPage(CONNECTORS)
     const rows = allRows(container)
@@ -229,22 +236,35 @@ describe('McpServersPage — da-table layout + navigation', () => {
     const monday = rowBy(rows, 'monday', 'agent-zeta')
     expect(chipText(monday)).toBe('Authorized')
     expect(buttonLabels(monday)).toEqual(['Disconnect'])
+    expect(cellTextByColumn(container, monday, 'Scope')).toBe('Personal')
+    expect(cellTextByColumn(container, monday, 'Authentication')).toBe('OAuth')
+    expect(cellTextByColumn(container, monday, 'Status')).toBe('Authorized')
 
     const clickup = rowBy(rows, 'clickup', 'agent-zeta')
     expect(chipText(clickup)).toBe('Requires setup')
     expect(buttonLabels(clickup)).toEqual(['Authorize'])
+    expect(cellTextByColumn(container, clickup, 'Scope')).toBe('Personal')
+    expect(cellTextByColumn(container, clickup, 'Authentication')).toBe('OAuth')
+    expect(cellTextByColumn(container, clickup, 'Status')).toBe('Requires setup')
+
+    const sharedDrive = rowBy(rows, 'shared-drive', 'agent-zeta')
+    expect(cellTextByColumn(container, sharedDrive, 'Scope')).toBe('Shared')
+    expect(cellTextByColumn(container, sharedDrive, 'Authentication')).toBe('OAuth')
+    expect(cellTextByColumn(container, sharedDrive, 'Status')).toBe('Requires setup')
 
     const filesystem = rowBy(rows, 'filesystem', 'agent-zeta')
     expect(chipText(filesystem)).toBe('—')
     expect(buttonLabels(filesystem)).toEqual([])
-    expect(filesystem.querySelector('td:nth-child(4)')?.textContent?.trim()).toBe(
-      'Static credentials'
-    )
+    expect(cellTextByColumn(container, filesystem, 'Scope')).toBe('—')
+    expect(cellTextByColumn(container, filesystem, 'Authentication')).toBe('Static credentials')
+    expect(cellTextByColumn(container, filesystem, 'Status')).toBe('—')
 
     const publicData = rowBy(rows, 'public-data', 'agent-zeta')
-    const authenticationCell = publicData.querySelector('td:nth-child(4)')
-    expect(authenticationCell?.textContent?.trim()).toBe('')
+    const authenticationCell = cellByColumn(container, publicData, 'Authentication')
+    expect(cellTextByColumn(container, publicData, 'Scope')).toBe('—')
+    expect(cellTextByColumn(container, publicData, 'Authentication')).toBe('')
     expect(authenticationCell?.childElementCount).toBe(0)
+    expect(cellTextByColumn(container, publicData, 'Status')).toBe('—')
     expect(publicData.textContent).not.toContain('No authentication')
 
     // oauth-user scope pill surfaces the blast-radius caption as a tooltip.
