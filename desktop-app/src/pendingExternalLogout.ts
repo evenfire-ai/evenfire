@@ -339,22 +339,6 @@ export function recordPendingKeytarCleanupIfMissing(
   return true
 }
 
-/** Retire a malformed marker only if no newer marker replaced its bytes. */
-export function clearPendingExternalLogoutIfContentsUnchanged(
-  userDataDirectory: string,
-  envKey: string,
-  expectedContentsRevision: string
-): boolean {
-  if (
-    readPendingExternalLogoutContentsRevision(userDataDirectory, envKey) !==
-    expectedContentsRevision
-  ) {
-    return false
-  }
-  clearPendingExternalLogout(userDataDirectory, envKey)
-  return true
-}
-
 /**
  * Convert the marker only when the producer still owns the observed marker.
  * A newer logout-pending marker is intentionally never downgraded to cleanup.

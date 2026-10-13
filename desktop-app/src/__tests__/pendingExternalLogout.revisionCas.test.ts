@@ -51,28 +51,6 @@ describe('pending logout revision ownership', () => {
     }
   )
 
-  it('does not retire malformed bytes after a newer logout replaces them', () => {
-    fs.writeFileSync(markerPath(), '{not-json')
-    const contentsRevision = markers.readPendingExternalLogoutContentsRevision(directory, envKey)!
-    markers.recordPendingExternalLogout(directory, envKey)
-    const newer = read()
-
-    expect(
-      markers.clearPendingExternalLogoutIfContentsUnchanged(directory, envKey, contentsRevision)
-    ).toBe(false)
-    expect(read()).toEqual(newer)
-  })
-
-  it('retires unchanged malformed bytes through their content revision', () => {
-    fs.writeFileSync(markerPath(), '{not-json')
-    const contentsRevision = markers.readPendingExternalLogoutContentsRevision(directory, envKey)!
-
-    expect(
-      markers.clearPendingExternalLogoutIfContentsUnchanged(directory, envKey, contentsRevision)
-    ).toBe(true)
-    expect(markers.readPendingExternalLogoutMarker(directory, envKey)).toBeNull()
-  })
-
   it('normalizes unchanged malformed bytes into revisioned logout intent', () => {
     fs.writeFileSync(markerPath(), '{not-json')
     const contentsRevision = markers.readPendingExternalLogoutContentsRevision(directory, envKey)!
