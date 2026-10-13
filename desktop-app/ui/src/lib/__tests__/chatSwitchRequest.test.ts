@@ -1,51 +1,36 @@
 import { describe, expect, it, vi } from 'vitest'
-import fc from 'fast-check'
 import { runChatSwitchRequest } from '../chatSwitchRequest'
 
-describe('logical switch request invariants', () => {
-  it('composes duplicate awaiters without duplicate execution or reports', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.boolean(),
-        fc.boolean(),
-        fc.integer({ min: 1, max: 30 }),
-        async (current, succeeds, observerCount) => {
-          const error = new Error('request failure')
-          const execute = vi.fn(() => (succeeds ? Promise.resolve() : Promise.reject(error)))
-          const report = vi.fn()
-          const request = runChatSwitchRequest(execute, () => current, report)
-          const results = await Promise.allSettled(
-            Array.from({ length: observerCount }, () => request)
-          )
-          expect(execute).toHaveBeenCalledTimes(1)
-          expect(report).toHaveBeenCalledTimes(!succeeds && current ? 1 : 0)
-          expect(
-            results.every(result =>
-              succeeds
-                ? result.status === 'fulfilled'
-                : result.status === 'rejected' && result.reason === error
-            )
-          ).toBe(true)
-        }
-      ),
-      { numRuns: 500 }
-    )
+// Admission, cancellation and navigation precedence belong to the controller:
+// switchFeedbackDecision.r12, switchExecutionLifecycle.r12 and switchJoinRevision.r12.
+// This helper owns only execution feedback and the raw rejection contract.
+describe('switch feedback executor contract', () => {
+  it('does not consult error ownership after success', async () => {
+    const current = vi.fn(() => true)
+    const report = vi.fn()
+    const execute = vi.fn(async () => undefined)
+    await expect(runChatSwitchRequest(execute, current, report)).resolves.toBeUndefined()
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(current).not.toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
   })
 
-  it('never lets a settled request own a later independent failure', async () => {
-    await fc.assert(
-      fc.asyncProperty(fc.array(fc.boolean(), { minLength: 2, maxLength: 30 }), async outcomes => {
-        const report = vi.fn()
-        for (const succeeds of outcomes) {
-          await runChatSwitchRequest(
-            () => (succeeds ? Promise.resolve() : Promise.reject(new Error('independent failure'))),
-            () => true,
-            report
-          ).catch(() => undefined)
-        }
-        expect(report).toHaveBeenCalledTimes(outcomes.filter(succeeds => !succeeds).length)
-      }),
-      { numRuns: 500 }
-    )
+  it.each([true, false])('preserves the rejection with current=%s', async current => {
+    const error = new Error('original failure')
+    const report = vi.fn()
+    const isCurrent = vi.fn(() => current)
+    const execute = vi.fn(async () => {
+      throw error
+    })
+    const request = runChatSwitchRequest(execute, isCurrent, report)
+    const observers = await Promise.allSettled([request, request])
+    expect(observers).toEqual([
+      { status: 'rejected', reason: error },
+      { status: 'rejected', reason: error },
+    ])
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(isCurrent).toHaveBeenCalledTimes(1)
+    expect(report).toHaveBeenCalledTimes(current ? 1 : 0)
+    if (current) expect(report).toHaveBeenCalledWith(error)
   })
 })
