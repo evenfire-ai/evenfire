@@ -542,6 +542,73 @@ describe('persistence transaction ordering', () => {
   })
 })
 
+describe('R20-M4 ordinary partial-write recovery', () => {
+  it.each(['absent', 'active-keytar'] as const)(
+    'fences a late admitted native writer after logout with an originally %s marker',
+    async markerSource => {
+      const h = await harness()
+      await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+      if (markerSource === 'active-keytar')
+        h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+      const keytar = await import('keytar')
+      const entered = deferred()
+      const release = deferred()
+      vi.mocked(keytar.setPassword).mockImplementationOnce(async (service, account, token) => {
+        entered.resolve()
+        await release.promise
+        runtime.keychain.set(keyOf(service, account), token)
+      })
+      const switching = h.service.switchTeam('fixture-other')
+      const rejection = switching.catch(() => undefined)
+      await entered.promise
+      await h.service.logout()
+      const restoring = h.service.initialize()
+      release.resolve()
+      await expect(switching).rejects.toThrow(/changed|superseded/)
+      await rejection
+      await expect(restoring).resolves.toEqual({ authenticated: false, me: null })
+      expect(h.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+      const restarted = await harness()
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+      })
+      expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+    }
+  )
+
+  it('retains home authentication across restart after an ordinary team write partially failed', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    const keytar = await import('keytar')
+    vi.mocked(keytar.setPassword).mockImplementationOnce(async (service, account, token) => {
+      runtime.keychain.set(keyOf(service, account), token)
+      throw new Error('fixture-partial ordinary Keytar write')
+    })
+    const rename = fs.rename.bind(fs)
+    let fileWriteFailed = false
+    vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      if (!fileWriteFailed && String(destination).endsWith('.enc')) {
+        fileWriteFailed = true
+        throw new Error('fixture-encrypted rename failed')
+      }
+      return rename(source, destination)
+    })
+    await expect(h.service.switchTeam('fixture-other')).rejects.toThrow(
+      'fixture-encrypted rename failed'
+    )
+    expect(fileWriteFailed).toBe(true)
+    expect(h.state.sessionToken).toBe(homeToken)
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: homeMe,
+    })
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+  })
+})
+
 describe('explicit login transient marker inspection', () => {
   it('does not normalize a valid cleanup marker after one transient EMFILE', async () => {
     const h = await harness()
