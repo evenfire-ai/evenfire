@@ -218,7 +218,7 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       }
 
       await trigger.click()
-      const compactClose = page.getByRole('button', { name: 'Close navigation menu' })
+      const compactClose = page.locator('.sidebar-compact-close')
       await compactClose.focus()
       await expect(compactClose).toBeFocused()
       await resizeDesktop(app!, 1200)
