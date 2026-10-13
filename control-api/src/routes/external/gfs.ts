@@ -625,8 +625,6 @@ export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceE
         drive,
         scopes,
         pathBindings: [],
-        ...(claims.authGeneration === undefined ? {} : { authGeneration: claims.authGeneration }),
-        principalType: 'user',
         ...(actionAuthority
           ? {
               actionAuthority: {

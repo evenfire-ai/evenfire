@@ -283,7 +283,13 @@ const v2Auth = () =>
   mockVerifyExternalSessionToken.mockResolvedValue({
     status: 'authenticated',
     contract: 'v2',
-    claims: SESSION,
+    claims: {
+      userId: SESSION.userId,
+      email: SESSION.email,
+      teamId: SESSION.teamId,
+      role: SESSION.role,
+      exp: SESSION.exp,
+    },
     authorityContext: {
       contract: 'v2',
       userId: U1,
@@ -1114,12 +1120,18 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
         gateway,
       })
     )
+    expect(mockSignCurrentExternalGfsUserToken.mock.calls[0]?.[1]).toEqual({
+      subject: U1,
+      drive: 'main',
+      scopes: ['gfs.read'],
+      pathBindings: [],
+      actionAuthority: { binding, sourceIssuedAt: 100, sourceExpiresAt: 200 },
+    })
     expect(mockSignGfsToken).toHaveBeenCalledWith({
       subject: U1,
       drive: 'main',
       scopes: ['gfs.read'],
       pathBindings: [],
-      authGeneration: 1,
       principalType: 'user',
       actionAuthority: { binding, sourceIssuedAt: 100, sourceExpiresAt: 200 },
     })
