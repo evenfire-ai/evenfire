@@ -134,6 +134,13 @@ jobs:
         working-directory: external-rest-api
         run: npm ci
 
+      # External REST producer-contract tests import Control API route sources
+      # directly, so install the producer's dependencies in this isolated job.
+      - name: Install Control API producer dependencies
+        if: matrix.service == 'external-rest-api'
+        working-directory: control-api
+        run: npm ci
+
       # Desktop strict-pixel fixture checks consume the Host's locked native
       # canvas dependency through mcp-host/package.json.
       - name: Install Host dependencies for Desktop fixture checks
