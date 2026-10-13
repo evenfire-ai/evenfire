@@ -24,8 +24,13 @@ Things to know before you write one:
 - **No status.** The CRD has no status subresource. A violation shows up on
   the *WorkflowRecipe*: `status.phase: failed` and `status.message:
   "Policy violation: [<policy>] <rule>: <detail>"`. WRC does not retry or
-  self-heal a policy failure. Fix the recipe spec (or the policy) to re-arm
-  enforcement.
+  self-heal a policy failure, and editing the spec does not clear it: while
+  the recipe is `failed` with a `Policy violation:` message, WRC skips policy
+  evaluation and the recipe stays `failed`. After you fix the recipe spec (or
+  the policy), call the control-api admin endpoint
+  `POST /api/v1/admin/recipes/<name>/retry`. It moves the recipe to
+  `candidate`, and the next reconcile evaluates the policies again. Deleting
+  and re-creating the recipe also starts it from `candidate`.
 - **Many fields are not enforced yet.** The schema accepts more than WRC
   checks. The tables below mark each field as **Enforced** or **Not
   enforced**. A not-enforced field is stored but nothing reads it.

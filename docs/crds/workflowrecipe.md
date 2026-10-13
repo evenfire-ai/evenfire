@@ -3104,18 +3104,20 @@ rolling-back --> rollback-failed         (rollback itself fails)
 - `failed` --> `active` (must go through `candidate` for retry)
 - `rollback-failed` --> any state (terminal; manual cleanup required)
 
-**Recovery from `failed` state**: Unlike `rollback-failed` (which is terminal), the `failed` state supports a retry path via `failed` --> `candidate`. The operator triggers this transition by annotating the WorkflowRecipe with `clerum.io/retry: "true"`. The controller:
+**Recovery from `failed` state**: Unlike `rollback-failed` (which is terminal), the `failed` state supports a retry path via `failed` --> `candidate`. The operator triggers this transition with the control-api admin endpoint `POST /api/v1/admin/recipes/<name>/retry` (`control-api/src/routes/admin/recipes.ts`). No annotation triggers a retry. The endpoint:
 
-1. Resets `status.workloads[].phase` to `pending` for all workloads
-2. Preserves existing PVCs and Secrets (does not recreate)
-3. Transitions to `candidate`, re-entering the approval flow
+1. Returns `409 invalid_transition` unless `status.phase` is `failed`
+2. Patches only the status subresource to `phase: candidate`, `message: "Manual retry requested by operator"`; the spec and existing resources are not touched
+3. Leaves the rest to WRC: the next reconcile evaluates WorkflowRecipePolicies again and reconciles the workloads, and the phase settles from their readiness
+
+A recipe that failed a policy check (`message` starting `Policy violation:`) needs this retry after the spec or policy is fixed; editing the spec alone does not re-run enforcement (see [WorkflowRecipePolicy](workflowrecipepolicy.md)).
 
 Retry counting is controller-internal. There is **no** `status.retryCount`
 property in the CRD status schema (§12.2) — the status object is structural with
 no `x-kubernetes-preserve-unknown-fields`, so such a key would be pruned — and
 there is no `WorkflowRecipePolicy.governance.maxRetries` field.
 
-This avoids the overhead of deleting and recreating the entire recipe (which loses status history and correlation ID) while still requiring re-approval for safety.
+This avoids deleting and recreating the entire recipe, which loses status history and correlation ID.
 
 #### 12.1.1 Simplified Visible States (CLI/Dashboard Layer)
 

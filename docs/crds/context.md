@@ -22,7 +22,7 @@ inject SharedFileSystem volume mounts into the mcp-host pod.
 | `spec.description` | string | no | Human-readable description of the context scope. |
 | `spec.mcpServers` | string[] | yes | List of McpServer CRD names accessible within this context. When a host requests servers for this context, only these servers are returned by the context-mapper. |
 | `spec.sharedFileSystems` | object[] | no | Optional list of SharedFileSystem references. Each entry causes HCC to inject a read-only volume mount into every mcp-host pod whose Host references this Context. Keyed on `mountPath` (unique within a Context). Each entry requires `name` (SharedFileSystem.metadata.name in the mcp-host namespace) and `mountPath` (absolute path inside the container, matching `^/[a-zA-Z0-9_.][a-zA-Z0-9_./\-]*$`). |
-| `spec.gfs.mounts` | object[] | no | Optional Global File System mount intents. Intent only: HCC wires a mount only if the Context identity already holds the requested scopes. Keyed on `target`. Each entry requires `drive` (gfs drive name), `target` (32-hex resource id or absolute path), and `scopes` (array from `gfs.read`, `gfs.write`, `gfs.delete`, `gfs.manage_acl`, `gfs.share`). |
+| `spec.gfs.mounts` | object[] | no | Optional Global File System mount intents. Defined in the schema, but host-context-controller does not read it in this release: an entry wires no mount and grants no access. (The CRD description's scope check lives in `host-context-controller/src/contextGfsMount.ts`, which has no production caller yet.) Keyed on `target`. Each entry requires `drive` (gfs drive name), `target` (32-hex resource id or absolute path), and `scopes` (array from `gfs.read`, `gfs.write`, `gfs.delete`, `gfs.manage_acl`, `gfs.share`). |
 
 ## Status Fields
 

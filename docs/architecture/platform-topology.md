@@ -4,7 +4,7 @@
 > All other specification documents reference this document for architectural decisions.
 > When the architecture changes, update THIS document first, then propagate to specs.
 >
-> **Security-First Architecture**: This document defines the 12-namespace architecture,
+> **Security-First Architecture**: This document defines the 13-namespace architecture,
 > the controller architecture (HCC + WRC), the Sandbox Recipes Namespace, the RPC Proxy Namespace,
 > and the **deny-all by default** security posture across all runtime namespaces.
 
