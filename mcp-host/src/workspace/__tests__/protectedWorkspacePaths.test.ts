@@ -73,6 +73,28 @@ describe('protected workspace paths', () => {
     await expect(workspace.search('accounting-sentinel')).resolves.toEqual([])
   })
 
+  it('blocks a retired pre-#1028 store tree and leaves a lookalike name readable', async () => {
+    const retired = '.gfs-download-store.retired-00000000-0000-4000-8000-000000000000'
+    fs.mkdirSync(path.join(root, retired))
+    fs.writeFileSync(path.join(root, retired, 'ledger-v1.json'), 'retired-sentinel', 'utf-8')
+    fs.mkdirSync(path.join(root, '.gfs-download-storex'))
+    fs.writeFileSync(path.join(root, '.gfs-download-storex', 'notes.md'), 'marmalade', 'utf-8')
+    const workspace = new WorkspaceService(root)
+
+    // Witness: the prefix check does not refuse every name that starts alike.
+    await expect(workspace.read('.gfs-download-storex/notes.md')).resolves.toBe('marmalade')
+    await expect(workspace.search('marmalade')).resolves.toEqual([
+      expect.objectContaining({ path: '.gfs-download-storex/notes.md' }),
+    ])
+    await expect(workspace.read(`${retired}/ledger-v1.json`)).rejects.toBeInstanceOf(
+      GfsDownloadPathError
+    )
+    await expect(workspace.list()).resolves.not.toContainEqual(
+      expect.objectContaining({ name: retired })
+    )
+    await expect(workspace.search('retired-sentinel')).resolves.toEqual([])
+  })
+
   it('rejects a workspace root that itself resolves into GFS accounting', async () => {
     const accountingRoot = path.join(root, '.gfs-download-store')
     fs.writeFileSync(path.join(accountingRoot, 'MEMORY.md'), 'accounting-sentinel', 'utf-8')

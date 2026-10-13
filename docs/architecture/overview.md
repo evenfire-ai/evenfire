@@ -1657,6 +1657,11 @@ Approving any MCP tool automatically approves **all tools from the same MCP serv
 | LLM calls 3 tools from `airtable-server`                  | 1 (first tool prompts, rest auto-approved) |
 | LLM calls tools from `airtable-server` + `mongodb-server` | 2 (one per server)                         |
 | Native tools (no `__` in name)                            | Per-tool (unchanged)                       |
+| `shell_exec` called 5 times, then `http_request`          | 2 (one per tool, for the rest of the task) |
+
+`shell_exec`, `http_request` and `cron_manage` (`SESSION_SCOPED_APPROVAL_TOOLS` in `approvalController.ts`) are approved per tool. A plain approval covers that tool for the rest of the current task, including every later iteration and the resume after another tool's approval card; the next user message starts a new task and asks again. An "always" approval covers the tool in later tasks while the conversation stays in memory. Approving one stores only its own name, never the turn-wide `'*'`, and a `'*'` granted by another approval does not cover them. A Host restart or cold resume asks again. A guardrail `ask` approval authorizes only that exact call.
+
+On a stateless Host that allows cron management, `cron_manage` `create` and `enable` ask on every call. The card has `exact_invocation` scope: approving it runs only that call and stores nothing, and no stored approval (`'*'`, a per-task or "always" `cron_manage` approval, a server prefix) covers such a call. Other `cron_manage` actions follow the per-task rule above.
 
 **Channel commands:**
 

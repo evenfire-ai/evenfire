@@ -14,7 +14,6 @@ import {
 } from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
 import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
-import type { GfsProcessingLeaseProvider } from '../../internalTools/gfsProcessingLease'
 import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
@@ -206,13 +205,12 @@ export class NativeToolRegistry implements ToolRegistry {
     // existing positional call sites stay valid; only taskExecutor passes it.
     activeLlmProvider?: LlmProvider,
     gfsDownload?: {
-      /** Omitted when the durable store is recovery-required; delivery then fails closed. */
+      /** Omitted when the Host has no download store or it is unavailable; delivery then fails closed. */
       store?: GfsDownloadStore
       /** True only for attended, policy-eligible, healthy workspace delivery. */
       deliveryAvailable: boolean
       callerIdentity: string
       callerWorkspacePath?: string
-      processingLeaseProvider: GfsProcessingLeaseProvider
       retentionOwnerId?: string
     }
   ) {
@@ -236,6 +234,9 @@ export class NativeToolRegistry implements ToolRegistry {
     // it (route memory/daily-class file_write through WorkspaceService) is future
     // hardening, independent of F5.
     if (fileToolsRoot !== undefined) this.register(new FileWriteTool(fileToolsRoot))
+    // A Host-owned GFS store binds the shell to the verified caller root. The
+    // shell never calls the store itself (#1019): it only re-verifies that the
+    // caller root is still canonical before each command.
     this.register(
       new ShellTool(
         gfsDownload ? gfsDownload.callerWorkspacePath : config.workspacePath,
@@ -243,7 +244,7 @@ export class NativeToolRegistry implements ToolRegistry {
         config.envAllowlist,
         dynamicEnvProvider,
         activeLlmProvider,
-        gfsDownload?.processingLeaseProvider
+        gfsDownload !== undefined
       )
     )
     this.register(new HttpRequestTool(config.httpAllowlist))

@@ -169,6 +169,7 @@ export default defineConfig({
         '**/codex-image-input.spec.ts',
         '**/subscription-image-input.spec.ts',
         '**/native-tool-discovery.spec.ts',
+        '**/session-tool-approval-scope.test.ts',
       ],
     },
     {

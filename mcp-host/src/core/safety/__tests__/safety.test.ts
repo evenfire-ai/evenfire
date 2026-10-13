@@ -44,6 +44,19 @@ describe('BasicSafety', () => {
     expect(result.errors.join(' ')).toMatch(/service account token/i)
   })
 
+  it('U7: rejects a shell_exec command containing a NUL character (#1020)', () => {
+    const result = safety.validateToolParams('shell_exec', { command: 'printf a\0b' })
+    expect(result).toEqual({
+      is_valid: false,
+      errors: ['shell_exec.command must not contain NUL characters'],
+    })
+    // Witness: the same command without the NUL byte is valid.
+    expect(safety.validateToolParams('shell_exec', { command: 'printf ab' })).toEqual({
+      is_valid: true,
+      errors: [],
+    })
+  })
+
   it('allows benign external http_request targets', () => {
     const result = safety.validateToolParams('http_request', {
       url: 'https://httpbin.org/get',

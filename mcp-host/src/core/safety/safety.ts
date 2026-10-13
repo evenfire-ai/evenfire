@@ -579,6 +579,13 @@ export class BasicSafety implements Safety {
         errors: ['shell_exec.command must be a non-empty string'],
       }
     }
+    // spawn() throws synchronously on a NUL byte in an argument (#1020).
+    if (command.includes('\0')) {
+      return {
+        is_valid: false,
+        errors: ['shell_exec.command must not contain NUL characters'],
+      }
+    }
 
     const errors = BasicSafety.SHELL_BLOCKED_PATTERNS.filter(rule =>
       rule.pattern.test(command)

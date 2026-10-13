@@ -10,6 +10,10 @@ import type { Conversation } from '../../core/types'
 import type { ToolOutput } from '../../core/types'
 import { GFS_FILE_LIMITS } from '../../internalTools/gfsFilePolicy'
 import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../internalTools/gfsReadTypes'
+import {
+  GFS_CACHE_FULL_GUIDANCE,
+  GFS_DISK_FULL_GUIDANCE,
+} from '../../internalTools/gfsSpaceGuidance'
 import type { FileReferenceResolution } from '../fileReferenceResolver'
 import { prepareGfsFiles } from '../gfsFilePreparation'
 
@@ -285,7 +289,6 @@ describe('GFS file preparation', () => {
     ['Error: GFS read failed (gfsc 403: forbidden)', 'denied'],
     ['Error: GFS read failed (gfsc 404: not_found)', 'missing'],
     ['Error: GFS download failed (version_conflict)', 'stale'],
-    ['Error: GFS download store failed (caller_quota_exceeded)', 'quota_exceeded'],
     ['Error: untrusted transport detail', 'download_failed'],
   ] as const)('publishes a fixed category for %s', async (content, code) => {
     const test = subject(vi.fn(async () => ({ content, duration_ms: 1, is_error: true })))
@@ -294,6 +297,88 @@ describe('GFS file preparation', () => {
       { referenceId: resolution().reference.id, status: 'unavailable', code },
     ])
     expect(JSON.stringify(result)).not.toContain(content)
+  })
+
+  const diskFull = 'Error: GFS download store failed (disk_full)'
+  const cacheFull = 'Error: GFS download store failed (host_quota_exceeded)'
+  const volumeUnmeasurable = 'Error: GFS download store failed (volume_unmeasurable)'
+  // Only shapes the real producer emits (or near misses of them): disk_full and
+  // host_quota_exceeded always carry their guidance line, volume_unmeasurable
+  // never does. taskExecutor.gfsPreparation.test.ts derives all three from the
+  // real tool output.
+  it.each([
+    [
+      'the disk_full envelope with its guidance',
+      `${diskFull}\n${GFS_DISK_FULL_GUIDANCE}`,
+      'disk_full',
+    ],
+    [
+      'the host_quota_exceeded envelope with its guidance',
+      `${cacheFull}\n${GFS_CACHE_FULL_GUIDANCE}`,
+      'quota_exceeded',
+    ],
+    [
+      'the disk_full envelope with the cache guidance',
+      `${diskFull}\n${GFS_CACHE_FULL_GUIDANCE}`,
+      'download_failed',
+    ],
+    [
+      'the host_quota_exceeded envelope with the disk guidance',
+      `${cacheFull}\n${GFS_DISK_FULL_GUIDANCE}`,
+      'download_failed',
+    ],
+    [
+      'the disk_full envelope with an untrusted second line',
+      `${diskFull}\nuntrusted detail`,
+      'download_failed',
+    ],
+    [
+      'the host_quota_exceeded envelope with its guidance and a third line',
+      `${cacheFull}\n${GFS_CACHE_FULL_GUIDANCE}\nuntrusted detail`,
+      'download_failed',
+    ],
+    [
+      'the store limit_exceeded envelope',
+      'Error: GFS download store failed (limit_exceeded)',
+      'limit_exceeded',
+    ],
+    [
+      'the store limit_exceeded envelope with the cache guidance',
+      `Error: GFS download store failed (limit_exceeded)\n${GFS_CACHE_FULL_GUIDANCE}`,
+      'download_failed',
+    ],
+    ['the bare volume_unmeasurable envelope', volumeUnmeasurable, 'volume_unmeasurable'],
+    [
+      'the volume_unmeasurable envelope with the cache guidance',
+      `${volumeUnmeasurable}\n${GFS_CACHE_FULL_GUIDANCE}`,
+      'download_failed',
+    ],
+    [
+      'the volume_unmeasurable envelope with the disk guidance',
+      `${volumeUnmeasurable}\n${GFS_DISK_FULL_GUIDANCE}`,
+      'download_failed',
+    ],
+    [
+      'the volume_unmeasurable envelope with an untrusted second line',
+      `${volumeUnmeasurable}\nuntrusted detail`,
+      'download_failed',
+    ],
+  ] as const)('maps %s to its fixed category', async (_label, content, code) => {
+    const test = subject(vi.fn(async () => ({ content, duration_ms: 1, is_error: true })))
+    const result = await prepareGfsFiles([resolution()], test.context)
+    expect(test.execute).toHaveBeenCalledTimes(1)
+    expect(result).toEqual([
+      { referenceId: resolution().reference.id, status: 'unavailable', code },
+    ])
+    expect(JSON.stringify(result)).not.toContain('untrusted detail')
+  })
+
+  it('keeps every guided space envelope within the fixed error bound', () => {
+    for (const content of [
+      `${diskFull}\n${GFS_DISK_FULL_GUIDANCE}`,
+      `${cacheFull}\n${GFS_CACHE_FULL_GUIDANCE}`,
+    ])
+      expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(GFS_FILE_LIMITS.errorBytes)
   })
 
   it('keeps the native pinned-version metadata conflict truthful instead of fabricating a receipt', async () => {

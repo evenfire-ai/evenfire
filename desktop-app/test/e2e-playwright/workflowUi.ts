@@ -282,12 +282,7 @@ export async function loginAs(
   password = E2E_DESKTOP_PASSWORD
 ): Promise<{ userId: string; userToken: string }> {
   const userId = seedPasswordForEmail(email, password)
-  await waitForPasswordLoginReady(email, password)
-  const loginRes = await apiRequest(
-    'POST',
-    `${EXT_API}/api/v1/auth/password-login`,
-    JSON.stringify({ email, password })
-  )
+  const loginRes = await pacedPasswordLogin(email, password)
   if (loginRes.status !== 200) {
     throw new Error(`password-login failed for ${email}: HTTP ${loginRes.status} ${loginRes.body}`)
   }
@@ -400,26 +395,49 @@ export function seedDesktopPasswordLogin(
   }
 }
 
-async function waitForPasswordLoginReady(
+// control-api admits one password verification per PASSWORD_ADMISSION_POLICY.paceMs
+// (7.5 s) for the whole server, and charges the identity's 5-per-15-minutes budget
+// before the pace check, so a paced 429 still spends an attempt. Space every password
+// attempt from this worker (API and Desktop sign-in) by the pace. The worker loads after
+// global setup's preflight login, so module load is a safe bound for that attempt.
+const PASSWORD_PACE_MS = 8_000
+// One paced retry at most; a longer Retry-After means the identity budget is spent.
+const MAX_PACE_RETRY_SECONDS = 15
+let lastPasswordAttemptAt = Date.now()
+
+export async function awaitPasswordPace(): Promise<void> {
+  const waitMs = lastPasswordAttemptAt + PASSWORD_PACE_MS - Date.now()
+  if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs))
+  lastPasswordAttemptAt = Date.now()
+}
+
+async function pacedPasswordLogin(
   email: string,
-  password = E2E_DESKTOP_PASSWORD
-): Promise<void> {
-  let lastStatus = 0
-  let lastBody = ''
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const res = await apiRequest(
+  password: string
+): Promise<{ status: number; body: string }> {
+  const attempt = async () => {
+    await awaitPasswordPace()
+    return apiRequest(
       'POST',
       `${EXT_API}/api/v1/auth/password-login`,
       JSON.stringify({ email, password })
     )
-    lastStatus = res.status
-    lastBody = res.body
-    if (res.status === 200) return
-    await new Promise(resolve => setTimeout(resolve, 250))
   }
-  throw new Error(
-    `seeded Desktop password login was not accepted for ${email}: HTTP ${lastStatus} ${lastBody}`
-  )
+  const first = await attempt()
+  if (first.status !== 429) return first
+  let retryAfterSeconds: number
+  try {
+    retryAfterSeconds = Number(JSON.parse(first.body).retryAfterSeconds)
+  } catch {
+    throw new Error(`password-login for ${email} returned HTTP 429 without JSON: ${first.body}`)
+  }
+  if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds > MAX_PACE_RETRY_SECONDS) {
+    throw new Error(
+      `password-login for ${email} is rate limited beyond the pace (identity budget spent?): HTTP 429 ${first.body}`
+    )
+  }
+  lastPasswordAttemptAt = Date.now() + retryAfterSeconds * 1000 - PASSWORD_PACE_MS
+  return attempt()
 }
 
 export function seedAllowlist(userId: string, recipeName: string): void {
@@ -608,13 +626,27 @@ export async function launchAndLogin(
       await expect(authenticatedShell).not.toBeVisible()
       await expect(signInButton).toBeVisible()
       await expect(signInButton).toBeEnabled()
+      // loginAs just spent a password attempt through the API; without the pace
+      // control-api answers this click with 429 and the form stays on screen.
+      await awaitPasswordPace()
       await humanUiClick(signInButton)
+      // The error alert expires after a few seconds, so keep its text once seen
+      // and stop polling: an error is terminal, not a pending login.
+      let loginError = ''
       await expect
         .poll(
           async () => {
             if (await authenticatedShell.isVisible().catch(() => false)) return 'authenticated'
             const errorToast = page.getByRole('alert').filter({ hasText: /login|password|failed/i })
-            if (await errorToast.isVisible().catch(() => false)) return 'error'
+            if (await errorToast.isVisible().catch(() => false)) {
+              loginError = (
+                await errorToast
+                  .first()
+                  .innerText()
+                  .catch(() => '')
+              ).trim()
+              return 'error'
+            }
             return 'pending'
           },
           {
@@ -623,7 +655,9 @@ export async function launchAndLogin(
             message: `waiting for Desktop password login to complete for ${email}`,
           }
         )
-        .toBe('authenticated')
+        .not.toBe('pending')
+      expect(loginError, `Desktop password login failed for ${email}`).toBe('')
+      await expect(authenticatedShell).toBeVisible()
     }
 
     await expect(authenticatedShell).toBeVisible({ timeout: 60_000 })

@@ -481,6 +481,64 @@ describe('ProgressStepper — suspended status (approval flow)', () => {
     expect(denyBtn.hasAttribute('disabled')).toBe(true)
   })
 
+  // A plain approval covers one tool for the task, so another tool in the same task
+  // suspends again (shell_exec approved, then http_request). The stepper stays mounted.
+  it.each([
+    ['after the task resumed', true],
+    ['directly from the previous suspension', false],
+  ])('enables the buttons of a later suspension in the same task (%s)', (_label, resumed) => {
+    const onApprove = vi.fn()
+    const onDeny = vi.fn()
+    const suspended = (requestId: string, displayName: string) =>
+      makeProgress({ status: 'suspended', suspendedInfo: { requestId, displayName } })
+    const { rerender } = render(
+      <ProgressStepper
+        progress={suspended('req-1', 'Shell')}
+        onApprove={onApprove}
+        onDeny={onDeny}
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('approval-approve-btn'))
+    expect(onApprove).toHaveBeenCalledOnce()
+    // Witness: the decided card is locked against a second submission.
+    expect(screen.getByTestId('approval-approve-btn').hasAttribute('disabled')).toBe(true)
+    rerender(
+      <ProgressStepper
+        progress={suspended('req-1', 'Shell')}
+        onApprove={onApprove}
+        onDeny={onDeny}
+      />
+    )
+    expect(screen.getByTestId('approval-deny-btn').hasAttribute('disabled')).toBe(true)
+
+    if (resumed) {
+      rerender(
+        <ProgressStepper
+          progress={makeProgress({ status: 'active' })}
+          onApprove={onApprove}
+          onDeny={onDeny}
+        />
+      )
+    }
+    rerender(
+      <ProgressStepper
+        progress={suspended('req-2', 'HTTP')}
+        onApprove={onApprove}
+        onDeny={onDeny}
+      />
+    )
+
+    expect(screen.getByText('HTTP requires approval')).toBeDefined()
+    const approveBtn = screen.getByTestId('approval-approve-btn')
+    const denyBtn = screen.getByTestId('approval-deny-btn')
+    expect(approveBtn.hasAttribute('disabled')).toBe(false)
+    expect(approveBtn.textContent).toBe('Approve')
+    expect(denyBtn.hasAttribute('disabled')).toBe(false)
+    fireEvent.click(denyBtn)
+    expect(onDeny).toHaveBeenCalledOnce()
+  })
+
   it('renders step list when suspended with existing steps after expanding details', () => {
     const steps = [makeStep({ toolCallId: 'tc-1', state: 'completed', displayName: 'MongoDB' })]
     render(

@@ -271,7 +271,10 @@ export function ProgressStepper({
   onConnect,
 }: ProgressStepperProps) {
   const [expanded, setExpanded] = useState(false)
-  const [approvalPending, setApprovalPending] = useState(false)
+  // The request id of the suspension the user already decided. A later suspension in
+  // the same task (another tool asking after an approval) has a new id, so its card
+  // starts with enabled buttons instead of inheriting the previous decision.
+  const [decidedRequestId, setDecidedRequestId] = useState<string | null>(null)
   const [connectPending, setConnectPending] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
 
@@ -428,6 +431,7 @@ export function ProgressStepper({
     const isConnect = info?.reason === 'connect_required'
     const connectServer = info?.mcpServerName || 'the connector'
     const canConnect = isConnect && !!onConnect
+    const approvalPending = !!info && decidedRequestId === info.requestId
     return (
       <div data-testid="progress-stepper" className="progress-stepper status-suspended">
         <div className="stepper-suspended-row">
@@ -501,7 +505,7 @@ export function ProgressStepper({
                 color="success"
                 disabled={approvalPending}
                 onClick={() => {
-                  setApprovalPending(true)
+                  setDecidedRequestId(info.requestId)
                   onApprove()
                 }}
                 size="sm"
@@ -517,7 +521,7 @@ export function ProgressStepper({
                 color="danger"
                 disabled={approvalPending}
                 onClick={() => {
-                  setApprovalPending(true)
+                  setDecidedRequestId(info.requestId)
                   onDeny()
                 }}
                 size="sm"

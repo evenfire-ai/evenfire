@@ -10,11 +10,27 @@ import type { GuardrailsConfig } from '../../core/guardrails'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import type { PreparedGfsFile } from '../../core/orchestration/turnContext'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
-import { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import { GfsDownloadStore, GfsDownloadStoreError } from '../../internalTools/gfsDownloadStore'
+import {
+  GFS_CACHE_FULL_GUIDANCE,
+  GFS_DISK_FULL_GUIDANCE,
+} from '../../internalTools/gfsSpaceGuidance'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import type { Task } from '../../queue/types'
+import { deriveUserKey } from '../../workspace/userKey'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
+
+/** The store keys the caller like its root: the channel-namespaced key, never the raw sender. */
+const UNIT_CALLER_STORE_KEY = deriveUserKey('unit-caller', 'rpc')
+
+// statfs reports the volume sized to its free space, so the disk's occupancy
+// never meets the store's free-space floor.
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof fs>()
+  const { freeSpaceSizedStatfs } = await import('../../__tests__/fixtures/gfsStoreTestKit')
+  return { ...actual, statfs: freeSpaceSizedStatfs(actual.statfs) }
+})
 
 const { clientFactory } = vi.hoisted(() => ({ clientFactory: vi.fn() }))
 // Only GFSC's external HTTP/token-file boundary is doubled. The real client,
@@ -93,7 +109,9 @@ async function scenario(
 ) {
   const root = await fs.mkdtemp(join(tmpdir(), 'gfs-preparation-task-'))
   roots.push(root)
-  const callerRoot = join(root, 'users', 'unit-caller')
+  // The same `users/<key>` the Agent binds for an rpc sender: the store refuses
+  // an identity that is not its caller root's key.
+  const callerRoot = join(root, 'users', deriveUserKey(options.sender ?? 'unit-caller', 'rpc'))
   await fs.mkdir(callerRoot, { recursive: true, mode: 0o700 })
   const store = new GfsDownloadStore(root)
   await store.initialize()
@@ -355,6 +373,7 @@ async function scenario(
     store,
     sessionKey: resolveTaskSessionKey(task),
     createCold: () => new TaskExecutor(task, deps),
+    manager,
     get contentRequests() {
       return contentRequests
     },
@@ -392,7 +411,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.createTransfer).toHaveBeenCalledWith(
       expect.objectContaining({ retentionOwnerId: test.task.id })
     )
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
   })
 
   it('keeps graceful-shutdown completion pending until the real owner release settles', async () => {
@@ -469,7 +488,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.executor.executorState).toBe('waiting_approval')
     expect(test.onApprovalNeeded).toHaveBeenCalledTimes(1)
     expect(test.requests).toHaveLength(1)
-    expect(test.store.debugUsage().files).toBe(1)
+    expect((await test.store.debugInventory()).files).toBe(1)
     expect(test.releaseReceiptOwner).not.toHaveBeenCalled()
     expect(JSON.stringify(test.executor.pendingApproval)).not.toContain(bytes.toString())
     expect(JSON.stringify(test.executor.pendingApproval)).not.toContain(bytes.toString('base64'))
@@ -530,7 +549,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     expect(test.executor.executorState).toBe('waiting_approval')
     await test.executor.deny()
 
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
     expect(test.onApprovalNeeded).toHaveBeenCalledExactlyOnceWith(
       test.executor.pendingApproval?.request_id ?? expect.any(String),
       test.task.id,
@@ -548,7 +567,10 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     test.executor.abort()
     await test.executor.waitForCompletion()
 
-    expect(test.releaseReceiptOwner).toHaveBeenCalledExactlyOnceWith(test.task.id, 'unit-caller')
+    expect(test.releaseReceiptOwner).toHaveBeenCalledExactlyOnceWith(
+      test.task.id,
+      UNIT_CALLER_STORE_KEY
+    )
     expect(test.contentRequests).toBe(1)
     expect(test.lifecycle.getStatus(test.task.id)).toBe('cancelled')
   })
@@ -573,8 +595,8 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
 
     expect(test.contentRequests).toBe(1)
     expect(test.requests).toEqual([])
-    expect(test.store.debugUsage().files).toBe(0)
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect((await test.store.debugInventory()).files).toBe(0)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
   })
 
   it('joins a cancelled large clerum__gfs_read producer before terminal release', async () => {
@@ -590,8 +612,8 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
 
     expect(test.contentRequests).toBe(1)
     expect(test.requests).toHaveLength(1)
-    expect(test.store.debugUsage().files).toBe(0)
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect((await test.store.debugInventory()).files).toBe(0)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
   })
 
   it.each([
@@ -639,7 +661,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     await run
 
     expect(order).toEqual(['admission-settled', 'owner-release'])
-    expect(test.store.debugUsage().files).toBe(0)
+    expect((await test.store.debugInventory()).files).toBe(0)
     expect(test.onFail).not.toHaveBeenCalled()
     expect(test.lifecycle.getStatus(test.task.id)).toBe('cancelled')
   })
@@ -672,8 +694,8 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
     await run
 
     expect(test.requests).toEqual([])
-    expect(test.store.debugUsage().files).toBe(0)
-    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, 'unit-caller')
+    expect((await test.store.debugInventory()).files).toBe(0)
+    expect(test.releaseReceiptOwner).toHaveBeenCalledWith(test.task.id, UNIT_CALLER_STORE_KEY)
   })
 
   it.each([
@@ -687,6 +709,34 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
       expect(test.observedReceipts).toMatchObject([{ status: 'unavailable', code }])
       expect(test.contentRequests).toBe(0)
       expect(JSON.stringify(test.requests)).not.toContain('untrusted transport detail')
+    }
+  )
+
+  // The store refusal travels through the real producer: gfsContentDownload,
+  // fail() in gfs.ts and the registry's `Error: ` prefix. The same refusal on
+  // the model's own clerum__gfs_download shows the exact string that path emits.
+  it.each([
+    ['disk_full', 'disk_full', `\n${GFS_DISK_FULL_GUIDANCE}`],
+    ['host_quota_exceeded', 'quota_exceeded', `\n${GFS_CACHE_FULL_GUIDANCE}`],
+    ['volume_unmeasurable', 'volume_unmeasurable', ''],
+  ] as const)(
+    'maps the real tool output for a %s store refusal to its preparation code',
+    async (storeCode, code, guidance) => {
+      const test = await scenario({ mode: 'download-again' })
+      test.createTransfer.mockRejectedValue(new GfsDownloadStoreError(storeCode))
+      await test.executor.run()
+
+      expect(test.onFail).not.toHaveBeenCalled()
+      // Witness: preparation and the model's call both reached store admission.
+      expect(test.createTransfer).toHaveBeenCalledTimes(2)
+      expect(test.contentRequests).toBe(0)
+      expect(test.observedReceipts).toEqual([
+        { referenceId: expect.any(String), status: 'unavailable', code },
+      ])
+      const toolResult = test.requests[1]?.find(
+        message => message.role === 'tool' && message.tool_call_id === 'unit-download-again'
+      )
+      expect(toolResult?.content).toBe(`Error: GFS download store failed (${storeCode})${guidance}`)
     }
   )
 
@@ -707,6 +757,25 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
       { status: 'unavailable', code: 'approval_required' },
     ])
     expect(test.metadataRequests).toBe(0)
+    expect(test.contentRequests).toBe(0)
+  })
+
+  // shell_exec follows the turn and "always" approval rules; a configured
+  // clerum__gfs_download approval stays per call (TaskExecutor live set).
+  it('asks for each configured clerum__gfs_download despite turn and persistent approval', async () => {
+    const test = await scenario({ mode: 'download-again', requireDownloadApproval: true })
+    const conversation = await test.manager.getOrCreate(test.sessionKey)
+    conversation.auto_approved_tools = new Set(['*', 'clerum__gfs_download'])
+    await test.executor.run()
+
+    expect(test.onFail).not.toHaveBeenCalled()
+    expect(test.executor.executorState).toBe('waiting_approval')
+    expect(test.executor.pendingApproval).toMatchObject({
+      tool_name: 'clerum__gfs_download',
+      tool_call_id: 'unit-download-again',
+      authorization_scope: 'exact_invocation',
+    })
+    expect(test.onApprovalNeeded).toHaveBeenCalledTimes(1)
     expect(test.contentRequests).toBe(0)
   })
 

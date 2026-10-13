@@ -148,7 +148,6 @@ function makeScenario(options: {
     workspaceService: undefined,
     gfsDownloadStore: store,
     gfsCallerWorkspacePath: callerWorkspace,
-    gfsProcessingLeaseProvider: store.processingLeaseProvider('gfs-caller'),
     modelName: 'fixture-model',
     approvalConfig: {
       defaultPolicy: 'channel_users',
