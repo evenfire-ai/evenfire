@@ -385,6 +385,45 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     expect(res.body.authorizeUrl).toBeUndefined()
   })
 
+  // A K8s read failure in the per-user gate is a backend failure, not a
+  // membership verdict: it must neither mint nor read as a 403.
+  it('user flavor: 500 without authorizeUrl when listing Contexts fails', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
+    await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
+    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business'] } })
+    const realList = gateway.listResource.bind(gateway)
+    vi.spyOn(gateway, 'listResource').mockImplementation((plural, ns) =>
+      plural === 'contexts'
+        ? Promise.reject(Object.assign(new Error('apiserver unavailable'), { statusCode: 503 }))
+        : realList(plural, ns)
+    )
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+    expect(res.status).toBe(500)
+    expect(res.body.authorizeUrl).toBeUndefined()
+  })
+
+  it('user flavor: 500 without authorizeUrl when an assigned agent Host read fails and no direct Context enables the server', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    membership(mockPoolQuery, { agents: { 'user-7': ['host-c'] } })
+    const realGet = gateway.getResource.bind(gateway)
+    vi.spyOn(gateway, 'getResource').mockImplementation((plural, name, ns) =>
+      plural === 'hosts'
+        ? Promise.reject(Object.assign(new Error('apiserver unavailable'), { statusCode: 503 }))
+        : realGet(plural, name, ns)
+    )
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+    expect(res.status).toBe(500)
+    expect(res.body.authorizeUrl).toBeUndefined()
+  })
+
   it('503 integration_not_configured when the client_id Secret is absent', async () => {
     // Server exists but no google-creds Secret seeded.
     void gateway.createResource(

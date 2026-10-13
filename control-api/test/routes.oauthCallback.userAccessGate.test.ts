@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import { createOAuthCallbackRouter } from '../src/routes/external/oauthCallback.js'
 import { editContextAllowlist } from '../src/services/contextAllowlist.js'
@@ -88,6 +89,7 @@ describe('GET /api/v1/oauth-callback/:oauthClientId — per-user access re-check
     gateway = new MockGateway(MCP_NS)
     app = express()
     app.use('/api/v1', createOAuthCallbackRouter(gateway as never))
+    app.use(clerumErrorHandler)
     mockPoolQuery.mockReset()
     fetchSpy = vi
       .spyOn(globalThis, 'fetch')
@@ -173,5 +175,39 @@ describe('GET /api/v1/oauth-callback/:oauthClientId — per-user access re-check
     const [sql, params] = writes[0] as [string, unknown[]]
     expect(sql).toContain('INSERT INTO oauth_grants')
     expect(params.slice(0, 5)).toEqual(['mcpserver', MCP_NS, SERVER, USER_ID, OAUTH_CLIENT_ID])
+  })
+
+  it('500 when listing Contexts fails; no exchange, no grant', async () => {
+    membership(mockPoolQuery, { contexts: { [USER_ID]: ['ctx-business'] } })
+    const realList = gateway.listResource.bind(gateway)
+    vi.spyOn(gateway, 'listResource').mockImplementation((plural, ns) =>
+      plural === 'contexts'
+        ? Promise.reject(Object.assign(new Error('apiserver unavailable'), { statusCode: 503 }))
+        : realList(plural, ns)
+    )
+
+    const res = await callback()
+
+    expect(res.status).toBe(500)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(grantWrites()).toHaveLength(0)
+  })
+
+  it('500 when an assigned agent Host read fails and no direct Context enables the server; no exchange, no grant', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', [SERVER])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    membership(mockPoolQuery, { agents: { [USER_ID]: ['host-c'] } })
+    const realGet = gateway.getResource.bind(gateway)
+    vi.spyOn(gateway, 'getResource').mockImplementation((plural, name, ns) =>
+      plural === 'hosts'
+        ? Promise.reject(Object.assign(new Error('apiserver unavailable'), { statusCode: 503 }))
+        : realGet(plural, name, ns)
+    )
+
+    const res = await callback()
+
+    expect(res.status).toBe(500)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(grantWrites()).toHaveLength(0)
   })
 })
