@@ -1,7 +1,10 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { AppService } from '../appService.js'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '../gfsDeepLinks.js'
-import { GfsResourceDeepLinkQueue } from '../gfsResourceDeepLinkQueue.js'
+import {
+  GfsResourceDeepLinkQueue,
+  createLogoutWithGfsResourceDeepLinkClear,
+} from '../gfsResourceDeepLinkQueue.js'
 
 type Handler = (event: unknown, payload: unknown) => Promise<unknown>
 
@@ -25,10 +28,9 @@ vi.mock('../appService.js', () => ({ AppService: class {} }))
 
 const queue = new GfsResourceDeepLinkQueue()
 const service = { logout: vi.fn(async () => undefined) }
-const logoutWithQueueCleanup = () => {
-  queue.clear()
-  return service.logout()
-}
+const logoutWithQueueCleanup = createLogoutWithGfsResourceDeepLinkClear(queue, () =>
+  service.logout()
+)
 const trusted = { senderFrame: { url: 'file:///app/index.html' } }
 
 function producedTarget(uri: string) {
@@ -75,5 +77,30 @@ describe('auth:logout GFS deep-link queue cleanup', () => {
 
     expect(queue.list()).toEqual([pending])
     expect(service.logout).not.toHaveBeenCalled()
+  })
+
+  it('clears links activated before the asynchronous logout finishes', async () => {
+    let finishLogout!: () => void
+    service.logout.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishLogout = resolve
+        })
+    )
+    queue.enqueue(producedTarget('gfs://main/dddddddddddddddddddddddddddddddd'))
+
+    const logoutOperation = handler('auth:logout')(trusted, undefined)
+    const duringLogout = queue.enqueue(
+      producedTarget('gfs://main/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')
+    )
+    expect(queue.list()).toEqual([duringLogout])
+
+    finishLogout()
+    await logoutOperation
+    expect(queue.list()).toEqual([])
+    expect(service.logout).toHaveBeenCalledOnce()
+
+    const afterLogout = queue.enqueue(producedTarget('gfs://main/ffffffffffffffffffffffffffffffff'))
+    expect(queue.list()).toEqual([afterLogout])
   })
 })

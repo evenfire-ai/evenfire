@@ -62,4 +62,32 @@ describe('GfsResourceDeepLinkQueue', () => {
     expect(userBLink.id).toBeGreaterThan(userALink.id)
     expect(queue.list()).toEqual([userBLink])
   })
+
+  it('clears links activated while the logout operation is pending', async () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    let finishLogout!: () => void
+    const logout = vi.fn(
+      () =>
+        new Promise<void>(resolve => {
+          finishLogout = resolve
+        })
+    )
+    const logoutAndClear = createLogoutWithGfsResourceDeepLinkClear(queue, logout)
+    const logoutOperation = logoutAndClear()
+
+    expect(logout).toHaveBeenCalledOnce()
+    const inFlightPrincipalLink = queue.enqueue(
+      parseProducedUri('gfs://main/cccccccccccccccccccccccccccccccc')
+    )
+    expect(queue.list()).toEqual([inFlightPrincipalLink])
+
+    finishLogout()
+    await logoutOperation
+    expect(queue.list()).toEqual([])
+
+    const postLogoutLink = queue.enqueue(
+      parseProducedUri('gfs://main/dddddddddddddddddddddddddddddddd')
+    )
+    expect(queue.list()).toEqual([postLogoutLink])
+  })
 })

@@ -39,8 +39,12 @@ export function createLogoutWithGfsResourceDeepLinkClear(
   queue: GfsResourceDeepLinkQueue,
   logout: () => Promise<unknown>
 ): () => Promise<unknown> {
-  return () => {
+  return async () => {
     queue.clear()
-    return logout()
+    try {
+      return await logout()
+    } finally {
+      queue.clear()
+    }
   }
 }
