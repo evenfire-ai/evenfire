@@ -82,7 +82,6 @@ const DEFAULT_DESKTOP_RELEASE_STATUS = {
   checked: true,
   currentVersion: '0.1.250',
   latestVersion: '0.1.250',
-  minimumVersion: '0.1.250',
   updateRequired: false,
   releaseUrl: '',
 }

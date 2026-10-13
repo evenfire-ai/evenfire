@@ -47,7 +47,8 @@ export type DesktopReleaseResponse = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
-  minimumDesktopVersion: string
+  /** @deprecated Compat field for desktop clients <= 0.11.0; equals desktopVersion. */
+  minimumDesktopVersion?: string
   releaseTag: string
   releaseUrl: string
 }

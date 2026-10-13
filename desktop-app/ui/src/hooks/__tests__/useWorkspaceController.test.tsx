@@ -22,7 +22,6 @@ const OUTDATED_DESKTOP_RELEASE = {
   checked: true,
   currentVersion: '0.1.249',
   latestVersion: '0.1.250',
-  minimumVersion: '0.1.250',
   updateRequired: true,
   releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250',
 }

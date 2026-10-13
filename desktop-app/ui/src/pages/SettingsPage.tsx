@@ -983,14 +983,6 @@ export function SettingsPage({
                     </dd>
                   </div>
                   <div>
-                    <dt>Minimum desktop version</dt>
-                    <dd>
-                      {endpointDiagnostics.releaseStatus
-                        ? endpointDiagnostics.releaseStatus.minimumVersion
-                        : getVersionValue(null, { loading: endpointDiagnostics.loading })}
-                    </dd>
-                  </div>
-                  <div>
                     <dt>Update required</dt>
                     <dd>
                       {endpointDiagnostics.releaseStatus

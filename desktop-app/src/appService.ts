@@ -2078,12 +2078,16 @@ export class AppService {
     const currentVersion = resolveDesktopAppVersion(app)
     const token = this.requireSessionToken()
     const policy = await this.authClient.getDesktopReleasePolicy(token)
-    const updateRequired = compareSemverLike(currentVersion, policy.minimumDesktopVersion) < 0
+    // The desktop app is tightly coupled to the backend release: any installed
+    // version below the release's desktopVersion must update. A missing or
+    // malformed desktopVersion never forces an update (and never throws).
+    const latestVersion = normalizeVersion(policy?.desktopVersion)
+    const updateRequired =
+      latestVersion !== null && compareSemverLike(currentVersion, latestVersion) < 0
     return {
       checked: true,
       currentVersion,
-      latestVersion: policy.desktopVersion,
-      minimumVersion: policy.minimumDesktopVersion,
+      latestVersion: latestVersion ?? '',
       updateRequired,
       releaseUrl: policy.releaseUrl,
       releaseId: policy.releaseId,

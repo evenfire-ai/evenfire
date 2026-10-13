@@ -73,7 +73,11 @@ export type DesktopReleasePolicy = {
   externalRestApiVersion?: string
   rpcProxyVersion?: string
   desktopVersion: string
-  minimumDesktopVersion: string
+  /**
+   * @deprecated Emitted by the backend only for desktop clients <= 0.11.0.
+   * Equal to desktopVersion; this client must not read it.
+   */
+  minimumDesktopVersion?: string
   releaseTag: string
   releaseUrl: string
 }
@@ -88,7 +92,6 @@ export type DesktopReleaseStatus = {
   checked: boolean
   currentVersion: string
   latestVersion: string
-  minimumVersion: string
   updateRequired: boolean
   releaseUrl: string
   releaseId?: string

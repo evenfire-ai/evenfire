@@ -9,13 +9,7 @@
 //
 //   node scripts/release/validate-release-tag.mjs --version 0.6.0
 import process from 'node:process'
-import {
-  COORDINATES,
-  SEMVER_RE,
-  argValue,
-  compareVersions,
-  readCounterPackage,
-} from './release-coordinates.mjs'
+import { COORDINATES, SEMVER_RE, argValue, readCounterPackage } from './release-coordinates.mjs'
 
 const ROOT = process.cwd()
 
@@ -40,15 +34,6 @@ for (const coordinate of COORDINATES) {
     case 'equals': {
       if (actual !== version) {
         failures.push(`${coordinate.name}=${actual}, expected ${version}`)
-      }
-      break
-    }
-
-    case 'floor': {
-      if (!SEMVER_RE.test(actual)) {
-        failures.push(`${coordinate.name}=${actual} is not MAJOR.MINOR.PATCH`)
-      } else if (compareVersions(actual, version) > 0) {
-        failures.push(`${coordinate.name}=${actual} is greater than the release version ${version}`)
       }
       break
     }
