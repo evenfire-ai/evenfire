@@ -35,13 +35,14 @@ import {
  * the persisted thread, and the provider-boundary ledger of the derived in-cluster
  * fixture.
  *
- * Issue #678: any document attached from the composer travels inline to the Host
- * as a `kind:'file'` attachment. The Host never puts its text in the prompt: it
- * announces the file in the turn context and the model reads it through the
- * `clerum__attachment_read` tool. The provider fixture asks for that tool call,
- * then answers with a digest of the text it received in the tool result. So the
+ * Issues #678/#656/#1093: any document attached from the composer travels inline
+ * to the Host as a `kind:'file'` attachment. The Host never puts its content in
+ * the prompt: it announces the reader in the turn context and the model reads
+ * TXT/MD through `clerum__attachment_read`, or PDF/XLSX through
+ * `clerum__document_read`. The provider fixture asks for that tool call, then
+ * answers with a digest of the text/table it received in the tool result. So the
  * answer on screen can only be produced if the exact bytes attached here crossed
- * the composer, IPC, the Host admission, the read tool and the provider wire.
+ * the composer, IPC, Host admission, the selected reader and the provider wire.
  *
  * A second chat sends a 6 MiB document. Its base64 exceeds the 6 MiB text share,
  * so it reaches the Host only through the credited `kind:'file'` quota in
@@ -186,6 +187,125 @@ const LARGE_DOCUMENT_BYTES = 6 * 1024 * 1024
  * first page may have; the slice itself comes from the ledger.
  */
 const ATTACHMENT_READ_PAGE_BYTES = 65_536
+
+const mcpHostRequire = createRequire(path.join(DESKTOP_APP_ROOT, '..', 'mcp-host', 'package.json'))
+
+/**
+ * Build the PDF with the same document dependencies as the Host. The token is
+ * generated only after admission, is drawn only into the page body, and never
+ * appears in the file name or prompt.
+ */
+async function pdfDocumentFixture(): Promise<{
+  fileName: string
+  mimeType: string
+  buffer: Buffer
+  documentSha256: string
+}> {
+  const { PDFDocument, StandardFonts } = mcpHostRequire('pdf-lib') as typeof import('pdf-lib')
+  const token = `DOCUMENT_READ_CODE:${randomBytes(12).toString('hex')}`
+  const document = await PDFDocument.create()
+  const font = await document.embedFont(StandardFonts.Helvetica)
+  const page = document.addPage([540, 180])
+  page.drawText(token, { x: 36, y: 120, size: 12, font })
+  return {
+    fileName: `body-only-${randomBytes(3).toString('hex')}.pdf`,
+    mimeType: 'application/pdf',
+    buffer: Buffer.from(await document.save()),
+    documentSha256: sha256Hex(Buffer.from(token, 'utf8')),
+  }
+}
+
+/**
+ * The XLSX table digest is the fixture's canonical `JSON.stringify(sheets)`.
+ * Building the workbook with ExcelJS keeps the test on the Host's own table
+ * semantics instead of inventing a second OOXML writer.
+ */
+async function xlsxDocumentFixture(): Promise<{
+  fileName: string
+  mimeType: string
+  buffer: Buffer
+  documentSha256: string
+}> {
+  const { Workbook } = mcpHostRequire('exceljs') as typeof import('exceljs')
+  const token = `DOCUMENT_READ_CODE:${randomBytes(12).toString('hex')}`
+  const sheets = [
+    {
+      name: 'Report',
+      startRow: 1,
+      truncated: false,
+      rows: [['token'], [token], [], ['after-the-gap']],
+    },
+  ]
+  const workbook = new Workbook()
+  const sheet = workbook.addWorksheet(sheets[0]!.name)
+  for (const row of sheets[0]!.rows) sheet.addRow(row)
+  return {
+    fileName: `body-only-${randomBytes(3).toString('hex')}.xlsx`,
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: Buffer.from(await workbook.xlsx.writeBuffer()),
+    documentSha256: sha256Hex(Buffer.from(JSON.stringify(sheets), 'utf8')),
+  }
+}
+
+/**
+ * One visible reader journey. Chat/turn state is the two durable message ids,
+ * visible UI is the sent attachment and rendered answer, and the business
+ * signal is the fixture's two call rows plus the expected content digest.
+ */
+async function sendReaderDocumentAndVerify(
+  page: Page,
+  env: ReturnType<typeof requireImageCapabilitiesFixtureEnv>,
+  assertBinding: () => Promise<void>,
+  document: {
+    fileName: string
+    mimeType: string
+    buffer: Buffer
+    documentSha256: string
+  },
+  expectedReader: 'pdf' | 'xlsx'
+) {
+  const before = readImageCapabilityEvidence(env)
+  await assertBinding()
+  await sendButton(page).click()
+  await expect(fileChips(page)).toHaveCount(0, { timeout: 30_000 })
+
+  await expect(page.getByTestId('message-list')).toBeVisible({ timeout: 20_000 })
+  await expect(page.locator('[data-chat-message-id]')).toHaveCount(2, { timeout: 120_000 })
+  await expect(sentMessageAttachments(page)).toHaveCount(1, { timeout: 20_000 })
+  await expect(sentMessageAttachments(page)).toContainText(document.fileName)
+  const response = page.getByTestId('agent-response').locator('.message-block.markdown-content')
+  await expect(response).toHaveCount(1, { timeout: 120_000 })
+  await expect(response).toContainText(ANY_DOCUMENT_ANSWER, { timeout: 120_000 })
+
+  const after = readImageCapabilityEvidence(env)
+  const appended = appendedAttempts(before, after)
+  const readRows = appended.filter(
+    row => row.responseKind === FIXTURE_RESPONSE_KIND.documentReadRequested
+  )
+  const answerRows = appended.filter(
+    row => row.responseKind === FIXTURE_RESPONSE_KIND.documentAnswer
+  )
+
+  expect(readRows).toHaveLength(1)
+  expect(readRows[0]?.documentReader).toBe(expectedReader)
+  expect(readRows[0]?.documentSha256).toBeNull()
+  expect(readRows[0]?.documentByteLength).toBe(document.buffer.length)
+  expect(answerRows).toHaveLength(1)
+  expect(answerRows[0]?.documentReader).toBe(expectedReader)
+  expect(answerRows[0]?.documentSha256).toBe(document.documentSha256)
+  expect(answerRows[0]?.imageSha256).toBeNull()
+
+  const answerDigest = answerRows[0]?.documentSha256
+  if (!answerDigest) throw new Error('[document-upload] the reader answer carries no digest')
+  await expect(response).toContainText(documentAnswerRegex(answerDigest))
+  await observeCompletedTask(page, env.hostRef, documentAnswerRegex(answerDigest))
+
+  expect(appended.filter(row => row.imageSha256 !== null)).toHaveLength(0)
+  expect(after.counters.imageAttempts - before.counters.imageAttempts).toBe(0)
+  expect(after.counters.documentReadRequests - before.counters.documentReadRequests).toBe(1)
+  expect(after.counters.documentAnswers - before.counters.documentAnswers).toBe(1)
+  expect(after.counters.documentFailures - before.counters.documentFailures).toBe(0)
+}
 
 /** How much of the file the Host's read tool must deliver on the first read. */
 type ExpectedRead = 'whole-file' | 'first-page'
@@ -509,6 +629,146 @@ test('document-upload fixture: an attached text file reaches the model through t
     })
 
     await screenshotAndLog(page, testInfo, 'desktop-document-upload-fixture')
+  } catch (error) {
+    if (recordedPage && !recordedPage.isClosed()) {
+      await recordedPage
+        .screenshot({ path: testInfo.outputPath('failure.png') })
+        .catch(() => undefined)
+    }
+    throw error
+  } finally {
+    await finalizeRecording(app, recordedPage)
+  }
+})
+
+test('document-upload fixture: an attached PDF reaches the model through document read', async ({}, testInfo) => {
+  test.skip(
+    MODE !== 'fixture',
+    'Set IMAGE_CAPABILITIES_RUN_ID=image-capabilities-<12 hex> (the runner does) to run the ' +
+      'derived-provider fixture journey.'
+  )
+
+  const env = requireImageCapabilitiesFixtureEnv()
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', env.externalRestApiBaseUrl)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', env.rpcProxyBaseUrl)
+  const baseline = readImageCapabilityEvidence(env)
+  expect(baseline.runId).toBe(env.runId)
+  expect(baseline.profile).toBe(env.profile)
+
+  const pdf = await pdfDocumentFixture()
+  let app: ElectronApplication | undefined
+  let recordedPage: Page | undefined
+  try {
+    const launched = await launchDesktopApp(
+      testInfo,
+      `issue1093-minikube${new URL(EXTERNAL_REST_API_BASE_URL).port}`
+    )
+    app = launched.app
+    recordedPage = launched.page
+    const page = launched.page
+    const assertBinding = instanceBindingCheck(app, page, testInfo)
+    await assertBinding()
+    await signIn(page)
+    await openConfiguredAgentChat(page, env.hostRef)
+
+    await test.step('a blank chat uses the fixture model without image input', async () => {
+      await startBlankChat(page)
+      await selectSupportedModel(page, IMAGE_CAPABILITY_FIXTURE_MODELS.unsupported)
+    })
+
+    await test.step('a PDF one byte over the composer limit is refused and leaves no chip', async () => {
+      const oversizedPdf = {
+        fileName: `too-big-${randomBytes(3).toString('hex')}.pdf`,
+        mimeType: 'application/pdf',
+        buffer: Buffer.concat([
+          pdf.buffer,
+          Buffer.alloc(COMPOSER_FILE_LIMIT_BYTES - pdf.buffer.length + 1, 0x61),
+        ]),
+      }
+      await attachDocument(page, oversizedPdf)
+      const refusal = page.getByRole('alert').filter({ hasText: oversizedPdf.fileName })
+      await expect(refusal).toHaveCount(1, { timeout: 15_000 })
+      await expect(refusal).toContainText(/a file can be at most 11\.0 MiB/)
+      await expect(fileChips(page)).toHaveCount(0)
+    })
+
+    await test.step('the picker chip is ready and reports no missing-reader refusal', async () => {
+      await attachDocument(page, pdf)
+      const chip = fileChips(page).filter({ hasText: pdf.fileName })
+      await expect(chip).toHaveCount(1, { timeout: 30_000 })
+      await expect(chip).toHaveAttribute('data-file-status', 'ready', { timeout: 30_000 })
+      await expect(page.getByRole('alert').filter({ hasText: /no reader/i })).toHaveCount(0)
+      await composer(page).fill(DOCUMENT_PROMPT)
+      await expect(sendButton(page)).toBeEnabled({ timeout: 20_000 })
+    })
+
+    await test.step('the visible answer carries the PDF body digest from document_read', async () => {
+      await sendReaderDocumentAndVerify(page, env, assertBinding, pdf, 'pdf')
+    })
+
+    await screenshotAndLog(page, testInfo, 'desktop-document-pdf-fixture')
+  } catch (error) {
+    if (recordedPage && !recordedPage.isClosed()) {
+      await recordedPage
+        .screenshot({ path: testInfo.outputPath('failure.png') })
+        .catch(() => undefined)
+    }
+    throw error
+  } finally {
+    await finalizeRecording(app, recordedPage)
+  }
+})
+
+test('document-upload fixture: an attached XLSX reaches the model through document read', async ({}, testInfo) => {
+  test.skip(
+    MODE !== 'fixture',
+    'Set IMAGE_CAPABILITIES_RUN_ID=image-capabilities-<12 hex> (the runner does) to run the ' +
+      'derived-provider fixture journey.'
+  )
+
+  const env = requireImageCapabilitiesFixtureEnv()
+  await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', env.externalRestApiBaseUrl)
+  await assertAllowedTarget('RPC_PROXY_BASE_URL', env.rpcProxyBaseUrl)
+  const baseline = readImageCapabilityEvidence(env)
+  expect(baseline.runId).toBe(env.runId)
+  expect(baseline.profile).toBe(env.profile)
+
+  const xlsx = await xlsxDocumentFixture()
+  let app: ElectronApplication | undefined
+  let recordedPage: Page | undefined
+  try {
+    const launched = await launchDesktopApp(
+      testInfo,
+      `issue1093-xlsx-minikube${new URL(EXTERNAL_REST_API_BASE_URL).port}`
+    )
+    app = launched.app
+    recordedPage = launched.page
+    const page = launched.page
+    const assertBinding = instanceBindingCheck(app, page, testInfo)
+    await assertBinding()
+    await signIn(page)
+    await openConfiguredAgentChat(page, env.hostRef)
+
+    await test.step('a blank chat is ready on the supported model', async () => {
+      await startBlankChat(page)
+      await selectSupportedModel(page, IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
+    })
+
+    await test.step('the picker chip is ready and reports no missing-reader refusal', async () => {
+      await attachDocument(page, xlsx)
+      const chip = fileChips(page).filter({ hasText: xlsx.fileName })
+      await expect(chip).toHaveCount(1, { timeout: 30_000 })
+      await expect(chip).toHaveAttribute('data-file-status', 'ready', { timeout: 30_000 })
+      await expect(page.getByRole('alert').filter({ hasText: /no reader/i })).toHaveCount(0)
+      await composer(page).fill(DOCUMENT_PROMPT)
+      await expect(sendButton(page)).toBeEnabled({ timeout: 20_000 })
+    })
+
+    await test.step('the visible answer carries the table digest from document_read', async () => {
+      await sendReaderDocumentAndVerify(page, env, assertBinding, xlsx, 'xlsx')
+    })
+
+    await screenshotAndLog(page, testInfo, 'desktop-document-xlsx-fixture')
   } catch (error) {
     if (recordedPage && !recordedPage.isClosed()) {
       await recordedPage

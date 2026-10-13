@@ -80,6 +80,8 @@ export const FIXTURE_REJECTION_REASONS: readonly string[] = Object.freeze([
   'image-tile-grid-mismatch',
   'image-pixel-not-a-tile-color',
   'document-byte-length-malformed',
+  'document-reader-unavailable',
+  'document-reader-unsupported',
   'document-tool-result-count',
   'document-tool-output-malformed',
   'document-tool-output-unreadable',
@@ -292,6 +294,8 @@ export interface FixtureProviderAttempt {
   /** Digest of the exact PNG bytes that reached the wire, or null when none did. */
   imageSha256: string | null
   responseKind: string
+  /** Which offered Host reader the fixture asked for. Present only on document rows. */
+  documentReader?: 'text' | 'pdf' | 'xlsx'
   /**
    * Digest of the document text that reached the wire in a tool-result message.
    * The fixture omits the field on image rows, so it is `undefined` there and
@@ -394,6 +398,23 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
 
   const row: FixtureProviderAttempt = { model, imageSha256, responseKind }
 
+  // Present on every document row and on no other row.
+  if (
+    responseKind === FIXTURE_RESPONSE_KIND.documentReadRequested ||
+    responseKind === FIXTURE_RESPONSE_KIND.documentAnswer
+  ) {
+    const documentReader = value.documentReader
+    if (documentReader !== 'text' && documentReader !== 'pdf' && documentReader !== 'xlsx') {
+      throw new Error(
+        `${source}: attempts[${index}].documentReader must be text, pdf or xlsx on a ` +
+          `${responseKind} row`
+      )
+    }
+    row.documentReader = documentReader
+  } else if ('documentReader' in value) {
+    throw new Error(`${source}: attempts[${index}].documentReader is only valid on a document row`)
+  }
+
   // Present on every rejected row and on no other row.
   if (responseKind === FIXTURE_RESPONSE_KIND.rejected) {
     const reason = value.reason
@@ -412,21 +433,32 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
 
   // Present on every answer row and on no other row.
   if (responseKind === FIXTURE_RESPONSE_KIND.documentAnswer) {
-    const byteRange = value.byteRange
-    if (!isRecord(byteRange) || !isByteCount(byteRange.offset) || !isByteCount(byteRange.length)) {
+    if (row.documentReader === 'text') {
+      const byteRange = value.byteRange
+      if (
+        !isRecord(byteRange) ||
+        !isByteCount(byteRange.offset) ||
+        !isByteCount(byteRange.length)
+      ) {
+        throw new Error(
+          `${source}: attempts[${index}].byteRange must be { offset, length } of non-negative ` +
+            `integers on a text ${FIXTURE_RESPONSE_KIND.documentAnswer} row`
+        )
+      }
+      if (typeof value.truncated !== 'boolean') {
+        throw new Error(
+          `${source}: attempts[${index}].truncated must be a boolean on a ` +
+            `text ${FIXTURE_RESPONSE_KIND.documentAnswer} row`
+        )
+      }
+      row.byteRange = { offset: byteRange.offset, length: byteRange.length }
+      row.truncated = value.truncated
+    } else if ('byteRange' in value || 'truncated' in value) {
       throw new Error(
-        `${source}: attempts[${index}].byteRange must be { offset, length } of non-negative ` +
-          `integers on a ${FIXTURE_RESPONSE_KIND.documentAnswer} row`
-      )
-    }
-    if (typeof value.truncated !== 'boolean') {
-      throw new Error(
-        `${source}: attempts[${index}].truncated must be a boolean on a ` +
+        `${source}: attempts[${index}].byteRange and truncated are only valid on a text ` +
           `${FIXTURE_RESPONSE_KIND.documentAnswer} row`
       )
     }
-    row.byteRange = { offset: byteRange.offset, length: byteRange.length }
-    row.truncated = value.truncated
   } else if ('byteRange' in value || 'truncated' in value) {
     throw new Error(
       `${source}: attempts[${index}].byteRange and truncated are only valid on a ` +
