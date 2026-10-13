@@ -49,7 +49,7 @@ bash scripts/e2e/fix-mongodb-probes-dev.sh             # re-apply probe workarou
 
 ### Validate Desktop App against the stack
 ```bash
-# ensure port-forwards are running first (make gcp-dev-pf-desktop)
+# first keep control-api :8090, external-rest-api :8091 and rpc-proxy :8094 forwarded to loopback
 bash scripts/e2e/playwright-dev.sh chat.test.ts -g "MongoDB"
 
 # ── Visual debug modes ──
