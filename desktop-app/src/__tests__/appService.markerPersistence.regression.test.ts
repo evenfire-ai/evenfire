@@ -430,6 +430,51 @@ describe('team persistence preserves the existing secure session on transient fa
 })
 
 describe('persistence transaction ordering', () => {
+  it('does not let a paused restorative write overwrite a completed newer login', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const keytar = await import('keytar')
+    const restoringEntered = deferred()
+    const restoringRelease = deferred()
+    vi.mocked(keytar.setPassword).mockImplementation(async (service, account, token) => {
+      if (token === 'fixture-other-session') {
+        runtime.keychain.set(keyOf(service, account), token)
+        throw new Error('fixture-partial team write')
+      }
+      if (token === homeToken) {
+        restoringEntered.resolve()
+        await restoringRelease.promise
+      }
+      runtime.keychain.set(keyOf(service, account), token)
+    })
+    const switching = h.service.switchTeam('fixture-other')
+    const switchedResult = switching.then(
+      () => undefined,
+      () => undefined
+    )
+    await restoringEntered.promise
+    const newerMe = { ...homeMe, id: 'fixture-new-user' }
+    const newer = h.state.installAuthenticatedLogin({
+      token: 'fixture-new-user-session',
+      me: newerMe,
+    })
+    await Promise.race([newer, new Promise(resolve => setTimeout(resolve, 250))])
+    restoringRelease.resolve()
+    await Promise.all([switchedResult, newer])
+    expect(h.service.getCachedUserId()).toBe(newerMe.id)
+    const restarted = await harness()
+    vi.mocked(restarted.state.authClient.getMe).mockResolvedValue(newerMe)
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: newerMe,
+    })
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith('fixture-new-user-session')
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+  })
+
   it('retains the newer user when an older team identity refresh resolves later', async () => {
     const h = await harness()
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
