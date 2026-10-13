@@ -26,7 +26,7 @@ describe('db.initDb', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('holds one advisory lock while partitioning legacy and PR1 migration transactions', async () => {
+  it('holds one advisory lock while partitioning legacy and composed migration transactions', async () => {
     const { initDb } = await import('../src/db.js')
 
     await initDb()
@@ -65,8 +65,8 @@ describe('db.initDb', () => {
     ).toBe(false)
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(39)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(39)
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(40)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(40)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)
