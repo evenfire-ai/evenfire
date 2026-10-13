@@ -119,6 +119,9 @@ export const FORBID_RUNNING_GRACE_SECONDS = 5 * 60
 /** Consecutive Forbid skips of one schedule before a warn log + counter fire. */
 export const FORBID_SUSTAINED_SKIP_THRESHOLD = 6
 
+/** Upper bound on per-replica skip-streak entries (see `forbiddenSkipStreaks`). */
+export const FORBID_SKIP_STREAK_CAPACITY = 1000
+
 /** A live non-terminal run (see the CHECK on `workflow_runs.phase`). */
 interface ActiveRecipeRun {
   run_id: string
@@ -135,11 +138,17 @@ interface ActiveRecipeRun {
  * never duplicated. `expectedFireAt` is the next_fire_at this replica wrote
  * with its last skip; if the row arrives with any other slot (another replica
  * fired or skipped it, or the batch rolled back) the streak restarts at 1.
- * Only a fire deletes an entry; a schedule skipped and then deleted, disabled
- * or actor-gated keeps its entry until restart. The map is therefore bounded
- * by the number of schedules.
+ * A fire deletes the entry. A schedule skipped and then deleted, disabled or
+ * actor-gated would otherwise keep its entry until restart, so the map holds at
+ * most FORBID_SKIP_STREAK_CAPACITY entries and evicts the least recently
+ * skipped one first. An evicted schedule that skips again restarts at 1.
  */
 const forbiddenSkipStreaks = new Map<string, { count: number; expectedFireAt: string }>()
+
+/** Test-only: number of schedules with a live skip streak on this replica. */
+export function concurrencyForbiddenStreakCountForTests(): number {
+  return forbiddenSkipStreaks.size
+}
 
 /** Test-only: forget every streak so cases do not leak into each other. */
 export function resetConcurrencyForbiddenStreaksForTests(): void {
@@ -579,10 +588,16 @@ async function skipForbiddenTick(
   const previous = forbiddenSkipStreaks.get(row.schedule_id)
   const consecutiveSkips =
     previous && previous.expectedFireAt === currentFire.toISOString() ? previous.count + 1 : 1
+  // Delete first so the entry moves to the end of the Map's insertion order.
+  forbiddenSkipStreaks.delete(row.schedule_id)
   forbiddenSkipStreaks.set(row.schedule_id, {
     count: consecutiveSkips,
     expectedFireAt: skipNextFire.toISOString(),
   })
+  for (const scheduleId of forbiddenSkipStreaks.keys()) {
+    if (forbiddenSkipStreaks.size <= FORBID_SKIP_STREAK_CAPACITY) break
+    forbiddenSkipStreaks.delete(scheduleId)
+  }
 
   const activeSince = new Date(activeRun.started_at ?? activeRun.created_at)
   const fields = {

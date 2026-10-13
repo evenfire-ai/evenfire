@@ -9,8 +9,10 @@ import {
   FORBID_PENDING_ACTIVE_BOUND_SECONDS,
   FORBID_RUNNING_GRACE_SECONDS,
   FORBID_RUNNING_MAX_DURATION_CAP_SECONDS,
+  FORBID_SKIP_STREAK_CAPACITY,
   FORBID_SUSTAINED_SKIP_THRESHOLD,
   computeNextFire,
+  concurrencyForbiddenStreakCountForTests,
   processMaturedSchedules,
   resetConcurrencyForbiddenStreaksForTests,
 } from '../src/services/workflowScheduleWorkerService.js'
@@ -64,6 +66,7 @@ type FakeRun = {
 const activeRuns = new Map<string, FakeRun>()
 /** Test-configurable hook that can inject a failure into the active-run lookup. */
 let activeRunQueryError: Error | null = null
+let nextFireUpdateError: Error | null = null
 
 const clientQuery = vi.fn(
   async (sql: unknown, params?: unknown[]): Promise<AnyQueryResult | LockQueryResult> => {
@@ -124,6 +127,7 @@ const clientQuery = vi.fn(
     }
 
     if (/UPDATE workflow_schedules/i.test(text) && /next_fire_at/i.test(text)) {
+      if (nextFireUpdateError) throw nextFireUpdateError
       const nextFire = params?.[0] as Date
       const scheduleId = String(params?.[1] ?? '')
       updatedSchedules.push({ schedule_id: scheduleId, next_fire_at: nextFire })
@@ -210,6 +214,7 @@ describe('processMaturedSchedules', () => {
     selectQueryError = null
     activeRuns.clear()
     activeRunQueryError = null
+    nextFireUpdateError = null
     clientQuery.mockClear()
     clientRelease.mockClear()
     mockConnect.mockClear()
@@ -737,6 +742,33 @@ describe('processMaturedSchedules', () => {
       expect(forbiddenSkips).toEqual([1, 1])
     })
 
+    it('caps the skip-streak map and evicts the least recently skipped schedule first', async () => {
+      setActiveRun()
+      const total = FORBID_SKIP_STREAK_CAPACITY + 1
+      for (let i = 0; i < total; i += 1) maturedRows.push(scheduleRow({ schedule_id: `s-${i}` }))
+      await processMaturedSchedules({ batchSize: total })
+      expect(concurrencyForbiddenStreakCountForTests()).toBe(FORBID_SKIP_STREAK_CAPACITY)
+
+      // s-0 was evicted, so its next consecutive skip restarts at 1; s-1 was kept and counts 2.
+      vi.setSystemTime(new Date('2026-04-20T09:05:05Z'))
+      vi.mocked(rootLogger.info).mockClear()
+      const slot = new Date('2026-04-20T09:05:00Z')
+      // s-1 goes first: re-adding s-0 evicts the then-oldest entry, which would be s-1.
+      maturedRows.push(scheduleRow({ schedule_id: 's-1', next_fire_at: slot }))
+      maturedRows.push(scheduleRow({ schedule_id: 's-0', next_fire_at: slot }))
+      await processMaturedSchedules()
+
+      const streaks = Object.fromEntries(
+        vi
+          .mocked(rootLogger.info)
+          .mock.calls.map(([fields]) => fields as Record<string, unknown>)
+          .filter(fields => fields?.event === 'workflow_schedule_worker_concurrency_forbidden')
+          .map(fields => [fields.scheduleId, fields.consecutiveSkips])
+      )
+      expect(streaks).toEqual({ 's-0': 1, 's-1': 2 })
+      expect(concurrencyForbiddenStreakCountForTests()).toBe(FORBID_SKIP_STREAK_CAPACITY)
+    })
+
     it('defaults a null concurrency_policy to Forbid', async () => {
       setActiveRun()
       maturedRows.push(scheduleRow({ concurrency_policy: null }))
@@ -826,6 +858,20 @@ describe('processMaturedSchedules', () => {
       expect(updatedSchedules).toHaveLength(0)
       expect(txEvents).toEqual(['BEGIN', 'ROLLBACK'])
       expect(clientRelease).toHaveBeenCalledTimes(1)
+    })
+
+    it('rolls back without firing when the skip write fails', async () => {
+      setActiveRun()
+      nextFireUpdateError = new Error('could not serialize access')
+      maturedRows.push(scheduleRow())
+
+      await expect(processMaturedSchedules()).rejects.toThrow('could not serialize access')
+
+      expect(createRunMock).not.toHaveBeenCalled()
+      expect(activeRunLookups()).toHaveLength(1)
+      expect(txEvents).toEqual(['BEGIN', 'ROLLBACK'])
+      expect(clientRelease).toHaveBeenCalledTimes(1)
+      expect(concurrencyForbiddenStreakCountForTests()).toBe(0)
     })
   })
 })
