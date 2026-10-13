@@ -16,8 +16,9 @@ A Host opts in by listing hooks under `Host.spec.guardrails.hooks.<phase>[]`
 (see [Host CRD](host.md)). A Host without a `guardrails` block runs no hooks.
 
 - **Image targets:** host-context-controller deploys a Deployment, Service,
-  and NetworkPolicy in `llm-hooks`. Hooks that share an image digest are
-  co-located on one pod and routed by `spec.path`.
+  and NetworkPolicy in `llm-hooks`. Hooks with the same image ref, port,
+  `envSecret`, `egressBindings` and `addCapabilities` are co-located on one
+  pod and routed by `spec.path`; a difference in any of these gets its own pod.
 - **Service and remote targets:** nothing is deployed.
 - **Who writes what:** mcp-host only reads LlmHook CRs. Only the controller
   writes `status`.
@@ -32,11 +33,11 @@ install stamps a platform-assigned `clerum.io/trust-level` annotation (`low`,
 | Field                                        | Type                    | Required              | Description                                                                                                                                                                                                                                                                    |
 | -------------------------------------------- | ----------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `spec.target`                                | object                  | yes                   | Exactly one of `image`, `service`, `remote`.                                                                                                                                                                                                                                   |
-| `spec.target.image.ref`                      | string                  | yes (image)           | Container image. Validated against the image allowlist and digest-pinned at install.                                                                                                                                                                                           |
+| `spec.target.image.ref`                      | string                  | yes (image)           | Container image. Must be digest-pinned at install; the image allowlist is checked only when `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST` is on (default off).                                                                                                                         |
 | `spec.target.image.port`                     | int                     | yes (image)           | Port the hook HTTP server listens on (1–65535).                                                                                                                                                                                                                                |
 | `spec.target.image.imagePullSecrets`         | string[]                | no                    | Pull secret names in `llm-hooks`.                                                                                                                                                                                                                                              |
 | `spec.target.image.envSecret`                | string                  | no                    | The hook's own credential Secret in `llm-hooks`. It can never reference a Host or LLM-key Secret.                                                                                                                                                                              |
-| `spec.target.image.egressBindings[]`         | object[]                | no                    | Allowed external egress: `toFQDN` or `cidr`, plus `ports`. host-context-controller rejects private, metadata, link-local and reserved destinations at reconcile (condition `InvalidEgress`) and fails the hook pod closed; unlike McpServer, this is not checked at admission. |
+| `spec.target.image.egressBindings[]`         | object[]                | no                    | Allowed external egress: `toFQDN` or `cidr`, plus `ports`. host-context-controller rejects private, metadata, link-local and reserved destinations at reconcile (reason `InvalidEgress`) and fails the hook pod closed; unlike McpServer, this is not checked at admission.    |
 | `spec.target.image.security.addCapabilities` | string[]                | no                    | Subset of `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, `NET_BIND_SERVICE`.                                                                                                                                                                                                               |
 | `spec.target.service`                        | object                  | yes (service)         | Existing in-cluster Service: `name`, `namespace`, `port`.                                                                                                                                                                                                                      |
 | `spec.target.remote.baseUrl`                 | string                  | yes (remote)          | External endpoint mcp-host dials directly. Must be `https://`; SSRF-validated at dial time.                                                                                                                                                                                    |
@@ -64,12 +65,12 @@ install stamps a platform-assigned `clerum.io/trust-level` annotation (`low`,
 
 ## Status Fields
 
-| Field                   | Description                                                                                                                                              |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status.observedDigest` | Image digest actually running. mcp-host binds `Host.spec.guardrails.hooks[].digest` against this, and fails closed (or skips with an alert) on mismatch. |
-| `status.readyReplicas`  | Ready replicas (image targets only).                                                                                                                     |
-| `status.lastReconciled` | Timestamp of the last successful reconcile.                                                                                                              |
-| `status.conditions[]`   | Standard conditions (`Deployed`, `Ready`) with `observedGeneration`.                                                                                     |
+| Field                   | Description                                                                                                                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status.observedDigest` | Image digest actually running. mcp-host binds `Host.spec.guardrails.hooks[].digest` against this, and fails closed (or skips with an alert) on mismatch.                               |
+| `status.readyReplicas`  | Ready replicas (image targets only).                                                                                                                                                   |
+| `status.lastReconciled` | Timestamp of the last successful reconcile.                                                                                                                                            |
+| `status.conditions[]`   | A single `Ready` condition with `observedGeneration`; its `reason` is one of `NoWorkload`, `Deploying`, `Ready`, `DuplicatePath`, `SecretNotFound`, `InvalidEgress`, `ReconcileError`. |
 
 `kubectl get llmhooks -n llm-hooks` shows Path, Order, FailMode, Digest, and Ready.
 

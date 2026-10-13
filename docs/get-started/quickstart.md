@@ -24,7 +24,8 @@ named `chatllm` you can message immediately.
   Mistral, … see [the full list](../llm-providers/README.md)) put its key in
   `.env` **and** set `CLERUM_MODEL_PROVIDER` and `CLERUM_MODEL_NAME`. The pair
   must be enabled in the model allowlist, or setup stops with
-  `HOST_MODEL_UNKNOWN`. Setup only writes the four keys above to the cluster,
+  `HOST_MODEL_UNKNOWN` (pair not in the allowlist) or `HOST_MODEL_DISABLED`
+  (pair listed but disabled). Setup only writes the four keys above to the cluster,
   so after `make minikube-setup` run `make minikube-apply-secrets` and then
   `kubectl rollout restart deployment/chatllm -n mcp-host --context clerum-test`.
   Without any key, setup still boots, but the agent can't reply until you add
