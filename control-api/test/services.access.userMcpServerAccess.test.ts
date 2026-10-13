@@ -174,16 +174,19 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
     expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
   })
 
-  it('a Host in another namespace does not count', async () => {
+  it('a Host that reports another namespace does not count', async () => {
+    // The read in the hosts namespace succeeds and the Host is enabled, so only
+    // the directory's reported-namespace check can turn this into false; a Host
+    // merely stored elsewhere would 404 and prove nothing about that check.
     await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
-    await gateway.createResource(
-      'hosts',
-      {
-        metadata: { name: 'host-c' },
-        spec: { host: 'host-c', contextRef: 'ctx-c', secretRef: 'x' },
-      },
-      'some-other-namespace'
-    )
+    await seedAgentHost(gateway, 'host-c', 'ctx-c', { enabled: true })
+    const real = gateway.getResource.bind(gateway)
+    vi.spyOn(gateway, 'getResource').mockImplementation(async (plural, name, ns) => {
+      const row = (await real(plural, name, ns)) as { metadata: Record<string, unknown> }
+      return plural === 'hosts'
+        ? { ...row, metadata: { ...row.metadata, namespace: 'some-other-namespace' } }
+        : row
+    })
     membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
     expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
   })
@@ -224,7 +227,10 @@ describe('userHasContextEnablingMcpServer — Contexts reached through assigned 
  * What the user is offered must be connectable: every server the connectors
  * panel classifies as `oauth-user` for the user's agents, or the flat
  * `/mcp-servers` rail returns for their Contexts (all grants present), passes
- * the consent gate — and the gate admits nothing that neither offers.
+ * the consent gate. The converse — the gate admits nothing neither catalog
+ * offers — holds only inside this generator, where every server is an enabled
+ * user-scope OAuth server with a URL: the gate reads allowlists alone and
+ * ignores `enabled`, transport and auth type, so outside it the gate is wider.
  */
 describe('consent gate vs. what the catalogs offer (property)', () => {
   const contextNames = ['ctx-a', 'ctx-b', 'ctx-c']
