@@ -23,7 +23,7 @@ import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
-import type { CompactMenuCloseReason } from '@components/SidebarNav/types'
+import type { CompactMenuCloseFocus } from '@components/SidebarNav/types'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
@@ -310,7 +310,7 @@ export function App() {
   const [compactSidebarOpen, setCompactSidebarOpen] = React.useState(false)
   const compactSidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null)
   const compactSidebarWasOpenRef = React.useRef(false)
-  const compactSidebarCloseReasonRef = React.useRef<CompactMenuCloseReason>('dismiss')
+  const compactSidebarCloseFocusRef = React.useRef<CompactMenuCloseFocus | null>(null)
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
@@ -1281,21 +1281,26 @@ export function App() {
   }, [compactNavigation])
 
   React.useEffect(() => {
-    if (
-      compactSidebarWasOpenRef.current &&
-      !compactSidebarOpen &&
-      compactNavigation &&
-      compactSidebarCloseReasonRef.current === 'dismiss'
-    ) {
-      compactSidebarTriggerRef.current?.focus()
+    if (compactSidebarWasOpenRef.current && !compactSidebarOpen && compactNavigation) {
+      const activeElement = document.activeElement
+      const compactSidebar = document.getElementById('desktop-sidebar-navigation')
+      const destinationOwnsFocus =
+        compactSidebarCloseFocusRef.current === 'preserve-destination-focus' &&
+        activeElement !== null &&
+        activeElement.isConnected &&
+        activeElement !== document.body &&
+        !compactSidebar?.contains(activeElement)
+      if (!destinationOwnsFocus) {
+        compactSidebarTriggerRef.current?.focus()
+      }
     }
-    if (!compactSidebarOpen) compactSidebarCloseReasonRef.current = 'dismiss'
+    if (!compactSidebarOpen) compactSidebarCloseFocusRef.current = null
     compactSidebarWasOpenRef.current = compactSidebarOpen
   }, [compactNavigation, compactSidebarOpen])
 
   const handleCompactSidebarOpenChange = React.useCallback(
-    (open: boolean, reason: CompactMenuCloseReason = 'dismiss') => {
-      compactSidebarCloseReasonRef.current = open ? 'dismiss' : reason
+    (open: boolean, closeFocus?: CompactMenuCloseFocus) => {
+      compactSidebarCloseFocusRef.current = open ? null : (closeFocus ?? null)
       setCompactSidebarOpen(open)
     },
     []

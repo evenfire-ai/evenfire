@@ -2,6 +2,7 @@
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { SidebarNavProps } from '@components/SidebarNav/types'
 import { DESKTOP_ROUTES, SIDEBAR_WIDTH_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
@@ -43,17 +44,7 @@ type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
 
 const sidebarHarness = vi.hoisted(() => ({
   renderActual: false,
-  props: null as null | {
-    onSelect?: (item: string) => void
-    onOpenSandboxUiApp?: (app: {
-      appRef: string
-      label: string
-      defaultPath: string
-      icon?: string
-    }) => void
-    compactMenuOpen?: boolean
-    onCompactMenuOpenChange?: (open: boolean, reason?: 'dismiss' | 'destination') => void
-  },
+  props: null as null | SidebarNavProps,
 }))
 const composerHarness = vi.hoisted(() => ({ renderActual: false }))
 
@@ -70,12 +61,15 @@ vi.mock('@components/SidebarNav', async importOriginal => {
   const actual = await importOriginal<typeof import('@components/SidebarNav')>()
   return {
     ...actual,
-    SidebarNav: (props: NonNullable<typeof sidebarHarness.props>) => {
+    SidebarNav: (props: SidebarNavProps) => {
       sidebarHarness.props = props
       return sidebarHarness.renderActual ? <actual.SidebarNav {...props} /> : null
     },
   }
 })
+vi.mock('@components/SidebarNav/FileExplorerTree', () => ({
+  FileExplorerTree: () => null,
+}))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 vi.mock('@pages/ChatPage', async () => {
@@ -234,6 +228,7 @@ function makeController(): AppController {
     // shows the instance-less picker instead of opening a tab.
     handleNavSelect: vi.fn((item: string) => {
       if (item === DESKTOP_ROUTES.apps) showAppsPicker()
+      else if (item === DESKTOP_ROUTES.files) openFilesSection()
     }),
     handleLogout: vi.fn(),
     pushToast: vi.fn(),
@@ -969,6 +964,34 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     await screen.findByTestId('nav-new-chat')
     fireEvent.keyDown(document, { key: 'Escape' })
 
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+  })
+
+  it('returns focus to the compact trigger after a Files route selection', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    sidebarHarness.renderActual = true
+
+    render(<App />)
+
+    const trigger = await screen.findByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByTestId('nav-files'))
+
+    await waitFor(() => expect(currentController.navItem).toBe(DESKTOP_ROUTES.files))
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('files')
     await waitFor(() => expect(document.activeElement).toBe(trigger))
   })
 })
