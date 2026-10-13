@@ -4,6 +4,7 @@ import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAut
 import {
   type AccessAuthoritySession,
   type AuthorityCandidate,
+  type OperationalPathBinding,
   filterCandidatesForOperationTarget,
   loadPrincipalAuthoritySnapshot,
   loadResourceAuthority,
@@ -80,6 +81,7 @@ export type LiveAuthorizationResult =
       effectiveCapabilities: readonly AccessCapability[]
       paths: readonly AccessPath[]
       selectedPath: AccessPath
+      operationalBindings: readonly OperationalPathBinding[]
       authorizationRevision: string
       validUntil: string | null
     }>
@@ -366,6 +368,7 @@ async function resolveInTransaction(input: {
     effectiveCapabilities: Object.freeze([...selectedPath.behavior.capabilities]),
     paths,
     selectedPath,
+    operationalBindings: Object.freeze([...selectedCandidate.operationalBindings]),
     authorizationRevision: revision,
     validUntil: authority.validUntil?.toISOString() ?? null,
   })

@@ -231,9 +231,18 @@ export async function checkpointActionAuthority(
   const destination = await destinationResolver({
     resource: result.context.resource,
     target: result.context.target,
+    mcpServerBinding: result.mcpServerBinding,
     gateway: input.gateway,
     budget: input.budget,
   })
+  if (destination.status === 'stale') {
+    return {
+      version: ACTION_CONTEXT_VERSION,
+      status: 'access_path_stale',
+      code: 'access_path_stale',
+      currentAuthorizationRevision: result.context.authorizationRevision,
+    }
+  }
   if (destination.status !== 'resolved') {
     return destination.status === 'unavailable'
       ? {

@@ -462,6 +462,15 @@ describe('message target preparation and selected-path action context', () => {
       ]),
       paths: [pathA, pathB],
       selectedPath: pathA,
+      operationalBindings: [
+        {
+          resourceType: 'host',
+          logicalId: host.logicalId,
+          providerUid: 'uid-host-contract-test',
+          providerResourceVersion: '1',
+          relationships: [],
+        },
+      ],
       authorizationRevision: revision,
       validUntil: null,
     } satisfies LiveAuthorizationResult

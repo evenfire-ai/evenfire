@@ -256,12 +256,21 @@ describe('POST /external/rpc/delegations', () => {
         behavior,
         validUntil: null,
       },
+      mcpServerBinding: {
+        providerUid: 'uid-oauth-weather',
+        providerResourceVersion: '17',
+      },
       behaviorBindingHash,
       preparedTarget: mcpPrepared,
       operation: {},
     })
     const getResourceExact = vi.fn(async () => ({
-      metadata: { name: 'oauth-weather', namespace: config.mcpServersNamespace },
+      metadata: {
+        name: 'oauth-weather',
+        namespace: config.mcpServersNamespace,
+        uid: 'uid-oauth-weather',
+        resourceVersion: '17',
+      },
       spec: {
         enabled: true,
         auth: { type: 'oauth' },
@@ -338,12 +347,21 @@ describe('POST /external/rpc/delegations', () => {
         },
         validUntil: null,
       },
+      mcpServerBinding: {
+        providerUid: 'uid-plain-weather',
+        providerResourceVersion: '22',
+      },
       behaviorBindingHash,
       preparedTarget: mcpPrepared,
       operation: {},
     })
     const getResourceExact = vi.fn(async () => ({
-      metadata: { name: 'plain-weather', namespace: config.mcpServersNamespace },
+      metadata: {
+        name: 'plain-weather',
+        namespace: config.mcpServersNamespace,
+        uid: 'uid-plain-weather',
+        resourceVersion: '22',
+      },
       spec: {
         enabled: true,
         auth: { type: 'none' },
@@ -364,16 +382,20 @@ describe('POST /external/rpc/delegations', () => {
       })
 
     expect(response.status).toBe(200)
-    expect(verifyUserDelegationV2(response.body.delegationToken)).toMatchObject({
+    const claims = verifyUserDelegationV2(response.body.delegationToken)
+    expect(claims).toMatchObject({
       operationIds: ['mcp.invoke'],
       resource: mcpResource,
       targets: { 'mcp.invoke': mcpTarget },
     })
+    expect(claims).not.toHaveProperty('mcpServerBinding')
+    expect(claims).not.toHaveProperty('providerUid')
+    expect(claims).not.toHaveProperty('providerResourceVersion')
     expect(getResourceExact).toHaveBeenCalledOnce()
     expect(tokenIssuer.issueUserDelegationV2).toHaveBeenCalledOnce()
   })
 
-  it('fails closed when exact MCP destination lookup is unavailable', async () => {
+  it('rejects a replaced MCP destination before v2 delegation signing', async () => {
     const mcpResource = canonicalResourceIdentity({
       environmentId: canonicalEnvironmentId(),
       type: 'mcp_server',
@@ -419,11 +441,107 @@ describe('POST /external/rpc/delegations', () => {
         },
         validUntil: null,
       },
+      mcpServerBinding: {
+        providerUid: 'uid-plain-weather',
+        providerResourceVersion: '22',
+      },
+      behaviorBindingHash,
+      preparedTarget: mcpPrepared,
+      operation: {},
+    })
+    const getResourceExact = vi.fn(async () => ({
+      metadata: {
+        name: 'plain-weather',
+        namespace: config.mcpServersNamespace,
+        uid: 'uid-replacement-weather',
+        resourceVersion: '23',
+      },
+      spec: {
+        enabled: true,
+        auth: { type: 'none' },
+        transport: { type: 'streamableHttp', url: 'http://replacement-weather/mcp' },
+      },
+    }))
+
+    const response = await request(app({ getResourceExact } as never))
+      .post('/external/rpc/delegations')
+      .set('x-user-session-token', 'session-v2')
+      .set('x-evenfire-access-path-id', accessPathId)
+      .set('x-evenfire-authorization-revision', authorizationRevision)
+      .send({
+        version: 2,
+        operationId: 'mcp.invoke',
+        resource: { type: 'mcp_server', logicalId: mcpResource.logicalId },
+        target: mcpTarget,
+      })
+
+    expect(response.status).toBe(409)
+    expect(response.body).toMatchObject({ error: { code: 'access_path_stale' } })
+    expect(getResourceExact).toHaveBeenCalledOnce()
+    expect(tokenIssuer.issueUserDelegationV2).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['unavailable', 503, 'authority_unavailable'],
+    ['missing', 404, 'not_found'],
+  ] as const)('preserves the exact MCP lookup outcome: %s', async (outcome, status, code) => {
+    const mcpResource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'mcp_server',
+      logicalId: `${config.mcpServersNamespace}/plain-weather`,
+    })
+    const mcpTarget = {
+      serverNamespace: config.mcpServersNamespace,
+      serverName: 'plain-weather',
+      toolName: 'forecast',
+    }
+    const mcpPrepared = prepareActionOperationTarget({
+      operationId: 'mcp.invoke',
+      resource: mcpResource,
+      operationTarget: mcpTarget,
+      allocateMessageId: () => {
+        throw new Error('MCP invocation must not allocate a chat message ID')
+      },
+    })
+    mocks.authorize.mockResolvedValueOnce({
+      status: 'allowed',
+      context: {
+        version: 2,
+        principal: { userId, sid, sessionVersion: 1 },
+        operationId: 'mcp.invoke',
+        resource: mcpResource,
+        target: mcpPrepared.target,
+        targetHash: mcpPrepared.targetHash,
+        accessPathId,
+        authorizationRevision,
+        behaviorBindingHash,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        selectedPathCapabilities: ['mcp_server.use'],
+        behavior: {
+          capabilities: ['mcp_server.use'],
+          budget: knownBehavior(null),
+          credentialPolicy: knownBehavior(null),
+          approvalPolicy: knownBehavior(null),
+          filesystemScope: knownBehavior(null),
+          runtime: knownBehavior('ctx/weather'),
+          providerModelPolicy: knownBehavior(null),
+          audit: knownBehavior(null),
+        },
+        validUntil: null,
+      },
+      mcpServerBinding: {
+        providerUid: 'uid-plain-weather',
+        providerResourceVersion: '22',
+      },
       behaviorBindingHash,
       preparedTarget: mcpPrepared,
       operation: {},
     })
     const getResourceExact = vi.fn(async () => {
+      if (outcome === 'missing') {
+        throw Object.assign(new Error('MCP destination not found'), { statusCode: 404 })
+      }
       throw new Error('Kubernetes API unavailable')
     })
 
@@ -439,8 +557,8 @@ describe('POST /external/rpc/delegations', () => {
         target: mcpTarget,
       })
 
-    expect(response.status).toBe(503)
-    expect(response.body).toMatchObject({ error: { code: 'authority_unavailable' } })
+    expect(response.status).toBe(status)
+    expect(response.body).toMatchObject({ error: { code } })
     expect(tokenIssuer.issueUserDelegationV2).not.toHaveBeenCalled()
   })
 

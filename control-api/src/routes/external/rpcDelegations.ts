@@ -198,6 +198,7 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
           const destination = await resolveActionDestination({
             resource: result.context.resource,
             target: result.context.target,
+            mcpServerBinding: result.mcpServerBinding,
             gateway,
             budget: req.accessExecutionBudget!,
           })
@@ -210,6 +211,20 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
               'Authorization is temporarily unavailable.',
               true
             )
+            return
+          }
+          if (destination.status === 'stale') {
+            sendPublicApiError(
+              req,
+              res,
+              409,
+              'access_path_stale',
+              'The access path is stale; refresh access before retrying.'
+            )
+            return
+          }
+          if (destination.status === 'not_found') {
+            sendPublicApiError(req, res, 404, 'not_found', 'The resource was not found.')
             return
           }
           if (

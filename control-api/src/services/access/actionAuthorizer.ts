@@ -37,6 +37,7 @@ export type ActionAuthorizationV2Result =
   | Readonly<{
       status: 'allowed'
       context: ValidatedActionContextV2
+      mcpServerBinding?: Readonly<{ providerUid: string; providerResourceVersion: string }>
       behaviorBindingHash: string
       operation: ActionOperationDefinition
       preparedTarget: PreparedActionOperationTarget
@@ -206,9 +207,26 @@ export async function authorizeActionV2(
         preparedTarget,
         authorization: result,
       })
+      const mcpServerBinding =
+        input.operationId === 'mcp.invoke'
+          ? result.operationalBindings.find(
+              binding =>
+                binding.resourceType === 'mcp_server' &&
+                binding.logicalId === input.resource.logicalId
+            )
+          : undefined
+      if (input.operationId === 'mcp.invoke' && !mcpServerBinding) return unavailable()
       return Object.freeze({
         status: 'allowed',
         context,
+        ...(mcpServerBinding
+          ? {
+              mcpServerBinding: Object.freeze({
+                providerUid: mcpServerBinding.providerUid,
+                providerResourceVersion: mcpServerBinding.providerResourceVersion,
+              }),
+            }
+          : {}),
         behaviorBindingHash: context.behaviorBindingHash,
         operation,
         preparedTarget,

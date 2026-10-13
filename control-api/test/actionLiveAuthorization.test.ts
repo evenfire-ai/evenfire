@@ -4,6 +4,8 @@ import type { DbClient } from '../src/db.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { checkpointActionAuthority } from '../src/services/access/actionAuthorityCheckpoint.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
+import { resolveActionDestination } from '../src/services/access/actionDestination.js'
+import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import {
   type LiveActionAuthorizationInput,
   resolveLiveActionAuthorization,
@@ -313,18 +315,127 @@ describe('canonical action live authorization', () => {
   })
 
   it('resolves an exact MCP tool target through a current context grant', async () => {
-    const result = await resolve({
-      operationId: 'mcp.invoke',
-      resource: mcpResource,
-      operationTarget: {
-        serverNamespace: config.mcpServersNamespace,
-        serverName: 'weather',
-        toolName: 'forecast',
+    const db = fakeTransaction('mcp_server')
+    const target = {
+      serverNamespace: config.mcpServersNamespace,
+      serverName: 'weather',
+      toolName: 'forecast',
+    }
+    const authorized = await authorizeActionV2(
+      {
+        session,
+        requested: { version: 2 },
+        operationId: 'mcp.invoke',
+        resource: mcpResource,
+        operationTarget: target,
+        allocateChatMessageId: false,
+        gateway,
       },
+      { authorizationOptions: { transaction: db.transaction } }
+    )
+    expect(authorized.status, JSON.stringify(authorized)).toBe('allowed')
+    if (authorized.status !== 'allowed') return
+    expect(authorized.context.selectedPathCapabilities).toContain('mcp_server.use')
+    expect(authorized.mcpServerBinding).toEqual({
+      providerUid: 'uid-mcp-weather',
+      providerResourceVersion: '23',
     })
-    expect(result.status, JSON.stringify(result)).toBe('allowed')
-    if (result.status !== 'allowed') return
-    expect(result.selectedPath.behavior.capabilities).toContain('mcp_server.use')
+
+    const budget = AccessExecutionBudget.create('action')
+    try {
+      const destination = await resolveActionDestination({
+        resource: authorized.context.resource,
+        target: authorized.context.target,
+        mcpServerBinding: authorized.mcpServerBinding,
+        gateway,
+        budget,
+      })
+      expect(destination).toEqual({
+        status: 'resolved',
+        destination: {
+          kind: 'mcp_server',
+          ref: mcpResource.logicalId,
+          url: 'http://weather.mcp-server:3000/mcp',
+        },
+      })
+    } finally {
+      budget.close()
+    }
+  })
+
+  it.each([
+    {
+      description: 'same name with a different UID',
+      uid: 'uid-mcp-weather-replacement',
+      resourceVersion: '24',
+    },
+    {
+      description: 'same UID with a changed resourceVersion',
+      uid: 'uid-mcp-weather',
+      resourceVersion: '24',
+    },
+  ])('rejects an MCP destination replaced after authorization: $description', async replacement => {
+    const db = fakeTransaction('mcp_server')
+    let currentMcpServer: unknown = mcpObject
+    const replacementGateway = {
+      getResourceExact: vi.fn(async (plural: string, name: string) => {
+        if (plural === 'mcpservers' && name === 'weather') return currentMcpServer
+        return gateway.getResourceExact(plural, name)
+      }),
+    }
+    const budget = AccessExecutionBudget.create('action')
+    try {
+      const authorized = await authorizeActionV2(
+        {
+          session,
+          requested: { version: 2 },
+          operationId: 'mcp.invoke',
+          resource: mcpResource,
+          operationTarget: {
+            serverNamespace: config.mcpServersNamespace,
+            serverName: 'weather',
+            toolName: 'forecast',
+          },
+          allocateChatMessageId: false,
+          gateway: replacementGateway,
+          budget,
+        },
+        { authorizationOptions: { transaction: db.transaction } }
+      )
+      expect(authorized.status, JSON.stringify(authorized)).toBe('allowed')
+      if (authorized.status !== 'allowed') return
+      expect(authorized.mcpServerBinding).toEqual({
+        providerUid: 'uid-mcp-weather',
+        providerResourceVersion: '23',
+      })
+
+      currentMcpServer = Object.freeze({
+        ...mcpObject,
+        metadata: Object.freeze({
+          ...mcpObject.metadata,
+          uid: replacement.uid,
+          resourceVersion: replacement.resourceVersion,
+        }),
+        spec: Object.freeze({
+          ...mcpObject.spec,
+          transport: Object.freeze({
+            type: 'streamable-http',
+            url: 'http://replacement.mcp-server:3000/mcp',
+          }),
+        }),
+      })
+
+      const destination = await resolveActionDestination({
+        resource: authorized.context.resource,
+        target: authorized.context.target,
+        mcpServerBinding: authorized.mcpServerBinding,
+        gateway: replacementGateway,
+        budget,
+      })
+      expect(destination).toEqual({ status: 'stale' })
+    } finally {
+      budget.close()
+    }
   })
 
   it('issues and checkpoints a read action using the real resolver path', async () => {
@@ -386,6 +497,110 @@ describe('canonical action live authorization', () => {
         authorizationRevision: issued.context.authorizationRevision,
         behaviorBindingHash: issued.context.behaviorBindingHash,
       })
+    } finally {
+      budget.close()
+    }
+  })
+
+  it('rejects a replaced MCP destination in the action checkpoint consumer', async () => {
+    const mcpTarget = {
+      serverNamespace: config.mcpServersNamespace,
+      serverName: 'weather',
+      toolName: 'forecast',
+    }
+    const preparedMcpTarget = prepareActionOperationTarget({
+      operationId: 'mcp.invoke',
+      resource: mcpResource,
+      operationTarget: mcpTarget,
+      allocateMessageId: () => {
+        throw new Error('MCP invocation must not allocate a chat message ID')
+      },
+    })
+    const initialDb = fakeTransaction('mcp_server')
+    const authorized = await authorizeActionV2(
+      {
+        session,
+        requested: { version: 2 },
+        operationId: 'mcp.invoke',
+        resource: mcpResource,
+        operationTarget: mcpTarget,
+        allocateChatMessageId: false,
+        gateway,
+      },
+      { authorizationOptions: { transaction: initialDb.transaction } }
+    )
+    expect(authorized.status, JSON.stringify(authorized)).toBe('allowed')
+    if (authorized.status !== 'allowed') return
+
+    const checkpointDb = fakeTransaction('mcp_server')
+    let currentMcpServer: unknown = mcpObject
+    const checkpointGateway = {
+      getResourceExact: vi.fn(async (plural: string, name: string) => {
+        if (plural === 'mcpservers' && name === 'weather') return currentMcpServer
+        return gateway.getResourceExact(plural, name)
+      }),
+    }
+    const replacement = Object.freeze({
+      ...mcpObject,
+      metadata: Object.freeze({
+        ...mcpObject.metadata,
+        uid: 'uid-mcp-weather-replacement',
+        resourceVersion: '24',
+      }),
+      spec: Object.freeze({
+        ...mcpObject.spec,
+        transport: Object.freeze({
+          type: 'streamable-http',
+          url: 'http://replacement.mcp-server:3000/mcp',
+        }),
+      }),
+    })
+    const budget = AccessExecutionBudget.create('action')
+    try {
+      const checked = await checkpointActionAuthority(
+        {
+          request: {
+            version: 2,
+            principal: { sub: userId, sid, sessionVersion: 1 },
+            delegationJti: jti,
+            resource: mcpResource,
+            operationId: 'mcp.invoke',
+            target: preparedMcpTarget.target,
+            targetHash: preparedMcpTarget.targetHash,
+            accessPathId: authorized.context.accessPathId,
+            authorizationRevision: authorized.context.authorizationRevision,
+            behaviorBindingHash: authorized.context.behaviorBindingHash,
+            domain: {
+              service: 'rpc-proxy',
+              resource: mcpResource,
+              targetHash: preparedMcpTarget.targetHash,
+            },
+          },
+          gateway: checkpointGateway,
+          budget,
+        },
+        {
+          authorize: async input => {
+            const current = await authorizeActionV2(input, {
+              authorizationOptions: { transaction: checkpointDb.transaction },
+            })
+            currentMcpServer = replacement
+            return current
+          },
+        }
+      )
+
+      expect(checked).toMatchObject({
+        version: 2,
+        status: 'access_path_stale',
+        code: 'access_path_stale',
+      })
+      expect(checkpointGateway.getResourceExact).toHaveBeenLastCalledWith(
+        'mcpservers',
+        'weather',
+        config.mcpServersNamespace,
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
     } finally {
       budget.close()
     }

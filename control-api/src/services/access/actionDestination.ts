@@ -13,7 +13,7 @@ export type ActionDestination = Readonly<{
 
 export type ActionDestinationResult =
   | Readonly<{ status: 'resolved'; destination: ActionDestination | null }>
-  | Readonly<{ status: 'not_found' | 'unavailable' }>
+  | Readonly<{ status: 'not_found' | 'stale' | 'unavailable' }>
 
 function scopedRef(logicalId: string): { namespace: string; name: string } | null {
   const separator = logicalId.indexOf('/')
@@ -30,6 +30,7 @@ function isNotFound(error: unknown): boolean {
 export async function resolveActionDestination(input: {
   resource: CanonicalResourceIdentity
   target: CanonicalActionTarget
+  mcpServerBinding?: Readonly<{ providerUid: string; providerResourceVersion: string }>
   gateway: Pick<K8sGateway, 'getResourceExact'>
   budget: AccessExecutionBudget
 }): Promise<ActionDestinationResult> {
@@ -64,6 +65,10 @@ export async function resolveActionDestination(input: {
     }
   }
   if (scoped.namespace !== config.mcpServersNamespace) return { status: 'not_found' }
+  const expectedBinding = input.mcpServerBinding
+  if (!expectedBinding?.providerUid || !expectedBinding.providerResourceVersion) {
+    return { status: 'stale' }
+  }
   try {
     input.budget.charge({ kind: 'exactKubernetesGets' })
     const timeoutSeconds = Math.max(1, Math.min(60, Math.ceil(input.budget.remainingMs() / 1_000)))
@@ -73,7 +78,13 @@ export async function resolveActionDestination(input: {
         signal,
       })
     )) as {
-      metadata?: { name?: string; namespace?: string; deletionTimestamp?: string | null }
+      metadata?: {
+        name?: string
+        namespace?: string
+        uid?: string
+        resourceVersion?: string
+        deletionTimestamp?: string | null
+      }
       spec?: {
         enabled?: boolean
         auth?: { type?: string }
@@ -81,16 +92,24 @@ export async function resolveActionDestination(input: {
       }
     }
     if (
+      object.metadata?.uid !== expectedBinding.providerUid ||
+      object.metadata?.resourceVersion !== expectedBinding.providerResourceVersion
+    ) {
+      return { status: 'stale' }
+    }
+    if (
       object.metadata?.name !== scoped.name ||
       (object.metadata.namespace !== undefined && object.metadata.namespace !== scoped.namespace) ||
       object.metadata?.deletionTimestamp ||
-      object.spec?.enabled === false ||
-      (object.spec?.auth?.type && object.spec.auth.type !== 'none')
+      object.spec?.enabled === false
     ) {
       return { status: 'not_found' }
     }
+    if (object.spec?.auth?.type && object.spec.auth.type !== 'none') {
+      return { status: 'resolved', destination: null }
+    }
     const url = resolveMcpServerUrl(object, scoped.namespace)
-    if (!url) return { status: 'not_found' }
+    if (!url) return { status: 'resolved', destination: null }
     return {
       status: 'resolved',
       destination: Object.freeze({
