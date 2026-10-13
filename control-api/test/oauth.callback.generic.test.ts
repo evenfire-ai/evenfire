@@ -118,6 +118,7 @@ function baseDeps(overrides: Partial<CallbackDeps>): CallbackDeps {
     } as unknown as CallbackDeps['db'],
     recipeReader: { read: vi.fn(async () => null) },
     userContextsReader: vi.fn(async () => ({ contextIds: ['ctx-A'] })),
+    userServerAccessReader: vi.fn(async () => true),
     fetchFn: (async () => {
       throw new Error('generic lane must NOT use fetchFn (DEC-17)')
     }) as unknown as typeof fetch,

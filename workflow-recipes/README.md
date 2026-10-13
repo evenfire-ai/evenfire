@@ -161,7 +161,6 @@ src/
     ├── httpMcpHostClient.ts  # mcp-host HTTP client
     ├── schedulingHandler.ts  # Cron/trigger scheduling
     ├── signalStore.ts        # Inter-step signal passing
-    ├── rateLimiter.ts        # LLM call rate limiting
     ├── historyManager.ts     # Execution history
     ├── restEndpoints.ts      # REST API for coordinator
     ├── objectStorageAdapter.ts # S3-compatible artifact storage
