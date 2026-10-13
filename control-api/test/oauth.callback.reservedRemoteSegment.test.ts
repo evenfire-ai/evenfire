@@ -249,6 +249,7 @@ async function deliverState(lane: Lane, serverName: string, segment: string) {
     secretReader,
     mcpServerReader,
     userContextsReader: vi.fn(async () => ({ contextIds: [CONTEXT] })),
+    userServerAccessReader: vi.fn(async () => true),
     fetchFn: fetchFn as unknown as typeof fetch,
     stateSecret: STATE_SECRET,
     encryptionKey: ENCRYPTION_KEY,
