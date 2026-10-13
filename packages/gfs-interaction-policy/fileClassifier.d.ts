@@ -15,12 +15,15 @@ export type FileClassFamily = 'text' | 'image' | 'document_binary' | 'binary_uns
 
 export type FileDetection = 'magic' | 'text_utf8' | 'declared'
 
+/** The reader the Host uses for a class: UTF-8 text, a document reader, or none. */
+export type FileReader = 'text' | 'pdf' | 'xlsx' | 'none'
+
 export interface FileClassification {
   class: FileClass
   detectedMediaType: string
   detection: FileDetection
   textReadable: boolean
-  reader: 'text' | 'none'
+  reader: FileReader
   modelImageInput: 'candidate' | 'unsupported'
   /** The detected family differs from the one the declared media type or the extension implies. */
   mismatch: boolean

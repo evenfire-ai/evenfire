@@ -507,6 +507,58 @@ const references = [
   r('name of 256 code points', { ...attachmentBase, name: `${'ñ'.repeat(253)}.md` }, invalid),
   r('empty name', { ...attachmentBase, name: '' }, invalid),
   r('reader text on a pdf', { ...gfsBase, reader: 'text' }, invalid),
+  r('reader pdf on a pdf', { ...gfsBase, reader: 'pdf' }, ok),
+  r('reader xlsx on a pdf', { ...gfsBase, reader: 'xlsx' }, invalid),
+  r(
+    'reader xlsx on an xlsx',
+    {
+      ...gfsBase,
+      name: 'q3.xlsx',
+      class: 'xlsx',
+      declaredMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      detectedMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      reader: 'xlsx',
+    },
+    ok
+  ),
+  r(
+    'reader none on an xlsx',
+    {
+      ...gfsBase,
+      name: 'q3.xlsx',
+      class: 'xlsx',
+      declaredMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      detectedMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      reader: 'none',
+    },
+    ok
+  ),
+  r(
+    'reader pdf on an xlsx',
+    {
+      ...gfsBase,
+      name: 'q3.xlsx',
+      class: 'xlsx',
+      declaredMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      detectedMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      reader: 'pdf',
+    },
+    invalid
+  ),
+  r(
+    'reader pdf on a docx',
+    {
+      ...gfsBase,
+      name: 'q3.docx',
+      class: 'docx',
+      declaredMediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      detectedMediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      reader: 'pdf',
+    },
+    invalid
+  ),
+  r('reader pdf on a text file', { ...attachmentBase, reader: 'pdf' }, invalid),
+  r('unknown reader', { ...gfsBase, reader: 'docx' }, invalid),
   r('textReadable on a pdf', { ...gfsBase, textReadable: true, reader: 'text' }, invalid),
   r('image candidate on a pdf', { ...gfsBase, modelImageInput: 'candidate' }, invalid),
   r('text detection on a pdf', { ...gfsBase, detection: 'text_utf8' }, invalid),

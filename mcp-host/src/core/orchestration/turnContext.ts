@@ -47,7 +47,7 @@ export interface TurnContextAttachedFile {
   name: string
   class: string
   byteLength: number
-  reader: 'text' | 'none'
+  reader: 'text' | 'pdf' | 'xlsx' | 'none'
   mismatch: boolean
   declaredMediaType: string | null
   detectedMediaType: string

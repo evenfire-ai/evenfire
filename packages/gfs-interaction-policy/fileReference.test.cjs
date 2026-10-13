@@ -15,7 +15,7 @@ const {
   quotePromptValue,
 } = require('./fileReference.cjs')
 
-const EXPECTED_VECTOR_COUNT = 45
+const EXPECTED_VECTOR_COUNT = 53
 const { vectors } = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'fixtures', 'file-reference-vectors.v1.json'), 'utf8')
 )

@@ -196,6 +196,20 @@ function parseDigest(digest) {
   return { value: { algorithm: 'sha256', hex: digest.hex } }
 }
 
+/**
+ * The readers a reference may name for its class. PDF and XLSX accept both
+ * `none` and their document reader while producers move from one to the other
+ * (#656): a parser that knew only `none` would reject every reference a newer
+ * producer builds, and one that knew only the new value would reject an older
+ * producer's. Every other class has exactly one reader.
+ */
+function allowedReaders(fileClass, textReadable) {
+  if (textReadable) return ['text']
+  if (fileClass === 'pdf') return ['none', 'pdf']
+  if (fileClass === 'xlsx') return ['none', 'xlsx']
+  return ['none']
+}
+
 function classificationProblem(input) {
   if (!FILE_CLASSES.includes(input.class)) return 'class is not a known file class'
   if (!DETECTIONS.has(input.detection)) return 'detection must be magic, text_utf8 or declared'
@@ -203,7 +217,9 @@ function classificationProblem(input) {
   if (typeof input.textReadable !== 'boolean') return 'textReadable must be a boolean'
   const family = fileClassFamily(input.class)
   if (input.textReadable !== (family === 'text')) return 'textReadable contradicts class'
-  if (input.reader !== (input.textReadable ? 'text' : 'none')) return 'reader contradicts class'
+  if (!allowedReaders(input.class, input.textReadable).includes(input.reader)) {
+    return 'reader contradicts class'
+  }
   const expectedImageInput = family === 'image' ? 'candidate' : 'unsupported'
   if (input.modelImageInput !== expectedImageInput) return 'modelImageInput contradicts class'
   if (input.detection === 'text_utf8' && family !== 'text') return 'detection contradicts class'
