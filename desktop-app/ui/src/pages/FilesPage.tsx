@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import {
   GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
   GFS_UPLOAD_NAME_RETRY_LIMIT,
@@ -38,6 +39,7 @@ import {
   GFS_UNAVAILABLE_LOCATION_MESSAGE,
   type GfsCrumb,
   type GfsDiscoveryFailure,
+  type GfsUriOpenFailure,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
@@ -47,6 +49,7 @@ import {
   describeGfsGrantError,
   describeGfsReadError,
   isRateLimited,
+  parseHttpStatus,
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
@@ -242,6 +245,8 @@ export function FilesPage({
   pushToast,
   pendingGfsUri,
   onPendingGfsUriHandled,
+  pendingGfsDeepLink,
+  onPendingGfsDeepLinkOutcome,
   remoteGfsChangeEpoch,
   onLocationChange,
   onOpenPreview,
@@ -259,6 +264,14 @@ export function FilesPage({
   const [renameTarget, setRenameTarget] = useState<GfsActionTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
+  const [pendingGfsDeepLinkFailure, setPendingGfsDeepLinkFailure] = useState<{
+    id: number
+    message: string
+    retryable: boolean
+  } | null>(null)
+  const [gfsDeepLinkRetry, setGfsDeepLinkRetry] = useState<{ id: number; request: number } | null>(
+    null
+  )
   const [refreshingCurrent, setRefreshingCurrent] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
@@ -865,15 +878,20 @@ export function FilesPage({
     }
   }
 
-  const handleOpenGfsLink = async (uri: string) => {
+  const handleOpenGfsLink = async (
+    uri: string,
+    onFailure?: (failure: GfsUriOpenFailure) => void,
+    onOpened?: () => void
+  ) => {
     const returnCrumbs = [...crumbs]
-    const opened = await ctrl.openUri(uri)
+    const opened = onFailure ? await ctrl.openUri(uri, { onFailure }) : await ctrl.openUri(uri)
     if (opened === false) return false
     if (typeof opened === 'object' && opened.kind === 'file') {
       const previewOpened = openFilePreview(opened)
       ctrl.restoreCrumbs(returnCrumbs)
       if (!previewOpened) await handleDownload(opened.gfsUri, opened.name)
     }
+    onOpened?.()
     return true
   }
 
@@ -891,7 +909,7 @@ export function FilesPage({
    * re-render cannot reopen it, and failures surface the browser's own error.
    */
   useEffect(() => {
-    if (!pendingGfsUri) return
+    if (!pendingGfsUri || pendingGfsDeepLink) return
     // Re-arm on every non-null seed so a deep-link onto an already-mounted page
     // suppresses the pre-open location the same way the initial mount does.
     seedPendingRef.current = true
@@ -899,6 +917,71 @@ export function FilesPage({
     void handleOpenGfsLink(pendingGfsUri)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGfsUri])
+
+  const deepLinkRetryRequest =
+    pendingGfsDeepLink && gfsDeepLinkRetry?.id === pendingGfsDeepLink.id
+      ? gfsDeepLinkRetry.request
+      : 0
+  useEffect(() => {
+    const link = pendingGfsDeepLink
+    if (!link) return
+    let current = true
+    seedPendingRef.current = true
+    setPendingGfsDeepLinkFailure(null)
+
+    if (normalizeGfsResourceUri(link.uri) !== link.uri) {
+      setPendingGfsDeepLinkFailure({
+        id: link.id,
+        message: 'This EvenDrive link is invalid or cannot be resolved.',
+        retryable: false,
+      })
+      onPendingGfsDeepLinkOutcome?.(link.id, 'terminal')
+      return () => {
+        current = false
+      }
+    }
+
+    const reportFailure = (failure: GfsUriOpenFailure) => {
+      if (!current) return
+      if (failure.kind === 'superseded') {
+        onPendingGfsDeepLinkOutcome?.(link.id, 'superseded')
+        return
+      }
+
+      const status = parseHttpStatus(
+        failure.error instanceof Error ? failure.error.message : String(failure.error)
+      )
+      const retryable =
+        status === null || status === 408 || status === 425 || status === 429 || status >= 500
+      const message =
+        status === 403
+          ? 'You do not have permission to open this resource.'
+          : status === 404
+            ? 'This resource could not be found.'
+            : status === 410
+              ? 'This resource was deleted.'
+              : status === 401
+                ? 'Your session can no longer open this resource. Sign in again and reopen the link.'
+                : status !== null && status >= 400 && status < 500 && status !== 401
+                  ? 'This EvenDrive link is invalid or cannot be resolved.'
+                  : describeGfsReadError(failure.error).message
+      setPendingGfsDeepLinkFailure({ id: link.id, message, retryable })
+      onPendingGfsDeepLinkOutcome?.(link.id, retryable ? 'retryable' : 'terminal')
+    }
+
+    void handleOpenGfsLink(link.uri, reportFailure, () => {
+      if (!current) return
+      setPendingGfsDeepLinkFailure(null)
+      onPendingGfsDeepLinkOutcome?.(link.id, 'opened')
+    }).catch(error => reportFailure({ kind: 'error', error }))
+
+    return () => {
+      current = false
+    }
+    // The callback intentionally follows the active queue item and explicit
+    // retry request. The page-level handlers close over the current resource.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGfsDeepLink?.id, pendingGfsDeepLink?.uri, deepLinkRetryRequest])
 
   // Report the live location (leaf gfsUri + folder name) so the owning files tab
   // persists it (mini-spec 06 §3). `current` is the top of the breadcrumb stack;
@@ -1671,6 +1754,28 @@ export function FilesPage({
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
+          {pendingGfsDeepLinkFailure ? (
+            <div role="alert">
+              <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
+              {pendingGfsDeepLinkFailure.retryable ? (
+                <Button
+                  color="secondary"
+                  onClick={() => {
+                    setPendingGfsDeepLinkFailure(null)
+                    setGfsDeepLinkRetry(current => ({
+                      id: pendingGfsDeepLinkFailure.id,
+                      request:
+                        current?.id === pendingGfsDeepLinkFailure.id ? current.request + 1 : 1,
+                    }))
+                  }}
+                  size="sm"
+                  variant="outline"
+                >
+                  Retry opening link
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
           {unavailableLocation ? (
             <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
           ) : null}
@@ -1749,7 +1854,7 @@ export function FilesPage({
                 </p>
               </div>
             </div>
-          ) : visibleResources.length === 0 ? (
+          ) : pendingGfsDeepLinkFailure ? null : visibleResources.length === 0 ? (
             // `unsupported` earns its own copy because the other two assert
             // something this branch cannot know. An older server that has no
             // listing endpoint never told us the library was empty — it told us

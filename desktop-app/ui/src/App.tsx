@@ -339,6 +339,8 @@ export function App() {
   const [pendingGfsDeepLinks, setPendingGfsDeepLinks] = React.useState<
     GfsResourceDeepLinkEnvelope[]
   >([])
+  const [activeGfsDeepLink, setActiveGfsDeepLink] =
+    React.useState<GfsResourceDeepLinkEnvelope | null>(null)
   const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
@@ -1604,11 +1606,16 @@ export function App() {
   const enqueueGfsDeepLink = React.useCallback(
     (value: GfsResourceDeepLinkEnvelope) => {
       const uri = normalizeGfsResourceUri(value?.uri)
-      if (!Number.isSafeInteger(value?.id) || value.id <= 0 || !uri) return
+      if (!Number.isSafeInteger(value?.id) || value.id <= 0) return
+      if (!uri) {
+        vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
+        void window.clerum.gfs?.acknowledgeDeepLink?.(value.id)?.catch(() => undefined)
+        return
+      }
       if (pendingGfsDeepLinksRef.current.some(item => item.id === value.id)) return
       setPendingGfsDeepLinkState([...pendingGfsDeepLinksRef.current, { id: value.id, uri }])
     },
-    [setPendingGfsDeepLinkState]
+    [setPendingGfsDeepLinkState, vm.pushToast]
   )
 
   const acknowledgeGfsDeepLink = React.useCallback(
@@ -1622,6 +1629,16 @@ export function App() {
       }
     },
     [setPendingGfsDeepLinkState]
+  )
+
+  const handleGfsDeepLinkOutcome = React.useCallback(
+    (id: number, outcome: 'opened' | 'terminal' | 'retryable' | 'superseded') => {
+      if (processingGfsDeepLinkIdRef.current !== id) return
+      if (outcome === 'retryable') return
+      setActiveGfsDeepLink(null)
+      void acknowledgeGfsDeepLink(id)
+    },
+    [acknowledgeGfsDeepLink]
   )
 
   const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId?: number) => {
@@ -1813,11 +1830,13 @@ export function App() {
       return
     }
     processingGfsDeepLinkIdRef.current = pending.id
+    setActiveGfsDeepLink({ id: pending.id, uri })
     try {
       vm.openFilesSection(uri)
-      void acknowledgeGfsDeepLink(pending.id)
     } catch (error) {
       processingGfsDeepLinkIdRef.current = null
+      setActiveGfsDeepLink(null)
+      void acknowledgeGfsDeepLink(pending.id)
       vm.pushToast(
         `Could not open EvenDrive link: ${error instanceof Error ? error.message : String(error)}`,
         'error'
@@ -3033,7 +3052,9 @@ export function App() {
                                   <FilesPage
                                     key={activeFilesTabId ?? 'files'}
                                     pushToast={vm.pushToast}
-                                    pendingGfsUri={filesSeedPath}
+                                    pendingGfsUri={activeGfsDeepLink?.uri ?? filesSeedPath}
+                                    pendingGfsDeepLink={activeGfsDeepLink}
+                                    onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                     remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                     onLocationChange={handleFilesLocationChange}
                                     onOpenPreview={vm.openPreviewSection}

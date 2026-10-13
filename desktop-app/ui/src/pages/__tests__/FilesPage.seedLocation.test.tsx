@@ -81,9 +81,21 @@ function authValue(): AuthContextValue {
 }
 
 const SEED_URI = 'gfs://main/aaa'
+const DEEP_LINK_URI = 'gfs://main/0123456789abcdef0123456789abcdef'
 
 /** App's files render seam, reduced to the tab-persistence contract under test. */
-function FilesTabHarness({ remoteGfsChangeEpoch = 0 }: { remoteGfsChangeEpoch?: number }) {
+function FilesTabHarness({
+  remoteGfsChangeEpoch = 0,
+  pendingGfsDeepLink,
+  onPendingGfsDeepLinkOutcome,
+}: {
+  remoteGfsChangeEpoch?: number
+  pendingGfsDeepLink?: { id: number; uri: string } | null
+  onPendingGfsDeepLinkOutcome?: (
+    id: number,
+    outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
+  ) => void
+}) {
   const queryClient = useQueryClient()
   const [state, setState] = useState<WorkspaceTabsState>(() => {
     let next = createEmptyWorkspaceTabsState()
@@ -125,7 +137,9 @@ function FilesTabHarness({ remoteGfsChangeEpoch = 0 }: { remoteGfsChangeEpoch?: 
       {activeFilesTab && (
         <FilesPage
           key={activeFilesTab.id}
-          pendingGfsUri={seedPath}
+          pendingGfsUri={pendingGfsDeepLink?.uri ?? seedPath}
+          pendingGfsDeepLink={pendingGfsDeepLink}
+          onPendingGfsDeepLinkOutcome={onPendingGfsDeepLinkOutcome}
           onLocationChange={handleLocationChange}
           {...({ remoteGfsChangeEpoch } as Record<string, number>)}
         />
@@ -134,14 +148,22 @@ function FilesTabHarness({ remoteGfsChangeEpoch = 0 }: { remoteGfsChangeEpoch?: 
   )
 }
 
-function renderHarness() {
+function renderHarness(
+  props: {
+    pendingGfsDeepLink?: { id: number; uri: string } | null
+    onPendingGfsDeepLinkOutcome?: (
+      id: number,
+      outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
+    ) => void
+  } = {}
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return {
     client,
     ...render(
       <AuthContext.Provider value={authValue()}>
         <QueryClientProvider client={client}>
-          <FilesTabHarness />
+          <FilesTabHarness {...props} />
         </QueryClientProvider>
       </AuthContext.Provider>
     ),
@@ -207,6 +229,124 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     })
 
     await waitFor(() => expect(tab()).toBe(`${SEED_URI}|Q4 Reports`))
+  })
+
+  it.each([
+    [403, 'You do not have permission to open this resource.'],
+    [404, 'This resource could not be found.'],
+    [410, 'This resource was deleted.'],
+  ])(
+    'shows an accurate terminal deep-link outcome for HTTP %i',
+    async (status, expectedMessage) => {
+      const errorMessage = await resolveDeniedMessage(
+        DEEP_LINK_URI,
+        { code: 'resource_unavailable', message: 'resource is unavailable' },
+        status
+      )
+      expect(errorMessage).toContain(`httpStatus=${status}`)
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+            resolve: vi.fn(async () => {
+              throw new Error(errorMessage)
+            }),
+            listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+            affordances: vi.fn(async () => ({
+              held: [],
+              canDelegate: false,
+              grantableBits: [],
+              canCreateShare: false,
+            })),
+          },
+        },
+      })
+      const reportOutcome = vi.fn()
+
+      renderHarness({
+        pendingGfsDeepLink: { id: 1084, uri: DEEP_LINK_URI },
+        onPendingGfsDeepLinkOutcome: reportOutcome,
+      })
+
+      expect(await screen.findByText(expectedMessage)).toBeTruthy()
+      expect(screen.queryByText('No shared files yet')).toBeNull()
+      expect(reportOutcome).toHaveBeenCalledWith(1084, 'terminal')
+    }
+  )
+
+  it('keeps a transient deep-link failure pending and retries only after an explicit action', async () => {
+    const errorMessage = await resolveDeniedMessage(
+      DEEP_LINK_URI,
+      { code: 'upstream_unavailable', message: 'try again later' },
+      503
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => {
+            throw new Error(errorMessage)
+          }),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+    const resolve = window.clerum.gfs.resolve as ReturnType<typeof vi.fn>
+    const reportOutcome = vi.fn()
+
+    renderHarness({
+      pendingGfsDeepLink: { id: 1085, uri: DEEP_LINK_URI },
+      onPendingGfsDeepLinkOutcome: reportOutcome,
+    })
+
+    const retry = await screen.findByRole('button', { name: 'Retry opening link' })
+    expect(reportOutcome).toHaveBeenCalledWith(1085, 'retryable')
+    expect(resolve).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      retry.click()
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+  })
+
+  it('terminally reports a malformed deep-link URI without calling the resolver', async () => {
+    const resolve = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+    const reportOutcome = vi.fn()
+
+    renderHarness({
+      pendingGfsDeepLink: { id: 1086, uri: 'https://files.example.test/resource' },
+      onPendingGfsDeepLinkOutcome: reportOutcome,
+    })
+
+    expect(
+      await screen.findByText('This EvenDrive link is invalid or cannot be resolved.')
+    ).toBeTruthy()
+    expect(resolve).not.toHaveBeenCalled()
+    expect(reportOutcome).toHaveBeenCalledWith(1086, 'terminal')
+    expect(screen.queryByText('No shared files yet')).toBeNull()
   })
 
   it('refreshes an open folder path and its child list after a remote move and create', async () => {

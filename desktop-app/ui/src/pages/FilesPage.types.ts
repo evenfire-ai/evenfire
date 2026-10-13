@@ -18,6 +18,12 @@ export interface FilesPageProps {
    */
   pendingGfsUri?: string | null
   onPendingGfsUriHandled?: () => void
+  /** App-queued deep link whose resolve outcome controls main-process acknowledgment. */
+  pendingGfsDeepLink?: { id: number; uri: string } | null
+  onPendingGfsDeepLinkOutcome?: (
+    id: number,
+    outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
+  ) => void
   /**
    * Reports the browser's live location so the owning files tab can persist it
    * (mini-spec 06 §3). Emits the current leaf `gfsUri` (the stable identity) and

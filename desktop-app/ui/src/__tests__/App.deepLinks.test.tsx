@@ -77,7 +77,16 @@ const appHeaderHarness = vi.hoisted(() => ({
 }))
 
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
-const filesPageHarness = vi.hoisted(() => ({ pendingGfsUri: null as string | null }))
+const filesPageHarness = vi.hoisted(() => ({
+  pendingGfsUri: null as string | null,
+  props: null as null | {
+    pendingGfsDeepLink?: { id: number; uri: string } | null
+    onPendingGfsDeepLinkOutcome?: (
+      id: number,
+      outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
+    ) => void
+  },
+}))
 
 const commandPaletteHarness = vi.hoisted(() => ({
   props: null as null | {
@@ -217,8 +226,16 @@ vi.mock('@pages/ChatPage', async () => {
   }
 })
 vi.mock('@pages/FilesPage', () => ({
-  FilesPage: (props: { pendingGfsUri?: string | null }) => {
+  FilesPage: (props: {
+    pendingGfsUri?: string | null
+    pendingGfsDeepLink?: { id: number; uri: string } | null
+    onPendingGfsDeepLinkOutcome?: (
+      id: number,
+      outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
+    ) => void
+  }) => {
     filesPageHarness.pendingGfsUri = props.pendingGfsUri ?? null
+    filesPageHarness.props = props
     return null
   },
 }))
@@ -463,6 +480,7 @@ describe('App deep-link orchestration', () => {
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
     filesPageHarness.pendingGfsUri = null
+    filesPageHarness.props = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     sidebarHarness.props = null
@@ -559,7 +577,10 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(currentController.openFilesSection).toHaveBeenCalledWith(uri))
     await waitFor(() => expect(filesPageHarness.pendingGfsUri).toBe(uri))
-    expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id)
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
+    act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened'))
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
   })
 
   it('routes a warm resource link to the active Files destination and acknowledges it', async () => {
@@ -584,7 +605,10 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(currentController.openFilesSection).toHaveBeenCalledWith(link.uri))
     await waitFor(() => expect(filesPageHarness.pendingGfsUri).toBe(link.uri))
-    expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id)
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual(link)
+    act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened'))
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
   })
 
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so
