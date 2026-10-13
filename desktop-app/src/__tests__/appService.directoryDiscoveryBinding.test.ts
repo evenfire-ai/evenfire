@@ -110,3 +110,15 @@ it('does not route a surviving session through another profile after an index wr
   expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
   expect(config.config.rpcProxyBaseUrl).toBe('')
 })
+
+it('does not persist another directory profile discovery on logout after an index write rejection', async () => {
+  const { service, config, store, b, key, index } = await selectSiblingAfterIndexFailure()
+  await service.logout()
+  expect(service.getCachedUserId()).toBeNull()
+  expect(await store.getSessionToken(key)).toBeNull()
+  expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
+  expect(config.config.rpcProxyBaseUrl).toBe('')
+  // A later successful native save persists B, never A's stale discovery.
+  await service.selectRuntimeConfig(b.id)
+  expect(JSON.parse(await fs.readFile(index, 'utf8')).activeProfileId).toBe(b.id)
+})
