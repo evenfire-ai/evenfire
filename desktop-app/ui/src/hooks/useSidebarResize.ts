@@ -38,6 +38,23 @@ type ActiveDrag = {
   startX: number
   startWidth: number
   candidate: number | null
+  captureTarget: HTMLElement
+  removalObserver: MutationObserver | null
+}
+
+function releaseDragResources(drag: ActiveDrag | null): void {
+  if (!drag) return
+  drag.removalObserver?.disconnect()
+  try {
+    if (
+      !drag.captureTarget.hasPointerCapture ||
+      drag.captureTarget.hasPointerCapture(drag.pointerId)
+    ) {
+      drag.captureTarget.releasePointerCapture?.(drag.pointerId)
+    }
+  } catch {
+    // A removed handle or browser-canceled gesture may already have released capture.
+  }
 }
 
 export type SidebarResizeControls = ReturnType<typeof useSidebarResize>
@@ -86,14 +103,22 @@ export function useSidebarResize(compactMode = false) {
   )
 
   const clearDrag = React.useCallback(() => {
+    const drag = activeDragRef.current
     activeDragRef.current = null
+    releaseDragResources(drag)
     setDragWidth(null)
     document.body.classList.remove('sidebar-resizing')
   }, [])
 
+  React.useLayoutEffect(() => {
+    if (compactMode) clearDrag()
+  }, [clearDrag, compactMode])
+
   React.useEffect(
     () => () => {
+      const drag = activeDragRef.current
       activeDragRef.current = null
+      releaseDragResources(drag)
       document.body.classList.remove('sidebar-resizing')
     },
     []
@@ -104,39 +129,60 @@ export function useSidebarResize(compactMode = false) {
       if (compactMode || event.button !== 0 || event.isPrimary === false) return
       event.preventDefault()
       const target = event.currentTarget
-      target.setPointerCapture?.(event.pointerId)
-      activeDragRef.current = {
+      try {
+        target.setPointerCapture?.(event.pointerId)
+      } catch {
+        // Continue with element-delivered pointer events when capture is unavailable.
+      }
+      const drag: ActiveDrag = {
         pointerId: event.pointerId,
         startX: event.clientX,
         startWidth: widthRef.current,
         candidate: null,
+        captureTarget: target,
+        removalObserver: null,
+      }
+      activeDragRef.current = drag
+      if (typeof MutationObserver !== 'undefined' && document.documentElement) {
+        drag.removalObserver = new MutationObserver(() => {
+          if (activeDragRef.current === drag && !target.isConnected) clearDrag()
+        })
+        drag.removalObserver.observe(document.documentElement, { childList: true, subtree: true })
       }
       document.body.classList.add('sidebar-resizing')
     },
-    [compactMode]
+    [clearDrag, compactMode]
   )
 
   const onPointerMove = React.useCallback(
     (event: React.PointerEvent<HTMLElement>) => {
       const drag = activeDragRef.current
-      if (compactMode || !drag || drag.pointerId !== event.pointerId) return
+      if (!drag || drag.pointerId !== event.pointerId) return
+      if (compactMode || !drag.captureTarget.isConnected) {
+        clearDrag()
+        return
+      }
       const candidate = clampSidebarWidth(
         Math.min(maxWidthRef.current, drag.startWidth + event.clientX - drag.startX)
       )
       drag.candidate = candidate
       setDragWidth(candidate)
     },
-    [compactMode]
+    [clearDrag, compactMode]
   )
 
   const onPointerUp = React.useCallback(
     (event: React.PointerEvent<HTMLElement>) => {
       const drag = activeDragRef.current
       if (!drag || drag.pointerId !== event.pointerId) return
+      if (compactMode || !drag.captureTarget.isConnected) {
+        clearDrag()
+        return
+      }
       if (drag.candidate !== null) commitWidth(drag.candidate, drag.startWidth)
       clearDrag()
     },
-    [clearDrag, commitWidth]
+    [clearDrag, commitWidth, compactMode]
   )
 
   const onPointerCancel = React.useCallback(

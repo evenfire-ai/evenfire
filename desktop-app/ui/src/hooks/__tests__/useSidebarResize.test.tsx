@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
@@ -12,23 +12,28 @@ import {
   useSidebarResize,
 } from '../useSidebarResize'
 
-function SidebarResizeHandle() {
-  const resize = useSidebarResize()
+function SidebarResizeHandle({ compactMode = false, mounted = true } = {}) {
+  const resize = useSidebarResize(compactMode)
   return (
-    <div
-      aria-label="Resize sidebar"
-      aria-valuemax={resize.maxWidth}
-      aria-valuemin={SIDEBAR_MIN_WIDTH}
-      aria-valuenow={resize.width}
-      onKeyDown={resize.onKeyDown}
-      onLostPointerCapture={resize.onLostPointerCapture}
-      onPointerCancel={resize.onPointerCancel}
-      onPointerDown={resize.onPointerDown}
-      onPointerMove={resize.onPointerMove}
-      onPointerUp={resize.onPointerUp}
-      role="separator"
-      tabIndex={0}
-    />
+    <>
+      <output data-testid="sidebar-width">{resize.width}</output>
+      {mounted && !compactMode ? (
+        <div
+          aria-label="Resize sidebar"
+          aria-valuemax={resize.maxWidth}
+          aria-valuemin={SIDEBAR_MIN_WIDTH}
+          aria-valuenow={resize.width}
+          onKeyDown={resize.onKeyDown}
+          onLostPointerCapture={resize.onLostPointerCapture}
+          onPointerCancel={resize.onPointerCancel}
+          onPointerDown={resize.onPointerDown}
+          onPointerMove={resize.onPointerMove}
+          onPointerUp={resize.onPointerUp}
+          role="separator"
+          tabIndex={0}
+        />
+      ) : null}
+    </>
   )
 }
 
@@ -100,6 +105,83 @@ describe('useSidebarResize', () => {
     fireEvent.pointerUp(handle, { clientX: 170, pointerId: 4 })
     expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('398')
     expect(handle.getAttribute('aria-valuenow')).toBe('398')
+  })
+
+  it('cancels an active drag when compact mode removes the separator', () => {
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '420')
+    const { container, rerender } = render(<SidebarResizeHandle />)
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+    const setPointerCapture = vi.fn()
+    const releasePointerCapture = vi.fn()
+    Object.defineProperty(handle, 'setPointerCapture', { value: setPointerCapture })
+    Object.defineProperty(handle, 'hasPointerCapture', { value: () => true })
+    Object.defineProperty(handle, 'releasePointerCapture', { value: releasePointerCapture })
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 12 })
+    fireEvent.pointerMove(handle, { clientX: 138, pointerId: 12 })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('458')
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('420')
+    expect(document.body.classList.contains('sidebar-resizing')).toBe(true)
+
+    rerender(<SidebarResizeHandle compactMode />)
+    expect(screen.queryByRole('separator', { name: 'Resize sidebar' })).toBeNull()
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('420')
+    expect(document.body.classList.contains('sidebar-resizing')).toBe(false)
+    expect(releasePointerCapture).toHaveBeenCalledWith(12)
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('420')
+
+    rerender(<SidebarResizeHandle />)
+    const reopenedHandle = screen.getByRole('separator', { name: 'Resize sidebar' })
+    fireEvent.pointerUp(reopenedHandle, { clientX: 138, pointerId: 12 })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe('420')
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('420')
+    expect(container.querySelector('[role="separator"]')).toBe(reopenedHandle)
+  })
+
+  it('cancels an active drag if the separator is removed outside a breakpoint change', async () => {
+    const { rerender } = render(<SidebarResizeHandle />)
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+    const releasePointerCapture = vi.fn()
+    Object.defineProperty(handle, 'setPointerCapture', { value: vi.fn() })
+    Object.defineProperty(handle, 'hasPointerCapture', { value: () => true })
+    Object.defineProperty(handle, 'releasePointerCapture', { value: releasePointerCapture })
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 13 })
+    fireEvent.pointerMove(handle, { clientX: 170, pointerId: 13 })
+    rerender(<SidebarResizeHandle mounted={false} />)
+
+    await waitFor(() => {
+      expect(document.body.classList.contains('sidebar-resizing')).toBe(false)
+    })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe(String(SIDEBAR_DEFAULT_WIDTH))
+    expect(releasePointerCapture).toHaveBeenCalledWith(13)
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBeNull()
+
+    rerender(<SidebarResizeHandle />)
+    const reopenedHandle = screen.getByRole('separator', { name: 'Resize sidebar' })
+    fireEvent.pointerUp(reopenedHandle, { clientX: 170, pointerId: 13 })
+    expect(screen.getByTestId('sidebar-width').textContent).toBe(String(SIDEBAR_DEFAULT_WIDTH))
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBeNull()
+  })
+
+  it('cancels an active drag on Escape without persisting its temporary width', () => {
+    render(<SidebarResizeHandle />)
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+    const releasePointerCapture = vi.fn()
+    Object.defineProperty(handle, 'setPointerCapture', { value: vi.fn() })
+    Object.defineProperty(handle, 'hasPointerCapture', { value: () => true })
+    Object.defineProperty(handle, 'releasePointerCapture', { value: releasePointerCapture })
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 14 })
+    fireEvent.pointerMove(handle, { clientX: 170, pointerId: 14 })
+    fireEvent.keyDown(handle, { key: 'Escape' })
+
+    expect(screen.getByTestId('sidebar-width').textContent).toBe(String(SIDEBAR_DEFAULT_WIDTH))
+    expect(document.body.classList.contains('sidebar-resizing')).toBe(false)
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBeNull()
+    expect(releasePointerCapture).toHaveBeenCalledWith(14)
+    fireEvent.pointerUp(handle, { clientX: 170, pointerId: 14 })
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBeNull()
   })
 
   it('supports arrow, Home, and End resizing and clamps to the live window width', () => {

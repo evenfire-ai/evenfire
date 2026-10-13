@@ -251,6 +251,38 @@ test('Desktop app tray layout is exercised with producer-backed notification and
         '192'
       )
 
+      const breakpointSeparatorBox = await bounds(separator)
+      const breakpointStartX = breakpointSeparatorBox.x + breakpointSeparatorBox.width / 2
+      const breakpointStartY =
+        breakpointSeparatorBox.y + Math.min(120, breakpointSeparatorBox.height / 2)
+      await page.mouse.move(breakpointStartX, breakpointStartY)
+      await page.mouse.down()
+      await page.mouse.move(breakpointStartX + 40, breakpointStartY)
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(232)
+      expect(
+        await page
+          .locator('body')
+          .evaluate(element => element.classList.contains('sidebar-resizing'))
+      ).toBe(true)
+      await resizeDesktop(app!, 700)
+      await expect(trigger).toBeVisible()
+      await expect(separator).not.toBeVisible()
+      await expect
+        .poll(() =>
+          page.locator('body').evaluate(element => element.classList.contains('sidebar-resizing'))
+        )
+        .toBe(false)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        '192'
+      )
+      await resizeDesktop(app!, 1200)
+      await expect(separator).toBeVisible()
+      await page.mouse.up()
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(192)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        '192'
+      )
+
       const separatorBox = await bounds(separator)
       const startX = separatorBox.x + separatorBox.width / 2
       const startY = separatorBox.y + Math.min(120, separatorBox.height / 2)
