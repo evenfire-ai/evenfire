@@ -126,6 +126,8 @@ function buildDeps(opts: {
       recipeReader,
       mcpServerReader,
       userContextsReader,
+      // Per-user servers: a Context of the user enables the server.
+      userServerAccessReader: vi.fn(async () => true),
       secretReader: secretReader as unknown as CallbackDeps['secretReader'],
       fetchFn: fetchFn as unknown as typeof fetch,
       stateSecret: STATE_SECRET,
