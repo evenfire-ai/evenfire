@@ -86,12 +86,16 @@ const preview = {
 }
 
 let producerServer: Server
+let responseDropProxyServer: Server
+let responseDropProxyPort: number
+let droppedResetResponsesForTest: () => number = () => 0
 let previousControlApiBaseUrl: string
 let previousControlApiServiceToken: string
 let previousControlApiServiceName: string
 
 function publicApp() {
   const app = express()
+  app.set('trust proxy', 1)
   app.use(express.json())
   app.use(createInvitationsRouter())
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: unknown) => {
@@ -107,7 +111,35 @@ function producerResponseApp() {
   return app
 }
 
-describe('R6 invitation/password producer response mappings', () => {
+function responseDropProxyApp(producerBaseUrl: string, onDroppedReset: () => void) {
+  const app = express()
+  app.use(express.json())
+  app.use('/api/v1', async (req, res) => {
+    const producerPath = req.originalUrl.replace(/^\/api\/v1/, '')
+    const headers: Record<string, string> = {
+      authorization: String(req.headers.authorization || ''),
+      'x-service-token': String(req.headers['x-service-token'] || ''),
+      'content-type': 'application/json',
+    }
+    const clientIp = req.headers['x-external-client-ip']
+    if (typeof clientIp === 'string') headers['x-external-client-ip'] = clientIp
+    const upstream = await fetch(`${producerBaseUrl}${producerPath}`, {
+      method: req.method,
+      headers,
+      body: req.method === 'GET' ? undefined : JSON.stringify(req.body),
+    })
+    const body = await upstream.text()
+    if (req.method === 'POST' && req.path === '/external/invitations/password-token') {
+      onDroppedReset()
+      req.socket.destroy()
+      return
+    }
+    res.status(upstream.status).type('application/json').send(body)
+  })
+  return app
+}
+
+describe('invitation/password producer response mappings', () => {
   beforeAll(async () => {
     previousControlApiBaseUrl = externalConfig.controlApiBaseUrl
     previousControlApiServiceToken = externalConfig.controlApiServiceToken
@@ -122,6 +154,22 @@ describe('R6 invitation/password producer response mappings', () => {
     externalConfig.controlApiBaseUrl = `http://127.0.0.1:${address.port}/api/v1`
     externalConfig.controlApiServiceToken = internalServiceToken
     externalConfig.controlApiServiceName = 'external-rest-api'
+
+    const producerBaseUrl = externalConfig.controlApiBaseUrl
+    let droppedResetResponses = 0
+    responseDropProxyServer = responseDropProxyApp(producerBaseUrl, () => {
+      droppedResetResponses += 1
+    }).listen(0, '127.0.0.1')
+    await new Promise<void>((resolve, reject) => {
+      responseDropProxyServer.once('error', reject)
+      responseDropProxyServer.once('listening', resolve)
+    })
+    const proxyAddress = responseDropProxyServer.address()
+    if (!proxyAddress || typeof proxyAddress === 'string') {
+      throw new Error('response-drop proxy did not bind TCP')
+    }
+    responseDropProxyPort = proxyAddress.port
+    droppedResetResponsesForTest = () => droppedResetResponses
   })
 
   afterAll(async () => {
@@ -132,6 +180,12 @@ describe('R6 invitation/password producer response mappings', () => {
       producerServer.closeAllConnections()
       await new Promise<void>((resolve, reject) =>
         producerServer.close(error => (error ? reject(error) : resolve()))
+      )
+    }
+    if (responseDropProxyServer) {
+      responseDropProxyServer.closeAllConnections()
+      await new Promise<void>((resolve, reject) =>
+        responseDropProxyServer.close(error => (error ? reject(error) : resolve()))
       )
     }
   })
@@ -220,6 +274,149 @@ describe('R6 invitation/password producer response mappings', () => {
     expect(response.headers['retry-after']).toBe('17')
     expect(response.headers['set-cookie']).toBeUndefined()
     expect(JSON.stringify(response.body)).not.toMatch(/verification_busy|r6-|sql|stack/i)
+  })
+
+  it('maps the exact producer empty-password payload rejection to sanitized public 400', async () => {
+    const producerResponse = await request(producerServer)
+      .post('/api/v1/external/invitations/password-token')
+      .set('authorization', `Bearer ${internalServiceToken}`)
+      .set('x-service-token', 'external-rest-api')
+      .send({
+        token: 'r6-synthetic-reset-proof',
+        email: preview.email,
+        invitationId: preview.id,
+        password: '',
+      })
+
+    expect(producerResponse.status).toBe(400)
+    expect(producerResponse.body).toEqual({ error: 'invalid payload' })
+    expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
+
+    const response = await request(publicApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.41')
+      .send({
+        token: 'r6-synthetic-reset-proof',
+        email: preview.email,
+        invitationId: preview.id,
+        password: '',
+      })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({
+      error: 'Password must be between 8 and 256 characters',
+    })
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toMatch(
+      /invalid payload|r6-|producer-invitation|sql|stack|password-token/i
+    )
+    expect(directory.getInvitationByToken).toHaveBeenCalledWith('r6-producer-invitation-token')
+    expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
+  })
+
+  it('completes a valid public reset through the real Control API producer route', async () => {
+    directory.setInvitationPasswordForEmail.mockResolvedValueOnce({
+      data: {
+        id: preview.id,
+        userId: preview.userId,
+        email: preview.email,
+        teamId: null,
+        role: 'member',
+        purpose: 'password_reset',
+        status: 'accepted',
+        lifecycleState: 'active',
+        authGeneration: 7,
+        passwordUpdated: true,
+        sessionContext: {
+          userId: preview.userId,
+          email: preview.email,
+          teamId: null,
+          role: 'member',
+          authGeneration: 7,
+        },
+      },
+    })
+
+    const response = await request(publicApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.42')
+      .send({
+        token: 'r6-synthetic-reset-proof',
+        email: preview.email,
+        invitationId: preview.id,
+        password: 'R6-synthetic-valid-password',
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      id: preview.id,
+      userId: preview.userId,
+      email: preview.email,
+      purpose: 'password_reset',
+      status: 'accepted',
+      passwordUpdated: true,
+    })
+    expect(response.body).not.toHaveProperty('token')
+    expect(String(response.headers['set-cookie'])).toContain(
+      'profile_session=synthetic-producer-session'
+    )
+    expect(String(response.headers['set-cookie'])).toContain('HttpOnly')
+    expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
+      preview.email,
+      preview.id,
+      'R6-synthetic-valid-password'
+    )
+    expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a dropped post-dispatch reset acknowledgement unknown and never retries it', async () => {
+    const originalControlApiBaseUrl = externalConfig.controlApiBaseUrl
+    externalConfig.controlApiBaseUrl = `http://127.0.0.1:${responseDropProxyPort}/api/v1`
+    directory.setInvitationPasswordForEmail.mockResolvedValueOnce({
+      data: {
+        id: preview.id,
+        userId: preview.userId,
+        email: preview.email,
+        teamId: null,
+        role: 'member',
+        purpose: 'password_reset',
+        status: 'accepted',
+        lifecycleState: 'active',
+        authGeneration: 7,
+        passwordUpdated: true,
+        sessionContext: {
+          userId: preview.userId,
+          email: preview.email,
+          teamId: null,
+          role: 'member',
+          authGeneration: 7,
+        },
+      },
+    })
+
+    const response = await (async () => {
+      try {
+        return await request(publicApp())
+          .post('/invitations/password')
+          .set('x-forwarded-for', '198.51.100.43')
+          .send({
+            token: 'r6-synthetic-reset-proof',
+            email: preview.email,
+            invitationId: preview.id,
+            password: 'R6-synthetic-valid-password',
+          })
+      } finally {
+        externalConfig.controlApiBaseUrl = originalControlApiBaseUrl
+      }
+    })()
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'recovery_outcome_unknown', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toMatch(/r6-|sql|stack|invalid_password/i)
+    expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledOnce()
+    expect(droppedResetResponsesForTest()).toBe(1)
   })
 
   it('maps a real producer password mismatch for desktop authorization', async () => {
