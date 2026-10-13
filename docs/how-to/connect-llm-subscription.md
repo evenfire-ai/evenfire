@@ -67,8 +67,8 @@ Notes:
   creates both.
 - Optional: `SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED` in `control-api-config`
   turns on periodic catalog refresh (see [Models and catalog sync](#models-and-catalog-sync)).
-- The minikube overlay sets everything in the table under
-  `deploy/overlays/minikube/` (`configmaps/*` and
+- The minikube overlay sets every row except `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
+  (which HCC injects) under `deploy/overlays/minikube/` (`configmaps/*` and
   `patches/workflow-recipes-grok.yaml`).
 
 Restart the affected Deployments after you change a ConfigMap. For upgrade

@@ -121,8 +121,9 @@ Two screens worth calling out specifically:
   everything the plugin's UI loads comes through `rpc-proxy`. The plugin gets
   a real interface; it does not get a second client to install.
 
-  ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail and "Back to apps" bar surround a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.webp)
-  *Dev cluster, demo tenant.*
+  ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail surrounds a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.webp)
+  *Dev cluster, demo tenant. Captured before the "Back to apps" bar was
+  removed; the sidebar now returns you to the app picker.*
 
 ## How it is wired
 
