@@ -1817,19 +1817,6 @@ export class AppService {
           retireMarkerAfterRestore: cleanupVerified,
         }
       } catch (error) {
-        try {
-          const markerRewritten = recordPendingKeytarCleanupIfUnchanged(
-            userDataDirectory,
-            envKey,
-            marker,
-            intent.credentialSource
-          )
-          if (!markerRewritten) {
-            recordPendingKeytarCleanupIfMissing(userDataDirectory, envKey, intent.credentialSource)
-          }
-        } catch (markerError) {
-          this.reportDeferredLogoutFailureSafely(markerError)
-        }
         if (error instanceof SessionTokenStorageClearError) {
           this.reportDeferredLogoutFailureSafely(error)
           return {
@@ -2204,19 +2191,6 @@ export class AppService {
           clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, marker)
         }
       } catch (error) {
-        try {
-          const markerRewritten = recordPendingKeytarCleanupIfUnchanged(
-            userDataDirectory,
-            envKey,
-            marker,
-            intent.credentialSource
-          )
-          if (!markerRewritten) {
-            recordPendingKeytarCleanupIfMissing(userDataDirectory, envKey, intent.credentialSource)
-          }
-        } catch (markerError) {
-          this.reportDeferredLogoutFailureSafely(markerError)
-        }
         this.reportDeferredLogoutFailureSafely(error)
       }
       return false
