@@ -1,11 +1,33 @@
 'use client'
 
+import {
+  CONTROL_UI_SESSION_INVALIDATION_EVENT,
+  METADATA_READ_CACHE_MAX_ENTRIES,
+  METADATA_READ_TTL_MS,
+} from '@constants/readRequests'
+import type { ApiRequestError, ApiRequestOptions } from './api.types'
 import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
 import type {
   McpSecretSummary,
   OAuthCredentialManifest,
   OAuthInstallSubmit,
 } from './oauthInstall.types'
+import {
+  clearReadRequestPrincipal,
+  completeReadRequestRecovery,
+  getReadRequestCacheEntry,
+  getReadRequestCacheGeneration,
+  getReadRequestCooldown,
+  getReadRequestPrincipal,
+  getReadRequestRecovery,
+  invalidateReadRequestCacheEntry,
+  joinReadRequestRecovery,
+  reserveReadRequestRecovery,
+  setReadRequestCacheEntry,
+  setReadRequestCooldown,
+  setReadRequestInvalidationHandler,
+  setReadRequestPrincipal,
+} from './readRequestCache'
 import {
   DEFAULT_MCP_SERVER_SECRET_NAMESPACE,
   DEFAULT_SANDBOX_SECRET_NAMESPACE,
@@ -125,11 +147,17 @@ const API_REQUEST_TIMEOUT_MS = 30000
 // this constant remains only for the compatibility helper and old API callers.
 export const GFS_UPLOAD_TIMEOUT_MS = 300000
 const inFlightGetRequests = new Map<string, Promise<unknown>>()
-let sessionEpoch = 0
-type ApiRequestOptions = {
-  silentUnauthorized?: boolean
-  signal?: AbortSignal
+type SharedMetadataRead = {
+  promise: Promise<unknown>
+  controller: AbortController
+  consumers: Set<{ signal?: AbortSignal }>
+  settled: boolean
 }
+const inFlightMetadataReads = new Map<string, SharedMetadataRead>()
+const activeGetControllers = new Set<AbortController>()
+let sessionEpoch = 0
+
+setReadRequestInvalidationHandler(abortActiveGetRequests)
 
 function qs(params: Record<string, string | undefined>) {
   const search = new URLSearchParams()
@@ -147,6 +175,26 @@ function authHeaders(): HeadersInit {
 /** Build a Control API URL using the same configured base as API requests. */
 export function controlApiUrl(path: string): string {
   return `${API_BASE}${path}`
+}
+
+export function retryAfterSeconds(
+  headers: Headers,
+  body: Record<string, unknown> | null,
+  nowMs = Date.now()
+): number | undefined {
+  const raw = headers.get('retry-after')?.trim()
+  if (raw && /^\d+$/.test(raw)) {
+    const seconds = Number(raw)
+    if (Number.isSafeInteger(seconds) && seconds > 0) return seconds
+  }
+  if (raw) {
+    const at = Date.parse(raw)
+    if (Number.isFinite(at) && at > nowMs) return Math.ceil((at - nowMs) / 1000)
+  }
+  const seconds = body?.retryAfterSeconds
+  return typeof seconds === 'number' && Number.isSafeInteger(seconds) && seconds > 0
+    ? seconds
+    : undefined
 }
 
 async function parseJsonResponse(res: Response): Promise<unknown> {
@@ -202,8 +250,22 @@ export function formatApiError(res: Response, text: string): Error {
                       : detail === 'member_registration_misconfigured'
                         ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
                         : detail)
-  const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
-  ;(error as Error & { status?: number }).status = res.status
+  const hasServerMessage =
+    typeof parsedBody?.message === 'string' && Boolean(parsedBody.message.trim())
+  const throttleSeconds =
+    res.status === 429 ? retryAfterSeconds(res.headers, parsedBody) : undefined
+  let throttleDetail: string
+  if (res.status === 429) {
+    throttleDetail = hasServerMessage
+      ? friendlyDetail
+      : throttleSeconds !== undefined
+        ? `Too many requests. Try again in ${throttleSeconds} seconds.`
+        : 'Too many requests. Try again later.'
+  } else {
+    throttleDetail = `${res.status} ${res.statusText} - ${friendlyDetail}`
+  }
+  const error = new Error(throttleDetail) as ApiRequestError
+  error.status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can
   // render structured, actionable errors (e.g. unpriced_models, price_in_use_by_budget)
   // instead of the generic message string.
@@ -212,15 +274,79 @@ export function formatApiError(res: Response, text: string): Error {
       parsedBody.error && typeof parsedBody.error === 'object'
         ? (parsedBody.error as Record<string, unknown>)
         : null
-    ;(error as Error & { code?: string }).code =
-      typeof parsedBody.error === 'string'
-        ? parsedBody.error
-        : typeof nestedError?.code === 'string'
-          ? nestedError.code
-          : undefined
-    ;(error as Error & { body?: Record<string, unknown> }).body = parsedBody
+    error.code =
+      typeof parsedBody.code === 'string'
+        ? parsedBody.code
+        : typeof parsedBody.error === 'string'
+          ? parsedBody.error
+          : typeof nestedError?.code === 'string'
+            ? nestedError.code
+            : undefined
+    error.body = parsedBody
+  }
+  if (throttleSeconds !== undefined) {
+    error.retryAfterSeconds = throttleSeconds
+    error.retryAtMs = Date.now() + throttleSeconds * 1000
   }
   return error
+}
+
+function abortActiveGetRequests(remote = false): void {
+  sessionEpoch += 1
+  for (const controller of activeGetControllers) controller.abort()
+  activeGetControllers.clear()
+  inFlightGetRequests.clear()
+  inFlightMetadataReads.clear()
+  if (remote && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(CONTROL_UI_SESSION_INVALIDATION_EVENT))
+  }
+}
+
+function readPrincipalKey(): string | null {
+  const current = getReadRequestPrincipal()
+  return current ? JSON.stringify([current.principalId, current.scope]) : null
+}
+
+function sameReadContext(epoch: number, principalContext: string | null): boolean {
+  if (typeof window === 'undefined') return true
+  return epoch === sessionEpoch && readPrincipalKey() === principalContext
+}
+
+function readRequestCacheKey(url: string, epoch: number): string | null {
+  if (typeof window === 'undefined') return null
+  const principalContext = getReadRequestPrincipal()
+  if (!principalContext) return null
+  const absoluteUrl = new URL(url, window.location.origin).href
+  return JSON.stringify([absoluteUrl, epoch, principalContext.principalId, principalContext.scope])
+}
+
+function waitForRead<T>(request: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return request
+  if (signal.aborted)
+    return Promise.reject(new DOMException('The read was cancelled', 'AbortError'))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('The read was cancelled', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    request.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
+function subscribeMetadataRead(shared: SharedMetadataRead, signal?: AbortSignal): Promise<unknown> {
+  const consumer = { signal }
+  shared.consumers.add(consumer)
+  const release = () => {
+    shared.consumers.delete(consumer)
+    if (!shared.settled && shared.consumers.size === 0) shared.controller.abort()
+  }
+  // Release synchronously on abort so an immediate remount cannot join a
+  // request whose last previous subscriber has already left.
+  signal?.addEventListener('abort', release, { once: true })
+  return waitForRead(shared.promise, signal)
+    .then(value => structuredClone(value))
+    .finally(() => {
+      signal?.removeEventListener('abort', release)
+      release()
+    })
 }
 
 async function apiPublicPost<T>(path: string, body: unknown): Promise<T> {
@@ -261,7 +387,7 @@ async function fetchWithTimeout(
   // immediately" — this matches the server proxy's resolveProxyTimeoutMs semantics.
   const effectiveTimeoutMs =
     Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : API_REQUEST_TIMEOUT_MS
-  const timeoutId = window.setTimeout(() => controller.abort(), effectiveTimeoutMs)
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), effectiveTimeoutMs)
   const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
   try {
     return await fetch(input, {
@@ -276,76 +402,228 @@ async function fetchWithTimeout(
     }
     throw error
   } finally {
-    window.clearTimeout(timeoutId)
+    globalThis.clearTimeout(timeoutId)
   }
 }
 
-export async function apiGet(
+export function apiGet(
   path: string,
   query: Record<string, string | undefined> = {},
   options: ApiRequestOptions = {}
 ) {
+  return apiRead(path, query, options)
+}
+
+async function apiRead(
+  path: string,
+  query: Record<string, string | undefined>,
+  options: ApiRequestOptions,
+  recoveringFamily = false
+) {
   const url = `${controlApiUrl(path)}${qs(query)}`
   const headers = { ...authHeaders() }
-  const cacheKey = `${url}|${sessionEpoch}`
-  const existing = options.signal ? undefined : inFlightGetRequests.get(cacheKey)
-  if (existing) return existing
-
-  const request = (async () => {
-    const res = await fetchWithTimeout(url, {
-      cache: 'no-store',
-      headers,
-      signal: options.signal,
-    })
-    if (!res.ok) {
-      if (res.status === 401) {
-        if (options.silentUnauthorized) {
-          clearAdminAuthToken()
-          throw new AuthExpiredError()
-        }
-        handleUnauthorized()
-      }
-      // Prefer a server-provided human-safe `message` (e.g. the 503
-      // registry_unavailable body) so callers surface the clear text instead of
-      // a bare "<status> <statusText>". Bodies carrying only a machine `error`
-      // code (or no JSON) keep the existing status-text message. Also attach the
-      // machine code, mirroring how registryCodedRequest surfaces `.code`.
-      const text = await res.text().catch(() => '')
-      let message = `${res.status} ${res.statusText}`
-      let code: string | undefined
-      let body: Record<string, unknown> | undefined
-      try {
-        const parsed = JSON.parse(text) as unknown
-        if (parsed && typeof parsed === 'object') {
-          body = parsed as Record<string, unknown>
-          if (typeof body.message === 'string' && body.message.trim()) {
-            message = body.message
-          }
-          if (typeof body.error === 'string') code = body.error
-        }
-      } catch {
-        /* non-JSON error body: keep the status-text message */
-      }
-      const error = new Error(message) as Error & {
-        status?: number
-        code?: string
-        body?: Record<string, unknown>
-      }
-      error.status = res.status
-      if (code) error.code = code
-      if (body) error.body = body
-      throw error
+  const requestEpoch = sessionEpoch
+  const requestPrincipalKey = readPrincipalKey()
+  const requestGeneration = getReadRequestCacheGeneration()
+  const cacheKey = `${url}|${requestEpoch}`
+  const metadataKey = options.metadataRead ? readRequestCacheKey(url, requestEpoch) : null
+  // Capabilities, connection lists and model catalogs share one server quota.
+  // Coordinate its cooldown across URLs without combining their result caches.
+  const familyKey = metadataKey
+    ? readRequestCacheKey(`${API_BASE}/#admin-subscription-read`, requestEpoch)
+    : null
+  const assertCurrent = () => {
+    if (!sameReadContext(requestEpoch, requestPrincipalKey)) throw new AuthExpiredError()
+    if (metadataKey && requestGeneration !== getReadRequestCacheGeneration()) {
+      throw new DOMException('The metadata read was invalidated', 'AbortError')
     }
-    return parseJsonResponse(res)
-  })()
-  if (!options.signal) {
-    inFlightGetRequests.set(cacheKey, request)
-    request.then(
-      () => inFlightGetRequests.delete(cacheKey),
-      () => inFlightGetRequests.delete(cacheKey)
-    )
+    if (options.signal?.aborted) throw new DOMException('The read was cancelled', 'AbortError')
   }
-  return request
+  assertCurrent()
+  if (metadataKey && !options.refresh) {
+    const cached = getReadRequestCacheEntry(metadataKey)
+    if (cached !== undefined) {
+      const value = await Promise.resolve(cached)
+      assertCurrent()
+      return value
+    }
+  }
+  if (familyKey) {
+    const cooldown = getReadRequestCooldown(familyKey)
+    if (cooldown) {
+      joinReadRequestRecovery(familyKey, options.signal)
+      throw cooldown
+    }
+    if (!recoveringFamily) {
+      const recovery = getReadRequestRecovery(familyKey)
+      if (recovery) {
+        joinReadRequestRecovery(familyKey, options.signal)
+        try {
+          await waitForRead(recovery, options.signal)
+        } catch (error) {
+          assertCurrent()
+          // The recovery rejects with its first failing member. Members reread
+          // before that failure are cached; their waiters get their own result,
+          // not a sibling's denial.
+          const own = metadataKey ? getReadRequestCacheEntry(metadataKey) : undefined
+          if (own !== undefined) return own
+          // Every registered interest left and the recovery was cancelled. A
+          // waiter without a signal cannot be registered, yet it still wants
+          // the result: read for itself now that the deadline has passed.
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            return apiRead(path, query, options)
+          }
+          throw error
+        }
+        assertCurrent()
+        return apiRead(path, query, options)
+      }
+    }
+  }
+  const metadataFlightKey = metadataKey ? `${metadataKey}|generation:${requestGeneration}` : null
+  if (metadataFlightKey) {
+    const existing = inFlightMetadataReads.get(metadataFlightKey)
+    if (existing && !existing.controller.signal.aborted) {
+      const value = await subscribeMetadataRead(existing, options.signal)
+      assertCurrent()
+      return value
+    }
+    if (options.refresh) invalidateReadRequestCacheEntry(metadataKey!)
+  } else if (typeof window !== 'undefined' && !options.signal) {
+    const existing = inFlightGetRequests.get(cacheKey)
+    if (existing) {
+      const value = await existing
+      assertCurrent()
+      return value
+    }
+  }
+
+  const controller = new AbortController()
+  const consumers = new Set<{ signal?: AbortSignal }>()
+  const assertNetworkCurrent = () => {
+    if (!sameReadContext(requestEpoch, requestPrincipalKey)) throw new AuthExpiredError()
+    if (metadataKey && requestGeneration !== getReadRequestCacheGeneration()) {
+      throw new DOMException('The metadata read was invalidated', 'AbortError')
+    }
+    if (controller.signal.aborted) throw new DOMException('The read was cancelled', 'AbortError')
+  }
+  const request = (async () => {
+    if (typeof window !== 'undefined') activeGetControllers.add(controller)
+    try {
+      const res = await fetchWithTimeout(url, {
+        cache: 'no-store',
+        headers,
+        signal:
+          !metadataKey && options.signal
+            ? AbortSignal.any([options.signal, controller.signal])
+            : controller.signal,
+      })
+      assertNetworkCurrent()
+      if (!res.ok) {
+        if (res.status === 401) {
+          if (options.silentUnauthorized) {
+            clearAdminAuthToken()
+            throw new AuthExpiredError()
+          }
+          handleUnauthorized()
+        }
+        // Prefer a server-provided human-safe message while preserving the
+        // existing non-429 GET status-text contract and structured error data.
+        const text = await res.text().catch(() => '')
+        assertNetworkCurrent()
+        let message = `${res.status} ${res.statusText}`
+        let code: string | undefined
+        let body: Record<string, unknown> | undefined
+        try {
+          const parsed = JSON.parse(text) as unknown
+          if (parsed && typeof parsed === 'object') {
+            body = parsed as Record<string, unknown>
+            if (typeof body.message === 'string' && body.message.trim()) {
+              message = body.message
+            }
+            if (typeof body.code === 'string') code = body.code
+            else if (typeof body.error === 'string') code = body.error
+          }
+        } catch {
+          /* non-JSON error body: keep the status-text message */
+        }
+        const seconds =
+          res.status === 429 ? retryAfterSeconds(res.headers, body ?? null) : undefined
+        if (res.status === 429) {
+          if (typeof body?.message !== 'string' || !body.message.trim()) {
+            message =
+              seconds !== undefined
+                ? `Too many requests. Try again in ${seconds} seconds.`
+                : 'Too many requests. Try again later.'
+          }
+        }
+        const error = new Error(message) as ApiRequestError
+        error.status = res.status
+        if (code) error.code = code
+        if (body) error.body = body
+        if (seconds !== undefined) {
+          error.retryAfterSeconds = seconds
+          error.retryAtMs = Date.now() + seconds * 1000
+        }
+        if (familyKey && res.status === 429) {
+          // One clock reading, so the recovery deadline equals the cooldown's
+          // retry time and a consumer released by one is never refused by the other.
+          const deniedAtMs = Date.now()
+          const delayMs = setReadRequestCooldown(familyKey, error, seconds, deniedAtMs)
+          reserveReadRequestRecovery(
+            familyKey,
+            deniedAtMs + delayMs,
+            metadataKey ?? url,
+            signal =>
+              sameReadContext(requestEpoch, requestPrincipalKey)
+                ? apiRead(path, query, { ...options, signal, refresh: false }, true)
+                : Promise.reject(new AuthExpiredError()),
+            metadataKey ? Array.from(consumers, consumer => consumer.signal) : [options.signal]
+          )
+        }
+        throw error
+      }
+      const parsed = await parseJsonResponse(res)
+      assertNetworkCurrent()
+      if (metadataKey) setReadRequestCacheEntry(metadataKey, parsed, METADATA_READ_TTL_MS)
+      if (familyKey && metadataKey && !getReadRequestCooldown(familyKey)) {
+        completeReadRequestRecovery(familyKey, metadataKey)
+      }
+      return parsed
+    } catch (error) {
+      assertNetworkCurrent()
+      throw error
+    } finally {
+      activeGetControllers.delete(controller)
+    }
+  })()
+  const shared: SharedMetadataRead = { promise: request, controller, consumers, settled: false }
+  const settled = () => {
+    shared.settled = true
+    if (metadataFlightKey && inFlightMetadataReads.get(metadataFlightKey) === shared) {
+      inFlightMetadataReads.delete(metadataFlightKey)
+    }
+    if (inFlightGetRequests.get(cacheKey) === request) inFlightGetRequests.delete(cacheKey)
+  }
+  request.then(settled, settled)
+  if (metadataFlightKey) {
+    while (inFlightMetadataReads.size >= METADATA_READ_CACHE_MAX_ENTRIES) {
+      const oldest = inFlightMetadataReads.keys().next().value
+      if (oldest === undefined) break
+      inFlightMetadataReads.get(oldest)?.controller.abort()
+      inFlightMetadataReads.delete(oldest)
+    }
+    inFlightMetadataReads.set(metadataFlightKey, shared)
+    const value = await subscribeMetadataRead(shared, options.signal)
+    assertCurrent()
+    return value
+  }
+  if (typeof window !== 'undefined' && !options.signal) {
+    inFlightGetRequests.set(cacheKey, request)
+  }
+  const value = await request
+  assertCurrent()
+  return value
 }
 
 export async function apiSend(
@@ -575,19 +853,23 @@ export type AdminLoginResponse = {
   me: { id: string; username?: string; email?: string | null; role: 'admin' }
 }
 
-export function clearAdminAuthToken(): void {
-  sessionEpoch += 1
-  inFlightGetRequests.clear()
+export function clearAdminAuthToken(options: { sessionChanged?: boolean } = {}): void {
+  clearReadRequestPrincipal(options)
   if (typeof window === 'undefined') return
   // Remove the legacy browser-readable admin JWT if it exists. Active admin
   // sessions now live in an HttpOnly cookie set by control-api.
   window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY)
 }
 
+export function setControlUIReadPrincipal(principalId: string, scope: string): void {
+  setReadRequestPrincipal(principalId, scope)
+}
+
 export async function loginControlUI(
   username: string,
   password: string
 ): Promise<AdminLoginResponse> {
+  clearAdminAuthToken()
   const res = await fetch(`${API_BASE}/api/v1/admin/auth/login`, {
     method: 'POST',
     credentials: 'include',
@@ -599,18 +881,20 @@ export async function loginControlUI(
     throw new Error(`${res.status} ${res.statusText} - ${text}`)
   }
   const data = (await res.json()) as AdminLoginResponse
-  clearAdminAuthToken()
+  // The shared cookie now belongs to the new session; tell every peer tab.
+  clearAdminAuthToken({ sessionChanged: true })
   return data
 }
 
 export async function logoutControlUI(): Promise<void> {
+  clearAdminAuthToken()
   try {
     await apiSend('POST', '/api/v1/admin/auth/logout')
   } catch {
     // Logout is best-effort: a stale token or backend revoke failure should not
     // keep the local admin session alive or surface a dev/runtime overlay.
   } finally {
-    clearAdminAuthToken()
+    clearAdminAuthToken({ sessionChanged: true })
   }
 }
 

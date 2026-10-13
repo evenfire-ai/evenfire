@@ -21,13 +21,35 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * (the raw buffer, the decoded string, the parsed object, the contract copy and
  * more than one serialization of it). Without this bound the stream gate would
  * let 24 bodies in.
- * Bodies over the ordinary cap never take this budget: they are V2 visual
- * envelopes, bounded by `visualStreamGate` instead, so the declared bodies a pod
- * can hold at once are 3 x 8 MiB here plus 2 x 24 MiB there. Measured with the
+ * A body whose Content-Length exceeds the ordinary cap is read under
+ * `visualStreamGate`. If it parses to a size within the ordinary cap
+ * (demotion), it takes a reservation for that size before releasing the
+ * visual slot, so the declared bodies a pod can hold at once are still 3 x 8
+ * MiB here plus 2 x 24 MiB there. Measured with the
  * full load the gates admit (eight 8 MiB streams, two 24 MiB visual streams
  * and three queued 8 MiB bodies, #739 D5), the process peaked at 790 MiB of
  * RSS with `--max-old-space-size=384` and at 886-1009 MiB with an uncapped
- * heap, which is why the deployment sets that cap and a 1Gi memory limit.
+ * heap, which is why the deployment sets a heap cap. The budget counts bytes,
+ * not structure: bodies at the worst structure the contract admits (262 144
+ * containers, 262 144 members, 1 048 576 elements) are 2.8 MiB each when
+ * compact, so it admits about eight of them parsing at once, or about five at
+ * 4.7 MiB, each a ~44 MiB tree. That aborted the process at a 384 MiB heap
+ * cap; the deployment uses 768 MiB and a 2048Mi memory limit, the maximum
+ * peak of that load (1327-1460 MiB of RSS, macOS, not cgroup memory) plus 25 %
+ * (#806 Q1). Charging structure as well as bytes is deferred code work.
+ *
+ * Bytes alone do not bound the parse: JSON.parse allocates one heap
+ * object per container, so the contracts cap containers at
+ * `maxRequestContainers` (262 144) and every parser scans the raw body for it
+ * before JSON.parse. Measured in this proxy (tsc build,
+ * `--max-old-space-size=384`, upstream held open) with three ordinary bodies
+ * at the 8 404 992-byte cap and two visual bodies in flight, each exactly
+ * 262 144 containers: every run exited 0 and admitted all five, the heap kept
+ * 154.4-163.4 MiB after a full GC and peaked at 205.6-238.4 MiB sampled. At
+ * 524 288 containers one run peaked at 319.6 MiB, and at 1 048 576 the
+ * process aborted. The bound for a new value: every run exits 0 and admits
+ * five of five, at most 200 MiB after GC and 280 MiB sampled peak. These are
+ * lower bounds: the serializations made while forwarding are not included.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 
@@ -43,6 +65,13 @@ export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
  * Not env-tunable.
  */
 export const BODY_READ_DEADLINE_MS = 10_000
+
+/**
+ * Bounds the interval between a visual read timeout/client response close and
+ * forced request destruction. The parser's callback—not this timer—releases the
+ * visual slot and principal share.
+ */
+export const VISUAL_READ_CLOSE_GRACE_MS = 100
 
 export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
@@ -68,7 +97,7 @@ export const STREAM_LIMITS = {
  * The pod cannot hold the ordinary 8-stream gate across a 24 MiB image, so
  * those requests are a tighter sibling and a V2 request keeps the slot until
  * the stream ends. Small bodies, including every valid V1, must not enter this
- * gate. The 1Gi limit is sized for these two slots plus the ordinary body
+ * gate. The 2048Mi limit is sized for these two slots plus the ordinary body
  * budget; widening either one needs a new memory measurement first.
  */
 export const VISUAL_STREAM_LIMITS = {
@@ -76,14 +105,46 @@ export const VISUAL_STREAM_LIMITS = {
   maxQueuedRequests: 8,
 } as const
 
+/**
+ * Fair share of the visual gate's entries — running plus queued — that one
+ * platform principal (`sub` plus sorted `hostRefs`) may hold at once. Above the
+ * share, further visual requests from that principal are refused 503
+ * `visual_host_share`, so one principal
+ * cannot fill a gate that every other host still needs. The gate widths above
+ * are unchanged; the share only bounds how much of them one principal occupies.
+ * Its refusal is a local capacity outcome, not an upstream outage.
+ */
+export const VISUAL_PER_HOST_MAX_ADMITTED = 4
+
 // Largest delay setTimeout honors; Node fires anything above it after 1 ms.
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
+/**
+ * Why a wait was refused. `deadline` means the caller's own deadline ended
+ * the wait, so a caller that passed the ticket's expiry as that deadline can
+ * tell a dead ticket from a full queue without reading the clock again: the
+ * deadline timer can fire a millisecond before `Date.now()` reaches it.
+ */
+export type RequestLimitKind =
+  | 'aborted'
+  | 'deadline'
+  | 'invalid'
+  | 'queue_full'
+  | 'queue_wait'
+  | 'ticket_life'
+
+export type RequestLimitCode = 'provider_unavailable' | 'proxy_capacity_exceeded' | 'visual_gate'
+
 export class RequestLimitError extends Error {
-  readonly code = 'provider_unavailable'
-  constructor(message: string) {
+  readonly code: RequestLimitCode
+  constructor(
+    message: string,
+    readonly kind: RequestLimitKind,
+    code: RequestLimitCode = 'provider_unavailable'
+  ) {
     super(message)
     this.name = 'RequestLimitError'
+    this.code = code
   }
 }
 
@@ -96,40 +157,56 @@ export class RequestLimitError extends Error {
  */
 export class TicketLifeError extends RequestLimitError {
   constructor() {
-    super('execution ticket expired while queued')
+    super('execution ticket expired while queued', 'ticket_life')
     this.name = 'TicketLifeError'
   }
 }
 
-export function assertBoundedDeadline(deadlineMs: number | undefined, maxDeadlineMs: number): number {
+export function assertBoundedDeadline(
+  deadlineMs: number | undefined,
+  maxDeadlineMs: number
+): number {
   // Without a valid maximum, Math.min below would return NaN for a valid
   // request deadline instead of refusing it.
   if (!Number.isInteger(maxDeadlineMs) || maxDeadlineMs <= 0) {
-    throw new RequestLimitError('deadline is invalid')
+    throw new RequestLimitError('deadline is invalid', 'invalid')
   }
   const requested = deadlineMs ?? Math.min(maxDeadlineMs, STREAM_LIMITS.maxStreamDurationMs)
   if (!Number.isFinite(requested) || !Number.isInteger(requested) || requested <= 0) {
-    throw new RequestLimitError('deadline is invalid')
+    throw new RequestLimitError('deadline is invalid', 'invalid')
   }
-  return Math.min(requested, maxDeadlineMs, STREAM_LIMITS.maxStreamDurationMs, CONTRACT_LIMITS.maxDeadlineMs)
+  return Math.min(
+    requested,
+    maxDeadlineMs,
+    STREAM_LIMITS.maxStreamDurationMs,
+    CONTRACT_LIMITS.maxDeadlineMs
+  )
 }
 
 export function assertBoundedIdleTimeout(idleTimeoutMs: number | undefined): number {
   const requested = idleTimeoutMs ?? STREAM_LIMITS.upstreamIdleTimeoutMs
   if (!Number.isInteger(requested) || requested <= 0) {
-    throw new RequestLimitError('upstream idle timeout is invalid')
+    throw new RequestLimitError('upstream idle timeout is invalid', 'invalid')
   }
   return Math.min(requested, STREAM_LIMITS.upstreamIdleTimeoutMs)
 }
 
+/**
+ * A queued stream-gate caller. `grant` hands it the slot a release passes on
+ * and returns false, after refusing it, when its wait already reached its
+ * bound.
+ */
+type StreamWaiter = { grant: (release: () => void) => boolean }
+
 export class StreamGate {
   private running = 0
-  private queued = 0
+  private readonly waiters: StreamWaiter[] = []
 
   constructor(
     private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
     private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests,
-    private readonly maxQueueWaitMs: number = STREAM_LIMITS.maxQueueWaitMs
+    private readonly maxQueueWaitMs: number = STREAM_LIMITS.maxQueueWaitMs,
+    private readonly queueCapacityCode: RequestLimitCode = 'proxy_capacity_exceeded'
   ) {
     // A NaN or fractional size would let every caller through or queue
     // without bound, because the comparisons below would never hold.
@@ -143,84 +220,131 @@ export class StreamGate {
     // 1 ms timer, which would refuse every queued waiter at once instead of
     // after the configured wait. Fractions are refused so the bound stays a
     // whole number of milliseconds.
-    if (!Number.isInteger(maxQueueWaitMs) || maxQueueWaitMs <= 0 || maxQueueWaitMs > MAX_TIMER_DELAY_MS) {
+    if (
+      !Number.isInteger(maxQueueWaitMs) ||
+      maxQueueWaitMs <= 0 ||
+      maxQueueWaitMs > MAX_TIMER_DELAY_MS
+    ) {
       throw new RangeError(`maxQueueWaitMs must be an integer in 1..${MAX_TIMER_DELAY_MS}`)
     }
   }
 
   /**
-   * Take a stream slot. When `signal` aborts (client disconnected) while the
-   * caller is still queued, the waiter is rejected and its queue slot freed, so
-   * a dropped client never proceeds to redeem an attempt. A waiter still
-   * queued after `maxQueueWaitMs`, or at `deadlineAt` (epoch ms) when that
-   * comes first, is rejected the same way (#739 D1). The bound is fixed when
-   * the caller queues, as the smaller of the two, and measured on the
-   * monotonic clock from then on. A deadline timer settles the waiter at the
-   * bound, and a poll that runs after the bound checks the elapsed wait before
-   * the slot count, so a slot that frees after the bound does not admit it
-   * even when the event loop stalled across the bound. A free slot is granted
-   * at once whatever the deadline; the caller checks a deadline already past.
+   * Take a stream slot. Waiters are granted in arrival order: a release hands
+   * its slot straight to the oldest waiter, and a new caller queues behind the
+   * waiters instead of taking a slot ahead of them. The returned release is
+   * idempotent. When `signal` aborts (client disconnected) while the caller is
+   * still queued, the waiter is rejected and removed, so a dropped client never
+   * proceeds to redeem an attempt. A waiter still queued after
+   * `maxQueueWaitMs`, or at `deadlineAt` (epoch ms) when that comes first, is
+   * rejected and removed the same way (#739 D1). The bound is fixed when the
+   * caller queues, as the smaller of the two, and measured on the monotonic
+   * clock from then on. A deadline timer settles the waiter at the bound, and
+   * a release that reaches a waiter after the bound checks the elapsed wait
+   * first and passes the slot on to the next waiter, so a slot that frees after
+   * the bound does not admit it even when the event loop stalled across the
+   * bound. A free slot with nobody queued is granted at once whatever the
+   * deadline; the caller checks a deadline already past.
+   *
+   * The refusal names which bound ran out. The gate's own bound is
+   * `maxQueueWaitMs` after the enqueue, or after `queueWaitStartedAt` (epoch
+   * ms) when the caller passes it: the visual gate's own wait is the request's
+   * admission clock, so its caller passes the arrival instant. Without
+   * `queueWaitStartedAt`, a `deadlineAt` at or before the own bound governs
+   * (`deadline`, `provider_unavailable`). With it, the deadline and the own
+   * bound are measured from the same instant, so a `deadlineAt` equal to the
+   * own bound is that bound restated and only a strictly earlier one governs.
+   * Every other expiry is the gate's queue wait (`queue_wait`,
+   * `queueCapacityCode`). The decision does not depend on how many
+   * milliseconds passed between the caller's stamp and the enqueue.
    */
-  async acquire(signal?: AbortSignal, deadlineAt?: number): Promise<() => void> {
+  async acquire(
+    signal?: AbortSignal,
+    deadlineAt?: number,
+    queueWaitStartedAt?: number
+  ): Promise<() => void> {
     if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
       throw new RangeError(`a stream gate deadline must be a finite epoch time, got ${deadlineAt}`)
     }
-    if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
-    if (this.running >= this.maxConcurrent) {
-      if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
-      this.queued += 1
-      try {
-        await new Promise<void>((resolve, reject) => {
-          let poll: ReturnType<typeof setTimeout> | undefined
-          const settle = () => {
-            if (poll !== undefined) clearTimeout(poll)
-            clearTimeout(deadline)
-            signal?.removeEventListener('abort', onAbort)
-          }
-          const onAbort = () => {
-            settle()
-            reject(new RequestLimitError('stream request was aborted'))
-          }
-          const expire = () => {
-            settle()
-            reject(new RequestLimitError('stream queue wait exceeded'))
-          }
-          const queuedAt = performance.now()
-          const waitBoundMs =
-            deadlineAt === undefined
-              ? this.maxQueueWaitMs
-              : Math.min(this.maxQueueWaitMs, deadlineAt - Date.now())
-          const deadline = setTimeout(expire, Math.max(0, waitBoundMs))
-          const wait = () => {
-            // After the event loop stalls, a poll and the deadline can both be
-            // overdue, and Node runs the poll first because it was due first.
-            if (performance.now() - queuedAt >= waitBoundMs) {
-              expire()
-              return
-            }
-            if (this.running < this.maxConcurrent) {
-              settle()
-              resolve()
-              return
-            }
-            poll = setTimeout(wait, 10)
-          }
-          signal?.addEventListener('abort', onAbort, { once: true })
-          wait()
-        })
-      } finally {
-        this.queued -= 1
-      }
+    if (queueWaitStartedAt !== undefined && !Number.isFinite(queueWaitStartedAt)) {
+      throw new RangeError(
+        `a stream gate queue wait start must be a finite epoch time, got ${queueWaitStartedAt}`
+      )
     }
-    this.running += 1
+    if (signal?.aborted) throw new RequestLimitError('stream request was aborted', 'aborted')
+    if (this.waiters.length === 0 && this.running < this.maxConcurrent) {
+      this.running += 1
+      return this.slotRelease()
+    }
+    if (this.waiters.length >= this.maxQueued)
+      throw new RequestLimitError('stream queue is full', 'queue_full', this.queueCapacityCode)
+    return new Promise<() => void>((resolve, reject) => {
+      const leave = () => {
+        const index = this.waiters.indexOf(waiter)
+        if (index !== -1) this.waiters.splice(index, 1)
+        clearTimeout(deadline)
+        signal?.removeEventListener('abort', onAbort)
+      }
+      const onAbort = () => {
+        leave()
+        reject(new RequestLimitError('stream request was aborted', 'aborted'))
+      }
+      const queuedAt = performance.now()
+      const enqueuedAt = Date.now()
+      const ownBoundAt = (queueWaitStartedAt ?? enqueuedAt) + this.maxQueueWaitMs
+      const deadlineGoverns =
+        deadlineAt !== undefined &&
+        (queueWaitStartedAt === undefined ? deadlineAt <= ownBoundAt : deadlineAt < ownBoundAt)
+      // No waiter stays queued longer than maxQueueWaitMs after the enqueue.
+      const boundAt = deadlineAt !== undefined && deadlineGoverns ? deadlineAt : ownBoundAt
+      const waitBoundMs = Math.min(this.maxQueueWaitMs, boundAt - enqueuedAt)
+      const expire = () => {
+        leave()
+        reject(
+          new RequestLimitError(
+            'stream queue wait exceeded',
+            deadlineGoverns ? 'deadline' : 'queue_wait',
+            deadlineGoverns ? 'provider_unavailable' : this.queueCapacityCode
+          )
+        )
+      }
+      const waiter: StreamWaiter = {
+        grant: release => {
+          // After the event loop stalls, a release can run while the deadline
+          // timer is overdue but has not fired yet.
+          if (performance.now() - queuedAt >= waitBoundMs) {
+            expire()
+            return false
+          }
+          leave()
+          resolve(release)
+          return true
+        },
+      }
+      const deadline = setTimeout(expire, Math.max(0, waitBoundMs))
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.waiters.push(waiter)
+      if (waitBoundMs <= 0) expire()
+    })
+  }
+
+  private slotRelease(): () => void {
+    let released = false
     return () => {
-      this.running = Math.max(0, this.running - 1)
+      if (released) return
+      released = true
+      // The slot passes to the oldest waiter still inside its bound, so
+      // `running` stays the same; it is freed only when nobody can take it.
+      while (this.waiters.length > 0) {
+        if (this.waiters[0]!.grant(this.slotRelease())) return
+      }
+      this.running -= 1
     }
   }
 
   /** Observable occupancy for tests. Production callers must not branch on this. */
   snapshot(): { running: number; queued: number } {
-    return { running: this.running, queued: this.queued }
+    return { running: this.running, queued: this.waiters.length }
   }
 }
 
@@ -228,7 +352,9 @@ export const streamGate = new StreamGate()
 
 export const visualStreamGate = new StreamGate(
   VISUAL_STREAM_LIMITS.maxConcurrentStreams,
-  VISUAL_STREAM_LIMITS.maxQueuedRequests
+  VISUAL_STREAM_LIMITS.maxQueuedRequests,
+  STREAM_LIMITS.maxQueueWaitMs,
+  'visual_gate'
 )
 
 type BodyWaiter = { bytes: number; grant: (release: () => void) => void }
@@ -278,27 +404,33 @@ export class BodyBudget {
       throw new RangeError(`a body of ${bytes} bytes cannot fit a budget of ${this.capacityBytes}`)
     }
     if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
-      throw new RangeError(`a body admission deadline must be a finite epoch time, got ${deadlineAt}`)
+      throw new RangeError(
+        `a body admission deadline must be a finite epoch time, got ${deadlineAt}`
+      )
     }
-    if (signal?.aborted) throw new RequestLimitError('body admission was aborted')
+    if (signal?.aborted) throw new RequestLimitError('body admission was aborted', 'aborted')
     if (this.waiters.length === 0 && this.inFlight + bytes <= this.capacityBytes) {
       return this.take(bytes)
     }
     if (this.waiters.length >= this.maxQueued) {
-      throw new RequestLimitError('body admission queue is full')
+      throw new RequestLimitError(
+        'body admission queue is full',
+        'queue_full',
+        'proxy_capacity_exceeded'
+      )
     }
     return new Promise<() => void>((resolve, reject) => {
       let deadline: ReturnType<typeof setTimeout> | undefined
-      const leave = (reason: string) => {
+      const leave = (reason: string, kind: RequestLimitKind) => {
         const index = this.waiters.indexOf(waiter)
         if (index === -1) return
         this.waiters.splice(index, 1)
         clearTimeout(deadline)
         signal?.removeEventListener('abort', onAbort)
-        reject(new RequestLimitError(reason))
+        reject(new RequestLimitError(reason, kind))
         this.drain()
       }
-      const onAbort = () => leave('body admission was aborted')
+      const onAbort = () => leave('body admission was aborted', 'aborted')
       const waiter: BodyWaiter = {
         bytes,
         grant: release => {
@@ -311,7 +443,7 @@ export class BodyBudget {
       this.waiters.push(waiter)
       if (deadlineAt !== undefined) {
         deadline = setTimeout(
-          () => leave('body admission wait exceeded'),
+          () => leave('body admission wait exceeded', 'deadline'),
           Math.max(0, deadlineAt - Date.now())
         )
       }
@@ -331,7 +463,10 @@ export class BodyBudget {
 
   /** Grant queued bodies in arrival order while the head of the queue fits. */
   private drain(): void {
-    while (this.waiters.length > 0 && this.inFlight + this.waiters[0]!.bytes <= this.capacityBytes) {
+    while (
+      this.waiters.length > 0 &&
+      this.inFlight + this.waiters[0]!.bytes <= this.capacityBytes
+    ) {
       const waiter = this.waiters.shift()!
       waiter.grant(this.take(waiter.bytes))
     }

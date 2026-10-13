@@ -244,6 +244,11 @@ export class ScopedWorkspaceProvider {
     this.collective = new WorkspaceService(baseRoot, { excludeDirs: [USERS_DIR] })
   }
 
+  /** Lexical Host-owned base used to verify the physical caller namespace. */
+  get baseRootPath(): string {
+    return this.baseRoot
+  }
+
   /** The collective (Pod-shared) workspace — used for admin identity reconcile. */
   get collectiveWorkspace(): WorkspaceService {
     return this.collective

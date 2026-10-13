@@ -25,6 +25,7 @@ describe('main window renderer readiness', () => {
       webContents: webContents as never,
       isCurrentWindow: () => true,
       markNotReady,
+      closeSandboxUi: vi.fn(async () => undefined),
     })
 
     expect(listeners.has('did-start-navigation')).toBe(false)
@@ -42,6 +43,7 @@ describe('main window renderer readiness', () => {
       webContents: webContents as never,
       isCurrentWindow: () => true,
       markNotReady,
+      closeSandboxUi: vi.fn(async () => undefined),
     })
 
     listeners.get('render-process-gone')?.({}, { reason: 'crashed' })
@@ -56,6 +58,7 @@ describe('main window renderer readiness', () => {
       webContents: clean.webContents as never,
       isCurrentWindow: () => true,
       markNotReady: vi.fn(),
+      closeSandboxUi: vi.fn(async () => undefined),
     })
     clean.listeners.get('render-process-gone')?.({}, { reason: 'clean-exit' })
     expect(clean.webContents.reload).not.toHaveBeenCalled()
@@ -66,9 +69,52 @@ describe('main window renderer readiness', () => {
       webContents: obsolete.webContents as never,
       isCurrentWindow: () => false,
       markNotReady,
+      closeSandboxUi: vi.fn(async () => undefined),
     })
     obsolete.listeners.get('render-process-gone')?.({}, { reason: 'crashed' })
     expect(markNotReady).not.toHaveBeenCalled()
     expect(obsolete.webContents.reload).not.toHaveBeenCalled()
+  })
+
+  it('closes the sandbox-ui embed once per replaced renderer of the current window', () => {
+    const navigated = makeWebContents()
+    const closeOnNavigate = vi.fn(async () => undefined)
+    wireMainWindowRendererReadiness({
+      webContents: navigated.webContents as never,
+      isCurrentWindow: () => true,
+      markNotReady: vi.fn(),
+      closeSandboxUi: closeOnNavigate,
+    })
+    navigated.listeners.get('did-navigate')?.()
+    expect(closeOnNavigate).toHaveBeenCalledOnce()
+
+    // A clean exit is not reloaded, but the renderer that owned the embed is gone.
+    const exited = makeWebContents()
+    const closeOnExit = vi.fn(async () => undefined)
+    wireMainWindowRendererReadiness({
+      webContents: exited.webContents as never,
+      isCurrentWindow: () => true,
+      markNotReady: vi.fn(),
+      closeSandboxUi: closeOnExit,
+    })
+    exited.listeners.get('render-process-gone')?.({}, { reason: 'clean-exit' })
+    expect(closeOnExit).toHaveBeenCalledOnce()
+  })
+
+  it('never closes the sandbox-ui embed for an obsolete window', () => {
+    const obsolete = makeWebContents()
+    const closeSandboxUi = vi.fn(async () => undefined)
+    wireMainWindowRendererReadiness({
+      webContents: obsolete.webContents as never,
+      isCurrentWindow: () => false,
+      markNotReady: vi.fn(),
+      closeSandboxUi,
+    })
+
+    obsolete.listeners.get('did-navigate')?.()
+    obsolete.listeners.get('render-process-gone')?.({}, { reason: 'crashed' })
+    obsolete.listeners.get('render-process-gone')?.({}, { reason: 'clean-exit' })
+
+    expect(closeSandboxUi).not.toHaveBeenCalled()
   })
 })

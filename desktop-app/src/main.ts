@@ -35,6 +35,7 @@ import {
 import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
 import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
+import { TokenStore } from './tokenStore.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
 const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
@@ -63,7 +64,11 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
-const appService = new AppService()
+const appService = new AppService(
+  devIsolationPlan
+    ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
+    : {}
+)
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
@@ -501,6 +506,7 @@ async function createWindow(): Promise<void> {
     markNotReady: () => {
       mainWindowRendererReady = false
     },
+    closeSandboxUi: () => appService.closeSandboxUi(),
   })
 
   wireWindowVisibility(window)

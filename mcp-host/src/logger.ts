@@ -20,9 +20,28 @@ const SENSITIVE_KEY_RE =
 const UNSAFE_OBJECT_KEY = /^(?:__proto__|constructor|prototype)$/
 const SAFE_OBJECT_KEY = /^[A-Za-z0-9._-]{1,64}$/
 
-const originalLog = console.log.bind(console)
-const originalError = console.error.bind(console)
-const originalWarn = console.warn.bind(console)
+// Every console adapter installed by any evaluation of this module is
+// registered with the sink it writes to. Evaluating the module again (tests
+// that call vi.resetModules()) must reuse that sink instead of wrapping the
+// previous adapter, or every line is JSON-encoded once per load. The registry
+// is keyed by function identity: a replacement such as a test spy is a sink.
+type ConsoleWriter = (...args: unknown[]) => void
+const ADAPTER_SINKS = Symbol.for('clerum.mcp-host.logger.adapterSinks')
+const registryHost = globalThis as { [ADAPTER_SINKS]?: WeakMap<ConsoleWriter, ConsoleWriter> }
+const adapterSinks = (registryHost[ADAPTER_SINKS] ??= new WeakMap())
+
+function sinkOf(writer: ConsoleWriter): ConsoleWriter {
+  return adapterSinks.get(writer) ?? writer.bind(console)
+}
+
+function adapter(sink: ConsoleWriter, write: ConsoleWriter): ConsoleWriter {
+  adapterSinks.set(write, sink)
+  return write
+}
+
+const originalLog = sinkOf(console.log)
+const originalError = sinkOf(console.error)
+const originalWarn = sinkOf(console.warn)
 
 function isSafeObjectKey(key: string): boolean {
   return SAFE_OBJECT_KEY.test(key) && !UNSAFE_OBJECT_KEY.test(key)
@@ -105,9 +124,9 @@ function emit(level: string, args: unknown[]): void {
   writer(JSON.stringify(entry))
 }
 
-console.log = (...args: unknown[]) => emit('info', args)
-console.error = (...args: unknown[]) => emit('error', args)
-console.warn = (...args: unknown[]) => emit('warn', args)
+console.log = adapter(originalLog, (...args: unknown[]) => emit('info', args))
+console.error = adapter(originalError, (...args: unknown[]) => emit('error', args))
+console.warn = adapter(originalWarn, (...args: unknown[]) => emit('warn', args))
 
 /** Explicit structured entry point for service code, sharing redaction and sinks. */
 function writeStructured(

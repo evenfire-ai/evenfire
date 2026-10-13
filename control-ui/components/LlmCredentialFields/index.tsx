@@ -95,6 +95,7 @@ export function LlmCredentialFields({
   existingKeys,
   onRemovedKeysChange,
   excludedProviders = [],
+  protectedKeys = [],
   pickerInline = false,
 }: LlmCredentialFieldsProps) {
   const [extraSlots, setExtraSlots] = useState<ExtraSlot[]>(() =>
@@ -118,6 +119,7 @@ export function LlmCredentialFields({
 
   const existingKeySet = useMemo(() => new Set(existingKeys ?? []), [existingKeys])
   const excludedProviderSet = useMemo(() => new Set(excludedProviders), [excludedProviders])
+  const protectedKeySet = useMemo(() => new Set(protectedKeys), [protectedKeys])
   const present = (dataKey: string): boolean =>
     (draft[dataKey] ?? '').trim().length > 0 || existingKeySet.has(dataKey)
 
@@ -147,9 +149,16 @@ export function LlmCredentialFields({
 
   // Filtering LLM_CREDENTIAL_GROUPS (instead of iterating the sets) keeps the
   // canonical package order regardless of the order providers were added.
+  // Sections for providers the Secret already holds (or that carry typed
+  // values) render first; providers surfaced this session through "Add
+  // provider" append BELOW them — a newly added provider that canonically
+  // precedes a stored one (openai over zai) must not push itself on top of
+  // the operator's existing credentials. Array#sort is stable, so each rank
+  // keeps its canonical order. In the create flow every section is
+  // session-added (rank 1), leaving that order untouched.
   const visibleGroups = LLM_SECRET_EDITOR_GROUPS.filter(group =>
     visibleProviders.has(group.provider)
-  )
+  ).sort((a, b) => Number(manuallyAdded.has(a.provider)) - Number(manuallyAdded.has(b.provider)))
   const addableGroups = LLM_SECRET_EDITOR_GROUPS.filter(
     group => !visibleProviders.has(group.provider) && !excludedProviderSet.has(group.provider)
   )
@@ -532,6 +541,11 @@ export function LlmCredentialFields({
               const storedExtra = slot.existingKey !== null && slot.committedKey === null
               const showExtraValueInput =
                 !storedExtra || replacingExtraKeys.has(slot.id) || slot.value.trim().length > 0
+              // Recipe-edit parity for keys a live fallback still references:
+              // a state chip on the row and a remove control that cannot be
+              // triggered. Renaming stays possible — the owning surface's
+              // save-time guard blocks retiring the key that way.
+              const locked = slot.existingKey !== null && protectedKeySet.has(slot.existingKey)
               return (
                 <Field
                   key={slot.id}
@@ -543,7 +557,7 @@ export function LlmCredentialFields({
                   }
                   error={error ?? undefined}
                 >
-                  <div className="cu-llm-cred-extra">
+                  <div className={cn('cu-llm-cred-extra', locked && 'cu-llm-cred-extra--locked')}>
                     <TextInput
                       monospace
                       value={slot.nameInput}
@@ -612,13 +626,25 @@ export function LlmCredentialFields({
                         </Button>
                       </div>
                     )}
+                    {locked ? (
+                      <span
+                        className="cu-chip"
+                        title="An active Host fallback still references this credential slot. Update the fallback configuration before removing this key."
+                      >
+                        fallback-locked
+                      </span>
+                    ) : null}
                     <button
                       type="button"
                       className="cu-btn cu-btn--icon cu-btn--danger-icon"
                       onClick={() => removeExtraSlot(slot.id)}
-                      disabled={disabled}
+                      disabled={disabled || locked}
                       aria-label="Remove extra credential slot"
-                      title="Remove extra credential slot"
+                      title={
+                        locked
+                          ? 'Fallback-locked — update the fallback configuration first'
+                          : 'Remove extra credential slot'
+                      }
                     >
                       <IconX width={16} height={16} />
                     </button>

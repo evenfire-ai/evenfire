@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express, { type Request as ExpressRequest } from 'express'
+import { execFileSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -56,6 +59,108 @@ function quoteIdent(value: string): string {
 function expectPrivileges(actual: string[], expected: string[]): void {
   expect([...actual].sort()).toEqual([...expected].sort())
 }
+
+function deploymentRuntimeAccessQueries(): string[] {
+  const script = readFileSync(
+    new URL('../../deploy/scripts/run-control-api-db-migration.sh', import.meta.url),
+    'utf8'
+  )
+  const start = script.indexOf('\nruntime_access_contract_values() {')
+  const end = script.indexOf('\nverify_trace_maintenance_access_contract() {', start)
+  if (start < 0 || end < 0) throw new Error('Deployment runtime access verifier is missing')
+
+  // Execute the real profile parser and verifier to capture their SQL, without
+  // entering the migration script's Kubernetes operations or copying its policy.
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+RUNTIME_ACCESS_PROFILES_FILE="$1"
+RUNTIME_SEQUENCE_ACCESS_PROFILES_FILE="$2"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+assert_db_query_equals() { printf '%s\\0' "$3"; }
+${script.slice(start, end)}
+verify_runtime_access_contract`,
+      'deployment-runtime-access',
+      fileURLToPath(
+        new URL('../../deploy/scripts/control-api-runtime-access-profiles.tsv', import.meta.url)
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/control-api-runtime-sequence-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+    ],
+    { encoding: 'utf8', timeout: 10_000 }
+  )
+  const queries = output.split('\0').filter(Boolean)
+  expect(queries).toHaveLength(2)
+  return queries
+}
+
+function traceMaintenanceRuntimeAccessQueries(): string[] {
+  const script = readFileSync(
+    new URL('../../deploy/scripts/run-control-api-db-migration.sh', import.meta.url),
+    'utf8'
+  )
+  const start = script.indexOf('\nmaintenance_access_contract_values() {')
+  const end = script.indexOf('\nverify_workflow_recipes_runtime_boundary() {', start)
+  if (start < 0 || end < 0) throw new Error('Trace maintenance access verifier is missing')
+
+  // Capture SQL from the production profile parser and verifier without entering Kubernetes.
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+MAINTENANCE_ACCESS_PROFILES_FILE="$1"
+MAINTENANCE_SEQUENCE_ACCESS_PROFILES_FILE="$2"
+MAINTENANCE_FUNCTION_ACCESS_PROFILES_FILE="$3"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+assert_db_query_equals() { printf '%s\\0' "$3"; }
+${script.slice(start, end)}
+verify_trace_maintenance_access_contract`,
+      'trace-maintenance-runtime-access',
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-sequence-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+      fileURLToPath(
+        new URL(
+          '../../deploy/scripts/trace-maintenance-runtime-function-access-profiles.tsv',
+          import.meta.url
+        )
+      ),
+    ],
+    { encoding: 'utf8', timeout: 10_000 }
+  )
+  const queries = output.split('\0').filter(Boolean)
+  expect(queries).toHaveLength(3)
+  return queries
+}
+
+const deniedRuntimeColumnPrivileges = [
+  { privilege: 'SELECT', relation: 'gfs_blob_manifests', column: 'blob_key' },
+  { privilege: 'INSERT', relation: 'gfs_blob_manifests', column: 'blob_key' },
+  { privilege: 'UPDATE', relation: 'password_verification_work', column: 'owner_instance' },
+  { privilege: 'REFERENCES', relation: 'gfs_blob_manifests', column: 'blob_key' },
+] as const
+
+const columnPrivilegeFixtures = deniedRuntimeColumnPrivileges.flatMap(grant => [
+  { ...grant, principal: 'direct' as const },
+  { ...grant, principal: 'public' as const },
+  { ...grant, principal: 'inherited' as const },
+])
 
 async function relationPrivileges(pool: Pool, roleName: string): Promise<PrivilegeExpectation> {
   const result = await pool.query<{
@@ -120,6 +225,8 @@ async function sequencePrivileges(pool: Pool, roleName: string): Promise<Privile
   return actual
 }
 
+const DAY_MS = 24 * 60 * 60 * 1_000
+
 describeRealPostgres('control-api real Postgres migrations', () => {
   const database = `control_api_migration_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
@@ -156,6 +263,155 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await adminPool?.end()
     }
   })
+
+  it('verifies the deployment access contract against migrated schema and rejects drift', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+    const [relationQuery, sequenceQuery] = deploymentRuntimeAccessQueries()
+    const violations = async (sql: string) =>
+      Number((await dbPool.query({ text: sql, rowMode: 'array' })).rows[0][0])
+
+    expect(await violations(relationQuery)).toBe(0)
+    expect(await violations(sequenceQuery)).toBe(0)
+    const privileges = await relationPrivileges(dbPool, 'control_api_runtime')
+    for (const relation of ['password_identifier_state', 'password_verification_pace']) {
+      expectPrivileges([...privileges[relation]], ['SELECT', 'INSERT', 'UPDATE', 'DELETE'])
+    }
+    expectPrivileges([...privileges.password_verification_work], ['SELECT', 'INSERT', 'DELETE'])
+
+    try {
+      await dbPool.query('GRANT UPDATE ON password_verification_work TO control_api_runtime')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('REVOKE UPDATE ON password_verification_work FROM control_api_runtime')
+    }
+    try {
+      await dbPool.query('REVOKE DELETE ON password_verification_work FROM control_api_runtime')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('GRANT DELETE ON password_verification_work TO control_api_runtime')
+    }
+    try {
+      await dbPool.query('CREATE TABLE runtime_access_contract_probe (id INTEGER)')
+      expect(await violations(relationQuery)).toBe(1)
+    } finally {
+      await dbPool.query('DROP TABLE IF EXISTS runtime_access_contract_probe')
+    }
+    expect(await violations(relationQuery)).toBe(0)
+  }, 60_000)
+
+  it.each(columnPrivilegeFixtures)(
+    'rejects $principal column-level $privilege on $relation',
+    async ({ privilege, relation, column, principal }) => {
+      const { initDb } = await import('../src/db.js')
+      await initDb({ connect: () => dbPool.connect() })
+      const [relationQuery] = deploymentRuntimeAccessQueries()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `runtime_column_acl_probe_${randomBytes(6).toString('hex')}`
+      const grantee = principal === 'public' ? 'PUBLIC' : quoteIdent('control_api_runtime')
+      const inherited = principal === 'inherited'
+      const assertClean = async () => {
+        const result = await dbPool.query<{ table_access: boolean; column_access: boolean }>(
+          `SELECT has_table_privilege('control_api_runtime', $1, $2) AS table_access,
+                  has_any_column_privilege('control_api_runtime', $1, $2) AS column_access`,
+          [relation, privilege]
+        )
+        expect(result.rows[0]).toEqual({ table_access: false, column_access: true })
+        const violationCount = Number(
+          (await dbPool.query({ text: relationQuery, rowMode: 'array' })).rows[0][0]
+        )
+        expect(violationCount).toBe(1)
+      }
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT ${privilege} (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO control_api_runtime`)
+        }
+
+        await assertClean()
+      } finally {
+        if (inherited) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM control_api_runtime`)
+          await dbPool.query(
+            `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${quoteIdent(inheritedRole)}`
+          )
+          await dbPool.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`)
+        } else {
+          await dbPool.query(
+            `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${grantee}`
+          )
+        }
+      }
+    }
+  )
+
+  it.each(['direct', 'public', 'inherited'] as const)(
+    'rejects %s column-level UPDATE on governed_event_stream for trace maintenance',
+    async principal => {
+      const { initDb } = await import('../src/db.js')
+      await initDb({ connect: () => dbPool.connect() })
+      const [relationQuery, sequenceQuery, functionQuery] = traceMaintenanceRuntimeAccessQueries()
+      const relation = 'governed_event_stream'
+      const column = 'event_id'
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `trace_maintenance_acl_probe_${randomBytes(6).toString('hex')}`
+      const grantee = principal === 'public' ? 'PUBLIC' : quoteIdent('trace_maintenance_runtime')
+      const inherited = principal === 'inherited'
+      const violationCount = async (query: string) =>
+        Number((await dbPool.query({ text: query, rowMode: 'array' })).rows[0][0])
+
+      expect(await violationCount(relationQuery)).toBe(0)
+      expect(await violationCount(sequenceQuery)).toBe(0)
+      expect(await violationCount(functionQuery)).toBe(0)
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT UPDATE (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO trace_maintenance_runtime`)
+        }
+
+        const privileges = await dbPool.query<{
+          table_access: boolean
+          column_access: boolean
+        }>(
+          `SELECT has_table_privilege('trace_maintenance_runtime', $1, 'UPDATE') AS table_access,
+                  has_any_column_privilege('trace_maintenance_runtime', $1, 'UPDATE') AS column_access`,
+          [relation]
+        )
+        expect(privileges.rows[0]).toEqual({ table_access: false, column_access: true })
+        expect(await violationCount(relationQuery)).toBe(1)
+        expect(await violationCount(sequenceQuery)).toBe(0)
+        expect(await violationCount(functionQuery)).toBe(0)
+      } finally {
+        if (inherited) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM trace_maintenance_runtime`)
+          await dbPool.query(
+            `REVOKE UPDATE (${columnName}) ON TABLE ${relationName} FROM ${quoteIdent(inheritedRole)}`
+          )
+          await dbPool.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`)
+        } else {
+          await dbPool.query(
+            `REVOKE UPDATE (${columnName}) ON TABLE ${relationName} FROM ${grantee}`
+          )
+        }
+      }
+    }
+  )
 
   it('applies initDb twice and leaves the exact runtime privilege envelopes', async () => {
     const { initDb } = await import('../src/db.js')
@@ -796,7 +1052,17 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     )
     expect(filterIndexes.rows.map(row => row.indexname)).toEqual([...requiredFilterIndexes].sort())
 
-    await dbPool.query(`
+    // These perf fixtures stay in the database when the retention wake below
+    // runs, and governed_trace_prune_expired_events prunes relative to
+    // clock_timestamp() (90 days for agent_run/administrative/reconcile
+    // telemetry). Anchor them to the wall clock so they can never age into
+    // the retention window and steal the wake's delete budget.
+    const perfFixtureBase = new Date(Math.floor((Date.now() - 2 * DAY_MS) / 1_000) * 1_000)
+    const perfFixtureBaseIso = perfFixtureBase.toISOString()
+    const perfWindowFrom = new Date(perfFixtureBase.getTime() - 13 * DAY_MS).toISOString()
+    const perfWindowTo = new Date(perfFixtureBase.getTime() + 17 * DAY_MS).toISOString()
+    await dbPool.query(
+      `
       WITH sessions AS (
         SELECT ordinal, gen_random_uuid() AS run_id, 'perf-session-' || ordinal AS session_id
           FROM generate_series(1, 300) ordinal
@@ -831,7 +1097,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
                     ELSE '{}'::jsonb END,
                md5('perf-payload-' || ordinal || '-' || event_ordinal) ||
                  md5('perf-payload-extra-' || ordinal || '-' || event_ordinal),
-               '2026-07-14T10:00:00Z'::timestamptz + (ordinal * interval '1 second') +
+               $1::timestamptz + (ordinal * interval '1 second') +
                  (event_ordinal * interval '1 millisecond')
           FROM fixture
         ON CONFLICT DO NOTHING
@@ -841,8 +1107,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         (event_family,event_id,schema_version,occurred_at,ingested_at,environment,run_id,payload_sha256)
       SELECT 'agent_run',event_id,1,occurred_at,ingested_at,'integration',run_id,payload_sha256
         FROM inserted
-    `)
-    await dbPool.query(`
+    `,
+      [perfFixtureBaseIso]
+    )
+    await dbPool.query(
+      `
       WITH inserted AS (
         INSERT INTO administrative_events (
           source_kind,source_service,source_event_id,idempotency_key,event_kind,action,outcome,
@@ -853,7 +1122,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
                'service_action','permission_grant','succeeded','control-api','permission',
                'permission/' || ordinal,
                md5('perf-admin-payload-' || ordinal) || md5('perf-admin-payload-extra-' || ordinal),
-               '2026-07-14T11:00:00Z'::timestamptz + ordinal * interval '1 second'
+               $1::timestamptz + interval '1 hour' + ordinal * interval '1 second'
           FROM generate_series(1, 400) ordinal
         ON CONFLICT DO NOTHING
         RETURNING event_id,occurred_at,ingested_at,payload_sha256
@@ -862,8 +1131,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         (event_family,event_id,schema_version,occurred_at,ingested_at,environment,payload_sha256)
       SELECT 'administrative',event_id,1,occurred_at,ingested_at,'integration',payload_sha256
         FROM inserted
-    `)
-    await dbPool.query(`
+    `,
+      [perfFixtureBaseIso]
+    )
+    await dbPool.query(
+      `
       WITH inserted AS (
         INSERT INTO infrastructure_telemetry_events (
           source_service,source_kind,source_occurrence_id,telemetry_type,trigger_kind,outcome,
@@ -875,7 +1147,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
                'cluster-1','control-plane','Deployment','deployment/perf-' || ordinal,
                'Deployment','perf-' || ordinal,1,
                md5('perf-infra-payload-' || ordinal) || md5('perf-infra-payload-extra-' || ordinal),
-               '2026-07-14T12:00:00Z'::timestamptz + ordinal * interval '1 second',
+               $1::timestamptz + interval '2 hours' + ordinal * interval '1 second',
                md5('perf-infra-' || ordinal) || md5('perf-infra-extra-' || ordinal)
           FROM generate_series(1, 400) ordinal
         ON CONFLICT DO NOTHING
@@ -885,7 +1157,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         (event_family,event_id,schema_version,occurred_at,ingested_at,environment,workload_ref,payload_sha256)
       SELECT 'infrastructure_telemetry',event_id,1,occurred_at,ingested_at,'integration',workload_ref,payload_sha256
         FROM inserted
-    `)
+    `,
+      [perfFixtureBaseIso]
+    )
     await dbPool.query(
       'ANALYZE agent_run_events, administrative_events, infrastructure_telemetry_events, governed_event_stream'
     )
@@ -963,8 +1237,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     })
     await new PostgresGovernedSessionReplayRepository(explainClient('session_list') as never).list({
       filters: {
-        occurredFrom: '2026-07-01T00:00:00.000Z',
-        occurredTo: '2026-07-31T00:00:00.000Z',
+        occurredFrom: perfWindowFrom,
+        occurredTo: perfWindowTo,
         outcome: [],
         sourceService: [],
         sessionId: [],
@@ -992,8 +1266,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         afterSequence: '9223372036854775807',
         highWatermark: '9223372036854775807',
         limit: 50,
-        occurredFrom: '2026-07-01T00:00:00.000Z',
-        occurredTo: '2026-07-31T00:00:00.000Z',
+        occurredFrom: perfWindowFrom,
+        occurredTo: perfWindowTo,
         filters,
       })
     }
@@ -1253,7 +1527,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       transaction: async () => {
         throw new Error('integration fixture supplies the transaction explicitly')
       },
-      now: () => new Date('2026-07-13T00:00:00.000Z'),
+      now: () => new Date(),
     })
     const tracePrincipal = {
       kind: 'mcp_host_runtime' as const,
@@ -1383,6 +1657,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     )
     expect(retainedAfterSecondBatch.rows[0]).toEqual({ family_count: '0', stream_count: '0' })
 
+    // Recent = well inside every retention window and not after ingestion
+    // (occurred_at <= ingested_at + 5 minutes), relative to the wall clock.
+    const recentOccurredAt = new Date(Date.now() - 60_000).toISOString()
+    const recentApprovalOccurredAt = new Date(Date.now() - 59_000).toISOString()
     const recentClient = await dbPool.connect()
     let recentEventId = ''
     try {
@@ -1398,7 +1676,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         recentBinding,
         {
           sourceEventId: randomUUID(),
-          occurredAt: '2026-07-13T00:00:00.000Z',
+          occurredAt: recentOccurredAt,
           eventType: 'run_start',
         }
       )
@@ -1418,7 +1696,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         },
         {
           sourceEventId: approvalSourceEventId,
-          occurredAt: '2026-07-13T00:00:01.000Z',
+          occurredAt: recentApprovalOccurredAt,
           eventType: 'approval',
           payload: { status: 'approved' },
         }
@@ -1736,6 +2014,66 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [auditId]
     )
     expect(stored.rows).toEqual([{ sequence_no: auditId, subject: 'host:1st:mcp-host/chatllm' }])
+  })
+
+  it('adds workflow_schedules.concurrency_policy idempotently with a Forbid default', async () => {
+    const { initDb } = await import('../src/db.js')
+    const connector = { connect: () => dbPool.connect() }
+    const version = '0129_workflow_schedules_concurrency_policy'
+
+    await initDb(connector)
+    // Forget the record so initDb re-runs the body over the existing column.
+    await dbPool.query('DELETE FROM schema_migrations WHERE version = $1', [version])
+    await initDb(connector)
+
+    const recorded = await dbPool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM schema_migrations WHERE version = $1',
+      [version]
+    )
+    expect(recorded.rows[0]?.count).toBe('1')
+
+    const column = await dbPool.query<{
+      column_default: string | null
+      is_nullable: string
+      data_type: string
+    }>(
+      `SELECT column_default, is_nullable, data_type
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'workflow_schedules'
+          AND column_name = 'concurrency_policy'`
+    )
+    expect(column.rows).toEqual([
+      { column_default: "'Forbid'::text", is_nullable: 'NO', data_type: 'text' },
+    ])
+
+    const checks = await dbPool.query<{ conname: string }>(
+      `SELECT conname
+         FROM pg_constraint
+        WHERE conrelid = 'public.workflow_schedules'::regclass
+          AND conname = 'workflow_schedules_concurrency_policy_check'`
+    )
+    expect(checks.rows).toHaveLength(1)
+
+    const client = await dbPool.connect()
+    try {
+      await client.query('BEGIN')
+      const inserted = await client.query<{ concurrency_policy: string }>(
+        `INSERT INTO workflow_schedules (recipe_namespace, recipe_name, cron_expression, next_fire_at)
+         VALUES ('p3-forbid-ns', 'p3-forbid-recipe', '*/5 * * * *', now())
+         RETURNING concurrency_policy`
+      )
+      expect(inserted.rows[0]?.concurrency_policy).toBe('Forbid')
+      await expect(
+        client.query(
+          `UPDATE workflow_schedules SET concurrency_policy = 'Sometimes'
+            WHERE recipe_namespace = 'p3-forbid-ns' AND recipe_name = 'p3-forbid-recipe'`
+        )
+      ).rejects.toThrow(/workflow_schedules_concurrency_policy_check/)
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
   })
 
   it('recognizes deployed entity-change aliases without replaying migration DDL', async () => {

@@ -11,9 +11,9 @@ import { readFileSync } from 'node:fs'
  * now live and this suite is GREEN. Do not weaken these assertions.
  *
  * Covered:
- *   1. Code defaults 150/120/600/600 (decision Q3: recalibrated from the old
- *      hardcoded 120/60; request-bucket and pre-auth unchanged at 600 but
- *      moved to ENV).
+ *   1. Code defaults 750/600/6000/600, plus authenticated pre-auth 6000 and
+ *      credential operations 1800. The 600 pre-auth value remains the anonymous or
+ *      invalid-credential source-IP ceiling.
  *   2. Each ENV override honored.
  *   3. Invalid values fail loudly at import (positiveIntegerFromEnv).
  *   4. Empty string falls back to the code default.
@@ -28,6 +28,10 @@ const RATE_LIMIT_KEYS = [
   'CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN',
   'CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN',
   'CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN',
+  'CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN',
+  'CONTROL_API_PLUGIN_SDK_ADMIN_PER_MIN',
+  'CONTROL_API_PLUGIN_SDK_INTERNAL_PER_MIN',
+  'CONTROL_API_PLUGIN_SDK_CREDENTIAL_PER_MIN',
 ] as const
 
 type RateLimitKey = (typeof RATE_LIMIT_KEYS)[number]
@@ -37,22 +41,42 @@ const EXPECTED: Array<{ env: RateLimitKey; field: string; defaultValue: number }
   {
     env: 'CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN',
     field: 'pluginSdkNotificationsRlPerMin',
-    defaultValue: 150,
+    defaultValue: 750,
   },
   {
     env: 'CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN',
     field: 'pluginSdkPromptBridgeRlPerMin',
-    defaultValue: 120,
+    defaultValue: 600,
   },
   {
     env: 'CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN',
     field: 'pluginSdkRequestBucketRlPerMin',
-    defaultValue: 600,
+    defaultValue: 6000,
   },
   {
     env: 'CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN',
     field: 'pluginSdkPreauthRlPerMin',
     defaultValue: 600,
+  },
+  {
+    env: 'CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN',
+    field: 'pluginSdkAuthenticatedPreauthRlPerMin',
+    defaultValue: 6000,
+  },
+  {
+    env: 'CONTROL_API_PLUGIN_SDK_ADMIN_PER_MIN',
+    field: 'pluginSdkAdminRlPerMin',
+    defaultValue: 600,
+  },
+  {
+    env: 'CONTROL_API_PLUGIN_SDK_INTERNAL_PER_MIN',
+    field: 'pluginSdkInternalRlPerMin',
+    defaultValue: 600,
+  },
+  {
+    env: 'CONTROL_API_PLUGIN_SDK_CREDENTIAL_PER_MIN',
+    field: 'pluginSdkCredentialRlPerMin',
+    defaultValue: 1800,
   },
 ]
 
@@ -97,13 +121,17 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     vi.resetModules()
   })
 
-  it('defaults the four platform rate limits to 150/120/600/600', async () => {
+  it('defaults platform rate limits without raising the anonymous pre-auth ceiling', async () => {
     const config = await loadConfigWith({})
 
-    expect(config.pluginSdkNotificationsRlPerMin).toBe(150)
-    expect(config.pluginSdkPromptBridgeRlPerMin).toBe(120)
-    expect(config.pluginSdkRequestBucketRlPerMin).toBe(600)
+    expect(config.pluginSdkNotificationsRlPerMin).toBe(750)
+    expect(config.pluginSdkPromptBridgeRlPerMin).toBe(600)
+    expect(config.pluginSdkRequestBucketRlPerMin).toBe(6000)
     expect(config.pluginSdkPreauthRlPerMin).toBe(600)
+    expect(config.pluginSdkAuthenticatedPreauthRlPerMin).toBe(6000)
+    expect(config.pluginSdkAdminRlPerMin).toBe(600)
+    expect(config.pluginSdkInternalRlPerMin).toBe(600)
+    expect(config.pluginSdkCredentialRlPerMin).toBe(1800)
   })
 
   it.each(EXPECTED)('honors the $env override', async ({ env, field }) => {
@@ -124,12 +152,18 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
       CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: '',
       CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: '',
       CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: '',
+      CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN: '',
+      CONTROL_API_PLUGIN_SDK_ADMIN_PER_MIN: '',
+      CONTROL_API_PLUGIN_SDK_INTERNAL_PER_MIN: '',
+      CONTROL_API_PLUGIN_SDK_CREDENTIAL_PER_MIN: '',
     })
 
-    expect(config.pluginSdkNotificationsRlPerMin).toBe(150)
-    expect(config.pluginSdkPromptBridgeRlPerMin).toBe(120)
-    expect(config.pluginSdkRequestBucketRlPerMin).toBe(600)
+    expect(config.pluginSdkNotificationsRlPerMin).toBe(750)
+    expect(config.pluginSdkPromptBridgeRlPerMin).toBe(600)
+    expect(config.pluginSdkRequestBucketRlPerMin).toBe(6000)
     expect(config.pluginSdkPreauthRlPerMin).toBe(600)
+    expect(config.pluginSdkAuthenticatedPreauthRlPerMin).toBe(6000)
+    expect(config.pluginSdkCredentialRlPerMin).toBe(1800)
   })
 
   it('registers every key at the code default in the base ConfigMap', async () => {
@@ -168,7 +202,7 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
       /maxInvocationsPerMinute:\s*\n\s*type: integer\s*\n\s*minimum: 1\s*\n\s*description: (.+)/,
       'maxInvocationsPerMinute description in charts/clerum-crds/crds/workflowrecipe.yaml'
     )
-    expect(invocationsDescription).toContain('default 120')
+    expect(invocationsDescription).toContain('default 600')
     expect(invocationsDescription).toContain('CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN')
 
     const notificationsDescription = extractOne(
@@ -176,7 +210,7 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
       /maxNotificationsPerMinute:\s*\n\s*type: integer\s*\n\s*minimum: 1\s*\n\s*description: (.+)/,
       'maxNotificationsPerMinute description in charts/clerum-crds/crds/workflowrecipe.yaml'
     )
-    expect(notificationsDescription).toContain('default 150')
+    expect(notificationsDescription).toContain('default 750')
     expect(notificationsDescription).toContain('CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN')
   })
 
@@ -195,13 +229,39 @@ describe('plugin SDK platform rate-limit config (issue #348)', () => {
     expect(field).toBe('pluginSdkRequestBucketRlPerMin')
   })
 
-  it('wires the pre-auth flood-guard limit from config in the SDK routes', () => {
-    const source = read('../src/routes/mcp-host/plugin-workload-sdk.routes.ts')
-    const field = extractOne(
-      source,
-      /limit:\s*config\.(pluginSdkPreauthRlPerMin)\b/,
-      'limit wired from config in src/routes/mcp-host/plugin-workload-sdk.routes.ts'
-    )
-    expect(field).toBe('pluginSdkPreauthRlPerMin')
+  it('keeps anonymous pre-auth separate from the verified principal allowance', () => {
+    const source = read('../src/middleware/pluginWorkloadSdkRateLimits.ts')
+    expect(source).toContain('limit: config.pluginSdkPreauthRlPerMin')
+    expect(source).toContain('limit: config.pluginSdkAuthenticatedPreauthRlPerMin')
+    expect(source).toContain('maxPerMinute: config.pluginSdkAdminRlPerMin')
+    expect(source).toContain('maxPerMinute: config.pluginSdkInternalRlPerMin')
+
+    const routes = read('../src/routes/mcp-host/plugin-workload-sdk.routes.ts')
+    const mounted = routes.slice(routes.indexOf("'/mcp-host/plugin-workload-sdk'"))
+    const anonymous = mounted.indexOf('createPluginWorkloadSdkAnonymousPreauthRateLimit()')
+    const authenticated = mounted.indexOf('createPluginWorkloadSdkAuthenticatedPreauthRateLimit()')
+    const jwt = mounted.indexOf('requireMcpHostJwt,')
+    const bucket = mounted.indexOf('createPluginWorkloadSdkRequestRateLimit()')
+    expect(anonymous).toBeGreaterThan(-1)
+    expect(anonymous).toBeLessThan(authenticated)
+    expect(authenticated).toBeLessThan(jwt)
+    expect(jwt).toBeLessThan(bucket)
+  })
+
+  it('gives a verified principal its own pre-auth allowance', async () => {
+    const config = await loadConfigWith({})
+    const { pluginSdkPreauthAssignment } =
+      await import('../src/middleware/pluginWorkloadSdkRateLimits.js')
+
+    expect(pluginSdkPreauthAssignment(null)).toEqual({
+      limit: config.pluginSdkPreauthRlPerMin,
+      key: null,
+    })
+    expect(pluginSdkPreauthAssignment('recipe:alpha')).toEqual({
+      limit: config.pluginSdkAuthenticatedPreauthRlPerMin,
+      key: 'plugin_workload_sdk_preauth:recipe:alpha',
+    })
+    expect(config.pluginSdkPreauthRlPerMin).toBe(600)
+    expect(config.pluginSdkAuthenticatedPreauthRlPerMin).toBe(6000)
   })
 })

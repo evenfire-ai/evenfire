@@ -1755,51 +1755,6 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
   }, [])
 
   useEffect(() => {
-    let cancelled = false
-    void listCodexSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) {
-          setCodexConnections(rows)
-          setCodexGrantLoadError('')
-        }
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setCodexConnections([])
-          if (!isDisabledCapabilityError(err)) {
-            setCodexGrantLoadError(
-              err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions'
-            )
-          } else {
-            setCodexGrantLoadError('')
-          }
-        }
-      })
-    void listGrokSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) {
-          setGrokConnections(rows)
-          setGrokGrantLoadError('')
-        }
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setGrokConnections([])
-          if (!isDisabledCapabilityError(err)) {
-            setGrokGrantLoadError(
-              err instanceof Error ? err.message : 'Could not load Grok subscriptions'
-            )
-          } else {
-            setGrokGrantLoadError('')
-          }
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
     setGrantSelection(storedRecipeGrantSelection(currentInitial))
   }, [currentInitial])
   const storedGrantSelection = useMemo(
@@ -1825,6 +1780,10 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
   const [codexGrantLoadError, setCodexGrantLoadError] = useState('')
   const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
   const [grokGrantLoadError, setGrokGrantLoadError] = useState('')
+  const [grantInventoryLoading, setGrantInventoryLoading] = useState(false)
+  const [grantInventoryRetryNonce, setGrantInventoryRetryNonce] = useState(0)
+  const [codexInventoryLoaded, setCodexInventoryLoaded] = useState(false)
+  const [grokInventoryLoaded, setGrokInventoryLoaded] = useState(false)
   const [grantSelection, setGrantSelection] = useState<RecipeGrantSelection>(() =>
     storedRecipeGrantSelection(initial)
   )
@@ -1881,6 +1840,39 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
   }, [jsonInput])
   const isCodexRecipe = manifestBrokerProvider === OPENAI_SUBSCRIPTION_PROVIDER
   const isGrokRecipe = manifestBrokerProvider === GROK_SUBSCRIPTION_PROVIDER
+
+  useEffect(() => {
+    if (step !== 'confirm' || (!isCodexRecipe && !isGrokRecipe)) return
+    const controller = new AbortController()
+    setGrantInventoryLoading(true)
+    const loader = isGrokRecipe ? listGrokSubscriptionConnections : listCodexSubscriptionConnections
+    loader({ signal: controller.signal })
+      .then(rows => {
+        if (controller.signal.aborted) return
+        if (isGrokRecipe) {
+          setGrokConnections(rows)
+          setGrokInventoryLoaded(true)
+        } else {
+          setCodexConnections(rows)
+          setCodexInventoryLoaded(true)
+        }
+        if (isGrokRecipe) setGrokGrantLoadError('')
+        else setCodexGrantLoadError('')
+      })
+      .catch(err => {
+        if (controller.signal.aborted || isDisabledCapabilityError(err)) return
+        const message =
+          err instanceof Error && err.message
+            ? err.message
+            : `Could not load ${isGrokRecipe ? 'Grok' : 'ChatGPT'} subscriptions`
+        if (isGrokRecipe) setGrokGrantLoadError(message)
+        else setCodexGrantLoadError(message)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setGrantInventoryLoading(false)
+      })
+    return () => controller.abort()
+  }, [grantInventoryRetryNonce, isCodexRecipe, isGrokRecipe, step])
   const codexGrant = grantSelectionForProvider(
     grantSelection,
     OPENAI_SUBSCRIPTION_PROVIDER,
@@ -1913,13 +1905,13 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       options.unshift({
         group: 'ChatGPT subscriptions',
         value: credentialSelectValue('', codexGrantKey),
-        label: `${codexGrantKey} (unavailable)`,
+        label: codexInventoryLoaded ? `${codexGrantKey} (unavailable)` : codexGrantKey,
         meta: 'ChatGPT subscription',
         providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })
     }
     return options
-  }, [codexConnections, codexGrantKey])
+  }, [codexConnections, codexGrantKey, codexInventoryLoaded])
 
   const grokGrantOptions = useMemo<LlmSecretSelectOption[]>(() => {
     const options: LlmSecretSelectOption[] = grokConnections
@@ -1938,13 +1930,13 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       options.unshift({
         group: 'Grok subscriptions',
         value: credentialSelectValue('', grokGrantKey, GROK_SUBSCRIPTION_PROVIDER),
-        label: `${grokGrantKey} (unavailable)`,
+        label: grokInventoryLoaded ? `${grokGrantKey} (unavailable)` : grokGrantKey,
         meta: 'Grok subscription',
         providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
       })
     }
     return options
-  }, [grokConnections, grokGrantKey])
+  }, [grokConnections, grokGrantKey, grokInventoryLoaded])
 
   const deploying = deployPhase !== 'idle'
 
@@ -2802,6 +2794,11 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
 
         {step === 'confirm' && isCodexRecipe ? (
           <div className="cu-recipe-status-panel" data-testid="codex-recipe-grant">
+            {grantInventoryLoading ? (
+              <p className="cu-muted" role="status">
+                Loading ChatGPT grants…
+              </p>
+            ) : null}
             <div style={{ fontWeight: 700, marginBottom: 8 }}>ChatGPT grant</div>
             <p style={{ margin: '0 0 10px', color: 'var(--cu-text-muted)' }}>
               Choose an existing ChatGPT grant. The recipe stores it as{' '}
@@ -2835,6 +2832,13 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
             {codexGrantLoadError ? (
               <div className="cu-banner cu-banner--error" role="alert" style={{ marginTop: 10 }}>
                 {codexGrantLoadError}
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--ghost cu-btn--sm"
+                  onClick={() => setGrantInventoryRetryNonce(value => value + 1)}
+                >
+                  Retry
+                </button>
               </div>
             ) : null}
           </div>
@@ -2842,6 +2846,11 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
 
         {step === 'confirm' && isGrokRecipe ? (
           <div className="cu-recipe-status-panel" data-testid="grok-recipe-grant">
+            {grantInventoryLoading ? (
+              <p className="cu-muted" role="status">
+                Loading Grok grants…
+              </p>
+            ) : null}
             <div style={{ fontWeight: 700, marginBottom: 8 }}>Grok grant</div>
             <p style={{ margin: '0 0 10px', color: 'var(--cu-text-muted)' }}>
               Choose an existing Grok grant. The recipe stores it as{' '}
@@ -2873,6 +2882,13 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
             {grokGrantLoadError ? (
               <div className="cu-banner cu-banner--error" role="alert" style={{ marginTop: 10 }}>
                 {grokGrantLoadError}
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--ghost cu-btn--sm"
+                  onClick={() => setGrantInventoryRetryNonce(value => value + 1)}
+                >
+                  Retry
+                </button>
               </div>
             ) : null}
           </div>

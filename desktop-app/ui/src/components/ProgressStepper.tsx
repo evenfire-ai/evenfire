@@ -122,14 +122,17 @@ function activeProgressLabel(progress: TaskProgress): string {
 function OutputPanel({
   preview,
   isError,
+  toolCallId,
 }: {
   preview: NonNullable<ProgressStep['outputPreview']>
   isError?: boolean
+  toolCallId: string
 }) {
   const latestLines = preview.tailLines.length > 0 ? preview.tailLines : preview.headLines
   return (
     <div
       data-testid="step-output-panel"
+      data-tool-call-id={toolCallId}
       className={`stepper-step-output${isError ? ' stepper-step-output--error' : ''}`}
     >
       <pre className="stepper-step-output-code">{latestLines.join('\n')}</pre>
@@ -243,10 +246,14 @@ function StepList({ steps }: { steps: TaskProgress['steps'] }) {
               <div className="stepper-step-error-detail">{step.errorSummary}</div>
             )}
             {isExpanded && step.state !== 'running' && step.outputPreview && (
-              <OutputPanel preview={step.outputPreview} isError={step.state === 'error'} />
+              <OutputPanel
+                preview={step.outputPreview}
+                isError={step.state === 'error'}
+                toolCallId={step.toolCallId}
+              />
             )}
             {isExpanded && step.state === 'running' && step.liveOutputPreview && (
-              <OutputPanel preview={step.liveOutputPreview} />
+              <OutputPanel preview={step.liveOutputPreview} toolCallId={step.toolCallId} />
             )}
           </React.Fragment>
         )
@@ -264,7 +271,10 @@ export function ProgressStepper({
   onConnect,
 }: ProgressStepperProps) {
   const [expanded, setExpanded] = useState(false)
-  const [approvalPending, setApprovalPending] = useState(false)
+  // The request id of the suspension the user already decided. A later suspension in
+  // the same task (another tool asking after an approval) has a new id, so its card
+  // starts with enabled buttons instead of inheriting the previous decision.
+  const [decidedRequestId, setDecidedRequestId] = useState<string | null>(null)
   const [connectPending, setConnectPending] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
 
@@ -421,6 +431,7 @@ export function ProgressStepper({
     const isConnect = info?.reason === 'connect_required'
     const connectServer = info?.mcpServerName || 'the connector'
     const canConnect = isConnect && !!onConnect
+    const approvalPending = !!info && decidedRequestId === info.requestId
     return (
       <div data-testid="progress-stepper" className="progress-stepper status-suspended">
         <div className="stepper-suspended-row">
@@ -459,6 +470,14 @@ export function ProgressStepper({
             </IconButton>
           )}
         </div>
+        {info?.inputPreview && !isConnect && (
+          <div data-testid="approval-input-preview" className="stepper-step-output">
+            <pre className="stepper-step-output-code">{info.inputPreview.text}</pre>
+            {info.inputPreview.truncated && (
+              <p role="note">This preview is incomplete or changed by redaction.</p>
+            )}
+          </div>
+        )}
         {info && canConnect && (
           <div className="stepper-approval-actions">
             <Button
@@ -486,7 +505,7 @@ export function ProgressStepper({
                 color="success"
                 disabled={approvalPending}
                 onClick={() => {
-                  setApprovalPending(true)
+                  setDecidedRequestId(info.requestId)
                   onApprove()
                 }}
                 size="sm"
@@ -502,7 +521,7 @@ export function ProgressStepper({
                 color="danger"
                 disabled={approvalPending}
                 onClick={() => {
-                  setApprovalPending(true)
+                  setDecidedRequestId(info.requestId)
                   onDeny()
                 }}
                 size="sm"

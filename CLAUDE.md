@@ -1,5 +1,19 @@
 # Evenfire repository guidance
 
+## Shared capability naming
+
+Name shared variables, functions, types, database fields, quota families,
+metrics and configuration after the domain or capability they implement.
+Do not name shared infrastructure after the AI agent, authoring tool, model
+or provider that first introduced it. A shared subscription quota, for
+example, uses an administrative subscription name.
+
+Provider names remain appropriate for actual provider-specific adapters,
+protocol identifiers and external contracts. Historical data and migration
+compatibility identifiers may retain legacy names when the concrete
+compatibility requirement is documented. Keep those references confined to
+that boundary; do not copy them into new shared runtime names.
+
 ## Branch naming
 
 Never create new branches with agent or vendor prefixes such as `codex/*`,

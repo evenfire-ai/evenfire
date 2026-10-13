@@ -100,7 +100,7 @@ async function setup(count = 83, reverse = false) {
     undefined,
     undefined,
     manager,
-    true,
+    { mcpDiscovery: true, nativeDiscovery: false },
     'codex-subscription'
   )
   // Match the observed 36-native workload without changing any real native
@@ -144,6 +144,7 @@ async function setup(count = 83, reverse = false) {
   config.bridge = {
     nativeNames,
     getDeferrableCatalogNames: () => new Set(manager.getAllTools().map(tool => tool.name)),
+    nativeTargets: false,
   }
   return { manager, native, registry, config, conversation, nativeNames }
 }
@@ -171,7 +172,7 @@ describe('approved catalog across presentation and lifecycle', () => {
         { dynamicToolsEnabled: false, dynamicToolsThreshold: 60, codexMode: 'auto' },
         { get: () => undefined, set: () => {} }
       )
-      const builder = new DefaultPromptBuilder()
+      const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
       const buildPrompts = async () => {
         const presented = await controller.refreshTools(registry.listDefinitions())
         const hasBridge = presented.some(tool => tool.name === 'clerum__tool_search')

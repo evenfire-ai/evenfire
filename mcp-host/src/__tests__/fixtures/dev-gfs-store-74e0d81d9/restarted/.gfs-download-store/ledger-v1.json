@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "records": {
+    "d6caab69-3268-4cd5-bdeb-c38826cae94e": {
+      "id": "d6caab69-3268-4cd5-bdeb-c38826cae94e",
+      "callerIdentity": "caller-dev-a",
+      "source": {
+        "kind": "gfs",
+        "drive": "main",
+        "resourceId": "00000000000000000000000000000001",
+        "gfsUri": "gfs://main/00000000000000000000000000000001",
+        "name": "rollback-1.bin",
+        "version": 1
+      },
+      "directory": "users/caller-dev-a/.gfs-downloads/input-d6caab69-3268-4cd5-bdeb-c38826cae94e",
+      "path": ".gfs-downloads/input-d6caab69-3268-4cd5-bdeb-c38826cae94e/source",
+      "hostPath": "users/caller-dev-a/.gfs-downloads/input-d6caab69-3268-4cd5-bdeb-c38826cae94e/source",
+      "sizeBytes": 64,
+      "createdAt": "2026-10-08T20:53:53.798Z",
+      "expiresAt": "2026-10-08T21:53:53.797Z",
+      "state": "quarantined",
+      "sha256": "7c8975e1e60a5c8337f28edf8c33c3b180360b7279644a9bc1af3c51e6220bf5"
+    },
+    "539bd553-e9c2-448e-b68e-fcbef6e5ebcb": {
+      "id": "539bd553-e9c2-448e-b68e-fcbef6e5ebcb",
+      "callerIdentity": "caller-dev-a",
+      "source": {
+        "kind": "gfs",
+        "drive": "main",
+        "resourceId": "00000000000000000000000000000002",
+        "gfsUri": "gfs://main/00000000000000000000000000000002",
+        "name": "rollback-2.bin",
+        "version": 1
+      },
+      "directory": "users/caller-dev-a/.gfs-downloads/input-539bd553-e9c2-448e-b68e-fcbef6e5ebcb",
+      "path": ".gfs-downloads/input-539bd553-e9c2-448e-b68e-fcbef6e5ebcb/source",
+      "hostPath": "users/caller-dev-a/.gfs-downloads/input-539bd553-e9c2-448e-b68e-fcbef6e5ebcb/source",
+      "sizeBytes": 64,
+      "createdAt": "2026-10-08T20:53:53.824Z",
+      "expiresAt": "2026-10-08T21:53:53.824Z",
+      "state": "quarantined"
+    },
+    "41cedf16-faf5-43bf-bf41-d8c2b04829c8": {
+      "id": "41cedf16-faf5-43bf-bf41-d8c2b04829c8",
+      "callerIdentity": "caller-dev-b",
+      "source": {
+        "kind": "gfs",
+        "drive": "main",
+        "resourceId": "00000000000000000000000000000003",
+        "gfsUri": "gfs://main/00000000000000000000000000000003",
+        "name": "rollback-3.bin",
+        "version": 1
+      },
+      "directory": "users/caller-dev-b/.gfs-downloads/input-41cedf16-faf5-43bf-bf41-d8c2b04829c8",
+      "path": ".gfs-downloads/input-41cedf16-faf5-43bf-bf41-d8c2b04829c8/source",
+      "hostPath": "users/caller-dev-b/.gfs-downloads/input-41cedf16-faf5-43bf-bf41-d8c2b04829c8/source",
+      "sizeBytes": 64,
+      "createdAt": "2026-10-08T20:53:53.848Z",
+      "expiresAt": "2026-10-08T21:53:53.848Z",
+      "state": "quarantined",
+      "sha256": "6aa56c4bcd208911792ad24c7681fefb93bed51903afc54860c9bd37e41e5a31"
+    },
+    "ed73f60a-3b7f-42bb-8c58-32b3d8ece70b": {
+      "id": "ed73f60a-3b7f-42bb-8c58-32b3d8ece70b",
+      "callerIdentity": "caller-dev-a",
+      "source": {
+        "kind": "gfs",
+        "drive": "main",
+        "resourceId": "00000000000000000000000000000004",
+        "gfsUri": "gfs://main/00000000000000000000000000000004",
+        "name": "rollback-4.bin",
+        "version": 1
+      },
+      "directory": "users/caller-dev-a/.gfs-downloads/input-ed73f60a-3b7f-42bb-8c58-32b3d8ece70b",
+      "path": ".gfs-downloads/input-ed73f60a-3b7f-42bb-8c58-32b3d8ece70b/source",
+      "hostPath": "users/caller-dev-a/.gfs-downloads/input-ed73f60a-3b7f-42bb-8c58-32b3d8ece70b/source",
+      "sizeBytes": 64,
+      "createdAt": "2026-10-08T20:53:53.883Z",
+      "expiresAt": "2026-10-08T21:53:53.883Z",
+      "state": "quarantined"
+    }
+  },
+  "processingLeases": {
+    "a5f9d9bd-07b8-4957-b6a1-8366d0b97ca9": {
+      "leaseId": "a5f9d9bd-07b8-4957-b6a1-8366d0b97ca9",
+      "callerIdentity": "caller-dev-b",
+      "recordIds": ["41cedf16-faf5-43bf-bf41-d8c2b04829c8"],
+      "acquiredAt": "2026-10-08T20:53:53.896Z",
+      "expiresAt": "2026-10-08T20:53:55.396Z",
+      "writerSessionId": "378484b4-406e-46ca-ba26-11789bd835e2"
+    },
+    "cfdd32f3-4afb-4436-9766-817fb5e3458e": {
+      "leaseId": "cfdd32f3-4afb-4436-9766-817fb5e3458e",
+      "callerIdentity": "caller-dev-a",
+      "recordIds": [
+        "d6caab69-3268-4cd5-bdeb-c38826cae94e",
+        "539bd553-e9c2-448e-b68e-fcbef6e5ebcb",
+        "ed73f60a-3b7f-42bb-8c58-32b3d8ece70b"
+      ],
+      "acquiredAt": "2026-10-08T20:53:55.909Z",
+      "expiresAt": "2026-10-08T21:53:55.909Z",
+      "writerSessionId": "378484b4-406e-46ca-ba26-11789bd835e2"
+    }
+  },
+  "retentionOwners": {}
+}

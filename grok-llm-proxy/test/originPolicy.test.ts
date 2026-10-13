@@ -142,4 +142,96 @@ describe('originPolicy', () => {
       ])
     ).resolves.toBeUndefined()
   })
+
+  it('wraps operational lookup codes without the host name', async () => {
+    const { assertResolvedUpstream } = await import('../src/originPolicy.js')
+    const codes = [
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'EAI_NONAME',
+      'ECONNREFUSED',
+      'ENETUNREACH',
+      'EHOSTUNREACH',
+    ] as const
+    let lookups = 0
+    for (const code of codes) {
+      const lookupError = Object.assign(new Error(`lookup failed for ${code}.invalid`), { code })
+      const err: unknown = await assertResolvedUpstream(
+        new URL(GROK_COMPLETIONS_ORIGIN),
+        async () => {
+          lookups += 1
+          throw lookupError
+        }
+      ).then(
+        () => 'resolved',
+        (rejection: unknown) => rejection
+      )
+      expect(err).toBeInstanceOf(Error)
+      expect(err).not.toBeInstanceOf(OriginDeniedError)
+      expect((err as Error).message).toBe('upstream address lookup failed')
+      const cause = (err as { cause?: unknown }).cause as Record<string, unknown>
+      expect(cause).toEqual({ code })
+      expect(JSON.stringify({ message: (err as Error).message, cause })).not.toContain(
+        `${code}.invalid`
+      )
+    }
+    expect(lookups).toBe(codes.length)
+  })
+
+  it('rethrows a Node ERR_* lookup error as the same reference', async () => {
+    const { assertResolvedUpstream } = await import('../src/originPolicy.js')
+    const err = Object.assign(new Error('lookup argument is invalid'), {
+      code: 'ERR_INVALID_ARG_TYPE',
+    })
+    let lookups = 0
+    await expect(
+      assertResolvedUpstream(new URL(GROK_COMPLETIONS_ORIGIN), async () => {
+        lookups += 1
+        throw err
+      })
+    ).rejects.toBe(err)
+    expect(lookups).toBe(1)
+  })
+
+  // Review R4-L1: the real lookup depends on the resolver honoring .invalid
+  // NXDOMAIN. The deterministic twins above own the code semantics.
+  it('maps a failed lookup to its code without the host name', async () => {
+    const { assertResolvedUpstream } = await import('../src/originPolicy.js')
+    const host = 'grok-origin-policy-r4-l1.invalid'
+    let lookups = 0
+    const err: unknown = await assertResolvedUpstream(new URL(GROK_COMPLETIONS_ORIGIN), async () => {
+      lookups += 1
+      const { lookup } = await import('node:dns/promises')
+      const records = await lookup(host, { all: true })
+      return records.map(record => ({ address: record.address, family: record.family }))
+    }).then(
+      () => 'resolved',
+      (rejection: unknown) => rejection
+    )
+    // Witness: the real lookup ran once.
+    expect(lookups).toBe(1)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(OriginDeniedError)
+    expect((err as Error).message).toBe('upstream address lookup failed')
+    const cause = (err as { cause?: unknown }).cause as Record<string, unknown>
+    expect(Object.keys(cause)).toEqual(['code'])
+    expect(String(cause.code)).toMatch(/^(ENOTFOUND|EAI_AGAIN)$/)
+    expect(JSON.stringify({ message: (err as Error).message, cause })).not.toContain(host)
+  }, 15_000)
+
+  it('rethrows a lookup error without a code-shaped code unchanged', async () => {
+    const { assertResolvedUpstream } = await import('../src/originPolicy.js')
+    const plain = new Error('lookup exploded')
+    await expect(
+      assertResolvedUpstream(new URL(GROK_COMPLETIONS_ORIGIN), async () => {
+        throw plain
+      })
+    ).rejects.toBe(plain)
+    const oddCode = Object.assign(new Error('odd'), { code: 'not a code' })
+    await expect(
+      assertResolvedUpstream(new URL(GROK_COMPLETIONS_ORIGIN), async () => {
+        throw oddCode
+      })
+    ).rejects.toBe(oddCode)
+  })
 })

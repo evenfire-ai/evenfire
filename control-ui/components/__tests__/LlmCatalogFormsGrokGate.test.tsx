@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { LlmAllowedModel, LlmModelPrice, TokenBudget } from '@lib/api'
-import { loadGrokSubscriptionCapability } from '@lib/grokSubscriptionFeature'
 import { LlmModelForm } from '../LlmModelForm'
 import { LlmPriceForm } from '../LlmPriceForm'
 import { TokenBudgetForm } from '../TokenBudgetForm'
@@ -10,10 +9,30 @@ import { TokenBudgetForm } from '../TokenBudgetForm'
 // grok-subscription must stay hidden until the Control API Grok capability
 // probe proves the flag on, while a saved Grok value stays visible "(disabled)".
 
-vi.mock('@lib/grokSubscriptionFeature', async importOriginal => {
-  const actual = await importOriginal<typeof import('@lib/grokSubscriptionFeature')>()
-  return { ...actual, loadGrokSubscriptionCapability: vi.fn() }
-})
+const grokCapabilityState = vi.hoisted(() => ({
+  enabled: false as boolean | null,
+  retry: vi.fn(),
+  error: null as Error | null,
+}))
+
+vi.mock('@lib/hooks/useSubscriptionCapabilities', () => ({
+  useSubscriptionCapabilities: () => ({
+    capabilities:
+      grokCapabilityState.enabled === null
+        ? null
+        : {
+            providers: {
+              'codex-subscription': { enabled: true },
+              'grok-subscription': { enabled: grokCapabilityState.enabled },
+            },
+          },
+    loading: grokCapabilityState.enabled === null && !grokCapabilityState.error,
+    error:
+      grokCapabilityState.error ??
+      (grokCapabilityState.enabled === null ? new Error('Capability read failed') : null),
+    retry: grokCapabilityState.retry,
+  }),
+}))
 
 vi.mock('@lib/hooks/useLlmAllowedModels', () => ({
   useLlmAllowedModels: () => ({ models: [], loading: false, error: '' }),
@@ -84,8 +103,12 @@ function optionValues(select: HTMLElement): string[] {
     .map(option => (option as HTMLOptionElement).value)
 }
 
-function flushProbe() {
-  return waitFor(() => expect(loadGrokSubscriptionCapability).toHaveBeenCalled())
+async function flushProbe() {
+  await Promise.resolve()
+}
+
+function setGrokCapability(enabled: boolean | null) {
+  grokCapabilityState.enabled = enabled
 }
 
 type SelectForm = {
@@ -131,12 +154,14 @@ const selectForms: SelectForm[] = [
 ]
 
 beforeEach(() => {
-  vi.mocked(loadGrokSubscriptionCapability).mockResolvedValue({ enabled: false })
+  setGrokCapability(false)
+  grokCapabilityState.retry.mockReset()
+  grokCapabilityState.error = null
 })
 
 afterEach(() => {
   cleanup()
-  vi.mocked(loadGrokSubscriptionCapability).mockReset()
+  setGrokCapability(false)
 })
 
 describe.each(selectForms)('$name Grok capability gate', form => {
@@ -155,7 +180,7 @@ describe.each(selectForms)('$name Grok capability gate', form => {
   })
 
   it('fails closed (no Grok option) when the probe throws', async () => {
-    vi.mocked(loadGrokSubscriptionCapability).mockRejectedValue(new Error('probe boom'))
+    setGrokCapability(null)
     form.renderCreate()
     await flushProbe()
     await Promise.resolve()
@@ -163,7 +188,7 @@ describe.each(selectForms)('$name Grok capability gate', form => {
   })
 
   it('offers grok-subscription once the probe reports enabled', async () => {
-    vi.mocked(loadGrokSubscriptionCapability).mockResolvedValue({ enabled: true })
+    setGrokCapability(true)
     form.renderCreate()
     await waitFor(() => expect(optionValues(providerSelect())).toContain(GROK))
     const grokOption = within(providerSelect())
@@ -185,6 +210,47 @@ describe.each(selectForms)('$name Grok capability gate', form => {
     expect(grokOptions[0]).toHaveTextContent(/\(disabled\)$/)
     expect(select).not.toHaveTextContent(/unrecognized/)
   })
+
+  it('keeps saved provider/model drafts during throttle uncertainty and recovers without calling the provider disabled', async () => {
+    const element = () =>
+      form.name === 'LlmModelForm' ? (
+        <LlmModelForm
+          mode="edit"
+          initial={grokModel}
+          saving={false}
+          onSubmit={noop}
+          onCancel={noop}
+        />
+      ) : (
+        <LlmPriceForm
+          mode="edit"
+          initial={grokPrice}
+          saving={false}
+          onSubmit={noop}
+          onCancel={noop}
+        />
+      )
+    setGrokCapability(null)
+    grokCapabilityState.error = Object.assign(new Error('Try again in 12 seconds.'), {
+      status: 429,
+    })
+    const view = render(element())
+    const model = screen.getByLabelText(/^Model\b/, { selector: 'input' })
+    fireEvent.change(model, { target: { value: 'grok-draft' } })
+    expect(providerSelect()).toHaveValue(GROK)
+    expect(providerSelect()).toHaveTextContent('availability unknown')
+    expect(providerSelect()).not.toHaveTextContent('(disabled)')
+    expect(screen.getByRole('alert')).toHaveTextContent('Try again in 12 seconds.')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(grokCapabilityState.retry).toHaveBeenCalledOnce()
+    setGrokCapability(true)
+    grokCapabilityState.error = null
+    view.rerender(element())
+    expect(providerSelect()).toHaveValue(GROK)
+    expect(model).toHaveValue('grok-draft')
+    expect(providerSelect()).not.toHaveTextContent(/disabled|availability unknown/)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
 })
 
 describe('TokenBudgetForm Grok capability gate', () => {
@@ -202,7 +268,7 @@ describe('TokenBudgetForm Grok capability gate', () => {
   })
 
   it('offers grok-subscription in the provider scope once the probe reports enabled', async () => {
-    vi.mocked(loadGrokSubscriptionCapability).mockResolvedValue({ enabled: true })
+    setGrokCapability(true)
     render(<TokenBudgetForm mode="create" saving={false} onSubmit={noop} onCancel={noop} />)
     await waitFor(() => expect(optionValues(addProviderSelect())).toContain(GROK))
   })
@@ -221,5 +287,34 @@ describe('TokenBudgetForm Grok capability gate', () => {
     await Promise.resolve()
     expect(screen.getByText('xAI Grok Subscription (disabled)')).toBeInTheDocument()
     expect(optionValues(addProviderSelect())).not.toContain(GROK)
+  })
+
+  it('retains a saved scope and a name draft while capability throttling is unknown, then recovers', async () => {
+    const element = () => (
+      <TokenBudgetForm
+        mode="edit"
+        initial={grokBudget}
+        saving={false}
+        onSubmit={noop}
+        onCancel={noop}
+      />
+    )
+    setGrokCapability(null)
+    grokCapabilityState.error = Object.assign(new Error('Try again in 12 seconds.'), {
+      status: 429,
+    })
+    const view = render(element())
+    fireEvent.change(screen.getByRole('textbox', { name: /^Name\b/ }), {
+      target: { value: 'Unsaved quota draft' },
+    })
+    expect(screen.getByText('xAI Grok Subscription (availability unknown)')).toBeInTheDocument()
+    expect(screen.queryByText('xAI Grok Subscription (disabled)')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    setGrokCapability(true)
+    grokCapabilityState.error = null
+    view.rerender(element())
+    expect(screen.getByRole('textbox', { name: /^Name\b/ })).toHaveValue('Unsaved quota draft')
+    expect(screen.getByText('xAI Grok Subscription')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })

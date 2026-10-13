@@ -242,7 +242,7 @@ describe('turnsToChatMessages', () => {
     ])
     const local: ChatMessage = {
       ...incoming[0]!,
-      attachments: buildChatMessageAttachments([], references),
+      attachments: buildChatMessageAttachments([], references, []),
     }
     const once = mergeAuthoritativeServerMessages([local], incoming)
     const twice = mergeAuthoritativeServerMessages(once, incoming)
@@ -395,6 +395,7 @@ describe('turnsToChatMessages', () => {
           previewDataUrl: 'data:image/png;base64,AQ==',
         },
       ],
+      [],
       []
     )[0]!
     const secondImage = buildChatMessageAttachments(
@@ -408,6 +409,7 @@ describe('turnsToChatMessages', () => {
           previewDataUrl: 'data:image/png;base64,Ag==',
         },
       ],
+      [],
       []
     )[0]!
     expect(firstImage.dataBase64).not.toBe(secondImage.dataBase64)
@@ -466,6 +468,7 @@ describe('turnsToChatMessages', () => {
             previewDataUrl: 'data:image/png;base64,Ag==',
           },
         ],
+        [],
         []
       ),
     }

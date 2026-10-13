@@ -7,9 +7,10 @@ import {
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
 
-// B-L6: a deeply nested authorize body must fail closed as invalid_request
-// before the authorizer serializes it. Without the guard, JSON.stringify throws
-// a RangeError that the route maps to a 500.
+// The contracts cap free-form trees at 64 containers. The authorizer also
+// guards the complete body before serialization, including direct service
+// calls that never pass through the route's raw-body scan. The deepest accepted
+// assistant tool-call arguments sit six containers below the body root.
 
 const PROVIDERS = [
   {
@@ -55,37 +56,20 @@ function wireBody(p: ProviderCase, parametersJson: string, extra = ''): Record<s
   ) as Record<string, unknown>
 }
 
-function nestedArrays(depth: number): string {
-  return `{"x":${'['.repeat(depth)}${']'.repeat(depth)}}`
-}
-
-/** Iterative (stack-free) depth of a JSON tree: the root container is level 1. */
-function nestingDepth(root: unknown): number {
-  let deepest = 0
-  const pending: Array<{ value: unknown; level: number }> = [{ value: root, level: 1 }]
-  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
-    if (typeof next.value !== 'object' || next.value === null) continue
-    deepest = Math.max(deepest, next.level)
-    const children = Array.isArray(next.value) ? next.value : Object.values(next.value)
-    for (const child of children) pending.push({ value: child, level: next.level + 1 })
-  }
-  return deepest
-}
-
 function nestedObjects(depth: number): string {
   return `${'{"n":'.repeat(depth - 1)}{}${'}'.repeat(depth - 1)}`
 }
 
-const GUARD_PASSED = new Error('guard passed: assignment lookup reached')
+const CAP_PASSED = new Error('contract cap passed: assignment lookup reached')
 
 function deps(): Partial<LlmProviderAttemptAuthorizerDeps> {
   return {
     enabled: true,
-    resolveAssignment: vi.fn().mockRejectedValue(GUARD_PASSED),
+    resolveAssignment: vi.fn().mockRejectedValue(CAP_PASSED),
   }
 }
 
-describe('authorizeLlmProviderAttempt nesting depth guard', () => {
+describe('authorizeLlmProviderAttempt contract nesting cap', () => {
   const previousGrokFlag = config.grokSubscriptionEnabled
 
   beforeEach(() => {
@@ -97,41 +81,37 @@ describe('authorizeLlmProviderAttempt nesting depth guard', () => {
   })
 
   for (const p of PROVIDERS) {
-    for (const depth of [5000, 150000]) {
-      it(`rejects a ${depth}-deep ${p.provider} request with invalid_request, not a RangeError`, async () => {
-        const body = wireBody(p, nestedArrays(depth))
-        // Whether V8's JSON.stringify overflows the stack at this depth is
-        // platform-dependent, so the fixture is verified by measuring its
-        // depth instead; the guard below is the platform-independent contract.
-        expect(nestingDepth(body)).toBeGreaterThanOrEqual(depth)
-        const current = deps()
-        const attempt = authorizeLlmProviderAttempt(claims(p.scope), body, current)
-        await expect(attempt).rejects.toBeInstanceOf(LlmProviderAttemptAuthorizeError)
-        await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' })
-        await expect(attempt).rejects.toThrow(/nesting depth/)
-        expect(current.resolveAssignment).not.toHaveBeenCalled()
-      })
-    }
-
-    it(`rejects deep nesting under an unknown ${p.provider} body key before serializing`, async () => {
-      const body = wireBody(p, '{"type":"object"}', `,"extra":${nestedArrays(150000)}`)
-      expect(nestingDepth(body)).toBeGreaterThanOrEqual(150000)
-      const current = deps()
-      const attempt = authorizeLlmProviderAttempt(claims(p.scope), body, current)
-      await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' })
-      await expect(attempt).rejects.toThrow(/nesting depth/)
+    it(`rejects 100000-deep ${p.provider} bodies before serialization and assignment lookup`, async () => {
+      const bodies = [
+        wireBody(p, nestedObjects(100_000)),
+        wireBody(p, '{"type":"object"}', `,"extra":${nestedObjects(100_000)}`),
+      ]
+      const stringify = vi.spyOn(JSON, 'stringify')
+      try {
+        for (const body of bodies) {
+          const current = deps()
+          const attempt = authorizeLlmProviderAttempt(claims(p.scope), body, current)
+          await expect(attempt).rejects.toBeInstanceOf(LlmProviderAttemptAuthorizeError)
+          await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' })
+          await expect(attempt).rejects.toThrow(/maximum nesting depth/)
+          expect(stringify).not.toHaveBeenCalledWith(body)
+          expect(current.resolveAssignment).not.toHaveBeenCalled()
+        }
+      } finally {
+        stringify.mockRestore()
+      }
     })
 
-    it(`lets a ${p.provider} request with 64-deep tool parameters past the guard`, async () => {
+    it(`lets a ${p.provider} request with 64-deep tool parameters past the contract cap`, async () => {
       const body = wireBody(p, nestedObjects(64))
       const current = deps()
       await expect(authorizeLlmProviderAttempt(claims(p.scope), body, current)).rejects.toBe(
-        GUARD_PASSED
+        CAP_PASSED
       )
       expect(current.resolveAssignment).toHaveBeenCalledTimes(1)
     })
 
-    it(`lets a ${p.provider} request with 64-deep assistant tool-call arguments past the guard`, async () => {
+    it(`lets a ${p.provider} request with 64-deep assistant tool-call arguments past the contract cap`, async () => {
       // The deepest accepted tree: body > request > messages[] > message >
       // toolCalls[] > call > arguments, then 64 levels inside arguments.
       const body = wireBody(p, '{"type":"object"}')
@@ -141,7 +121,7 @@ describe('authorizeLlmProviderAttempt nesting depth guard', () => {
       )
       const current = deps()
       await expect(authorizeLlmProviderAttempt(claims(p.scope), body, current)).rejects.toBe(
-        GUARD_PASSED
+        CAP_PASSED
       )
     })
 

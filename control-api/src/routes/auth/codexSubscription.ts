@@ -22,7 +22,7 @@ import {
   resolveCodexCallbackControlUiBaseUrl,
 } from '../../services/codexSubscriptionRedirectUri.js'
 import { publishAllowedModelsConfigMapAfterGrantChange } from '../../services/llmAllowedModelsConfigMap.js'
-import { codexOAuthCallbackRateLimits } from '../workflows/shared/rateLimit.js'
+import { subscriptionOAuthCallbackRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'auth-codex-subscription' })
 
@@ -65,7 +65,7 @@ export function createAuthCodexSubscriptionRouter(
 
   router.get(
     '/auth/codex-subscription/callback',
-    ...codexOAuthCallbackRateLimits(),
+    ...subscriptionOAuthCallbackRateLimits(),
     asyncHandler(async (req, res) => {
       const code = typeof req.query.code === 'string' ? req.query.code : ''
       const state = typeof req.query.state === 'string' ? req.query.state : ''
@@ -88,7 +88,10 @@ export function createAuthCodexSubscriptionRouter(
         redirectToCodexSurface(res, 'connected')
       } catch (err) {
         if (err instanceof CodexSubscriptionOAuthError) {
-          log.warn({ event: 'codex_oauth_callback_denied', code: err.code }, 'callback denied')
+          log.warn(
+            { event: 'subscription_oauth_callback_denied', code: err.code },
+            'callback denied'
+          )
           if (err.code === 'disabled') {
             res.status(404).json({ error: err.code })
             return

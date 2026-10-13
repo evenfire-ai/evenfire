@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import {
+  LIMITS as GROK_LIMITS,
+  GROK_VISUAL_LIMITS,
+  buildGrokProxyEnvelope,
+  hashGrokCompletionRequest,
+  parseGrokCompletionRequest,
+} from '@clerum/grok-provider-attempt-contract'
 import { LlmErrorCode } from '../../core/errors'
 import { classifyFailoverClass } from '../failover/classify'
 import {
@@ -10,6 +17,7 @@ import {
 import { GrokSubscriptionProvider } from '../grokSubscription'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { closedPortUrl, fetchFailure, silentServer } from './connectFailureFixtures'
+import { GROK_PNG_2X2_BASE64 } from './grokImageFixtures'
 
 const RUNTIME_BASE = 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080'
 const RUNTIME_URL = `${RUNTIME_BASE}/internal/runtime/v1/grok/completions`
@@ -34,6 +42,49 @@ function client(fetchFn: unknown, extra: { refreshOnUnauthorized?: () => Promise
   })
 }
 
+// A well-formed V2 request with one image, authorized under its own hash.
+function visualInput() {
+  const parsed = parseGrokCompletionRequest({
+    schemaVersion: 'grok-completion-request.v2',
+    requestId: 'req-visual',
+    idempotencyKey: 'idem-visual',
+    provider: 'grok-subscription',
+    model: 'grok-4.6',
+    deadlineMs: 1000,
+    messages: [
+      {
+        role: 'user',
+        content: 'Describe the attached image',
+        contentParts: [
+          { type: 'text', text: 'Describe the attached image' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: GROK_PNG_2X2_BASE64,
+            source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+          },
+        ],
+      },
+    ],
+  })
+  if (!parsed.ok) throw new Error(parsed.message)
+  return {
+    request: parsed.value,
+    requestHash: hashGrokCompletionRequest(parsed.value),
+    executionTicket: 'fixture-ticket',
+  }
+}
+type VisualInput = ReturnType<typeof visualInput>
+
+/** The fixture's single user message, with its parts. */
+function visualMessage(input: VisualInput) {
+  const [message] = input.request.messages
+  if (!message || !('contentParts' in message) || !message.contentParts) {
+    throw new Error('fixture message has no contentParts')
+  }
+  return { ...message, contentParts: message.contentParts }
+}
+
 const STREAM_INPUT = {
   executionTicket: 'ticket-123456',
   requestHash: 'a'.repeat(64),
@@ -41,6 +92,140 @@ const STREAM_INPUT = {
 }
 
 describe('GrokLlmProxyClient', () => {
+  it('T-G4c-4 sends the exact measured V2 envelope and refuses an independent deadline or hash', async () => {
+    const parsed = parseGrokCompletionRequest({
+      schemaVersion: 'grok-completion-request.v2',
+      requestId: 'req-visual',
+      idempotencyKey: 'idem-visual',
+      provider: 'grok-subscription',
+      model: 'grok-4.6',
+      deadlineMs: 1000,
+      messages: [
+        {
+          role: 'user',
+          content: 'Describe the attached image',
+          contentParts: [
+            { type: 'text', text: 'Describe the attached image' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: GROK_PNG_2X2_BASE64,
+              source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+            },
+          ],
+        },
+      ],
+    })
+    if (!parsed.ok) throw new Error(parsed.message)
+    const input = {
+      request: parsed.value,
+      requestHash: hashGrokCompletionRequest(parsed.value),
+      executionTicket: 'fixture-ticket',
+    }
+    const measured = buildGrokProxyEnvelope(input)
+    if (!measured.ok) throw new Error(measured.message)
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(sse([{ type: 'done', outcome: 'success' }]))
+    )
+    const grok = client(fetchFn)
+    // grok-llm-proxy refuses an outer deadline on V2 (the deadline is inside
+    // the hashed request), so the client must not send one.
+    await grok.stream({ ...input, deadlineMs: 1000 })
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual(measured.value)
+    expect(measured.value).not.toHaveProperty('deadlineMs')
+    await expect(grok.stream({ ...input, deadlineMs: 2000 })).rejects.toMatchObject({
+      code: 'invalid_request',
+      dispatched: false,
+    })
+    await expect(grok.stream({ ...input, requestHash: 'a'.repeat(64) })).rejects.toMatchObject({
+      code: 'request_hash_mismatch',
+      message: 'requestHash does not match the request',
+      dispatched: false,
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  // Each contract refusal on the V2 path keeps its own code, so the Host
+  // classifies a size refusal as a size refusal and never dispatches.
+  it.each([
+    [
+      'a request the contract rejects',
+      (input: VisualInput) => ({ ...input, request: { ...input.request, requestId: '' } }),
+      { code: 'invalid_request', message: 'requestId is invalid' },
+    ],
+    [
+      'an envelope over the visual ceiling',
+      (input: VisualInput) => ({
+        ...input,
+        executionTicket: 't'.repeat(GROK_LIMITS.maxVisualRequestBodyBytes),
+      }),
+      { code: 'payload_too_large', message: 'proxy envelope exceeds maxVisualRequestBodyBytes' },
+    ],
+    [
+      'an envelope the contract rejects',
+      (input: VisualInput) => ({ ...input, executionTicket: 'short' }),
+      { code: 'invalid_request', message: 'executionTicket is invalid' },
+    ],
+    // Review R3 nit c: the envelope refusal uses the providers' canonical
+    // mapping, so an image count is not a size refusal.
+    [
+      'more images than the contract allows',
+      (input: VisualInput) => {
+        const message = visualMessage(input)
+        const image = message.contentParts.find(part => part.type === 'image')
+        if (!image) throw new Error('fixture has no image part')
+        const images = Array.from({ length: GROK_VISUAL_LIMITS.maxImages + 1 }, (_, i) => ({
+          ...image,
+          source: { kind: 'attachment' as const, attachmentId: `att-${i}`, messageId: 'msg-1' },
+        }))
+        const contentParts = [{ type: 'text' as const, text: message.content }, ...images]
+        return {
+          ...input,
+          request: { ...input.request, messages: [{ ...message, contentParts }] },
+        }
+      },
+      {
+        code: 'invalid_request',
+        message: `request exceeds ${GROK_VISUAL_LIMITS.maxImages} images`,
+      },
+    ],
+    [
+      'text over the non-image budget',
+      (input: VisualInput) => {
+        const message = visualMessage(input)
+        const text = 'x'.repeat(GROK_LIMITS.maxRequestBodyBytes)
+        const parts = message.contentParts.map(part =>
+          part.type === 'text' ? { ...part, text } : part
+        )
+        return {
+          ...input,
+          request: {
+            ...input.request,
+            messages: [{ ...message, content: text, contentParts: parts }],
+          },
+        }
+      },
+      {
+        code: 'request_limit_exceeded',
+        message: 'request exceeds maxRequestBodyBytes outside image data',
+      },
+    ],
+  ])('T-G4c-5 refuses %s before the proxy hop', async (_label, mutate, expected) => {
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(sse([{ type: 'done', outcome: 'success' }]))
+    )
+    const grok = client(fetchFn)
+    const input = visualInput()
+    await expect(grok.stream(mutate(input))).rejects.toMatchObject({
+      ...expected,
+      dispatched: false,
+    })
+    expect(fetchFn).not.toHaveBeenCalled()
+    // Witness: the unmodified request reaches the proxy.
+    await grok.stream(input)
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
   it('streams only to the server-owned Grok runtime URL and ignores a caller-supplied URL', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
@@ -359,6 +544,90 @@ describe('GrokLlmProxyClient', () => {
     })
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
+
+  it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'] as const)(
+    'decodes the local %s admission code without failover and keeps the client usable',
+    async code => {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json({ error: code, reason: 'untrusted upstream prose' }, { status: 503 })
+        )
+        .mockResolvedValueOnce(new Response(sse([{ type: 'done', outcome: 'success' }])))
+      const grok = client(fetchFn)
+      const err = await grok.stream(STREAM_INPUT).then(
+        () => undefined,
+        (e: unknown) => e
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(GrokProxyError)
+      if (!(err instanceof GrokProxyError)) throw new Error('expected GrokProxyError')
+      expect(err).toMatchObject({
+        code,
+        message: grokProxyErrorMessage(code, 503),
+        dispatched: true,
+      })
+      expect(err.message).not.toContain('untrusted upstream prose')
+
+      const provider = new GrokSubscriptionProvider('grok-4.6', {} as never)
+      const classified = provider.classifyError(err)
+      expect(classified.code).toBe(LlmErrorCode.ApiCallFailed)
+      expect(classified.retryable).toBe(false)
+      expect(classified.providerCode).toBe(code)
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+      const next = await grok.stream(STREAM_INPUT)
+      expect(next.outcome).toBe('success')
+      expect(fetchFn).toHaveBeenCalledTimes(2)
+
+      const outage = provider.classifyError(
+        new GrokProxyError('provider_unavailable', 'real upstream outage')
+      )
+      expect(outage.code).toBe(LlmErrorCode.ModelOverloaded)
+      expect(outage.retryable).toBe(true)
+      expect(classifyFailoverClass(outage.code, outage.retryable)).toBe('provider_unavailable')
+    }
+  )
+
+  it.each([
+    [
+      'unknown_machine_code',
+      JSON.stringify({ error: 'future_proxy_error' }),
+      LlmErrorCode.ApiCallFailed,
+      false,
+      'future_proxy_error',
+    ],
+    [
+      'reason_only',
+      JSON.stringify({ reason: 'visual_gate' }),
+      LlmErrorCode.ModelOverloaded,
+      true,
+      'provider_unavailable',
+    ],
+    ['malformed_json', '{', LlmErrorCode.ModelOverloaded, true, 'provider_unavailable'],
+  ] as const)(
+    'keeps wire %s separate from trusted local refusal provenance',
+    async (_label, body, code, retryable, providerCode) => {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(body, { status: 503, headers: { 'content-type': 'application/json' } })
+        )
+      const proxy = client(fetchFn)
+      const error = await proxy.stream(STREAM_INPUT).then(
+        () => undefined,
+        (caught: unknown) => caught
+      )
+      expect(error).toBeInstanceOf(GrokProxyError)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      const provider = new GrokSubscriptionProvider('grok-4.6', {} as never)
+      const classified = provider.classifyError(error)
+      expect(classified).toMatchObject({ code, retryable, providerCode })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+        retryable ? 'provider_unavailable' : null
+      )
+    }
+  )
 
   // T-TE-1 (D4) — the proxy passes control-api's redeem refusal through as
   // `403 { error: 'ticket_expired' }` when the ticket died while the request

@@ -129,7 +129,8 @@ describe('buildComposerResendDraft', () => {
             version: 3,
             bytes: 4096,
           },
-        ]
+        ],
+        []
       ),
     })
     expect(draft.referenceAttachments).toMatchObject([

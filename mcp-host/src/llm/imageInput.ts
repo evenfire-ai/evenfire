@@ -19,6 +19,7 @@
  *   vertex              yes       yes                n/a        user
  *   bedrock             yes       yes                n/a        user
  *   codex-subscription  yes       yes                n/a        user
+ *   grok-subscription   yes       yes                n/a        user
  *
  * `complete` is the tool-less, cache-less path (`completeSingleTurn`): OpenAI,
  * OpenAI-compatible and Azure rebuild `role/content` and drop `contentParts`,
@@ -79,6 +80,7 @@ export type ImageWireFamily =
   | 'vertex'
   | 'bedrock'
   | 'codex'
+  | 'grok'
   /**
    * No covered serializer exists for this id (unknown string, or a registered
    * provider with no factory arm we have proven). Every capability answer is
@@ -100,6 +102,7 @@ const EXPLICIT_DRIVER_FAMILY: Readonly<Record<string, ImageWireFamily>> = {
   bedrock: 'bedrock',
   azure: 'openai-compatible',
   'codex-subscription': 'codex',
+  'grok-subscription': 'grok',
 }
 
 export function imageWireFamilyFor(providerType: string): ImageWireFamily {
@@ -147,6 +150,14 @@ const TRANSPORT_SUPPORT: Readonly<
     completeAndCache: false,
     completeWithToolsAndCache: false,
   },
+  // #784: Grok V2 carries ordered user image parts on the same two paths.
+  // Cache variants are not implemented on this transport.
+  grok: {
+    complete: true,
+    completeWithTools: true,
+    completeAndCache: false,
+    completeWithToolsAndCache: false,
+  },
   unregistered: {
     complete: false,
     completeWithTools: false,
@@ -161,6 +172,7 @@ const IMAGE_ROLES_BY_FAMILY: Readonly<Record<ImageWireFamily, readonly MessageRo
   vertex: ['user'],
   bedrock: ['user'],
   codex: ['user'],
+  grok: ['user'],
   unregistered: [],
 }
 
@@ -248,6 +260,9 @@ export interface ImageInputRequestFacts {
  * omission — callers must not pass `capability === undefined` unless they have
  * a row. Curated `unsupported` / dated evidence still wins. Never invent
  * models.dev rows.
+ *
+ * #784 applies the same rule to Grok Subscription: the recorded Grok catalog
+ * carries no modality field either.
  */
 export function resolveHostImageInput(
   providerType: string,
@@ -255,8 +270,9 @@ export function resolveHostImageInput(
   options: { transportSupported: boolean; now?: number }
 ): ImageInputDecision {
   const decision = resolveImageInputCapability(capability, options)
+  const family = imageWireFamilyFor(providerType)
   if (
-    imageWireFamilyFor(providerType) === 'codex' &&
+    (family === 'codex' || family === 'grok') &&
     options.transportSupported === true &&
     capability === undefined &&
     decision.state === 'unknown' &&

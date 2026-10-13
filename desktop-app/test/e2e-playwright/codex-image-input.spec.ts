@@ -150,7 +150,7 @@ for (const format of ['png', 'jpeg'] as const) {
     test.setTimeout(240_000)
     // The random answer exists only in pixels, never the filename or prompt.
     // A generic response or discarded image cannot satisfy this 64-bit challenge.
-    const image = challengeImage(format)
+    const image = challengeImage(format, { requirePixels: true })
     const filename = `visual-${randomUUID()}.${format}`
     await test.step('select the owned Codex Host and model through UI', async () => {
       await startOwnedChat(appPage)
@@ -173,7 +173,7 @@ for (const format of ['png', 'jpeg'] as const) {
 
 test('2048 px JPEG follows the Codex long-side pixel bound', async ({ appPage }) => {
   test.setTimeout(360_000)
-  const image = challengeImageAt('jpeg', 2048, 256)
+  const image = challengeImageAt('jpeg', 2048, 256, { requirePixels: true })
   const filename = `visual-${randomUUID()}.jpeg`
   await startOwnedChat(appPage)
   await uploadThroughChooser(appPage, [
@@ -189,7 +189,7 @@ test('2048 px JPEG follows the Codex long-side pixel bound', async ({ appPage })
 
 test('2048 by 2048 JPEG stays at the Codex pixel ceiling', async ({ appPage }) => {
   test.setTimeout(360_000)
-  const image = challengeImageAt('jpeg', 2048, 2048)
+  const image = challengeImageAt('jpeg', 2048, 2048, { requirePixels: true })
   const filename = `visual-${randomUUID()}.jpeg`
   await startOwnedChat(appPage)
   await uploadThroughChooser(appPage, [
@@ -204,7 +204,7 @@ test('2048 by 2048 JPEG stays at the Codex pixel ceiling', async ({ appPage }) =
 })
 
 test('refuses a 2049 px image before send', async ({ appPage }) => {
-  const image = challengeImageAt('png', 2049, 128)
+  const image = challengeImageAt('png', 2049, 128, { requirePixels: true })
   const filename = `over-res-${randomUUID()}.png`
   await startOwnedChat(appPage)
   await uploadThroughChooser(appPage, [
@@ -219,7 +219,7 @@ test('refuses a 2049 px image before send', async ({ appPage }) => {
 
 test('5 MiB JPEG follows the same visual path as a small image', async ({ appPage }) => {
   test.setTimeout(360_000)
-  const image = paddedChallengeImage('jpeg', 5 * MIB)
+  const image = paddedChallengeImage('jpeg', 5 * MIB, { requirePixels: true })
   const filename = `visual-${randomUUID()}.jpeg`
   await startOwnedChat(appPage)
   await uploadThroughChooser(appPage, [
@@ -235,7 +235,7 @@ test('5 MiB JPEG follows the same visual path as a small image', async ({ appPag
 
 test('12 MiB PNG follows the exceptional hard ceiling above 10 MiB', async ({ appPage }) => {
   test.setTimeout(360_000)
-  const image = paddedChallengeImage('png', 12 * MIB)
+  const image = paddedChallengeImage('png', 12 * MIB, { requirePixels: true })
   const filename = `visual-${randomUUID()}.png`
   await startOwnedChat(appPage)
   await uploadThroughChooser(appPage, [
@@ -251,8 +251,8 @@ test('12 MiB PNG follows the exceptional hard ceiling above 10 MiB', async ({ ap
 
 test('10 MiB PNG + 5 MiB JPEG stay under the 16 MiB combined hard ceiling', async ({ appPage }) => {
   test.setTimeout(360_000)
-  const ten = paddedChallengeImage('png', 10 * MIB)
-  const five = paddedChallengeImage('jpeg', 5 * MIB)
+  const ten = paddedChallengeImage('png', 10 * MIB, { requirePixels: true })
+  const five = paddedChallengeImage('jpeg', 5 * MIB, { requirePixels: true })
   const tenName = `visual-${randomUUID()}.png`
   const fiveName = `visual-${randomUUID()}.jpeg`
   await startOwnedChat(appPage)
@@ -271,9 +271,9 @@ test('10 MiB PNG + 5 MiB JPEG stay under the 16 MiB combined hard ceiling', asyn
 
 test('three 5 MiB images follow the combined budget', async ({ appPage }) => {
   test.setTimeout(360_000)
-  const first = paddedChallengeImage('png', 5 * MIB)
-  const second = paddedChallengeImage('jpeg', 5 * MIB)
-  const third = paddedChallengeImage('png', 5 * MIB)
+  const first = paddedChallengeImage('png', 5 * MIB, { requirePixels: true })
+  const second = paddedChallengeImage('jpeg', 5 * MIB, { requirePixels: true })
+  const third = paddedChallengeImage('png', 5 * MIB, { requirePixels: true })
   const files: UploadFile[] = [
     { name: `visual-${randomUUID()}.png`, mimeType: 'image/png', buffer: first.bytes },
     { name: `visual-${randomUUID()}.jpeg`, mimeType: 'image/jpeg', buffer: second.bytes },
@@ -290,7 +290,7 @@ test('three 5 MiB images follow the combined budget', async ({ appPage }) => {
 })
 
 test('refuses a single image over the 16 MiB limit before send', async ({ appPage }) => {
-  const image = paddedChallengeImage('png', 17 * MIB)
+  const image = paddedChallengeImage('png', 17 * MIB, { requirePixels: true })
   const filename = `over-${randomUUID()}.png`
   await startOwnedChat(appPage)
   await uploadThroughChooser(appPage, [
@@ -304,8 +304,8 @@ test('refuses a single image over the 16 MiB limit before send', async ({ appPag
 })
 
 test('composer attaches a pair that exceeds the hop aggregate', async ({ appPage }) => {
-  const fits = paddedChallengeImage('png', 10 * MIB)
-  const over = paddedChallengeImage('jpeg', 7 * MIB)
+  const fits = paddedChallengeImage('png', 10 * MIB, { requirePixels: true })
+  const over = paddedChallengeImage('jpeg', 7 * MIB, { requirePixels: true })
   const fitsName = `fits-${randomUUID()}.png`
   const overName = `over-total-${randomUUID()}.jpeg`
   await startOwnedChat(appPage)
@@ -321,7 +321,7 @@ test('composer attaches a pair that exceeds the hop aggregate', async ({ appPage
 
 test('explains a 21st image instead of dropping it silently', async ({ appPage }) => {
   const files = Array.from({ length: 20 }, (_, index) => {
-    const image = challengeImage(index === 1 ? 'jpeg' : 'png')
+    const image = challengeImage(index === 1 ? 'jpeg' : 'png', { requirePixels: true })
     const format = index === 1 ? 'jpeg' : 'png'
     return {
       name: `visual-${randomUUID()}.${format}`,
@@ -329,7 +329,7 @@ test('explains a 21st image instead of dropping it silently', async ({ appPage }
       buffer: image.bytes,
     }
   })
-  const extra = challengeImage('png')
+  const extra = challengeImage('png', { requirePixels: true })
   const extraName = `visual-${randomUUID()}.png`
   await startOwnedChat(appPage)
   await uploadThroughChooser(appPage, files)

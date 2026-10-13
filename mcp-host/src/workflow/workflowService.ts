@@ -900,6 +900,14 @@ export class WorkflowService {
     }
 
     const router = new StepMcpRouter(this.mcpClientFactory)
+
+    // Spec §3.1.2: a non-empty allowedTools.include is the step's complete
+    // toolset. Absent/empty keeps today's behaviour: every registered tool is
+    // offered when the step declares MCP servers, and none for a text-only step.
+    const allowedToolNames =
+      Array.isArray(req.allowedTools?.include) && req.allowedTools.include.length > 0
+        ? new Set(req.allowedTools.include)
+        : null
     // Register internal output tools (clerum__*) — available to all
     // workflow steps. Also register clerum__get_capabilities so workflow
     // steps can branch on which integrations the operator has set up.
@@ -1112,7 +1120,17 @@ export class WorkflowService {
         ].filter(tool => requestedGfsToolNames.has(tool.name))
         internalTools.push(...scopedGfsTools)
       }
-      router.registerInternalTools(internalTools, getOutputDir())
+      // Register an internal tool only when the allowlist names it (extends the
+      // GFS opt-in above to every clerum__* tool), and reject calls to anything
+      // outside the offered set at dispatch time. Both are no-ops without an
+      // allowlist.
+      router.registerInternalTools(
+        allowedToolNames
+          ? internalTools.filter(tool => allowedToolNames.has(tool.name))
+          : internalTools,
+        getOutputDir()
+      )
+      router.setAllowedTools(req.allowedTools)
 
       // 1. Connect to step-declared MCP servers
       await router.connect(req.mcpServers ?? [], {
@@ -1124,8 +1142,7 @@ export class WorkflowService {
       // unless the recipe explicitly allows them; otherwise analysis steps can
       // loop on premature file-generation calls.
       const hasDeclaredMcpServers = (req.mcpServers ?? []).length > 0
-      const hasExplicitAllowedTools =
-        Array.isArray(req.allowedTools?.include) && req.allowedTools.include.length > 0
+      const hasExplicitAllowedTools = allowedToolNames !== null
       const tools =
         hasDeclaredMcpServers || hasExplicitAllowedTools
           ? router.getFilteredTools(req.allowedTools)

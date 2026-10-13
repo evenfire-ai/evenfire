@@ -31,6 +31,8 @@ export interface AgentChatActionsContextValue {
   handleAddComposerImageAttachments: (attachments: ComposerImageAttachment[]) => void
   handleUpdateComposerImageAttachment: (attachment: ComposerImageAttachment) => void
   handleRemoveComposerImageAttachment: (attachmentId: string) => void
+  handleAddComposerFiles: (files: File[], draft: string) => void
+  handleRemoveComposerFileAttachment: (attachmentId: string) => void
   handleAddComposerReferenceAttachments: (attachments: ComposerReferenceAttachment[]) => void
   handleRemoveComposerReferenceAttachment: (attachmentId: string) => void
   handleSendAgentMessage: (text: string) => Promise<void>

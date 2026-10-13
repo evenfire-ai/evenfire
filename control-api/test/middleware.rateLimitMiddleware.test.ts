@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { MemoryStore } from 'express-rate-limit'
+import { MemoryStore, rateLimit } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
 import request from 'supertest'
 import type { RateLimitCheck } from '../src/services/rateLimiterService.js'
@@ -69,6 +69,66 @@ describe('rateLimitMiddleware backend-unavailable policy', () => {
   beforeEach(() => {
     checkAndIncrement.mockReset()
     hits.inc.mockReset()
+  })
+
+  it.each([1, LIMIT + 1])(
+    'publishes authoritative ledger headers after a fresh edge (count %i)',
+    async count => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(resetMs - 30_000)
+      try {
+        checkAndIncrement.mockResolvedValue(available(count))
+        const app = express()
+        app.get(
+          '/limited',
+          rateLimit({
+            windowMs: 60_000,
+            limit: 100,
+            standardHeaders: 'draft-7',
+            legacyHeaders: false,
+          }),
+          rateLimitMiddleware({
+            bucketType: 'unit_bucket',
+            maxPerMinute: LIMIT,
+            getBucketKey: () => 'unit:key',
+            onBackendUnavailable: 'closed',
+          }),
+          (_req, res) => res.sendStatus(204)
+        )
+        const response = await request(app).get('/limited')
+        expect(response.status).toBe(count <= LIMIT ? 204 : 429)
+        const remaining = Math.max(0, LIMIT - count)
+        expect(response.headers.ratelimit).toBe(`limit=${LIMIT}, remaining=${remaining}, reset=30`)
+        expect(response.headers['ratelimit-policy']).toBe(`${LIMIT};w=60`)
+        expect(response.headers['x-ratelimit-limit']).toBe(String(LIMIT))
+        expect(response.headers['x-ratelimit-remaining']).toBe(String(remaining))
+        if (count > LIMIT) expect(response.headers['retry-after']).toBe('30')
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  it('removes stale edge quota metadata when the authoritative backend cannot count', async () => {
+    checkAndIncrement.mockResolvedValue(unavailable())
+    const app = express()
+    app.get(
+      '/limited',
+      rateLimit({ windowMs: 60_000, limit: 100, standardHeaders: 'draft-7', legacyHeaders: false }),
+      rateLimitMiddleware({
+        bucketType: 'unit_bucket',
+        maxPerMinute: LIMIT,
+        getBucketKey: () => 'unit:key',
+        onBackendUnavailable: 'closed',
+      }),
+      (_req, res) => res.sendStatus(204)
+    )
+    const response = await request(app).get('/limited')
+    expect(response.status).toBe(503)
+    expect(response.headers.ratelimit).toBeUndefined()
+    expect(response.headers['ratelimit-policy']).toBeUndefined()
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(response.headers['retry-after']).toBe('2')
   })
 
   it("'closed' answers 503 with Retry-After when the backend cannot count the request", async () => {
@@ -145,7 +205,12 @@ describe('rateLimitMiddleware backend-unavailable policy', () => {
     const retryAfterSeconds = Number(denied.headers['retry-after'])
     expect(retryAfterSeconds).toBeGreaterThanOrEqual(1)
     expect(retryAfterSeconds).toBeLessThanOrEqual(60)
-    expect(denied.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds })
+    expect(denied.body).toEqual({
+      error: 'Too Many Requests',
+      code: 'rate_limited',
+      message: `This request limit has been reached. Try again in ${retryAfterSeconds} seconds.`,
+      retryAfterSeconds,
+    })
     expect(denied.headers['x-ratelimit-limit']).toBe(String(LIMIT))
     expect(denied.headers['x-ratelimit-remaining']).toBe('0')
     expect(Number(denied.headers['x-ratelimit-reset'])).toBeGreaterThan(Date.now() / 1000)

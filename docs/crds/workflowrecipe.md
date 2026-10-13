@@ -1181,6 +1181,14 @@ spec:
 
 **Runtime behavior.** Scheduling is **Postgres-backed, not a Kubernetes CronJob**: WRC keeps a `workflow_schedules` row in sync and the advance loop lives in a control-api worker. `enabled = NOT suspend`, so suspending keeps the row rather than deleting it.
 
+**`concurrencyPolicy`** (and `spec.scheduling.concurrencyPolicy` on the legacy path, §3.14) applies to scheduled ticks only; on-demand and autonomous triggers are never gated by it.
+
+- `Forbid` (default): a tick is skipped while a run of the recipe is still live, whatever started it. Live means `Pending` for less than 15 minutes, or `Running` for less than `maxRunDurationSeconds` plus a 5-minute grace. The schedule worker caps that duration at 24 hours (the controller maximum) and assumes 24 hours when it is unset. That is only the Forbid blocking bound: a run with no `maxRunDurationSeconds` stores no duration, and the timeout reaper never fails it, so nothing else ends it on a deadline. The schedule advances to its next future window; skipped windows are not replayed.
+- `Allow`: every tick fires, and runs may overlap.
+- `Replace`: accepted but **not implemented**. It currently behaves exactly like `Allow`.
+
+A run that never reaches a terminal phase stops blocking once it passes that bound, so a stuck run cannot silence a schedule forever. After the bound, one new scheduled run may overlap the stuck one. Set `spec.runRetention.maxRunDurationSeconds` so the reaper fails a stuck run (and the schedule resumes) sooner than the 24 hours the worker assumes when it is unset. Every skip is logged as `workflow_schedule_worker_concurrency_forbidden` with the blocking run id and age. Six consecutive skips of one schedule on the same control-api replica also log `workflow_schedule_worker_concurrency_forbidden_sustained` (warn) and increment `wrc_schedule_worker_concurrency_forbidden_sustained_total`. The streak is kept in memory per replica, so it restarts at 1 when another replica takes the schedule lock, the process restarts, or the replica already tracks 1,000 skipped schedules. Treat the warning as best effort and alert on the per-skip log as well.
+
 ### 3.14 Scheduling (`spec.scheduling`) — legacy
 
 The predecessor of `spec.triggers.schedule` (§3.13), still accepted for backwards compatibility. The reconciler prefers `spec.triggers.schedule`. **Prefer `spec.triggers` in new recipes.**
@@ -1377,12 +1385,12 @@ Declaring this block forces an always-on `mcp-host`. Runtime enforcement is addi
 | `promptBridge.maxOutputTokens`               | integer  | No        | Min 1. Enforced as `max_tokens` on API-key providers (OpenAI, Claude, Z.AI, Bedrock, Google). `codex-subscription` cannot bind it: the ChatGPT wire rejects `max_output_tokens`, so there the ceiling only shapes the authorize request identity and the enforced bound is the contract limit of 16384. |
 | `promptBridge.maxRequestsPerRun`             | integer  | No        | Min 1. **Deprecated:** accepted but ignored; platform per-minute rate limits apply. Removal planned. |
 | `promptBridge.maxConcurrentInvocations`      | integer  | No        | Min 1. Runtime default 5.                                                   |
-| `promptBridge.maxInvocationsPerMinute`       | integer  | No        | Min 1. Platform default 120 when unset (ENV `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN`, issue #348). |
+| `promptBridge.maxInvocationsPerMinute`       | integer  | No        | Min 1. Platform default 600 when unset (ENV `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN`, issue #348). |
 | `clientNotifications.allowedEventTypes`      | string[] | **Yes**\† | 1–64 entries.                                                               |
 | `clientNotifications.allowedTargetRefs`      | string[] | No        | Max 64.                                                                     |
 | `clientNotifications.allowedUserRefs`        | boolean  | No        | Whether `userRef` targets are permitted.                                    |
 | `clientNotifications.maxNotificationsPerRun` | integer  | No        | Min 1. **Deprecated:** accepted but ignored; platform per-minute rate limits apply. Removal planned. |
-| `clientNotifications.maxNotificationsPerMinute` | integer  | No        | Min 1. Platform default 150 when unset (ENV `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN`, issue #348). |
+| `clientNotifications.maxNotificationsPerMinute` | integer  | No        | Min 1. Platform default 750 when unset (ENV `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN`, issue #348). |
 | `allowedCallers`                             | string[] | No        | Workload ids permitted to call the SDK. **Empty = all declared workloads.** |
 | `idempotencyKeyPattern`                      | string   | No        | Regex; runtime default `^[a-zA-Z0-9_-]{1,128}$`. Must compile.              |
 

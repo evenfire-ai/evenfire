@@ -1,9 +1,12 @@
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
+import type { ApprovalInputPreview } from '@/uiTypes'
 import type {
-  PendingApprovalLite,
+  PendingApprovalLite as RpcPendingApprovalLite,
   SessionLifecycleState,
   SessionTokensLite,
 } from '../../../../src/types'
+
+type PendingApprovalLite = RpcPendingApprovalLite & { inputPreview?: ApprovalInputPreview }
 
 /**
  * SessionFSM — pure reducer for the per-chat session lifecycle projection
