@@ -609,6 +609,70 @@ describe('R20-M4 ordinary partial-write recovery', () => {
   })
 })
 
+describe('R20-M5 rejected encrypted fallback residue', () => {
+  it('keeps verified old Keytar authentication quarantined when encrypted disposal fails', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const keytar = await import('keytar')
+    vi.mocked(keytar.setPassword).mockRejectedValueOnce(new Error('fixture-transient Keytar write'))
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.decryptString).mockReturnValueOnce('')
+    const unlink = fsSync.unlinkSync.bind(fsSync)
+    vi.spyOn(fsSync, 'unlinkSync').mockImplementation(file => {
+      if (String(file).endsWith('.enc')) throw new Error('fixture-encrypted disposal failed')
+      return unlink(file)
+    })
+    await expect(h.service.switchTeam('fixture-other')).rejects.toThrow('could not be verified')
+    expect(h.state.sessionToken).toBe(homeToken)
+    const firstRestart = await harness()
+    await expect(firstRestart.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: homeMe,
+    })
+    expect(
+      firstRestart.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)
+    ).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'active-keytar',
+    })
+    vi.doMock('keytar', () => ({}))
+    const secondRestart = await harness()
+    await expect(secondRestart.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(secondRestart.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+  })
+
+  it('does not restore a rejected fallback after cleanup retired and Keytar subsequently disappeared', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const keytar = await import('keytar')
+    vi.mocked(keytar.setPassword).mockRejectedValueOnce(new Error('fixture-transient Keytar write'))
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.decryptString).mockReturnValueOnce('')
+    await expect(h.service.switchTeam('fixture-other')).rejects.toThrow('could not be verified')
+    expect(h.state.sessionToken).toBe(homeToken)
+    const firstRestart = await harness()
+    await expect(firstRestart.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: homeMe,
+    })
+    expect(
+      firstRestart.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
+    ).toBeNull()
+    vi.doMock('keytar', () => ({}))
+    const secondRestart = await harness()
+    await expect(secondRestart.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(secondRestart.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+  })
+})
+
 describe('explicit login transient marker inspection', () => {
   it('does not normalize a valid cleanup marker after one transient EMFILE', async () => {
     const h = await harness()
