@@ -62,7 +62,11 @@ const host = (name: string, contextRef: string) => ({
   metadata: { name, namespace: HOSTS_NS },
   spec: { contextRef },
 })
-const ctx = (contextId: string, servers: string[]) => ({ spec: { contextId, mcpServers: servers } })
+// A Host `contextRef` names the Context RESOURCE (`metadata.name`) — PR #1004 R2.
+const ctx = (name: string, servers: string[], contextId: string = name) => ({
+  metadata: { name },
+  spec: { contextId, mcpServers: servers },
+})
 
 // A generic self-hosted oauth server: auth.type oauth, oauth.source generic,
 // oauth.id present, NO provider.

@@ -40,6 +40,7 @@ import { upsertOAuthGrant } from '../src/oauth/store.js'
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { type McpServerResource, normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import { admitContexts } from './fixtures/mcpConsentAdmission.js'
 import {
   DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
   dcrPilot,
@@ -228,7 +229,7 @@ describeRealPostgres(
         db,
         recipeReader: { read: async () => null },
         mcpServerReader: subjectReader(gateway),
-        userContextsReader: async () => ({ contextIds: ['ctx-A'] }),
+        consentAdmission: admitContexts(['ctx-A']),
         secretReader: { read: async () => ({}) },
         fetchFn: (async () => {
           throw new Error('remote lane must not use fetchFn')

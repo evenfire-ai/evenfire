@@ -68,11 +68,20 @@ export interface InstallOutcome {
   dcrCalls: RecordedDcrCall[]
 }
 
-/** Seed the Context the install attaches the server to. */
-export async function seedContext(gateway: MockGateway, namespace: string, name: string) {
+/**
+ * Seed the Context the install attaches the server to. `mcpServers` is its
+ * allowlist: per-user consent is admitted only for servers a member Context
+ * lists (PR #1004), so suites that mint consent seed the names they install.
+ */
+export async function seedContext(
+  gateway: MockGateway,
+  namespace: string,
+  name: string,
+  mcpServers?: string[]
+) {
   await gateway.createResource(
     'contexts',
-    { metadata: { name }, spec: { contextId: name } },
+    { metadata: { name }, spec: { contextId: name, ...(mcpServers ? { mcpServers } : {}) } },
     namespace
   )
 }

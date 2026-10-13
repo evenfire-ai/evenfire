@@ -3,7 +3,10 @@ import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
+import { AUTO_REFRESH_STALE_AFTER_MS } from '@constants/autoRefresh'
 import type { RpcConnector, RpcConnectorsResult } from '../../../../../src/types'
+import { desktopQueryDefaults } from '../../../lib/queryClient'
+import { desktopQueryKeys } from '../queryKeys'
 import { useConnectorsController } from '../useConnectorsController'
 
 /**
@@ -202,5 +205,90 @@ describe('useConnectorsController — click→IPC invariants (T5, T4)', () => {
     // Observable: the list is unchanged, and no refetch was issued.
     expect(connectorNames(result)).toEqual(['shared-drive', 'monday'])
     expect(rpc.listConnectors.mock.calls.length).toBe(listCallsBefore)
+  })
+})
+
+/**
+ * #991: the catalog used to load only at sign-in. Surfaces that SHOW it keep it
+ * current through `useAutoRefresh` (its own suite pins the scheduling); this
+ * hook only exposes the cache-age read the scheduler consults, so the query
+ * itself stays app-coordinated and `reset` still clears it.
+ */
+describe('useConnectorsController — staleness read for the refresh scheduler (#991)', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  function renderWithClient(client: QueryClient) {
+    return renderHook(() => useConnectorsController(), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+  }
+
+  const prodClient = () => new QueryClient({ defaultOptions: desktopQueryDefaults })
+  const seed = (client: QueryClient, ageMs: number) =>
+    client.setQueryData(desktopQueryKeys.connectors, payload([USER]), {
+      updatedAt: Date.now() - ageMs,
+    })
+
+  it('mounting only reads the cache (app-coordinated load)', async () => {
+    const rpc = installClerum()
+    const client = prodClient()
+    seed(client, AUTO_REFRESH_STALE_AFTER_MS * 10)
+    renderWithClient(client)
+    await act(async () => {})
+    expect(rpc.listConnectors).not.toHaveBeenCalled()
+  })
+
+  it('isStale compares the cache age at call time against the given window', () => {
+    installClerum()
+    const client = prodClient()
+    seed(client, 1_000)
+    const { result } = renderWithClient(client)
+    expect(result.current.isStale(AUTO_REFRESH_STALE_AFTER_MS)).toBe(false)
+
+    // Re-seeding older data is visible without a re-render (no stale closure).
+    seed(client, AUTO_REFRESH_STALE_AFTER_MS + 1_000)
+    expect(result.current.isStale(AUTO_REFRESH_STALE_AFTER_MS)).toBe(true)
+  })
+
+  it('isStale treats a fetch already in flight as fresh, so it is not duplicated', async () => {
+    const rpc = installClerum()
+    let release: () => void = () => undefined
+    rpc.listConnectors.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          release = () => resolve(payload([USER]))
+        })
+    )
+    const client = prodClient()
+    const { result } = renderWithClient(client)
+    expect(result.current.isStale(AUTO_REFRESH_STALE_AFTER_MS)).toBe(true)
+
+    let pending: Promise<void> = Promise.resolve()
+    act(() => {
+      pending = result.current.refresh()
+    })
+    expect(result.current.isStale(AUTO_REFRESH_STALE_AFTER_MS)).toBe(false)
+    await act(async () => {
+      release()
+      await pending
+    })
+    expect(result.current.isStale(AUTO_REFRESH_STALE_AFTER_MS)).toBe(false)
+  })
+
+  it('after reset (logout / team switch), isStale reports the cache as stale', () => {
+    installClerum()
+    const client = prodClient()
+    seed(client, 0)
+    const { result } = renderWithClient(client)
+    expect(result.current.isStale(AUTO_REFRESH_STALE_AFTER_MS)).toBe(false)
+    act(() => result.current.reset())
+    expect(client.getQueryData(desktopQueryKeys.connectors)).toBeUndefined()
+    expect(result.current.isStale(AUTO_REFRESH_STALE_AFTER_MS)).toBe(true)
   })
 })

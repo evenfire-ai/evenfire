@@ -36,6 +36,7 @@ import type { OAuthGrantKey } from '../../src/oauth/store.js'
 import { buildGenericOAuthSpec } from '../../src/routes/admin/registryGenericOauth.js'
 import { buildRemoteOAuthSpec } from '../../src/routes/admin/remoteMcp.js'
 import type { MockGateway } from '../mockGateway.js'
+import { admitContexts } from './mcpConsentAdmission.js'
 import { PILOTS, makeDiscoveryTransport } from './remoteOAuthDiscovery.js'
 
 export const NS = config.mcpServersNamespace
@@ -222,7 +223,7 @@ export async function legacyConsent(
         return resolved ? { namespace: NS, ...resolved } : null
       },
     },
-    userContextsReader: async () => ({ contextIds: [CONTEXT] }),
+    consentAdmission: admitContexts([CONTEXT]),
     fetchFn: fetchFn as unknown as typeof fetch,
     stateSecret: STATE_SECRET,
     encryptionKey,
@@ -266,7 +267,7 @@ export async function currentConsent(
           return resolved ? { namespace: NS, ...resolved } : null
         },
       },
-      userContextsReader: async () => ({ contextIds: [CONTEXT] }),
+      consentAdmission: admitContexts([CONTEXT]),
       fetchFn: (async () => {
         throw new Error('remote/generic consent must not use fetchFn')
       }) as unknown as typeof fetch,

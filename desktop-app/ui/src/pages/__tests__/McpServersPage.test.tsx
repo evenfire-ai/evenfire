@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { AUTO_REFRESH_POLL_INTERVAL_MS, AUTO_REFRESH_STALE_AFTER_MS } from '@constants/autoRefresh'
 import type { AccessCatalog, RpcConnectorsResult } from '../../../../src/types'
 import { desktopQueryKeys } from '../../hooks/domain/queryKeys'
 import { McpServersPage } from '../McpServersPage'
@@ -101,8 +102,9 @@ function renderPage(result: RpcConnectorsResult) {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
   // The controller's query is `enabled:false` — the app coordinator owns the
-  // initial load, so a navigation to the panel only READS cache. Seed the cache
-  // the way the post-auth bootstrap would, then render.
+  // initial load, so a navigation to the panel reads cache unless it is older
+  // than AUTO_REFRESH_STALE_AFTER_MS. Seed a fresh cache the way the post-auth
+  // bootstrap would, then render.
   client.setQueryData(desktopQueryKeys.connectors, result)
   return render(
     <QueryClientProvider client={client}>
@@ -307,5 +309,117 @@ describe('McpServersPage — da-table layout + navigation', () => {
       expect(screen.getByText('Couldn\'t disconnect "monday". write boom')).toBeTruthy()
     )
     expect(screen.queryByText('read boom')).toBeNull()
+  })
+})
+
+// #991: the screen used to read only the sign-in snapshot, so a connector an
+// admin added or removed mid-session never appeared until restart.
+describe('McpServersPage — keeps the catalog current (#991)', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  const LATER: RpcConnectorsResult = {
+    userId: 'user-1',
+    agents: [
+      {
+        name: 'agent-zeta',
+        contextRef: 'ctx-shared',
+        connectors: [
+          {
+            name: 'stripe-oauth',
+            provider: 'stripe',
+            authKind: 'oauth-user',
+            grantScope: 'user',
+            status: 'requires_setup',
+          },
+        ],
+      },
+    ],
+  }
+
+  it('opening the screen with a stale catalog fetches the server list', async () => {
+    const rpc = installClerum(LATER)
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    client.setQueryData(desktopQueryKeys.connectors, CONNECTORS, {
+      updatedAt: Date.now() - 10 * 60_000,
+    })
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <McpServersPage />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(allRows(container)).toHaveLength(1))
+    expect(allRows(container).map(rowName).join(' ')).toContain('stripe-oauth')
+    expect(rpc.listConnectors).toHaveBeenCalledTimes(1)
+  })
+
+  it('the refresh button refetches even within the staleness window', async () => {
+    const rpc = installClerum(LATER)
+    const { container } = renderPage(CONNECTORS)
+    expect(rpc.listConnectors).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh connectors' }))
+    await waitFor(() => expect(allRows(container)).toHaveLength(1))
+    expect(allRows(container).map(rowName).join(' ')).toContain('stripe-oauth')
+    expect(rpc.listConnectors).toHaveBeenCalledTimes(1)
+  })
+
+  it('polls at exactly +60s from the START of the open refresh, even when the reply is slow', async () => {
+    vi.useFakeTimers()
+    try {
+      const rpc = installClerum(LATER)
+      // The open refresh replies after 100ms; a completion-anchored poll (or an
+      // age check at the deadline) would land at 60_100 or be skipped.
+      rpc.listConnectors.mockImplementation(
+        () => new Promise(resolve => window.setTimeout(() => resolve(LATER), 100))
+      )
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      client.setQueryData(desktopQueryKeys.connectors, CONNECTORS, {
+        updatedAt: Date.now() - 10 * 60_000,
+      })
+      render(
+        <QueryClientProvider client={client}>
+          <McpServersPage />
+        </QueryClientProvider>
+      )
+      expect(rpc.listConnectors).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(AUTO_REFRESH_POLL_INTERVAL_MS - 1)
+      })
+      expect(rpc.listConnectors).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+      expect(rpc.listConnectors).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('regaining window focus with a stale catalog refetches once', async () => {
+    const rpc = installClerum(LATER)
+    focusManager.setFocused(false)
+    try {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      client.setQueryData(desktopQueryKeys.connectors, CONNECTORS)
+      const { container } = render(
+        <QueryClientProvider client={client}>
+          <McpServersPage />
+        </QueryClientProvider>
+      )
+      expect(rpc.listConnectors).not.toHaveBeenCalled()
+      client.setQueryData(desktopQueryKeys.connectors, CONNECTORS, {
+        updatedAt: Date.now() - AUTO_REFRESH_STALE_AFTER_MS - 1_000,
+      })
+      await act(async () => {
+        focusManager.setFocused(true)
+      })
+      await waitFor(() => expect(allRows(container)).toHaveLength(1))
+      expect(rpc.listConnectors).toHaveBeenCalledTimes(1)
+    } finally {
+      focusManager.setFocused(undefined)
+    }
   })
 })

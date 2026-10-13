@@ -18,7 +18,12 @@ import {
   type RpcHostAccessDirectory,
   authorizeRpcHostAccess,
 } from '../../services/access/rpcHostAccessAuthorizer.js'
-import { getUserAgents, getUserContexts } from '../../services/directory/index.js'
+import {
+  getCurrentTeam,
+  getTeamAgents,
+  getUserAgents,
+  getUserContexts,
+} from '../../services/directory/index.js'
 import {
   type DirectRunAttributionBindingService,
   DirectRunBindingConflictError,
@@ -159,25 +164,37 @@ export function createRpcAccessUsersRouter(
   // per agent — `authorized` / `requires_setup` / `no_oauth`. Same gate as
   // `/mcp-servers`; `req.params.userId` is authoritative (bound to the RPC
   // token subject by `requireRpcTokenUserMatch()`) and flows only into the
-  // grant-presence key, never from a body. Agents derive from `getUserAgents`.
+  // grant-presence key, never from a body. Agents are the user's direct grants
+  // (`getUserAgents`) plus, when the token carries a session team the user is
+  // still an active member of, that team's grants (`getTeamAgents`) — the same
+  // session-team rule as `authorizeRpcHostAccess` (PR #1004).
   router.get(
     '/rpc/access/users/:userId/mcp-connectors',
     requireValidRpcAccessToken(),
     requireRpcTokenUserMatch(),
-    async (req, res, next) => {
+    async (req: RpcAuthedRequest, res, next) => {
       try {
-        const { agentNames } = await getUserAgents(req.params.userId)
+        const userId = req.params.userId
+        const { agentNames: directAgents } = await getUserAgents(userId)
+        const agentNames = [...directAgents]
+        const teamId = req.rpcAuth?.teamId
+        if (teamId && (await getCurrentTeam(userId, teamId))) {
+          const { agentNames: teamAgents } = await getTeamAgents(teamId)
+          for (const name of teamAgents) {
+            if (!agentNames.includes(name)) agentNames.push(name)
+          }
+        }
         const agents = await resolveConnectorsForAgents(
           gateway,
           {
             mcpServersNamespace: config.mcpServersNamespace,
             hostsNamespace: config.hostsNamespace,
             agentNames,
-            userId: req.params.userId,
+            userId,
           },
           { query: (text, values) => pool.query(text, values) }
         )
-        res.status(200).json({ userId: req.params.userId, agents })
+        res.status(200).json({ userId, agents })
       } catch (error) {
         next(error)
       }

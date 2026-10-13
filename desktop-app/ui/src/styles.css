@@ -8415,6 +8415,19 @@ h3 {
   align-content: start;
 }
 
+.mcp-servers-page-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+/* Connectors refresh control (#991): Connectors page header + agent panel hero. */
+.connectors-refresh svg {
+  width: 16px;
+  height: 16px;
+}
+
 .mcp-servers-board-header {
   display: flex;
   align-items: center;
@@ -9455,6 +9468,16 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 .agent-details-hero--flush {
   padding-inline: 0;
   border-block: 0;
+}
+
+.agent-details-hero--with-actions {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.agent-details-hero__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .agent-details-avatar {

@@ -74,6 +74,16 @@ function seedOauthServer(
     },
     MCP_NS
   )
+  // Per-user admission follows agent exposure (PR #1004): the member Context
+  // must list the server for the revoke to pass the gate.
+  void gateway.createResource(
+    'contexts',
+    {
+      metadata: { name: opts.contextRef ?? 'ctx-9' },
+      spec: { contextId: opts.contextRef ?? 'ctx-9', mcpServers: [opts.name] },
+    },
+    MCP_NS
+  )
 }
 
 function mockDb(opts: { memberContexts: string[]; deleteRowCount: number }): void {

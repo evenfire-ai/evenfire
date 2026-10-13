@@ -87,7 +87,9 @@ function databaseUrl(baseUrl: string, database: string): string {
 
 const NS = 'mcp-server'
 const SERVER = 'my-gmail'
-const USER = 'user-9'
+// users.id is a UUID: the callback's consent admission (PR #1004) reads the
+// membership tables, which reject a non-UUID subject.
+const USER = '00000000-0000-4000-8000-000000000009'
 
 /** Baked-OAuth catalog entry, same shape as the registry OAuth install tests. */
 const GMAIL_ENTRY = {
@@ -269,6 +271,13 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
       spec: { contextId: 'default-context', mcpServers: [] },
     })
     const app = makeApp(gw)
+    // The consenting user is a member of the install Context, which the install
+    // allowlists the server into — the exposure the callback admits by (PR #1004).
+    await db.query(`INSERT INTO users (id, email) VALUES ($1, 'user-9@example.com')`, [USER])
+    await db.query(
+      `INSERT INTO user_contexts (user_id, context_id) VALUES ($1, 'default-context')`,
+      [USER]
+    )
 
     expect((await install(app)).status).toBe(201)
     expect((await consent(app, gw)).status).toBe(200)
