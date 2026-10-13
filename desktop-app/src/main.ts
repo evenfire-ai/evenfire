@@ -20,7 +20,10 @@ import {
 } from './devIsolation.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { GFS_RESOURCE_DEEP_LINK_HOST, parseGfsResourceDeepLink } from './gfsDeepLinks.js'
-import { GfsResourceDeepLinkQueue } from './gfsResourceDeepLinkQueue.js'
+import {
+  GfsResourceDeepLinkQueue,
+  createLogoutWithGfsResourceDeepLinkClear,
+} from './gfsResourceDeepLinkQueue.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
@@ -73,6 +76,10 @@ const appService = new AppService(
 )
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
+const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkClear(
+  gfsResourceDeepLinkQueue,
+  () => appService.logout()
+)
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
 const mcpOauthCompletionQueue = new McpOauthCompletionQueue(completion => {
@@ -332,7 +339,7 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   handleGfsResourceDeepLink,
   gfsResourceDeepLinkHost: GFS_RESOURCE_DEEP_LINK_HOST,
   isRendererReady: () => mainWindowRendererReady,
-  logout: () => appService.logout(),
+  logout: logoutAndClearGfsResourceDeepLinks,
   requestMainWindow,
   sandboxUiDeepLinkHost: SANDBOX_UI_DEEP_LINK_HOST,
   shouldAcceptSandboxUiProtocolLink,
@@ -596,7 +603,7 @@ if (gotSingleInstanceLock) {
       // runtime eagerly on first call, and a plugin can be mounted the moment
       // the window paints.
       initPluginSdkRuntime({ service: appService, getMainWindow: () => mainWindow })
-      registerIpcHandlers(appService)
+      registerIpcHandlers(appService, logoutAndClearGfsResourceDeepLinks)
       mainWindowLifecycleReady = true
       wirePowerMonitor()
       app.on('activate', () => {

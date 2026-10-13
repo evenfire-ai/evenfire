@@ -349,7 +349,10 @@ function sanitizeDesktopNotificationActions(
     .slice(0, 3)
 }
 
-export function registerIpcHandlers(service: AppService): void {
+export function registerIpcHandlers(
+  service: AppService,
+  logout: () => Promise<unknown> = () => service.logout()
+): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
@@ -464,7 +467,7 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    await service.logout()
+    await logout()
     return { ok: true }
   })
 

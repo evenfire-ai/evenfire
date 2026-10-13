@@ -34,3 +34,13 @@ export class GfsResourceDeepLinkQueue {
     return this.sequence + 1
   }
 }
+
+export function createLogoutWithGfsResourceDeepLinkClear(
+  queue: GfsResourceDeepLinkQueue,
+  logout: () => Promise<unknown>
+): () => Promise<unknown> {
+  return () => {
+    queue.clear()
+    return logout()
+  }
+}

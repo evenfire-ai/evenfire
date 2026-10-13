@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '../gfsDeepLinks.js'
-import { GfsResourceDeepLinkQueue } from '../gfsResourceDeepLinkQueue.js'
+import {
+  GfsResourceDeepLinkQueue,
+  createLogoutWithGfsResourceDeepLinkClear,
+} from '../gfsResourceDeepLinkQueue.js'
 
 function parseProducedUri(uri: string) {
   const target = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
@@ -43,5 +46,20 @@ describe('GfsResourceDeepLinkQueue', () => {
     const next = queue.enqueue(parseProducedUri('gfs://main/00000000000000000000000000000002'))
     expect(next.id).toBe(first.id + 1)
     expect(queue.list()).toEqual([next])
+  })
+
+  it('clears the prior principal at logout and retains links accepted afterward', async () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    const userALink = queue.enqueue(parseProducedUri('gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
+    const logout = vi.fn(async () => undefined)
+    const logoutAndClear = createLogoutWithGfsResourceDeepLinkClear(queue, logout)
+
+    await logoutAndClear()
+    expect(logout).toHaveBeenCalledOnce()
+    expect(queue.list()).toEqual([])
+
+    const userBLink = queue.enqueue(parseProducedUri('gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'))
+    expect(userBLink.id).toBeGreaterThan(userALink.id)
+    expect(queue.list()).toEqual([userBLink])
   })
 })
