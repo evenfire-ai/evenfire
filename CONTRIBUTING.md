@@ -152,8 +152,10 @@ for private reporting.
 
 ## CLA
 
-This project requires a signed Contributor License Agreement. Contributions
-may be used in the project's commercial / managed editions.
+The project plans to require a signed Contributor License Agreement, and
+contributions may be used in the project's commercial / managed editions.
 
-See [CLA.md](CLA.md) for the agreement and how to accept it (it is a draft,
-pending legal review).
+The agreement in [CLA.md](CLA.md) is a draft pending legal review and is not
+open for signing yet: no CLA bot runs on pull requests and there is no
+signature record. You cannot sign it today. Once it is final, CLA.md will say
+how to accept it.

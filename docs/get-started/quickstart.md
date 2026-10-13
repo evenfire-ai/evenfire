@@ -79,7 +79,7 @@ CRDs → JWT signing keys → secrets from `.env` → service images pulled from
 `ghcr.io/evenfire-ai` → deploy → readiness wait with auto-recovery → seed →
 verify.
 
-**You do not build images.** The 23 service images are published for
+**You do not build images.** The 25 service images are published for
 `linux/amd64` and `linux/arm64`, so an Apple Silicon Mac pulls a native image
 instead of compiling anything. MCP servers are not loaded into the cluster at
 all — they are installed on demand from the evenfire registry.
@@ -184,10 +184,12 @@ curl -s -X POST "$RPC/api/v1/rpc/hosts/$HOST/approvals/approve" \
 
 ## 5. Optional: chat from Telegram
 
-1. Create a bot with [@BotFather](https://t.me/BotFather); get your numeric
-   user id (e.g. via `@userinfobot`).
-2. Set `CLERUM_TELEGRAM_BOT_TOKEN` and `CLERUM_TELEGRAM_USER_ID` in `.env`.
-3. Re-run `make minikube-setup REUSE_DB=true ARGS="--skip-build"` and message your bot.
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
+2. In the Control UI, open **External Channels** → **Create**, pick your Host
+   and the Telegram provider, enter the bot handle and token, and grant access
+   to your user.
+3. Message your bot. (Setting the Telegram variables in `.env` and re-running
+   setup does not enable Telegram on minikube.)
 
 Approval requests arrive on Telegram with inline **Approve / Deny** buttons.
 Details: [Connect Telegram](../how-to/connect-telegram.md).
@@ -199,7 +201,7 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 | Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1)                                                                                                                                                                                                                           |
 | `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default)                                                                                                              |
 | Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                                                                                                                                                                                                                                               |
-| postgres CrashLoopBackOff after cold start | `CONTROL_DB_RESET_PVC_UID="$(kubectl --context clerum-test -n control-plane get pvc control-postgres-data -o jsonpath='{.metadata.uid}')" make minikube-setup ARGS="--reset-db --skip-build"`                                                                                                                                                                                                                                                                        |
+| postgres CrashLoopBackOff after cold start | Rebuild the DB — this deletes all its data. First print and check the volume's UID: `kubectl --context clerum-test -n control-plane get pvc control-postgres-data -o jsonpath='{.metadata.uid}'`. Then paste it: `CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-setup ARGS="--reset-db --skip-build"` ([details](../deploy/minikube.md#postgres-crashloopbackoff-wal-corruption)) |
 | Port-forwards die                          | Re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops) |
 
 ## Next steps

@@ -533,9 +533,11 @@ a `Set<string>` so an unchanged hostRef triggers exactly one reconcile.
 
 **RBAC:** HCC's `host-context-controller-channels-runtime` Role grants
 `get/list/watch` on `communicationchannels.clerum.io` in the `channels`
-namespace. **Applied out-of-band** with
-[`deploy/scripts/bootstrap-rbac.sh`](../../deploy/scripts/bootstrap-rbac.sh),
-because a deploy service account should not be able to grant RBAC.
+namespace. It lives in `deploy/base/channels/rbac.yaml`, so the overlay apply
+creates it. Where the CD identity is not allowed to patch Roles, apply it once
+out of band with
+[`deploy/scripts/bootstrap-rbac.sh`](../../deploy/scripts/bootstrap-rbac.sh)
+and an admin kubeconfig.
 
 ---
 

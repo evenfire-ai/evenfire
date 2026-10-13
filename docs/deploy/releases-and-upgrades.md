@@ -42,8 +42,10 @@ for what the hook does to your commits.
 
 ## How a release is made
 
-Images are built once, on the `dev` branch. A release never rebuilds them. It
-copies the exact images that `dev` already built to the release tag.
+Images are built by `build-publish.yml`: automatically on every push to `dev`,
+or when a maintainer runs that workflow by hand (`workflow_dispatch`, optionally
+with `build_all`). A release never rebuilds them. It copies images that were
+already built to the release tag.
 
 ```text
 push to dev ──► build-publish.yml ──► ghcr.io/evenfire-ai/<image>:sha-<7> and :latest
@@ -206,7 +208,8 @@ Read the notes for every release you skip over, not only the target release.
 2. **Apply the CRDs first.**
 
    ```bash
-   kubectl apply -f ./charts/clerum-crds/crds/
+   KCTX=<your-context>   # the cluster you are upgrading; never rely on the current context
+   kubectl --context "$KCTX" apply -f ./charts/clerum-crds/crds/
    ```
 
    `helm upgrade` does not update files in a chart's `crds/` directory, so you

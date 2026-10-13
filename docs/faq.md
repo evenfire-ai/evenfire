@@ -72,9 +72,11 @@ allowlist it in the Context: [Add an MCP server](how-to/add-mcp-server.md).
 
 ### Telegram bot ignores me
 
-Your numeric user id must be allowlisted
-(`CLERUM_TELEGRAM_USER_ID` in `.env`, or CRD `userIds`). Usernames alone are
-not enough. See [Connect Telegram](how-to/connect-telegram.md).
+The sender must be allowed on the channel: the access list of a channel
+created in the Control UI's External Channels page, or the numeric Telegram
+user ids in CRD `userIds` (usernames alone are not enough). On minikube,
+`.env` Telegram variables do not configure the channel; create it in the
+Control UI. See [Connect Telegram](how-to/connect-telegram.md).
 
 ## Platform
 

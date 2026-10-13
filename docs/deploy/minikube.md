@@ -98,11 +98,17 @@ otherwise surfaces at the migration gate as
 `control_api_runtime relation privileges differ from the explicit access contract`.
 On a fresh cluster (no volume, no reset state) there is nothing to delete and
 setup continues. On a cluster that already has the volume, the reset refuses to
-run unless you name the exact volume it may delete:
+run unless you name the exact volume it may delete. This deletes all data in
+that volume, so check the UID yourself before passing it — do not read it inline:
 
 ```bash
-CONTROL_DB_RESET_PVC_UID="$(kubectl --context clerum-test -n control-plane \
-  get pvc control-postgres-data -o jsonpath='{.metadata.uid}')" make minikube-setup
+# 1. Inspect the volume you are about to delete and note its UID
+kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+  -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
+
+# 2. Paste that UID as a literal value
+CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-setup
+
 # or keep the data instead:
 make minikube-setup REUSE_DB=true
 ```
@@ -678,10 +684,14 @@ make minikube-pf-desktop      # Re-establish port forwards
 ## Restart With Database Wipe
 
 ```bash
-# Deletes the postgres PVC, recreates it, restarts control-api.
-# Name the exact PVC it may delete (or `none` if there is none):
-CONTROL_DB_RESET_PVC_UID="$(kubectl --context clerum-test -n control-plane \
-  get pvc control-postgres-data -o jsonpath='{.metadata.uid}')" make minikube-db-reset
+# Destructive: deletes the postgres PVC and all its data, recreates it,
+# restarts control-api.
+# 1. Inspect the PVC it will delete and note its UID:
+kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+  -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
+
+# 2. Paste that UID as a literal value (or `none` if there is no PVC):
+CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-db-reset
 # → Allows re-running the initial admin setup in Control UI
 ```
 
@@ -1137,11 +1147,18 @@ re-applies the manifests.
 
 ### Postgres CrashLoopBackOff (WAL corruption)
 
-Common after cold starts. The setup script detects and auto-fixes this, but you can also force a DB rebuild:
+Common after cold starts. The setup script detects an invalid checkpoint and
+stops; it does not repair the volume, because automatic destructive recovery is
+disabled. Fix it by rebuilding the DB, which deletes all data in the
+`control-postgres-data` volume:
 
 ```bash
-CONTROL_DB_RESET_PVC_UID="$(kubectl --context clerum-test -n control-plane \
-  get pvc control-postgres-data -o jsonpath='{.metadata.uid}')" \
+# 1. Inspect the PVC you are about to delete and note its UID
+kubectl --context clerum-test -n control-plane get pvc control-postgres-data \
+  -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp
+
+# 2. Paste that UID as a literal value
+CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> \
   make minikube-setup ARGS="--reset-db --skip-build"
 ```
 

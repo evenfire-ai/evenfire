@@ -32,7 +32,7 @@ make setup
 make install_loki
 
 # Create the dashboards ConfigMap first: Grafana's values mount it
-kubectl create configmap grafana-dashboards \
+kubectl --context <your-context> create configmap grafana-dashboards \
   --from-file=dashboards/loki-grafana-dashboard.json \
   -n monitoring
 
@@ -42,6 +42,12 @@ make install_grafana
 
 
 ## Makefile Targets
+
+These targets pass no `--context` / `--kube-context`: they run `kubectl` and
+`helm` against your kubeconfig's **current** context. Check
+`kubectl config current-context` before you run any of them, or use the
+explicit commands in
+[docs/operations/monitoring.md](../docs/operations/monitoring.md#install-on-minikube).
 
 | Target | Description |
 |--------|-------------|
@@ -72,7 +78,7 @@ The `grafana/values.yaml` configures:
 The setup steps above create the `grafana-dashboards` ConfigMap that Grafana's values reference. To recreate it after editing the dashboard:
 
 ```bash
-kubectl create configmap grafana-dashboards \
+kubectl --context <your-context> create configmap grafana-dashboards \
   --from-file=dashboards/loki-grafana-dashboard.json \
   -n monitoring
 ```
@@ -81,6 +87,10 @@ kubectl create configmap grafana-dashboards \
 
 ```bash
 make port_forward_grafana
-# Open http://localhost:3000
+# Open localhost:3000
 # Default user: admin (password set via secret or Helm override)
 ```
+
+On minikube the Control UI already uses local port 3000. Forward Grafana to
+another port instead:
+`kubectl --context <your-context> port-forward -n monitoring svc/grafana 3001:80`.

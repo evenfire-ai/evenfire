@@ -193,7 +193,7 @@ of copying minikube's choices.
 
 | Setting                                                                             | Base value                | What to do                                                                                                                                                                                                                                   |
 | ----------------------------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| API server `cidr` in `allow-k8s-api-egress-control-plane`, `-mcp-host`, `-channels` | `10.109.0.1/32`           | Patch to your API server endpoint IP (`kubectl get endpoints kubernetes -n default`). The minikube template [`k8s-api-ip.yaml.template`](../../deploy/overlays/minikube/patches/k8s-api-ip.yaml.template) explains why this is an `ipBlock`. |
+| API server `cidr` in `allow-k8s-api-egress-control-plane`, `-mcp-host`, `-channels` | `10.109.0.1/32`           | Patch to your API server endpoint IP (`kubectl --context "$KCTX" get endpoints kubernetes -n default`). The minikube template [`k8s-api-ip.yaml.template`](../../deploy/overlays/minikube/patches/k8s-api-ip.yaml.template) explains why this is an `ipBlock`. |
 | `CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS` (HCC)                                 | `do-block-storage-retain` | Set to a block StorageClass in your cluster.                                                                                                                                                                                                 |
 | `storageClassName` on `control-postgres-data` and `clerum-workflow-output`          | unset                     | Patch, or rely on your default StorageClass.                                                                                                                                                                                                 |
 | `CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET` (HCC)                                       | `clerum`                  | Name your pull Secret in `mcp-host`, or set `""` if none is needed (minikube sets `""`).                                                                                                                                                     |
@@ -212,19 +212,28 @@ scripts under [`deploy/scripts`](../../deploy/scripts) take a `CONTEXT` and are
 the ones to use elsewhere. Several of them also require `ALLOWED_CONTEXTS`, an
 exact allowlist of kube-contexts they may touch.
 
+Pick one kube-context for the whole install and pass it explicitly to every
+command; do not rely on your kubeconfig's current context. The examples use
+`KCTX`, and the same value goes into each script's `CONTEXT`:
+
+```bash
+KCTX=<your-context>
+kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
+```
+
 1. **CRDs.**
 
    ```bash
-   helm install clerum-crds ./charts/clerum-crds
+   helm --kube-context "$KCTX" install clerum-crds ./charts/clerum-crds
    # After chart upgrades, re-apply the CRD YAML (Helm 3 does not upgrade crds/):
-   kubectl apply -f ./charts/clerum-crds/crds/
+   kubectl --context "$KCTX" apply -f ./charts/clerum-crds/crds/
    ```
 
 2. **Namespaces.** The key scripts write into existing namespaces, so create
    them first:
 
    ```bash
-   kubectl apply -f deploy/base/namespaces.yaml
+   kubectl --context "$KCTX" apply -f deploy/base/namespaces.yaml
    ```
 
    Your overlay apply (step 4) adds the deny-all baselines, Roles and
@@ -234,7 +243,7 @@ exact allowlist of kube-contexts they may touch.
 
 3. **Keys and secrets.** Run
    [`deploy/scripts/gen-jwt-keys.sh`](../../deploy/scripts/gen-jwt-keys.sh)
-   with `CONTEXT=<your-context>`. It creates the four RSA-4096 key pairs
+   with `CONTEXT="$KCTX"`. It creates the four RSA-4096 key pairs
    (session, rpc, admin, wrc), the OAuth state HMAC and encryption key, the
    Control UI CSRF secret, the prompt-history encryption key, and the
    Secrets and public-key ConfigMaps that carry them. Then run
@@ -266,7 +275,7 @@ exact allowlist of kube-contexts they may touch.
    - Secrets for LLM keys and channel credentials are separate; see
      [LLM providers (operator guide)](llm-providers.md).
 
-4. **Apply your overlay** (`kubectl apply -k <your-overlay>`), with the
+4. **Apply your overlay** (`kubectl --context "$KCTX" apply -k <your-overlay>`), with the
    ghcr component pinned to one release tag.
 
 5. **Database migrations and roles.** Run
@@ -275,8 +284,11 @@ exact allowlist of kube-contexts they may touch.
    [`provision-control-api-runtime-roles.sh`](../../deploy/scripts/provision-control-api-runtime-roles.sh).
    If you use the Global File System, follow
    [GFS permission-store credential lifecycle](gfs-permission-store.md)
-   (`provision-gfs-db.sh`, `provision-gfs-runtime.sh`; production contexts
-   need `--allow-prod`).
+   (`provision-gfs-db.sh`, `provision-gfs-runtime.sh`).
+   `provision-gfs-runtime.sh` refuses a non-dev context unless it is listed in
+   `ALLOWED_CONTEXTS` or you pass `--allow-prod`. `provision-gfs-db.sh` has no
+   such guard: it runs against whatever `CONTEXT` you give it, so check that
+   value before you run it.
 
 6. **First admin.** control-api creates the bootstrap admin from
    `CONTROL_API_ADMIN_BOOTSTRAP_USERNAME`, `CONTROL_API_ADMIN_BOOTSTRAP_EMAIL`

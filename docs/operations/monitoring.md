@@ -53,35 +53,51 @@ clusters want. Override both at install time.
 The dashboard ConfigMap must exist before Grafana starts, because
 `grafana/values.yaml` mounts the `grafana-dashboards` ConfigMap.
 
+Every command below names the target cluster explicitly. Set `KCTX` to your
+minikube profile (`clerum-test` by default) and check it before you run
+anything:
+
 ```bash
+KCTX=clerum-test
+kubectl --context "$KCTX" get nodes   # confirm this is the cluster you mean
+
 # Helm repo + monitoring namespace
-make -C monitoring setup
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+kubectl --context "$KCTX" apply -f monitoring/namespace.yaml
 
 # Dashboard ConfigMap (before Grafana)
-kubectl create configmap grafana-dashboards \
+kubectl --context "$KCTX" create configmap grafana-dashboards \
   --from-file=monitoring/dashboards/loki-grafana-dashboard.json \
   -n monitoring
 
 # Loki + Promtail, with a minikube storage class and a smaller volume
-helm install loki grafana/loki-stack --version 2.9.10 -n monitoring \
+helm --kube-context "$KCTX" install loki grafana/loki-stack --version 2.9.10 \
+  -n monitoring \
   -f monitoring/loki/values.yaml \
   --set loki.persistence.storageClassName=standard \
   --set loki.persistence.size=10Gi
 
 # Grafana
-helm install grafana grafana/grafana -n monitoring \
+helm --kube-context "$KCTX" install grafana grafana/grafana -n monitoring \
   -f monitoring/grafana/values.yaml \
   --set persistence.storageClassName=standard
 
-make -C monitoring status
+kubectl --context "$KCTX" get pods,daemonset,pvc -n monitoring
 # Control UI already uses localhost:3000 on minikube, so forward Grafana elsewhere:
-kubectl port-forward -n monitoring svc/grafana 3001:80   # then open localhost:3001
+kubectl --context "$KCTX" port-forward -n monitoring svc/grafana 3001:80   # then open localhost:3001
 ```
 
 The admin user is `admin`. The values file does not set a password. Set
 `adminPassword` with `--set` or an existing Secret, or read the one the chart
-generates. On a cluster whose StorageClass matches the values files, the plain
-`make -C monitoring install_loki` and `install_grafana` targets work as-is.
+generates. On a cluster whose StorageClass matches the values files, the same
+`helm --kube-context` commands work without the `--set` overrides.
+
+The targets in `monitoring/Makefile` (`setup`, `install_*`, `upgrade_*`,
+`uninstall_*`, `status`, `port_forward_grafana`) take no context: they run
+`kubectl` and `helm` against your kubeconfig's **current** context. Use them
+only after `kubectl config current-context` shows the intended cluster; the
+explicit commands above are the safer default.
 
 ## Logs
 
@@ -91,11 +107,11 @@ picks them up. The format differs by service:
 | Service                                                                         | Format                                                                         | Level variable |
 | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | -------------- |
 | control-api                                                                     | Pino JSON, `svc: control-api`, ISO timestamps, token paths removed             | `LOG_LEVEL`    |
-| workspace-files-controller                                                      | Pino and Pino HTTP JSON                                                        |                |
-| codex-llm-proxy, grok-llm-proxy                                                 | Pino JSON                                                                      |                |
+| workspace-files-controller                                                      | Pino and Pino HTTP JSON                                                        | `LOG_LEVEL`    |
+| codex-llm-proxy, grok-llm-proxy                                                 | Pino JSON                                                                      | `LOG_LEVEL`    |
 | mcp-host                                                                        | JSON lines (`timestamp`, `level`, `component`, `msg`), sensitive keys redacted | `LOG_LEVEL`    |
 | host-context-controller                                                         | JSON lines from its own logger, sensitive keys redacted                        | `LOG_LEVEL`    |
-| workflow-recipes (controller and coordinator), workflow-approval-request-reader | JSON lines from their own loggers                                              |                |
+| workflow-recipes (controller and coordinator), workflow-approval-request-reader | JSON lines from their own loggers                                              | `LOG_LEVEL`    |
 
 Other services may still print plain text. Don't assume every line is JSON.
 The repository logging standard is in [CLAUDE.md](../../CLAUDE.md) under

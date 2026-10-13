@@ -202,8 +202,8 @@ Six `npm` scripts in `desktop-app/package.json` drive the makers, each running
 `electron-forge make --platform=<platform> --arch=<arch>`. Packaging runs
 `npm run build` first through the forge `prePackage` hook (set
 `EVENFIRE_SKIP_PACKAGE_BUILD=1` to reuse an existing build). `desktop-app/Makefile`
-has no packaging targets — only install, build, dev, start, clean, and
-port-forward helpers — so use the scripts directly:
+has no packaging targets — only install, build, dev, start, clean,
+reinstall, and port-forward helpers — so use the scripts directly:
 
 | Script               | Platform | Arch  | Makers                |
 | -------------------- | -------- | ----- | --------------------- |
@@ -215,10 +215,11 @@ port-forward helpers — so use the scripts directly:
 | `make:linux:arm64`   | linux    | arm64 | zip, deb, rpm         |
 
 Output lands in `desktop-app/out/` (git-ignored). Run the macOS scripts on a
-macOS host: signing, notarization, and the adaptive-icon step (`xcrun actool`)
-are all gated on the **build host** being macOS. The adaptive-icon
-step is best-effort and falls back to the static icon unless
-`EVENFIRE_REQUIRE_ADAPTIVE_ICONS=1`.
+macOS host. Signing and notarization run only when the **build host** is macOS
+(and `ENABLE_APPLE_CODESIGN=1`). The adaptive-icon step (`xcrun actool`) runs
+for every **darwin target**, whatever the host, and needs `xcrun`, which exists
+only on macOS. It is best-effort: on failure it falls back to the static icon,
+unless `EVENFIRE_REQUIRE_ADAPTIVE_ICONS=1` makes the failure stop the build.
 
 The package is built with ASAR integrity validation, `OnlyLoadAppFromAsar`, and
 the `RunAsNode`, `NODE_OPTIONS`, and inspector-argument fuses turned off.
@@ -279,7 +280,10 @@ installers. The user-facing flow is in
 You ship **one** packaged app, not a build per customer. A packaged build does
 **not** read `EXTERNAL_REST_API_BASE_URL` or `RPC_PROXY_BASE_URL` from the
 environment — those apply only to unpackaged dev runs, since
-`desktop-app/src/config.ts` gates them behind `!app.isPackaged`. Instead, each
+`desktop-app/src/config.ts` gates them behind `!app.isPackaged`. (The one
+exception is a packaged build launched with `--evenfire-desktop-dev-package`
+whose two URLs are the localhost defaults; it is for local packaging tests.)
+Instead, each
 user points the installed app at whatever instance they want — your hosted
 service, a teammate's, or local `make`-forwarded services — from the app's own
 **Environment** screen: name it, paste the External REST API URL, Save. The RPC
@@ -290,9 +294,9 @@ config file. Adding and switching environments and the invitation setup path
 are covered in [Desktop setup & updates](../how-to/desktop-setup-and-updates.md).
 
 Two variables **do** apply to a packaged build, read from the environment or
-the bundled `.env.prod`: `MEMBER_REGISTRATION_SERVICE_BASE_URL` — which has
-**no working default**, so left unset it silently falls back to the placeholder
-`https://example.com` — and `REQUEST_TIMEOUT_MS`.
+the bundled `.env.prod`: `MEMBER_REGISTRATION_SERVICE_BASE_URL` — left unset
+(or empty) it falls back to `https://registration.evenfire.ai`, the hosted
+evenfire service, so set it when you run your own — and `REQUEST_TIMEOUT_MS`.
 
 ## The `member-registration-service` gap
 

@@ -17,6 +17,13 @@ native tool, guardrails or an MCP server.
 You need Node.js 24 and an API key for one
 [supported provider](../llm-providers/README.md).
 
+mcp-host has no setting to bind only to localhost, and with
+`CLERUM_ENABLE_AUTH=false` any client that reaches port `8080` can send the
+edge headers, approve its own shell commands and run them. Before you start it
+this way, make sure no other machine can reach that port (a host firewall rule,
+or a network you control). Otherwise use [Run it in Docker](#run-it-in-docker),
+which publishes the port on `127.0.0.1` only.
+
 ```bash
 cd mcp-host
 npm ci
@@ -144,4 +151,5 @@ docker run --rm -p 127.0.0.1:8080:8080 \
 The root `docker-compose.yml` declares the same dev-mode settings, plus an
 optional channel-reader under the `telegram` profile. Its mcp-host build does
 not work as written: it uses `context: ./mcp-host`, so the Dockerfile cannot
-find `packages/`. Use the commands above instead.
+find `packages/`. It also publishes `8080:8080` on all interfaces with auth
+off. Use the commands above instead.
