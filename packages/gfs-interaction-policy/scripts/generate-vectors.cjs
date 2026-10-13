@@ -71,6 +71,20 @@ const PNG = b(
 )
 const PDF = b('%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n')
 
+const READER_BY_CLASS = Object.freeze({
+  text: 'text',
+  markdown: 'text',
+  html: 'text',
+  code: 'text',
+  svg: 'text',
+  jpeg: 'none',
+  png: 'none',
+  pdf: 'pdf',
+  docx: 'none',
+  xlsx: 'xlsx',
+  binary_unsupported: 'none',
+})
+
 const T = (cls, detection, mismatch, extra = {}) => {
   const text = ['text', 'markdown', 'html', 'code', 'svg'].includes(cls)
   const media = {
@@ -91,7 +105,7 @@ const T = (cls, detection, mismatch, extra = {}) => {
     detectedMediaType: extra.detectedMediaType ?? media,
     detection,
     textReadable: text,
-    reader: text ? 'text' : 'none',
+    reader: READER_BY_CLASS[cls],
     modelImageInput: cls === 'jpeg' || cls === 'png' ? 'candidate' : 'unsupported',
     mismatch,
   }
@@ -132,6 +146,15 @@ const classifier = [
   v('pdf bytes named .txt', PDF, 'notes.txt', 'text/plain', T('pdf', 'magic', true)),
   v('docx by zip entries', DOCX, 'letter.docx', DOCX_MIME, T('docx', 'magic', false)),
   v('xlsx by zip entries', XLSX, 'sheet.xlsx', XLSX_MIME, T('xlsx', 'magic', false)),
+  v('xlsx bytes named .txt', XLSX, 'q3.txt', 'text/plain', T('xlsx', 'magic', true)),
+  v(
+    'empty prefix falls back to the declared xlsx',
+    b(''),
+    'q3.xlsx',
+    XLSX_MIME,
+    T('xlsx', 'declared', false),
+    2048
+  ),
   v(
     'plain zip archive',
     PLAIN_ZIP,

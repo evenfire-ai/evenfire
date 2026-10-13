@@ -28,6 +28,19 @@ const FILE_CLASSES = Object.freeze([
 const TEXT_CLASSES = new Set(['text', 'markdown', 'html', 'code', 'svg'])
 const IMAGE_CLASSES = new Set(['jpeg', 'png'])
 const DOCUMENT_BINARY_CLASSES = new Set(['pdf', 'docx', 'xlsx'])
+const READER_BY_CLASS = Object.freeze({
+  text: 'text',
+  markdown: 'text',
+  html: 'text',
+  code: 'text',
+  svg: 'text',
+  jpeg: 'none',
+  png: 'none',
+  pdf: 'pdf',
+  docx: 'none',
+  xlsx: 'xlsx',
+  binary_unsupported: 'none',
+})
 
 /** A prefix shorter than this carries too little evidence to override the declared type. */
 const DECLARED_EVIDENCE_PREFIX_BYTES = 65536
@@ -380,7 +393,7 @@ function result(fileClass, detection, mismatch, detectedMediaType) {
     detectedMediaType: detectedMediaType ?? MEDIA_TYPE_BY_CLASS[fileClass],
     detection,
     textReadable,
-    reader: textReadable ? 'text' : 'none',
+    reader: READER_BY_CLASS[fileClass],
     modelImageInput: IMAGE_CLASSES.has(fileClass) ? 'candidate' : 'unsupported',
     mismatch,
   }
