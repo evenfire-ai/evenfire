@@ -74,6 +74,20 @@ function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
 }
 
+function matchesCurrentResourceUri(
+  current: GfsCrumb | null | undefined,
+  targetUri: string | null
+): current is GfsCrumb {
+  if (!current || !targetUri) return false
+  if (current.gfsUri !== targetUri) return false
+  const targetResourceId = targetUri.slice(targetUri.lastIndexOf('/') + 1)
+  const currentResourceId = current.resourceId.replace(/-/g, '').toLowerCase()
+  return (
+    currentResourceId === targetResourceId.replace(/-/g, '').toLowerCase() &&
+    (current.kind === 'file' || current.kind === 'directory')
+  )
+}
+
 /** Maps a permission set onto the Share dialog's two roles (Editor > Read). */
 function roleForAccessPermissions(permissions: string[]): GfsAccessRole {
   return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
@@ -291,6 +305,15 @@ export function FilesPage({
     pendingResourceAction?.id === lastHandledResourceActionIdRef.current
       ? null
       : pendingResourceAction
+  const pendingActionSeedRef = useRef<{ id: number; path: string | null | undefined } | null>(null)
+  if (!pendingResourceActionRef.current) {
+    pendingActionSeedRef.current = null
+  } else if (pendingActionSeedRef.current?.id !== pendingResourceActionRef.current.id) {
+    pendingActionSeedRef.current = {
+      id: pendingResourceActionRef.current.id,
+      path: pendingGfsUri,
+    }
+  }
 
   useEffect(
     () => () => {
@@ -1540,11 +1563,17 @@ export function FilesPage({
       pendingResourceActionRef.current = null
       onPendingResourceActionHandled?.(request.id)
     }
-    if (pendingGfsUri !== navigationUri) {
+    // A changed activation seed means this mounted page has been superseded.
+    // The seed never establishes readiness: that comes from live `current` below.
+    if (
+      pendingActionSeedRef.current?.id === request.id &&
+      pendingActionSeedRef.current.path !== pendingGfsUri
+    ) {
       markHandled()
       return
     }
     if (request.actionId === 'move' && request.targetResource) {
+      if (ctrl.resolving) return
       if (navigationUri === null) {
         if (current) {
           markHandled()
@@ -1562,7 +1591,10 @@ export function FilesPage({
           )
           return
         }
-      } else if (current?.gfsUri !== navigationUri) {
+      } else if (
+        !matchesCurrentResourceUri(current, navigationUri) ||
+        current.kind !== 'directory'
+      ) {
         if (ctrl.openError && !ctrl.resolving) {
           markHandled()
           pushToast?.(ctrl.openError, 'error')
@@ -1577,9 +1609,13 @@ export function FilesPage({
         }
       }
       const target = visibleResources.find(
-        resource => resource.resourceId === request.targetResource?.resourceId
+        resource =>
+          resource.resourceId.replace(/-/g, '').toLowerCase() ===
+            request.targetResource?.resourceId.replace(/-/g, '').toLowerCase() &&
+          resource.kind === request.targetResource?.kind &&
+          resource.gfsUri === request.targetUri
       )
-      if (!target || target.kind !== request.targetResource.kind) {
+      if (!target) {
         markHandled()
         pushToast?.('This resource is no longer available from its parent folder.', 'error')
         return
@@ -1594,7 +1630,8 @@ export function FilesPage({
       })
       return
     }
-    if (current?.gfsUri === request.targetUri) {
+    if (matchesCurrentResourceUri(current, request.targetUri)) {
+      if (ctrl.resolving || ctrl.authorityPending) return
       const action = currentResourceActions.find(candidate => candidate.id === request.actionId)
       if (!action) {
         markHandled()
@@ -1621,6 +1658,8 @@ export function FilesPage({
     ctrl.authorityPending,
     ctrl.discoveryFailure,
     current?.gfsUri,
+    current?.resourceId,
+    current?.kind,
     currentResourceActions,
     error,
     loading,

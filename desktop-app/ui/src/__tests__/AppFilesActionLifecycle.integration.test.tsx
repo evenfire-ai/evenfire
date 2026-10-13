@@ -14,14 +14,17 @@ import {
   openFilesTab,
   openPreviewTab,
   openSettingsTab,
+  selectWorkspaceTab,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import {
   accessibleResource,
+  childView,
   listAccessiblePage,
   listChildrenPage,
   resolveResource,
+  resolvedDirectory,
   resolvedFile,
   resourceAffordances,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
@@ -236,20 +239,31 @@ function deferred<T>(): Deferred<T> {
 }
 
 type HarnessResource = Awaited<ReturnType<typeof resolvedFile>>
+type HarnessGfsOptions = {
+  accessibleRows?: ReturnType<typeof accessibleResource>[]
+  childRowsByParent?: Map<string, ReturnType<typeof childView>[]>
+}
 
 function installClerum(
   resources: HarnessResource[],
-  deferredByUri = new Map<string, Deferred<unknown>>()
+  deferredByUri = new Map<string, Deferred<unknown>>(),
+  options: HarnessGfsOptions = {}
 ) {
   const rootPage = listAccessiblePage(
-    resources.map(resource =>
-      accessibleResource(resource.resourceId, resource.name, 'file', {
-        gfsUri: resource.gfsUri,
-        parentResourceId: resource.parentResourceId,
-        version: resource.version,
-        bytes: resource.bytes,
-      })
-    )
+    options.accessibleRows ??
+      resources.map(resource =>
+        accessibleResource(
+          resource.resourceId,
+          resource.name,
+          resource.kind === 'directory' ? 'directory' : 'file',
+          {
+            gfsUri: resource.gfsUri,
+            parentResourceId: resource.parentResourceId,
+            version: resource.version,
+            bytes: resource.bytes,
+          }
+        )
+      )
   )
   const resolveResourceByUri = vi.fn(async (uri: string) => {
     const pending = deferredByUri.get(uri)
@@ -259,12 +273,20 @@ function installClerum(
     return resolveResource(resource)
   })
   const deleteResource = vi.fn(async () => ({}))
+  const createFolder = vi.fn(async () => ({}))
+  const createFileFromPath = vi.fn(async () => ({}))
+  const moveResource = vi.fn(async () => ({}))
   const gfs = {
     listAccessible: vi.fn(async () => rootPage),
-    listChildren: vi.fn(async () => listChildrenPage([])),
+    listChildren: vi.fn(async (resourceId: string) =>
+      listChildrenPage(options.childRowsByParent?.get(resourceId) ?? [])
+    ),
     resolve: resolveResourceByUri,
     affordances: vi.fn(async () => resourceAffordances(['read', 'write', 'delete'])),
     deleteResource,
+    createFolder,
+    createFileFromPath,
+    moveResource,
     copyDeepLink: vi.fn(async () => ({ url: 'https://profile.fixture.test/link' })),
     download: vi.fn(),
     downloadPreview: vi.fn(async (_gfsUri: string, _maxBytes: number) => ({
@@ -297,7 +319,7 @@ function installClerum(
       gfs,
     } as unknown as Window['clerum'],
   })
-  return { gfs, deleteResource }
+  return { gfs, deleteResource, createFolder, createFileFromPath, moveResource }
 }
 
 function renderApp() {
@@ -318,7 +340,12 @@ async function chooseDeleteAction(resourceName: string) {
 }
 
 async function chooseRowAction(resourceName: string, actionName: string) {
-  const row = screen.getByRole('treeitem', { name: new RegExp(resourceName) })
+  const row = screen
+    .getAllByRole('treeitem')
+    .find(
+      item => item.querySelector('.da-file-explorer__name')?.textContent?.trim() === resourceName
+    )
+  if (!row) throw new Error(`Could not find the exact sidebar row for ${resourceName}`)
   fireEvent.click(within(row).getByRole('button', { name: `Options for ${resourceName}` }))
   fireEvent.click(await screen.findByRole('menuitem', { name: actionName }))
 }
@@ -328,6 +355,59 @@ async function confirmDelete(resourceName: string) {
   const dialog = title.closest<HTMLElement>('[role="dialog"], [role="alertdialog"]')
   if (!dialog) throw new Error(`Delete confirmation for ${resourceName} is not in a dialog`)
   fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+}
+
+async function openLiveTargetInSameFilesTab() {
+  const sourceFolder = await resolveResource(
+    resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Source folder')
+  )
+  const targetFolder = await resolveResource(
+    resolvedDirectory('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'Target folder', {
+      parentResourceId: sourceFolder.resourceId,
+    })
+  )
+  const targetRow = childView(targetFolder.resourceId, targetFolder.name, 'directory', {
+    gfsUri: targetFolder.gfsUri,
+    parentResourceId: sourceFolder.resourceId,
+    version: targetFolder.version,
+  })
+  const { gfs, createFolder, createFileFromPath } = installClerum(
+    [sourceFolder, targetFolder],
+    new Map(),
+    {
+      accessibleRows: [
+        accessibleResource(sourceFolder.resourceId, sourceFolder.name, 'directory', {
+          gfsUri: sourceFolder.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[sourceFolder.resourceId, [targetRow]]]),
+    }
+  )
+  const controller = makeController(
+    openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'same-files-tab',
+      path: sourceFolder.gfsUri,
+    })
+  )
+  controller.desktopEnvironmentSetupComplete = false
+  appHarness.controller = controller
+  renderApp()
+
+  fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+  const sourceRow = await screen.findByRole('treeitem', { name: /Source folder/ })
+  fireEvent.click(within(sourceRow).getByRole('button', { name: 'Expand Source folder' }))
+  await screen.findByRole('button', { name: 'Options for Target folder' })
+  const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
+  fireEvent.click(within(filesBrowser).getByRole('button', { name: 'Target folder' }))
+
+  await waitFor(() =>
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'same-files-tab',
+      kind: 'files',
+      files: { path: targetFolder.gfsUri },
+    })
+  )
+  return { sourceFolder, targetFolder, gfs, createFolder, createFileFromPath }
 }
 
 const targetA = await resolveResource(
@@ -356,6 +436,94 @@ afterEach(() => {
 })
 
 describe('App → Files action lifecycle integration', () => {
+  it('executes an action on the live same-tab Files route after S → T navigation', async () => {
+    const { targetFolder } = await openLiveTargetInSameFilesTab()
+
+    await chooseRowAction(targetFolder.name, 'Delete')
+
+    expect(await screen.findByText(`Delete ${targetFolder.name}?`)).toBeTruthy()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'same-files-tab',
+      kind: 'files',
+      files: { path: targetFolder.gfsUri },
+    })
+    expect(
+      appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files')
+    ).toHaveLength(1)
+  })
+
+  it('opens and submits New folder against the exact live same-tab destination', async () => {
+    const { targetFolder, createFolder } = await openLiveTargetInSameFilesTab()
+
+    await chooseRowAction(targetFolder.name, 'New folder')
+    const dialog = await screen.findByRole('dialog', { name: 'New folder' })
+    expect(dialog.textContent).toContain(`Create a new folder in ${targetFolder.name}.`)
+    expect(dialog.contains(document.activeElement), document.activeElement?.outerHTML).toBe(true)
+
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Folder name' }), {
+      target: { value: 'Created from sidebar' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create folder' }))
+
+    await waitFor(() =>
+      expect(createFolder).toHaveBeenCalledWith(
+        targetFolder.resourceId,
+        'Created from sidebar',
+        'main'
+      )
+    )
+  })
+
+  it('opens the file chooser and uploads into the exact live same-tab destination', async () => {
+    const { targetFolder, createFileFromPath } = await openLiveTargetInSameFilesTab()
+    const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    const uploadInput = within(filesBrowser).getByLabelText('Upload file', {
+      selector: 'input[type="file"]',
+    }) as HTMLInputElement
+    const clickChooser = vi.spyOn(uploadInput, 'click').mockImplementation(() => undefined)
+
+    await chooseRowAction(targetFolder.name, 'Upload file')
+    await waitFor(() => expect(clickChooser).toHaveBeenCalledTimes(1))
+    const upload = new File(['test upload'], 'sidebar-upload.md', { type: 'text/markdown' })
+    fireEvent.change(uploadInput, { target: { files: [upload] } })
+
+    await waitFor(() =>
+      expect(createFileFromPath).toHaveBeenCalledWith(
+        targetFolder.resourceId,
+        'sidebar-upload.md',
+        'sidebar-upload.md',
+        'main'
+      )
+    )
+  })
+
+  it('reuses an inactive exact-destination Files tab and completes the pending action', async () => {
+    const target = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'existing-target.txt')
+    )
+    const initialTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'existing-target-files',
+      path: target.gfsUri,
+    })
+    appHarness.controller = makeController(selectWorkspaceTab(initialTabs, 'chat-tab-1'))
+    installClerum([target])
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /existing-target\.txt/ })
+    await chooseDeleteAction(target.name)
+
+    expect(await screen.findByText(`Delete ${target.name}?`)).toBeTruthy()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'existing-target-files',
+      kind: 'files',
+      files: { path: target.gfsUri },
+    })
+    expect(
+      appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files')
+    ).toHaveLength(1)
+  })
+
   it('hands a sidebar action from Chat with no Files tab to the exact ready resource once', async () => {
     const deferredTarget = deferred<unknown>()
     const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
@@ -525,6 +693,100 @@ describe('App → Files action lifecycle integration', () => {
     })
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
     expect(deleteResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('moves an unreadable child from its accessible parent without changing target identity', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Shared parent')
+    )
+    const target = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'unreadable-child.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const destination = await resolveResource(
+      resolvedDirectory('dddddddddddddddddddddddddddddddd', 'Move destination')
+    )
+    const unreadableChild = childView(target.resourceId, target.name, 'file', {
+      gfsUri: target.gfsUri,
+      parentResourceId: parent.resourceId,
+      version: target.version,
+      readable: false,
+    })
+    const { moveResource } = installClerum([parent, target, destination], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+        accessibleResource(destination.resourceId, destination.name, 'directory', {
+          gfsUri: destination.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parent.resourceId, [unreadableChild]]]),
+    })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const parentRow = await screen.findByRole('treeitem', { name: /Shared parent/ })
+    fireEvent.click(within(parentRow).getByRole('button', { name: 'Expand Shared parent' }))
+    await screen.findByRole('button', { name: 'Options for unreadable-child.txt' })
+    await chooseRowAction(target.name, 'Move to')
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file unreadable-child.txt' })
+    expect(dialog.querySelector('.da-gfs-move-dialog__current-location')?.textContent).toContain(
+      'Shared parent'
+    )
+    fireEvent.click(await within(dialog).findByRole('button', { name: destination.name }))
+    fireEvent.click(within(dialog).getByRole('button', { name: `Move here (${destination.name})` }))
+
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith(
+        target.resourceId,
+        destination.resourceId,
+        'main',
+        target.version
+      )
+    )
+  })
+
+  it('moves a root row through virtual-root readiness and preserves its target', async () => {
+    const target = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'root-move.txt')
+    )
+    const destination = await resolveResource(
+      resolvedDirectory('dddddddddddddddddddddddddddddddd', 'Root move destination')
+    )
+    const { moveResource } = installClerum([target, destination], new Map(), {
+      accessibleRows: [
+        accessibleResource(target.resourceId, target.name, 'file', {
+          gfsUri: target.gfsUri,
+        }),
+        accessibleResource(destination.resourceId, destination.name, 'directory', {
+          gfsUri: destination.gfsUri,
+        }),
+      ],
+    })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /root-move\.txt/ })
+    await chooseRowAction(target.name, 'Move to')
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file root-move.txt' })
+    expect(dialog.querySelector('.da-gfs-move-dialog__current-location')?.textContent).toContain(
+      'Shared with me'
+    )
+    fireEvent.click(await within(dialog).findByRole('button', { name: destination.name }))
+    fireEvent.click(within(dialog).getByRole('button', { name: `Move here (${destination.name})` }))
+
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith(
+        target.resourceId,
+        destination.resourceId,
+        'main',
+        target.version
+      )
+    )
   })
 
   it('keeps copy-content owned by the matching Preview page', async () => {
