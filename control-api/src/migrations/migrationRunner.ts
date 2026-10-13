@@ -41,21 +41,28 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
 ] as const)
 
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
-  '0136_workflow_authority_bindings',
-  '0137_gfs_upload_authority_bindings',
-  '0138_pr2_readiness_evidence',
-  '0139_pr2_runtime_privileges',
-  '0140_workflow_recipe_authority_entity',
-  '0141_workflow_run_failure_reason',
-  '0142_r31_runtime_behavior_sources',
+  '0137_workflow_authority_bindings',
+  '0138_gfs_upload_authority_bindings',
+  '0139_pr2_readiness_evidence',
+  '0140_pr2_runtime_privileges',
+  '0141_workflow_recipe_authority_entity',
+  '0142_workflow_run_failure_reason',
+  '0143_r31_runtime_behavior_sources',
 ])
+
+const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0130_user_access_foundation'
+const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
+  '0144_authorization_revision_delete_compatibility'
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)
 
 const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   ...DEV_POST_0106_MIGRATION_VERSIONS,
-  ...PR1_MIGRATION_VERSIONS,
+  ...PR1_MIGRATION_VERSIONS.filter(
+    version => version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
+  ),
   ...PR2_MIGRATION_VERSIONS,
+  AUTHORIZATION_REVISION_COMPATIBILITY_VERSION,
 ] as const)
 
 export type MigrationDescriptor = {
@@ -65,10 +72,6 @@ export type MigrationDescriptor = {
   preserveLegacyReceipts?: boolean
   apply: (db: DbClient) => Promise<void>
 }
-
-const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0130_user_access_foundation'
-const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
-  '0144_authorization_revision_delete_compatibility'
 
 type ApplyPendingPr1MigrationsInput = {
   db: DbClient
@@ -226,8 +229,14 @@ export async function applyPendingPr1Migrations({
     if (isPr1Migration && !acceptedLegacyVersion && hasPostSchemaIndexes) {
       await runBoundedTransaction(db, async () => migration.apply(db))
       await preparePr1Migration(db, version, 'after-schema')
-      await runBoundedTransaction(db, async () => recordMigration(db, version))
+      await runBoundedTransaction(db, async () => {
+        await recordMigration(db, version)
+        for (const alias of preservedMigrationReceipts) {
+          if (!appliedVersions.has(alias)) await recordMigration(db, alias)
+        }
+      })
       appliedVersions.add(version)
+      for (const alias of preservedMigrationReceipts) appliedVersions.add(alias)
       continue
     }
 

@@ -6629,66 +6629,83 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // The frozen parent now owns every slot through 0130. Preserve each previously
     // published PR2 identity so re-slotting records a canonical version without replaying DDL.
-    version: '0136_workflow_authority_bindings',
+    version: '0137_workflow_authority_bindings',
     legacyVersions: [
+      '0136_workflow_authority_bindings',
       '0131_workflow_authority_bindings',
       '0115_workflow_authority_bindings',
       '010f_workflow_authority_bindings',
     ],
+    preserveLegacyReceipts: true,
     apply: applyWorkflowAuthorityBindingsSchema,
   },
   {
-    version: '0137_gfs_upload_authority_bindings',
+    version: '0138_gfs_upload_authority_bindings',
     legacyVersions: [
+      '0137_gfs_upload_authority_bindings',
       '0132_gfs_upload_authority_bindings',
       '0116_gfs_upload_authority_bindings',
       '0110_gfs_upload_authority_bindings',
     ],
+    preserveLegacyReceipts: true,
     apply: applyGfsUploadAuthorityBindingSchema,
   },
   {
-    version: '0138_pr2_readiness_evidence',
+    version: '0139_pr2_readiness_evidence',
     legacyVersions: [
+      '0138_pr2_readiness_evidence',
       '0133_pr2_readiness_evidence',
       '0119_pr2_readiness_evidence',
       '0117_pr2_readiness_evidence',
       '0111_pr2_readiness_evidence',
     ],
+    preserveLegacyReceipts: true,
     apply: applyPr2ReadinessEvidenceSchema,
   },
   {
-    version: '0139_pr2_runtime_privileges',
+    version: '0140_pr2_runtime_privileges',
     legacyVersions: [
+      '0139_pr2_runtime_privileges',
       '0134_pr2_runtime_privileges',
       '011a_pr2_runtime_privileges',
       '0118_pr2_runtime_privileges',
       '0112_pr2_runtime_privileges',
     ],
+    preserveLegacyReceipts: true,
     apply: applyPr2RuntimePrivilegesSchema,
   },
   {
-    version: '0140_workflow_recipe_authority_entity',
+    version: '0141_workflow_recipe_authority_entity',
     legacyVersions: [
+      '0140_workflow_recipe_authority_entity',
       '0135_workflow_recipe_authority_entity',
       '011b_workflow_recipe_authority_entity',
       '0119_workflow_recipe_authority_entity',
       '0113_workflow_recipe_authority_entity',
     ],
+    preserveLegacyReceipts: true,
     apply: applyWorkflowRecipeAuthorityEntitySchema,
   },
   {
-    version: '0141_workflow_run_failure_reason',
+    version: '0142_workflow_run_failure_reason',
     legacyVersions: [
+      '0141_workflow_run_failure_reason',
       '0136_workflow_run_failure_reason',
       '011c_workflow_run_failure_reason',
       '011a_workflow_run_failure_reason',
       '0114_workflow_run_failure_reason',
     ],
+    preserveLegacyReceipts: true,
     apply: applyWorkflowRunFailureReasonSchema,
   },
   {
-    version: '0142_r31_runtime_behavior_sources',
-    legacyVersions: ['0137_r31_runtime_behavior_sources', '0120_r31_runtime_behavior_sources'],
+    version: '0143_r31_runtime_behavior_sources',
+    legacyVersions: [
+      '0142_r31_runtime_behavior_sources',
+      '0137_r31_runtime_behavior_sources',
+      '0120_r31_runtime_behavior_sources',
+    ],
+    preserveLegacyReceipts: true,
     apply: applyR31RuntimeBehaviorSourcesSchema,
   },
   {

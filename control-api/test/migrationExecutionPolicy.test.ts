@@ -33,6 +33,7 @@ const FRESH_TABLE_INDEXES = Object.freeze([
 ])
 
 const USER_ACCESS_FOUNDATION_VERSION = '0130_user_access_foundation'
+const CATALOG_UTF8_ORDERING_VERSION = '0132_catalog_utf8_ordering'
 const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
   '0144_authorization_revision_delete_compatibility'
 
@@ -71,6 +72,15 @@ describe('D34 migration execution policy', () => {
       '0136_legacy_password_security_epoch_backfill',
       '0144_authorization_revision_delete_compatibility',
     ])
+    expect(PR2_MIGRATION_VERSIONS).toEqual([
+      '0137_workflow_authority_bindings',
+      '0138_gfs_upload_authority_bindings',
+      '0139_pr2_readiness_evidence',
+      '0140_pr2_runtime_privileges',
+      '0141_workflow_recipe_authority_entity',
+      '0142_workflow_run_failure_reason',
+      '0143_r31_runtime_behavior_sources',
+    ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0119_dynamic_clients_table')
@@ -106,7 +116,7 @@ describe('D34 migration execution policy', () => {
     expect(countByMigrationVersion).toEqual({
       '0130_user_access_foundation': 18,
       '0132_catalog_utf8_ordering': 7,
-      '0136_workflow_authority_bindings': 1,
+      '0137_workflow_authority_bindings': 1,
     })
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
@@ -157,7 +167,7 @@ describe('D34 migration execution policy', () => {
     )
     const classified = [
       ...PR1_ONLINE_INDEX_PLAN.filter(
-        index => index.migrationVersion !== '0136_workflow_authority_bindings'
+        index => index.migrationVersion !== '0137_workflow_authority_bindings'
       ).map(index => index.name),
       ...FRESH_TABLE_INDEXES,
     ].sort()
@@ -173,7 +183,7 @@ describe('D34 migration execution policy', () => {
         .replace(/\s*([(),])\s*/g, '$1')
         .trim()
     for (const index of PR1_ONLINE_INDEX_PLAN) {
-      if (index.migrationVersion === '0136_workflow_authority_bindings') continue
+      if (index.migrationVersion === '0137_workflow_authority_bindings') continue
       expect(canonical(index.createSql), index.name).toBe(
         canonical(historicalDefinitions.get(index.name) ?? '')
       )
@@ -259,7 +269,7 @@ describe('D34 PR1 migration runner', () => {
         version,
         apply: vi.fn(async () => undefined),
       })),
-      ...PR1_MIGRATION_VERSIONS.map(version => ({
+      ...[...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS].map(version => ({
         version,
         legacyVersions: [`historical_${version}`],
         preserveLegacyReceipts: true,
@@ -301,11 +311,10 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    const taskVersions = [...PR1_MIGRATION_VERSIONS]
-    const compatibilityIndex = taskVersions.indexOf(AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)
-    const compatibilityVersion = taskVersions.splice(compatibilityIndex, 1)[0]!
-    const foundationIndex = taskVersions.indexOf(USER_ACCESS_FOUNDATION_VERSION)
-    const afterFoundation = taskVersions.splice(foundationIndex + 1)
+    const taskVersions = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS].filter(
+      version => version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
+    )
+    const compatibilityVersion = AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
     const expected = [
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       USER_ACCESS_FOUNDATION_VERSION,
@@ -313,15 +322,14 @@ describe('D34 PR1 migration runner', () => {
       compatibilityVersion,
       `historical_${compatibilityVersion}`,
       ...taskVersions
-        .slice(foundationIndex + 1)
+        .filter(version => version !== USER_ACCESS_FOUNDATION_VERSION)
         .flatMap(version => [version, `historical_${version}`]),
-      ...afterFoundation.flatMap(version => [version, `historical_${version}`]),
     ]
     expect(applied).toEqual(expected)
     expect(transactions.filter(event => event.startsWith('rollback:'))).toEqual([])
     const transactionForReceipt = (version: string) =>
       transactions.find(event => event.endsWith(`:${version}`))?.split(':')[1]
-    for (const version of PR1_MIGRATION_VERSIONS) {
+    for (const version of [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]) {
       expect(transactionForReceipt(`historical_${version}`), `${version} alias transaction`).toBe(
         transactionForReceipt(version)
       )
@@ -330,11 +338,16 @@ describe('D34 PR1 migration runner', () => {
       transactionForReceipt(`historical_${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}`),
       'compatibility alias is recorded with the foundation transaction'
     ).toBe(transactionForReceipt(USER_ACCESS_FOUNDATION_VERSION))
+    const expectedTransactionCount =
+      DEV_POST_0106_MIGRATION_VERSIONS.length +
+      taskVersions.length +
+      Number(taskVersions.includes(CATALOG_UTF8_ORDERING_VERSION)) +
+      taskVersions.filter(hasPostSchemaOnlineIndexes).length
     expect(transactions.filter(event => event.startsWith('begin:'))).toHaveLength(
-      DEV_POST_0106_MIGRATION_VERSIONS.length + PR1_MIGRATION_VERSIONS.length
+      expectedTransactionCount
     )
     expect(transactions.filter(event => event.startsWith('commit:'))).toHaveLength(
-      DEV_POST_0106_MIGRATION_VERSIONS.length + PR1_MIGRATION_VERSIONS.length
+      expectedTransactionCount
     )
   })
 
@@ -442,7 +455,7 @@ describe('D34 PR1 migration runner', () => {
         return { rows: [], rowCount: 0 }
       }),
     }
-    const pendingVersion = '0136_workflow_authority_bindings'
+    const pendingVersion = '0137_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS,
@@ -477,7 +490,7 @@ describe('D34 PR1 migration runner', () => {
       if (sql.startsWith('CREATE INDEX CONCURRENTLY')) throw new Error('online index failed')
       return { rows: [], rowCount: 0 }
     })
-    const pendingVersion = '0136_workflow_authority_bindings'
+    const pendingVersion = '0137_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS,
