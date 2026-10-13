@@ -1089,15 +1089,15 @@ export function useChatListController({
       }
       throw error
     }
-    chatStore.clearCachedRemoteData()
-    if (selectedAgentRef.current !== agentRef || requestGenerationRef.current !== requestGeneration)
-      return
-    appendNewEntry(agentRef, meta)
     if (
-      selectionIntentRevision !== undefined &&
-      host.current?.getSelectionIntentRevision() !== selectionIntentRevision
+      selectedAgentRef.current !== agentRef ||
+      requestGenerationRef.current !== requestGeneration ||
+      currentAuthorityScopeRef.current !== authorityScopeAtCreate
     )
       return
+    chatStore.clearCachedRemoteData()
+    appendNewEntry(agentRef, meta)
+    if (!isCurrentCreate()) return
     host.current?.markAutoSelectedChat(null)
     await host.current?.switchToChat(agentRef, chatId, {
       onCurrentError: error => {
