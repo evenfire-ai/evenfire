@@ -233,7 +233,7 @@ export function SidebarNav({
 
   const handleSelect = (item: NavItem) => {
     onSelect(item)
-    onCompactMenuOpenChange(false)
+    onCompactMenuOpenChange(false, 'destination')
     updateSettingsMenuOpen(false)
     setSessionMenuId(null)
   }
@@ -420,7 +420,7 @@ export function SidebarNav({
                       onClick={event => {
                         event.stopPropagation()
                         onNewChat()
-                        onCompactMenuOpenChange(false)
+                        onCompactMenuOpenChange(false, 'destination')
                       }}
                       variant="ghost"
                     >
@@ -517,7 +517,7 @@ export function SidebarNav({
                                         isRemote: session.remote === true,
                                         title: session.title,
                                       })
-                                      onCompactMenuOpenChange(false)
+                                      onCompactMenuOpenChange(false, 'destination')
                                       setSessionMenuId(null)
                                     }}
                                   >
@@ -610,7 +610,7 @@ export function SidebarNav({
                             aria-label={`Open ${app.label}`}
                             onClick={() => {
                               onOpenSandboxUiApp(app)
-                              onCompactMenuOpenChange(false)
+                              onCompactMenuOpenChange(false, 'destination')
                             }}
                           >
                             <span className="nav-available-app__label">{app.label}</span>
@@ -663,11 +663,11 @@ export function SidebarNav({
                 <FileExplorerTree
                   onOpenFolder={uri => {
                     onOpenFilesSection(uri)
-                    onCompactMenuOpenChange(false)
+                    onCompactMenuOpenChange(false, 'destination')
                   }}
                   onOpenPreview={preview => {
                     onOpenPreviewSection(preview)
-                    onCompactMenuOpenChange(false)
+                    onCompactMenuOpenChange(false, 'destination')
                   }}
                   pushToast={pushToast}
                 />
@@ -755,7 +755,7 @@ export function SidebarNav({
                     color="danger"
                     onClick={() => {
                       updateSettingsMenuOpen(false)
-                      onCompactMenuOpenChange(false)
+                      onCompactMenuOpenChange(false, 'destination')
                       onLogout()
                     }}
                     disabled={busy}

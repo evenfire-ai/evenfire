@@ -264,7 +264,7 @@ describe('SidebarNav logo', () => {
 
     fireEvent.click(screen.getByTestId('nav-files'))
     expect(onSelect).toHaveBeenCalledWith('files')
-    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, 'destination')
   })
 
   it('shows expanded navigation in compact mode without changing the desktop collapse preference', () => {
@@ -298,7 +298,7 @@ describe('SidebarNav logo', () => {
     fireEvent.click(screen.getByTestId('nav-new-chat'))
 
     expect(onNewChat).toHaveBeenCalledOnce()
-    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, 'destination')
   })
 
   it('closes the compact overlay after opening a file-tree folder', () => {
@@ -319,7 +319,7 @@ describe('SidebarNav logo', () => {
     fireEvent.click(screen.getByTestId('file-tree-open-folder'))
 
     expect(onOpenFilesSection).toHaveBeenCalledWith('gfs://main/folder')
-    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, 'destination')
   })
 
   it('closes the compact overlay after opening a file-tree preview', () => {
@@ -345,7 +345,7 @@ describe('SidebarNav logo', () => {
       kind: 'markdown',
       name: 'readme.md',
     })
-    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false)
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, 'destination')
   })
 })
 

@@ -23,6 +23,7 @@ import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
+import type { CompactMenuCloseReason } from '@components/SidebarNav/types'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
@@ -309,6 +310,7 @@ export function App() {
   const [compactSidebarOpen, setCompactSidebarOpen] = React.useState(false)
   const compactSidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null)
   const compactSidebarWasOpenRef = React.useRef(false)
+  const compactSidebarCloseReasonRef = React.useRef<CompactMenuCloseReason>('dismiss')
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
@@ -1279,11 +1281,25 @@ export function App() {
   }, [compactNavigation])
 
   React.useEffect(() => {
-    if (compactSidebarWasOpenRef.current && !compactSidebarOpen && compactNavigation) {
+    if (
+      compactSidebarWasOpenRef.current &&
+      !compactSidebarOpen &&
+      compactNavigation &&
+      compactSidebarCloseReasonRef.current === 'dismiss'
+    ) {
       compactSidebarTriggerRef.current?.focus()
     }
+    if (!compactSidebarOpen) compactSidebarCloseReasonRef.current = 'dismiss'
     compactSidebarWasOpenRef.current = compactSidebarOpen
   }, [compactNavigation, compactSidebarOpen])
+
+  const handleCompactSidebarOpenChange = React.useCallback(
+    (open: boolean, reason: CompactMenuCloseReason = 'dismiss') => {
+      compactSidebarCloseReasonRef.current = open ? 'dismiss' : reason
+      setCompactSidebarOpen(open)
+    },
+    []
+  )
 
   React.useEffect(() => {
     void window.clerum.app.rendererReady().catch(error => {
@@ -2866,7 +2882,7 @@ export function App() {
                               collapsed={sidebarCollapsed}
                               compactMode={compactNavigation}
                               compactMenuOpen={compactSidebarOpen}
-                              onCompactMenuOpenChange={setCompactSidebarOpen}
+                              onCompactMenuOpenChange={handleCompactSidebarOpenChange}
                               resize={sidebarResize}
                               onCollapsedChange={handleSidebarCollapsedChange}
                               onNewChat={handleNewWorkspaceChatTab}
@@ -2913,7 +2929,9 @@ export function App() {
                                     label="Open navigation"
                                     aria-controls="desktop-sidebar-navigation"
                                     aria-expanded={compactSidebarOpen}
-                                    onClick={() => setCompactSidebarOpen(open => !open)}
+                                    onClick={() =>
+                                      handleCompactSidebarOpenChange(!compactSidebarOpen)
+                                    }
                                   >
                                     <svg viewBox="0 0 16 16" aria-hidden="true">
                                       <path d="M2 4h12M2 8h12M2 12h12" />

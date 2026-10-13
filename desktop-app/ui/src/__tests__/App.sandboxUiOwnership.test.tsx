@@ -42,6 +42,7 @@ function useReactiveController(controller: AppController): AppController {
 type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
 
 const sidebarHarness = vi.hoisted(() => ({
+  renderActual: false,
   props: null as null | {
     onSelect?: (item: string) => void
     onOpenSandboxUiApp?: (app: {
@@ -51,9 +52,10 @@ const sidebarHarness = vi.hoisted(() => ({
       icon?: string
     }) => void
     compactMenuOpen?: boolean
-    onCompactMenuOpenChange?: (open: boolean) => void
+    onCompactMenuOpenChange?: (open: boolean, reason?: 'dismiss' | 'destination') => void
   },
 }))
+const composerHarness = vi.hoisted(() => ({ renderActual: false }))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
 vi.mock('@hooks/useAgentChatActionsValue', () => ({ useAgentChatActionsValue: () => ({}) }))
@@ -64,15 +66,27 @@ vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({ ConfirmDialog: () => null }))
 vi.mock('@components/GfsImagePreview', () => ({ GfsImagePreview: () => null }))
 vi.mock('@components/PluginConsentModal', () => ({ PluginConsentModal: () => null }))
-vi.mock('@components/SidebarNav', () => ({
-  SidebarNav: (props: NonNullable<typeof sidebarHarness.props>) => {
-    sidebarHarness.props = props
-    return null
-  },
-}))
+vi.mock('@components/SidebarNav', async importOriginal => {
+  const actual = await importOriginal<typeof import('@components/SidebarNav')>()
+  return {
+    ...actual,
+    SidebarNav: (props: NonNullable<typeof sidebarHarness.props>) => {
+      sidebarHarness.props = props
+      return sidebarHarness.renderActual ? <actual.SidebarNav {...props} /> : null
+    },
+  }
+})
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
-vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
+vi.mock('@pages/ChatPage', async () => {
+  const React = await import('react')
+  const { ComposerPanel } = await vi.importActual<
+    typeof import('@components/agents/ComposerPanel')
+  >('@components/agents/ComposerPanel')
+  return {
+    ChatPage: () => (composerHarness.renderActual ? React.createElement(ComposerPanel) : null),
+  }
+})
 vi.mock('@pages/ContextDetailsPage', () => ({ ContextDetailsPage: () => null }))
 vi.mock('@pages/ContextsPage', () => ({ ContextsPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
@@ -83,6 +97,25 @@ vi.mock('@pages/TeamDetailsPage', () => ({ TeamDetailsPage: () => null }))
 vi.mock('@pages/TeamsPage', () => ({ TeamsPage: () => null }))
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
 vi.mock('@pages/WorkflowsPage', () => ({ WorkflowsPage: () => null }))
+vi.mock('@hooks/domain/useContextsDataController', () => ({
+  useContextsDataController: () => ({ sharedFilesByContext: {}, refreshSharedFiles: vi.fn() }),
+}))
+vi.mock('@hooks/domain/useMcpServersDataController', () => ({
+  useMcpServersDataController: () => ({
+    selectedAgentMcpServers: [],
+    agentContextByName: {},
+    refresh: vi.fn(),
+  }),
+}))
+vi.mock('@hooks/useHostModels', () => ({
+  useHostModels: () => ({
+    data: null,
+    state: 'loading',
+    imageBlockMessage: null,
+    visualSendBlocked: false,
+    imageInput: { state: 'unknown' },
+  }),
+}))
 
 type AppController = ReturnType<typeof useAppController>
 
@@ -169,7 +202,12 @@ function makeController(): AppController {
     notifications: [],
     toasts: [],
     pendingApprovals: [],
+    agentSending: false,
+    agentError: null,
+    failedAgentSend: null,
     composerImageAttachments: [],
+    composerFileAttachments: [],
+    composerFileRefusals: [],
     composerReferenceAttachments: [],
     groupedMessages: [],
     activeMessages: [],
@@ -285,7 +323,9 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    sidebarHarness.renderActual = false
     sidebarHarness.props = null
+    composerHarness.renderActual = false
     openGfsResourceCb = null
     shortcutCommandCb = null
     currentController = makeController()
@@ -317,6 +357,7 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
         },
         app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
         sandboxUi,
+        workflows: { list: vi.fn().mockResolvedValue({ items: [] }) },
         pluginSdk: {
           onOpenGfsResource: vi.fn((cb: (resource: OpenGfsPayload) => void) => {
             openGfsResourceCb = cb
@@ -873,5 +914,61 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     const alphaPrefix = `${ALPHA!.appRef}: `
     await waitFor(() => expect(screen.queryByText(text => text.startsWith(alphaPrefix))).toBeNull())
     expect(await screen.findByRole('button', { name: 'Open Alpha' })).toBeTruthy()
+  })
+
+  it('keeps focus in the new composer after compact-menu New Chat', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    sidebarHarness.renderActual = true
+    composerHarness.renderActual = true
+    currentController.selectedAgent = 'agent-a'
+
+    render(<App />)
+
+    const trigger = await screen.findByTestId('compact-navigation-toggle')
+    const composer = await screen.findByRole('textbox', { name: 'Agent message composer' })
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByTestId('nav-new-chat'))
+
+    await waitFor(() => expect(document.activeElement).toBe(composer))
+  })
+
+  it('returns focus to the compact trigger when Escape dismisses the menu', async () => {
+    const media = {
+      matches: true,
+      media: '(max-width: 759px)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => media)
+    )
+    sidebarHarness.renderActual = true
+
+    render(<App />)
+
+    const trigger = await screen.findByTestId('compact-navigation-toggle')
+    fireEvent.click(trigger)
+    await screen.findByTestId('nav-new-chat')
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
   })
 })
