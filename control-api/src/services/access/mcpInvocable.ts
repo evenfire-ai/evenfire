@@ -175,6 +175,30 @@ async function loadAllowedNamesByContext(
 }
 
 /**
+ * Union of the `spec.mcpServers` allowlists of the given Contexts (by
+ * `spec.contextId`), names trimmed. The single definition of "these Contexts
+ * enable these servers" for the consent gate and the rpc-proxy rail, so the
+ * two cannot drift. An empty `contextIds` resolves without listing Contexts.
+ */
+export async function allowedMcpServerNamesForContexts(
+  gateway: Pick<K8sGateway, 'listResource'>,
+  mcpServersNamespace: string,
+  contextIds: readonly string[]
+): Promise<Set<string>> {
+  const union = new Set<string>()
+  if (contextIds.length === 0) return union
+  const allowedByContext = await loadAllowedNamesByContext(
+    gateway,
+    mcpServersNamespace,
+    new Set(contextIds)
+  )
+  for (const names of allowedByContext.values()) {
+    for (const name of names) union.add(name)
+  }
+  return union
+}
+
+/**
  * Whether some Context the user belongs to enables `mcpServerName` through its
  * `spec.mcpServers` allowlist. This is the access rule for consenting to (and
  * completing consent for) a per-user OAuth server: the grant is keyed by
@@ -195,16 +219,12 @@ export async function userHasContextEnablingMcpServer(opts: {
   mcpServerName: string
 }): Promise<boolean> {
   const { contextIds } = await getUserContexts(opts.userId)
-  if (contextIds.length === 0) return false
-  const allowedByContext = await loadAllowedNamesByContext(
+  const allowed = await allowedMcpServerNamesForContexts(
     opts.gateway,
     opts.mcpServersNamespace,
-    new Set(contextIds)
+    contextIds
   )
-  for (const names of allowedByContext.values()) {
-    if (names.has(opts.mcpServerName)) return true
-  }
-  return false
+  return allowed.has(opts.mcpServerName)
 }
 
 /**
@@ -338,19 +358,14 @@ export async function resolveInvocableMcpServersForContexts(
   callerUserId: string,
   db: DbClient
 ): Promise<InvocableMcpServer[]> {
-  const scoped = new Set(scopedContextIds)
-  if (scoped.size === 0) return []
+  if (scopedContextIds.length === 0) return []
 
-  const [allowedByContext, mcpServers] = await Promise.all([
-    loadAllowedNamesByContext(gateway, mcpServersNamespace, scoped),
+  const [union, mcpServers] = await Promise.all([
+    allowedMcpServerNamesForContexts(gateway, mcpServersNamespace, scopedContextIds),
     gateway.listResource('mcpservers', mcpServersNamespace),
   ])
   const serverList = asArray<McpServerCR>(mcpServers)
 
-  const union = new Set<string>()
-  for (const names of allowedByContext.values()) {
-    for (const name of names) union.add(name)
-  }
   const grantPresence = await computeGrantPresence(
     db,
     mcpServersNamespace,

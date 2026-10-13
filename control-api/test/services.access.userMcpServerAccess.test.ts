@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
 import { config } from '../src/config.js'
-import { userHasContextEnablingMcpServer } from '../src/services/access/mcpInvocable.js'
+import {
+  allowedMcpServerNamesForContexts,
+  userHasContextEnablingMcpServer,
+} from '../src/services/access/mcpInvocable.js'
 import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -85,5 +89,46 @@ describe('userHasContextEnablingMcpServer', () => {
     membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-a'] } })
     vi.spyOn(gateway, 'listResource').mockRejectedValueOnce(new Error('apiserver down'))
     await expect(check(gateway, 'user-1', 'notion')).rejects.toThrow('apiserver down')
+  })
+})
+
+describe('allowedMcpServerNamesForContexts', () => {
+  const contextNames = ['ctx-a', 'ctx-b', 'ctx-c', 'ctx-d']
+  // Padded variants are reachable: the allowlist writer stores the name as given.
+  const serverName = fc.constantFrom('notion', 'gdrive', 'slack', ' notion', 'gdrive ', '')
+
+  it('is exactly the trimmed union of the asked Contexts allowlists (oracle)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.dictionary(
+          fc.constantFrom(...contextNames),
+          fc.uniqueArray(serverName, { maxLength: 4 })
+        ),
+        fc.uniqueArray(fc.constantFrom(...contextNames, 'ctx-unseeded'), { maxLength: 5 }),
+        async (allowlists, asked) => {
+          const gateway = new MockGateway(MCP_NS)
+          for (const [name, servers] of Object.entries(allowlists)) {
+            await seedAllowlistedContext(gateway, name, servers)
+          }
+
+          const out = await allowedMcpServerNamesForContexts(gateway as never, MCP_NS, asked)
+
+          const expected = new Set<string>()
+          for (const id of asked) {
+            for (const n of allowlists[id] ?? []) if (n.trim()) expected.add(n.trim())
+          }
+          expect([...out].sort()).toEqual([...expected].sort())
+        }
+      ),
+      { numRuns: 300 }
+    )
+  })
+
+  it('resolves empty without listing Contexts when asked for none', async () => {
+    const gateway = new MockGateway(MCP_NS)
+    await seedAllowlistedContext(gateway, 'ctx-a', ['notion'])
+    const listSpy = vi.spyOn(gateway, 'listResource')
+    expect(await allowedMcpServerNamesForContexts(gateway as never, MCP_NS, [])).toEqual(new Set())
+    expect(listSpy).not.toHaveBeenCalled()
   })
 })
