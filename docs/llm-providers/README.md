@@ -217,9 +217,12 @@ deployment name. Step-by-step setup is in the operator guide:
 
 ### 4.6 Local development (no Kubernetes)
 
-Dev mode bypasses all of the above. Set `CLERUM_DEV_MODE=true` and export the
-provider's env var(s) — `OPENAI_API_KEY`, `GROQ_API_KEY`, `AWS_ACCESS_KEY_ID` +
-`AWS_SECRET_ACCESS_KEY`, etc. If `CLERUM_MODEL_PROVIDER` is unset, mcp-host
+Dev mode bypasses the Kubernetes setup above (Secrets, Host CRs). Set
+`CLERUM_DEV_MODE=true` and export the provider's env var(s) — `OPENAI_API_KEY`,
+`GROQ_API_KEY`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, etc. Bedrock
+also needs `AWS_REGION` to run: the two keys are enough for auto-selection, but
+without the region the provider fails to construct and mcp-host runs degraded.
+Azure likewise needs `AZURE_OPENAI_ENDPOINT`. If `CLERUM_MODEL_PROVIDER` is unset, mcp-host
 **auto-detects** the first provider (in the canonical id order) whose required
 slots are all present and uses that provider's default model;
 `CLERUM_MODEL_NAME` applies only when `CLERUM_MODEL_PROVIDER` is also set.
@@ -375,17 +378,17 @@ failing over on those would just mask bugs.
 
 ## 8. Troubleshooting
 
-| Symptom                                             | Cause                                                                                                         |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Agent degraded, log `credential '<slot>' not found` | A required slot is missing. Bedrock needs **both** keys.                                                      |
-| Agent degraded, `failed to construct <provider>`    | Missing non-secret env (`AWS_REGION`, `VERTEX_PROJECT_ID`, `AZURE_OPENAI_ENDPOINT`) or malformed Vertex JSON. |
-| `403 model_not_allowed`                             | Model isn't allowlisted/enabled for that provider.                                                            |
-| `404 No secret mapping found` (workflow step)       | Provider has no entry in `clerum-model-secret-mapping` — see below.                                           |
-| `500 ConfigMap not found` (workflow step)           | `clerum-model-secret-mapping` missing from the `mcp-host` namespace.                                          |
-| `502 mcp_host configure failed/unreachable`         | WRC resolved the credential but couldn't configure mcp-host.                                                  |
-| Model dropdown empty in the wizard                  | No enabled allowlist rows for that provider.                                                                  |
-| Context-window indicator looks wrong                | `context_window_tokens` unset on the allowlist row → falls back to `CLERUM_CONTEXT_MAX_TOKENS`.               |
-| Cost report shows a model as unpriced               | No row in `llm_model_prices`; only 8 models are seeded. Add one under **Cost → LLM prices**.                  |
+| Symptom                                                  | Cause                                                                                                                                                                                                                                  |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent degraded, log `Required LLM credential is missing` | A required slot is missing. Bedrock needs **both** keys.                                                                                                                                                                               |
+| Agent degraded, log `Failed to construct LLM provider`   | The log names neither provider nor cause. Check `AWS_REGION` (Bedrock), `AZURE_OPENAI_ENDPOINT` (Azure), or the Vertex JSON; Vertex uses the JSON's `project_id` when `VERTEX_PROJECT_ID` is unset and fails only if both are missing. |
+| `403 model_not_allowed`                                  | Model isn't allowlisted/enabled for that provider.                                                                                                                                                                                     |
+| `404 No secret mapping found` (workflow step)            | Provider has no entry in `clerum-model-secret-mapping` — see below.                                                                                                                                                                    |
+| `500 ConfigMap not found` (workflow step)                | `clerum-model-secret-mapping` missing from the `mcp-host` namespace.                                                                                                                                                                   |
+| `502 mcp_host configure failed/unreachable`              | WRC resolved the credential but couldn't configure mcp-host.                                                                                                                                                                           |
+| Model dropdown empty in the wizard                       | No enabled allowlist rows for that provider.                                                                                                                                                                                           |
+| Context-window indicator looks wrong                     | `context_window_tokens` unset on the allowlist row → falls back to `CLERUM_CONTEXT_MAX_TOKENS`.                                                                                                                                        |
+| Cost report shows a model as unpriced                    | No row in `llm_model_prices`; only 8 models are seeded. Add one under **Cost → LLM prices**.                                                                                                                                           |
 
 ### Known sharp edge: workflow steps and the secret mapping
 
