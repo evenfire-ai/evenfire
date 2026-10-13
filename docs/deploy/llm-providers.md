@@ -59,7 +59,9 @@ returns key names only). To rotate a key, re-enter it.
    - The driver builds GCP credentials **from the JSON in memory** — it never
      writes a key file and does not use `GOOGLE_APPLICATION_CREDENTIALS`.
 3. On the Host, open **Host → Environment** and set:
-   - `VERTEX_PROJECT_ID` — the GCP project id (required).
+   - `VERTEX_PROJECT_ID` — the GCP project id. Set it explicitly: when it is
+     unset, the driver silently falls back to the service-account JSON's
+     `project_id`, and fails only if both are missing.
    - `VERTEX_LOCATION` — the region, e.g. `us-central1` (optional; provider
      default applies if unset).
 4. Set the Host `spec.model.provider: vertex` and pick a Vertex model from the
@@ -106,7 +108,9 @@ the `clerum-model-secret-mapping` caveat.
 > unset, mcp-host auto-detects the first provider whose keys are present.
 > Because Bedrock's env vars are the standard `AWS_ACCESS_KEY_ID` /
 > `AWS_SECRET_ACCESS_KEY`, a shell that already exports AWS credentials can
-> auto-select `bedrock`; set `CLERUM_MODEL_PROVIDER` explicitly to avoid that. See
+> auto-select `bedrock`; set `CLERUM_MODEL_PROVIDER` explicitly to avoid that.
+> Selection needs only the two keys, but Bedrock still needs `AWS_REGION` to
+> run; without it the provider fails to construct and mcp-host runs degraded. See
 > [Local development](../llm-providers/README.md#46-local-development-no-kubernetes).
 
 ## 4. Extra credential slots (for provider fallback, R5)

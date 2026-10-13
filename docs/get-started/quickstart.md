@@ -24,7 +24,8 @@ named `chatllm` you can message immediately.
   Mistral, … see [the full list](../llm-providers/README.md)) put its key in
   `.env` **and** set `CLERUM_MODEL_PROVIDER` and `CLERUM_MODEL_NAME`. The pair
   must be enabled in the model allowlist, or setup stops with
-  `HOST_MODEL_UNKNOWN`. Setup only writes the four keys above to the cluster,
+  `HOST_MODEL_UNKNOWN` (pair not in the allowlist) or `HOST_MODEL_DISABLED`
+  (pair listed but disabled). Setup only writes the four keys above to the cluster,
   so after `make minikube-setup` run `make minikube-apply-secrets` and then
   `kubectl rollout restart deployment/chatllm -n mcp-host --context clerum-test`.
   Without any key, setup still boots, but the agent can't reply until you add
@@ -100,9 +101,10 @@ It seeds for you:
 - one account, using the `ADMIN_PASSWORD` you set in `.env`: username
   **`admin`** for the Control UI and email **`admin@evenfire.local`** for the
   Desktop App — the same account, and the sole Desktop App member. It is also
-  the initial EvenDrive (GFS) operator. Re-running setup never recreates a
-  revoked operator link or adds a second member; if the link is missing,
-  setup stops with an actionable error.
+  the initial EvenDrive (GFS) operator. A default re-run of setup rebuilds
+  the control database, so it seeds a fresh link. With `REUSE_DB=true` it
+  keeps the database and never recreates a revoked operator link or adds a
+  second member; if the link is missing, setup stops with an actionable error.
 
 Verify:
 
@@ -181,10 +183,15 @@ curl -s -X POST "$RPC/api/v1/rpc/hosts/$HOST/approvals/approve" \
 
 ## 5. Optional: chat from Telegram
 
-1. Create a bot with [@BotFather](https://t.me/BotFather); get your numeric
-   user id (e.g. via `@userinfobot`).
-2. Set `CLERUM_TELEGRAM_BOT_TOKEN` and `CLERUM_TELEGRAM_USER_ID` in `.env`.
-3. Re-run `make minikube-setup ARGS="--skip-build"` and message your bot.
+1. Create a bot with [@BotFather](https://t.me/BotFather); copy the bot token
+   and its `@handle`.
+2. In the Control UI, open **External Channels** and create a channel: pick the
+   `chatllm` agent, choose Telegram, and paste the bot token and handle. The
+   token is stored as a write-only channel credential.
+3. Grant your Telegram account chat access, then message your bot.
+
+Setup does not read Telegram values from `.env`; channel credentials are set
+only through the Control UI (or the admin API).
 
 Approval requests arrive on Telegram with inline **Approve / Deny** buttons.
 Details: [Connect Telegram](../how-to/connect-telegram.md).

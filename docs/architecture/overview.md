@@ -520,9 +520,9 @@ a `Set<string>` so an unchanged hostRef triggers exactly one reconcile.
 
 **RBAC:** HCC's `host-context-controller-channels-runtime` Role grants
 `get/list/watch` on `communicationchannels.clerum.io` in the `channels`
-namespace. **Applied out-of-band** via `make gcp-dev-bootstrap-rbac` /
-`make gcp-prod-bootstrap-rbac` because the CD service account intentionally
-cannot grant RBAC (see `deploy/scripts/post-deploy-sync.sh`).
+namespace. **Applied out-of-band** with
+[`deploy/scripts/bootstrap-rbac.sh`](../../deploy/scripts/bootstrap-rbac.sh),
+because a deploy service account should not be able to grant RBAC.
 
 ---
 
@@ -1443,12 +1443,19 @@ Default: `your-registry.example.com/evenfire/`
 
 ### Full Production Deployment Sequence
 
+The service Makefiles only build and push images; they have no `deploy`
+target. The workloads ship as Kustomize manifests under `deploy/base`, applied
+through an overlay. [Production deployment](../deploy/production.md) gives the
+rollout order, and [minikube](../deploy/minikube.md) is the scripted reference
+(`make minikube-deploy-all`).
+
 ```bash
 # 1. Install CRDs
 helm install clerum-crds ./charts/clerum-crds
 
-# 2. Deploy host-context-controller (operator must run first)
-cd host-context-controller && make deploy
+# 2. Apply the platform manifests (deploy/base through your overlay):
+#    host-context-controller first, then control-api, mcp-host,
+#    channel-reader and the proxies
 
 # 3. Deploy MCP server secrets and CRDs
 cd mcp-servers && make deploy-all
@@ -1456,16 +1463,10 @@ cd mcp-servers && make deploy-all
 # 4. Create Context CRD (defines which servers are accessible)
 kubectl apply -f charts/clerum-crds/examples/context1.yaml
 
-# 5. Deploy mcp-host
-cd mcp-host && make deploy
-
-# 6. Create Host CRD with API keys secret
+# 5. Create Host CRD with API keys secret
 kubectl apply -f charts/clerum-crds/examples/host-chatllm.yaml
 
-# 7. Deploy channel-reader
-cd channel-reader && make deploy
-
-# 8. Create CommunicationChannel CRD
+# 6. Create CommunicationChannel CRD
 kubectl apply -f charts/clerum-crds/examples/channels.yaml
 ```
 
