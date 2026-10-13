@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import { mkdtemp, readFile, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -6,6 +6,26 @@ import { dirname, join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
 import { config, getActiveEnvKey } from '../config.js'
 import { DesktopUploadCapabilityError, normalizeUploadProductMaxBytes } from '../gfs/upload.js'
+import { readPendingExternalLogoutMarker } from '../pendingExternalLogout.js'
+import { TokenStore } from '../tokenStore.js'
+
+const tokenStorageRuntime = vi.hoisted(() => ({ directory: '' }))
+vi.mock('electron', () => ({
+  app: {
+    getPath: vi.fn(() => tokenStorageRuntime.directory),
+    isReady: vi.fn(() => true),
+  },
+  safeStorage: {
+    isEncryptionAvailable: vi.fn(() => true),
+    encryptString: vi.fn((value: string) => Buffer.from(value)),
+    decryptString: vi.fn((value: Buffer) => value.toString()),
+  },
+}))
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  tokenStorageRuntime.directory = ''
+})
 
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
@@ -272,10 +292,7 @@ type UploadScopeTestService = {
     passwordLogin: ReturnType<typeof vi.fn>
     googleLogin: ReturnType<typeof vi.fn>
   }
-  tokenStore: {
-    clearSessionTokenStrictly: ReturnType<typeof vi.fn>
-    setSessionToken: ReturnType<typeof vi.fn>
-  }
+  tokenStore: TokenStore
   completePasswordLogin: (email: string, password: string) => ReturnType<AppService['googleLogin']>
   googleLogin: AppService['googleLogin']
   listGfsUploadSessions: AppService['listGfsUploadSessions']
@@ -292,8 +309,13 @@ type UploadScopeTestService = {
   startGfsFileReplace: AppService['startGfsFileReplace']
 }
 
-function authenticatedUploadService(statePath: string): UploadScopeTestService {
+async function authenticatedUploadService(statePath: string): Promise<UploadScopeTestService> {
+  tokenStorageRuntime.directory = dirname(statePath)
+  const tokenStore = new TokenStore({ isolatedUserDataPath: tokenStorageRuntime.directory })
+  await tokenStore.setSessionToken('token-a', getActiveEnvKey())
+  vi.spyOn(tokenStore, 'setSessionToken')
   const service = new AppService({
+    tokenStore,
     getUserDataDirectory: () => dirname(statePath),
   }) as unknown as UploadScopeTestService
   service.sessionToken = 'token-a'
@@ -319,13 +341,6 @@ function authenticatedUploadService(statePath: string): UploadScopeTestService {
     passwordLogin: vi.fn(),
     googleLogin: vi.fn(),
   }
-  service.tokenStore = {
-    clearSessionTokenStrictly: vi.fn().mockResolvedValue({
-      keytarAvailable: true,
-      keytarDisabled: false,
-    }),
-    setSessionToken: vi.fn().mockResolvedValue(undefined),
-  }
   service.startDesktopGfsUpload = vi.fn()
   return service
 }
@@ -336,7 +351,7 @@ describe('AppService GFS upload security scope', () => {
     try {
       const filePath = join(root, 'legacy.bin')
       await writeFile(filePath, Buffer.from('legacy payload'))
-      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
         new DesktopUploadCapabilityError('resumable uploads are disabled', {
           allowLegacyFallback: true,
@@ -387,7 +402,7 @@ describe('AppService GFS upload security scope', () => {
     try {
       const filePath = join(root, 'payload.bin')
       await writeFile(filePath, Buffer.from('payload'))
-      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       let malformed: unknown
       try {
         normalizeUploadProductMaxBytes(0)
@@ -416,7 +431,7 @@ describe('AppService GFS upload security scope', () => {
       const filePath = join(root, 'oversized-legacy.bin')
       await writeFile(filePath, Buffer.alloc(0))
       await truncate(filePath, 16 * 1024 * 1024 + 1)
-      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
         new DesktopUploadCapabilityError('resumable uploads are disabled', {
           allowLegacyFallback: true,
@@ -442,7 +457,7 @@ describe('AppService GFS upload security scope', () => {
     try {
       const filePath = join(root, 'resume.bin')
       await writeFile(filePath, Buffer.from('resume payload'))
-      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
         new DesktopUploadCapabilityError('resumable uploads are disabled', {
           allowLegacyFallback: true,
@@ -468,7 +483,7 @@ describe('AppService GFS upload security scope', () => {
     try {
       const filePath = join(root, 'replace.bin')
       await writeFile(filePath, Buffer.from('replace payload'))
-      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       service.startDesktopGfsUpload.mockRejectedValue(
         new DesktopUploadCapabilityError('resumable uploads are disabled', {
           allowLegacyFallback: true,
@@ -494,7 +509,7 @@ describe('AppService GFS upload security scope', () => {
       const statePath = join(root, 'gfs-upload-sessions.json')
       const record = scopedUploadRecord('92929292-9292-4292-8292-929292929292')
       await writeFile(statePath, JSON.stringify({ version: 2, records: [record], quarantined: [] }))
-      const service = authenticatedUploadService(statePath) as UploadScopeTestService & {
+      const service = (await authenticatedUploadService(statePath)) as UploadScopeTestService & {
         gfsTransientTeamHopDepth: number
       }
       const job = {
@@ -532,7 +547,7 @@ describe('AppService GFS upload security scope', () => {
       const statePath = join(root, 'gfs-upload-sessions.json')
       const record = scopedUploadRecord('93939393-9393-4393-8393-939393939393')
       await writeFile(statePath, JSON.stringify({ version: 2, records: [record], quarantined: [] }))
-      const service = authenticatedUploadService(statePath)
+      const service = await authenticatedUploadService(statePath)
       const job = {
         snapshot: vi.fn(() => ({
           state: 'uploading',
@@ -576,7 +591,7 @@ describe('AppService GFS upload security scope', () => {
         token: 'legacy-token-must-not-survive',
       }
       await writeFile(statePath, JSON.stringify([legacy]))
-      const service = authenticatedUploadService(statePath)
+      const service = await authenticatedUploadService(statePath)
 
       await expect(service.listGfsUploadSessions('main')).resolves.toEqual([])
       const migrated = JSON.parse(await readFile(statePath, 'utf8')) as {
@@ -649,7 +664,7 @@ describe('AppService GFS upload security scope', () => {
         statePath,
         JSON.stringify({ version: 2, records: [orphaned, live], quarantined: [] })
       )
-      const service = authenticatedUploadService(statePath)
+      const service = await authenticatedUploadService(statePath)
       service.gfsUploadJobs.set(live.uploadId, {
         job: {},
         promise: Promise.resolve(live.session),
@@ -782,7 +797,7 @@ describe('AppService GFS upload security scope', () => {
           quarantined: [],
         })
       )
-      const service = authenticatedUploadService(statePath)
+      const service = await authenticatedUploadService(statePath)
 
       await expect(service.listGfsUploadSessions('main')).resolves.toEqual([
         expect.objectContaining({ uploadId: exact.uploadId, drive: 'main' }),
@@ -800,6 +815,8 @@ describe('AppService GFS upload security scope', () => {
       )
       expect(service.sessionToken).toBeNull()
       expect(service.gfsDispatchBlocked).toBe(true)
+      await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBeNull()
+      expect(readPendingExternalLogoutMarker(root, getActiveEnvKey())).toBeNull()
 
       service.sessionToken = 'token-b'
       service.me = {
@@ -854,7 +871,7 @@ describe('AppService GFS upload security scope', () => {
   it('aborts and awaits an in-flight legacy fallback before logout clears A credentials', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-auth-fence-'))
     try {
-      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
       const scope = scopedUploadRecord('91919191-9191-4191-8191-919191919191').scope
       let releaseAbort!: () => void
       const abortReleased = new Promise<void>(resolve => {
@@ -880,12 +897,14 @@ describe('AppService GFS upload security scope', () => {
       })
       await vi.waitFor(() => expect(sawAbort).toBe(true))
       expect(logoutSettled).toBe(false)
+      await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBe('token-a')
       releaseAbort()
       await logout
 
       await expect(settled).resolves.toContain('authentication fence')
       expect(service.sessionToken).toBeNull()
-      expect(service.tokenStore.clearSessionTokenStrictly).toHaveBeenCalledTimes(1)
+      await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBeNull()
+      expect(readPendingExternalLogoutMarker(root, getActiveEnvKey())).toBeNull()
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -896,7 +915,7 @@ describe('AppService GFS upload security scope', () => {
     async loginKind => {
       const root = await mkdtemp(join(tmpdir(), `evenfire-gfs-${loginKind}-login-fence-`))
       try {
-        const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+        const service = await authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
         const scope = scopedUploadRecord('92929292-9292-4292-8292-929292929292').scope
         const nextMe = {
           id: 'user-b',
@@ -942,6 +961,7 @@ describe('AppService GFS upload security scope', () => {
         await vi.waitFor(() => expect(sawAbort).toBe(true))
         expect(loginSettled).toBe(false)
         expect(service.sessionToken).toBe('token-a')
+        await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBe('token-a')
         expect(service.tokenStore.setSessionToken).not.toHaveBeenCalled()
         releaseAbort()
 
@@ -950,6 +970,7 @@ describe('AppService GFS upload security scope', () => {
         expect(service.sessionToken).toBe('token-b')
         expect(service.me).toEqual(nextMe)
         expect(service.gfsDispatchBlocked).toBe(false)
+        await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBe('token-b')
         expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
           'token-b',
           getActiveEnvKey(),
