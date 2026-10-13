@@ -435,6 +435,189 @@ describe('routes/profile', () => {
     ).expect(403)
   })
 
+  describe('per-team invitation role ceiling', () => {
+    function withTeamRoleSession(req: any, role: 'admin' | 'inviter' | 'member') {
+      return withInternalServiceAuth(req).set(
+        'x-user-session-token',
+        signExternalSessionToken({
+          userId: 'u1',
+          email: 'u@example.com',
+          teamId: 't1',
+          role,
+          authGeneration: 1,
+        })
+      )
+    }
+
+    function invitationApp() {
+      const app = express()
+      app.use(express.json())
+      mountInternalRoutes(app, accessCatalogGateway())
+      return app
+    }
+
+    it('rejects an inviter granting the admin role', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'inviter' })
+      await withTeamRoleSession(
+        request(invitationApp()).post('/external/teams/t1/invitations'),
+        'inviter'
+      )
+        .send({ email: 'new@example.com', role: 'admin' })
+        .expect(403)
+        .expect(({ body }) => {
+          expect(body).toEqual({ error: 'forbidden' })
+        })
+      expect(svc.createInvitation).not.toHaveBeenCalled()
+    })
+
+    it('rejects an inviter granting the admin role through a legacy role alias', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'inviter' })
+      await withTeamRoleSession(
+        request(invitationApp()).post('/external/teams/t1/invitations'),
+        'inviter'
+      )
+        .send({ email: 'new@example.com', role: 'Leader' })
+        .expect(403)
+      expect(svc.createInvitation).not.toHaveBeenCalled()
+    })
+
+    it.each(['member', 'inviter'] as const)(
+      'allows an inviter to grant the %s role',
+      async role => {
+        svc.findMemberRole.mockResolvedValue({ role: 'inviter' })
+        svc.createInvitation.mockResolvedValue({ email: 'new@example.com', token: 'tok' })
+        await withTeamRoleSession(
+          request(invitationApp()).post('/external/teams/t1/invitations'),
+          'inviter'
+        )
+          .send({ email: 'new@example.com', role })
+          .expect(200)
+        expect(svc.createInvitation).toHaveBeenCalledWith('t1', 'new', 'new@example.com', role)
+      }
+    )
+
+    it('allows an admin to grant the admin role', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'admin' })
+      svc.createInvitation.mockResolvedValue({ email: 'new@example.com', token: 'tok' })
+      await withTeamRoleSession(
+        request(invitationApp()).post('/external/teams/t1/invitations'),
+        'admin'
+      )
+        .send({ email: 'new@example.com', role: 'admin' })
+        .expect(200)
+      expect(svc.createInvitation).toHaveBeenCalledWith('t1', 'new', 'new@example.com', 'admin')
+    })
+
+    it('uses the current team role when it differs from the session role', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'inviter' })
+      await withTeamRoleSession(
+        request(invitationApp()).post('/external/teams/t1/invitations'),
+        'admin'
+      )
+        .send({ email: 'new@example.com', role: 'admin' })
+        .expect(403, { error: 'forbidden' })
+      expect(svc.findMemberRole).toHaveBeenCalledWith('t1', 'u1')
+      expect(svc.createInvitation).not.toHaveBeenCalled()
+    })
+
+    it('rejects an invitation when the caller has no active team membership', async () => {
+      svc.findMemberRole.mockResolvedValue(null)
+      await withTeamRoleSession(
+        request(invitationApp()).post('/external/teams/t1/invitations'),
+        'admin'
+      )
+        .send({ email: 'new@example.com', role: 'member' })
+        .expect(403, { error: 'forbidden' })
+      expect(svc.createInvitation).not.toHaveBeenCalled()
+    })
+
+    it('rejects a member session before the role check', async () => {
+      await withTeamRoleSession(
+        request(invitationApp()).post('/external/teams/t1/invitations'),
+        'member'
+      )
+        .send({ email: 'new@example.com', role: 'member' })
+        .expect(403)
+      expect(svc.findMemberRole).not.toHaveBeenCalled()
+      expect(svc.createInvitation).not.toHaveBeenCalled()
+    })
+
+    it('rejects a caller whose current team role is member', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'member' })
+      await withTeamRoleSession(
+        request(invitationApp()).post('/external/teams/t1/invitations'),
+        'inviter'
+      )
+        .send({ email: 'new@example.com', role: 'member' })
+        .expect(403, { error: 'forbidden' })
+      expect(svc.createInvitation).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('team member management uses the current team role', () => {
+    const adminSession = signExternalSessionToken({
+      userId: 'u1',
+      email: 'u@example.com',
+      teamId: 't1',
+      role: 'admin',
+      authGeneration: 1,
+    })
+
+    function adminRequest(req: any) {
+      return withInternalServiceAuth(req).set('x-user-session-token', adminSession)
+    }
+
+    function managementApp() {
+      const app = express()
+      app.use(express.json())
+      mountInternalRoutes(app, accessCatalogGateway())
+      return app
+    }
+
+    it.each([[{ role: 'inviter' }], [{ role: 'member' }], [null]])(
+      'rejects a role change when the current team role is %j',
+      async currentRole => {
+        svc.findMemberRole.mockResolvedValue(currentRole)
+        await adminRequest(request(managementApp()).patch('/external/teams/t1/members/u2/role'))
+          .send({ role: 'admin' })
+          .expect(403, { error: 'forbidden' })
+        expect(svc.findMemberRole).toHaveBeenCalledWith('t1', 'u1')
+        expect(svc.updateMemberRole).not.toHaveBeenCalled()
+      }
+    )
+
+    it('allows a role change by a current team admin', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'admin' })
+      svc.updateMemberRole.mockResolvedValue({ team_id: 't1', user_id: 'u2', role: 'admin' })
+      await adminRequest(request(managementApp()).patch('/external/teams/t1/members/u2/role'))
+        .send({ role: 'admin' })
+        .expect(200)
+      expect(svc.updateMemberRole).toHaveBeenCalledWith('t1', 'u2', 'admin', 'u1')
+    })
+
+    it.each([[{ role: 'inviter' }], [{ role: 'member' }], [null]])(
+      'rejects a member removal when the current team role is %j',
+      async currentRole => {
+        svc.findMemberRole.mockResolvedValue(currentRole)
+        await adminRequest(request(managementApp()).delete('/external/teams/t1/members/u2')).expect(
+          403,
+          { error: 'forbidden' }
+        )
+        expect(svc.findMemberRole).toHaveBeenCalledWith('t1', 'u1')
+        expect(svc.softDeleteMember).not.toHaveBeenCalled()
+      }
+    )
+
+    it('allows a member removal by a current team admin', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'admin' })
+      svc.softDeleteMember.mockResolvedValue({ team_id: 't1', user_id: 'u2' })
+      await adminRequest(request(managementApp()).delete('/external/teams/t1/members/u2')).expect(
+        200
+      )
+      expect(svc.softDeleteMember).toHaveBeenCalledWith('t1', 'u2', 'u1')
+    })
+  })
+
   it('allows membership lookup for another team when user claim matches', async () => {
     svc.findMembership.mockResolvedValue({
       team_id: 't2',

@@ -26,10 +26,10 @@ import {
 } from './invitationStore.js'
 import type { InviteRole, TeamRole } from './types.js'
 import {
+  canManagerInviteAssignment,
   normalizeChannels,
   normalizeTeamRoleInput,
   roleCanDeleteMembers,
-  roleCanInviteMembers,
 } from './types.js'
 import { DesktopUserRetirementError, retireDesktopUser } from './users.js'
 
@@ -1085,15 +1085,6 @@ async function getManagerRolesForTeams(
   )
 }
 
-function canManagerInviteAssignment(
-  managerRole: TeamRole | undefined,
-  assignmentRole: InviteRole
-): boolean {
-  if (!roleCanInviteMembers(managerRole)) return false
-  if (assignmentRole === 'admin') return roleCanDeleteMembers(managerRole)
-  return true
-}
-
 async function managerCanControlAllInvitationTeams(
   managerUserId: string,
   teams: readonly InvitationTeamRow[]
@@ -1185,11 +1176,7 @@ export async function createManagedInvitationForUser(
     ])
   )
   for (const assignment of assignments) {
-    const managerRole = managerRoles.get(assignment.teamId)
-    if (!roleCanInviteMembers(managerRole)) {
-      return { error: 'forbidden' as const }
-    }
-    if (assignment.role === 'admin' && !roleCanDeleteMembers(managerRole)) {
+    if (!canManagerInviteAssignment(managerRoles.get(assignment.teamId), assignment.role)) {
       return { error: 'forbidden' as const }
     }
   }

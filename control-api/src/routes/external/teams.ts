@@ -27,7 +27,12 @@ import {
   softDeleteMember,
   updateMemberRole,
 } from '../../services/directory/index.js'
-import { normalizeTeamRoleInput } from '../../services/directory/types.js'
+import {
+  type TeamRole,
+  canManagerInviteAssignment,
+  normalizeTeamRoleInput,
+  roleCanDeleteMembers,
+} from '../../services/directory/types.js'
 
 function sendInvitationServiceError(
   res: { status: (code: number) => { json: (body: unknown) => unknown } },
@@ -37,6 +42,13 @@ function sendInvitationServiceError(
   if (!message.includes('Member registration service')) return false
   res.status(502).json({ error: 'invitation_service_unavailable', message })
   return true
+}
+
+async function currentTeamRole(
+  req: ExternalAuthedRequest,
+  teamId: string
+): Promise<TeamRole | undefined> {
+  return (await findMemberRole(teamId, req.externalAuth!.userId))?.role
 }
 
 export function createExternalTeamsRouter(gateway: K8sGateway): Router {
@@ -192,6 +204,13 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
       try {
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!role) return res.status(400).json({ error: 'invalid role' })
+        if (
+          !roleCanDeleteMembers(
+            await currentTeamRole(req as ExternalAuthedRequest, req.params.teamId)
+          )
+        ) {
+          return res.status(403).json({ error: 'forbidden' })
+        }
         return res
           .status(200)
           .json(
@@ -223,6 +242,10 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         if (!email || !role) {
           return res.status(400).json({ error: 'invalid invitation payload' })
         }
+        const callerRole = await currentTeamRole(req as ExternalAuthedRequest, req.params.teamId)
+        if (!canManagerInviteAssignment(callerRole, role)) {
+          return res.status(403).json({ error: 'forbidden' })
+        }
         const fallbackName = email.split('@')[0] || email
         return res
           .status(200)
@@ -239,6 +262,13 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     requireExternalRole(['admin']),
     async (req, res, next) => {
       try {
+        if (
+          !roleCanDeleteMembers(
+            await currentTeamRole(req as ExternalAuthedRequest, req.params.teamId)
+          )
+        ) {
+          return res.status(403).json({ error: 'forbidden' })
+        }
         const deleted = await softDeleteMember(
           req.params.teamId,
           req.params.userId,

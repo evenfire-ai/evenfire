@@ -1,4 +1,4 @@
-import { controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 import { TeamAgentsResponse, TeamRole } from '../types.js'
 
 type AuthContext = {
@@ -163,6 +163,9 @@ export async function inviteMember(auth: AuthContext, email: string, role: TeamR
   if (!canInvite(auth.role)) {
     return { error: 'forbidden' as const }
   }
+  if (role === 'admin' && !canManageRoles(auth.role)) {
+    return { error: 'forbidden_role' as const }
+  }
 
   const invited = await controlApiRequest<{ email: string; token: string }>(
     'POST',
@@ -195,7 +198,10 @@ export async function deleteMember(auth: AuthContext, userId: string) {
         userSessionToken: auth.sessionToken,
       }
     )
-  } catch {
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 403) {
+      return { error: 'forbidden' as const }
+    }
     return { error: 'not_found' as const }
   }
   return { deleted }

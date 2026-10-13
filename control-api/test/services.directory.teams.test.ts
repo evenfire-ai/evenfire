@@ -3,6 +3,7 @@ import {
   addMemberToTeam,
   adminDeleteTeam,
   adminDeleteUser,
+  createManagedInvitationForUser,
   createTeam,
   createTeamForUser,
   getTeamById,
@@ -310,5 +311,78 @@ describe('services/directory team management unit tests', () => {
     expect(dbMocks.txQuery).not.toHaveBeenCalledWith(expect.stringContaining('DELETE FROM users'), [
       'u1',
     ])
+  })
+})
+
+describe('services/directory managed invitation role ceiling', () => {
+  const reachedInsert = new Error('reached invitation insert')
+
+  function managerRoles(rows: Array<{ team_id: string; role: string }>) {
+    dbMocks.poolQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM team_members tm')) {
+        return {
+          rows: rows.map(row => ({ ...row, team_name: row.team_id })),
+          rowCount: rows.length,
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+  }
+
+  beforeEach(() => {
+    dbMocks.poolQuery.mockReset()
+    dbMocks.txQuery.mockReset()
+    dbMocks.txQuery.mockRejectedValue(reachedInsert)
+  })
+
+  it('rejects an inviter granting the admin role', async () => {
+    managerRoles([{ team_id: 'team-1', role: 'inviter' }])
+
+    await expect(
+      createManagedInvitationForUser('manager-1', 'new@example.com', [
+        { teamId: 'team-1', role: 'admin' },
+      ])
+    ).resolves.toEqual({ error: 'forbidden' })
+    expect(dbMocks.txQuery).not.toHaveBeenCalled()
+  })
+
+  it('rejects an admin assignment on a team where the manager is only an inviter', async () => {
+    managerRoles([
+      { team_id: 'team-1', role: 'admin' },
+      { team_id: 'team-2', role: 'inviter' },
+    ])
+
+    await expect(
+      createManagedInvitationForUser('manager-1', 'new@example.com', [
+        { teamId: 'team-1', role: 'admin' },
+        { teamId: 'team-2', role: 'admin' },
+      ])
+    ).resolves.toEqual({ error: 'forbidden' })
+    expect(dbMocks.txQuery).not.toHaveBeenCalled()
+  })
+
+  it('rejects an assignment on a team the manager does not manage', async () => {
+    managerRoles([{ team_id: 'team-1', role: 'admin' }])
+
+    await expect(
+      createManagedInvitationForUser('manager-1', 'new@example.com', [
+        { teamId: 'team-2', role: 'member' },
+      ])
+    ).resolves.toEqual({ error: 'forbidden' })
+    expect(dbMocks.txQuery).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['admin', 'admin'],
+    ['inviter', 'inviter'],
+    ['inviter', 'member'],
+  ])('lets a team %s grant the %s role', async (managerRole, assignmentRole) => {
+    managerRoles([{ team_id: 'team-1', role: managerRole }])
+
+    await expect(
+      createManagedInvitationForUser('manager-1', 'new@example.com', [
+        { teamId: 'team-1', role: assignmentRole as 'admin' | 'inviter' | 'member' },
+      ])
+    ).rejects.toBe(reachedInsert)
   })
 })
