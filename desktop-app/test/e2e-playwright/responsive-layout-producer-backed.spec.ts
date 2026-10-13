@@ -155,6 +155,7 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       const sidebar = page.locator('#desktop-sidebar-navigation')
       await expect(sidebar).toBeVisible()
       await expect(sidebar).toHaveClass(/compact-open/)
+      await expect.poll(async () => (await nativeSandboxViewState(app!)).visible).toBe(false)
       const [sidebarBox, titlebarBox, hiddenView, contentAfter] = await Promise.all([
         bounds(sidebar),
         bounds(page.locator('.window-titlebar')),
