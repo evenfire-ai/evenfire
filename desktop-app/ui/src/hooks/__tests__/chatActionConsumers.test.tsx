@@ -1,47 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { ChatThread } from '@components/agents/ChatThread'
 import { FleetBoard } from '@components/agents/FleetBoard'
-import { renderController } from '../domain/__tests__/__fixtures__/controllerHarness'
-import { installMockClerum, uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
-import { useAgentChatActionsValue } from '../useAgentChatActionsValue'
-import type { useAppController } from '../useAppController'
-
-const live = vi.hoisted(() => ({ vm: null as any, actions: null as any }))
-vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => live.vm }))
-vi.mock('@contexts/NotificationsContext', () => ({ useNotificationsContext: () => live.vm }))
-vi.mock('@contexts/AgentChatActionsContext', () => ({
-  useAgentChatActionsContext: () => live.actions,
-}))
-vi.mock('@contexts/ChatComposerStateContext', () => ({
-  useChatComposerStateContext: () => live.vm,
-}))
-vi.mock('@contexts/ChatThreadStateContext', () => ({ useChatThreadStateContext: () => live.vm }))
-vi.mock('@contexts/ChatListContext', () => ({ useChatListContext: () => live.vm }))
-vi.mock('@contexts/McpRuntimeContext', () => ({ useMcpRuntimeContext: () => live.vm }))
-vi.mock('@contexts/AgentActivityContext', () => ({ useAgentActivityContext: () => live.vm }))
-vi.mock('@hooks/domain/useAgentsDataController', () => ({ useAgentsDataController: () => live.vm }))
-vi.mock('@hooks/domain/useTeamsDataController', () => ({
-  useTeamsDataController: () => ({
-    teams: [],
-    currentTeamId: 'team-1',
-    teamDirectory: {},
-    ensureHydrated: async () => undefined,
-  }),
-}))
-vi.mock('@hooks/domain/useMcpServersDataController', () => ({
-  useMcpServersDataController: () => ({
-    agentMcpServerCountByAgent: {},
-    agentMcpServersByAgent: {},
-    mcpServerMappingUnavailableMessage: '',
-  }),
-}))
-vi.mock('@components/agents/InFlightAssistantPlaceholder', () => ({
-  InFlightAssistantPlaceholder: () => null,
-}))
-vi.mock('@components/agents/NudgeArea', () => ({ NudgeArea: () => null }))
-vi.mock('@components/agents/ChatStateBadge', () => ({ ChatStateBadge: () => null }))
+import { installAppControllerClerum } from '../domain/__tests__/__fixtures__/appControllerHarness'
+import { deferred } from '../domain/__tests__/__fixtures__/catalogFixtures'
+import { renderChatActionConsumer } from '../domain/__tests__/__fixtures__/chatActionConsumerHarness'
+import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
 
 beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -57,7 +22,7 @@ afterEach(() => {
 })
 
 async function mountActions() {
-  const clerum = installMockClerum()
+  const { clerum } = installAppControllerClerum()
   for (const chat of ['chat-1', 'chat-2']) {
     await clerum.chat.create('agent-x', chat)
     await clerum.chat.upsertMessages('agent-x', chat, [
@@ -65,65 +30,149 @@ async function mountActions() {
     ])
   }
   clerum.chat.getIndex.mockImplementation(agent => clerum.readIndex(agent))
-  const app = renderController({ loadMenuData: false })
-  await waitFor(() => expect(app.result.current.chatListLoading).toBe(false))
-  const vm = { ...app.result.current, pushToast: app.spies.pushToast }
-  const actions = renderHook(() =>
-    useAgentChatActionsValue(vm as unknown as ReturnType<typeof useAppController>)
+  const app = await renderChatActionConsumer(
+    <>
+      <FleetBoard />
+      <ChatThread />
+    </>
   )
-  live.vm = {
-    ...vm,
-    activeMessages: vm.chatMessages,
-    groupedMessages: [],
-    semanticModelsByMessageId: new Map(),
-    selectedAgent: 'agent-x',
-    agentNames: ['agent-x'],
-    agentDisplayByName: { 'agent-x': 'Agent X' },
-    userAgentNames: ['agent-x'],
-    teamAgentNames: [],
-    agentLastActiveByAgent: {},
-    handleSelectChatAgent: vi.fn(),
-  }
-  live.actions = actions.result.current
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-1', selectLatest: false }))
+  await waitFor(() => expect(screen.getByText('chat-1 real history')).toBeTruthy())
+  await waitFor(() => expect(app.getVm().chatListLoading).toBe(false))
   return { app, clerum }
 }
 
-it('observes a ChatThread conversation click through the real stable action', async () => {
-  const { app, clerum } = await mountActions()
-  clerum.chat.setLastActive.mockRejectedValueOnce(new Error('sidebar switch failed'))
-  render(<ChatThread />)
-  const button = document.querySelector<HTMLButtonElement>('.agent-dedicated-session-title-btn')!
-  expect(button).toBeTruthy()
-  const target =
-    live.vm.chatList.find((chat: any) => chat.title === button.textContent)?.id ??
-    live.vm.chatList[0].id
-  fireEvent.click(button)
-  await waitFor(() =>
-    expect(app.spies.pushToast).toHaveBeenCalledWith(
-      'Could not open conversation: sidebar switch failed',
-      'error'
-    )
-  )
-  expect(app.spies.pushToast).toHaveBeenCalledTimes(1)
-  expect(app.result.current.activeChatId).toBe(target)
-  expect(app.result.current.chatMessages).toEqual([])
-  expect(app.result.current.chatMessagesLoading).toBe(false)
-})
-
-it('observes a FleetBoard New chat click through the real stable create action', async () => {
-  const { app, clerum } = await mountActions()
-  clerum.chat.create.mockRejectedValueOnce(new Error('fleet create failed'))
-  render(<FleetBoard />)
+function clickFleetCreate() {
   fireEvent.click(screen.getByRole('button', { name: /More actions for/ }))
   fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
-  await waitFor(() =>
-    expect(app.spies.pushToast).toHaveBeenCalledWith(
-      'Could not create conversation: fleet create failed',
-      'error'
-    )
+}
+
+it('observes a ChatThread conversation click through the real app action and toast', async () => {
+  const { app, clerum } = await mountActions()
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { selectLatest: false }))
+  await waitFor(() => expect(app.getVm().activeChatId).toBeNull())
+  clerum.chat.setLastActive.mockRejectedValueOnce(new Error('sidebar switch failed'))
+  const chats = [...app.getVm().chatList].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  const buttonIndex = chats.findIndex(chat => chat.id === 'chat-2')
+  fireEvent.click(screen.getAllByRole('button', { name: chats[buttonIndex]!.title })[buttonIndex]!)
+  await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1))
+  expect(screen.getByRole('alert').textContent).toContain(
+    'Could not open conversation: sidebar switch failed'
   )
-  expect(app.spies.pushToast).toHaveBeenCalledTimes(1)
-  expect(app.result.current.activeChatId).toBeNull()
-  expect(app.result.current.chatMessages).toEqual([])
-  expect(app.result.current.chatMessagesLoading).toBe(false)
+  expect(app.getVm().toasts).toHaveLength(1)
+  expect(app.getVm().activeChatId).toBe('chat-2')
+  expect(app.getVm().activeMessages).toEqual([])
+  expect(app.getVm().chatMessagesLoading).toBe(false)
+})
+
+it('reports a FleetBoard create-phase rejection once without misclassifying recovery', async () => {
+  const { app, clerum } = await mountActions()
+  clerum.chat.create.mockRejectedValueOnce(new Error('fleet create failed'))
+  clickFleetCreate()
+  await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1))
+  expect(screen.getByRole('alert').textContent).toContain(
+    'Could not create conversation: fleet create failed'
+  )
+  expect(app.getVm().toasts).toHaveLength(1)
+  expect((await clerum.readIndex('agent-x')).chats).toHaveLength(2)
+  expect(app.getVm().activeChatId).toBeNull()
+  expect(app.getVm().activeMessages).toEqual([])
+  expect(app.getVm().chatMessagesLoading).toBe(false)
+})
+
+it('reports opening a successfully created FleetBoard chat as one open failure', async () => {
+  const { app, clerum } = await mountActions()
+  clerum.chat.setLastActive.mockRejectedValueOnce(new Error('created chat open failed'))
+  clickFleetCreate()
+  await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1))
+  const index = await clerum.readIndex('agent-x')
+  const created = index.chats.find(chat => !['chat-1', 'chat-2'].includes(chat.id))!
+  expect(created).toBeTruthy()
+  expect(app.getVm().chatList.some(chat => chat.id === created.id)).toBe(true)
+  expect(screen.getByRole('alert').textContent).toContain(
+    'Could not open conversation: created chat open failed'
+  )
+  expect(app.getVm().toasts).toHaveLength(1)
+  expect(app.getVm().activeChatId).toBe(created.id)
+  expect(app.getVm().activeMessages).toEqual([])
+  expect(app.getVm().chatMessagesLoading).toBe(false)
+})
+
+it('does not report a stale FleetBoard opening failure or disturb newer real history', async () => {
+  const { app, clerum } = await mountActions()
+  const held = deferred<void>()
+  const entered = deferred<void>()
+  clerum.chat.setLastActive.mockImplementationOnce(async () => {
+    entered.resolve()
+    return held.promise
+  })
+  clickFleetCreate()
+  await act(async () => {
+    await entered.promise
+  })
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-2', selectLatest: false }))
+  await waitFor(() => expect(screen.getByText('chat-2 real history')).toBeTruthy())
+  const status = { text: app.getVm().statusText, tone: app.getVm().statusTone }
+  await act(async () => {
+    held.reject(new Error('obsolete created chat open failed'))
+    await held.promise.catch(() => undefined)
+  })
+  expect(app.getVm().activeChatId).toBe('chat-2')
+  expect(app.getVm().activeMessages.map(message => message.content)).toEqual([
+    'chat-2 real history',
+  ])
+  expect(screen.getByText('chat-2 real history')).toBeTruthy()
+  expect(app.getVm().chatMessagesLoading).toBe(false)
+  expect(app.getVm().toasts).toEqual([])
+  expect(screen.queryAllByRole('alert')).toEqual([])
+  expect({ text: app.getVm().statusText, tone: app.getVm().statusTone }).toEqual(status)
+  expect((await clerum.readIndex('agent-x')).chats).toHaveLength(3)
+})
+
+it('keeps the raw create API rejection observable after creation succeeds', async () => {
+  const { app, clerum } = await mountActions()
+  const error = new Error('raw create opening failed')
+  clerum.chat.setLastActive.mockRejectedValueOnce(error)
+  await act(async () => {
+    await expect(app.getVm().handleCreateChat()).rejects.toBe(error)
+  })
+  expect((await clerum.readIndex('agent-x')).chats).toHaveLength(3)
+  expect(app.getVm().chatMessagesLoading).toBe(false)
+  expect(app.getVm().toasts.map(toast => toast.text)).toEqual([
+    'Could not open conversation: raw create opening failed',
+  ])
+})
+
+it('raw create awaiters still receive a stale opening rejection without stale feedback', async () => {
+  const { app, clerum } = await mountActions()
+  const held = deferred<void>()
+  const entered = deferred<void>()
+  const rejected = deferred<unknown>()
+  const error = new Error('raw stale create open failed')
+  clerum.chat.setLastActive.mockImplementationOnce(async () => {
+    entered.resolve()
+    return held.promise
+  })
+  act(() => {
+    void app
+      .getVm()
+      .handleCreateChat()
+      .catch(cause => rejected.resolve(cause))
+  })
+  await act(async () => {
+    await entered.promise
+  })
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-2', selectLatest: false }))
+  await waitFor(() => expect(screen.getByText('chat-2 real history')).toBeTruthy())
+  await act(async () => {
+    held.reject(error)
+    expect(await rejected.promise).toBe(error)
+  })
+  expect(app.getVm().toasts).toEqual([])
+  expect(screen.queryAllByRole('alert')).toEqual([])
+  expect(app.getVm().activeChatId).toBe('chat-2')
+  expect(app.getVm().activeMessages.map(message => message.content)).toEqual([
+    'chat-2 real history',
+  ])
+  expect(app.getVm().chatMessagesLoading).toBe(false)
 })

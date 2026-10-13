@@ -1049,6 +1049,11 @@ export function useChatListController({
     host.current?.clearPendingSelection(agentRef)
     const requestGeneration = requestGenerationRef.current
     const authorityScopeAtCreate = currentAuthorityScopeRef.current
+    const isCurrentCreate = () =>
+      selectionIntentRevision !== undefined &&
+      requestGenerationRef.current === requestGeneration &&
+      currentAuthorityScopeRef.current === authorityScopeAtCreate &&
+      host.current?.getSelectionIntentRevision() === selectionIntentRevision
     const chatId = crypto.randomUUID()
     let meta: ChatMetadata
     try {
@@ -1057,12 +1062,11 @@ export function useChatListController({
       // The failed New chat invalidated whichever selection was in flight. Restore
       // its visible conversation only while this create still owns the same scope
       // and selection revision; a newer navigation must remain authoritative.
-      if (
-        selectionIntentRevision !== undefined &&
-        requestGenerationRef.current === requestGeneration &&
-        currentAuthorityScopeRef.current === authorityScopeAtCreate &&
-        host.current?.getSelectionIntentRevision() === selectionIntentRevision
-      ) {
+      if (isCurrentCreate()) {
+        host.current?.pushToast(
+          `Could not create conversation: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
         const restoreChatId =
           pendingSelection?.mode === 'specific'
             ? pendingSelection.chatId
@@ -1094,7 +1098,14 @@ export function useChatListController({
     )
       return
     host.current?.markAutoSelectedChat(null)
-    await host.current?.switchToChat(agentRef, chatId)
+    await host.current?.switchToChat(agentRef, chatId, {
+      onCurrentError: error => {
+        host.current?.pushToast(
+          `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+      },
+    })
     host.current?.scrollChatToBottom()
   }, [chatStore, appendNewEntry, host, readPendingSelection])
 

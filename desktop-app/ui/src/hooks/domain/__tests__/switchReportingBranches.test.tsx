@@ -113,7 +113,13 @@ it.each([false, true])(
     if (superseded)
       await act(async () => controller.result.current.switchToChat('agent-x', 'successor'))
     await act(async () => gate.reject(new Error('restore failed')))
-    expect(controller.spies.pushToast).toHaveBeenCalledTimes(superseded ? 0 : 1)
+    // Creation failed while current: one create-phase report. Restoration is
+    // a separate switch and reports only if its own execution remains current.
+    expect(controller.spies.pushToast).toHaveBeenCalledTimes(superseded ? 1 : 2)
+    expect(controller.spies.pushToast).toHaveBeenCalledWith(
+      'Could not create conversation: create failed',
+      'error'
+    )
     if (!superseded)
       expect(controller.spies.pushToast).toHaveBeenCalledWith(
         'Could not restore conversation: restore failed',
