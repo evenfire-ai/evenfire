@@ -239,14 +239,27 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       await page.mouse.move(startX + 80, startY)
       await page.mouse.up()
       await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(272)
-      await expect
-        .poll(async () => (await nativeSandboxViewState(app!)).bounds.x)
-        .toBeGreaterThan(0)
-      const [resizedSlot, resizedView, resizedDpr] = await Promise.all([
-        bounds(page.locator('.sandbox-ui-embed-slot')),
-        nativeSandboxViewState(app!),
-        page.evaluate(() => window.devicePixelRatio),
-      ])
+      const readResizedGeometry = async () => {
+        const [slot, view, devicePixelRatio] = await Promise.all([
+          bounds(page.locator('.sandbox-ui-embed-slot')),
+          nativeSandboxViewState(app!),
+          page.evaluate(() => window.devicePixelRatio),
+        ])
+        const scaleFactor = devicePixelRatio / view.scaleFactor
+        const matchesSlot = [
+          [view.bounds.x, slot.x * scaleFactor],
+          [view.bounds.y, slot.y * scaleFactor],
+          [view.bounds.width, slot.width * scaleFactor],
+          [view.bounds.height, slot.height * scaleFactor],
+        ].every(([actual, expected]) => Math.abs(actual! - expected!) <= 2)
+        return { slot, view, devicePixelRatio, matchesSlot }
+      }
+      await expect.poll(async () => (await readResizedGeometry()).matchesSlot).toBe(true)
+      const {
+        slot: resizedSlot,
+        view: resizedView,
+        devicePixelRatio: resizedDpr,
+      } = await readResizedGeometry()
       expect(resizedView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
       const resizedFactor = resizedDpr / resizedView.scaleFactor
       for (const [actual, expected] of [
