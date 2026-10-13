@@ -12,6 +12,9 @@ import { gfsPermissionsToCapabilities } from './capabilityRegistry.js'
 import {
   CATALOG_FAMILIES,
   type CatalogFamily,
+  type CatalogHydrationIncompleteRoot,
+  type CatalogHydrationOutcome,
+  type CatalogHydrationResult,
   type CatalogKey,
   type CatalogOperationalHydration,
   type CatalogProducer,
@@ -437,13 +440,14 @@ async function hydrateRows(input: {
   sourceRevision: string
   rows: readonly JsonRecord[]
   operationalHydration?: CatalogOperationalHydration
-}): Promise<HydratedCatalogResource[]> {
+}): Promise<CatalogHydrationResult> {
   input.context.budget.charge({
     kind: 'decodedBytes',
     amount: decodedHydrationBytes(input.rows),
     authorityRequired: true,
   })
   const hydrated: HydratedCatalogResource[] = []
+  const incompleteRoots: CatalogHydrationIncompleteRoot[] = []
   let representedPaths = 0
   let representedRelationships = 0
   let rawPaths = 0
@@ -492,7 +496,6 @@ async function hydrateRows(input: {
   for (const row of input.rows) {
     const logicalId = boundedString(row.logical_id, 'resource_logical_id')
     const pathRows = records(row.paths)
-    if (pathRows.length === 0) continue
     const relationshipRows = records(row.relationships)
     const graphResult =
       operationalGraphs?.get(
@@ -511,6 +514,21 @@ async function hydrateRows(input: {
       reportedRelationshipRows,
       nonNegativeInteger(row.total_relationship_rows ?? 0, 'total_relationship_rows')
     )
+    if (row.incomplete_reason !== null && row.incomplete_reason !== undefined) {
+      if (
+        input.family !== 'host' ||
+        (row.incomplete_reason !== 'configured_context_missing' &&
+          row.incomplete_reason !== 'configured_context_ambiguous')
+      ) {
+        throw new CatalogProducerContractError('incomplete_root_reason_invalid')
+      }
+      incompleteRoots.push({
+        key: catalogKey(input.context.environmentId, input.family, logicalId),
+        reason: row.incomplete_reason,
+      })
+      continue
+    }
+    if (pathRows.length === 0) continue
     const accessPaths =
       input.family === 'host' ||
       input.family === 'context' ||
@@ -615,7 +633,10 @@ async function hydrateRows(input: {
       authorityRequired: true,
     })
   }
-  return hydrated
+  return Object.freeze({
+    resources: Object.freeze(hydrated),
+    incompleteRoots: Object.freeze(incompleteRoots),
+  })
 }
 
 class SqlCatalogProducer implements CatalogProducer {
@@ -653,7 +674,7 @@ class SqlCatalogProducer implements CatalogProducer {
     context: CatalogRequestContext,
     keys: readonly CatalogKey[],
     operationalHydration?: CatalogOperationalHydration
-  ): Promise<readonly HydratedCatalogResource[]> {
+  ): Promise<CatalogHydrationOutcome> {
     const logicalIds = validateHydrationKeys({ context, family: this.family, keys })
     if (logicalIds.length === 0) return Object.freeze([])
     const readiness = operationalReadiness(context, this.family, this.requiredOperationalSources)
@@ -666,18 +687,17 @@ class SqlCatalogProducer implements CatalogProducer {
       hydrationSql(this.family),
       hydrationValues({ context, family: this.family, logicalIds })
     )
-    return Object.freeze(
-      await hydrateRows({
-        context,
-        family: this.family,
-        sourceRevision:
-          this.requiredOperationalSources.length === 0
-            ? 'database-resource'
-            : readiness.sourceRevision,
-        rows: result.rows as JsonRecord[],
-        operationalHydration,
-      })
-    )
+    const hydrated = await hydrateRows({
+      context,
+      family: this.family,
+      sourceRevision:
+        this.requiredOperationalSources.length === 0
+          ? 'database-resource'
+          : readiness.sourceRevision,
+      rows: result.rows as JsonRecord[],
+      operationalHydration,
+    })
+    return hydrated.incompleteRoots.length > 0 ? hydrated : hydrated.resources
   }
 }
 

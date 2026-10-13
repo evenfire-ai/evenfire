@@ -32,6 +32,8 @@ import {
 import {
   CATALOG_FAMILIES,
   type CatalogFamily,
+  type CatalogHydrationIncompleteRoot,
+  type CatalogHydrationResult,
   type CatalogIdentityCandidate,
   type CatalogKey,
   type CatalogOperationalHydration,
@@ -128,12 +130,23 @@ function emptyContinuations(): Record<CatalogFamily, ProducerContinuation> {
   ) as Record<CatalogFamily, ProducerContinuation>
 }
 
-function safePartialErrors(runtimes: readonly ProducerRuntime[]): SafeCatalogPartialError[] {
+function safePartialErrors(
+  runtimes: readonly ProducerRuntime[],
+  hasIncompleteHosts: boolean
+): SafeCatalogPartialError[] {
   const values = new Map<string, SafeCatalogPartialError>()
   for (const runtime of runtimes) {
     for (const error of runtime.page.partialErrors) {
       values.set(JSON.stringify([error.producer, error.code]), error)
     }
+  }
+  if (hasIncompleteHosts) {
+    const error: SafeCatalogPartialError = Object.freeze({
+      producer: 'host',
+      code: 'operational_source_unavailable',
+      retryable: true,
+    })
+    values.set(JSON.stringify([error.producer, error.code]), error)
   }
   return [...values.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
@@ -144,7 +157,10 @@ async function hydrateSelected(
   context: CatalogRequestContext,
   selected: readonly CatalogIdentityCandidate[],
   operationalHydration?: CatalogOperationalHydration
-): Promise<Map<string, HydratedCatalogResource>> {
+): Promise<{
+  resources: Map<string, HydratedCatalogResource>
+  incompleteRoots: ReadonlyMap<string, CatalogHydrationIncompleteRoot['reason']>
+}> {
   const byFamily = new Map<CatalogFamily, CatalogKey[]>()
   for (const candidate of selected) {
     const values = byFamily.get(candidate.key[1]) ?? []
@@ -152,6 +168,7 @@ async function hydrateSelected(
     byFamily.set(candidate.key[1], values)
   }
   const hydratedValues: HydratedCatalogResource[] = []
+  const incompleteRoots: CatalogHydrationIncompleteRoot[] = []
   for (const family of CATALOG_FAMILIES) {
     const keys = byFamily.get(family)
     if (!keys?.length) continue
@@ -160,15 +177,44 @@ async function hydrateSelected(
       keys,
       operationalHydration
     )
-    hydratedValues.push(...values)
+    if (Array.isArray(values)) {
+      hydratedValues.push(...values)
+    } else {
+      const result = values as CatalogHydrationResult
+      if (!Array.isArray(result.resources) || !Array.isArray(result.incompleteRoots)) {
+        throw new AccessCatalogRequestError('authority_unavailable')
+      }
+      hydratedValues.push(...result.resources)
+      incompleteRoots.push(...result.incompleteRoots)
+    }
   }
-  const hydrated = mergeHydratedCatalogResources(hydratedValues)
+  const resources = mergeHydratedCatalogResources(hydratedValues)
+  const selectedByKey = new Map(
+    selected.map(candidate => [JSON.stringify(candidate.key), candidate])
+  )
+  const incompleteByKey = new Map<string, CatalogHydrationIncompleteRoot['reason']>()
+  for (const incomplete of incompleteRoots) {
+    const key = JSON.stringify(incomplete.key)
+    const candidate = selectedByKey.get(key)
+    if (
+      !candidate ||
+      candidate.key[1] !== 'host' ||
+      (incomplete.reason !== 'configured_context_missing' &&
+        incomplete.reason !== 'configured_context_ambiguous') ||
+      incompleteByKey.has(key) ||
+      resources.has(key)
+    ) {
+      throw new AccessCatalogRequestError('authority_unavailable')
+    }
+    incompleteByKey.set(key, incomplete.reason)
+  }
   for (const candidate of selected) {
-    if (!hydrated.has(JSON.stringify(candidate.key))) {
+    const key = JSON.stringify(candidate.key)
+    if (!resources.has(key) && !incompleteByKey.has(key)) {
       throw new AccessCatalogRequestError('authority_unavailable')
     }
   }
-  return hydrated
+  return { resources, incompleteRoots: incompleteByKey }
 }
 
 async function prepareOperationalHydration(
@@ -376,11 +422,18 @@ async function buildInTransaction(input: {
     selectedHydratable,
     preparedOperationalHydration.hydration
   )
-  const items = selectedHydratable.map(candidate =>
-    catalogItem(context, hydrated.get(JSON.stringify(candidate.key))!)
-  )
+  const items = selectedHydratable.flatMap(candidate => {
+    const key = JSON.stringify(candidate.key)
+    if (hydrated.incompleteRoots.has(key)) return []
+    const resource = hydrated.resources.get(key)
+    if (!resource) throw new AccessCatalogRequestError('authority_unavailable')
+    return [catalogItem(context, resource)]
+  })
   const partialErrorsByIdentity = new Map(
-    safePartialErrors(runtimes).map(error => [JSON.stringify([error.producer, error.code]), error])
+    safePartialErrors(runtimes, hydrated.incompleteRoots.size > 0).map(error => [
+      JSON.stringify([error.producer, error.code]),
+      error,
+    ])
   )
   for (const key of preparedOperationalHydration.unavailableRootKeys) {
     const [family] = JSON.parse(key) as [CatalogFamily, string]
@@ -406,7 +459,7 @@ async function buildInTransaction(input: {
       const continuation = continuations[runtime.family]
       return runtime.page.sourceCompleteness === 'complete' && !continuation.exhausted
     })
-  const validUntil = earliestValidUntil(merged, hydrated)
+  const validUntil = earliestValidUntil(merged, hydrated.resources)
   const lastCanonicalKey = selected.at(-1)?.key
   const nextCursor =
     hasNext && lastCanonicalKey

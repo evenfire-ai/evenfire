@@ -221,6 +221,24 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
        AND alias_source.resource_type = 'context'
        AND alias_source.logical_id = alias_relationship.source_id
        AND alias_source.provider_uid = alias_relationship.source_provider_uid
+  ), configured_context_candidate_counts AS MATERIALIZED (
+    SELECT candidate.reference_id, COUNT(DISTINCT candidate.canonical_id)::int AS candidate_count
+      FROM context_identity_candidates candidate
+     GROUP BY candidate.reference_id
+  ), incomplete_configured_contexts AS MATERIALIZED (
+    SELECT relationship.source_id AS logical_id,
+           CASE WHEN BOOL_OR(COALESCE(candidate_count.candidate_count, 0) > 1)
+             THEN 'configured_context_ambiguous'
+             ELSE 'configured_context_missing'
+           END AS incomplete_reason
+      FROM outgoing_relationships relationship
+      LEFT JOIN configured_context_candidate_counts candidate_count
+        ON candidate_count.reference_id = relationship.target_id
+     WHERE relationship.source_type = 'host'
+       AND relationship.relationship_type = 'uses_context'
+       AND relationship.target_type = 'context'
+       AND COALESCE(candidate_count.candidate_count, 0) <> 1
+     GROUP BY relationship.source_id
   ), context_identities AS MATERIALIZED (
     SELECT candidate.reference_id, MIN(candidate.canonical_id) AS canonical_id
       FROM context_identity_candidates candidate
@@ -298,8 +316,11 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
          ), '[]'::jsonb) AS relationships,
          (SELECT COUNT(*) FROM paths) AS total_path_rows,
          (SELECT COUNT(*) FROM relationships) AS total_relationship_rows,
+         incomplete.incomplete_reason,
          NULL::timestamptz AS valid_until
     FROM resources resource
+    LEFT JOIN incomplete_configured_contexts incomplete
+      ON $4::text = 'host' AND incomplete.logical_id = resource.logical_id
    ORDER BY resource.logical_id`
 
 export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
