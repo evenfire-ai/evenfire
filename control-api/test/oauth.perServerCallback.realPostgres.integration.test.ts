@@ -36,6 +36,7 @@ import {
 } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import { attachServerToContext } from '../src/services/contextAllowlist.js'
 import { discoverPilot, installRemoteServer, seedContext } from './fixtures/perServerInstall.js'
 import {
   ATLASSIAN_V2_PILOT,
@@ -325,6 +326,10 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       },
       NS
     )
+    // The CR is written by hand (no install), so the allowlist step the install performs
+    // is replayed here: without it the mint stops at the membership gate (403) and never
+    // reaches the nonce check this test certifies.
+    await attachServerToContext(gateway as never, { name: CONTEXT, namespace: NS }, 'legacy')
     // The only producer of a nonce-less row: the pre-install-identity upsert.
     await upsertDynamicClient(db, KEY, {
       serverNamespace: NS,
@@ -344,6 +349,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       .set('x-service-token', 'rpc-proxy')
       .send({ mcpServerName: 'legacy', userId: 'user-9' })
     expect(mintRes.status).toBe(503)
+    expect(mintRes.body).toMatchObject({ error: 'integration_not_configured' })
 
     const state = await signedStateFor('legacy')
     for (const path of ['/remote/legacy', `/remote/legacy/${randomUUID()}`]) {
