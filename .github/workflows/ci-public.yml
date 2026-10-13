@@ -514,6 +514,8 @@ jobs:
           cache-dependency-path: tests/e2e/package-lock.json
       - name: Run descriptor-bound fixture unit suites
         run: E2E_VITEST_SUITE_GROUP=node-unit bash scripts/e2e/run-vitest-e2e.sh
+      - name: Run E2E static-audit regression matrix
+        run: python3 -m tools.test_e2e_static_audit_scope
 
   # ─── Registry contract — boot evenfire-registry and drive the real client ──
   # Catches wire-format drift in clerumRegistryClient.ts before merge. Requires

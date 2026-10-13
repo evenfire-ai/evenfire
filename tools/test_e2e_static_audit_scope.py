@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -207,5 +208,16 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
         )
 
 
+def run_tests() -> int:
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    test_count = suite.countTestCases()
+    if test_count == 0:
+        print("E2E static-audit regression matrix collected zero tests", file=sys.stderr)
+        return 2
+
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
 if __name__ == "__main__":
-    unittest.main()
+    raise SystemExit(run_tests())
