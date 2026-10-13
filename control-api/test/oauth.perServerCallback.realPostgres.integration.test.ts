@@ -15,8 +15,10 @@
  * Real producers (T1): discovery by `discoverRemoteOAuth` over probe fixtures; CR,
  * uid, row and nonce by the real install route; the state by the real authorize-url
  * mint; teardown by the uninstall's own store call. The AS registration response and
- * the token endpoint are the only external edges. Context membership is answered on the
- * app pool as the sibling route suites do (it is not what this suite certifies).
+ * the token endpoint are the only external edges. The consenting user is a real row whose
+ * Context and agent access is written by the production writers (`seedActiveMember`), so
+ * the per-user gate's readers run against real tables: a retired user, or one whose
+ * access only comes through a team, is refused.
  *
  *   CONTROL_API_REAL_PG_ADMIN_URL=postgres://<user>:<pass>@<host>:5432 npm test -- \
  *     test/oauth.perServerCallback.realPostgres.integration.test.ts
@@ -36,6 +38,12 @@ import {
 } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import { attachServerToContext } from '../src/services/contextAllowlist.js'
+import { setTeamAgents } from '../src/services/directory/agentAccess.js'
+import { setTeamContexts } from '../src/services/directory/contextAccess.js'
+import { createTeamForUser } from '../src/services/directory/teams.js'
+import { retireDesktopUser } from '../src/services/directory/users.js'
+import { seedActiveMember, seedAgentHost, seedControlAdmin } from './fixtures/contextAllowlist.js'
 import { discoverPilot, installRemoteServer, seedContext } from './fixtures/perServerInstall.js'
 import {
   ATLASSIAN_V2_PILOT,
@@ -47,7 +55,6 @@ import { MockGateway } from './mockGateway.js'
 
 const testDb = vi.hoisted(() => ({
   pool: undefined as import('pg').Pool | undefined,
-  context: 'ctx-a',
 }))
 
 vi.mock('../src/db.js', async () => {
@@ -59,14 +66,11 @@ vi.mock('../src/db.js', async () => {
   return {
     ...actual,
     pool: {
-      query: (text: string, values?: unknown[]) => {
-        if (text.includes('FROM user_contexts')) {
-          return Promise.resolve({ rows: [{ context_id: testDb.context }], rowCount: 1 })
-        }
-        return current().query(text, values)
-      },
+      query: (text: string, values?: unknown[]) => current().query(text, values),
       connect: () => current().connect(),
     },
+    withTransaction: (work: Parameters<typeof actual.withTransaction>[0]) =>
+      actual.withTransaction(work, current()),
   }
 })
 
@@ -144,6 +148,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
   let gateway: MockGateway
   let app: ReturnType<typeof createApp>
   let savedBaseUrl: string
+  let memberId: string
 
   beforeAll(async () => {
     if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
@@ -180,6 +185,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     config.oauthCallbackBaseUrl = ORIGIN
     gateway = new MockGateway(NS)
     await seedContext(gateway, NS, CONTEXT)
+    memberId = await seedActiveMember(db, { contexts: [CONTEXT] })
     app = createApp(gateway as never)
     tokenEndpoint.posts.length = 0
   })
@@ -207,13 +213,17 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     return { registered, reported: String(res.body.redirectUri) }
   }
 
-  /** The authorize URL the real mint returns; its state is what the AS round-trips. */
-  async function mint(name: string): Promise<{ redirectUri: string; state: string }> {
-    const res = await request(app)
+  function mintRequest(name: string, userId: string) {
+    return request(app)
       .post('/api/v1/internal/mcp-oauth/authorize-url')
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: name, userId: 'user-9' })
+      .send({ mcpServerName: name, userId })
+  }
+
+  /** The authorize URL the real mint returns; its state is what the AS round-trips. */
+  async function mint(name: string): Promise<{ redirectUri: string; state: string }> {
+    const res = await mintRequest(name, memberId)
     if (res.status !== 200)
       throw new Error(`mint failed: ${res.status} ${JSON.stringify(res.body)}`)
     const url = new URL(res.body.authorizeUrl)
@@ -325,6 +335,10 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       },
       NS
     )
+    // The CR is written by hand (no install), so the allowlist step the install performs
+    // is replayed here: without it the mint stops at the membership gate (403) and never
+    // reaches the nonce check this test certifies.
+    await attachServerToContext(gateway as never, { name: CONTEXT, namespace: NS }, 'legacy')
     // The only producer of a nonce-less row: the pre-install-identity upsert.
     await upsertDynamicClient(db, KEY, {
       serverNamespace: NS,
@@ -342,8 +356,9 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
       .post('/api/v1/internal/mcp-oauth/authorize-url')
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'legacy', userId: 'user-9' })
+      .send({ mcpServerName: 'legacy', userId: memberId })
     expect(mintRes.status).toBe(503)
+    expect(mintRes.body).toMatchObject({ error: 'integration_not_configured' })
 
     const state = await signedStateFor('legacy')
     for (const path of ['/remote/legacy', `/remote/legacy/${randomUUID()}`]) {
@@ -410,6 +425,52 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     expect(tokenEndpoint.posts).toHaveLength(0)
   })
 
+  // Per-user gate against the real membership tables: the readers' SQL, not a fake,
+  // decides who reaches the Context that allowlists the server.
+  it('per-user gate: a user reaching the Context only through an assigned agent mints', async () => {
+    await installAtlassian('atlassian')
+    await seedAgentHost(gateway, 'host-c', CONTEXT)
+    const agentOnly = await seedActiveMember(db, { agents: ['host-c'] })
+    const res = await mintRequest('atlassian', agentOnly)
+    expect(res.status).toBe(200)
+    expect(res.body.authorizeUrl).toEqual(expect.any(String))
+  })
+
+  it('per-user gate: a retired user is refused although their Context rows remain', async () => {
+    await installAtlassian('atlassian')
+    const retirer = await seedControlAdmin(db)
+    await retireDesktopUser(
+      { kind: 'control_admin', controlAdminId: retirer },
+      memberId,
+      'real-pg per-user gate',
+      `gate-${memberId}`,
+      null,
+      { retainWithoutLinkHistory: true }
+    )
+    const rows = await dbPool.query('SELECT context_id FROM user_contexts WHERE user_id = $1', [
+      memberId,
+    ])
+    expect(rows.rows).toEqual([{ context_id: CONTEXT }])
+
+    const res = await mintRequest('atlassian', memberId)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'context_membership_denied' })
+  })
+
+  it('per-user gate: access only through a team (team_contexts, team_agents) is refused', async () => {
+    await installAtlassian('atlassian')
+    await seedAgentHost(gateway, 'host-c', CONTEXT)
+    const teamOnly = await seedActiveMember(db, {})
+    const operator = await seedControlAdmin(db)
+    const team = await createTeamForUser(teamOnly, `team-${teamOnly}`)
+    await setTeamContexts(team.id, [CONTEXT], operator)
+    await setTeamAgents(team.id, ['host-c'], operator)
+
+    const res = await mintRequest('atlassian', teamOnly)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'context_membership_denied' })
+  })
+
   /**
    * A state for a server the mint refuses (no usable registration). Signed by the same
    * signer the mint uses, with the CR's current client id — what a state minted just
@@ -423,7 +484,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     return signOAuthState(config.oauthStateHmacSecret, {
       subjectKind: 'mcp',
       mcpServerName: name,
-      userId: 'user-9',
+      userId: memberId,
       oauthClientId: cr.spec.oauth.id,
       grantKind: 'user',
       background: false,
