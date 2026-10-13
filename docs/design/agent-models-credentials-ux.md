@@ -236,4 +236,3 @@ Host or LLM Secret operation failed when the API can provide that detail.
 - Shared-set impact and write-only limitations are visible before Save.
 - The UI preserves drafts on failures and never places secret values in logs,
   analytics, documentation, or error messages.
-

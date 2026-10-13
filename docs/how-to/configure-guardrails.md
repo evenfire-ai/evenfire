@@ -53,8 +53,11 @@ provenance (see the example below).
   tasks are **unattended**. In an unattended run an `ask` becomes
   a deny ("approval required but no approver is available"), so the task
   does not hang.
-- `allow` does not skip approvals. MCP tools and the five risky native tools
-  still require approval under `spec.approval`.
+- `allow` does not skip approvals. MCP tool calls still go through the
+  approval gate, which `spec.approval` does not configure. Native tools
+  still follow their own approval default (for example `shell_exec` and
+  `http_request` ask) or the per-tool override in `spec.approval.tools`.
+  See [Configure approvals](configure-approvals.md).
 
 ## Option A — mcp-host dev mode
 
@@ -228,19 +231,24 @@ the fields it does not edit when it saves.
   `may_deny` is requested; the form preselects the hook author's suggested
   fail mode (or `open`), and **May deny** forces `closed`.
 
-- **Timeouts.** The per-call deadline is the Host's
-  `limits.maxHookTimeoutMs`, default 5000 ms, on both lanes. mcp-host does
-  not read `LlmHook.spec.timeoutMs`.
+- **Timeouts.** The Host's `limits.maxHookTimeoutMs` (default 5000 ms) is
+  the transport timeout for each hook call on both lanes. LLM-lane hooks
+  also have a fixed 15000 ms hard deadline, so on that lane a value above
+  15000 has no effect: the call reports unavailable after 15 seconds.
+  mcp-host does not read `LlmHook.spec.timeoutMs`.
 - **Circuit breaker.** `onUnavailable.mode: breaker` (threshold 5, cooldown
   30000 ms by default) short-circuits a down hook without dialing it. It
   applies only to LLM-lane hooks **without** `may_deny`. A deny-capable hook
   is always dialed.
-- **Digest binding.** For image hooks, mcp-host compares the Host's `digest`
-  with `LlmHook.status.observedDigest`. On a mismatch it quarantines the
-  hook: every call reports unavailable, so the fail-mode rules above apply.
-  The same happens to a co-located hook that lost a `DuplicatePath`
-  collision. Upgrade with `POST /admin/registry/upgrade-hook`, which bumps
-  the CR and every Host's digest together.
+- **Digest binding.** For image hooks whose Host reference pins a `digest`,
+  mcp-host compares it with `LlmHook.status.observedDigest` (once that is
+  set). On a mismatch it quarantines the hook. Quarantine is enforced on the
+  LLM lane only: there every call reports unavailable, so the fail-mode
+  rules above apply. A tool-lane hook (`preToolUse`/`postToolUse`) with a
+  mismatched digest is still dialed. The same quarantine applies to a
+  co-located hook that lost a `DuplicatePath` collision. Upgrade with
+  `POST /admin/registry/upgrade-hook`, which bumps the CR and every Host's
+  digest together.
 - **The Host phase key does not filter.** mcp-host collects hook ids from
   all phases. The `LlmHook`'s own `lifecyclePoints` decide where it runs.
 

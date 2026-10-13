@@ -533,9 +533,9 @@ a `Set<string>` so an unchanged hostRef triggers exactly one reconcile.
 
 **RBAC:** HCC's `host-context-controller-channels-runtime` Role grants
 `get/list/watch` on `communicationchannels.clerum.io` in the `channels`
-namespace. **Applied out-of-band** via `make gcp-dev-bootstrap-rbac` /
-`make gcp-prod-bootstrap-rbac` because the CD service account intentionally
-cannot grant RBAC (see `deploy/scripts/post-deploy-sync.sh`).
+namespace. **Applied out-of-band** with
+[`deploy/scripts/bootstrap-rbac.sh`](../../deploy/scripts/bootstrap-rbac.sh),
+because a deploy service account should not be able to grant RBAC.
 
 ---
 
@@ -1459,7 +1459,11 @@ Default: `your-registry.example.com/evenfire/`
 
 ### Full Production Deployment Sequence
 
-See [Production deployment](../deploy/production.md) for the full rollout order.
+The service Makefiles only build and push images; they have no `deploy`
+target. The workloads ship as Kustomize manifests under `deploy/base`, applied
+through an overlay. [Production deployment](../deploy/production.md) gives the
+rollout order, and [minikube](../deploy/minikube.md) is the scripted reference
+(`make minikube-deploy-all`).
 
 ```bash
 # 1. Install CRDs

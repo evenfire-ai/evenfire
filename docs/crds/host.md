@@ -60,8 +60,8 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `guardrails.builtins[]` | First-party hooks compiled into mcp-host (e.g. `prompt-shaping`, `token-trim`). |
 | `guardrails.minInstalledHookTrustLevel` | `low` \| `mid` \| `high`: minimum trust level for hooks installed onto this Host. Checked by control-api when a hook is installed or upgraded, not at runtime. |
 | `guardrails.capabilityCeiling[]` | Upper bound on the capabilities an install may grant: `may_deny`, `may_rewrite`, `may_substitute_result`, `may_add_context`. Checked at install/upgrade, not at runtime, so a hand-edited LlmHook is not re-validated against it. |
-| `guardrails.approvalPolicies[]` | Accepted by the schema (`cli_only`, `channel_users`, `designated_approvers`) but not read by mcp-host today; `ask` decisions use `spec.approval`. |
-| `guardrails.limits` | `maxRules` (100) and `maxHookTimeoutMs` (5000, the deadline for every hook call) are enforced. `maxHookOutputBytes` (65536 when a `limits` object is present; otherwise mcp-host allows 1 MiB, and 5 MiB for `preCall` rewrites) applies to LLM-lane hooks. `maxHooksPerPhase` is accepted but not enforced. |
+| `guardrails.approvalPolicies[]` | Accepted by the schema (`cli_only`, `channel_users`, `designated_approvers`) but not read by mcp-host today; `ask` decisions use `spec.approval`, or mcp-host's `CLERUM_APPROVAL_CONFIG` when `spec.approval` is unset. |
+| `guardrails.limits` | `maxRules` (100) and `maxHookTimeoutMs` (5000, the transport timeout for each hook call on both lanes) are enforced; LLM-lane hooks also have a fixed 15000 ms hard deadline, so a larger value has no effect there. `maxHookOutputBytes` (65536 when a `limits` object is present; otherwise 1 MiB) caps `moderate`, `postCallSuccess` and `onError` hook responses. It does not apply to `preCall` (always 5 MiB) or to tool-lane hooks (1 MiB). `maxHooksPerPhase` is accepted but not enforced. |
 
 Apply the CRD before any component writes `spec.guardrails`: the API server
 silently prunes fields an older CRD does not know.
