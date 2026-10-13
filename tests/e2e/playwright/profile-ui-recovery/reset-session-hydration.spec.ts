@@ -3,8 +3,7 @@ import { expect, test } from '@playwright/test'
 test('retries session hydration after committed reset without resubmitting the reset proof', async ({
   page,
 }) => {
-  // E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT: this entry represents the URL in
-  // the member's password-reset email.
+  // E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT: the emailed password-reset URL.
   await page.goto('/invitations/synthetic-reset-proof')
   await expect(page.getByRole('heading', { name: 'Reset password' })).toBeVisible()
 

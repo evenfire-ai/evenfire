@@ -25,6 +25,17 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 def audit_file(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
+    return audit_text(text, path)
+
+
+def _adjacent_line(text: str, position: int) -> str:
+    line_start = text.rfind("\n", 0, position) + 1
+    previous_line_end = line_start - 1
+    previous_line_start = text.rfind("\n", 0, previous_line_end) + 1
+    return text[previous_line_start:previous_line_end]
+
+
+def audit_text(text: str, path: Path = Path("<source>")) -> list[str]:
     findings: list[str] = []
     for label, pattern in RULES:
         for match in pattern.finditer(text):
@@ -42,20 +53,30 @@ def audit_file(path: Path) -> list[str]:
     ):
         findings.append(f"{path}: missing critical network-response/request wait")
 
-    # Direct navigation is allowed only in an explicitly negative terminal
-    # guard, as the first application-root entry, or as a marked password-reset
-    # link delivered by email. Other deep links remain forbidden.
+    # Navigation exceptions must be attached to the specific call. Searching a
+    # broad look-behind for "guard" also matches "GUARDIAN" and lets one marker
+    # bless later calls.
     for match in re.finditer(r"\bpage\.goto\s*\(", text):
-        before = text[max(0, match.start() - 240) : match.start()]
-        after = text[match.end() : match.end() + 80]
-        if re.search(r"terminal|deep.?link|foreign|missing|guard", before, re.IGNORECASE):
-            continue
-        if "E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT" in before and re.match(
-            r"\s*['\"]\/invitations\/[^'\"]+['\"]", after
+        adjacent = _adjacent_line(text, match.start())
+        after = text[match.end() : match.end() + 160]
+        if re.fullmatch(
+            r"\s*//\s*Negative (?:protected-route guard|route-guard|deep-link guard|"
+            r"legacy terminal-route guard):[^\n]*",
+            adjacent,
+            re.IGNORECASE,
         ):
             continue
-        if "E2E_GUARDIAN_ENTRY_POINT" in text and re.match(
-            r"""\s*['\"]/?['\"]""", after
+        if (
+            re.fullmatch(
+                r"\s*//\s*E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT(?::[^\n]*)?",
+                adjacent,
+            )
+            and re.match(r"\s*['\"]\/invitations\/[^'\"]+['\"]", after)
+        ):
+            continue
+        if (
+            re.fullmatch(r"\s*//\s*E2E_GUARDIAN_ENTRY_POINT(?::[^\n]*)?", adjacent)
+            and re.match(r"\s*['\"]/?['\"]", after)
         ):
             continue
         line = text.count("\n", 0, match.start()) + 1
