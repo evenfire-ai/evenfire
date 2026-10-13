@@ -187,6 +187,7 @@ jobs:
         if: matrix.service == 'desktop-app'
         run: |
           node scripts/tests/run-node-test-files.mjs \
+            scripts/tests/ci-public-node-mirror.test.mjs \
             scripts/tests/subscription-image-coordinator.test.mjs \
             scripts/tests/subscription-image-coordinator-regressions.test.mjs \
             scripts/tests/subscription-image-runner.test.mjs \

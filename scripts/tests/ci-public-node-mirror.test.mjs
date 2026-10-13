@@ -20,6 +20,13 @@ for (const service of ['profile-ui', 'mcp-servers/web-search']) {
     const command = step.split('\n').find(line => line.includes('docker build'))
     assert.ok(command, 'CI build command must exist')
     assert.match(command, /--build-arg NODE_IMAGE=mirror\.gcr\.io\/library\/node:24-alpine/)
-    assert.doesNotMatch(publish, /--build-arg NODE_IMAGE=/)
+    assert.doesNotMatch(publish, /NODE_IMAGE/)
   })
 }
+
+test('public CI runs the Node mirror contract', () => {
+  const step = workflow
+    .slice(workflow.indexOf('- name: Test subscription image fixtures and memory calibration'))
+    .split('\n      - name:')[0]
+  assert.match(step, /^\s+scripts\/tests\/ci-public-node-mirror\.test\.mjs\s*\\?$/m)
+})
