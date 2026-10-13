@@ -23,6 +23,7 @@ import { externalGfsRateLimitRequestsTotal } from '../src/observability/metrics.
 
 const mockVerifyExternalSessionToken = vi.fn()
 const mockSignGfsToken = vi.hoisted(() => vi.fn())
+const mockSignCurrentExternalGfsUserToken = vi.hoisted(() => vi.fn())
 const mockQuery = vi.hoisted(() => vi.fn())
 const mockAppendPermissionEvents = vi.hoisted(() => vi.fn())
 const mockWithTransaction = vi.hoisted(() => vi.fn())
@@ -97,6 +98,14 @@ vi.mock('../src/db.js', () => ({
   rateLimitPool: { query: (...a: unknown[]) => mockQuery(...a) },
   withTransaction: (...a: unknown[]) => mockWithTransaction(...a),
 }))
+vi.mock('../src/gfs/externalAuthority.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../src/gfs/externalAuthority.js')>()
+  return {
+    ...original,
+    signCurrentExternalGfsUserToken: (...args: unknown[]) =>
+      mockSignCurrentExternalGfsUserToken(...args),
+  }
+})
 vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
   appendControlApiPermissionEventsInTransaction: (...a: unknown[]) =>
     mockAppendPermissionEvents(...a),
@@ -210,6 +219,7 @@ async function buildAdminGrantsApp(sub: string) {
 beforeEach(() => {
   mockVerifyExternalSessionToken.mockReset()
   mockSignGfsToken.mockReset()
+  mockSignCurrentExternalGfsUserToken.mockReset()
   mockQuery.mockReset()
   mockAppendPermissionEvents.mockReset()
   mockWithTransaction.mockReset()
@@ -229,6 +239,19 @@ beforeEach(() => {
   )
   mockAppendPermissionEvents.mockResolvedValue(null)
   mockSignGfsToken.mockReturnValue({ token: 'gfs-user-token', expiresInSeconds: 300 })
+  mockSignCurrentExternalGfsUserToken.mockImplementation(
+    async (
+      authentication: { claims?: typeof SESSION } | undefined,
+      input: Record<string, unknown>
+    ) =>
+      mockSignGfsToken({
+        ...input,
+        ...(authentication?.claims?.authGeneration === undefined
+          ? {}
+          : { authGeneration: authentication.claims.authGeneration }),
+        principalType: 'user',
+      })
+  )
   ;(config as { gfscProxyTimeoutMs: number }).gfscProxyTimeoutMs = 300_000
   ;(config as { desktopGfsOperatorLinkingEnabled: boolean }).desktopGfsOperatorLinkingEnabled =
     false
