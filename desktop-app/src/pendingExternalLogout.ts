@@ -5,6 +5,12 @@ import path from 'node:path'
 const PENDING_EXTERNAL_LOGOUT_PREFIX = 'pending-external-logout-'
 const MARKER_VERSION = 1
 
+/** Temporary inspection failures do not establish corruption or logout intent. */
+export function isTransientPendingLogoutReadError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return typeof code === 'string' && ['EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EINTR'].includes(code)
+}
+
 export type PendingExternalLogoutIntent =
   | { intent: 'logout-pending' }
   | {

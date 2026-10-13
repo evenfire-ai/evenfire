@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
+import fsSync from 'node:fs'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -395,6 +397,36 @@ describe('team persistence preserves the existing secure session on transient fa
       }
     }
   )
+
+  it('rejects a hop on transient marker EMFILE without deleting the existing credential', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    const markerPath = path.join(
+      runtime.directory,
+      `pending-external-logout-${createHash('sha256').update(h.envKey).digest('hex')}`
+    )
+    const open = fsSync.openSync.bind(fsSync)
+    let failed = false
+    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      if (!failed && String(file) === markerPath) {
+        failed = true
+        throw Object.assign(new Error('fixture-transient marker read'), { code: 'EMFILE' })
+      }
+      return open(file, flags, mode)
+    })
+    notifySessionChanged.mockClear()
+    await expect(
+      h.state.runWithTeamContext('fixture-other', async () => 'must-not-run')
+    ).rejects.toThrow('fixture-transient marker read')
+    expect(failed).toBe(true)
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
+    expect(h.service.getCachedUserId()).toBe(homeMe.id)
+    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
+    expect(h.reportFailure).toHaveBeenCalledWith(expect.objectContaining({ code: 'EMFILE' }))
+  })
 })
 
 describe('persistence transaction ordering', () => {
@@ -462,6 +494,38 @@ describe('persistence transaction ordering', () => {
     })
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith('fixture-new-user-session')
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+  })
+})
+
+describe('explicit login transient marker inspection', () => {
+  it('does not normalize a valid cleanup marker after one transient EMFILE', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const observed = h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
+    const markerPath = path.join(
+      runtime.directory,
+      `pending-external-logout-${createHash('sha256').update(h.envKey).digest('hex')}`
+    )
+    const open = fsSync.openSync.bind(fsSync)
+    let failed = false
+    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      if (!failed && String(file) === markerPath) {
+        failed = true
+        throw Object.assign(new Error('fixture-transient login marker read'), { code: 'EMFILE' })
+      }
+      return open(file, flags, mode)
+    })
+    const keytar = await import('keytar')
+    vi.mocked(keytar.setPassword).mockClear()
+    await expect(
+      h.state.installAuthenticatedLogin({ token: 'fixture-must-not-install', me: homeMe })
+    ).rejects.toThrow('fixture-transient login marker read')
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
+    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toEqual(observed)
+    expect(keytar.setPassword).not.toHaveBeenCalled()
   })
 })
 

@@ -38,6 +38,7 @@ import {
   type PendingExternalLogoutIntent,
   type PendingExternalLogoutMarker,
   clearPendingExternalLogoutIfUnchanged,
+  isTransientPendingLogoutReadError,
   pendingExternalLogoutMarkersMatch,
   readPendingExternalLogoutContentsRevision,
   readPendingExternalLogoutMarker,
@@ -1204,7 +1205,11 @@ export class AppService {
     try {
       return readPendingExternalLogoutMarker(this.getUserDataDirectory(), envKey)
     } catch (error) {
-      await this.failClosedForPendingLogout(error)
+      if (isTransientPendingLogoutReadError(error)) {
+        this.reportDeferredLogoutFailureSafely(error)
+      } else {
+        await this.failClosedForPendingLogout(error)
+      }
       throw error
     }
   }
@@ -2181,6 +2186,10 @@ export class AppService {
     try {
       marker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
     } catch (markerError) {
+      if (isTransientPendingLogoutReadError(markerError)) {
+        this.reportDeferredLogoutFailureSafely(markerError)
+        throw markerError
+      }
       let malformedMarkerContentsRevision: string | null
       try {
         malformedMarkerContentsRevision = readPendingExternalLogoutContentsRevision(
