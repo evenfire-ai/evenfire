@@ -213,9 +213,13 @@ async function loadAllowedNamesByContext(
 
 /**
  * Union of the `spec.mcpServers` allowlists of the given Contexts (by
- * `spec.contextId`), names trimmed. The single definition of "these Contexts
- * enable these servers" for the consent gate and the rpc-proxy rail, so the
- * two cannot drift. An empty `contextIds` resolves without listing Contexts.
+ * `spec.contextId`), names trimmed. Shared by the user-scope consent gate and
+ * the flat `/mcp-servers` rail, so those two cannot drift on which servers a
+ * set of Contexts enables. The per-agent resolvers (`resolveMcpServersForAgents`,
+ * `resolveConnectorsForAgents`) read `loadAllowedNamesByContext` directly
+ * instead: they need each agent's own Context allowlist, not a union, and
+ * both paths apply the same per-Context trimming there. An empty `contextIds`
+ * resolves without listing Contexts.
  */
 export async function allowedMcpServerNamesForContexts(
   gateway: Pick<K8sGateway, 'listResource'>,
