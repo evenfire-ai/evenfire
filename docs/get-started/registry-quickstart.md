@@ -90,13 +90,16 @@ press **Install**.
 
 | Field           | Notes                                                                                             |
 | --------------- | ------------------------------------------------------------------------------------------------- |
-| **Name**        | Optional. Left blank, it is generated from the entry name and version. Must be a valid K8s name.  |
+| **Server name** | Under **Configuration**. Optional. Left blank, it is generated from the entry name and version.   |
 | **Credentials** | Only if the entry declares them. Fill in **all** fields or **none** (empty installs it pending).  |
 | **Egress**      | Review the external hosts the connector needs. Default-deny networking means unlisted hosts fail. |
 
-The install runs as a server-side saga: it verifies the bundle digest, creates
-the `McpServer` with its own private access scope, and rolls back if a step
-fails. Afterwards, grant it to agents from **Installed Connectors**.
+The install runs as a server-side saga: it creates the `McpServer` with its own
+private access scope and rolls back the Secrets and `McpServer` it created if a
+later step fails. For a `local` (bundle) entry it also compares the bundle to
+the registry's published digest and stops on a mismatch; when the registry
+returns no digest, or the lookup fails, the install continues without that
+check. Afterwards, grant it to agents from **Installed Connectors**.
 
 Verify it landed:
 

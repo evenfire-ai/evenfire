@@ -8,8 +8,9 @@ deny-all-baseline networking — declared as Kubernetes CRDs.
 > `CLERUM_*`). Same project — [code names](concepts/code-names.md).
 
 Start at the root [`README.md`](../README.md) for the product pitch and license.
-Use this index for long-form docs. Pages describe what `deploy/base` and the
-minikube overlays ship; features that are off by default say so.
+Use this index for long-form docs. User and operator pages describe what
+`deploy/base` and the minikube overlays ship; features that are off by default
+say so. [Design records](#design-records) are point-in-time and not maintained.
 
 ---
 
@@ -17,7 +18,7 @@ minikube overlays ship; features that are off by default say so.
 
 | Doc                                                       | Description                                                                 |
 | --------------------------------------------------------- | --------------------------------------------------------------------------- |
-| [Quickstart](get-started/quickstart.md)                   | Full platform on minikube with one command                                  |
+| [Quickstart](get-started/quickstart.md)                   | Full platform on minikube: set `.env`, one command                          |
 | [Registry quickstart](get-started/registry-quickstart.md) | Connect, install, and publish as a self-hoster                              |
 | [Dev mode](get-started/dev-mode.md)                       | Run mcp-host alone without Kubernetes (contributors; not platform security) |
 | [Learning path](get-started/learning-path.md)             | Choose a path by role and goal                                              |
@@ -86,8 +87,8 @@ minikube overlays ship; features that are off by default say so.
 | **Upgrade notes**                                                                |                                                                  |
 | [Workflow output PVC upgrade](deploy/workflow-output-pvc-upgrade.md)             | Per-recipe output PVC ownership change                           |
 | [Plugin Workload SDK upgrade](deploy/plugin-workload-sdk-upgrade.md)             | promptBridge / clientNotifications rollout order and migration   |
-| [GFS permission store](deploy/gfs-permission-store.md)                           | `gfs_controller` DB credential: provisioning, rotation, recovery |
 | **Runbooks**                                                                     |                                                                  |
+| [GFS permission store](deploy/gfs-permission-store.md)                           | `gfs_controller` DB credential: provisioning, rotation, recovery |
 | [Password work ownership recovery](how-to/password-work-ownership-recovery.md)   | Recover the bcrypt work-bounding singleton                       |
 | [MCP secret rollback permits](how-to/control-api-mcp-secret-rollback-permits.md) | Short-lived permits for the legacy MCP secret rollback path      |
 | [GFS large-file downloads](operations/gfs-large-file-host-downloads.md)          | GFS admission limits vs visual model input                       |

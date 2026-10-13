@@ -91,8 +91,9 @@ update policy, so different tenants can be on different versions at the same
 time. It asks that tenant's External REST API for its release info, including a
 `minimumDesktopVersion`. If the installed version is **below** that minimum, the
 app shows a **Desktop update required** dialog; **Download update** opens the
-release page for the new build (release tag `v<desktopVersion>`) in your browser. (A packaged distribution is
-where this matters most — a source checkout can just pull the latest.)
+`releaseUrl` the server returns (the release tagged `v<desktopVersion>`) in
+your browser. (A packaged distribution is where this matters most — a source
+checkout can just pull the latest.)
 
 This is update **detection**, not silent auto-install: the app tells the user an
 update is required and links the release; it never downloads or installs on

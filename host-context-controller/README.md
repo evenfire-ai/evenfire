@@ -642,7 +642,8 @@ unchanged into the gfsc pods (`gfscEnv` in `src/k8s/gfsFactory.ts`):
 (written to the pod as the matching `GFS_UPLOAD_*` name;
 `CONTEXT_MAPPER_GFSC_UPLOAD_V2_ENABLED` goes to the writer only). HCC sets no
 default for these: an unset variable is not injected, and gfsc's own default
-applies (`gfs-controller/src/config.ts`). `deploy/base` sets only
+applies (`gfs-controller/src/config.ts`; for `GFS_MAX_WRITE_BODY_BYTES`, 16 MiB
+in `gfs-controller/src/api/serve.ts`). `deploy/base` sets only
 `GFS_MAX_WRITE_BODY_BYTES` (`25165824`, 24 MiB).
 
 ### NetworkPolicy

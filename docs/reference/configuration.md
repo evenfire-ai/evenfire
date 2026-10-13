@@ -14,8 +14,9 @@ Full per-service variable lists live in each service's README (see
 > you create it. Only the minikube overlay ships one
 > (`deploy/overlays/minikube/configmaps/mcp-host-config.yaml`); copy it and
 > review each value (see [Production deployment](../deploy/production.md)).
-> Variables you leave out take mcp-host's code defaults, so the mcp-host rows
-> below are off unless your ConfigMap sets them.
+> Variables you leave out take mcp-host's code defaults: the mcp-host rows in
+> the two "Off" tables below stay off unless your ConfigMap sets them, and the
+> mcp-host rows under [On by default](#on-by-default) stay on.
 
 Set boolean switches to the lowercase string `true`. Some services also accept
 `1` or other casings, but `true` works everywhere.
@@ -36,7 +37,7 @@ Set boolean switches to the lowercase string `true`. Some services also accept
 | `CLERUM_MEMORY_ENABLED`                            | mcp-host (`mcp-host-config`)               | Agent workspace memory                                                                     | [mcp-host README](../../mcp-host/README.md)                             |
 | `CLERUM_SESSION_SEARCH_ENABLED`                    | mcp-host (`mcp-host-config`)               | Session search for agents                                                                  | [mcp-host README](../../mcp-host/README.md)                             |
 | `CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED` | control-api (`control-api-config`)         | Makes the initial Desktop admin an EvenDrive operator on self-hosted installs              | [GFS operator parity](../architecture/gfs-desktop-operator-parity.md)   |
-| `PLUGIN_WORKLOAD_SDK_ENABLED`                      | workflow-recipes (Deployment env)          | The Plugin Workload SDK for recipe workloads                                               | [Plugin Workload SDK upgrade](../deploy/plugin-workload-sdk-upgrade.md) |
+| `PLUGIN_WORKLOAD_SDK_ENABLED`                      | workflow-recipes (Deployment env)          | The Plugin Workload SDK; WRC passes it to the mcp-host pods of recipes that declare it     | [Plugin Workload SDK upgrade](../deploy/plugin-workload-sdk-upgrade.md) |
 | `WRC_ENABLE_SNIPPET_RUNTIME`                       | workflow-recipes (Deployment env)          | Snippet-based workflow coordinators                                                        | [WorkflowRecipes operations](../deploy/workflow-recipes-guide.md)       |
 | `WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE`              | workflow-recipes (Deployment env)          | Custom coordinator images (digest-pinned)                                                  | [Workflow SDK](../../packages/workflow-sdk/README.md)                   |
 | `CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED`      | workflow-recipes (Deployment env)          | Confirms the cluster CNI enforces NetworkPolicies (enforcement mode is `required` in both) | [WorkflowRecipes operations](../deploy/workflow-recipes-guide.md)       |
@@ -45,25 +46,25 @@ Set boolean switches to the lowercase string `true`. Some services also accept
 
 ## Off in both `deploy/base` and the minikube overlay
 
-| Switch                                    | Service                 | What it turns on                                                                          |
-| ----------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------- |
-| `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST`     | control-api             | Reject connector images that are not on the allowlist (otherwise audit mode)              |
-| `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST`  | host-context-controller | Block non-allowlisted connector images at reconcile (otherwise logged and allowed)        |
-| `SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED`  | control-api             | Periodic model-catalog refresh for subscription connections                               |
-| `OAUTH_PROACTIVE_REFRESH_CRON_ENABLED`    | control-api             | Refresh remote-connector OAuth tokens before they expire                                  |
-| `TRACING_APPROVAL_PROMPT_HISTORY_ENABLED` | control-api             | Keep prompt history in approval traces                                                    |
-| `CLERUM_PERSONALIZATION_ENABLED`          | mcp-host                | Identity files from `CLERUM_IDENTITY_SEED` in dev mode (Hosts use `spec.personalization`) |
-| `MCP_PROXY_ENABLED`                       | mcp-host                | Route MCP traffic through mcp-proxy                                                       |
+| Switch                                    | Service                 | What it turns on                                                                           |
+| ----------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------ |
+| `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST`     | control-api             | Reject connector images that are not on the allowlist (off: no image check at all)         |
+| `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST`  | host-context-controller | Block non-allowlisted connector images at reconcile (otherwise logged and allowed)         |
+| `SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED`  | control-api             | Periodic model-catalog refresh for subscription connections                                |
+| `OAUTH_PROACTIVE_REFRESH_CRON_ENABLED`    | control-api             | Refresh remote-connector OAuth tokens before they expire                                   |
+| `TRACING_APPROVAL_PROMPT_HISTORY_ENABLED` | control-api, mcp-host   | Keep prompt history in approval traces                                                     |
+| `CLERUM_PERSONALIZATION_ENABLED`          | mcp-host                | Identity files from `CLERUM_IDENTITY_SEED` at startup when the Host has no personalization |
+| `MCP_PROXY_ENABLED`                       | mcp-host                | Route MCP traffic through mcp-proxy                                                        |
 
 ## On by default
 
-| Switch                                            | Service          | Note                                                                          |
-| ------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------- |
-| `CLERUM_ENABLE_APPROVAL`                          | mcp-host         | Human approval gate ([Configure approvals](../how-to/configure-approvals.md)) |
-| `LLM_CATALOG_SYNC_CRON_ENABLED`                   | control-api      | models.dev catalog sync; new rows arrive disabled for review                  |
-| `CLERUM_ENABLE_RESPONSE_ATTACHMENTS`              | channel-reader   | Send generated files back to channels                                         |
-| `WRC_ENABLE_DETERMINISTIC`                        | workflow-recipes | Deterministic workflow steps                                                  |
-| `WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED` | control-api      | Deliver workflow approval notifications                                       |
+| Switch                                            | Service                  | Note                                                                          |
+| ------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------- |
+| `CLERUM_ENABLE_APPROVAL`                          | mcp-host                 | Human approval gate ([Configure approvals](../how-to/configure-approvals.md)) |
+| `LLM_CATALOG_SYNC_CRON_ENABLED`                   | control-api              | models.dev catalog sync; new rows arrive disabled for review                  |
+| `CLERUM_ENABLE_RESPONSE_ATTACHMENTS`              | channel-reader, mcp-host | Send generated files back to channels                                         |
+| `WRC_ENABLE_DETERMINISTIC`                        | workflow-recipes         | Deterministic workflow steps                                                  |
+| `WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED` | control-api              | Deliver workflow approval notifications                                       |
 
 ## Where every variable is documented
 

@@ -899,7 +899,9 @@ host-context-controller/
 > `deploy/base/control-plane/host-context-controller.yaml`.
 
 The controller reconciles six CRDs: `McpServer`, `Context`, `Host`,
-`SharedFileSystem`, `GlobalFileSystem`, and `LlmHook`.
+`SharedFileSystem`, `GlobalFileSystem`, and `LlmHook`. It also watches
+`CommunicationChannel` resources in the `channels` namespace to size each
+Host's channel-reader Deployment.
 
 ### Operator Reconciliation
 
@@ -1231,7 +1233,7 @@ For comprehensive testing documentation, see [mcp-servers/README.md §Testing](.
 
 ### Namespace Layout & NetworkPolicy Strategy
 
-Scoped to the four namespaces on the message path — for the full deny-all model across all 12 namespaces, see [platform-topology.md §2](platform-topology.md#2-security-architecture-deny-all-by-default).
+Scoped to the four namespaces on the message path — for the full deny-all model across all 13 namespaces, see [platform-topology.md §2](platform-topology.md#2-security-architecture-deny-all-by-default).
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
@@ -1253,7 +1255,7 @@ flowchart LR
     class HCC ctrl
 ```
 
-`deploy/base/namespaces.yaml` declares ten namespaces: `channels`, `control-plane`, `mcp-host`, `mcp-server`, `profiles`, `rpc-proxy`, `sandbox-recipes`, `sandbox-ui`, `webhook-ingress`, `gfs`. The core four for the message path are:
+`deploy/base/namespaces.yaml` declares eleven namespaces: `channels`, `control-plane`, `mcp-host`, `mcp-server`, `llm-hooks`, `profiles`, `rpc-proxy`, `sandbox-recipes`, `sandbox-ui`, `webhook-ingress`, `gfs` (the opt-in `ingress` namespace from `deploy/base/ingress/` and the minikube-only `registry` namespace bring the platform total to 13). The core four for the message path are:
 
 - `channels` - channel-reader (no inbound traffic needed)
 - `mcp-host` - mcp-host service (receives HTTP from channel-reader)
@@ -1459,29 +1461,31 @@ Default: `your-registry.example.com/evenfire/`
 
 ### Full Production Deployment Sequence
 
+The service Makefiles only build and push images; they have no `deploy`
+target. The workloads ship as Kustomize manifests under `deploy/base`, applied
+through an overlay. [Production deployment](../deploy/production.md) gives the
+rollout order, and [minikube](../deploy/minikube.md) is the scripted reference
+(`make minikube-deploy-all`).
+
 ```bash
 # 1. Install CRDs
 helm install clerum-crds ./charts/clerum-crds
 
-# 2. Deploy host-context-controller (operator must run first)
-cd host-context-controller && make deploy
+# 2. Apply the platform manifests (namespaces, host-context-controller,
+#    mcp-host, channel-reader, ...). The services have no per-service
+#    `make deploy`; build your own kustomize overlay on deploy/base.
+kubectl apply -k <your-overlay>
 
-# 3. Deploy MCP server secrets and CRDs
-cd mcp-servers && make deploy-all
+# 3. Deploy the example MCP server secrets and McpServer CRDs
+make -C mcp-servers deploy-all
 
 # 4. Create Context CRD (defines which servers are accessible)
 kubectl apply -f charts/clerum-crds/examples/context1.yaml
 
-# 5. Deploy mcp-host
-cd mcp-host && make deploy
-
-# 6. Create Host CRD with API keys secret
+# 5. Create Host CRD with API keys secret
 kubectl apply -f charts/clerum-crds/examples/host-chatllm.yaml
 
-# 7. Deploy channel-reader
-cd channel-reader && make deploy
-
-# 8. Create CommunicationChannel CRD
+# 6. Create CommunicationChannel CRD
 kubectl apply -f charts/clerum-crds/examples/channels.yaml
 ```
 

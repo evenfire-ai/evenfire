@@ -220,11 +220,11 @@ Precedence there is host Secret > host ConfigMap > LLM Secret > process env.
 
 | Variable                         | Default                                  | Source     | Description                                                                                                                              |
 | -------------------------------- | ---------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLERUM_MEMORY_ENABLED`          | `false`                                  | CM `true`  | Enable workspace memory. Used when the Host has no `spec.memory`.                                                                        |
-| `CLERUM_MEMORY_WORKSPACE_PATH`   | `/workspace` (`./workspace` in dev mode) | -          | Memory workspace directory, used when the Host has no `spec.memory.workspacePath`.                                                       |
+| `CLERUM_MEMORY_ENABLED`          | `false`                                  | CM `true`  | Enable workspace memory. The Host CRD has no memory field, so this variable is the only switch.                                          |
+| `CLERUM_MEMORY_WORKSPACE_PATH`   | `/workspace` (`./workspace` in dev mode) | -          | Memory workspace directory.                                                                                                              |
 | `CLERUM_MEMORY_MD_MAX_BYTES`     | `8192`                                   | -          | Size cap for `MEMORY.md`.                                                                                                                |
 | `CLERUM_MEMORY_SCAN_ENABLED`     | `true`                                   | -          | Reject memory writes that match prompt-injection, exfiltration, invisible-Unicode or sensitive-path patterns. Only `false` turns it off. |
-| `CLERUM_PERSONALIZATION_ENABLED` | `false`                                  | CM `false` | Enable identity/personalization seeding.                                                                                                 |
+| `CLERUM_PERSONALIZATION_ENABLED` | `false`                                  | CM `false` | Seed identity files from `CLERUM_IDENTITY_SEED` at startup when the Host has no `spec.personalization`. Requires memory to be enabled.   |
 | `CLERUM_IDENTITY_SEED`           | unset                                    | -          | JSON seed with optional `identity`, `soul`, `agents` and `user` strings (contents for `IDENTITY.md`, `SOUL.md`, `AGENTS.md`, `USER.md`). |
 
 #### Guardrails
@@ -382,7 +382,7 @@ Get your Coding Plan API key at: https://modelstudio.console.alibabacloud.com/
 
 ### Per-Tool Approval Overrides
 
-`Host.spec.approval.tools` is an optional map that overrides each native tool's hard-coded `requiresApproval()` default. Use it to skip per-call approval for tools whose risk you mitigate via a different gate (e.g. `http_request` paired with `CLERUM_HTTP_ALLOWLIST`).
+`Host.spec.approval.tools` is an optional map that overrides each native tool's hard-coded `requiresApproval()` default. Use it to skip per-call approval for tools whose risk you mitigate via a different gate (e.g. `http_request` paired with `CLERUM_HTTP_ALLOWLIST`). `CLERUM_HTTP_ALLOWLIST` is empty by default, and an empty list filters no domains, so set it before you turn off approval for `http_request`.
 
 ```yaml
 spec:
@@ -391,7 +391,7 @@ spec:
     channels:
       telegram: { enabled: true }
     tools:
-      http_request: false # skip approval — relies on CLERUM_HTTP_ALLOWLIST as the gate
+      http_request: false # skip approval — only safe with a non-empty CLERUM_HTTP_ALLOWLIST
       shell_exec: true # explicit (matches code default; documents intent)
 ```
 

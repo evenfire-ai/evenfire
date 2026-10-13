@@ -2,12 +2,12 @@
 
 > Curated map of public docs. Prefer these paths over random monorepo files.
 > Code/API still use the historical name "clerum" (clerum.io, CLERUM_*).
-> Docs describe what deploy/base and the minikube overlays ship; off-by-default features say so.
+> Docs describe what deploy/base and the minikube overlays ship; off-by-default features say so. design/ records are point-in-time, not maintained.
 
 ## Start here
 
 - README: ../README.md — product pitch, security model, providers, license
-- Quickstart: get-started/quickstart.md — full platform on minikube, one command
+- Quickstart: get-started/quickstart.md — full platform on minikube: fill in .env, then one command
 - Registry quickstart: get-started/registry-quickstart.md — self-hosted connect → install → publish round trip
 - Dev mode (mcp-host without Kubernetes): get-started/dev-mode.md
 - Learning path: get-started/learning-path.md
