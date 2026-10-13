@@ -42,6 +42,23 @@ function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResour
   return action !== null
 }
 
+// These selections open dialogs/choosers or move to another destination. The
+// resulting surface owns focus; clipboard and refresh actions can return it.
+const ACTIONS_WITH_FOCUS_DESTINATION = new Set([
+  'copy-content',
+  'delete',
+  'download',
+  'move',
+  'new-folder',
+  'open-folder',
+  'open-route',
+  'preview',
+  'replace',
+  'rename',
+  'share',
+  'upload-file',
+])
+
 function horizontalBounds(anchor: HTMLElement, edgeInset: number) {
   const viewportLeft = edgeInset
   const viewportRight = window.innerWidth - edgeInset
@@ -86,6 +103,7 @@ export function GfsResourceMenu({
   const shareTriggerRef = useRef<HTMLButtonElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
+  const restoreTriggerAfterActionRef = useRef(false)
   const [panelPosition, setPanelPosition] = useState<{ left: number; top: number } | null>(null)
   const [submenuPosition, setSubmenuPosition] = useState<{ left: number; top: number } | null>(null)
   const closeMenu = useCallback(() => {
@@ -246,6 +264,25 @@ export function GfsResourceMenu({
   }, [closeMenu, open, shareOpen])
 
   useEffect(() => {
+    if (open || !restoreTriggerAfterActionRef.current) return
+    const timer = window.setTimeout(() => {
+      restoreTriggerAfterActionRef.current = false
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return
+      const activeElement = document.activeElement
+      if (
+        activeElement &&
+        activeElement !== document.body &&
+        activeElement !== document.documentElement &&
+        activeElement.isConnected
+      ) {
+        return
+      }
+      if (triggerRef.current?.isConnected) triggerRef.current.focus()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [open])
+
+  useEffect(() => {
     if (!shareOpen) return
     submenuRef.current
       ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
@@ -284,7 +321,9 @@ export function GfsResourceMenu({
     items[nextIndex]?.focus()
   }
 
-  const runAction = (action: () => void) => {
+  const runAction = (action: () => void, keyboardActivated: boolean, actionKey: string) => {
+    restoreTriggerAfterActionRef.current =
+      keyboardActivated && !ACTIONS_WITH_FOCUS_DESTINATION.has(actionKey)
     closeMenu()
     action()
   }
@@ -368,6 +407,7 @@ export function GfsResourceMenu({
           if (open) {
             closeMenu()
           } else {
+            restoreTriggerAfterActionRef.current = false
             setOpen(true)
           }
         }}
@@ -410,12 +450,12 @@ export function GfsResourceMenu({
                         ref={action.submenu ? shareTriggerRef : undefined}
                         trailingIcon={action.submenu ? <IconChevronRight /> : undefined}
                         onMouseEnter={action.submenu ? () => setShareOpen(true) : undefined}
-                        onClick={() => {
+                        onClick={event => {
                           if (action.disabled) return
                           if (action.submenu) {
                             action.onClick()
                           } else {
-                            runAction(action.onClick)
+                            runAction(action.onClick, event.detail === 0, action.key)
                           }
                         }}
                       >
@@ -443,9 +483,10 @@ export function GfsResourceMenu({
                     disabled={shareAction?.disabled}
                     leadingIcon={<IconShare />}
                     role="menuitem"
-                    onClick={() => {
-                      if (shareAction) runAction(shareAction.run)
-                      else if (onManage) runAction(onManage)
+                    onClick={event => {
+                      if (shareAction)
+                        runAction(shareAction.run, event.detail === 0, shareAction.id)
+                      else if (onManage) runAction(onManage, event.detail === 0, 'share')
                     }}
                   >
                     Share
@@ -456,7 +497,9 @@ export function GfsResourceMenu({
                       disabled={copyLinkAction.disabled}
                       leadingIcon={copyLinkAction.icon}
                       role="menuitem"
-                      onClick={() => runAction(copyLinkAction.run)}
+                      onClick={event =>
+                        runAction(copyLinkAction.run, event.detail === 0, copyLinkAction.id)
+                      }
                     >
                       {copyLinkAction.label}
                     </MenuItem>
@@ -465,7 +508,7 @@ export function GfsResourceMenu({
                       data-gfs-action="copy-link"
                       leadingIcon={<IconCopy />}
                       role="menuitem"
-                      onClick={() => runAction(onCopyLink)}
+                      onClick={event => runAction(onCopyLink, event.detail === 0, 'copy-link')}
                     >
                       Copy link
                     </MenuItem>

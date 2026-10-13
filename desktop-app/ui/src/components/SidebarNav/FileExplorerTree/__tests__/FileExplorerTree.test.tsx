@@ -3,6 +3,7 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -217,6 +218,230 @@ describe('FileExplorerTree — resource action menus', () => {
     expect(firstRow.getAttribute('aria-selected')).toBe('true')
     expect(secondRow.getAttribute('aria-selected')).toBe('false')
     expect(onOpenPreview).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['Copy route', 'Copy link'])(
+    'returns keyboard focus to the same persistent row trigger after %s',
+    async actionName => {
+      const resource = accessibleResource(
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'focus-target.md',
+        'file'
+      )
+      const onResourceAction = vi.fn()
+      installClerum({
+        listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+        affordances: vi.fn(async () => resourceAffordances(['read'])),
+      })
+      const user = userEvent.setup()
+      renderTree({ onResourceAction })
+
+      const row = await screen.findByRole('treeitem', { name: /focus-target\.md/ })
+      const trigger = within(row).getByRole('button', { name: 'Options for focus-target.md' })
+      for (let attempt = 0; document.activeElement !== trigger && attempt < 10; attempt += 1) {
+        await user.tab()
+      }
+      expect(document.activeElement).toBe(trigger)
+
+      await user.keyboard('{Enter}')
+      const menu = await screen.findByRole('menu', { name: 'Actions for focus-target.md' })
+      const menuItems = within(menu).getAllByRole('menuitem')
+      const selectedIndex = menuItems.findIndex(item => item.textContent?.trim() === actionName)
+      expect(selectedIndex).toBeGreaterThanOrEqual(0)
+      await user.keyboard('{Home}')
+      for (let index = 0; index < selectedIndex; index += 1) {
+        await user.keyboard('{ArrowDown}')
+      }
+      expect(document.activeElement).toBe(menuItems[selectedIndex])
+      await user.keyboard('{Enter}')
+
+      await waitFor(() => expect(document.activeElement).toBe(trigger))
+      expect(trigger.isConnected).toBe(true)
+      expect(onResourceAction).toHaveBeenCalledWith(
+        expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
+        actionName === 'Copy route' ? 'copy-route' : 'copy-link'
+      )
+    }
+  )
+
+  it('does not focus a row trigger after its action unmounts the tree', async () => {
+    const resource = accessibleResource(
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'removed-target.md',
+      'file'
+    )
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances: vi.fn(async () => resourceAffordances(['read'])),
+    })
+    const user = userEvent.setup()
+    let trigger: HTMLButtonElement | null = null
+    let unmountTree: () => void = () => {}
+    const onResourceAction = vi.fn(() => unmountTree())
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    function UnmountingHarness() {
+      const [visible, setVisible] = useState(true)
+      unmountTree = () => setVisible(false)
+      return (
+        <QueryClientProvider client={queryClient}>
+          {visible ? (
+            <FileExplorerTree
+              onOpenFolder={vi.fn()}
+              onOpenPreview={vi.fn()}
+              onResourceAction={onResourceAction}
+              pushToast={vi.fn()}
+            />
+          ) : null}
+        </QueryClientProvider>
+      )
+    }
+    render(<UnmountingHarness />)
+
+    const row = await screen.findByRole('treeitem', { name: /removed-target\.md/ })
+    const triggerButton = within(row).getByRole('button', {
+      name: 'Options for removed-target.md',
+    }) as HTMLButtonElement
+    trigger = triggerButton
+    const focusTrigger = vi.spyOn(triggerButton, 'focus')
+    for (let attempt = 0; document.activeElement !== triggerButton && attempt < 10; attempt += 1) {
+      await user.tab()
+    }
+    expect(document.activeElement).toBe(triggerButton)
+    await user.keyboard('{Enter}')
+    const menu = await screen.findByRole('menu', { name: 'Actions for removed-target.md' })
+    focusTrigger.mockClear()
+    const menuItems = within(menu).getAllByRole('menuitem')
+    const copyRouteIndex = menuItems.findIndex(item => item.textContent?.trim() === 'Copy route')
+    await user.keyboard('{Home}')
+    for (let index = 0; index < copyRouteIndex; index += 1) {
+      await user.keyboard('{ArrowDown}')
+    }
+    await user.keyboard('{Enter}')
+
+    await waitFor(() => expect(trigger?.isConnected).toBe(false))
+    await new Promise(resolve => window.setTimeout(resolve, 10))
+    expect(focusTrigger).not.toHaveBeenCalled()
+    expect(onResourceAction).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
+      'copy-route'
+    )
+  })
+
+  it('keeps pointer menu activation without keyboard-only focus restoration', async () => {
+    const resource = accessibleResource(
+      'dddddddddddddddddddddddddddddddd',
+      'pointer-target.md',
+      'file'
+    )
+    const onResourceAction = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances: vi.fn(async () => resourceAffordances(['read'])),
+    })
+    const user = userEvent.setup()
+    renderTree({ onResourceAction })
+
+    const row = await screen.findByRole('treeitem', { name: /pointer-target\.md/ })
+    const trigger = within(row).getByRole('button', { name: 'Options for pointer-target.md' })
+    await user.click(trigger)
+    const menu = await screen.findByRole('menu', { name: 'Actions for pointer-target.md' })
+    await user.click(within(menu).getByRole('menuitem', { name: 'Copy route' }))
+
+    expect(onResourceAction).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
+      'copy-route'
+    )
+    expect(document.activeElement).not.toBe(trigger)
+  })
+
+  it('keeps focus in a dialog opened by a keyboard row action', async () => {
+    const resource = accessibleResource(
+      'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      'dialog-target.md',
+      'file'
+    )
+    const onResourceAction = vi.fn()
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances: vi.fn(async () => resourceAffordances(['read', 'delete'])),
+    })
+    const user = userEvent.setup()
+    function DialogHarness() {
+      const [dialogOpen, setDialogOpen] = useState(false)
+      return (
+        <QueryClientProvider
+          client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        >
+          <FileExplorerTree
+            onOpenFolder={vi.fn()}
+            onOpenPreview={vi.fn()}
+            onResourceAction={(item, action) => {
+              onResourceAction(item, action)
+              if (action === 'delete') setDialogOpen(true)
+            }}
+            pushToast={vi.fn()}
+          />
+          {dialogOpen ? (
+            <div role="dialog" aria-label="Delete dialog">
+              <button autoFocus>Confirm delete</button>
+            </div>
+          ) : null}
+        </QueryClientProvider>
+      )
+    }
+    render(<DialogHarness />)
+
+    const row = await screen.findByRole('treeitem', { name: /dialog-target\.md/ })
+    const trigger = within(row).getByRole('button', { name: 'Options for dialog-target.md' })
+    for (let attempt = 0; document.activeElement !== trigger && attempt < 10; attempt += 1) {
+      await user.tab()
+    }
+    expect(document.activeElement).toBe(trigger)
+    await user.keyboard('{Enter}')
+    const menu = await screen.findByRole('menu', { name: 'Actions for dialog-target.md' })
+    const items = within(menu).getAllByRole('menuitem')
+    const deleteIndex = items.findIndex(item => item.textContent?.trim() === 'Delete')
+    expect(deleteIndex).toBeGreaterThanOrEqual(0)
+    await user.keyboard('{Home}')
+    for (let index = 0; index < deleteIndex; index += 1) {
+      await user.keyboard('{ArrowDown}')
+    }
+    await user.keyboard('{Enter}')
+
+    const dialog = await screen.findByRole('dialog', { name: 'Delete dialog' })
+    const confirm = within(dialog).getByRole('button', { name: 'Confirm delete' })
+    await waitFor(() => expect(document.activeElement).toBe(confirm))
+    expect(document.activeElement).not.toBe(trigger)
+    expect(onResourceAction).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
+      'delete'
+    )
+  })
+
+  it('keeps Escape returning focus to the invoking trigger', async () => {
+    const resource = accessibleResource(
+      'cccccccccccccccccccccccccccccccc',
+      'escape-target.md',
+      'file'
+    )
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances: vi.fn(async () => resourceAffordances(['read'])),
+    })
+    const user = userEvent.setup()
+    renderTree()
+
+    const row = await screen.findByRole('treeitem', { name: /escape-target\.md/ })
+    const trigger = within(row).getByRole('button', { name: 'Options for escape-target.md' })
+    for (let attempt = 0; document.activeElement !== trigger && attempt < 10; attempt += 1) {
+      await user.tab()
+    }
+    expect(document.activeElement).toBe(trigger)
+    await user.keyboard('{Enter}')
+    await screen.findByRole('menu', { name: 'Actions for escape-target.md' })
+    await user.keyboard('{Escape}')
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
   })
 
   it('keeps exact-row action dispatch connected through nested folders', async () => {
