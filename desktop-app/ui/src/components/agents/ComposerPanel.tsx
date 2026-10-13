@@ -40,6 +40,7 @@ import type {
   ComposerFileAttachment,
   ComposerImageAttachment,
   ComposerReferenceAttachment,
+  ReadyComposerFileAttachment,
 } from '../../uiTypes'
 import { AnnotationCanvas } from './AnnotationCanvas'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
@@ -119,6 +120,14 @@ function composerPerImageLimitMessage(
   return `${name || 'Image'} is too large. Max size is ${formatComposerMebibytes(maxImageBytes)} ${sizeUnit}.`
 }
 
+function composerReaderIsSupported(
+  reader: ReadyComposerFileAttachment['classification']['reader']
+): boolean {
+  // An unknown value from an incompatible producer fails closed instead of
+  // silently presenting a document as readable.
+  return reader === 'text' || reader === 'pdf' || reader === 'xlsx'
+}
+
 function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
   if (attachment.type === 'plugin') return <IconWorkflows />
   if (attachment.type === 'connector') return <IconConnectors />
@@ -130,7 +139,7 @@ function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
 function getComposerFileMeta(file: ComposerFileAttachment): string {
   if (file.status !== 'ready') return 'Reading...'
   const size = formatFileSize(file.sizeBytes)
-  if (file.classification.reader === 'none') return `${size} · No reader available`
+  if (!composerReaderIsSupported(file.classification.reader)) return `${size} · No reader available`
   return `${size} · ${file.classification.class}`
 }
 
@@ -140,7 +149,7 @@ function getComposerFileNotice(file: ComposerFileAttachment): string | null {
   if (file.classification.mismatch) {
     return `${file.filename} looks like a ${file.classification.class} file, not what its name or type says. It is attached as it is.`
   }
-  if (file.classification.reader === 'none') {
+  if (!composerReaderIsSupported(file.classification.reader)) {
     return `${file.filename} is attached, but the agent has no reader for this kind of file.`
   }
   return null

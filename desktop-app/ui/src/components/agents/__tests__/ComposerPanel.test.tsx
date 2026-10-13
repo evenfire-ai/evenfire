@@ -1307,6 +1307,46 @@ describe('ComposerPanel document attachments (#678)', () => {
   // A ZIP local-file header: bytes the agent has no reader for.
   const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new Array(60).fill(0)])
   const pdfBytes = new TextEncoder().encode('%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n')
+  const DOCX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+  /**
+   * Minimal valid Office ZIP structure. The classifier reads entry names and
+   * does not inflate contents, so empty entries are enough for a chip fixture.
+   */
+  function officeBytes(entryName: string): Uint8Array<ArrayBuffer> {
+    const name = new TextEncoder().encode(entryName)
+    const local = new Uint8Array(30 + name.length)
+    const localView = new DataView(local.buffer)
+    localView.setUint32(0, 0x04034b50, true)
+    localView.setUint16(4, 20, true)
+    localView.setUint16(26, name.length, true)
+    local.set(name, 30)
+
+    const central = new Uint8Array(46 + name.length)
+    const centralView = new DataView(central.buffer)
+    centralView.setUint32(0, 0x02014b50, true)
+    centralView.setUint16(4, 20, true)
+    centralView.setUint16(6, 20, true)
+    centralView.setUint16(28, name.length, true)
+    // Offset of the entry's local header, which starts the archive.
+    centralView.setUint32(42, 0, true)
+    central.set(name, 46)
+
+    const eocd = new Uint8Array(22)
+    const eocdView = new DataView(eocd.buffer)
+    eocdView.setUint32(0, 0x06054b50, true)
+    eocdView.setUint16(8, 1, true)
+    eocdView.setUint16(10, 1, true)
+    eocdView.setUint32(12, central.length, true)
+    eocdView.setUint32(16, local.length, true)
+
+    const bytes = new Uint8Array(local.length + central.length + eocd.length)
+    bytes.set(local)
+    bytes.set(central, local.length)
+    bytes.set(eocd, local.length + central.length)
+    return bytes
+  }
 
   function notesFile() {
     return readyFile('file-1', 'notes.txt', notesBytes, 'text/plain')
@@ -1406,6 +1446,93 @@ describe('ComposerPanel document attachments (#678)', () => {
       'archive.zip is attached, but the agent has no reader for this kind of file.'
     )
     expect(sendButton().disabled).toBe(false)
+  })
+
+  it('does not warn for a PDF the classifier can read', async () => {
+    const report = await readyFile('file-6', 'report.pdf', pdfBytes, 'application/pdf')
+    expect(report.status === 'ready' && report.classification.reader).toBe('pdf')
+    composerState.composerFileAttachments = [report]
+    render(<ComposerPanel inline />)
+
+    const chip = screen.getByTestId('composer-file-chip')
+    expect(chip.textContent).toContain('report.pdf')
+    expect(chip.textContent).toContain('pdf')
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('does not warn for an XLSX the classifier can read', async () => {
+    const workbook = await readyFile(
+      'file-7',
+      'q3.xlsx',
+      officeBytes('xl/workbook.xml'),
+      XLSX_MEDIA_TYPE
+    )
+    expect(workbook.status === 'ready' && workbook.classification.reader).toBe('xlsx')
+    composerState.composerFileAttachments = [workbook]
+    render(<ComposerPanel inline />)
+
+    const chip = screen.getByTestId('composer-file-chip')
+    expect(chip.textContent).toContain('q3.xlsx')
+    expect(chip.textContent).toContain('xlsx')
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('keeps the no-reader warning for a PDF built by an older classifier', async () => {
+    const report = await readyFile('file-8', 'report.pdf', pdfBytes, 'application/pdf')
+    if (report.status !== 'ready') throw new Error('expected the PDF fixture to read')
+    const legacyReport = {
+      ...report,
+      classification: { ...report.classification, reader: 'none' as const },
+    }
+    composerState.composerFileAttachments = [legacyReport]
+    render(<ComposerPanel inline />)
+
+    const chip = screen.getByTestId('composer-file-chip')
+    expect(chip.textContent).toContain('report.pdf')
+    expect(chip.textContent).toContain('No reader available')
+    expect(screen.getByRole('status').textContent).toBe(
+      'report.pdf is attached, but the agent has no reader for this kind of file.'
+    )
+  })
+
+  it('keeps the no-reader warning for DOCX', async () => {
+    const letter = await readyFile(
+      'file-9',
+      'letter.docx',
+      officeBytes('word/document.xml'),
+      DOCX_MEDIA_TYPE
+    )
+    expect(letter.status === 'ready' && letter.classification.reader).toBe('none')
+    composerState.composerFileAttachments = [letter]
+    render(<ComposerPanel inline />)
+
+    const chip = screen.getByTestId('composer-file-chip')
+    expect(chip.textContent).toContain('letter.docx')
+    expect(chip.textContent).toContain('No reader available')
+    expect(screen.getByRole('status').textContent).toBe(
+      'letter.docx is attached, but the agent has no reader for this kind of file.'
+    )
+  })
+
+  it('fails closed when a reader value is unknown', async () => {
+    const report = await readyFile('file-10', 'report.pdf', pdfBytes, 'application/pdf')
+    if (report.status !== 'ready') throw new Error('expected the PDF fixture to read')
+    const futureReader = {
+      ...report,
+      classification: {
+        ...report.classification,
+        reader: 'future-reader' as 'pdf',
+      },
+    }
+    composerState.composerFileAttachments = [futureReader]
+    render(<ComposerPanel inline />)
+
+    const chip = screen.getByTestId('composer-file-chip')
+    expect(chip.textContent).toContain('report.pdf')
+    expect(chip.textContent).toContain('No reader available')
+    expect(screen.getByRole('status').textContent).toBe(
+      'report.pdf is attached, but the agent has no reader for this kind of file.'
+    )
   })
 
   it('warns when the bytes do not match the name or type', async () => {
