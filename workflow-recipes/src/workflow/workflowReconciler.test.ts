@@ -950,9 +950,10 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       expect(createdPodNames()).toContain(`${childRecipeName}-snippet-runner`)
     })
 
-    it('judges an inherited resource-instance Secret against the parent scope', async () => {
-      // The child inherits the parent's status.resourceInstances, so the snippet
-      // resource id resolves to the PARENT's instance Secret, owned by the parent.
+    it('judges a Secret resolved through a supplied resourceInstances map against the parent scope', async () => {
+      // Pins only the preflight: given a resourceInstances map, the snippet resource id
+      // resolves through it and ownership is judged against the parent scope. The map
+      // is supplied by hand; how a triggered child builds it is not covered here.
       mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
         metadata: { labels: { 'clerum.io/owner-recipe': parentScopeRecipeName } },
         data: { token: 'fixture-token' },
