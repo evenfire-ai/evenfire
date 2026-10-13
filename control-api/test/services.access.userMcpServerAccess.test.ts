@@ -236,6 +236,16 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
   const contextNames = ['ctx-a', 'ctx-b', 'ctx-c']
   const hostNames = ['host-1', 'host-2', 'host-3']
   const servers = ['s1', 's2', 's3']
+  /**
+   * Unit stand-in for the grants table, hand-written because the real writer
+   * (`upsertOAuthGrant`) needs a Postgres and this property must run in the
+   * default suite. Contract assumed: `oauthGrantExists` reports a grant iff
+   * its `SELECT 1 FROM oauth_grants … LIMIT 1` returns a row, so answering
+   * every query with one row means "every server has a grant". The property
+   * asserts that meaning on each run (the flat rail returns exactly the
+   * allowlisted servers) so a stub that drifts fails here instead of
+   * silently shrinking what the flat rail offers.
+   */
   const allGrantsPresent = { query: async () => ({ rows: [{ '?column?': 1 }], rowCount: 1 }) }
 
   async function seedUserOauthServer(gateway: MockGateway, name: string): Promise<void> {
@@ -256,6 +266,7 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
   }
 
   it('panel ∪ flat rail ⇔ gate', async () => {
+    let runsWithFlatOffer = 0
     await fc.assert(
       fc.asyncProperty(
         fc.record({
@@ -301,6 +312,10 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
             'user-1',
             allGrantsPresent as never
           )
+          const allowlistedForUser = new Set(userContexts.flatMap(id => allowlists[id] ?? []))
+          expect(flat.map(s => s.name).sort()).toEqual([...allowlistedForUser].sort())
+          if (flat.length > 0) runsWithFlatOffer++
+
           const offered = new Set<string>(flat.map(s => s.name))
           for (const agent of panel) {
             for (const c of agent.connectors) if (c.authKind === 'oauth-user') offered.add(c.name)
@@ -316,6 +331,7 @@ describe('consent gate vs. what the catalogs offer (property)', () => {
       ),
       { numRuns: 200 }
     )
+    expect(runsWithFlatOffer).toBeGreaterThan(0)
   })
 })
 
