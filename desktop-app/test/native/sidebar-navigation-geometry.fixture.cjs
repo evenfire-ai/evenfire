@@ -13,6 +13,9 @@ async function layout(window) {
     }
     return {
       compact: matchMedia('(max-width: 759px)').matches,
+      overlayOpen: document
+        .querySelector('#desktop-sidebar-navigation')
+        .classList.contains('compact-open'),
       titlebar: rect('.window-titlebar'),
       compactToggleDisplay: getComputedStyle(
         document.querySelector('.compact-navigation-toggle')
@@ -48,13 +51,11 @@ app.whenReady().then(async () => {
       <body><div class="app-frame" style="--sidebar-width:328px">
         <header class="window-titlebar">
           <div class="window-titlebar__controls"><span>Window controls</span></div>
-          <div class="window-titlebar__leading">
-            <button class="ui-icon-button compact-navigation-toggle" type="button">Menu</button>
-          </div>
+          <div class="window-titlebar__leading"></div>
           <div class="window-titlebar__actions"></div>
         </header>
         <div class="app-root"><main class="app-shell">
-          <aside id="desktop-sidebar-navigation" class="left-nav glass-card compact-open">
+          <aside id="desktop-sidebar-navigation" class="left-nav glass-card">
             <button class="sidebar-mobile-backdrop" aria-label="Close navigation"></button>
             <div class="sidebar-logo"><span>Navigation</span></div>
             <div class="sidebar-menu-surface"><nav>Chat · Files · Settings</nav></div>
@@ -65,40 +66,63 @@ app.whenReady().then(async () => {
         </main></div>
       </div></body></html>`
     await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+    await window.webContents.executeJavaScript(`(() => {
+      const sidebar = document.querySelector('#desktop-sidebar-navigation')
+      const toggle = () => sidebar.classList.toggle('compact-open')
+      document.querySelector('.window-titlebar__leading').innerHTML =
+        '<button class="ui-icon-button compact-navigation-toggle" type="button">Menu</button>'
+      document.querySelector('.compact-navigation-toggle').addEventListener('click', toggle)
+    })()`)
     view = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true } })
     await view.webContents.loadURL(
       `data:text/html;charset=utf-8,${encodeURIComponent('<!doctype html><body>Native sandbox view</body>')}`
     )
     window.contentView.addChildView(view)
 
-    const compact = await layout(window)
-    assert.equal(compact.compact, true, '700px window uses the compact navigation breakpoint')
-    assert.notEqual(compact.compactToggleDisplay, 'none', 'compact navigation trigger is visible')
+    const closed = await layout(window)
+    assert.equal(closed.compact, true, '700px window uses the compact navigation breakpoint')
+    assert.equal(closed.overlayOpen, false, 'compact navigation starts closed')
+    assert.notEqual(closed.compactToggleDisplay, 'none', 'compact navigation trigger is visible')
     assert.equal(
-      compact.compactTogglePointerEvents,
+      closed.compactTogglePointerEvents,
       'auto',
       'compact navigation trigger can receive pointer input'
     )
-    assert.ok(Math.abs(compact.sidebar.x) <= 1, 'compact navigation starts at the left edge')
-    assert.ok(
-      Math.abs(compact.sidebar.y - compact.titlebar.height) <= 1,
-      'compact navigation starts below the real window titlebar'
-    )
-    assert.ok(Math.abs(compact.sidebar.width - 700) <= 2, 'compact navigation spans the window')
     assert.equal(view.getVisible(), true, 'native WebContentsView starts visible')
 
-    const contentBefore = compact.workspace
-    await window.webContents.executeJavaScript(`(() => {
-      document.querySelector('#desktop-sidebar-navigation').classList.add('compact-open')
-      document.querySelector('.app-frame').dataset.compactOpen = 'true'
-    })()`)
+    const contentBefore = closed.workspace
+    await window.webContents.executeJavaScript(
+      "document.querySelector('.compact-navigation-toggle').click()"
+    )
+    await waitForLayout()
+    const overlay = await layout(window)
+    assert.equal(overlay.overlayOpen, true, 'the trigger opens compact navigation')
+    assert.ok(Math.abs(overlay.sidebar.x) <= 1, 'compact navigation starts at the left edge')
+    assert.ok(
+      Math.abs(overlay.sidebar.y - overlay.titlebar.height) <= 1,
+      'compact navigation starts below the real window titlebar'
+    )
+    assert.ok(Math.abs(overlay.sidebar.width - 700) <= 2, 'compact navigation spans the window')
     view.setVisible(false)
     assert.equal(view.getVisible(), false, 'native WebContentsView is hidden for the overlay')
-    const overlay = await layout(window)
     assert.deepEqual(
       overlay.workspace,
       contentBefore,
       'fixed overlay does not move workspace content'
+    )
+
+    await window.webContents.executeJavaScript(`(() => {
+      const workspace = document.querySelector('.workspace-layout')
+      workspace.style.transform = 'translateX(1px)'
+    })()`)
+    const movedWorkspace = await layout(window)
+    assert.notDeepEqual(
+      movedWorkspace.workspace,
+      contentBefore,
+      'negative control detects a workspace movement'
+    )
+    await window.webContents.executeJavaScript(
+      "document.querySelector('.workspace-layout').style.removeProperty('transform')"
     )
 
     await window.webContents.executeJavaScript(`(() => {
