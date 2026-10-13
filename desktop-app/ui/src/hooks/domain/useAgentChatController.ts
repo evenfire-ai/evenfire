@@ -450,8 +450,8 @@ export function useAgentChatController({
 
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const selectionIntentRevisionRef = useRef(0)
-  // A matching pending effect awaits this exact execution, even if it settled
-  // before the catalog read. The promise retains the outcome, never an error owner.
+  // Admission closes at settlement. An effect that captured this execution
+  // while in flight may still await its result after its catalog read.
   const pendingChatSwitchRequestRef = useRef<PendingChatSwitchRequest | null>(null)
   const activeChatSwitchRequestRef = useRef<symbol | null>(null)
   const activeChatSwitchKeyRef = useRef<string | null>(null)
@@ -1217,17 +1217,24 @@ export function useAgentChatController({
       const promise = runSwitchForIntent(agentRef, chatId, selectionIntentRevision, error => {
         options.onCurrentError?.(error)
       })
-      pendingChatSwitchRequestRef.current =
+      const request: PendingChatSwitchRequest | null =
         readPendingSelection(agentRef)?.mode === 'specific'
           ? {
               agentRef,
               chatId,
               revision: selectionIntentRevision,
               scope: currentAuthScopeRef.current,
+              settled: false,
               promise,
             }
           : null
-      await promise
+      pendingChatSwitchRequestRef.current = request
+      try {
+        await promise
+      } finally {
+        // Mark this execution, not whatever successor now occupies the ref.
+        if (request) request.settled = true
+      }
     },
     [
       beginSelectionIntent,
@@ -1463,6 +1470,7 @@ export function useAgentChatController({
     const pendingSwitch = pendingChatSwitchRequestRef.current
     const sharesPendingSwitch = Boolean(
       requestedSelection?.mode === 'specific' &&
+      !pendingSwitch?.settled &&
       pendingSwitch?.revision === selectionIntentRevision &&
       pendingSwitch.scope === currentAuthScopeRef.current &&
       pendingSwitch.agentRef === selectedAgent &&
