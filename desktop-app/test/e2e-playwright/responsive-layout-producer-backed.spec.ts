@@ -181,7 +181,19 @@ test('Desktop app tray layout is exercised with producer-backed notification and
         await page.locator('body').evaluate(element => getComputedStyle(element).overflow)
       ).toBe('hidden')
 
-      await trigger.click()
+      const backdropPoint = await page.evaluate(() => {
+        const sidebar = document.querySelector('#desktop-sidebar-navigation')
+        if (!sidebar) throw new Error('Compact navigation sidebar is missing')
+        const rect = sidebar.getBoundingClientRect()
+        const point = { x: window.innerWidth - 16, y: rect.top + rect.height / 2 }
+        const target = document.elementFromPoint(point.x, point.y)
+        return {
+          ...point,
+          isBackdrop: target?.classList.contains('sidebar-mobile-backdrop') ?? false,
+        }
+      })
+      expect(backdropPoint.isBackdrop, 'right edge must be an exposed backdrop target').toBe(true)
+      await page.mouse.click(backdropPoint.x, backdropPoint.y)
       await expect(sidebar).not.toHaveClass(/compact-open/)
       await expect.poll(async () => (await nativeSandboxViewState(app!)).visible).toBe(true)
       expect(await trigger.evaluate(element => element === document.activeElement)).toBe(true)

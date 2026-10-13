@@ -3,7 +3,7 @@ const { readFileSync } = require('node:fs')
 const path = require('node:path')
 const { app, BrowserWindow, WebContentsView, screen } = require('electron')
 
-const waitForLayout = () => new Promise(resolve => setTimeout(resolve, 80))
+const waitForLayout = () => new Promise(resolve => setTimeout(resolve, 200))
 
 async function layout(window) {
   return window.webContents.executeJavaScript(`(() => {
@@ -24,6 +24,7 @@ async function layout(window) {
         document.querySelector('.compact-navigation-toggle')
       ).pointerEvents,
       sidebar: rect('.left-nav'),
+      viewport: { width: innerWidth, height: innerHeight },
       workspace: rect('.workspace-layout'),
       slot: rect('.sandbox-ui-embed-slot'),
     }
@@ -71,7 +72,12 @@ app.whenReady().then(async () => {
       const toggle = () => sidebar.classList.toggle('compact-open')
       document.querySelector('.window-titlebar__leading').innerHTML =
         '<button class="ui-icon-button compact-navigation-toggle" type="button">Menu</button>'
-      document.querySelector('.compact-navigation-toggle').addEventListener('click', toggle)
+      const trigger = document.querySelector('.compact-navigation-toggle')
+      trigger.addEventListener('click', toggle)
+      document.querySelector('.sidebar-mobile-backdrop').addEventListener('click', () => {
+        sidebar.classList.remove('compact-open')
+        trigger.focus()
+      })
     })()`)
     view = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true } })
     await view.webContents.loadURL(
@@ -100,9 +106,40 @@ app.whenReady().then(async () => {
     assert.ok(Math.abs(overlay.sidebar.x) <= 1, 'compact navigation starts at the left edge')
     assert.ok(
       Math.abs(overlay.sidebar.y - overlay.titlebar.height) <= 1,
-      'compact navigation starts below the real window titlebar'
+      `compact navigation starts below the real window titlebar: ${JSON.stringify({ sidebarY: overlay.sidebar.y, titlebarHeight: overlay.titlebar.height })}`
     )
     assert.ok(Math.abs(overlay.sidebar.width - 700) <= 2, 'compact navigation spans the window')
+    assert.ok(
+      Math.abs(overlay.sidebar.y + overlay.sidebar.height - overlay.viewport.height) <= 1,
+      'compact navigation extends to the bottom of the content viewport'
+    )
+    const backdropTarget = await window.webContents.executeJavaScript(`(() => {
+      const target = document.elementFromPoint(window.innerWidth - 16, window.innerHeight / 2)
+      return {
+        className: target?.className,
+        backdrop: target?.classList.contains('sidebar-mobile-backdrop') ?? false,
+      }
+    })()`)
+    assert.equal(
+      backdropTarget.backdrop,
+      true,
+      `right edge remains a reachable backdrop target: ${backdropTarget.className}`
+    )
+    await window.webContents.executeJavaScript(`(() => {
+      const target = document.elementFromPoint(window.innerWidth - 16, window.innerHeight / 2)
+      target.click()
+    })()`)
+    await waitForLayout()
+    const dismissed = await layout(window)
+    assert.equal(dismissed.overlayOpen, false, 'backdrop target dismisses compact navigation')
+    const triggerRestoredFocus = await window.webContents.executeJavaScript(
+      "document.activeElement.classList.contains('compact-navigation-toggle')"
+    )
+    assert.equal(triggerRestoredFocus, true, 'backdrop dismissal restores focus to its trigger')
+    await window.webContents.executeJavaScript(
+      "document.querySelector('.compact-navigation-toggle').click()"
+    )
+    await waitForLayout()
     view.setVisible(false)
     assert.equal(view.getVisible(), false, 'native WebContentsView is hidden for the overlay')
     assert.deepEqual(
