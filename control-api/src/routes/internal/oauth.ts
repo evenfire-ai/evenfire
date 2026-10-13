@@ -307,11 +307,13 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         //     and the consenting user must be a member of it, because the
         //     resulting shared grant is planted for that whole Context.
         //   - `user`: the grant is keyed by (user, server) and serves every
-        //     Context that enables the server, so the user must belong to at
-        //     least one Context whose `spec.mcpServers` allowlist names it — the
-        //     same rule invoke and the catalog apply. `spec.contextRef` and the
-        //     body contextId play no part: gating on the former rejected users
-        //     whose Context enables a server another Context declares.
+        //     Context that enables the server, so the user must reach at least
+        //     one Context whose `spec.mcpServers` allowlist names it — directly
+        //     (`user_contexts`) or through an assigned agent's Host — which is
+        //     every Context the flat catalog or the connectors panel resolves
+        //     for them. `spec.contextRef` and the body contextId play no part:
+        //     gating on the former rejected users whose Context enables a
+        //     server another Context declares.
         // Either way, connect shares the `mcp:server:invoke` scope with invoke,
         // so without this gate any user could start consent for (and enumerate)
         // integrations none of their Contexts expose.
@@ -335,6 +337,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
           const enabled = await userHasContextEnablingMcpServer({
             gateway,
             mcpServersNamespace: config.mcpServersNamespace,
+            hostsNamespace: config.hostsNamespace,
             userId,
             mcpServerName,
           })

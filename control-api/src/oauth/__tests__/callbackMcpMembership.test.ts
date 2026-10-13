@@ -20,7 +20,7 @@ import { signOAuthState } from '../state.js'
  * happy paths (context member + per-user) still exchange and persist.
  *
  * The per-user flavor has its own pre-exchange guard: some Context the user
- * belongs to must still enable the server (`userServerAccessReader`), so a user
+ * reaches must still enable the server (`userServerAccessReader`), so a user
  * who lost that access between mint and callback cannot finish creating a grant.
  */
 

@@ -25,6 +25,27 @@ export async function seedAllowlistedContext(
 }
 
 /**
+ * Seed an agent's Host CR in the hosts namespace with the CRD-required fields
+ * (`host`, `contextRef`, an LLM `secretRef`). Hand-written: no exported
+ * producer builds Host CRs.
+ */
+export async function seedAgentHost(
+  gateway: MockGateway,
+  name: string,
+  contextRef: string,
+  spec: Record<string, unknown> = {}
+): Promise<void> {
+  await gateway.createResource(
+    'hosts',
+    {
+      metadata: { name },
+      spec: { host: name, contextRef, secretRef: `${name}-llm`, ...spec },
+    },
+    config.hostsNamespace
+  )
+}
+
+/**
  * Who belongs to what, keyed by user id. `contexts` answers the
  * `getUserContexts` read (`FROM user_contexts`), `agents` the `getUserAgents`
  * read (`FROM user_agents`). A user not listed has no rows.

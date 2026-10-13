@@ -4,21 +4,23 @@ import request from 'supertest'
 import { config } from '../src/config.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import { createOAuthCallbackRouter } from '../src/routes/external/oauthCallback.js'
-import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { editContextAllowlist } from '../src/services/contextAllowlist.js'
+import { membership, seedAgentHost, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
  * The per-user (`grantScope: user`) consent callback re-checks access through the
  * PRODUCTION wiring of `userServerAccessReader` in `createOAuthCallbackRouter`:
- * some Context the signed user belongs to must allowlist the server. The server's
- * own `spec.contextRef` is deliberately a Context the user is NOT a member of, so
- * only the allowlist rule can decide the outcome.
+ * some Context the signed user reaches — directly or through an assigned
+ * agent's Host — must allowlist the server. The server's own `spec.contextRef`
+ * is deliberately a Context the user is NOT a member of, so only the allowlist
+ * rule can decide the outcome.
  *
  * Contexts are written through the real allowlist writer, membership is the
- * `user_contexts` read on the mocked pool (the same stand-in the sibling suites
- * use), and the state is signed by the real signer. The provider token endpoint
- * is the only network edge: `globalThis.fetch`, which the route wires as its
- * baked-lane transport.
+ * `user_contexts` / `user_agents` reads on the mocked pool (the same stand-in
+ * the sibling suites use), Host CRs are hand-written, and the state is signed
+ * by the real signer. The provider token endpoint is the only network edge:
+ * `globalThis.fetch`, which the route wires as its baked-lane transport.
  */
 
 const mockPoolQuery = vi.fn()
@@ -141,6 +143,31 @@ describe('GET /api/v1/oauth-callback/:oauthClientId — per-user access re-check
     expect(res.text).toContain('source=mcp')
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     expect(String(fetchSpy.mock.calls[0][0])).toBe('https://oauth2.googleapis.com/token')
+    const writes = grantWrites()
+    expect(writes).toHaveLength(1)
+    const [sql, params] = writes[0] as [string, unknown[]]
+    expect(sql).toContain('INSERT INTO oauth_grants')
+    expect(params.slice(0, 5)).toEqual(['mcpserver', MCP_NS, SERVER, USER_ID, OAUTH_CLIENT_ID])
+  })
+
+  it('200 when the user reaches an allowlisting Context only through an assigned agent; exchanges and writes the user grant', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', [SERVER])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    membership(mockPoolQuery, {
+      contexts: { [USER_ID]: [OWNER_CONTEXT] },
+      agents: { [USER_ID]: ['host-c'] },
+    })
+    // The owner Context no longer allowlists the server.
+    await editContextAllowlist(
+      gateway as never,
+      { name: OWNER_CONTEXT, namespace: MCP_NS },
+      servers => servers.filter(name => name !== SERVER)
+    )
+
+    const res = await callback()
+
+    expect(res.status).toBe(200)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
     const writes = grantWrites()
     expect(writes).toHaveLength(1)
     const [sql, params] = writes[0] as [string, unknown[]]

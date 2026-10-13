@@ -3,18 +3,23 @@ import fc from 'fast-check'
 import { config } from '../src/config.js'
 import {
   allowedMcpServerNamesForContexts,
+  resolveConnectorsForAgents,
+  resolveInvocableMcpServersForContexts,
   userHasContextEnablingMcpServer,
 } from '../src/services/access/mcpInvocable.js'
-import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { membership, seedAgentHost, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
  * The access rule shared by the per-user OAuth connect gate and its callback:
- * a user may connect a server iff they belong (user_contexts) to at least one
- * Context whose `spec.mcpServers` allowlist names it — the same rule invoke and
- * the catalog apply. Membership comes from `getUserContexts` (mocked at the
- * pool, so the real SQL runs through it); allowlists are written through the
- * real allowlist writer onto the gateway fake.
+ * a user may connect a server iff some Context they reach allowlists it in
+ * `spec.mcpServers` — directly (user_contexts) or through an assigned agent
+ * (user_agents → a Host the agent directory shows → its contextRef). Those are
+ * the sources of the flat `/mcp-servers` catalog and the connectors panel; team
+ * membership does not count. Membership is answered at the pool (the real
+ * readers' SQL runs through it); allowlists are written through the real
+ * allowlist writer onto the gateway fake; Host CRs are hand-written (no
+ * exported producer).
  */
 
 const mockPoolQuery = vi.fn()
@@ -23,11 +28,13 @@ vi.mock('../src/db.js', () => ({
 }))
 
 const MCP_NS = config.mcpServersNamespace
+const HOSTS_NS = config.hostsNamespace
 
 function check(gateway: MockGateway, userId: string, mcpServerName: string): Promise<boolean> {
   return userHasContextEnablingMcpServer({
     gateway: gateway as never,
     mcpServersNamespace: MCP_NS,
+    hostsNamespace: HOSTS_NS,
     userId,
     mcpServerName,
   })
@@ -76,19 +83,233 @@ describe('userHasContextEnablingMcpServer', () => {
     expect(listSpy).not.toHaveBeenCalled()
   })
 
-  it('membership is read from user_contexts only (team membership does not count)', async () => {
+  it('team membership does not count: neither team_contexts nor team_agents is read', async () => {
     await seedAllowlistedContext(gateway, 'ctx-team', ['notion'])
-    membership(mockPoolQuery, { contexts: { 'user-1': [] } })
+    await seedAgentHost(gateway, 'host-team', 'ctx-team')
+    membership(mockPoolQuery, { contexts: { 'user-1': [] }, agents: { 'user-1': [] } })
     expect(await check(gateway, 'user-1', 'notion')).toBe(false)
     const sqls = mockPoolQuery.mock.calls.map(([sql]) => String(sql))
     expect(sqls.some(sql => sql.includes('FROM user_contexts'))).toBe(true)
-    expect(sqls.some(sql => sql.includes('team_contexts'))).toBe(false)
+    expect(sqls.some(sql => sql.includes('FROM user_agents'))).toBe(true)
+    expect(sqls.some(sql => /team_contexts|team_agents/.test(sql))).toBe(false)
   })
 
   it('propagates a Context list failure instead of answering false', async () => {
     membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-a'] } })
     vi.spyOn(gateway, 'listResource').mockRejectedValueOnce(new Error('apiserver down'))
     await expect(check(gateway, 'user-1', 'notion')).rejects.toThrow('apiserver down')
+  })
+})
+
+describe('userHasContextEnablingMcpServer — Contexts reached through assigned agents', () => {
+  let gateway: MockGateway
+
+  beforeEach(() => {
+    gateway = new MockGateway(MCP_NS)
+    mockPoolQuery.mockReset()
+  })
+
+  it('S1: no direct Contexts, an assigned agent whose Context allowlists the server → true', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(true)
+  })
+
+  it('S2: the direct Context dropped the server, an assigned agent Context still allowlists it → true', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-owner', [])
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    membership(mockPoolQuery, {
+      contexts: { 'user-1': ['ctx-owner'] },
+      agents: { 'user-1': ['host-c'] },
+    })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(true)
+  })
+
+  it('an agent assigned to another user does not count', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    membership(mockPoolQuery, { agents: { 'user-2': ['host-c'] } })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+  })
+
+  it('a disabled Host does not count', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c', { enabled: false })
+    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+  })
+
+  it('the legacy fleet-wide sentinel Host does not count', async () => {
+    expect(HOSTS_NS).toBe('mcp-host')
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'standalone', 'ctx-c')
+    membership(mockPoolQuery, { agents: { 'user-1': ['standalone'] } })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+  })
+
+  it('a deleting Host does not count', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    const real = gateway.getResource.bind(gateway)
+    vi.spyOn(gateway, 'getResource').mockImplementation(async (plural, name, ns) => {
+      const row = (await real(plural, name, ns)) as { metadata: Record<string, unknown> }
+      return plural === 'hosts'
+        ? { ...row, metadata: { ...row.metadata, deletionTimestamp: '2026-10-12T00:00:00Z' } }
+        : row
+    })
+    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+  })
+
+  it('a Host whose directory name differs from the assigned agent name does not count', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-other', 'ctx-c')
+    const real = gateway.getResource.bind(gateway)
+    vi.spyOn(gateway, 'getResource').mockImplementation(async (plural, name, ns) =>
+      plural === 'hosts' ? real(plural, 'host-other', ns) : real(plural, name, ns)
+    )
+    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+  })
+
+  it('a Host in another namespace does not count', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await gateway.createResource(
+      'hosts',
+      {
+        metadata: { name: 'host-c' },
+        spec: { host: 'host-c', contextRef: 'ctx-c', secretRef: 'x' },
+      },
+      'some-other-namespace'
+    )
+    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(false)
+  })
+
+  it('a missing (404) Host is ignored, the other agents still count', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    membership(mockPoolQuery, { agents: { 'user-1': ['host-gone', 'host-c'] } })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(true)
+  })
+
+  it('a non-404 Host read failure propagates when the direct Contexts do not enable the server', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    vi.spyOn(gateway, 'getResource').mockRejectedValue(
+      Object.assign(new Error('apiserver unavailable'), { statusCode: 503 })
+    )
+    membership(mockPoolQuery, { agents: { 'user-1': ['host-c'] } })
+    await expect(check(gateway, 'user-1', 'gdrive')).rejects.toThrow('apiserver unavailable')
+  })
+
+  it('a Host read failure does not matter when a direct Context already enables the server', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    const hostRead = vi
+      .spyOn(gateway, 'getResource')
+      .mockRejectedValue(Object.assign(new Error('apiserver unavailable'), { statusCode: 503 }))
+    membership(mockPoolQuery, {
+      contexts: { 'user-1': ['ctx-business'] },
+      agents: { 'user-1': ['host-c'] },
+    })
+    expect(await check(gateway, 'user-1', 'gdrive')).toBe(true)
+    expect(hostRead).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * What the user is offered must be connectable: every server the connectors
+ * panel classifies as `oauth-user` for the user's agents, or the flat
+ * `/mcp-servers` rail returns for their Contexts (all grants present), passes
+ * the consent gate — and the gate admits nothing that neither offers.
+ */
+describe('consent gate vs. what the catalogs offer (property)', () => {
+  const contextNames = ['ctx-a', 'ctx-b', 'ctx-c']
+  const hostNames = ['host-1', 'host-2', 'host-3']
+  const servers = ['s1', 's2', 's3']
+  const allGrantsPresent = { query: async () => ({ rows: [{ '?column?': 1 }], rowCount: 1 }) }
+
+  async function seedUserOauthServer(gateway: MockGateway, name: string): Promise<void> {
+    await gateway.createResource(
+      'mcpservers',
+      {
+        metadata: { name },
+        spec: {
+          contextRef: 'ctx-a',
+          image: 'example/mcp:1',
+          transport: { type: 'streamableHttp', url: `https://${name}.example.com/mcp` },
+          auth: { type: 'oauth' },
+          oauth: { id: `${name}-client`, grantScope: 'user' },
+        },
+      },
+      MCP_NS
+    )
+  }
+
+  it('panel ∪ flat rail ⇔ gate', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record({
+          allowlists: fc.dictionary(
+            fc.constantFrom(...contextNames),
+            fc.uniqueArray(fc.constantFrom(...servers), { maxLength: 3 })
+          ),
+          hosts: fc.dictionary(
+            fc.constantFrom(...hostNames),
+            fc.record({ contextRef: fc.constantFrom(...contextNames), enabled: fc.boolean() })
+          ),
+          userContexts: fc.uniqueArray(fc.constantFrom(...contextNames), { maxLength: 3 }),
+          userAgents: fc.uniqueArray(fc.constantFrom(...hostNames, 'host-gone'), { maxLength: 4 }),
+        }),
+        async ({ allowlists, hosts, userContexts, userAgents }) => {
+          const gateway = new MockGateway(MCP_NS)
+          for (const name of servers) await seedUserOauthServer(gateway, name)
+          for (const name of contextNames) {
+            await seedAllowlistedContext(gateway, name, allowlists[name] ?? [])
+          }
+          for (const [name, h] of Object.entries(hosts)) {
+            await seedAgentHost(gateway, name, h.contextRef, { enabled: h.enabled })
+          }
+          membership(mockPoolQuery, {
+            contexts: { 'user-1': userContexts },
+            agents: { 'user-1': userAgents },
+          })
+
+          const panel = await resolveConnectorsForAgents(
+            gateway as never,
+            {
+              mcpServersNamespace: MCP_NS,
+              hostsNamespace: HOSTS_NS,
+              agentNames: userAgents,
+              userId: 'user-1',
+            },
+            allGrantsPresent as never
+          )
+          const flat = await resolveInvocableMcpServersForContexts(
+            gateway as never,
+            MCP_NS,
+            userContexts,
+            'user-1',
+            allGrantsPresent as never
+          )
+          const offered = new Set<string>(flat.map(s => s.name))
+          for (const agent of panel) {
+            for (const c of agent.connectors) if (c.authKind === 'oauth-user') offered.add(c.name)
+          }
+
+          for (const name of servers) {
+            expect({ name, gate: await check(gateway, 'user-1', name) }).toEqual({
+              name,
+              gate: offered.has(name),
+            })
+          }
+        }
+      ),
+      { numRuns: 200 }
+    )
   })
 })
 

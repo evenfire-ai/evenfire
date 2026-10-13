@@ -293,8 +293,9 @@ export interface CallbackDeps {
    */
   userContextsReader?: (userId: string) => Promise<{ contextIds: string[] }>
   /**
-   * Whether some Context the user belongs to still enables the server through
-   * its `spec.mcpServers` allowlist. Required ONLY for the per-user mcp path
+   * Whether some Context the user reaches (directly, or through an agent
+   * assigned to them) still enables the server through its `spec.mcpServers`
+   * allowlist. Required ONLY for the per-user mcp path
    * (`grantScope='user'`), re-checked before the code exchange so a user who
    * lost that access after the authorize URL was minted cannot finish creating
    * a grant. The route wires the same rule the authorize-URL mint applies. When
@@ -393,10 +394,13 @@ export type CallbackResult =
    */
   | { kind: 'server_missing_context' }
   /**
-   * mcp subject with `grantScope='context'` where the consenting (signed) user
-   * is NOT a member of the server's Context. A shared grant lends a team-wide
-   * credential, so a non-member must not be able to bootstrap it. Fail closed →
-   * 403, no persist.
+   * mcp subject whose consenting (signed) user lacks access, by flavor:
+   *   - `grantScope='context'`: not a member of the server's `spec.contextRef`
+   *     (a shared grant lends a Context-wide credential);
+   *   - `grantScope='user'`: no Context the user reaches (directly or through an
+   *     assigned agent) still lists the server in its `spec.mcpServers` allowlist.
+   * Also returned when the reader for that flavor is not wired. Fail closed →
+   * 403, no code exchange, no persist.
    */
   | { kind: 'context_membership_denied' }
   /**
@@ -555,9 +559,9 @@ export async function handleOAuthCallback(
  * recovered fresh from the CR (authoritative), NOT from the state or any body.
  *
  * Access is re-checked BEFORE the code exchange, by flavor:
- *   - `grantScope='user'`    → some Context the signed user belongs to must still
- *     allowlist the server (`userServerAccessReader`); `spec.contextRef` is not
- *     consulted.
+ *   - `grantScope='user'`    → some Context the signed user reaches (directly or
+ *     through an assigned agent) must still allowlist the server
+ *     (`userServerAccessReader`); `spec.contextRef` is not consulted.
  *   - `grantScope='context'` → the signed user must be a member of the server's
  *     `spec.contextRef` (`userContextsReader`).
  *
@@ -655,8 +659,9 @@ async function handleMcpOAuthCallback(
     contextRef = subject.contextRef
   } else {
     // Per-user identity — the grant serves every Context that enables the
-    // server, so access is "some Context of the user still allowlists it", the
-    // same rule the mint applied. Fail closed when the reader is unwired.
+    // server, so access is "some Context the user reaches still allowlists
+    // it", the same rule the mint applied. Fail closed when the reader is
+    // unwired.
     if (!deps.userServerAccessReader) return { kind: 'context_membership_denied' }
     const enabled = await deps.userServerAccessReader(claims.userId, claims.mcpServerName)
     if (!enabled) return { kind: 'context_membership_denied' }

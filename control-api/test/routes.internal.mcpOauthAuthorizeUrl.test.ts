@@ -4,7 +4,7 @@ import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { verifyOAuthStateSignature } from '../src/oauth/state.js'
 import { checkAndIncrement } from '../src/services/rateLimiterService.js'
-import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { membership, seedAgentHost, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -15,9 +15,10 @@ import { MockGateway } from './mockGateway.js'
  * The `oauthClientId` + grantScope come from the McpServer CR, never the body.
  *
  * Membership gate by flavor:
- *   - `user`    → the user must belong (user_contexts) to at least one Context
- *     whose `spec.mcpServers` allowlist names the server; `spec.contextRef` is
- *     irrelevant and the body `contextId` is ignored.
+ *   - `user`    → the user must reach at least one Context whose
+ *     `spec.mcpServers` allowlist names the server — directly (user_contexts)
+ *     or through an assigned agent's Host (user_agents → Host.contextRef);
+ *     `spec.contextRef` is irrelevant and the body `contextId` is ignored.
  *   - `context` → membership in the server's `spec.contextRef` (unchanged).
  */
 
@@ -243,9 +244,10 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   //
   // These replace the earlier "member of spec.contextRef" expectations: a
   // `user`-scope grant is keyed by (user, server) and serves every Context that
-  // enables the server, so the gate is the same rule invoke uses — the user
-  // belongs to at least one Context whose allowlist names the server. The
-  // server's own `spec.contextRef` no longer decides anything for this flavor.
+  // enables the server, so the gate is "the user reaches at least one Context
+  // whose allowlist names the server", directly or through an assigned agent.
+  // The server's own `spec.contextRef` no longer decides anything for this
+  // flavor.
 
   // Reproduces the reported 403: the server's contextRef is a Context the user
   // is NOT in, but a Context the user IS in allowlists the server.
@@ -301,6 +303,26 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     })
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
     membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business'] } })
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+    expect(res.status).toBe(200)
+    expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
+  })
+
+  // The server's own Context dropped it; the user still reaches a Context that
+  // allowlists it through an assigned agent, which is where the connectors
+  // panel offers it.
+  it('user flavor: reached only through an assigned agent whose Context allowlists it mints OK', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
+    await seedAllowlistedContext(gateway, 'ctx-owner', [])
+    await seedAllowlistedContext(gateway, 'ctx-c', ['gdrive'])
+    await seedAgentHost(gateway, 'host-c', 'ctx-c')
+    membership(mockPoolQuery, {
+      contexts: { 'user-7': ['ctx-owner'] },
+      agents: { 'user-7': ['host-c'] },
+    })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')

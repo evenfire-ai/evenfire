@@ -129,12 +129,14 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
           // Shared-identity mcp bootstrap requires the consenting user to be a
           // member of the server's Context (defence in depth).
           userContextsReader: getUserContexts,
-          // Per-user mcp consent requires some Context of the user to still
-          // allowlist the server — the same rule the authorize-URL mint applies.
+          // Per-user mcp consent requires some Context the user reaches
+          // (directly or through an assigned agent) to still allowlist the
+          // server — the same rule the authorize-URL mint applies.
           userServerAccessReader: (userId, mcpServerName) =>
             userHasContextEnablingMcpServer({
               gateway,
               mcpServersNamespace: config.mcpServersNamespace,
+              hostsNamespace: config.hostsNamespace,
               userId,
               mcpServerName,
             }),
