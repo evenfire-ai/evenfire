@@ -271,7 +271,7 @@ describe('team persistence respects pending-marker authority', () => {
     { keytarState: 'absent', safeStorageAvailable: true },
     { keytarState: 'absent', safeStorageAvailable: false },
   ])(
-    'rejects an active-Keytar team write with $keytarState Keytar and safeStorage=$safeStorageAvailable',
+    'keeps source-bound team persistence with $keytarState Keytar and safeStorage=$safeStorageAvailable',
     async ({ keytarState, safeStorageAvailable }) => {
       const harness = await createService()
       await harness.login()
@@ -286,21 +286,40 @@ describe('team persistence respects pending-marker authority', () => {
       vi.spyOn(harness.authClient, 'switchTeam').mockResolvedValue({
         token: 'fixture-other-team-session',
       })
-
-      await expect(harness.service.switchTeam('fixture-other-team')).rejects.toThrow(/Keytar/)
-
-      expect(harness.service.getCachedUserId()).toBeNull()
+      const switchedMe = { ...me, teamId: 'fixture-other-team', teamName: 'Fixture other team' }
+      vi.mocked(harness.authClient.getMe).mockResolvedValue(switchedMe)
+      if (safeStorageAvailable) {
+        await expect(harness.service.switchTeam('fixture-other-team')).resolves.toEqual({
+          authenticated: true,
+          me: switchedMe,
+        })
+        expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
+          'fixture-other-team-session'
+        )
+      } else {
+        await expect(harness.service.switchTeam('fixture-other-team')).rejects.toThrow(
+          /Keytar|safeStorage/
+        )
+        // Missing Keytar cannot mutate its slot; an ordinary failed setter's
+        // working reader verifies the old slot. Neither case destroys the old session.
+        if (keytarState === 'failed')
+          expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
+            'fixture-fresh-session'
+          )
+      }
+      expect(harness.service.getCachedUserId()).toBe(me.id)
       expect(harness.reportFailure).toHaveBeenCalled()
-      expect(notifySessionChanged).toHaveBeenCalledWith(false)
+      expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
       expect(
         harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
       ).toEqual({
         intent: 'keytar-cleanup-pending',
-        credentialSource: 'active-keytar',
+        credentialSource: safeStorageAvailable ? 'safe-storage' : 'active-keytar',
       })
-      expect(await fs.readdir(runtime.directory)).not.toContain(
-        `session-token-${harness.envKey}.enc`
-      )
+      if (!safeStorageAvailable)
+        expect(await fs.readdir(runtime.directory)).not.toContain(
+          `session-token-${harness.envKey}.enc`
+        )
       expect(await fs.readdir(runtime.directory)).not.toContain(
         `session-token-${harness.envKey}.json`
       )

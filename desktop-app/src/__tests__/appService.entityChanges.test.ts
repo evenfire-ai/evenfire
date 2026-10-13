@@ -523,13 +523,21 @@ describe('AppService entity-change stream team-context lifecycle', () => {
     const operationGate = new Promise<void>(resolve => {
       finishOperation = resolve
     })
+    let markOperationEntered!: () => void
+    const operationEntered = new Promise<void>(resolve => {
+      markOperationEntered = resolve
+    })
+    let teamOperation: Promise<void> | undefined
     try {
       service.startEntityChangeStream('stream-1', 7, vi.fn())
       await flushAsyncWork()
       expect(opened[0]?.token).toBe('committed-session-token')
 
-      const teamOperation = service.runWithTeamContext('team-b', async () => operationGate)
-      await flushAsyncWork()
+      teamOperation = service.runWithTeamContext('team-b', async () => {
+        markOperationEntered()
+        await operationGate
+      })
+      await Promise.race([operationEntered, teamOperation])
       expect(service.sessionToken).toBe('transient-team-context-token')
 
       finishFirstStream()
@@ -544,6 +552,8 @@ describe('AppService entity-change stream team-context lifecycle', () => {
       expect(opened.map(entry => entry.token)).toContain('restored-session-token')
     } finally {
       service.stopEntityChangeStream('stream-1', 7)
+      finishOperation()
+      await teamOperation?.catch(() => undefined)
       vi.useRealTimers()
       vi.restoreAllMocks()
     }

@@ -267,7 +267,7 @@ export function recordPendingKeytarCleanup(
   })
 }
 
-function isCurrentMarker(
+export function pendingExternalLogoutMarkersMatch(
   current: PendingExternalLogoutMarker | null,
   expected: PendingExternalLogoutMarker
 ): boolean {
@@ -285,7 +285,12 @@ export function recordPendingExternalLogoutIfUnchanged(
   envKey: string,
   expected: PendingExternalLogoutMarker
 ): boolean {
-  if (!isCurrentMarker(readPendingExternalLogoutMarker(userDataDirectory, envKey), expected)) {
+  if (
+    !pendingExternalLogoutMarkersMatch(
+      readPendingExternalLogoutMarker(userDataDirectory, envKey),
+      expected
+    )
+  ) {
     return false
   }
   writeMarkerIntent(userDataDirectory, envKey, { intent: 'logout-pending' })
@@ -302,7 +307,12 @@ export function clearPendingExternalLogoutIfUnchanged(
   envKey: string,
   expected: PendingExternalLogoutMarker
 ): boolean {
-  if (!isCurrentMarker(readPendingExternalLogoutMarker(userDataDirectory, envKey), expected)) {
+  if (
+    !pendingExternalLogoutMarkersMatch(
+      readPendingExternalLogoutMarker(userDataDirectory, envKey),
+      expected
+    )
+  ) {
     return false
   }
   clearPendingExternalLogout(userDataDirectory, envKey)
@@ -350,7 +360,12 @@ export function recordPendingKeytarCleanupIfUnchanged(
   credentialSource: 'active-keytar' | 'safe-storage',
   replacementRevision = randomUUID()
 ): boolean {
-  if (!isCurrentMarker(readPendingExternalLogoutMarker(userDataDirectory, envKey), expected)) {
+  if (
+    !pendingExternalLogoutMarkersMatch(
+      readPendingExternalLogoutMarker(userDataDirectory, envKey),
+      expected
+    )
+  ) {
     return false
   }
   writeMarkerIntent(

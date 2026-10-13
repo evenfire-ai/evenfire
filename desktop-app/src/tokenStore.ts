@@ -1,5 +1,6 @@
 import { app, safeStorage } from 'electron'
 import { randomUUID } from 'node:crypto'
+import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -102,6 +103,18 @@ export type StrictSessionTokenClearResult = {
   keytarDisabled: boolean
 }
 
+/** Required Keytar was absent: no native or fallback credential write was dispatched. */
+export class SessionTokenStorageUnavailableBeforeWriteError extends Error {
+  constructor(readonly storageSource: 'keytar' | 'safe-storage' = 'keytar') {
+    super(
+      storageSource === 'keytar'
+        ? 'Keytar is unavailable during session-token replacement'
+        : 'Electron safeStorage is unavailable for session-token fallback'
+    )
+    this.name = 'SessionTokenStorageUnavailableBeforeWriteError'
+  }
+}
+
 async function loadKeytar(): Promise<KeytarModule | null> {
   try {
     const mod = await import('keytar')
@@ -169,7 +182,29 @@ async function syncDirectory(directoryPath: string): Promise<void> {
   }
 }
 
+const tokenFileMutations = new Map<string, Promise<void>>()
+
+function mutateTokenFile<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
+  const pending = (tokenFileMutations.get(filePath) ?? Promise.resolve()).then(operation)
+  const settled = pending.then(
+    () => undefined,
+    () => undefined
+  )
+  tokenFileMutations.set(filePath, settled)
+  void settled.then(() => {
+    if (tokenFileMutations.get(filePath) === settled) tokenFileMutations.delete(filePath)
+  })
+  return pending
+}
+
 async function writeTokenFileAtomic(filePath: string, value: string | Uint8Array): Promise<void> {
+  return mutateTokenFile(filePath, () => writeTokenFileAtomicOnce(filePath, value))
+}
+
+async function writeTokenFileAtomicOnce(
+  filePath: string,
+  value: string | Uint8Array
+): Promise<void> {
   const temporaryPath = `${filePath}.${randomUUID()}.tmp`
   let handle: Awaited<ReturnType<typeof fs.open>> | null = null
   try {
@@ -188,8 +223,10 @@ async function writeTokenFileAtomic(filePath: string, value: string | Uint8Array
 }
 
 async function removeTokenFileDurably(filePath: string): Promise<void> {
-  await fs.unlink(filePath)
-  await syncDirectory(path.dirname(filePath))
+  return mutateTokenFile(filePath, async () => {
+    await fs.unlink(filePath)
+    await syncDirectory(path.dirname(filePath))
+  })
 }
 
 export class TokenStore {
@@ -505,12 +542,50 @@ export class TokenStore {
       assertEnvKey(envKey)
       if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
       if (!app?.isReady() || !safeStorage.isEncryptionAvailable()) {
-        throw new Error('Electron safeStorage is unavailable for session-token fallback')
+        throw new SessionTokenStorageUnavailableBeforeWriteError('safe-storage')
       }
       await writeTokenFileAtomic(
         await this.encryptedFilePath(envKey),
         safeStorage.encryptString(token)
       )
+    })
+  }
+
+  /** Remove only this rejected attempt's encrypted token; never clear another source. */
+  async discardSafeStorageSessionTokenIfMatches(token: string, envKey: string): Promise<boolean> {
+    return this.trackOperation(async () => {
+      assertEnvKey(envKey)
+      const file = await this.encryptedFilePath(envKey)
+      return mutateTokenFile(file, async () => {
+        let descriptor: number | undefined
+        try {
+          const flags =
+            process.platform === 'win32'
+              ? fsSync.constants.O_RDONLY
+              : fsSync.constants.O_RDONLY |
+                fsSync.constants.O_NONBLOCK |
+                fsSync.constants.O_NOFOLLOW
+          descriptor = fsSync.openSync(file, flags)
+          if (!fsSync.fstatSync(descriptor).isFile()) {
+            throw new Error('Encrypted session token is not a regular file')
+          }
+          if (process.platform === 'win32' && !fsSync.lstatSync(file).isFile()) {
+            throw new Error('Encrypted session token is not a regular file')
+          }
+          const encrypted = fsSync.readFileSync(descriptor)
+          if (safeStorage.decryptString(encrypted) !== token) return false
+          // No await between inspection and unlink: another main-process producer
+          // cannot replace the compared file during this conditional deletion.
+          fsSync.unlinkSync(file)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false
+          throw error
+        } finally {
+          if (descriptor !== undefined) fsSync.closeSync(descriptor)
+        }
+        await syncDirectory(path.dirname(file))
+        return true
+      })
     })
   }
 
@@ -524,7 +599,7 @@ export class TokenStore {
     const account = accountFor(envKey)
     const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
     if (options.requireKeytar && !keytar) {
-      throw new Error('Keytar is unavailable during session-token replacement')
+      throw new SessionTokenStorageUnavailableBeforeWriteError()
     }
     if (keytar) {
       try {
@@ -658,7 +733,8 @@ export class TokenStore {
     await Promise.all(
       filePaths.map(async filePath => {
         try {
-          await fs.unlink(await filePath)
+          const resolvedFilePath = await filePath
+          await mutateTokenFile(resolvedFilePath, () => fs.unlink(resolvedFilePath))
         } catch (error) {
           const code = (error as NodeJS.ErrnoException | undefined)?.code
           if (options.throwOnStorageError && code !== 'ENOENT') {
