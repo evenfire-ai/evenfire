@@ -145,6 +145,7 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       const savedWidthBeforeOverlay = await page.evaluate(() =>
         window.localStorage.getItem('clerum.ui.sidebarWidth')
       )
+      await expect.poll(async () => (await nativeSandboxViewState(app!)).visible).toBe(true)
       const nativeViewBeforeOverlay = await nativeSandboxViewState(app!)
       const trigger = page.getByTestId('compact-navigation-toggle')
       await expect(trigger).toBeVisible()
