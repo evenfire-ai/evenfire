@@ -751,3 +751,39 @@ describe('R18-M3 cleanup-only revision ownership', () => {
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith('fixture-other-session')
   })
 })
+
+describe('R20-M6 queued source-plan fencing', () => {
+  it('does not persist a rejected team token after queued cleanup retires its observed marker', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const entered = deferred()
+    const release = deferred()
+    const readEncrypted = h.tokenStore.getSafeStorageSessionToken.bind(h.tokenStore)
+    vi.spyOn(h.tokenStore, 'getSafeStorageSessionToken').mockImplementationOnce(async (...args) => {
+      const token = await readEncrypted(...args)
+      entered.resolve()
+      await release.promise
+      return token
+    })
+    const cleanup = h.service.applyPendingExternalLogoutIntent()
+    await entered.promise
+    const switching = h.service.switchTeam('fixture-other')
+    const rejected = switching.catch(() => undefined)
+    await new Promise(resolve => setImmediate(resolve))
+    release.resolve()
+    await cleanup
+    await expect(switching).rejects.toThrow('Pending logout intent changed')
+    await rejected
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: homeMe,
+    })
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+  })
+})
