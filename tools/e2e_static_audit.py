@@ -59,6 +59,8 @@ def audit_text(text: str, path: Path = Path("<source>")) -> list[str]:
     for match in re.finditer(r"\bpage\.goto\s*\(", text):
         adjacent = _adjacent_line(text, match.start())
         after = text[match.end() : match.end() + 160]
+        if re.match(r"\s*['\"]/?['\"]", after):
+            continue
         if re.fullmatch(
             r"\s*//\s*Negative (?:protected-route guard|route-guard|deep-link guard|"
             r"legacy terminal-route guard):[^\n]*",

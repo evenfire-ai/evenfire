@@ -7,6 +7,12 @@ from tools.e2e_static_audit import audit_text
 
 
 class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
+    def test_plain_application_root_entry_remains_allowed(self) -> None:
+        source = "const response = page.waitForResponse(() => true)\npage.goto('/')"
+        self.assertFalse(
+            any("direct page.goto" in finding for finding in audit_text(source, Path("root.spec.ts")))
+        )
+
     def test_marker_must_be_adjacent_to_its_navigation(self) -> None:
         source = "// E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT\n\npage.goto('/invitations/reset-token')"
         self.assertTrue(

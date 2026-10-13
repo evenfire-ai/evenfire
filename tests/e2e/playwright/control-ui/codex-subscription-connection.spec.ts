@@ -78,6 +78,7 @@ test.describe('Codex subscription connection', () => {
   })
 
   test('J2 authenticated deep link and legacy redirect; unauth is AuthGate', async ({ page }) => {
+    // Negative deep-link guard: this protected page must stay at AuthGate.
     await page.goto('/secrets/llm/subscriptions')
     await expect(page.getByLabel('Username or email')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByRole('button', { name: 'Add subscription' })).toHaveCount(0)
