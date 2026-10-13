@@ -93,6 +93,12 @@ let droppedResetResponsesForTest: () => number = () => 0
 let previousControlApiBaseUrl: string
 let previousControlApiServiceToken: string
 let previousControlApiServiceName: string
+let nextInvitationContractClientIp = 50
+
+function invitationContractClientIp(): string {
+  nextInvitationContractClientIp += 1
+  return `198.51.100.${nextInvitationContractClientIp}`
+}
 
 interface RawLoopbackResponse {
   status: number
@@ -629,6 +635,180 @@ describe('invitation/password producer response mappings', () => {
       /invalid payload|r6-|producer-invitation|sql|stack|password-token/i
     )
     expect(directory.getInvitationByToken).toHaveBeenCalledWith('r6-producer-invitation-token')
+    expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      label: 'invalid password',
+      invitationId: 'r6-accepted-member-row',
+      password: 'short',
+      serviceResult: { error: 'invalid_password' },
+      producerStatus: 400,
+      producerBody: { error: 'invalid_password' },
+      publicStatus: 400,
+      publicBody: { error: 'Password must be between 8 and 256 characters' },
+    },
+    {
+      label: 'retired member',
+      invitationId: 'r6-accepted-member-row',
+      password: 'R6-synthetic-valid-password',
+      serviceResult: { error: 'user_retired' },
+      producerStatus: 401,
+      producerBody: { error: 'user_retired' },
+      publicStatus: 404,
+      publicBody: { error: 'Invitation not found' },
+    },
+    {
+      label: 'wrong member binding',
+      invitationId: 'r6-accepted-member-row',
+      password: 'R6-synthetic-valid-password',
+      serviceResult: { error: 'forbidden' },
+      producerStatus: 403,
+      producerBody: { error: 'forbidden' },
+      publicStatus: 403,
+      publicBody: { error: 'Invitation is invalid or unavailable' },
+    },
+    {
+      label: 'missing member invitation',
+      invitationId: 'r6-accepted-member-row',
+      password: 'R6-synthetic-valid-password',
+      serviceResult: { error: 'not_found' },
+      producerStatus: 404,
+      producerBody: { error: 'not_found' },
+      publicStatus: 404,
+      publicBody: { error: 'Invitation not found' },
+    },
+    {
+      label: 'invitation no longer accepted',
+      invitationId: 'r6-accepted-member-row',
+      password: 'R6-synthetic-valid-password',
+      serviceResult: { error: 'not_accepted' },
+      producerStatus: 409,
+      producerBody: { error: 'invitation_not_accepted' },
+      publicStatus: 409,
+      publicBody: { error: 'Invitation must be accepted before setting a password' },
+    },
+    {
+      label: 'reset invitation already used through authenticated setup',
+      invitationId: 'r6-authenticated-reset-row',
+      password: 'R6-synthetic-valid-password',
+      serviceResult: { error: 'not_pending' },
+      producerStatus: 409,
+      producerBody: { error: 'invitation_not_pending' },
+      publicStatus: 409,
+      publicBody: { error: 'Invitation has already been used' },
+    },
+    {
+      label: 'reset invitation expired through authenticated setup',
+      invitationId: 'r6-authenticated-reset-row',
+      password: 'R6-synthetic-valid-password',
+      serviceResult: { error: 'expired' },
+      producerStatus: 410,
+      producerBody: { error: 'expired' },
+      publicStatus: 410,
+      publicBody: { error: 'Invitation has expired' },
+    },
+  ])('maps the authenticated password-setup producer outcome: $label', async scenario => {
+    directory.setInvitationPasswordForUser.mockResolvedValue(scenario.serviceResult)
+    const producerPayload = {
+      userId: 'r6-user',
+      email: 'r6-member@example.invalid',
+      invitationId: scenario.invitationId,
+      password: scenario.password,
+    }
+
+    const producerResponse = await request(producerServer)
+      .post('/api/v1/external/invitations/password')
+      .set('authorization', `Bearer ${internalServiceToken}`)
+      .set('x-service-token', 'external-rest-api')
+      .set('x-user-session-token', 'r6-synthetic-session')
+      .send(producerPayload)
+
+    expect(producerResponse.status).toBe(scenario.producerStatus)
+    expect(producerResponse.body).toEqual(scenario.producerBody)
+    expect(producerResponse.headers['retry-after']).toBeUndefined()
+    expect(producerResponse.headers['set-cookie']).toBeUndefined()
+
+    const response = await request(publicApp())
+      .post('/invitations/password')
+      .set('authorization', 'Bearer r6-synthetic-session')
+      .set('x-forwarded-for', invitationContractClientIp())
+      .send({ invitationId: scenario.invitationId, password: scenario.password })
+
+    expect(response.status).toBe(scenario.publicStatus)
+    expect(response.body).toEqual(scenario.publicBody)
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toMatch(
+      /r6-|example\.invalid|producer|sql|stack|password_hash|token/i
+    )
+    expect(directory.setInvitationPasswordForUser).toHaveBeenCalledWith(
+      'r6-user',
+      'r6-member@example.invalid',
+      scenario.invitationId,
+      scenario.password
+    )
+    expect(directory.setInvitationPasswordForUser).toHaveBeenCalledTimes(2)
+    expect(directory.acceptInvitationForEmail).not.toHaveBeenCalled()
+    expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
+    expect(flow.validateInvitationFlowToken).not.toHaveBeenCalled()
+    expect(desktopFlow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      label: 'busy password-work owner',
+      error: new PasswordAdmissionError(429, 17, 'verification_busy'),
+      producerStatus: 429,
+      producerBody: { error: 'rate_limited', retryAfterSeconds: 17 },
+      publicStatus: 429,
+      publicBody: { error: 'rate_limited', retryAfterSeconds: 17 },
+    },
+    {
+      label: 'unavailable password authority',
+      error: new PasswordAdmissionError(503, 23, 'authority_failure'),
+      producerStatus: 503,
+      producerBody: { error: 'authority_unavailable', retryAfterSeconds: 23 },
+      publicStatus: 503,
+      publicBody: { error: 'authority_unavailable', retryAfterSeconds: 23 },
+    },
+  ])('preserves bounded $label responses for accepted-invitation setup', async scenario => {
+    directory.setInvitationPasswordForUser.mockRejectedValue(scenario.error)
+    const payload = {
+      userId: 'r6-user',
+      email: 'r6-member@example.invalid',
+      invitationId: 'r6-accepted-member-row',
+      password: 'R6-synthetic-valid-password',
+    }
+
+    const producerResponse = await request(producerServer)
+      .post('/api/v1/external/invitations/password')
+      .set('authorization', `Bearer ${internalServiceToken}`)
+      .set('x-service-token', 'external-rest-api')
+      .set('x-user-session-token', 'r6-synthetic-session')
+      .send(payload)
+
+    expect(producerResponse.status).toBe(scenario.producerStatus)
+    expect(producerResponse.body).toEqual(scenario.producerBody)
+    expect(producerResponse.headers['retry-after']).toBe(String(scenario.error.retryAfterSeconds))
+
+    const response = await request(publicApp())
+      .post('/invitations/password')
+      .set('authorization', 'Bearer r6-synthetic-session')
+      .set('x-forwarded-for', invitationContractClientIp())
+      .send({ invitationId: payload.invitationId, password: payload.password })
+
+    expect(response.status).toBe(scenario.publicStatus)
+    expect(response.body).toEqual(scenario.publicBody)
+    expect(response.headers['retry-after']).toBe(String(scenario.error.retryAfterSeconds))
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.headers['cache-control']).toBe('no-store')
+    expect(JSON.stringify(response.body)).not.toMatch(
+      /verification_busy|authority_failure|r6-|sql|stack/i
+    )
+    expect(directory.setInvitationPasswordForUser).toHaveBeenCalledTimes(2)
+    expect(directory.acceptInvitationForEmail).not.toHaveBeenCalled()
     expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
   })
 
