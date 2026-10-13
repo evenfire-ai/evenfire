@@ -311,6 +311,7 @@ export function App() {
   const compactSidebarTriggerRef = React.useRef<HTMLButtonElement | null>(null)
   const compactSidebarWasOpenRef = React.useRef(false)
   const compactSidebarCloseFocusRef = React.useRef<CompactMenuCloseFocus | null>(null)
+  const compactNavigationControlOwnedFocusRef = React.useRef(false)
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
@@ -1281,20 +1282,65 @@ export function App() {
   }, [compactNavigation])
 
   React.useEffect(() => {
-    if (compactSidebarWasOpenRef.current && !compactSidebarOpen && compactNavigation) {
-      const activeElement = document.activeElement
-      const compactSidebar = document.getElementById('desktop-sidebar-navigation')
-      const destinationOwnsFocus =
-        compactSidebarCloseFocusRef.current === 'preserve-destination-focus' &&
-        activeElement !== null &&
-        activeElement.isConnected &&
-        activeElement !== document.body &&
-        !compactSidebar?.contains(activeElement)
-      if (!destinationOwnsFocus) {
-        compactSidebarTriggerRef.current?.focus()
+    const handleFocusIn = (event: FocusEvent) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (target.matches('.sidebar-compact-close, .compact-navigation-toggle')) {
+        compactNavigationControlOwnedFocusRef.current = true
+      } else if (target !== document.body) {
+        compactNavigationControlOwnedFocusRef.current = false
       }
     }
-    if (!compactSidebarOpen) compactSidebarCloseFocusRef.current = null
+
+    document.addEventListener('focusin', handleFocusIn)
+    return () => document.removeEventListener('focusin', handleFocusIn)
+  }, [])
+
+  React.useEffect(() => {
+    if (compactSidebarWasOpenRef.current && !compactSidebarOpen) {
+      if (compactNavigation) {
+        const activeElement = document.activeElement
+        const compactSidebar = document.getElementById('desktop-sidebar-navigation')
+        const destinationOwnsFocus =
+          compactSidebarCloseFocusRef.current === 'preserve-destination-focus' &&
+          activeElement !== null &&
+          activeElement.isConnected &&
+          activeElement !== document.body &&
+          !compactSidebar?.contains(activeElement)
+        if (!destinationOwnsFocus) {
+          compactSidebarTriggerRef.current?.focus()
+        }
+      } else if (compactNavigationControlOwnedFocusRef.current) {
+        const compactSidebar = document.getElementById('desktop-sidebar-navigation')
+        const currentRouteItem = compactSidebar?.querySelector<HTMLElement>(
+          '.nav-link.active .nav-link-main, .nav-available-app.active'
+        )
+        const navigationLandmark = compactSidebar?.querySelector<HTMLElement>('.nav-links')
+        const isVisibleFocusOwner = (
+          element: HTMLElement | null | undefined
+        ): element is HTMLElement =>
+          Boolean(
+            element &&
+            element.isConnected &&
+            element.getClientRects().length > 0 &&
+            getComputedStyle(element).visibility !== 'hidden' &&
+            !element.closest('[inert], [aria-hidden="true"]')
+          )
+
+        if (isVisibleFocusOwner(currentRouteItem)) {
+          currentRouteItem.focus()
+        } else if (isVisibleFocusOwner(navigationLandmark)) {
+          if (!navigationLandmark.hasAttribute('tabindex')) {
+            navigationLandmark.setAttribute('tabindex', '-1')
+          }
+          navigationLandmark.focus()
+        }
+      }
+    }
+    if (!compactSidebarOpen) {
+      compactSidebarCloseFocusRef.current = null
+      compactNavigationControlOwnedFocusRef.current = false
+    }
     compactSidebarWasOpenRef.current = compactSidebarOpen
   }, [compactNavigation, compactSidebarOpen])
 

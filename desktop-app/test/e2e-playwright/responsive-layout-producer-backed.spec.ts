@@ -217,8 +217,29 @@ test('Desktop app tray layout is exercised with producer-backed notification and
         expect(Math.abs(actual! - expected!)).toBeLessThanOrEqual(2)
       }
 
+      await trigger.click()
+      const compactClose = page.getByRole('button', { name: 'Close navigation menu' })
+      await compactClose.focus()
+      await expect(compactClose).toBeFocused()
       await resizeDesktop(app!, 1200)
       await expect(trigger).not.toBeVisible()
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const active = document.activeElement
+            return active?.getAttribute('data-testid') ?? null
+          })
+        )
+        .toBe('nav-sandbox-ui')
+      const desktopFocus = await page.evaluate(() => {
+        const active = document.activeElement
+        return {
+          connected: active?.isConnected ?? false,
+          visible: Boolean(active?.getClientRects().length),
+          inert: Boolean(active?.closest('[inert]')),
+        }
+      })
+      expect(desktopFocus).toEqual({ connected: true, visible: true, inert: false })
       const separator = page.getByRole('separator', { name: 'Resize sidebar' })
       await expect(separator).toBeVisible()
       const desktopSidebar = page.locator('.left-nav')
