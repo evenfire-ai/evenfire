@@ -42,6 +42,8 @@ async function seedUserScopedOauthServer(gateway: MockGateway): Promise<void> {
       metadata: { name: SERVER },
       spec: {
         contextRef: OWNER_CONTEXT,
+        image: 'example/gdrive-mcp:1',
+        transport: { type: 'streamableHttp', url: 'https://gdrive.example.com/mcp' },
         auth: { type: 'oauth' },
         oauth: {
           id: OAUTH_CLIENT_ID,

@@ -67,6 +67,8 @@ function seedOauthServer(
       metadata: { name: opts.name },
       spec: {
         contextRef: opts.contextRef ?? 'ctx-9',
+        image: 'example/gdrive-mcp:1',
+        transport: { type: 'streamableHttp', url: 'https://gdrive.example.com/mcp' },
         auth: { type: 'oauth' },
         oauth: {
           id: 'google-drive',
@@ -209,31 +211,6 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
     expect(membershipQuery).toBeUndefined()
   })
 
-  it('user flavor: a server WITHOUT contextRef can be disconnected', async () => {
-    void gateway.createResource(
-      'mcpservers',
-      {
-        metadata: { name: 'gdrive' },
-        spec: {
-          auth: { type: 'oauth' },
-          oauth: {
-            id: 'google-drive',
-            provider: 'google',
-            clientIdRef: { name: 'google-creds', key: 'client-id' },
-            clientSecretRef: { name: 'google-creds', key: 'client-secret' },
-            grantScope: 'user',
-          },
-        },
-      },
-      MCP_NS
-    )
-    mockDb({ memberContexts: [] })
-    const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-7' })
-    expect(res.status).toBe(204)
-    expect(deleteCalls()).toHaveLength(1)
-    expect(deleteCalls()[0][1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'user-7', 'google-drive'])
-  })
-
   // Existence and oauth-ness are still answered before any flavor-specific
   // branch, for a user-flavor caller with no Contexts as for anyone else.
   it('user flavor ordering: unknown server → 404 and non-oauth → 400, with no delete', async () => {
@@ -244,7 +221,15 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
 
     void gateway.createResource(
       'mcpservers',
-      { metadata: { name: 'plain' }, spec: { auth: { type: 'none' } } },
+      {
+        metadata: { name: 'plain' },
+        spec: {
+          contextRef: 'ctx-9',
+          image: 'example/plain-mcp:1',
+          transport: { type: 'streamableHttp', url: 'https://plain.example.com/mcp' },
+          auth: { type: 'none' },
+        },
+      },
       MCP_NS
     )
     const plain = await del(app).send({ mcpServerName: 'plain', userId: 'user-8' })

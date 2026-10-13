@@ -59,6 +59,8 @@ function seedOauthServer(
       metadata: { name: opts.name },
       spec: {
         contextRef: opts.contextRef ?? 'ctx-9',
+        image: 'example/gdrive-mcp:1',
+        transport: { type: 'streamableHttp', url: 'https://gdrive.example.com/mcp' },
         auth: { type: 'oauth' },
         oauth: {
           id: 'google-drive',
@@ -275,40 +277,6 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('context_membership_denied')
     expect(res.body.authorizeUrl).toBeUndefined()
-  })
-
-  it('user flavor: a server WITHOUT contextRef that an allowlist enables mints OK', async () => {
-    void gateway.createResource(
-      'mcpservers',
-      {
-        metadata: { name: 'gdrive' },
-        spec: {
-          auth: { type: 'oauth' },
-          oauth: {
-            id: 'google-drive',
-            provider: 'google',
-            clientIdRef: { name: 'google-creds', key: 'client-id' },
-            clientSecretRef: { name: 'google-creds', key: 'client-secret' },
-            grantScope: 'user',
-          },
-        },
-      },
-      MCP_NS
-    )
-    gateway.seedSecret('google-creds', MCP_NS, {
-      data: {
-        'client-id': Buffer.from('GOOGLE_CLIENT_ID').toString('base64'),
-        'client-secret': Buffer.from('GOOGLE_CLIENT_SECRET').toString('base64'),
-      },
-    })
-    await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business'] } })
-    const res = await post(app)
-      .set('Authorization', 'Bearer dev-rpc-proxy-token')
-      .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
-    expect(res.status).toBe(200)
-    expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
   })
 
   // The server's own Context dropped it; the user still reaches a Context that
