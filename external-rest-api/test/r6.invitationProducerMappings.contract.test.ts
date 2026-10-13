@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import type { Server } from 'node:http'
+import { request as httpRequest } from 'node:http'
+import type { IncomingHttpHeaders, Server } from 'node:http'
 import request from 'supertest'
 import { requireInternalToken } from '../../control-api/src/middleware/internalServiceAuth.js'
 import { createExternalInvitationsRouter } from '../../control-api/src/routes/external/invitations.js'
@@ -93,6 +94,268 @@ let previousControlApiBaseUrl: string
 let previousControlApiServiceToken: string
 let previousControlApiServiceName: string
 
+interface RawLoopbackResponse {
+  status: number
+  body: string
+  headers: IncomingHttpHeaders
+}
+
+function listenOnLoopback(app: express.Express): Promise<Server> {
+  const server = app.listen(0, '127.0.0.1')
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.once('listening', () => resolve(server))
+  })
+}
+
+function listeningPort(server: Server): number {
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('server did not bind TCP')
+  return address.port
+}
+
+async function closeLoopbackServer(server: Server | undefined): Promise<void> {
+  if (!server) return
+  server.closeAllConnections()
+  await new Promise<void>((resolve, reject) =>
+    server.close(error => (error ? reject(error) : resolve()))
+  )
+}
+
+function requestRawLoopback(
+  port: number,
+  method: string,
+  path: string,
+  body: unknown = {}
+): Promise<RawLoopbackResponse> {
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(
+      {
+        hostname: '127.0.0.1',
+        port,
+        method,
+        path,
+        headers: {
+          authorization: `Bearer ${internalServiceToken}`,
+          'x-service-token': 'external-rest-api',
+          'content-type': 'application/json',
+        },
+      },
+      incoming => {
+        const chunks: Buffer[] = []
+        incoming.on('data', chunk =>
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        )
+        incoming.once('error', reject)
+        incoming.once('end', () =>
+          resolve({
+            status: incoming.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString('utf8'),
+            headers: incoming.headers,
+          })
+        )
+      }
+    )
+    outgoing.once('error', reject)
+    if (method === 'GET' || method === 'HEAD') outgoing.end()
+    else outgoing.end(JSON.stringify(body))
+  })
+}
+
+describe('response-drop proxy outbound boundary', () => {
+  it('rejects request-target and method variants without dispatching to loopback services', async () => {
+    let producerServer: Server | undefined
+    let proxyServer: Server | undefined
+    let redirectSinkServer: Server | undefined
+    const producerRequests: string[] = []
+    let redirectSinkRequests = 0
+
+    try {
+      const redirectSink = express()
+      redirectSink.all('*', (_req, res) => {
+        redirectSinkRequests += 1
+        res.status(200).json({ sink: 'r7-local-canary' })
+      })
+      redirectSinkServer = await listenOnLoopback(redirectSink)
+
+      const producer = express()
+      producer.use((req, _res, next) => {
+        producerRequests.push(`${req.method} ${req.originalUrl}`)
+        next()
+      })
+      producer.post('/ssrf-canary', (_req, res) => res.sendStatus(202))
+      producer.post('/api/v1/external/invitations/password-token', (_req, res) =>
+        res.sendStatus(204)
+      )
+      producer.all('/api/v1/external/invitations/password-token', (_req, res) =>
+        res.sendStatus(405)
+      )
+      producerServer = await listenOnLoopback(producer)
+      const producerBaseUrl = `http://127.0.0.1:${listeningPort(producerServer)}/api/v1`
+      proxyServer = await listenOnLoopback(responseDropProxyApp(producerBaseUrl, () => undefined))
+
+      const targets: Array<{ method: string; path: string }> = [
+        { method: 'POST', path: '/api/v1/../../ssrf-canary' },
+        { method: 'POST', path: '/api/v1/%2e%2e/%2e%2e/ssrf-canary' },
+        { method: 'GET', path: '/api/v1/external/invitations/token/../ssrf-canary' },
+        { method: 'GET', path: '/api/v1/external/invitations/token/%2e%2e/ssrf-canary' },
+        {
+          method: 'POST',
+          path: '/api/v1/external/invitations/password-token/../../ssrf-canary',
+        },
+        {
+          method: 'POST',
+          path: `/api/v1//127.0.0.1:${listeningPort(redirectSinkServer)}/ssrf-canary`,
+        },
+        {
+          method: 'POST',
+          path: `/api/v1/external/invitations/password-token/extra?next=//127.0.0.1:${listeningPort(redirectSinkServer)}/ssrf-canary`,
+        },
+        { method: 'GET', path: '/api/v1/external/invitations/password-token' },
+        { method: 'PUT', path: '/api/v1/external/invitations/password-token' },
+        { method: 'DELETE', path: '/api/v1/external/invitations/password-token' },
+        {
+          method: 'HEAD',
+          path: '/api/v1/external/invitations/token/r6-synthetic-reset-proof',
+        },
+        {
+          method: 'POST',
+          path: `http://127.0.0.1:${listeningPort(redirectSinkServer)}/api/v1/external/invitations/password-token`,
+        },
+        {
+          method: 'POST',
+          path: 'http://example.invalid/api/v1/external/invitations/password-token',
+        },
+      ]
+      const responses: RawLoopbackResponse[] = []
+      for (const target of targets) {
+        responses.push(
+          await requestRawLoopback(listeningPort(proxyServer), target.method, target.path, {
+            password: 'synthetic-test-value',
+          }).catch(() => ({ status: 0, body: '', headers: {} }))
+        )
+      }
+
+      expect(producerRequests).toEqual([])
+      expect(responses.slice(0, 10).map(response => response.status)).toEqual(
+        targets.slice(0, 10).map(() => 404)
+      )
+      expect([0, 400, 404]).toContain(responses[10].status)
+      expect([0, 400, 404]).toContain(responses[11].status)
+      expect([0, 400, 404]).toContain(responses[12].status)
+      expect(redirectSinkRequests).toBe(0)
+    } finally {
+      await closeLoopbackServer(proxyServer)
+      await closeLoopbackServer(producerServer)
+      await closeLoopbackServer(redirectSinkServer)
+    }
+  })
+
+  it('does not follow a producer redirect to a second task-owned loopback server', async () => {
+    let producerServer: Server | undefined
+    let proxyServer: Server | undefined
+    let redirectSinkServer: Server | undefined
+    let producerRequests = 0
+    let redirectSinkRequests = 0
+    let droppedResetResponses = 0
+    let notifyDropped: () => void = () => undefined
+    const dropped = new Promise<void>(resolve => {
+      notifyDropped = resolve
+    })
+
+    try {
+      const redirectSink = express()
+      redirectSink.all('*', (_req, res) => {
+        redirectSinkRequests += 1
+        res.status(200).json({ sink: 'r7-local-canary' })
+      })
+      redirectSinkServer = await listenOnLoopback(redirectSink)
+      const redirectProducer = express()
+      redirectProducer.post('/api/v1/external/invitations/password-token', (_req, res) => {
+        producerRequests += 1
+        res.redirect(302, `http://127.0.0.1:${listeningPort(redirectSinkServer!)}/redirect-target`)
+      })
+      producerServer = await listenOnLoopback(redirectProducer)
+      const producerBaseUrl = `http://127.0.0.1:${listeningPort(producerServer)}/api/v1`
+      proxyServer = await listenOnLoopback(
+        responseDropProxyApp(producerBaseUrl, () => {
+          droppedResetResponses += 1
+          notifyDropped()
+        })
+      )
+
+      await requestRawLoopback(
+        listeningPort(proxyServer),
+        'POST',
+        '/api/v1/external/invitations/password-token',
+        { token: 'synthetic-test-value' }
+      ).catch(() => undefined)
+      await dropped
+
+      expect(producerRequests).toBe(1)
+      expect(droppedResetResponses).toBe(1)
+      expect(redirectSinkRequests).toBe(0)
+    } finally {
+      await closeLoopbackServer(proxyServer)
+      await closeLoopbackServer(producerServer)
+      await closeLoopbackServer(redirectSinkServer)
+    }
+  })
+
+  it('forwards the real producer status and JSON body with controlled headers when not dropping', async () => {
+    let producerServer: Server | undefined
+    let proxyServer: Server | undefined
+    try {
+      producerServer = await listenOnLoopback(producerResponseApp())
+      const producerBaseUrl = `http://127.0.0.1:${listeningPort(producerServer)}/api/v1`
+      proxyServer = await listenOnLoopback(
+        responseDropProxyApp(producerBaseUrl, () => undefined, { dropResetResponse: false })
+      )
+
+      const result = await requestRawLoopback(
+        listeningPort(proxyServer),
+        'POST',
+        '/api/v1/external/invitations/password-token',
+        {
+          token: 'r6-synthetic-reset-proof',
+          email: preview.email,
+          invitationId: preview.id,
+          password: '',
+        }
+      ).then(
+        response => ({ response }),
+        () => ({ response: undefined })
+      )
+
+      expect(result.response?.status).toBe(400)
+      expect(result.response && JSON.parse(result.response.body)).toEqual({
+        error: 'invalid payload',
+      })
+      expect(result.response?.headers['content-type']).toMatch(/^application\/json/)
+      expect(result.response?.headers['retry-after']).toBeUndefined()
+      expect(result.response?.headers['set-cookie']).toBeUndefined()
+      expect(result.response?.headers.location).toBeUndefined()
+      expect(JSON.stringify(result)).not.toMatch(/sql|stack|r6-reset-proof/i)
+    } finally {
+      await closeLoopbackServer(proxyServer)
+      await closeLoopbackServer(producerServer)
+    }
+  })
+
+  it('rejects producer origins and base paths outside the task-owned loopback API', () => {
+    for (const producerBaseUrl of [
+      'https://127.0.0.1:43121/api/v1',
+      'http://example.invalid:43121/api/v1',
+      'http://localhost:43121/api/v1',
+      'http://127.0.0.1:43121/api/v1/../../admin',
+      'http://127.0.0.1:43121/api/v1?next=/admin',
+      'http://user:password@127.0.0.1:43121/api/v1',
+    ]) {
+      expect(() => responseDropProxyApp(producerBaseUrl, () => undefined)).toThrow()
+    }
+  })
+})
+
 function publicApp() {
   const app = express()
   app.set('trust proxy', 1)
@@ -111,31 +374,86 @@ function producerResponseApp() {
   return app
 }
 
-function responseDropProxyApp(producerBaseUrl: string, onDroppedReset: () => void) {
+function responseDropProxyApp(
+  producerBaseUrl: string,
+  onDroppedReset: () => void,
+  options: { dropResetResponse?: boolean } = {}
+) {
+  const producerBase = new URL(producerBaseUrl)
+  const expectedProducerBaseUrl = `http://127.0.0.1:${producerBase.port}/api/v1`
+  if (
+    producerBase.protocol !== 'http:' ||
+    producerBase.hostname !== '127.0.0.1' ||
+    !producerBase.port ||
+    producerBase.username ||
+    producerBase.password ||
+    producerBase.pathname !== '/api/v1' ||
+    producerBase.search ||
+    producerBase.hash ||
+    producerBaseUrl !== expectedProducerBaseUrl
+  ) {
+    throw new Error('response-drop proxy requires the task-owned loopback Control API producer')
+  }
+
+  const previewRequestPath = '/api/v1/external/invitations/token/r6-synthetic-reset-proof'
+  const resetRequestPath = '/api/v1/external/invitations/password-token'
+  const previewProducerUrl = new URL(previewRequestPath, producerBase.origin)
+  const resetProducerUrl = new URL(resetRequestPath, producerBase.origin)
+  const dropResetResponse = options.dropResetResponse ?? true
   const app = express()
   app.use(express.json())
-  app.use('/api/v1', async (req, res) => {
-    const producerPath = req.originalUrl.replace(/^\/api\/v1/, '')
+  const forwardProducerResponse = async (
+    req: express.Request,
+    res: express.Response,
+    method: 'GET' | 'POST',
+    producerUrl: URL,
+    dropResponse: boolean
+  ) => {
+    const requestPath = method === 'GET' ? previewRequestPath : resetRequestPath
+    if (req.originalUrl !== requestPath) {
+      res.sendStatus(404)
+      return
+    }
+    if (
+      req.headers.authorization !== `Bearer ${internalServiceToken}` ||
+      req.headers['x-service-token'] !== 'external-rest-api'
+    ) {
+      res.sendStatus(404)
+      return
+    }
+
     const headers: Record<string, string> = {
-      authorization: String(req.headers.authorization || ''),
-      'x-service-token': String(req.headers['x-service-token'] || ''),
+      authorization: `Bearer ${internalServiceToken}`,
+      'x-service-token': 'external-rest-api',
       'content-type': 'application/json',
     }
     const clientIp = req.headers['x-external-client-ip']
     if (typeof clientIp === 'string') headers['x-external-client-ip'] = clientIp
-    const upstream = await fetch(`${producerBaseUrl}${producerPath}`, {
-      method: req.method,
+    const upstream = await fetch(producerUrl, {
+      method,
       headers,
-      body: req.method === 'GET' ? undefined : JSON.stringify(req.body),
+      body: method === 'POST' ? JSON.stringify(req.body) : undefined,
+      redirect: 'manual',
     })
     const body = await upstream.text()
-    if (req.method === 'POST' && req.path === '/external/invitations/password-token') {
+    if (dropResponse) {
       onDroppedReset()
       req.socket.destroy()
       return
     }
     res.status(upstream.status).type('application/json').send(body)
+  }
+  app.get(previewRequestPath, async (req, res) => {
+    if (req.method !== 'GET') {
+      res.sendStatus(404)
+      return
+    }
+    await forwardProducerResponse(req, res, 'GET', previewProducerUrl, false)
   })
+  app.post(resetRequestPath, async (req, res) =>
+    forwardProducerResponse(req, res, 'POST', resetProducerUrl, dropResetResponse)
+  )
+  app.use((_req, res) => res.sendStatus(404))
   return app
 }
 
