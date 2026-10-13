@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
+import JSZip from 'jszip'
 import * as os from 'os'
 import * as path from 'path'
 import { zipEntries } from '../../../workflow/__tests__/support/zipEntries'
@@ -41,6 +42,14 @@ function metadata(
 
 function decoded(attachment: Attachment): Buffer {
   return Buffer.from(attachment[dataKey], b64)
+}
+
+/** A minimal Office package whose one XML part holds `text`. */
+function officePackage(text: string): Promise<Buffer> {
+  return new JSZip()
+    .file('[Content_Types].xml', '<Types/>')
+    .file('part.xml', `<part>${text}</part>`)
+    .generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
 }
 
 describe('generated internal artifact attachments', () => {
@@ -108,14 +117,20 @@ describe('generated internal artifact attachments', () => {
   })
 
   it.each([
-    ['clerum__generate_pdf', 'report.pdf', 'pdf', Buffer.from('%PDF-1.7\n%%EOF')],
-    ['clerum__generate_docx', 'report.docx', 'docx', Buffer.from('PK docx bytes')],
-    ['clerum__generate_xlsx', 'report.xlsx', 'xlsx', Buffer.from('PK xlsx bytes')],
-    ['clerum__generate_pptx', 'report.pptx', 'pptx', Buffer.from('PK pptx bytes')],
-    ['clerum__generate_chart', 'chart.png', 'png', Buffer.from([0x89, 0x50, 0x4e, 0x47])],
+    ['clerum__generate_pdf', 'report.pdf', 'pdf', async () => Buffer.from('%PDF-1.7\n%%EOF')],
+    ['clerum__generate_docx', 'report.docx', 'docx', () => officePackage('safe generated content')],
+    ['clerum__generate_xlsx', 'report.xlsx', 'xlsx', () => officePackage('safe generated content')],
+    ['clerum__generate_pptx', 'report.pptx', 'pptx', () => officePackage('safe generated content')],
+    [
+      'clerum__generate_chart',
+      'chart.png',
+      'png',
+      async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    ],
   ] as const)(
     'builds a %s binary attachment when the source payload has no configured secrets',
-    (sourceTool, filename, format, body) => {
+    async (sourceTool, filename, format, make) => {
+      const body = await make()
       fs.writeFileSync(path.join(outputDir, filename), body)
 
       const attachment = buildGeneratedArtifactAttachment({
@@ -182,6 +197,54 @@ describe('generated internal artifact attachments', () => {
       })
 
       expect(attachment).toBeNull()
+    }
+  )
+
+  it.each([
+    ['clerum__generate_docx', 'report.docx', 'docx'],
+    ['clerum__generate_xlsx', 'report.xlsx', 'xlsx'],
+    ['clerum__generate_pptx', 'report.pptx', 'pptx'],
+  ] as const)(
+    'does not auto-attach a %s whose delivered text holds a secret its payload never spelled',
+    async (sourceTool, filename, format) => {
+      fs.writeFileSync(path.join(outputDir, filename), await officePackage('<v>3141592653</v>'))
+
+      const attachment = buildGeneratedArtifactAttachment({
+        sourceTool,
+        artifact: metadata(outputDir, filename, format),
+        outputDir,
+        maxBytes: 52_428_800,
+        sourcePayload: { cell: '3,141,592,653' },
+        secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: '3141592653' }],
+      })
+
+      expect(attachment).toBeNull()
+    }
+  )
+
+  it.each([
+    ['clerum__generate_docx', 'report.docx', 'docx'],
+    ['clerum__generate_xlsx', 'report.xlsx', 'xlsx'],
+    ['clerum__generate_pptx', 'report.pptx', 'pptx'],
+  ] as const)(
+    'does not auto-attach a %s it cannot read while secrets are configured, and attaches it when none are',
+    (sourceTool, filename, format) => {
+      fs.writeFileSync(path.join(outputDir, filename), Buffer.from('PK not a package'))
+      const params = {
+        sourceTool,
+        artifact: metadata(outputDir, filename, format),
+        outputDir,
+        maxBytes: 52_428_800,
+        sourcePayload: { content: 'safe generated content' },
+      }
+
+      expect(
+        buildGeneratedArtifactAttachment({
+          ...params,
+          secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
+        })
+      ).toBeNull()
+      expect(buildGeneratedArtifactAttachment(params)).toMatchObject({ kind: 'file', filename })
     }
   )
 
@@ -415,6 +478,99 @@ describe('generated internal artifact attachments', () => {
       expect(result.is_error).toBe(false)
       expect(sheetXml(path.join(outputDir, 'keyed.xlsx'))).toContain(protectedValue)
       expect(result.attachments ?? []).toHaveLength(0)
+    })
+  })
+
+  describe('values a generator stores in a form its arguments never spelled', () => {
+    const protectedValue = '3141592653'
+
+    function tool(name: string) {
+      process.env.CLERUM_OUTPUT_DIR = outputDir
+      const registry = new NativeToolRegistry(
+        {
+          workspacePath: outputDir,
+          shellTimeout: 5000,
+          toolTimeout: 60000,
+          toolProgressInterval: 30000,
+          httpAllowlist: [],
+          envAllowlist: ['PATH'],
+          memoryMaxSize: 1048576,
+        },
+        'conv-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        null,
+        {
+          maxBytes: 52_428_800,
+          secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: protectedValue }],
+        }
+      )
+      return registry.get(name)!
+    }
+
+    function packageXml(file: string): string {
+      return [...zipEntries(file)]
+        .filter(([name]) => name.endsWith('.xml'))
+        .map(([, data]) => data.toString('utf8'))
+        .join('\n')
+    }
+
+    it.each([
+      ['grouped digits under an integer format', '3,141,592,653', { Amount: '0' }],
+      ['an amount of money', '$3,141,592,653', undefined],
+    ])(
+      'does not attach a sheet that stores %s as the protected digits',
+      async (_label, cell, formats) => {
+        const result = await tool('clerum__generate_xlsx').execute({
+          filename: 'stored.xlsx',
+          sheets: [
+            {
+              name: 'S',
+              rows: [['Amount'], [cell]],
+              ...(formats ? { columnFormats: formats } : {}),
+            },
+          ],
+        })
+        expect(result.is_error).toBe(false)
+        // Witness: the sheet holds, as a number, digits the arguments never spelled.
+        expect(packageXml(path.join(outputDir, 'stored.xlsx'))).toContain(
+          `<v>${protectedValue}</v>`
+        )
+        expect(result.attachments ?? []).toHaveLength(0)
+      }
+    )
+
+    it('attaches a sheet whose stored numbers hold no secret', async () => {
+      const result = await tool('clerum__generate_xlsx').execute({
+        filename: 'ordinary.xlsx',
+        sheets: [{ name: 'S', rows: [['Amount'], ['1,234']], columnFormats: { Amount: '0' } }],
+      })
+      expect(result.is_error).toBe(false)
+      expect(packageXml(path.join(outputDir, 'ordinary.xlsx'))).toContain('<v>1234</v>')
+      expect(result.attachments ?? []).toHaveLength(1)
+    })
+
+    it('does not attach a deck whose chart stores grouped digits as the protected value', async () => {
+      const deck = (data: string[]) => ({
+        filename: 'chart.pptx',
+        slides: [
+          {
+            layout: 'title-chart',
+            title: 'Revenue',
+            chart: { type: 'bar', labels: ['A'], datasets: [{ label: 'S', data }] },
+          },
+        ],
+      })
+      const leaked = await tool('clerum__generate_pptx').execute(deck(['3,141,592,653']))
+      expect(leaked.is_error).toBe(false)
+      expect(packageXml(path.join(outputDir, 'chart.pptx'))).toContain(protectedValue)
+      expect(leaked.attachments ?? []).toHaveLength(0)
+
+      const ordinary = await tool('clerum__generate_pptx').execute(deck(['1,234']))
+      expect(ordinary.is_error).toBe(false)
+      expect(ordinary.attachments ?? []).toHaveLength(1)
     })
   })
 

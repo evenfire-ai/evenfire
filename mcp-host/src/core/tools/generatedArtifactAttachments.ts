@@ -5,6 +5,8 @@ import {
   redactArtifactForDelivery,
 } from '../../artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from '../../artifacts/artifactRedaction'
+import { officePackageHasText } from '../../artifacts/officePackageText'
+import { logger } from '../../logger'
 import {
   ArtifactPathError,
   isSafeArtifactFilename,
@@ -29,6 +31,13 @@ export const INTERNAL_GENERATED_ARTIFACT_FORMAT_BY_TOOL: ReadonlyMap<
   ['clerum__generate_pptx', 'pptx'],
   ['clerum__generate_chart', 'png'],
 ] as const)
+
+/** Zip packages of XML parts, whose delivered text can be read back. */
+const OFFICE_PACKAGE_FORMATS: ReadonlySet<InternalGeneratedArtifactFormat> = new Set([
+  'docx',
+  'xlsx',
+  'pptx',
+])
 
 export const INTERNAL_GENERATED_ARTIFACT_MIME_BY_FORMAT: ReadonlyMap<
   InternalGeneratedArtifactFormat,
@@ -87,9 +96,15 @@ function closeFd(fd: number): void {
 }
 
 function warnSkip(reason: string, sourceTool: string, artifact: ArtifactMetadata): void {
-  console.warn(
-    `[GeneratedArtifactAttachment] Skipping artifact attachment: reason=${reason}, ` +
-      `tool=${sourceTool}, format=${artifact.format}, filename=${artifact.name}`
+  logger.warn(
+    {
+      component: 'GeneratedArtifactAttachment',
+      reason,
+      tool: sourceTool,
+      format: artifact.format,
+      filename: artifact.name,
+    },
+    'Skipping artifact attachment'
   )
 }
 
@@ -202,8 +217,9 @@ export function buildGeneratedArtifactAttachment(
     const fileBuffer = readOpenedArtifactBuffer(opened, params.maxBytes)
     const secretEntries = params.secretEntriesProvider?.() ?? []
     if (isBinaryArtifactFormat(expectedFormat)) {
-      // Binary artifacts are not redacted byte-by-byte here. Trust is limited to
-      // native generator provenance plus the source payload that produced them.
+      // Binary artifacts are not redacted byte-by-byte here, so one that may
+      // hold a secret is withheld: when the source payload that produced it
+      // holds one, and, for an Office package, when the text it delivers does.
       if (secretEntries.length > 0 && params.sourcePayload === undefined) {
         warnSkip('binary_source_payload_unavailable', params.sourceTool, params.artifact)
         return null
@@ -211,6 +227,22 @@ export function buildGeneratedArtifactAttachment(
       if (sourcePayloadContainsRedactableSecretEntry(params.sourcePayload, secretEntries)) {
         warnSkip('binary_redaction_unavailable', params.sourceTool, params.artifact)
         return null
+      }
+      // A generator can write a value in a form the payload never spelled, as
+      // a sheet stores the text "3,141,592,653" as the number 3141592653, so
+      // the package is read as delivered. One that cannot be read is withheld.
+      if (secretEntries.length > 0 && OFFICE_PACKAGE_FORMATS.has(expectedFormat)) {
+        const found = officePackageHasText(fileBuffer, text =>
+          textContainsRedactableSecretEntry(text, secretEntries)
+        )
+        if (found !== false) {
+          warnSkip(
+            found ? 'binary_redaction_unavailable' : 'office_package_unreadable',
+            params.sourceTool,
+            params.artifact
+          )
+          return null
+        }
       }
     }
     const redacted = redactArtifactForDelivery(expectedFormat, fileBuffer, secretEntries)
