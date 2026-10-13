@@ -1512,72 +1512,49 @@ export function FilesPage({
     setManageOpen(true)
   }
 
-  const currentResourceActions = useMemo(
-    () =>
-      current
-        ? buildGfsResourceActions({
-            kind: current.kind,
-            uri: current.gfsUri,
-            handlers: {
-              refresh: () => void handleRefreshCurrent(),
-              'copy-link': () => void handleCopyLink(current.gfsUri),
-              'copy-route': () => void handleCopyRoute(current.gfsUri),
-              'open-route': () => setOpenLinkOpen(true),
-              rename: () => openRenameTarget(current),
-              move: () => setMoveTarget(current),
-              'new-folder': () => openCreateFolder(),
-              'upload-file': () => uploadInputRef.current?.click(),
-              share: () => openManageCurrent(),
-              preview:
-                currentIsFile && currentPreviewAvailable
-                  ? () => void openFilePreview(current)
-                  : undefined,
-              download: currentIsFile
-                ? () => void handleDownload(current.gfsUri, current.name)
-                : undefined,
-              replace:
-                currentIsFile && canWriteCurrent
-                  ? (file, context) => {
-                      if (file) void handleReplaceCurrentFile(file)
-                      else context?.requestFileSelection?.()
-                    }
-                  : undefined,
-              delete: () => setDeleteTarget(current),
-            },
-            canRename: canWriteCurrent,
-            canMove: !accessRevoked,
-            canCreateFolder: currentIsFolder && canWriteCurrent,
-            canUpload: currentIsFolder && canWriteCurrent,
-            canShare: canManageCurrent,
-            canPreview: currentPreviewAvailable,
-            canDownload: currentIsFile,
-            canReplace: currentIsFile && canWriteCurrent,
-            canDelete: canDeleteCurrent,
-            mutating: ctrl.mutating,
-            refreshing: refreshingCurrent,
-          })
-        : [],
-    [
-      accessRevoked,
-      canDeleteCurrent,
-      canManageCurrent,
-      canWriteCurrent,
-      ctrl.mutating,
-      current,
-      currentIsFolder,
-      handleCopyLink,
-      handleCopyRoute,
-      handleRefreshCurrent,
-      handleDownload,
-      currentIsFile,
-      currentPreviewAvailable,
-      openCreateFolder,
-      openFilePreview,
-      openManageCurrent,
-      openRenameTarget,
-      refreshingCurrent,
-    ]
-  )
+  const currentResourceActions = current
+    ? buildGfsResourceActions({
+        kind: current.kind,
+        uri: current.gfsUri,
+        handlers: {
+          refresh: () => void handleRefreshCurrent(),
+          'copy-link': () => void handleCopyLink(current.gfsUri),
+          'copy-route': () => void handleCopyRoute(current.gfsUri),
+          'open-route': () => setOpenLinkOpen(true),
+          rename: () => openRenameTarget(current),
+          move: () => setMoveTarget(current),
+          'new-folder': () => openCreateFolder(),
+          'upload-file': () => uploadInputRef.current?.click(),
+          share: () => openManageCurrent(),
+          preview:
+            currentIsFile && currentPreviewAvailable
+              ? () => void openFilePreview(current)
+              : undefined,
+          download: currentIsFile
+            ? () => void handleDownload(current.gfsUri, current.name)
+            : undefined,
+          replace:
+            currentIsFile && canWriteCurrent
+              ? (file, context) => {
+                  if (file) void handleReplaceCurrentFile(file)
+                  else context?.requestFileSelection?.()
+                }
+              : undefined,
+          delete: () => setDeleteTarget(current),
+        },
+        canRename: canWriteCurrent,
+        canMove: !accessRevoked,
+        canCreateFolder: currentIsFolder && canWriteCurrent,
+        canUpload: currentIsFolder && canWriteCurrent,
+        canShare: canManageCurrent,
+        canPreview: currentPreviewAvailable,
+        canDownload: currentIsFile,
+        canReplace: currentIsFile && canWriteCurrent,
+        canDelete: canDeleteCurrent,
+        mutating: ctrl.mutating,
+        refreshing: refreshingCurrent,
+      })
+    : []
 
   const openResource = (resource: GfsDriveResource) => {
     // The children listing marks rows the session cannot read (e.g. a folder
