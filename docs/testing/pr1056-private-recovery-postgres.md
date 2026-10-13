@@ -1,0 +1,38 @@
+# PR #1056 private password-recovery integration lane
+
+Public CI excludes the two cross-service recovery suites because they require the
+real Member Registration producer and isolated PostgreSQL databases. The public
+PostgreSQL job checks that both pinned suite files exist before excluding them;
+that check proves suite discoverability, not producer execution.
+
+Run the producer-backed lane from the Evenfire repository root:
+
+```sh
+scripts/ci/run-pr1056-private-recovery-postgres.sh local
+scripts/ci/run-pr1056-private-recovery-postgres.sh configured
+scripts/ci/run-pr1056-private-recovery-postgres.sh all
+```
+
+`local` runs `control-api/test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts`.
+It requires an isolated PostgreSQL 16 admin DSN in `CONTROL_API_REAL_PG_ADMIN_URL`,
+the Member Registration source checkout in `EVENFIRE_MEMBER_REGISTRATION_ROOT`,
+and that checkout's installed `tsx` dependencies. The suite creates temporary
+control and producer databases and launches the real local Member Registration
+service. Use a disposable local PostgreSQL instance only.
+
+`configured` runs `control-api/test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts`.
+It requires `CONTROL_API_REAL_PG_ADMIN_URL`,
+`CONTROL_API_REAL_MEMBER_REGISTRATION_PG_URL`,
+`CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL`, and
+`CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET`. The service URL and HMAC must refer
+to a real authorized Member Registration producer and its real PostgreSQL data.
+The test creates a temporary Control API database and observes the configured
+producer database; it does not start or replace that producer.
+
+`all` runs both modes sequentially and requires both sets of prerequisites. The
+runner verifies each exact suite file, requires at least one passing test, and
+fails if Vitest reports skipped tests. It does not print environment values.
+Do not substitute mocked producer responses for either suite. If a mode's
+producer, database, credentials, or service dependencies are unavailable, report
+that mode as **NOT VERIFIED** rather than treating the public CI exclusion check
+as execution evidence.
