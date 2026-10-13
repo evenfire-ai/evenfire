@@ -1266,6 +1266,7 @@ export function useAgentChatController({
       beginSelectionIntent,
       getSelectionIntentRevision: () => selectionIntentRevisionRef.current,
       clearPendingSelection,
+      clearActiveChat,
       scrollChatToBottom,
       dispatchSession,
       clearComposerDraft,

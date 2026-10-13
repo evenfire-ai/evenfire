@@ -23,8 +23,16 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   const handleRenameChat = useStableCallback(vm.handleRenameChat)
   const handleRenameChatForAgent = useStableCallback(vm.handleRenameChatForAgent)
   const captureChatDeleteFence = useStableCallback(vm.captureChatDeleteFence)
-  const handleDeleteChat = useStableCallback(vm.handleDeleteChat)
-  const handleDeleteChatForAgent = useStableCallback(vm.handleDeleteChatForAgent)
+  const handleDeleteChat = useStableCallback(
+    async (...args: Parameters<AppVm['handleDeleteChat']>) => {
+      await vm.handleDeleteChat(...args).catch(() => undefined)
+    }
+  )
+  const handleDeleteChatForAgent = useStableCallback(
+    async (...args: Parameters<AppVm['handleDeleteChatForAgent']>) => {
+      await vm.handleDeleteChatForAgent(...args).catch(() => undefined)
+    }
+  )
   const handleSelectChat = useStableCallback(vm.handleSelectChat)
   const clearComposerSendError = useStableCallback(vm.clearComposerSendError)
   const handleAddComposerImageAttachments = useStableCallback(vm.handleAddComposerImageAttachments)
