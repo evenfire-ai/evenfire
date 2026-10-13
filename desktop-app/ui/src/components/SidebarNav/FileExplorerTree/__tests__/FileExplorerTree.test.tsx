@@ -366,12 +366,11 @@ describe('FileExplorerTree — resource action menus', () => {
       affordances: vi.fn(async () => resourceAffordances(['read', 'delete'])),
     })
     const user = userEvent.setup()
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     function DialogHarness() {
       const [dialogOpen, setDialogOpen] = useState(false)
       return (
-        <QueryClientProvider
-          client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
-        >
+        <QueryClientProvider client={queryClient}>
           <FileExplorerTree
             onOpenFolder={vi.fn()}
             onOpenPreview={vi.fn()}
