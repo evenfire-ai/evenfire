@@ -7,6 +7,7 @@ const path = require('node:path')
 const test = require('node:test')
 const zlib = require('node:zlib')
 const contract = require('./index.cjs')
+const visualPayload = require('./visualPayload.cjs')
 const {
   declaredHeaderPng,
   declaredHeaderPngOfSize,
@@ -459,21 +460,16 @@ test('T-E2 the element bound reports itself distinctly from the byte bound', () 
   // maxRequestBodyBytes` therefore could not say which one fired. Compaction is the remedy either way;
   // the distinct wording buys diagnosis, not a different fix (#731).
   //
-  // What makes the two guards separable here is ORDER, not size:
-  // `checkStructure` runs before `JSON.stringify`, so the element count is
-  // refused first. The payload below is also ~3x the byte cap once serialized
-  // — by construction it has to be, since more elements than the byte cap
-  // cannot encode under it — so without that ordering the byte bound would
-  // claim it and this test would be pinning the wrong guard.
+  // The shape fits the byte bound; only the element count refuses it.
   const refused = contract.parseCodexCompletionRequestV1({
     ...BASE,
-    messages: new Array(contract.LIMITS.maxRequestBodyBytes + 1).fill({}),
+    messages: new Array(contract.LIMITS.maxRequestElements + 1).fill(0),
   })
   assert.deepEqual(refused, {
     ok: false,
     code: 'limit',
     kind: 'size',
-    message: 'request exceeds maxRequestBodyBytes element bound',
+    message: 'request exceeds maxRequestElements',
   })
 })
 
@@ -717,6 +713,74 @@ test('v2 fixture png is a real image: real CRCs and an inflatable scanline strea
   assert.equal(raw.length, height * (1 + width * 3))
   for (let row = 0; row < height; row++) {
     assert.equal(raw[row * (1 + width * 3)], 0, `scanline ${row} filter byte`)
+  }
+})
+
+test('visualPayload: marker-fill and IHDR-length edges return exact verdicts', () => {
+  const u32 = value => [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255]
+  // CRCs are zero because this corpus tests container structure, not pixel decoding.
+  const chunk = (type, data = []) => [...u32(data.length), ...Buffer.from(type, 'latin1'), ...data, 0, 0, 0, 0]
+  const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+  const SOI = [0xff, 0xd8]
+  const EOI = [0xff, 0xd9]
+  const sof = [
+    0xff, 0xc0, 0x00, 0x11, 0x08, 0, 6, 0, 8,
+    0x03, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0,
+  ]
+  const sos = [0xff, 0xda, 0x00, 0x0c, 0x03, 1, 0, 2, 0x11, 3, 0x11, 0x00, 0x3f, 0x00]
+  const jpegWithPrefix = prefix => [...SOI, ...prefix, ...sof, ...sos, 0x12, 0x34, ...EOI]
+  const invalid = message => ({ ok: false, code: 'invalid', message })
+  const accepted = (bytes, width, height) => ({ ok: true, value: { bytes, width, height } })
+  const jpegLength = jpegWithPrefix([]).length
+  const corpus = [
+    ['legal FF FF fill before a marker', 'image/jpeg', jpegWithPrefix([0xff, 0xff]), accepted(jpegLength + 2, 8, 6)],
+    ['standalone temporary marker', 'image/jpeg', jpegWithPrefix([0xff, 0x01]), accepted(jpegLength + 2, 8, 6)],
+    ['standalone restart marker 7', 'image/jpeg', jpegWithPrefix([0xff, 0xd7]), accepted(jpegLength + 2, 8, 6)],
+    [
+      'malformed 14-byte IHDR',
+      'image/png',
+      [
+        ...SIG,
+        ...chunk('IHDR', [...u32(3), ...u32(2), 8, 6, 0, 0, 0, 0]),
+        ...chunk('IDAT', [0x78, 0x9c]),
+        ...chunk('IEND'),
+      ],
+      invalid('PNG first chunk must be a 13-byte IHDR'),
+    ],
+    // Eight or more bytes with one wrong signature byte and otherwise valid
+    // chunks: the signature check alone must refuse it.
+    [
+      'wrong last PNG signature byte',
+      'image/png',
+      [
+        ...SIG.slice(0, 7),
+        0x0b,
+        ...chunk('IHDR', [...u32(3), ...u32(2), 8, 6, 0, 0, 0]),
+        ...chunk('IDAT', [0x78, 0x9c]),
+        ...chunk('IEND'),
+      ],
+      invalid('PNG signature is missing'),
+    ],
+    // SOF length boundary: 7 is one byte short of length+P+Y+X+Nf, 8 is the minimum.
+    [
+      '7-byte JPEG frame header',
+      'image/jpeg',
+      [...SOI, 0xff, 0xc0, 0x00, 0x07, 0x08, 0x00, 0x06, 0x00, 0x08, ...sos, 0x12, 0x34, ...EOI],
+      invalid('JPEG frame header is truncated'),
+    ],
+    [
+      '8-byte JPEG frame header is the minimum accepted',
+      'image/jpeg',
+      [...SOI, 0xff, 0xc0, 0x00, 0x08, 0x08, 0x00, 0x06, 0x00, 0x08, 0x01, ...sos, 0x12, 0x34, ...EOI],
+      accepted(2 + 10 + 14 + 2 + 2, 8, 6),
+    ],
+  ]
+  for (const [name, mimeType, bytes, expected] of corpus) {
+    assert.deepEqual(
+      visualPayload.inspectVisualImage({ mimeType, data: Buffer.from(bytes).toString('base64') }),
+      expected,
+      name
+    )
   }
 })
 
@@ -1060,24 +1124,28 @@ test('v2 visual budgets are request-scoped across messages: twenty small images 
 })
 
 /**
- * The request with every image payload replaced by an empty string — the
- * non-image share the V2 budget is defined on. Used to find an exact boundary;
- * the assertions below always check the contract's verdict, not this helper.
+ * The request with every image payload replaced by an empty string, and the
+ * text parts blanked where they repeat `content` — the non-image share the V2
+ * budget is defined on. Used to find an exact boundary; the assertions below
+ * always check the contract's verdict, not this helper.
  */
 function nonImageBytes(request) {
   return Buffer.byteLength(
     JSON.stringify({
       ...request,
-      messages: request.messages.map(message =>
-        Array.isArray(message.contentParts)
-          ? {
-              ...message,
-              contentParts: message.contentParts.map(part =>
-                part.type === 'image' ? { ...part, data: '' } : part
-              ),
-            }
-          : message
-      ),
+      messages: request.messages.map(message => {
+        if (!Array.isArray(message.contentParts)) return message
+        const texts = message.contentParts.filter(part => part.type === 'text').map(part => part.text)
+        const repeatsContent = texts.join('\n') === message.content
+        return {
+          ...message,
+          contentParts: message.contentParts.map(part => {
+            if (part.type === 'image') return { ...part, data: '' }
+            if (repeatsContent && part.type === 'text') return { ...part, text: '' }
+            return part
+          }),
+        }
+      }),
     }),
     'utf8'
   )
@@ -1156,7 +1224,7 @@ test('v2 preserves the non-image budget: text and tools stay on the maxRequestBo
     v2WithParts([image, { type: 'text', text: 'z'.repeat(length) }], 'z'.repeat(length))
   const base = nonImageBytes(withImageAndText(0))
   const growth = (nonImageBytes(withImageAndText(10)) - base) / 10
-  assert.equal(growth, 2, 'content and its text part both carry the payload')
+  assert.equal(growth, 1, 'the text part repeats content and is counted once')
   const exactLength = Math.floor((maxRequestBodyBytes - base) / growth)
   const boundary = nonImageBytes(withImageAndText(exactLength))
   assert.ok(
@@ -1178,6 +1246,190 @@ test('v2 preserves the non-image budget: text and tools stay on the maxRequestBo
     nonImageBytes(withImageAndText(exactLength + 1)) > maxRequestBodyBytes,
     'the rejection is the non-image budget, not another gate'
   )
+})
+
+// Review R3-L3: a V2 user message carries its text twice, in `content` and in
+// its text parts, and the parser requires their '\n' join to equal `content`.
+// The non-image share counts that text once, as a V1 request would.
+function textAndImage(text) {
+  return v2WithParts([{ type: 'text', text }, imagePart(IMAGE_DATA.png)], text)
+}
+
+const AUTHORIZE_WRAPPER_BYTES =
+  Buffer.byteLength(JSON.stringify({ request: null }), 'utf8') - Buffer.byteLength('null', 'utf8')
+
+/** The non-image share of `request` as the contract measures it. */
+function nonImageShare(request) {
+  return contract.measureNonImageAuthorizeBytes({ request }) - AUTHORIZE_WRAPPER_BYTES
+}
+
+/**
+ * `request` serialized with image data blanked and, when `blankText`, the text
+ * of its text parts blanked too: the two measurements the share can take.
+ */
+function shadowBytes(request, blankText) {
+  return Buffer.byteLength(
+    JSON.stringify({
+      ...request,
+      messages: request.messages.map(message =>
+        Array.isArray(message.contentParts)
+          ? {
+              ...message,
+              contentParts: message.contentParts.map(part => {
+                if (part?.type === 'image') return { ...part, data: '' }
+                if (blankText && part?.type === 'text') return { ...part, text: '' }
+                return part
+              }),
+            }
+          : message
+      ),
+    }),
+    'utf8'
+  )
+}
+
+const TEXT_OVERFLOW = {
+  ok: false,
+  code: 'limit',
+  kind: 'size',
+  message: 'request exceeds maxRequestBodyBytes outside image data',
+}
+
+const PARTS_MISMATCH = index => ({
+  ok: false,
+  code: 'invalid',
+  message: `messages[${index}].content must equal the text parts joined by '\\n'`,
+})
+
+test('R3-L3 the non-image share counts text repeated in content and its parts once', () => {
+  const growth = (nonImageShare(textAndImage('z'.repeat(10))) - nonImageShare(textAndImage(''))) / 10
+  assert.equal(growth, 1)
+  const request = textAndImage('look')
+  assert.equal(nonImageShare(request), shadowBytes(request, true))
+  assert.ok(nonImageShare(request) < shadowBytes(request, false))
+})
+
+test('R3-L3 a 4.5 MiB prompt beside an image is accepted, as the same prompt is in V1', () => {
+  const { maxRequestBodyBytes } = contract.LIMITS
+  const text = 'x'.repeat(4.5 * MIB)
+  const v1 = { ...BASE, messages: [{ role: 'user', content: text }] }
+  const v1Parsed = contract.parseCodexCompletionRequest(v1)
+  assert.equal(v1Parsed.ok, true, v1Parsed.message)
+
+  const v2 = textAndImage(text)
+  assert.ok(shadowBytes(v2, false) > maxRequestBodyBytes, 'counted twice, the prompt is over the budget')
+  const parsed = contract.parseCodexCompletionRequest(v2)
+  assert.equal(parsed.ok, true, parsed.message)
+  assert.equal(parsed.value.messages[0].content, text)
+  assert.equal(parsed.value.messages[0].contentParts[0].text, text)
+
+  // The authorize and completion helpers take the same share.
+  assert.ok(
+    contract.measureNonImageAuthorizeBytes({ request: v2, invocationId: 'invocation-1' }) <=
+      maxRequestBodyBytes
+  )
+  assert.ok(
+    contract.measureNonImageCompletionBytes({
+      request: v2,
+      requestHash: 'a'.repeat(64),
+      executionTicket: `header.${'a'.repeat(2048)}.sig`,
+    }) <= maxRequestBodyBytes
+  )
+  // The measurement works on a detached copy.
+  assert.equal(v2.messages[0].contentParts[0].text, text)
+  assert.equal(v2.messages[0].contentParts[1].data, IMAGE_DATA.png)
+})
+
+test('R3-L3 exact boundary: the largest text beside an image is accepted and one byte more is refused', () => {
+  const { maxRequestBodyBytes } = contract.LIMITS
+  const length = maxRequestBodyBytes - shadowBytes(textAndImage(''), true)
+  const atLimit = textAndImage('x'.repeat(length))
+  assert.equal(nonImageShare(atLimit), maxRequestBodyBytes)
+  assert.ok(shadowBytes(atLimit, false) > maxRequestBodyBytes, 'counted twice, this body was refused')
+  const accepted = contract.parseCodexCompletionRequest(atLimit)
+  assert.equal(accepted.ok, true, accepted.message)
+  const over = textAndImage('x'.repeat(length + 1))
+  assert.equal(nonImageShare(over), maxRequestBodyBytes + 1)
+  assert.deepEqual(contract.parseCodexCompletionRequest(over), TEXT_OVERFLOW)
+})
+
+test('R3-L3 text parts that do not repeat content keep both copies in the share and are refused', () => {
+  const text = 'x'.repeat(4.5 * MIB)
+  // Same length, one character different: counted twice, over the budget.
+  assert.deepEqual(
+    contract.parseCodexCompletionRequest(v2WithParts([{ type: 'text', text }, imagePart(IMAGE_DATA.png)], `${text.slice(1)}y`)),
+    TEXT_OVERFLOW
+  )
+  const image = imagePart(IMAGE_DATA.png)
+  const mismatches = [
+    ['different text', [{ type: 'text', text: 'look' }, image], 'lock'],
+    ['swapped parts', [{ type: 'text', text: 'b' }, image, { type: 'text', text: 'a' }], 'a\nb'],
+    ['joined without the separator', [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }, image], 'ab'],
+    ['a trailing separator', [{ type: 'text', text: 'a' }, image], 'a\n'],
+    ['content without text parts', [image], 'look'],
+    ['text parts with empty content', [{ type: 'text', text: 'look' }, image], ''],
+  ]
+  for (const [label, parts, content] of mismatches) {
+    const request = v2WithParts(parts, content)
+    assert.equal(nonImageShare(request), shadowBytes(request, false), label)
+    assert.deepEqual(contract.parseCodexCompletionRequest(request), PARTS_MISMATCH(0), label)
+  }
+  // Malformed messages are measured as sent, never throw, and the parser
+  // refuses them.
+  const malformed = [
+    ['a non-string text part', [{ type: 'text', text: 7 }, image], '7'],
+    ['a non-object part beside a matching text part', ['junk', { type: 'text', text: 'look' }, image], 'look'],
+    ['a non-string content', [{ type: 'text', text: 'look' }, image], 7],
+  ]
+  for (const [label, parts, content] of malformed) {
+    const request = v2WithParts(parts, content)
+    assert.equal(nonImageShare(request), shadowBytes(request, false), label)
+    const parsed = contract.parseCodexCompletionRequest(request)
+    assert.equal(parsed.ok, false, label)
+    assert.equal(parsed.code, 'invalid', label)
+  }
+})
+
+test('R3-L3 multi-part and multi-message requests count each matching message once', () => {
+  const { maxRequestBodyBytes } = contract.LIMITS
+  const multiPart = v2WithParts(
+    [
+      { type: 'text', text: 'a' },
+      imagePart(IMAGE_DATA.png),
+      { type: 'text', text: 'b' },
+      imagePart(IMAGE_DATA.jpeg, 'image/jpeg'),
+      { type: 'text', text: '' },
+    ],
+    'a\nb\n'
+  )
+  assert.equal(nonImageShare(multiPart), shadowBytes(multiPart, true))
+  const multiPartParsed = contract.parseCodexCompletionRequest(multiPart)
+  assert.equal(multiPartParsed.ok, true, multiPartParsed.message)
+
+  const turn = content => ({
+    role: 'user',
+    content,
+    contentParts: [{ type: 'text', text: content }, imagePart(IMAGE_DATA.png)],
+  })
+  const text = 'x'.repeat(3 * MIB)
+  const twoTurns = v2WithMessages([turn(text), { role: 'assistant', content: 'ok' }, turn(text)])
+  assert.ok(shadowBytes(twoTurns, false) > maxRequestBodyBytes, 'counted twice, the history is over the budget')
+  assert.equal(nonImageShare(twoTurns), shadowBytes(twoTurns, true))
+  const twoTurnsParsed = contract.parseCodexCompletionRequest(twoTurns)
+  assert.equal(twoTurnsParsed.ok, true, twoTurnsParsed.message)
+
+  // Each message is judged on its own: the mismatched turn keeps its text.
+  const mismatched = { role: 'user', content: 'lock', contentParts: [{ type: 'text', text: 'look' }, imagePart(IMAGE_DATA.png)] }
+  const mixed = v2WithMessages([turn('look'), mismatched])
+  const expected = {
+    ...mixed,
+    messages: [
+      { ...turn('look'), contentParts: [{ type: 'text', text: '' }, imagePart('')] },
+      { ...mismatched, contentParts: [{ type: 'text', text: 'look' }, imagePart('')] },
+    ],
+  }
+  assert.equal(nonImageShare(mixed), Buffer.byteLength(JSON.stringify(expected), 'utf8'))
+  assert.deepEqual(contract.parseCodexCompletionRequest(mixed), PARTS_MISMATCH(1))
 })
 
 test('v2 total budget: the raw body is capped at 24 MiB and the three budgets stay consistent', () => {
@@ -1775,4 +2027,313 @@ test('frozen Codex fixture corpus hashes identically through hashCanonicalCodexR
   for (const fixture of FIXTURE.rejects) {
     assert.equal(contract.hashCanonicalCodexRequest(fixture.request).ok, false, fixture.name)
   }
+})
+
+// A8: JSON.parse allocates one heap object per container, so a body can fit
+// every byte bound and still exhaust the proxy heap. The contract bounds the
+// container count of a request, and codex-llm-proxy and control-api scan the
+// raw body against the same bound before JSON.parse runs. The scan's own
+// behaviour is tested in the Grok contract; bodyStructure.cjs is the same
+// file in both packages, which the test below enforces.
+
+/** Containers (objects and arrays) in a parsed value, the root included. */
+function countContainers(value) {
+  let containers = 0
+  const stack = [value]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === null || typeof node !== 'object') continue
+    containers++
+    for (const child of Object.values(node)) stack.push(child)
+  }
+  return containers
+}
+
+/** A valid request holding exactly `target` containers. */
+function requestWithContainers(target) {
+  const filler = []
+  const request = {
+    ...BASE,
+    tools: [{ name: 'crm__export', description: 'd', parameters: { type: 'object', filler } }],
+  }
+  for (let count = countContainers(request); count < target; count++) filler.push([])
+  assert.equal(countContainers(request), target)
+  return request
+}
+
+test('LIMITS.maxRequestContainers is pinned', () => {
+  assert.equal(contract.LIMITS.maxRequestContainers, 262144)
+})
+
+// Only the refusal fields are compared, so a regression that accepts the
+// request fails with a short diff instead of inspecting a value that holds
+// hundreds of thousands of containers.
+function refusalOf(result) {
+  return { ok: result.ok, code: result.code, kind: result.kind, message: result.message }
+}
+
+test("a request over maxRequestContainers is refused with kind:'size'", () => {
+  const limit = contract.LIMITS.maxRequestContainers
+  const at = requestWithContainers(limit)
+  assert.equal(contract.parseCodexCompletionRequest(at).ok, true)
+  assert.equal(contract.hashCanonicalCodexRequest(at).ok, true)
+  const expected = {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestContainers',
+  }
+  const over = requestWithContainers(limit + 1)
+  assert.ok(Buffer.byteLength(JSON.stringify(over), 'utf8') < contract.LIMITS.maxRequestBodyBytes)
+  assert.deepEqual(refusalOf(contract.parseCodexCompletionRequest(over)), expected)
+  assert.deepEqual(refusalOf(contract.hashCanonicalCodexRequest(over)), expected)
+  assert.deepEqual(
+    refusalOf(contract.parseCodexCompletionRequest({ ...over, schemaVersion: 'codex-completion-request.v2' })),
+    expected
+  )
+})
+
+/** Object members in a parsed value, over every object in the tree. */
+function countMembers(value) {
+  let members = 0
+  const stack = [value]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === null || typeof node !== 'object') continue
+    if (!Array.isArray(node)) members += Object.keys(node).length
+    for (const child of Object.values(node)) stack.push(child)
+  }
+  return members
+}
+
+/** A valid request holding exactly `target` object members. */
+function requestWithMembers(target) {
+  const filler = {}
+  const request = {
+    ...BASE,
+    tools: [{ name: 'crm__export', description: 'd', parameters: { type: 'object', properties: filler } }],
+  }
+  for (let count = countMembers(request); count < target; count++) {
+    filler[`m${String(count).padStart(7, '0')}`] = 0
+  }
+  assert.equal(countMembers(request), target)
+  return request
+}
+
+test('LIMITS.maxRequestMembers is pinned', () => {
+  assert.equal(contract.LIMITS.maxRequestMembers, 262144)
+})
+
+/** Count JSON values independently of the contract's structural pre-check. */
+function countElements(value) {
+  let elements = 1
+  const stack = [value]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === null || typeof node !== 'object') continue
+    const children = Array.isArray(node) ? node : Object.values(node)
+    elements += children.length
+    for (const child of children) if (child !== null && typeof child === 'object') stack.push(child)
+  }
+  return elements
+}
+
+function requestWithElements(target) {
+  const filler = []
+  const request = {
+    ...BASE,
+    tools: [{ name: 'crm__export', description: 'd', parameters: { type: 'object', enum: filler } }],
+  }
+  filler.length = target - countElements(request)
+  filler.fill(0)
+  assert.equal(countElements(request), target)
+  return request
+}
+
+test('LIMITS.maxRequestElements is pinned', () => {
+  assert.equal(contract.LIMITS.maxRequestElements, 1048576)
+})
+
+test("a request over maxRequestElements is refused with kind:'size'", () => {
+  const limit = contract.LIMITS.maxRequestElements
+  const at = requestWithElements(limit)
+  assert.equal(contract.parseCodexCompletionRequest(at).ok, true)
+  assert.equal(contract.hashCanonicalCodexRequest(at).ok, true)
+  const over = requestWithElements(limit + 1)
+  assert.ok(Buffer.byteLength(JSON.stringify(over), 'utf8') < contract.LIMITS.maxRequestBodyBytes)
+  const expected = {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestElements',
+  }
+  assert.deepEqual(refusalOf(contract.parseCodexCompletionRequest(over)), expected)
+  assert.deepEqual(refusalOf(contract.hashCanonicalCodexRequest(over)), expected)
+  assert.deepEqual(
+    refusalOf(contract.parseCodexCompletionRequest({ ...over, schemaVersion: 'codex-completion-request.v2' })),
+    expected
+  )
+})
+
+test("a request over maxRequestMembers is refused with kind:'size'", () => {
+  const limit = contract.LIMITS.maxRequestMembers
+  const at = requestWithMembers(limit)
+  assert.equal(contract.parseCodexCompletionRequest(at).ok, true)
+  assert.equal(contract.hashCanonicalCodexRequest(at).ok, true)
+  const expected = {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestMembers',
+  }
+  const over = requestWithMembers(limit + 1)
+  // The refusal is the member bound, not a byte bound.
+  assert.ok(Buffer.byteLength(JSON.stringify(over), 'utf8') < contract.LIMITS.maxRequestBodyBytes)
+  assert.deepEqual(refusalOf(contract.parseCodexCompletionRequest(over)), expected)
+  assert.deepEqual(refusalOf(contract.hashCanonicalCodexRequest(over)), expected)
+  assert.deepEqual(
+    refusalOf(contract.parseCodexCompletionRequest({ ...over, schemaVersion: 'codex-completion-request.v2' })),
+    expected
+  )
+})
+
+test('bodyStructure.cjs is byte-identical in both contract packages', () => {
+  const codex = fs.readFileSync(path.join(__dirname, 'bodyStructure.cjs'))
+  const grok = fs.readFileSync(path.join(__dirname, '../grok-provider-attempt-contract/bodyStructure.cjs'))
+  assert.ok(codex.length > 0)
+  assert.equal(Buffer.compare(codex, grok), 0)
+})
+
+test('BODY_STRUCTURE_LIMITS derive from LIMITS', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  assert.deepEqual(limits, {
+    maxStructuralBytes: contract.LIMITS.maxRequestBodyBytes + contract.ENVELOPE_ALLOWANCE_BYTES,
+    maxContainers: contract.LIMITS.maxRequestContainers + 16,
+    maxDepth: contract.LIMITS.maxNestingDepth + 6,
+    maxMembers: contract.LIMITS.maxRequestMembers + 64,
+    maxElements: contract.LIMITS.maxRequestElements + 64,
+  })
+  assert.deepEqual(limits, {
+    maxStructuralBytes: 8404992,
+    maxContainers: 262160,
+    maxDepth: 70,
+    maxMembers: 262208,
+    maxElements: 1048640,
+  })
+  assert.equal(Object.isFrozen(limits), true)
+})
+
+test('the body scan admits the deepest and the largest request the contract admits', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  const deepest = {
+    ...BASE,
+    messages: [
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'c1', name: 'deep', arguments: nest(contract.LIMITS.maxNestingDepth, 'a') }],
+      },
+    ],
+  }
+  assert.equal(contract.parseCodexCompletionRequest(deepest).ok, true)
+  const deep = Buffer.from(JSON.stringify({ executionTicket: 't', requestHash: 'h', request: deepest }))
+  assert.equal(contract.scanJsonStructure(deep, limits).deepest, limits.maxDepth)
+  const request = requestWithContainers(contract.LIMITS.maxRequestContainers)
+  const wide = Buffer.from(JSON.stringify({ executionTicket: 't', requestHash: 'h', request }))
+  assert.equal(contract.scanJsonStructure(wide, limits).containers, contract.LIMITS.maxRequestContainers + 1)
+})
+
+test('the body scan bounds object members and never counts string contents', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  const atBound = Buffer.from(
+    `{${Array.from({ length: limits.maxMembers }, (_, i) => `"m${i}":0`).join(',')}}`
+  )
+  assert.equal(contract.scanJsonStructure(atBound, limits).members, limits.maxMembers)
+  assert.throws(
+    () =>
+      contract.scanJsonStructure(
+        Buffer.from(`{${Array.from({ length: limits.maxMembers + 1 }, (_, i) => `"m${i}":0`).join(',')}}`),
+        limits
+      ),
+    {
+      name: 'BodyStructureError',
+      status: 413,
+      type: 'body.structure.too.many.members',
+    }
+  )
+  // A colon inside a string is content, not a member.
+  const quoted = Buffer.from(`["${':'.repeat(10)}"]`)
+  assert.equal(contract.scanJsonStructure(quoted, limits).members, 0)
+})
+
+test('the body scan counts values exactly and bounds elements before JSON.parse', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  for (const [json, elements] of [
+    ['{"a":0}', 2],
+    ['[{},{}]', 3],
+    ['[ 0 , "x,[{}]", {"a": [1, 2]} ]', 7],
+    ['{"a\\\"[,": "\\\\,]"}', 2],
+  ]) {
+    assert.equal(contract.scanJsonStructure(Buffer.from(json), limits).elements, elements, json)
+  }
+  const at = Buffer.from(`[${'0,'.repeat(limits.maxElements - 2)}0]`)
+  assert.equal(contract.scanJsonStructure(at, limits).elements, limits.maxElements)
+  const over = Buffer.from(`[${'0,'.repeat(limits.maxElements - 1)}0]`)
+  assert.throws(() => contract.scanJsonStructure(over, limits), {
+    name: 'BodyStructureError',
+    status: 413,
+    type: 'body.structure.too.many.elements',
+  })
+})
+
+test('the body scan treats a container holding only whitespace as empty', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  for (const [json, elements] of [
+    ['[ ]', 1],
+    ['{ \n }', 1],
+    ['[\n]', 1],
+    ['[\t\r\n ]', 1],
+    ['[[ ], { \n }, [\n]]', 4],
+    // Liveness witnesses: a container with a value inside is still counted.
+    ['[ 0 ]', 2],
+    ['{ "a" : 0 }', 2],
+    ['[\n[ ]\n]', 2],
+  ]) {
+    assert.equal(contract.scanJsonStructure(Buffer.from(json), limits).elements, elements, json)
+  }
+  // The element bound sees the same counts: three whitespace-only containers in
+  // an array make 4 values, and a fourth makes 5.
+  const tight = { ...limits, maxElements: 4 }
+  assert.equal(contract.scanJsonStructure(Buffer.from('[[ ],[\n],{ }]'), tight).elements, 4)
+  assert.throws(() => contract.scanJsonStructure(Buffer.from('[[ ],[\n],{ },[]]'), tight), {
+    name: 'BodyStructureError',
+    status: 413,
+    type: 'body.structure.too.many.elements',
+  })
+})
+
+test('the verify hook refuses a charset other than UTF-8 and scans UTF-8 bodies', () => {
+  const verify = contract.createBodyStructureVerify(contract.BODY_STRUCTURE_LIMITS)
+  const body = Buffer.from('{"a":[1]}')
+  assert.throws(() => verify({}, {}, body, 'utf-16le'), {
+    name: 'BodyStructureError',
+    status: 415,
+    type: 'charset.unsupported',
+  })
+  assert.equal(verify({}, {}, body, 'utf-8'), undefined)
+  const deep = Buffer.from('['.repeat(71) + ']'.repeat(71))
+  assert.throws(() => verify({}, {}, deep, 'utf-8'), { status: 400, type: 'body.structure.too.deep' })
+  const wide = Buffer.from(`[${'[],'.repeat(contract.BODY_STRUCTURE_LIMITS.maxContainers)}[]]`)
+  assert.throws(() => verify({}, {}, wide, 'utf-8'), { status: 413, type: 'body.structure.too.many.containers' })
+})
+
+test('the verify hook fails closed unless every bound is a positive safe integer', () => {
+  const good = contract.BODY_STRUCTURE_LIMITS
+  for (const name of ['maxStructuralBytes', 'maxContainers', 'maxDepth', 'maxMembers', 'maxElements']) {
+    for (const value of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => contract.createBodyStructureVerify({ ...good, [name]: value }), TypeError)
+    }
+  }
+  // Liveness witness: the contract's own bounds construct the hook.
+  assert.equal(typeof contract.createBodyStructureVerify(good), 'function')
 })

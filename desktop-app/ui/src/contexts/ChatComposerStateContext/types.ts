@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react'
 import type {
+  ComposerFileAttachment,
+  ComposerFileRefusal,
   ComposerImageAttachment,
   ComposerReferenceAttachment,
   FailedAgentSend,
@@ -14,6 +16,9 @@ import type {
 export interface ChatComposerStateContextValue {
   activeChatId: string | null
   composerImageAttachments: ComposerImageAttachment[]
+  composerFileAttachments: ComposerFileAttachment[]
+  /** Why the documents of the last attach were not attached (#678). */
+  composerFileRefusals: ComposerFileRefusal[]
   composerReferenceAttachments: ComposerReferenceAttachment[]
   agentSending: boolean
   agentError: string | null

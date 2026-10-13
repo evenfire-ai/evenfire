@@ -1,11 +1,9 @@
-import { getCodexSubscriptionConnection } from './codexSubscription'
+import { loadSubscriptionCapabilities } from './subscriptionCapabilities'
 
 export type CodexSubscriptionCapability = {
   enabled: boolean
   error?: string
 }
-
-const DISABLED_CAPABILITY: CodexSubscriptionCapability = { enabled: false }
 
 export function isDisabledCapabilityError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
@@ -14,18 +12,9 @@ export function isDisabledCapabilityError(error: unknown): boolean {
   return status === 404 || code === 'disabled'
 }
 
-/**
- * Control UI default is off. Capability is proven only by a successful
- * Control API connection read — never by a browser-manipulable env var.
- */
 export async function loadCodexSubscriptionCapability(): Promise<CodexSubscriptionCapability> {
-  try {
-    await getCodexSubscriptionConnection()
-    return { enabled: true }
-  } catch (error) {
-    if (isDisabledCapabilityError(error)) return DISABLED_CAPABILITY
-    throw error
-  }
+  const capabilities = await loadSubscriptionCapabilities()
+  return { enabled: capabilities.providers['codex-subscription'].enabled }
 }
 
 export function isCodexSubscriptionUiEnabled(

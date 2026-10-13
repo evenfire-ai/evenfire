@@ -21,6 +21,8 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
+import type { VisualDeliveryLimits } from '../visualInput/deliveryLimits'
+import type { ImageTransportOperation } from './imageInput'
 import type { LlmProvider } from './registryCore'
 
 /**
@@ -83,6 +85,8 @@ export interface SingleTurnProvider {
   ): Promise<ToolCompletionResponse>
 
   getProviderType(): LlmProvider
+  /** The current transport instance's verified visual contract, never a primary fallback profile. */
+  getVisualDeliveryLimits?(operation: ImageTransportOperation): VisualDeliveryLimits | null
 
   /**
    * Classify an error thrown by this provider's SDK into a structured

@@ -11,9 +11,11 @@ import {
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
+import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
@@ -22,7 +24,6 @@ import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { LlmProviderSummary } from '../../../components/LlmProviderSummary'
 import { LlmSecretSelect, type LlmSecretSelectOption } from '../../../components/LlmSecretSelect'
-import { LlmSecretUpdateModal } from '../../../components/LlmSecretUpdateModal'
 import { RowActionsMenu } from '../../../components/RowActionsMenu'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconMoreHorizontal, IconPencil, IconX } from '../../../components/icons'
@@ -34,6 +35,7 @@ import {
   updateContext,
 } from '../../../lib/api'
 import type { ContextResource, ContextSpec, HostSecretResource } from '../../../lib/api'
+import type { ApiRequestError } from '../../../lib/api.types'
 import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexSubscriptionConnectionView,
@@ -76,6 +78,7 @@ import {
   validateLlmPolicy,
 } from '../../../lib/llm'
 import { credentialSelectValue, parseCredentialSelect } from '../../../lib/llmCredentialSelect'
+import { scheduleReadRequestRetry } from '../../../lib/readRequestCache'
 import type { HostTab } from './types'
 
 const TAB_LABELS: Record<HostTab, string> = {
@@ -124,6 +127,12 @@ function agentConnectorMutationError(error: unknown): string {
     return 'This agent’s connector settings are missing a server version. Reload the agent and try again.'
   }
   return contextMutationError(error, 'Failed to update connectors for this agent.')
+}
+
+function subscriptionInventoryMessage(error: unknown, brand: string): string {
+  return error instanceof Error && error.message
+    ? error.message
+    : `Could not load ${brand} subscriptions`
 }
 
 function AgentActionsMenu({ busy, onDelete }: { busy: boolean; onDelete: () => void }) {
@@ -202,7 +211,11 @@ export default function HostDetailsPage() {
   const [initialLoading, setInitialLoading] = useState(true)
 
   const [editingModel, setEditingModel] = useState(false)
-  const [llmSecretModalOpen, setLlmSecretModalOpen] = useState(false)
+  const subscriptionCapabilities = useSubscriptionCapabilities({ enabled: editingModel })
+  const codexEnabled =
+    subscriptionCapabilities.capabilities?.providers['codex-subscription'].enabled ?? false
+  const grokEnabled =
+    subscriptionCapabilities.capabilities?.providers['grok-subscription'].enabled ?? false
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
   const [deleteAgentDialogError, setDeleteAgentDialogError] = useState('')
@@ -231,12 +244,34 @@ export default function HostDetailsPage() {
   } = useLlmAllowedModels()
   const [modelNameDraft, setModelNameDraft] = useState('')
   const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
-  const [codexModels, setCodexModels] = useState<string[]>([])
+  const [grantCatalog, setGrantCatalog] = useState<{
+    provider: LlmProvider
+    connectionRef: string
+    models: string[]
+  } | null>(null)
+  // A retained catalog is display data for its exact broker/connection only;
+  // changing the draft binding cannot make the old models valid for a new grant.
+  const [codexModels, grokModels] = useMemo(() => {
+    const models =
+      grantCatalog?.provider === providerDraft && grantCatalog.connectionRef === connectionRefDraft
+        ? grantCatalog.models
+        : []
+    return [
+      providerDraft === 'codex-subscription' ? models : [],
+      providerDraft === GROK_SUBSCRIPTION_PROVIDER ? models : [],
+    ] as const
+  }, [connectionRefDraft, grantCatalog, providerDraft])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
-  const [grokModels, setGrokModels] = useState<string[]>([])
   const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
-  const [grokEnabled, setGrokEnabled] = useState(false)
+  const [codexInventoryLoaded, setCodexInventoryLoaded] = useState(false)
+  const [grokInventoryLoaded, setGrokInventoryLoaded] = useState(false)
   const [grantCatalogError, setGrantCatalogError] = useState('')
+  const [subscriptionInventoryError, setSubscriptionInventoryError] = useState('')
+  const [subscriptionInventoryLoading, setSubscriptionInventoryLoading] = useState(false)
+  const [inventoryRetryNonce, setInventoryRetryNonce] = useState(0)
+  const [subscriptionInventoryThrottle, setSubscriptionInventoryThrottle] =
+    useState<ApiRequestError | null>(null)
+  const inventoryAutoRetryUsedRef = useRef(false)
   const catalogForEditor = useMemo(() => {
     if (providerDraft === 'codex-subscription') {
       const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
@@ -280,10 +315,6 @@ export default function HostDetailsPage() {
   const [availableLlmSecrets, setAvailableLlmSecrets] = useState<HostSecretResource[]>([])
   // Fallback policy (spec §3-R5). `undefined` = the Host has no llmPolicy.
   const [llmPolicyDraft, setLlmPolicyDraft] = useState<LlmPolicy | undefined>(undefined)
-  // Keep the last server-backed policy separate from the editable draft. A
-  // model edit may contain an unsaved fallback slot, but Secret retirement
-  // must be guarded by the policy that is actually active on the Host.
-  const [persistedLlmPolicy, setPersistedLlmPolicy] = useState<LlmPolicy | undefined>(undefined)
   // Per-host model allowlist subset (spec.allowedModels, Topic 3a). Empty = the
   // host offers the full global allowlist per provider (back-compat default).
   const [allowedModelsDraft, setAllowedModelsDraft] = useState<HostAllowedModel[]>([])
@@ -336,17 +367,6 @@ export default function HostDetailsPage() {
       allowedCatalog
     )
   }, [allowedModelsDraft, allowedCatalog, providerDraft, llmPolicyDraft])
-  const protectedCredentialSlots = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          (persistedLlmPolicy?.fallbacks ?? [])
-            .map(fallback => String(fallback.credentialSlot || '').trim())
-            .filter(Boolean)
-        )
-      ),
-    [persistedLlmPolicy]
-  )
   // Mount race: if the host loaded before the allowlist and it had NO saved
   // model, loadData resolved the draft to '' — seed the default once the
   // catalog arrives. Never overrides a non-empty draft (a saved model that
@@ -392,86 +412,123 @@ export default function HostDetailsPage() {
   ])
 
   useEffect(() => {
-    let cancelled = false
-    void listCodexSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) setCodexConnections(rows)
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setCodexConnections([])
-          if (!isDisabledCapabilityError(err)) {
-            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
-          }
-        }
-      })
-    void listGrokSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) {
-          setGrokConnections(rows)
-          setGrokEnabled(true)
-        }
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setGrokConnections([])
-          setGrokEnabled(false)
-          if (!isDisabledCapabilityError(err)) {
-            setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
-          }
-        }
-      })
-    return () => {
-      cancelled = true
+    if (!editingModel || !subscriptionCapabilities.capabilities) {
+      setSubscriptionInventoryError('')
+      setSubscriptionInventoryThrottle(null)
+      setSubscriptionInventoryLoading(false)
+      return
     }
-  }, [])
+    const controller = new AbortController()
+    setSubscriptionInventoryLoading(true)
+    // Retry only re-runs this effect. An inventory the shared recovery already
+    // read after a 429 is cached; forcing a refresh would spend a second read
+    // in the same quota window and answer the visible Retry with another 429.
+    const requests = [
+      codexEnabled
+        ? listCodexSubscriptionConnections({ signal: controller.signal })
+        : Promise.resolve([]),
+      ...(grokEnabled ? [listGrokSubscriptionConnections({ signal: controller.signal })] : []),
+    ]
+    Promise.allSettled(requests)
+      .then(([codexResult, grokResult]) => {
+        if (controller.signal.aborted) return
+        if (codexResult.status === 'fulfilled') {
+          setCodexConnections(codexResult.value)
+          setCodexInventoryLoaded(codexEnabled)
+        }
+        if (codexResult.status === 'fulfilled' && grokResult?.status !== 'rejected') {
+          inventoryAutoRetryUsedRef.current = false
+        }
+        if (grokResult?.status === 'fulfilled') {
+          setGrokConnections(grokResult.value)
+          setGrokInventoryLoaded(true)
+        }
+        setSubscriptionInventoryError('')
+        setSubscriptionInventoryThrottle(null)
+        const failure = [codexResult, grokResult].find(
+          result => result?.status === 'rejected' && !isDisabledCapabilityError(result.reason)
+        )
+        if (failure?.status === 'rejected') throw failure.reason
+      })
+      .catch(err => {
+        if (controller.signal.aborted || isDisabledCapabilityError(err)) return
+        setSubscriptionInventoryError(subscriptionInventoryMessage(err, 'subscription'))
+        const denied = err as ApiRequestError
+        setSubscriptionInventoryThrottle(denied?.status === 429 ? denied : null)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSubscriptionInventoryLoading(false)
+      })
+    return () => controller.abort()
+  }, [
+    codexEnabled,
+    editingModel,
+    grokEnabled,
+    inventoryRetryNonce,
+    subscriptionCapabilities.capabilities,
+  ])
+
+  // The family's shared recovery rereads a denied inventory once Retry-After
+  // passes. Re-run the load once at that time: it waits for the recovery and
+  // shows its cached result without a click or a second read. A denial on that
+  // run leaves the visible Retry; a success or a manual Retry restores the
+  // automatic attempt for the next denial.
+  useEffect(() => {
+    if (!subscriptionInventoryThrottle || inventoryAutoRetryUsedRef.current) return
+    return scheduleReadRequestRetry(subscriptionInventoryThrottle, () => {
+      inventoryAutoRetryUsedRef.current = true
+      setInventoryRetryNonce(value => value + 1)
+    })
+  }, [subscriptionInventoryThrottle])
 
   useEffect(() => {
+    if (!editingModel) return
     if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
-      setCodexModels([])
-      setGrokModels([])
+      setGrantCatalog(null)
       setGrantCatalogError('')
       return
     }
-    let cancelled = false
+    const controller = new AbortController()
     setGrantCatalogError('')
     if (providerDraft === GROK_SUBSCRIPTION_PROVIDER) {
-      setCodexModels([])
-      void listGrokConnectionModels(connectionRefDraft)
+      void listGrokConnectionModels(connectionRefDraft, { signal: controller.signal })
         .then(models => {
-          if (cancelled) return
-          setGrokModels(offeredCodexModelNames(models))
+          if (controller.signal.aborted) return
+          setGrantCatalog({
+            provider: providerDraft,
+            connectionRef: connectionRefDraft,
+            models: offeredCodexModelNames(models),
+          })
         })
         .catch(err => {
-          if (cancelled) return
-          setGrokModels([])
-          setModelNameDraft('')
+          if (controller.signal.aborted) return
           setGrantCatalogError(
             err instanceof Error ? err.message : 'Could not load Grok grant models'
           )
         })
       return () => {
-        cancelled = true
+        controller.abort()
       }
     }
-    setGrokModels([])
-    void listCodexConnectionModels(connectionRefDraft)
+    void listCodexConnectionModels(connectionRefDraft, { signal: controller.signal })
       .then(models => {
-        if (cancelled) return
-        setCodexModels(offeredCodexModelNames(models))
+        if (controller.signal.aborted) return
+        setGrantCatalog({
+          provider: providerDraft,
+          connectionRef: connectionRefDraft,
+          models: offeredCodexModelNames(models),
+        })
       })
       .catch(err => {
-        if (cancelled) return
-        setCodexModels([])
-        setModelNameDraft('')
+        if (controller.signal.aborted) return
         setGrantCatalogError(
           err instanceof Error ? err.message : 'Could not load ChatGPT grant models'
         )
       })
     return () => {
-      cancelled = true
+      controller.abort()
     }
-  }, [connectionRefDraft, providerDraft])
+  }, [connectionRefDraft, editingModel, inventoryRetryNonce, providerDraft])
 
   useEffect(() => {
     setActiveTab(parseHostTab(params.tab))
@@ -507,8 +564,6 @@ export default function HostDetailsPage() {
       const { host, contexts: contextsList, secrets: secretsList, agentUsers, agentTeams } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
-      const nextPersistedLlmPolicy = normalizeLlmPolicy(spec.llmPolicy)
-      setPersistedLlmPolicy(nextPersistedLlmPolicy)
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
@@ -598,7 +653,7 @@ export default function HostDetailsPage() {
             (spec.model as { connectionRef?: string } | undefined)?.connectionRef || ''
           ).trim() || CODEX_UNASSIGNED_CONNECTION_KEY
         )
-        setLlmPolicyDraft(nextPersistedLlmPolicy)
+        setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
         // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
         // → [] = unrestricted (offers the full global allowlist per provider).
         setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
@@ -784,7 +839,7 @@ export default function HostDetailsPage() {
       options.push({
         group: 'ChatGPT subscriptions',
         value: credentialSelectValue('', connectionRefDraft),
-        label: `${connectionRefDraft} (unavailable)`,
+        label: codexInventoryLoaded ? `${connectionRefDraft} (unavailable)` : connectionRefDraft,
         meta: 'ChatGPT subscription',
         providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })
@@ -800,7 +855,7 @@ export default function HostDetailsPage() {
       options.push({
         group: 'Grok subscriptions',
         value: credentialSelectValue('', connectionRefDraft, GROK_SUBSCRIPTION_PROVIDER),
-        label: `${connectionRefDraft} (unavailable)`,
+        label: grokInventoryLoaded ? `${connectionRefDraft} (unavailable)` : connectionRefDraft,
         meta: 'Grok subscription',
         providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
       })
@@ -810,6 +865,8 @@ export default function HostDetailsPage() {
     availableLlmSecrets,
     codexConnections,
     grokConnections,
+    codexInventoryLoaded,
+    grokInventoryLoaded,
     connectionRefDraft,
     currentSecretKeys,
     providerDraft,
@@ -927,7 +984,7 @@ export default function HostDetailsPage() {
     if (parsed.kind === 'empty') {
       setSecretRefDraft('')
       setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-      setCodexModels([])
+      setGrantCatalog(null)
       setGrantCatalogError('')
       return
     }
@@ -941,13 +998,32 @@ export default function HostDetailsPage() {
       return
     }
     setSecretRefDraft(parsed.name)
-    setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-    setCodexModels([])
-    setGrokModels([])
-    setGrantCatalogError('')
-    if (isOauthBrokerProvider(providerDraft)) {
-      setProviderDraft('openai')
-      setModelNameDraft(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
+    // Secret → provider sync (mirrors HostWizard.handleExistingSecretChange and
+    // an explicit provider switch): when the picked secret carries provider
+    // credentials (the same metadata that renders the option's provider icons),
+    // align the primary provider — and its default model — with it so the
+    // pair stays coherent. A secret that already serves the current provider
+    // keeps it (multi-provider secrets never clobber a coherent choice), and a
+    // provider-less/custom secret never touches the operator's provider.
+    const pickedProviders = (
+      llmSecretOptions.find(option => option.value === parsed.name)?.providers ?? []
+    )
+      .map(provider => normalizeProvider(provider.id))
+      .filter(provider => !isOauthBrokerProvider(provider))
+    if (pickedProviders.length > 0) {
+      setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+      setGrantCatalog(null)
+      setGrantCatalogError('')
+      if (!pickedProviders.includes(providerDraft)) {
+        const nextProvider = pickedProviders[0]
+        setProviderDraft(nextProvider)
+        setModelNameDraft(
+          resolveDefaultModel(
+            nextProvider,
+            constrainModelOptions(allowedCatalog, allowedModelsDraft, nextProvider)
+          )
+        )
+      }
     }
   }
 
@@ -1087,57 +1163,78 @@ export default function HostDetailsPage() {
     await loadData('model')
   }
 
-  function renderModelCredentialFields(idPrefix: string, selectDisabled: boolean) {
+  function renderModelCredentialFields(idPrefix: string, variant: 'summary' | 'editor') {
+    const isEditor = variant === 'editor'
+    // Static surfaces must not read as broken dropdowns: the summary renders a
+    // read-only value display (no chrome, chevron, hover, or pointer cursor)
+    // and no pencil — every editing affordance lives in the editor dialog.
+    const assignmentValue = credentialSelectValue(
+      showFallbackSecretField ? '' : secretRefDraft,
+      connectionRefDraft,
+      providerDraft === GROK_SUBSCRIPTION_PROVIDER
+        ? GROK_SUBSCRIPTION_PROVIDER
+        : 'codex-subscription'
+    )
+    const assignmentEditorPlaceholder = isBrokerAssignment
+      ? isBrokerUnassigned
+        ? 'No credential assigned'
+        : assignedBrokerLabel
+      : apiKeySecretOptions.length === 0
+        ? 'No LLM Secret available'
+        : 'Select an LLM Secret...'
+    const assignmentSummaryPlaceholder = isBrokerAssignment
+      ? isBrokerUnassigned
+        ? 'No credential assigned'
+        : assignedBrokerLabel
+      : 'No LLM Secret assigned'
+    const secretEditorPlaceholder =
+      apiKeySecretOptions.length === 0 ? 'No LLM Secret available' : 'Select an LLM Secret...'
+    function handleFallbackSecretChange(value: string) {
+      const parsed = parseCredentialSelect(value)
+      setSecretRefDraft(parsed.kind === 'secret' ? parsed.name : '')
+    }
+    // The pencil leaves this page for the full-screen secret editor. `from`
+    // brings the operator back to this tab when the edit completes or is
+    // cancelled — the editor dialog itself unmounts with the navigation.
+    const renderPencil = () => (
+      <button
+        type="button"
+        className="cu-btn cu-btn--icon cu-btn--toolbar"
+        onClick={() =>
+          router.push(
+            CONTROL_ROUTES.secrets.editLlm(secretRefDraft.trim(), { from: hostTabHref('model') })
+          )
+        }
+        disabled={busy || !secretRefDraft.trim()}
+        aria-label="Edit LLM Secret credentials"
+        title="Edit LLM Secret credentials"
+      >
+        <IconPencil width={16} height={16} />
+      </button>
+    )
     return (
       <>
         <div className="cu-field">
-          <label htmlFor={`${idPrefix}-assignment`}>{credentialFieldLabel}</label>
+          {isEditor ? (
+            <label htmlFor={`${idPrefix}-assignment`}>{credentialFieldLabel}</label>
+          ) : (
+            <span className="cu-llm-summary__label">{credentialFieldLabel}</span>
+          )}
           <div className="cu-llm-secret-control">
             <LlmSecretSelect
               id={`${idPrefix}-assignment`}
-              value={
-                showFallbackSecretField
-                  ? credentialSelectValue(
-                      '',
-                      connectionRefDraft,
-                      providerDraft === GROK_SUBSCRIPTION_PROVIDER
-                        ? GROK_SUBSCRIPTION_PROVIDER
-                        : 'codex-subscription'
-                    )
-                  : credentialSelectValue(
-                      secretRefDraft,
-                      connectionRefDraft,
-                      providerDraft === GROK_SUBSCRIPTION_PROVIDER
-                        ? GROK_SUBSCRIPTION_PROVIDER
-                        : 'codex-subscription'
-                    )
-              }
+              value={assignmentValue}
               ariaLabel={credentialFieldLabel}
-              onChange={handleCredentialChange}
               options={llmSecretOptions}
-              placeholder={
-                isBrokerAssignment
-                  ? isBrokerUnassigned
-                    ? 'No credential assigned'
-                    : assignedBrokerLabel
-                  : apiKeySecretOptions.length === 0
-                    ? 'No LLM Secret available'
-                    : 'Select an LLM Secret...'
-              }
-              disabled={selectDisabled}
+              {...(isEditor
+                ? {
+                    onChange: handleCredentialChange,
+                    disabled: busy,
+                    placeholder: assignmentEditorPlaceholder,
+                  }
+                : { readOnly: true, placeholder: assignmentSummaryPlaceholder })}
             />
-            {showFallbackSecretField ? null : (
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => setLlmSecretModalOpen(true)}
-                disabled={busy || !secretRefDraft.trim()}
-                aria-label="Edit LLM Secret credentials"
-                title="Edit LLM Secret credentials"
-              >
-                <IconPencil width={16} height={16} />
-              </button>
-            )}
+            {isEditor && !showFallbackSecretField ? renderPencil() : null}
           </div>
           <span className="cu-field__hint">
             {showFallbackSecretField
@@ -1149,34 +1246,26 @@ export default function HostDetailsPage() {
         </div>
         {showFallbackSecretField ? (
           <div className="cu-field">
-            <label htmlFor={`${idPrefix}-fallback`}>LLM Secret</label>
+            {isEditor ? (
+              <label htmlFor={`${idPrefix}-fallback`}>LLM Secret</label>
+            ) : (
+              <span className="cu-llm-summary__label">LLM Secret</span>
+            )}
             <div className="cu-llm-secret-control">
               <LlmSecretSelect
                 id={`${idPrefix}-fallback`}
                 value={secretRefDraft}
                 ariaLabel="LLM Secret"
-                onChange={value => {
-                  const parsed = parseCredentialSelect(value)
-                  setSecretRefDraft(parsed.kind === 'secret' ? parsed.name : '')
-                }}
                 options={apiKeySecretOptions}
-                placeholder={
-                  apiKeySecretOptions.length === 0
-                    ? 'No LLM Secret available'
-                    : 'Select an LLM Secret...'
-                }
-                disabled={selectDisabled}
+                {...(isEditor
+                  ? {
+                      onChange: handleFallbackSecretChange,
+                      disabled: busy,
+                      placeholder: secretEditorPlaceholder,
+                    }
+                  : { readOnly: true, placeholder: 'No LLM Secret assigned' })}
               />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => setLlmSecretModalOpen(true)}
-                disabled={busy || !secretRefDraft.trim()}
-                aria-label="Edit LLM Secret credentials"
-                title="Edit LLM Secret credentials"
-              >
-                <IconPencil width={16} height={16} />
-              </button>
+              {isEditor ? renderPencil() : null}
             </div>
             <span className="cu-field__hint">
               Needed for the {fallbackSecretLabels.join(', ') || 'static'} fallback
@@ -1408,7 +1497,7 @@ export default function HostDetailsPage() {
 
             {!editingModel ? (
               <div className="cu-form-stack cu-form-stack--wide">
-                {renderModelCredentialFields('model-secret-summary', true)}
+                {renderModelCredentialFields('model-secret-summary', 'summary')}
                 <LlmProviderSummary
                   provider={providerDraft}
                   model={modelNameDraft}
@@ -1453,10 +1542,31 @@ export default function HostDetailsPage() {
               }
               onDismiss={() => void cancelModelEdit()}
               open={editingModel}
-              size="default"
-              title="Edit model configuration"
+              title="Edit model & credentials"
             >
               <div className="cu-form-stack cu-form-stack--wide">
+                <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
+                {subscriptionInventoryLoading ? (
+                  <p className="cu-muted" role="status">
+                    Loading subscription options…
+                  </p>
+                ) : null}
+                {subscriptionInventoryError || grantCatalogError ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    <span>{subscriptionInventoryError || grantCatalogError}</span>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => {
+                        inventoryAutoRetryUsedRef.current = false
+                        setInventoryRetryNonce(value => value + 1)
+                      }}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : null}
+                {renderModelCredentialFields('model-secret-editor', 'editor')}
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
@@ -1469,8 +1579,7 @@ export default function HostDetailsPage() {
                     // another broker's connection key.
                     if (next.provider !== providerDraft) {
                       setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-                      setCodexModels([])
-                      setGrokModels([])
+                      setGrantCatalog(null)
                       setGrantCatalogError('')
                     }
                   }}
@@ -1483,24 +1592,14 @@ export default function HostDetailsPage() {
                   catalogError={modelsError}
                   modelLabel="Current model"
                   secretKeys={currentSecretKeys}
+                  // Fallbacks are opt-in: the section starts collapsed so the
+                  // dialog leads with the primary provider + credentials.
+                  fallbackProvidersInitiallyCollapsed
                   disabled={busy}
                   grokEnabled={grokEnabled}
                 />
               </div>
             </DialogShell>
-
-            {llmSecretModalOpen && secretRefDraft.trim() ? (
-              <LlmSecretUpdateModal
-                key={secretRefDraft}
-                secretName={secretRefDraft}
-                existingKeys={currentSecretKeys}
-                protectedCredentialSlots={protectedCredentialSlots}
-                onClose={() => setLlmSecretModalOpen(false)}
-                onChanged={async () => {
-                  await loadData('none')
-                }}
-              />
-            ) : null}
           </>
         )}
 

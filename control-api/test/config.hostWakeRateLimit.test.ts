@@ -137,10 +137,16 @@ describe('host-wake rate limit budget (cross-service derivation guard)', () => {
     )
   })
 
-  it('defaults host wake rate limit to the derived 30/min', async () => {
+  it('defaults host wake rate limit to the authenticated 150/min budget', async () => {
     const config = await loadConfigWith({})
 
-    expect(config.hostWakeRlPerMin).toBe(30)
+    expect(config.hostWakeRlPerMin).toBe(150)
+  })
+
+  it.each(['0', '-1', '1.5', 'nope'])('rejects invalid host wake budget %s', async value => {
+    await expect(loadConfigWith({ CONTROL_API_HOST_WAKE_RL_PER_MIN: value })).rejects.toThrow(
+      'CONTROL_API_HOST_WAKE_RL_PER_MIN must be a positive integer'
+    )
   })
 
   it('accepts the host wake rate limit environment override', async () => {

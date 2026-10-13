@@ -7,6 +7,7 @@ import {
   rejectBodyUserTeamMismatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   acceptInvitationForEmail,
@@ -246,6 +247,7 @@ export function createExternalInvitationsRouter(): Router {
           expiresInSeconds: 120,
         })
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }

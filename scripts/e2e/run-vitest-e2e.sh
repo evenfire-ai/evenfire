@@ -16,6 +16,9 @@ DEFAULT_NODE_UNIT_VITEST_SUITES=(
   # Codex subscription contract freeze: reads only repository files, so it
   # belongs in the node-unit group and not behind a cluster.
   integration/codex-subscription-contract-freeze.test.ts
+  # Chat body budget parity (#678): compares rpc-proxy, mcp-host and composer
+  # sources, so it needs no cluster either.
+  integration/chat-body-budget-parity.test.ts
 )
 DEFAULT_CLUSTER_VITEST_SUITES=(
   gfsUploadProductMutation.test.ts

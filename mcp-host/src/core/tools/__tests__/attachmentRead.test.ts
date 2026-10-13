@@ -7,6 +7,8 @@ import { createHash } from 'node:crypto'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import { decodeTextContent } from '../../../internalTools/textContent'
 import type { IncomingMessage } from '../../../server'
+import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
+import { BasicSafety } from '../../safety/safety'
 import type { Attachment } from '../../types'
 import { AttachmentReadTool } from '../attachmentRead'
 
@@ -21,9 +23,14 @@ afterEach(() => {
   vi.mocked(decodeTextContent).mockClear()
 })
 
-const READ_LIMIT = 262_144
-const SPILLOVER_THRESHOLD = 8192
+const READ_LIMIT = 65_536
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const WINDOW_TOKENS = 4_000_000
+const safety = new BasicSafety()
+const measureResult = (raw: string): number =>
+  Math.ceil(
+    Buffer.byteLength(safety.previewOutputForLlm('clerum__attachment_read', raw), 'utf8') / 4
+  ) + 4
 
 function rawFile(id: string, filename: string, mimeType: string, bytes: Buffer) {
   return {
@@ -50,11 +57,7 @@ function admitted(raw: unknown[]): Attachment[] {
   return result.attachments!
 }
 
-function toolFor(
-  attachments: Attachment[],
-  limit = READ_LIMIT,
-  spilloverThresholdBytes: number | null = SPILLOVER_THRESHOLD
-): AttachmentReadTool {
+function toolFor(attachments: Attachment[], limit = READ_LIMIT): AttachmentReadTool {
   const message: IncomingMessage = {
     content: 'Analyze the attached file',
     channelType: 'rpc',
@@ -65,11 +68,15 @@ function toolFor(
     hostRef: 'host-1',
     attachments,
   }
-  return new AttachmentReadTool(message, limit, spilloverThresholdBytes)
+  return new AttachmentReadTool(message, limit, {
+    contextWindowTokens: WINDOW_TOKENS,
+    ledger: new AttachmentReadLedger(),
+    redactor: new BasicSafety(),
+  })
 }
 
 async function read(tool: AttachmentReadTool, params: Record<string, unknown>) {
-  const output = await tool.execute(params)
+  const output = await tool.execute(params, { onOutput: () => {}, measureResult })
   return { output, body: JSON.parse(output.content) as Record<string, unknown> }
 }
 
@@ -201,7 +208,10 @@ describe('clerum__attachment_read', () => {
       truncated = body.truncated as boolean
       calls += 1
     }
-    expect(calls).toBe(2)
+    // Pages cover the file; the boundary correction shortens a page by at most
+    // one byte, so the count is pinned between the two page-size bounds.
+    expect(calls).toBeGreaterThanOrEqual(Math.ceil(bytes.length / READ_LIMIT))
+    expect(calls).toBeLessThanOrEqual(Math.ceil(bytes.length / (READ_LIMIT - 1)))
     // Witness: text came back, and none of it is a replacement character.
     expect(pages[0]!.length).toBeGreaterThan(0)
     expect(pages.join('')).toBe(original)
@@ -255,18 +265,20 @@ describe('clerum__attachment_read', () => {
     ])
   })
 
-  it('states the spillover threshold in its description when results can spill', () => {
-    const description = toolFor([], READ_LIMIT, SPILLOVER_THRESHOLD).description()
-    expect(description).toContain(
-      `A page whose result reaches the tool-output spillover threshold (${SPILLOVER_THRESHOLD} bytes) is returned as a spillover summary.`
-    )
-    expect(description).toContain('clerum__spillover_read')
+  it('declares its output exempt from spillover: the caller bounds the page', () => {
+    expect(toolFor([]).spilloverExempt?.()).toBe(true)
   })
 
-  it('does not mention spillover when this execution has no spillover storage', () => {
-    const description = toolFor([], READ_LIMIT, null).description()
+  it('describes a page as bounded by maxBytes and the budgets, and never mentions spillover', () => {
+    const description = toolFor([]).description()
     // Witness: the description is the tool's full text.
     expect(description).toContain('Files with reader=text return UTF-8 text')
+    // C16 can end a page before maxBytes, so the page is not promised whole.
+    expect(description).not.toContain('returned whole')
+    expect(description).toContain(
+      `A page holds at most maxBytes (default ${READ_LIMIT} bytes) and ends earlier when the page or turn budget binds; ` +
+        'when truncated is true, limit names the bound that ended the page and nextOffset is where the next page starts.'
+    )
     expect(description).not.toContain('spillover')
   })
 

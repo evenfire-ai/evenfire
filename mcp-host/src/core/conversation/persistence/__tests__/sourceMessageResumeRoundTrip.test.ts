@@ -247,7 +247,13 @@ describe('#666 R4-M2 — source message resume round-trip', () => {
     expect(listed?.content).toBe('read the notes')
     expect(JSON.stringify(listed)).not.toContain(FILE_BYTES.toString('base64'))
     expect([...referencedFilePins(listed?.fileReferenceResolutions).values()]).toEqual([
-      { version: 3, currentVersion: 5 },
+      {
+        version: 3,
+        currentVersion: 5,
+        byteLength: 4,
+        reader: 'text',
+        modelImageInput: 'unsupported',
+      },
     ])
   })
 

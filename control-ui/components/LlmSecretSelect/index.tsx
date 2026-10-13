@@ -42,10 +42,29 @@ export function LlmSecretSelect({
   onChange,
   options,
   placeholder,
+  readOnly = false,
   value,
 }: LlmSecretSelectProps) {
   const [open, setOpen] = useState(false)
   const selectedOption = options.find(option => option.value === value)
+
+  // Read-only presentation: the same selected-option content (label, provider
+  // icons or meta) as the picker, rendered as a static value box with no
+  // dropdown chrome, hover affordance, or pointer cursor.
+  if (readOnly) {
+    return (
+      <div id={id} className={cn('cu-agent-select cu-agent-select--readonly', className)}>
+        <div className="cu-llm-summary__value" aria-label={ariaLabel}>
+          <span>{selectedOption?.label || placeholder}</span>
+          {selectedOption?.providers && selectedOption.providers.length > 0 ? (
+            <ProviderSummary providers={selectedOption.providers} />
+          ) : selectedOption?.meta ? (
+            <span className="cu-agent-select__button-meta">{selectedOption.meta}</span>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -93,7 +112,7 @@ export function LlmSecretSelect({
                   role="option"
                   aria-selected={value === option.value}
                   onClick={() => {
-                    onChange(option.value)
+                    onChange?.(option.value)
                     setOpen(false)
                   }}
                 >

@@ -425,16 +425,17 @@ export function prepareStatements(db: Database): PreparedStatements {
         request_id, session_id, task_id, tool_name, tool_call_id,
         parameters, description, context_snapshot, completed_results,
         intent_summary, source_message, registered_at, expires_at, trace_context,
-        reason, mcp_server_name, task_budget
+        reason, mcp_server_name, task_budget, authorization_scope
       ) VALUES (
         @request_id, @session_id, @task_id, @tool_name, @tool_call_id,
         @parameters, @description, @context_snapshot, @completed_results,
         @intent_summary, @source_message, @registered_at, @expires_at, @trace_context,
-        @reason, @mcp_server_name, @task_budget
+        @reason, @mcp_server_name, @task_budget, @authorization_scope
       )
       ON CONFLICT(request_id) DO UPDATE SET
         task_id = excluded.task_id,
         task_budget = excluded.task_budget,
+        authorization_scope = excluded.authorization_scope,
         context_snapshot = excluded.context_snapshot,
         completed_results = excluded.completed_results,
         trace_context = excluded.trace_context,

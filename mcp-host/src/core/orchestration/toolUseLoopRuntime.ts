@@ -210,6 +210,32 @@ export function taskBrakeResult(
   }
 }
 
+/**
+ * A15 U1 — a trusted tool result ended the turn (`ToolResult.stopTurn`). Like
+ * the task brake, the task completes normally: `message` is the reply and the
+ * attachments collected so far are kept. No further model call is made.
+ */
+export function turnStopResult(
+  config: LoopConfig,
+  iterations: number,
+  message: string,
+  attachments: Attachment[]
+): LoopResult {
+  logger.info({ iterations }, 'Turn stopped by a tool result')
+  config.events.emit({
+    type: 'loop:completed',
+    data: { iteration: iterations, resultType: 'turn_stop' },
+    timestamp: new Date(),
+  })
+  return {
+    type: 'exhaustion',
+    reason: 'turn_stop',
+    message,
+    iterations,
+    attachments: attachments.length > 0 ? attachments : undefined,
+  }
+}
+
 export function exhaustionResult(
   config: LoopConfig,
   maxIterations: number,

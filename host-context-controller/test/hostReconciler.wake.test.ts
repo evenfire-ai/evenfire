@@ -421,6 +421,7 @@ describe('HostReconciler wake fast-path — wake × state transition matrix', ()
     expect(ensureBootstrap).toHaveBeenCalledWith(expect.anything(), {
       forceFreshForWake: false,
       targetSuspended: false,
+      prepareForResourceChange: true,
     })
     // The guard re-ran the durable wake transition.
     const writes = lifecycleStatusWrites(customApi)
@@ -456,6 +457,7 @@ describe('HostReconciler wake fast-path — wake × state transition matrix', ()
     expect(ensureBootstrap).toHaveBeenCalledWith(expect.anything(), {
       forceFreshForWake: false,
       targetSuspended: false,
+      prepareForResourceChange: true,
     })
   })
 

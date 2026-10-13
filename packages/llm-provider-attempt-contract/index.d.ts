@@ -38,6 +38,12 @@ export declare const LIMITS: {
   readonly maxDeadlineMs: 1800000
   readonly maxIdLength: 128
   readonly maxNestingDepth: 64
+  /** Objects and arrays in one request, the root included; equal to the Grok contract's. */
+  readonly maxRequestContainers: 262144
+  /** Object members in one request, over every object in the tree; equal to the Grok contract's. */
+  readonly maxRequestMembers: 262144
+  /** JSON values in one request, including the root; equal to the Grok contract's. */
+  readonly maxRequestElements: 1048576
   /** Execution ticket TTL; control-api signs tickets with it. */
   readonly executionTicketTtlMs: 60000
 }
@@ -49,6 +55,54 @@ export declare const LIMITS: {
  * by `LIMITS.maxVisualRequestBodyBytes` as a whole.
  */
 export declare const ENVELOPE_ALLOWANCE_BYTES: 16384
+
+/**
+ * Bounds for the raw-body scan run before JSON.parse: the request bounds plus
+ * the envelope around the request. Equal to the Grok contract's.
+ */
+export declare const BODY_STRUCTURE_LIMITS: {
+  readonly maxStructuralBytes: 8404992
+  readonly maxContainers: 262160
+  readonly maxDepth: 70
+  readonly maxMembers: 262208
+  readonly maxElements: 1048640
+}
+
+export interface BodyStructureLimits {
+  readonly maxStructuralBytes: number
+  readonly maxContainers: number
+  readonly maxDepth: number
+  readonly maxMembers: number
+  readonly maxElements: number
+}
+
+/**
+ * Thrown by the scan. `type` is `body.structure.too.dense` (413),
+ * `body.structure.too.many.containers` (413), `body.structure.too.deep` (400),
+ * `body.structure.too.many.members` (413),
+ * `body.structure.too.many.elements` (413) or, from the verify hook,
+ * `charset.unsupported` (415).
+ */
+export interface BodyStructureError extends Error {
+  readonly name: 'BodyStructureError'
+  readonly status: 400 | 413 | 415
+  readonly type: string
+}
+
+/** Scans a UTF-8 JSON body; throws a BodyStructureError on the first bound crossed. */
+export declare function scanJsonStructure(
+  buf: Uint8Array,
+  limits: BodyStructureLimits
+): { structuralBytes: number; containers: number; deepest: number; members: number; elements: number }
+
+/**
+ * A body-parser `verify` hook running scanJsonStructure. The error it throws
+ * reaches the error handler with the raw body attached as `err.body`, so the
+ * handler must never log the error object.
+ */
+export declare function createBodyStructureVerify(
+  limits: BodyStructureLimits
+): (req: unknown, res: unknown, buf: Uint8Array, encoding: string) => void
 
 /**
  * Conservative local safety/product budgets for V2 image parts. These are
@@ -251,20 +305,21 @@ export declare function stableStringify(value: unknown): string
  * BEFORE parsing: 24 MiB for a document that declares
  * `codex-completion-request.v2`, `maxRequestBodyBytes` (8 MiB) for anything
  * else. Declaring V2 does not raise the budget for text or tool definitions —
- * the parser measures the body with every image payload blanked and keeps that
- * share on the `maxRequestBodyBytes` ceiling.
+ * the parser measures the body with image data and text parts that repeat
+ * `content` blanked, and keeps that share on the `maxRequestBodyBytes` ceiling.
  */
 export declare function requestBodyLimitBytes(request: unknown): number
 /**
- * Byte length of an authorize document after every image payload inside
- * `body.request` is blanked. Wrapper fields stay on the non-image budget
- * (`maxRequestBodyBytes` plus the caller's envelope allowance) even when the
- * nested request declares V2.
+ * Byte length of an authorize document with image data and text parts that
+ * repeat `content` blanked inside `body.request`. Wrapper fields stay on the
+ * non-image budget (`maxRequestBodyBytes` plus the caller's envelope
+ * allowance) even when the nested request declares V2.
  */
 export declare function measureNonImageAuthorizeBytes(body: unknown): number
 /**
- * Byte length of a proxy completion document after image payloads inside
- * `body.request` are blanked and `executionTicket` is omitted. The ticket is
+ * Byte length of a proxy completion document with image data and text parts
+ * that repeat `content` blanked inside `body.request`, and `executionTicket`
+ * omitted. The ticket is
  * issued after authorize, so it must not consume the non-image budget
  * that authorize already applied to the pre-ticket wrapper.
  */

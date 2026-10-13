@@ -4,7 +4,7 @@ import type {
 } from '@lib/sandboxUiAppSelection.types'
 import type { ActiveSandboxUiApp } from '@/uiTypes'
 
-function toActiveSandboxUiApp(app: SandboxUiAppListing): ActiveSandboxUiApp {
+export function toActiveSandboxUiApp(app: SandboxUiAppListing): ActiveSandboxUiApp {
   return {
     appRef: app.appRef,
     label: app.title?.trim() || app.appRef,

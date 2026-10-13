@@ -1,3 +1,5 @@
+import { replaceTemplateReferences } from '@clerum/workflow-runtime-core'
+
 /**
  * Custom error for unresolved template references.
  */
@@ -50,7 +52,7 @@ export interface TemplateContext {
  * - {{computed.name}}         → computed value
  */
 export function resolve(template: string, context: TemplateContext): string {
-  return template.replace(/\{\{([^}]+)\}\}/g, (_match, ref: string) => {
+  return replaceTemplateReferences(template, (ref: string) => {
     const trimmed = ref.trim()
 
     // Check for injection attempts

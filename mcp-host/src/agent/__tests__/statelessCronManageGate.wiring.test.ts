@@ -26,6 +26,7 @@ import { AgentStateMachine } from '../stateMachine'
 vi.mock('../../config', () => ({
   config: {
     devMode: true,
+    contextMaxTokens: 100_000,
     enableApproval: true,
     // The lever under test: stateless lifecycle arms the cron×stateless gate.
     statelessLifecycle: true,

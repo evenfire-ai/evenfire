@@ -15,9 +15,23 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAIL=0
 GROUPS_RUN=0
-EXPECTED_GROUPS=9
+EXPECTED_GROUPS=11
 REGISTERED=()
 COUNT_SUMMARY=""
+
+# Read-only inventory mode for hermetic discovery tests and operator inspection.
+# It does not enter package, cluster, Electron or browser execution.
+if [[ "${1:-}" == "--discovery-only" ]]; then
+  if [[ "$#" -ne 2 ]]; then
+    echo "usage: $0 --discovery-only <registered-file>" >&2
+    exit 2
+  fi
+  node "${ROOT}/scripts/tests/lib/subscription-t0-discovery.mjs" grok "${ROOT}" "$2"
+  exit "$?"
+elif [[ "$#" -ne 0 ]]; then
+  echo "unsupported T0 argument: $1" >&2
+  exit 2
+fi
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -166,6 +180,34 @@ run_group() {
   rm -f "$log"
 }
 
+run_node_group() {
+  local name="$1" rel log
+  shift
+  local files=()
+  for rel in "$@"; do
+    REGISTERED+=("${rel}")
+    require_file "$rel" || return 1
+    files+=("${ROOT}/$rel")
+  done
+  [[ ${#files[@]} -gt 0 ]] || { fail "$name: group listed no suite files"; return 1; }
+  log="$(mktemp)"
+  echo "── ${name} ──"
+  if ! node "$ROOT/scripts/tests/run-node-test-files.mjs" "${files[@]}" >"$log" 2>&1; then
+    fail "$name: command failed"
+    cat "$log"
+    rm -f "$log"
+    return 1
+  fi
+  if ! assert_executed_counts "$name" "$log" "${#files[@]}"; then
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+  GROUPS_RUN=$((GROUPS_RUN + 1))
+  pass "$name"
+}
+
+
 require_ci_matrix_entry() {
   local entry="$1"
   if ! grep -Eq "^[[:space:]]+- ${entry}$" "${ROOT}/.github/workflows/ci-public.yml"; then
@@ -179,10 +221,10 @@ require_ci_matrix_entry() {
 # proves they exist and that the CI real-PG lane asserts each one ran.
 require_real_pg_suite() {
   local rel="$1"
-  REGISTERED+=("${rel}")
   require_file "${rel}" || return 1
   local suite
-  suite="$(basename "${rel}" .test.ts)"
+  # The real-PG lane lists each suite by its file name, `.test.ts` included.
+  suite="$(basename "${rel}")"
   if ! sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*\\$//' "${ROOT}/.github/workflows/ci-public.yml" |
     grep -Fxq "${suite}"; then
     fail "ci-public.yml real-PG lane does not list ${suite}"
@@ -192,6 +234,17 @@ require_real_pg_suite() {
 }
 
 echo "Grok subscription T0 aggregator"
+
+run_node_group "subscription-discovery-and-offline-image-provider" \
+  "scripts/tests/subscription-t0-discovery.test.mjs" \
+  "scripts/tests/subscription-image-runner.test.mjs" \
+  "scripts/tests/subscription-image-coordinator.test.mjs" \
+  "scripts/tests/subscription-image-coordinator-regressions.test.mjs" \
+  "scripts/tests/control-api-qa-runtime.test.mjs" \
+  "scripts/tests/subscription-private-ui-input.test.mjs" \
+  "scripts/tests/subscription-image-input-frames.test.mjs" \
+  "scripts/e2e/prepare-subscription-remaining-fixtures.test.mjs" \
+  "scripts/e2e/fixtures/subscription-image-provider.test.mjs"
 
 require_ci_matrix_entry "grok-llm-proxy"
 require_ci_matrix_entry "packages/grok-provider-attempt-contract"
@@ -229,18 +282,31 @@ run_group "grok-catalog-projection" "packages/codex-catalog-projection" \
 run_group "grok-llm-proxy" "grok-llm-proxy" \
   "test/abortWhenClientDisconnects.test.ts" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/bindLoopbackSetup.test.ts" \
+  "test/bodyAdmission.test.ts" \
+  "test/bodyBudget.test.ts" \
+  "test/bodyStructure.test.ts" \
   "test/catalogBounds.test.ts" \
+  "test/catalogContextWindow.test.ts" \
   "test/contractFreeze.test.ts" \
   "test/controlApiClient.test.ts" \
+  "test/deployManifest.test.ts" \
+  "test/executionTicketVerifier.test.ts" \
   "test/grokTransport.conformance.test.ts" \
   "test/grokUpstreamHeaders.test.ts" \
+  "test/metrics.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
+  "test/releaseAtAcceptance.test.ts" \
   "test/requestLimits.test.ts" \
   "test/runtimePath.hermetic.e2e.test.ts" \
   "test/server.security.test.ts" \
   "test/sseBackpressure.test.ts" \
-  "test/toolNameMap.test.ts"
+  "test/sseHeartbeat.test.ts" \
+  "test/streamGate.handoff.test.ts" \
+  "test/visualBodyReadOwnership.test.ts" \
+  "test/toolNameMap.test.ts" \
+  "test/upstreamErrorHint.test.ts"
 
 run_group "control-api grok" "control-api" \
   "test/db.grokSubscriptionMigration.test.ts" \
@@ -260,6 +326,10 @@ run_group "control-api grok" "control-api" \
   "test/subscriptionGrantIdentity.test.ts" \
   "test/llmProviders.test.ts" \
   "test/routes.admin.grokSubscription.test.ts" \
+  "test/routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts" \
+  "test/llmProviderAttemptBodyAdmission.test.ts" \
+  "test/llmProviderAttemptAuthorizer.cancellation.test.ts" \
+  "test/helpers.realPostgresCancellation.test.ts" \
   "test/routes.internal.llmProviderAttempts.grok.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
   "test/routes.adminRecipes.test.ts" \
@@ -274,10 +344,19 @@ require_real_pg_suite "control-api/test/services.grokProviderAttemptRedemption.r
 require_real_pg_suite "control-api/test/services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts"
 require_real_pg_suite "control-api/test/pluginWorkloadSdkGrokDualLedger.realPostgres.integration.test.ts"
 require_real_pg_suite "control-api/test/db.llmProviderAttemptConnectionIntegrity.realPostgres.integration.test.ts"
+# Shared with Codex; it holds the Grok V2 envelope rollback twin (#784).
+require_real_pg_suite "control-api/test/services.llmProviderAttemptAuthorization.realPostgres.integration.test.ts"
 
 run_group "mcp-host grok" "mcp-host" \
   "src/llm/__tests__/grokSubscription.test.ts" \
+  "src/llm/__tests__/attachmentBudgetRefusal.test.ts" \
+  "src/llm/__tests__/imageSource.test.ts" \
   "src/llm/__tests__/grokLlmProxyClient.test.ts" \
+  "src/llm/__tests__/imageInput.test.ts" \
+  "src/llm/failover/__tests__/subscriptionAdmission.integration.test.ts" \
+  "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
+  "src/core/adapters/__tests__/llmImageCompatibility.test.ts" \
+  "src/agent/__tests__/taskExecutor.test.ts" \
   "src/llm/__tests__/grokPolicyBinding.test.ts" \
   "src/llm/__tests__/subscriptionRequestHash.test.ts" \
   "src/llm/__tests__/registry.test.ts" \
@@ -315,9 +394,37 @@ run_group "control-ui grok" "control-ui" \
   "components/__tests__/LlmProviderConfig.test.tsx" \
   "components/__tests__/LlmPolicyEditor.test.tsx" \
   "components/__tests__/LlmModelForm.test.tsx" \
+  "lib/__tests__/grokSubscription.sync.test.ts" \
   "lib/__tests__/grokSubscriptionFeature.test.ts" \
   "lib/__tests__/llm.test.ts" \
   "lib/hooks/__tests__/useGrokSubscriptionEnabled.test.tsx"
+
+# The Grok composer budget (16 MiB per image, 16 MiB decoded total, no pixel
+# bound) is desktop code. It needs Node 24 and the Electron runtime, exactly as
+# the Codex desktop group does; a test result from another runtime is not counted.
+node_major=$(node --version | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')
+if [[ "${node_major}" != "24" ]]; then
+  fail "Desktop T0 requires Node 24.x (got $(node --version))"
+else
+  pass "Node $(node --version) for Desktop T0"
+  if ! (
+    cd "${ROOT}/desktop-app"
+    npm run verify:electron
+  ); then
+    fail "desktop-app verify:electron failed"
+  else
+    pass "desktop-app verify:electron"
+    run_group "desktop-app grok" "desktop-app" \
+      "test/subscriptionImageCollection.test.ts" \
+      "test/subscriptionImageChallenge.test.ts" \
+      "test/subscriptionImageRunContract.test.ts" \
+      "test/subscriptionAdmissionGuard.test.ts" \
+      "test/subscriptionRemainingJourneyData.test.ts" \
+      "test/subscriptionRemainingJourneysContract.test.ts" \
+      "ui/src/constants/__tests__/attachments.test.ts" \
+      "ui/src/components/agents/__tests__/ComposerPanel.test.tsx"
+  fi
+fi
 
 echo "── grok-llm-proxy deploy contract ──"
 if require_file "scripts/tests/test-grok-llm-proxy-deploy-contract.sh" &&
@@ -330,36 +437,14 @@ if require_file "scripts/tests/test-grok-llm-proxy-deploy-contract.sh" &&
   fi
 fi
 
-# A Grok suite that exists but is not listed above is lost coverage. Every
-# proxy/contract test file and every *grok* test file in the Grok-touching
-# packages must be registered in a group or as a real-PG presence check.
-is_registered() {
-  local candidate="$1" entry
-  for entry in "${REGISTERED[@]}"; do
-    [[ "${entry}" == "${candidate}" ]] && return 0
-  done
-  return 1
-}
-unlisted=0
-while IFS= read -r rel; do
-  [[ -n "${rel}" ]] || continue
-  if ! is_registered "${rel}"; then
-    fail "unlisted Grok suite ${rel}"
-    unlisted=1
-  fi
-done < <(
-  cd "${ROOT}" &&
-    {
-      find grok-llm-proxy/test packages/grok-provider-attempt-contract \
-        -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.cjs' \) -print
-      find control-api mcp-host workflow-recipes host-context-controller control-ui \
-        \( -name node_modules -o -name dist -o -name .next -o -name coverage \) -prune -o \
-        -type f -iname '*grok*' \( -name '*.test.ts' -o -name '*.test.tsx' \) -print
-    } | sort -u
-)
-if [[ "${unlisted}" -eq 0 ]]; then
-  pass "every Grok suite is registered in T0"
+# Every candidate is registered in T0 or has an explicit CI/PG/runtime lane.
+# Discovery never certifies those other lanes; each requires its own physical receipt.
+discovery_registry="$(mktemp)"
+printf '%s\n' "${REGISTERED[@]}" >"${discovery_registry}"
+if ! node "${ROOT}/scripts/tests/lib/subscription-t0-discovery.mjs" grok "${ROOT}" "${discovery_registry}"; then
+  FAIL=1
 fi
+rm -f "${discovery_registry}"
 
 if [[ "${GROUPS_RUN}" -ne "${EXPECTED_GROUPS}" ]]; then
   fail "expected all ${EXPECTED_GROUPS} T0 groups, ran ${GROUPS_RUN}"

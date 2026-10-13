@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { TaskState } from '@contexts/AgentTaskTrackerContext'
-import { mapTrackerStatusToProgress, trackerStateToTaskProgress } from '../trackerToProgress'
+import {
+  mapTrackerStatusToProgress,
+  readApprovalInputPreview,
+  trackerStateToTaskProgress,
+} from '../trackerToProgress'
 
 const baseState: TaskState = {
   taskId: 'task-1',
@@ -25,6 +29,20 @@ describe('mapTrackerStatusToProgress', () => {
 })
 
 describe('trackerStateToTaskProgress', () => {
+  it('preserves the bounded pending command and rejects malformed wire previews', () => {
+    const inputPreview = { text: 'node -e "console.log(1)"', truncated: false }
+    const progress = trackerStateToTaskProgress({
+      ...baseState,
+      status: 'suspended',
+      pendingApproval: { requestId: 'preview-request', displayName: 'Shell', inputPreview },
+    })
+    expect(progress.suspendedInfo?.inputPreview).toEqual(inputPreview)
+    expect(
+      readApprovalInputPreview({ ...inputPreview, headers: { other: 'not-for-preview' } })
+    ).toEqual(inputPreview)
+    expect(readApprovalInputPreview({ text: 'node', truncated: 'false' })).toBeUndefined()
+    expect(readApprovalInputPreview({ text: '🌴'.repeat(20_000), truncated: true })).toBeUndefined()
+  })
   it('carries taskId, steps, iteration and elapsed', () => {
     const p = trackerStateToTaskProgress(baseState)
     expect(p).toMatchObject({

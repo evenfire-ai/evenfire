@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DefaultLoopController, buildLoopConfig } from '../../orchestration/loopConfig'
 import { ConversationState } from '../../types'
 import type { Conversation, PendingApproval } from '../../types'
-import { ApprovalController } from '../approvalController'
+import { ApprovalController, SESSION_SCOPED_APPROVAL_TOOLS } from '../approvalController'
 
 function makeConversation(overrides?: Partial<Conversation>): Conversation {
   return {
@@ -53,6 +53,96 @@ describe('ApprovalController', () => {
 
     const result = controller.beforeTool('shell_exec', { command: 'rm -rf' })
     expect(result).toBe('proceed')
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('requires a fresh delegate decision for live-approval tools despite wildcard approval', () => {
+    const conv = makeConversation({
+      auto_approved_tools: new Set(['*', 'shell_exec']),
+    })
+    const pendingApproval: PendingApproval = {
+      request_id: 'req-live',
+      tool_name: 'other_tool',
+      parameters: {},
+      description: 'Other tool',
+      tool_call_id: 'tc_other',
+      context_snapshot: [],
+    }
+    const customDelegate = {
+      ...new DefaultLoopController(),
+      beforeTool: vi.fn().mockReturnValue({ type: 'suspend', approval: pendingApproval }),
+      shouldAccept: delegate.shouldAccept.bind(delegate),
+      onTextRejected: delegate.onTextRejected.bind(delegate),
+      onExhaustion: delegate.onExhaustion.bind(delegate),
+      refreshTools: delegate.refreshTools.bind(delegate),
+    }
+    const controller = new ApprovalController(conv, customDelegate, new Set(['shell_exec']))
+
+    const result = controller.beforeTool('shell_exec', { command: 'process-file' })
+    expect(result).toEqual({
+      type: 'suspend',
+      approval: { ...pendingApproval, authorization_scope: 'exact_invocation' },
+    })
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith('shell_exec', {
+      command: 'process-file',
+    })
+  })
+
+  it.each(['process-file', 'process-another-file'])(
+    'delegates a live call for %s while preserving the frozen pending approval',
+    command => {
+      const pendingApproval: PendingApproval = {
+        request_id: 'req-live',
+        tool_name: 'shell_exec',
+        parameters: { command: 'process-file' },
+        description: 'Governed shell command',
+        tool_call_id: 'tc_shell',
+        context_snapshot: [],
+      }
+      const conv = makeConversation({
+        auto_approved_tools: new Set(['*', 'shell_exec']),
+        pending_approval: pendingApproval,
+      })
+      const nextApproval: PendingApproval = {
+        ...pendingApproval,
+        request_id: 'req-live-2',
+        parameters: { command },
+        tool_call_id: 'tc_shell_2',
+      }
+      const customDelegate = {
+        ...new DefaultLoopController(),
+        beforeTool: vi.fn().mockReturnValue({ type: 'suspend', approval: nextApproval }),
+        shouldAccept: delegate.shouldAccept.bind(delegate),
+        onTextRejected: delegate.onTextRejected.bind(delegate),
+        onExhaustion: delegate.onExhaustion.bind(delegate),
+        refreshTools: delegate.refreshTools.bind(delegate),
+      }
+      const controller = new ApprovalController(conv, customDelegate, new Set(['shell_exec']))
+
+      expect(controller.beforeTool('shell_exec', { command })).toEqual({
+        type: 'suspend',
+        approval: { ...nextApproval, authorization_scope: 'exact_invocation' },
+      })
+      expect(customDelegate.beforeTool).toHaveBeenCalledExactlyOnceWith('shell_exec', { command })
+      expect(conv.pending_approval).toBe(pendingApproval)
+    }
+  )
+
+  it('preserves one-shot approval consumption for tools outside the live set', () => {
+    const pendingApproval: PendingApproval = {
+      request_id: 'req-once',
+      tool_name: 'shell_exec',
+      parameters: { command: 'printf approved' },
+      description: 'Shell command',
+      tool_call_id: 'tc_once',
+      context_snapshot: [],
+    }
+    const conv = makeConversation({ pending_approval: pendingApproval })
+    const spy = vi.spyOn(delegate, 'beforeTool')
+    const controller = new ApprovalController(conv, delegate, new Set(['other_tool']))
+
+    expect(controller.beforeTool('shell_exec', pendingApproval.parameters)).toBe('proceed')
+    expect(conv.pending_approval).toBeUndefined()
     expect(spy).not.toHaveBeenCalled()
   })
 
@@ -187,7 +277,7 @@ describe('ApprovalController', () => {
     expect(result2).toBe('proceed') // DefaultLoopController returns "proceed"
   })
 
-  it("should bypass ALL tools when wildcard '*' is in auto_approved_tools", () => {
+  it("should bypass every tool outside the session-scoped set when wildcard '*' is in auto_approved_tools", () => {
     const conv = makeConversation({
       auto_approved_tools: new Set(['*']),
     })
@@ -215,14 +305,61 @@ describe('ApprovalController', () => {
 
     const controller = new ApprovalController(conv, customDelegate)
 
-    // Wildcard should bypass delegate for any tool
-    expect(controller.beforeTool('shell_exec', { command: 'rm -rf /' })).toBe('proceed')
+    // Wildcard bypasses the delegate for MCP tools and other gated natives
     expect(controller.beforeTool('mongodb-server__drop_database', {})).toBe('proceed')
-    expect(controller.beforeTool('http_request', { url: 'https://evil.com' })).toBe('proceed')
+    expect(controller.beforeTool('workflow_trigger', { recipe: 'report' })).toBe('proceed')
     expect(controller.beforeTool('airtable-server__delete_all', {})).toBe('proceed')
 
-    // Delegate should NEVER have been called — wildcard bypasses everything
+    // Delegate should NEVER have been called for those tools
     expect(customDelegate.beforeTool).not.toHaveBeenCalled()
+  })
+
+  it("does not let wildcard '*' cover shell_exec, http_request or cron_manage", () => {
+    const conv = makeConversation({
+      auto_approved_tools: new Set(['*']),
+    })
+    const suspendFor = (toolName: string) => ({
+      type: 'suspend' as const,
+      approval: {
+        request_id: `req-${toolName}`,
+        tool_name: toolName,
+        parameters: {},
+        description: toolName,
+        tool_call_id: `tc-${toolName}`,
+        context_snapshot: [],
+      },
+    })
+    const customDelegate = {
+      ...new DefaultLoopController(),
+      beforeTool: vi.fn((toolName: string) => suspendFor(toolName)),
+      shouldAccept: delegate.shouldAccept.bind(delegate),
+      onTextRejected: delegate.onTextRejected.bind(delegate),
+      onExhaustion: delegate.onExhaustion.bind(delegate),
+      refreshTools: delegate.refreshTools.bind(delegate),
+    }
+    const controller = new ApprovalController(conv, customDelegate)
+
+    // Witness: the wildcard is live and covers an MCP tool of the same turn.
+    expect(controller.beforeTool('mongodb-server__find', {})).toBe('proceed')
+    expect(customDelegate.beforeTool).not.toHaveBeenCalled()
+
+    for (const toolName of SESSION_SCOPED_APPROVAL_TOOLS) {
+      expect(controller.beforeTool(toolName, {})).toEqual(suspendFor(toolName))
+    }
+    expect(customDelegate.beforeTool.mock.calls.map(call => call[0])).toEqual([
+      'shell_exec',
+      'http_request',
+      'cron_manage',
+    ])
+
+    // Each session-scoped tool proceeds once its own name is approved, either
+    // for later tasks ("always") or for the current task.
+    conv.auto_approved_tools.add('shell_exec')
+    conv.task_approved_tools = new Set(['cron_manage'])
+    expect(controller.beforeTool('shell_exec', {})).toBe('proceed')
+    expect(controller.beforeTool('cron_manage', {})).toBe('proceed')
+    expect(controller.beforeTool('http_request', {})).toEqual(suspendFor('http_request'))
+    expect(customDelegate.beforeTool).toHaveBeenCalledTimes(4)
   })
 
   it('should NOT bypass tools when wildcard is absent and individual tool is not approved', () => {

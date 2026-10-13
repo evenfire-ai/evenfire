@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
-import { loadGrokSubscriptionCapability } from '@lib/grokSubscriptionFeature'
+import type { SubscriptionCapabilities } from '../../subscriptionCapabilities'
 import { useGrokSubscriptionEnabled } from '../useGrokSubscriptionEnabled'
 
-vi.mock('@lib/grokSubscriptionFeature', async importOriginal => {
-  const actual = await importOriginal<typeof import('@lib/grokSubscriptionFeature')>()
-  return { ...actual, loadGrokSubscriptionCapability: vi.fn() }
-})
+const grokCapabilityState = vi.hoisted(() => ({
+  capabilities: null as SubscriptionCapabilities | null,
+}))
+
+vi.mock('@lib/hooks/useSubscriptionCapabilities', () => ({
+  useSubscriptionCapabilities: () => ({
+    capabilities: grokCapabilityState.capabilities,
+    loading: grokCapabilityState.capabilities === null,
+    error: null,
+    retry: vi.fn(),
+  }),
+}))
 
 function Probe() {
   return <span data-testid="grok">{String(useGrokSubscriptionEnabled())}</span>
@@ -14,37 +22,52 @@ function Probe() {
 
 afterEach(() => {
   cleanup()
+  grokCapabilityState.capabilities = null
   vi.clearAllMocks()
 })
 
 describe('useGrokSubscriptionEnabled', () => {
-  it('starts hidden and turns on only after the capability probe reports enabled', async () => {
-    let resolve!: (value: { enabled: boolean }) => void
-    vi.mocked(loadGrokSubscriptionCapability).mockReturnValue(
-      new Promise(res => {
-        resolve = res
-      })
-    )
+  it('starts hidden and turns on after shared capability discovery confirms the integration', async () => {
+    grokCapabilityState.capabilities = null
     render(<Probe />)
     expect(screen.getByTestId('grok')).toHaveTextContent('false')
-    resolve({ enabled: true })
+    cleanup()
+
+    grokCapabilityState.capabilities = {
+      providers: {
+        'codex-subscription': { enabled: false },
+        'grok-subscription': { enabled: true },
+      },
+    }
+    render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('grok')).toHaveTextContent('true'))
-    expect(loadGrokSubscriptionCapability).toHaveBeenCalledTimes(1)
   })
 
-  it('stays hidden when the probe reports the flag off', async () => {
-    vi.mocked(loadGrokSubscriptionCapability).mockResolvedValue({ enabled: false })
+  it('stays hidden when the shared integration flag is off', () => {
+    grokCapabilityState.capabilities = {
+      providers: {
+        'codex-subscription': { enabled: false },
+        'grok-subscription': { enabled: false },
+      },
+    }
     render(<Probe />)
-    await waitFor(() => expect(loadGrokSubscriptionCapability).toHaveBeenCalled())
-    await Promise.resolve()
     expect(screen.getByTestId('grok')).toHaveTextContent('false')
   })
 
-  it('fails closed when the probe throws a non-disabled error', async () => {
-    vi.mocked(loadGrokSubscriptionCapability).mockRejectedValue(new Error('probe boom'))
+  it('fails closed before confirmation', () => {
+    grokCapabilityState.capabilities = null
     render(<Probe />)
-    await waitFor(() => expect(loadGrokSubscriptionCapability).toHaveBeenCalled())
-    await Promise.resolve()
     expect(screen.getByTestId('grok')).toHaveTextContent('false')
+  })
+
+  it('keeps a previously confirmed Grok integration visible during a transient read failure', () => {
+    grokCapabilityState.capabilities = {
+      providers: {
+        'codex-subscription': { enabled: false },
+        'grok-subscription': { enabled: true },
+      },
+    }
+    render(<Probe />)
+    expect(screen.getByTestId('grok')).toHaveTextContent('true')
   })
 })

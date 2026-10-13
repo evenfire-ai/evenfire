@@ -137,6 +137,25 @@ export function mergeAnnotationsForReplace(
   return merged
 }
 
+/** Preserve the kubeconfig client's server, auth and TLS middleware per call. */
+function cancellationOptions(signal?: AbortSignal): k8s.ConfigurationOptions | undefined {
+  signal?.throwIfAborted()
+  if (!signal) return undefined
+  const cancellation = k8s.createConfiguration({
+    promiseMiddleware: [
+      {
+        pre: async context => {
+          signal.throwIfAborted()
+          context.setSignal(signal)
+          return context
+        },
+        post: async response => response,
+      },
+    ],
+  })
+  return { middleware: cancellation.middleware, middlewareMergeStrategy: 'append' }
+}
+
 export class ResourceService {
   // Allowed namespaces derived from config at construction time.
   private readonly allowedNamespaces: Set<string>
@@ -177,19 +196,29 @@ export class ResourceService {
     return Array.from(namespaces)
   }
 
-  async listResource(plural: ClerumResourceType, namespace?: string): Promise<unknown[]> {
+  async listResource(
+    plural: ClerumResourceType,
+    namespace?: string,
+    signal?: AbortSignal
+  ): Promise<unknown[]> {
+    signal?.throwIfAborted()
     if (namespace === '*') {
       const items: unknown[] = []
       for (const nsName of this.listNamespacesForPlural(plural)) {
         try {
-          const namespaced = (await this.customApi.listNamespacedCustomObject({
-            group: CLERUM_GROUP,
-            version: CLERUM_VERSION,
-            namespace: nsName,
-            plural,
-          })) as unknown as ResourceListResponse
+          const namespaced = (await this.customApi.listNamespacedCustomObject(
+            {
+              group: CLERUM_GROUP,
+              version: CLERUM_VERSION,
+              namespace: nsName,
+              plural,
+            },
+            cancellationOptions(signal)
+          )) as unknown as ResourceListResponse
+          signal?.throwIfAborted()
           items.push(...(namespaced.items || []))
         } catch {
+          signal?.throwIfAborted()
           // Ignore namespaces where the resource is absent/inaccessible.
         }
       }
@@ -197,30 +226,43 @@ export class ResourceService {
     }
 
     const resolvedNamespace = this.resolveNamespace(plural, namespace)
-    const res = (await this.customApi.listNamespacedCustomObject({
-      group: CLERUM_GROUP,
-      version: CLERUM_VERSION,
-      namespace: resolvedNamespace,
-      plural,
-    })) as unknown as ResourceListResponse
+    const res = (await this.customApi.listNamespacedCustomObject(
+      {
+        group: CLERUM_GROUP,
+        version: CLERUM_VERSION,
+        namespace: resolvedNamespace,
+        plural,
+      },
+      cancellationOptions(signal)
+    )) as unknown as ResourceListResponse
+    signal?.throwIfAborted()
     return res.items || []
   }
 
   async getResource(
     plural: ClerumResourceType,
     name: string,
-    namespace?: string
+    namespace?: string,
+    signal?: AbortSignal
   ): Promise<unknown> {
+    signal?.throwIfAborted()
     const ns = this.resolveNamespace(plural, namespace)
     try {
-      return await this.customApi.getNamespacedCustomObject({
-        group: CLERUM_GROUP,
-        version: CLERUM_VERSION,
-        namespace: ns,
-        plural,
-        name,
-      })
+      const resource = await this.customApi.getNamespacedCustomObject(
+        {
+          group: CLERUM_GROUP,
+          version: CLERUM_VERSION,
+          namespace: ns,
+          plural,
+          name,
+        },
+        cancellationOptions(signal)
+      )
+      signal?.throwIfAborted()
+      return resource
     } catch (err) {
+      // node-fetch reports AbortError; retain the owner's typed reason instead.
+      signal?.throwIfAborted()
       const status = extractK8sStatus(err)
       if (namespace && namespace.trim()) {
         if (status === 404) {
@@ -231,7 +273,7 @@ export class ResourceService {
       if (status !== 404 && status !== null) {
         throw err
       }
-      const items = (await this.listResource(plural, '*')) as Array<{
+      const items = (await this.listResource(plural, '*', signal)) as Array<{
         metadata?: { name?: string }
       }>
       const match = items.find(i => i.metadata?.name === name)

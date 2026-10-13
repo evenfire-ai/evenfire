@@ -92,6 +92,12 @@ export interface LlmInProgressEvent {
   elapsedMs: number
 }
 
+export interface ApprovalInputPreview {
+  text: string
+  /** Also true when redaction changes the command; never claim an exact full copy. */
+  truncated: boolean
+}
+
 export interface SuspendedEvent {
   taskId: string
   requestId: string
@@ -106,6 +112,8 @@ export interface SuspendedEvent {
   reason: 'approval_required' | 'connect_required'
   /** Set iff reason==='connect_required' — the oauth mcp-server to connect. */
   mcpServerName?: string
+  /** Sanitized, bounded input for human review; never used to resume execution. */
+  inputPreview?: ApprovalInputPreview
 }
 
 /**
