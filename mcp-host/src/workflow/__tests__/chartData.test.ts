@@ -518,7 +518,151 @@ describe('values that name their label', () => {
   })
 })
 
+describe('colors of values that name their label', () => {
+  it('go with their values', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['Jan', 'Feb'],
+        datasets: [
+          {
+            data: [
+              { label: 'Feb', value: 20 },
+              { label: 'Jan', value: 10 },
+            ],
+            backgroundColor: ['red', 'green'],
+            borderColor: ['darkred', 'darkgreen'],
+          },
+        ],
+      },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([10, 20])
+    expect(r.datasets[0].backgroundColor).toEqual(['green', 'red'])
+    expect(r.datasets[0].borderColor).toEqual(['darkgreen', 'darkred'])
+  })
+
+  it('repeat a short list with their values on a bar chart, as Chart.js repeats it', () => {
+    // C, A and B sent against two colors: C red, A green, B red again.
+    const r = normalizeChartData(
+      {
+        labels: ['A', 'B', 'C'],
+        datasets: [
+          {
+            data: [
+              { label: 'C', value: 3 },
+              { label: 'A', value: 1 },
+              { label: 'B', value: 2 },
+            ],
+            backgroundColor: ['red', 'green'],
+          },
+        ],
+      },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([1, 2, 3])
+    expect(r.datasets[0].backgroundColor).toEqual(['green', 'red', 'red'])
+  })
+
+  it('leave a gap, and on a slice chart a value past a short list, without a color', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['A', 'B', 'C'],
+        datasets: [
+          {
+            data: [
+              { label: 'C', value: 3 },
+              { label: 'A', value: 1 },
+            ],
+            backgroundColor: ['red'],
+          },
+        ],
+      },
+      { chartType: 'pie' }
+    )
+    expect(r.datasets[0].data).toEqual([1, null, 3])
+    expect(r.datasets[0].backgroundColor).toEqual([undefined, undefined, 'red'])
+  })
+
+  it('are left out with a value that repeats a label', () => {
+    const r = normalizeChartData(
+      {
+        datasets: [
+          {
+            data: [
+              { label: 'A', value: 1 },
+              { label: 'A', value: 9 },
+              { label: 'B', value: 2 },
+            ],
+            backgroundColor: ['red', 'blue', 'green'],
+          },
+        ],
+      },
+      bar
+    )
+    expect(r.labels).toEqual(['A', 'B'])
+    expect(r.datasets[0].data).toEqual([1, 2])
+    expect(r.datasets[0].backgroundColor).toEqual(['red', 'green'])
+  })
+
+  it('leave an empty color list as it was sent', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['A', 'B'],
+        datasets: [
+          {
+            data: [
+              { label: 'B', value: 2 },
+              { label: 'A', value: 1 },
+            ],
+            backgroundColor: [],
+          },
+        ],
+      },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([1, 2])
+    expect(r.datasets[0].backgroundColor).toEqual([])
+  })
+
+  it('reach every category a later series adds', () => {
+    const r = normalizeChartData(
+      {
+        datasets: [
+          { data: [{ label: 'A', value: 1 }], backgroundColor: ['red'] },
+          { data: [{ label: 'B', value: 2 }] },
+        ],
+      },
+      bar
+    )
+    expect(r.labels).toEqual(['A', 'B'])
+    expect(r.datasets[0].data).toEqual([1, null])
+    expect(r.datasets[0].backgroundColor).toEqual(['red', undefined])
+  })
+})
+
 describe('single-series charts', () => {
+  it.each(['waterfall', 'funnel'] as const)('%s: a dropped series adds no category', chartType => {
+    const r = normalizeChartData(
+      {
+        datasets: [
+          {
+            label: 'Primary',
+            data: [
+              { label: 'Start', value: 2 },
+              { label: 'Change', value: -1 },
+            ],
+          },
+          { label: 'Second', data: [{ label: 'Phantom', value: 900 }] },
+        ],
+      },
+      { chartType }
+    )
+    expect(r.labels).toEqual(['Start', 'Change'])
+    expect(r.datasets).toHaveLength(1)
+    expect(r.datasets[0].data).toEqual([2, -1])
+    expect(r.warnings.join(' ')).toContain('1 extra dataset(s) were dropped')
+  })
+
   it('count only the series they draw when numbering missing labels', () => {
     const r = normalizeChartData(
       {

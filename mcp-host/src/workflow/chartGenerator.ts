@@ -94,8 +94,9 @@ interface ChartDataset {
    * tuples once a waterfall has been expanded into floating bars.
    */
   data: Array<number | null> | NormalizedPoint[] | number[][]
-  backgroundColor?: string | string[]
-  borderColor?: string | string[]
+  /** Per value when a list; a gap is a value placed by its label with no color of its own. */
+  backgroundColor?: string | Array<string | undefined>
+  borderColor?: string | Array<string | undefined>
   fill?: boolean
 }
 
@@ -234,6 +235,9 @@ function applyThemePalette(
           theme.backgroundColor
         )
         out.backgroundColor = colors
+        if (Array.isArray(out.borderColor)) {
+          out.borderColor = out.borderColor.map(c => c ?? theme.backgroundColor)
+        }
         const where = `data.datasets[${idx}]`
         if (padded) {
           warnings.push(
@@ -250,11 +254,15 @@ function applyThemePalette(
       }
     } else {
       const color = theme.palette[idx % theme.palette.length]
+      // Translucent wherever series are drawn over one another — a solid
+      // radar fill hides every series behind the first.
+      const fill = TRANSLUCENT_FILL_TYPES.has(chartType) ? `${color}33` : color
       if (!out.borderColor) out.borderColor = color
-      if (!out.backgroundColor) {
-        // Translucent wherever series are drawn over one another — a solid
-        // radar fill hides every series behind the first.
-        out.backgroundColor = TRANSLUCENT_FILL_TYPES.has(chartType) ? `${color}33` : color
+      if (!out.backgroundColor) out.backgroundColor = fill
+      // A value with no color of its own in a list takes the series color.
+      if (Array.isArray(out.borderColor)) out.borderColor = out.borderColor.map(c => c ?? color)
+      if (Array.isArray(out.backgroundColor)) {
+        out.backgroundColor = out.backgroundColor.map(c => c ?? fill)
       }
       if (chartType === 'area' && out.fill === undefined) {
         out.fill = true
@@ -452,7 +460,7 @@ function resolveChartType(
       ds.data = paired.map(p => p.v)
       o.labels = paired.map(p => p.l)
       // Per-stage colors follow their stage through the sort.
-      const follow = (colors: string | string[] | undefined) =>
+      const follow = (colors: string | Array<string | undefined> | undefined) =>
         Array.isArray(colors) ? paired.map(p => colors[p.i % colors.length]) : colors
       ds.backgroundColor = follow(ds.backgroundColor)
       ds.borderColor = follow(ds.borderColor)

@@ -680,6 +680,40 @@ describe('colors follow their points', () => {
     expect(colorCount(image, red, bottom)).toBeGreaterThan(colorCount(image, green, bottom))
   })
 
+  it('keeps each bar in its color when values are placed by their labels', async () => {
+    const tool = findTool('clerum__generate_chart')
+    const red = '#dc2626'
+    const green = '#16a34a'
+    const r = await tool.execute(
+      {
+        filename: 'placed-colors.png',
+        type: 'bar',
+        showValues: false,
+        data: {
+          labels: ['Jan', 'Feb'],
+          datasets: [
+            {
+              data: [
+                { label: 'Feb', value: 20 },
+                { label: 'Jan', value: 10 },
+              ],
+              backgroundColor: [red, green],
+            },
+          ],
+        },
+      },
+      outputDir
+    )
+    expect(r.success).toBe(true)
+    const image = await pixelsOf(path.join(outputDir, 'placed-colors.png'))
+    const half = Math.floor(image.width / 2)
+    const left = { x: 0, y: 0, w: half, h: image.height }
+    const right = { x: half, y: 0, w: image.width - half, h: image.height }
+    // Jan, sent green, is the left bar; Feb, sent red, the right one.
+    expect(colorCount(image, green, left)).toBeGreaterThan(colorCount(image, red, left))
+    expect(colorCount(image, red, right)).toBeGreaterThan(colorCount(image, green, right))
+  })
+
   it('fills a short color list from the theme instead of repeating it', async () => {
     const tool = findTool('clerum__generate_chart')
     const r = await tool.execute(

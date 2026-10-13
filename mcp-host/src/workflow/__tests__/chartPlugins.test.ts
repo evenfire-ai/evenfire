@@ -209,6 +209,13 @@ describe('slice colors', () => {
     expect(padded).toBe(true)
   })
 
+  it('keeps a requested color on its slice when the list has gaps', () => {
+    const { colors, padded } = sliceColors(3, [undefined, '#16a34a'], palette, '#ffffff')
+    expect(colors[1]).toBe('#16a34a')
+    expect(new Set(colors).size).toBe(3)
+    expect(padded).toBe(true)
+  })
+
   it('shades the palette past its end, and never gives the last slice the first color', () => {
     const { colors, repeated } = sliceColors(8, undefined, palette, '#ffffff')
     expect(new Set(colors).size).toBe(8)

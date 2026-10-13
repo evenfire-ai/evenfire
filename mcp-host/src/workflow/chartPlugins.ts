@@ -482,11 +482,16 @@ function distance(a: string, b: string): number {
  */
 export function sliceColors(
   count: number,
-  requested: string[] | undefined,
+  requested: ReadonlyArray<string | undefined> | undefined,
   palette: string[],
   background: string
 ): { colors: string[]; padded: boolean; repeated: boolean } {
-  const own = (requested ?? []).filter(c => typeof c === 'string').slice(0, count)
+  // A requested color stays on its slice; a slice without one takes the next
+  // color the theme adds.
+  const ownAt = (i: number) => (typeof requested?.[i] === 'string' ? requested[i] : undefined)
+  const own = Array.from({ length: count }, (_, i) => ownAt(i)).filter(
+    (c): c is string => c !== undefined
+  )
   const light = (rgb(background) ?? [255, 255, 255]).reduce((sum, c) => sum + c, 0) > 382
   const shades = [
     ...palette.map(c => mix(c, background, 0.45)),
@@ -499,7 +504,8 @@ export function sliceColors(
     if (pool.every(used => distance(used, candidate) >= MIN_COLOR_DISTANCE)) pool.push(candidate)
   }
   const distinct = pool.length
-  const colors = Array.from({ length: count }, (_, i) => pool[i % distinct])
+  let next = own.length
+  const colors = Array.from({ length: count }, (_, i) => ownAt(i) ?? pool[next++ % distinct])
   if (count > distinct && count > 1 && colors[count - 1] === colors[0]) {
     colors[count - 1] = pool[Math.min(1, distinct - 1)]
   }

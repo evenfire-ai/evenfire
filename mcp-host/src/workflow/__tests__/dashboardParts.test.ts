@@ -29,6 +29,55 @@ describe('DashboardCharts', () => {
     expect(charts.drawn).toBe(1)
   })
 
+  it('keeps the colors of values placed by their labels, and colors a gap without a warning', () => {
+    const reported = notes()
+    const charts = new DashboardCharts(true, reported)
+    charts.card(
+      {
+        type: 'bar',
+        labels: ['Jan', 'Feb', 'Mar'],
+        datasets: [
+          {
+            label: 's',
+            data: [
+              { label: 'Feb', value: 20 },
+              { label: 'Jan', value: 10 },
+            ],
+            backgroundColor: ['red', 'green'],
+          },
+        ],
+      },
+      'data.charts[0]'
+    )
+    const ds = charts.specs[0].datasets[0]
+    expect(ds.data).toEqual([10, 20, null])
+    const colors = ds.backgroundColor as string[]
+    expect(colors.slice(0, 2)).toEqual(['green', 'red'])
+    expect(typeof colors[2]).toBe('string')
+    expect(reported.warnings.join(' ')).not.toContain('not a CSS color')
+  })
+
+  it.each(['waterfall', 'funnel'])('%s: a dropped series adds no category', type => {
+    const charts = new DashboardCharts(true, notes())
+    charts.card(
+      {
+        type,
+        datasets: [
+          {
+            label: 'Primary',
+            data: [
+              { label: 'Start', value: 2 },
+              { label: 'Change', value: -1 },
+            ],
+          },
+          { label: 'Second', data: [{ label: 'Phantom', value: 900 }] },
+        ],
+      },
+      'data.charts[0]'
+    )
+    expect(charts.specs[0].labels).not.toContain('Phantom')
+  })
+
   it('reports a chart it cannot draw in its place, escaped', () => {
     const reported = notes()
     const charts = new DashboardCharts(true, reported)

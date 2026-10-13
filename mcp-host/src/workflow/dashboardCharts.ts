@@ -189,7 +189,8 @@ function checkColors(
     }
     out[key] = value.map((v, j) => {
       if (isCssColor(v)) return v
-      bad.push({ at: `${at}[${j}]`, value: v })
+      // A value placed by its label with no color of its own takes the palette's.
+      if (v !== undefined) bad.push({ at: `${at}[${j}]`, value: v })
       return paletteColor(SLICE_TYPES.has(type) ? j : index).color
     })
   }
@@ -290,7 +291,7 @@ function translate(
       chart.labels = pairs.map(p => p.l)
       // Per-stage colors follow their stage through the sort, as in the PNG
       // funnel; a short list wraps as Chart.js wraps it.
-      const follow = (colors: string | string[] | undefined) =>
+      const follow = (colors: string | Array<string | undefined> | undefined) =>
         Array.isArray(colors) && colors.length > 0
           ? pairs.map(p => colors[p.i % colors.length])
           : colors

@@ -37,8 +37,9 @@ export interface NormalizedPoint {
 export interface NormalizedDataset {
   label?: string
   data: Array<number | null> | NormalizedPoint[]
-  backgroundColor?: string | string[]
-  borderColor?: string | string[]
+  /** Per value when a list; a gap (undefined) is a value with no color of its own. */
+  backgroundColor?: string | Array<string | undefined>
+  borderColor?: string | Array<string | undefined>
   fill?: boolean
 }
 
@@ -598,14 +599,20 @@ export function normalizeChartData(raw: unknown, opts: NormalizeOptions): Normal
     datasets.push({ ...(carryStyle(ds) as NormalizedDataset), data: series.data })
   })
 
-  if (labelled.some(Boolean)) labels = placeByLabel(labels, datasets, labelled, root, warnings)
-
+  // A single-series chart draws only the first dataset, so the rest are left out
+  // before anything is read from them: their labels must not become categories.
   if (SINGLE_SERIES_TYPES.has(chartType) && datasets.length > 1) {
     const extra = datasets.length - 1
     warnings.push(
       `\`${root}.datasets[${extra === 1 ? '1' : `1..${extra}`}]\`: "${chartType}" draws a ` +
         `single series; ${extra} extra dataset(s) were dropped.`
     )
+    datasets.splice(1)
+    labelled.splice(1)
+  }
+
+  if (labelled.some(Boolean)) {
+    labels = placeByLabel(labels, datasets, labelled, root, warnings, !SLICE_TYPES.has(chartType))
   }
 
   if (!isXY) {
@@ -663,18 +670,25 @@ export function normalizeChartData(raw: unknown, opts: NormalizeOptions): Normal
   return { labels, datasets, warnings }
 }
 
+/** Per-value styles, which go wherever their value is placed. */
+const POINT_STYLE_KEYS = ['backgroundColor', 'borderColor'] as const
+
 /**
  * Values that carry their own label ({label, value} records, [label, value]
  * pairs) placed at that label, not at their position: the categories are the
  * given labels, then any new ones in the order met. A series with no value for
- * a category leaves a gap there. Returns the categories.
+ * a category leaves a gap there. Each value's own colors go with it; with
+ * `wrapColors` a short color list repeats, as Chart.js repeats it, and without
+ * it (slice charts) a value past the list, like a gap, has no color of its own
+ * and is left for the renderer to color. Returns the categories.
  */
 function placeByLabel(
   given: string[] | undefined,
   datasets: NormalizedDataset[],
   labelled: Array<string[] | undefined>,
   root: string,
-  warnings: string[]
+  warnings: string[],
+  wrapColors: boolean
 ): string[] {
   const categories = given ? [...given] : []
   // Labels match whatever their case and surrounding spaces: 'jan' is the 'Jan' column.
@@ -686,6 +700,7 @@ function placeByLabel(
   let moved = false
   let repeated = 0
   const unmatched: number[] = []
+  const placedColors: Array<Array<string | undefined>> = []
   labelled.forEach((own, d) => {
     if (!own) return
     // Labels of its own that name none of the given ones are not categories but
@@ -697,6 +712,18 @@ function placeByLabel(
     }
     const values = datasets[d].data as Array<number | null>
     const placed: Array<number | null> = new Array(categories.length).fill(null)
+    const styles = POINT_STYLE_KEYS.flatMap(styleKey => {
+      const list = datasets[d][styleKey]
+      return Array.isArray(list) && list.length > 0
+        ? [
+            {
+              styleKey,
+              list,
+              placed: new Array<string | undefined>(categories.length).fill(undefined),
+            },
+          ]
+        : []
+    })
     const seen = new Set<string>()
     own.forEach((label, i) => {
       if (seen.has(key(label))) {
@@ -712,9 +739,19 @@ function placeByLabel(
       }
       if (at !== i) moved = true
       placed[at] = values[i]
+      for (const style of styles) {
+        style.placed[at] = wrapColors ? style.list[i % style.list.length] : style.list[i]
+      }
     })
     datasets[d] = { ...datasets[d], data: placed }
+    for (const style of styles) {
+      datasets[d][style.styleKey] = style.placed
+      placedColors.push(style.placed)
+    }
   })
+  // A placed color list reaches every category; those a later series added
+  // are gaps the renderer colors.
+  for (const list of placedColors) while (list.length < categories.length) list.push(undefined)
   // Series without labels of their own keep their positions, padded to every category.
   for (const ds of datasets) {
     const data = ds.data as Array<number | null>
