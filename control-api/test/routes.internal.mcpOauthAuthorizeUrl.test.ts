@@ -4,7 +4,7 @@ import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { verifyOAuthStateSignature } from '../src/oauth/state.js'
 import { checkAndIncrement } from '../src/services/rateLimiterService.js'
-import { memberOf, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -114,7 +114,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
     // user-7 is a member of ctx-9, whose allowlist enables gdrive.
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
-    memberOf(mockPoolQuery, ['ctx-9'])
+    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-9'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -189,7 +189,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('context server: accepts a matching body contextId from a MEMBER and mints the URL', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
     // Membership check (getUserContexts → user_contexts): user-2 is a member of ctx-A.
-    mockPoolQuery.mockResolvedValue({ rows: [{ context_id: 'ctx-A' }], rowCount: 1 })
+    membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-A'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -202,11 +202,8 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   // rejected at the MINT boundary — fail early, never sent to the provider.
   it('context server: a NON-member is rejected 403 at mint, with NO authorizeUrl', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    // getUserContexts returns contexts that do NOT include ctx-A.
-    mockPoolQuery.mockResolvedValue({
-      rows: [{ context_id: 'ctx-other' }, { context_id: 'ctx-else' }],
-      rowCount: 2,
-    })
+    // The user's Contexts do NOT include ctx-A.
+    membership(mockPoolQuery, { contexts: { 'user-nomember': ['ctx-other', 'ctx-else'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -223,7 +220,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('context server: membership in an allowlisting Context other than contextRef → still 403', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
     await seedAllowlistedContext(gateway, 'ctx-B', ['gdrive'])
-    memberOf(mockPoolQuery, ['ctx-B'])
+    membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-B'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -234,7 +231,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
 
   it('context server: a contextRef member mints even when no allowlist names the server', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    memberOf(mockPoolQuery, ['ctx-A'])
+    membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-A'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -256,17 +253,26 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
     await seedAllowlistedContext(gateway, 'ctx-owner', ['gdrive'])
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
-    memberOf(mockPoolQuery, ['ctx-business', 'ctx-unrelated'])
+    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business', 'ctx-unrelated'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
       .send({ mcpServerName: 'gdrive', userId: 'user-7' })
     expect(res.status).toBe(200)
     expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
-    const membershipQuery = mockPoolQuery.mock.calls.find(
-      ([sql]) => typeof sql === 'string' && sql.includes('FROM user_contexts')
-    )
-    expect(membershipQuery?.[1]).toEqual(['user-7'])
+  })
+
+  it('user flavor: the requesting user is not a member but another user is → 403, NO authorizeUrl', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
+    await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
+    membership(mockPoolQuery, { contexts: { 'someone-else': ['ctx-business'] } })
+    const res = await post(app)
+      .set('Authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('context_membership_denied')
+    expect(res.body.authorizeUrl).toBeUndefined()
   })
 
   it('user flavor: a server WITHOUT contextRef that an allowlist enables mints OK', async () => {
@@ -294,7 +300,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
       },
     })
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
-    memberOf(mockPoolQuery, ['ctx-business'])
+    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -306,7 +312,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('user flavor: the body contextId is ignored (neither required nor cross-checked)', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-owner' })
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
-    memberOf(mockPoolQuery, ['ctx-business'])
+    membership(mockPoolQuery, { contexts: { 'user-7': ['ctx-business'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -317,7 +323,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('user flavor: no Context of the user allowlists the server → 403, NO authorizeUrl', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
     await seedAllowlistedContext(gateway, 'ctx-other', ['some-other-server'])
-    memberOf(mockPoolQuery, ['ctx-other'])
+    membership(mockPoolQuery, { contexts: { 'user-8': ['ctx-other'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -330,7 +336,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
   it('user flavor: a user with no Contexts at all → 403', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
-    memberOf(mockPoolQuery, [])
+    membership(mockPoolQuery, { contexts: { 'user-8': [] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -347,7 +353,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
     await seedAllowlistedContext(gateway, 'ctx-business', ['gdrive'])
     await seedAllowlistedContext(gateway, 'ctx-other', [])
-    memberOf(mockPoolQuery, ['ctx-other'])
+    membership(mockPoolQuery, { contexts: { 'user-8': ['ctx-other'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')
@@ -379,7 +385,7 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     // Member of ctx-9, which enables gdrive, so we reach the Secret read (past
     // the membership gate).
     await seedAllowlistedContext(gateway, 'ctx-9', ['gdrive'])
-    memberOf(mockPoolQuery, ['ctx-9'])
+    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-9'] } })
     const res = await post(app)
       .set('Authorization', 'Bearer dev-rpc-proxy-token')
       .set('x-service-token', 'rpc-proxy')

@@ -13,7 +13,7 @@ import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
 import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
-import { seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import {
   ATLASSIAN_V2_PILOT,
   DROPBOX_PILOT,
@@ -341,16 +341,12 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
     gateway = new MockGateway(MCP_NS)
     app = createApp(gateway as never)
     mockPoolQuery.mockReset()
-    mockPoolQuery.mockImplementation((sql: unknown) => {
-      const text = typeof sql === 'string' ? sql : ''
-      if (text.includes('FROM user_contexts')) {
-        return Promise.resolve({ rows: [{ context_id: CONTEXT }], rowCount: 1 })
-      }
-      if (text.includes('DELETE FROM oauth_grants')) {
-        return Promise.resolve({ rows: [], rowCount: 1 })
-      }
-      return Promise.resolve({ rows: [], rowCount: 0 })
-    })
+    membership(mockPoolQuery, { contexts: { 'user-1': [CONTEXT] } }, sql =>
+      Promise.resolve({
+        rows: [],
+        rowCount: typeof sql === 'string' && sql.includes('DELETE FROM oauth_grants') ? 1 : 0,
+      })
+    )
     config.mcpOauthBrokerEnabled = true
   })
 
@@ -389,13 +385,7 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
 
     it(`${c.label}: authorize-url for a non-member → 403, configuration not disclosed`, async () => {
       await seed('srv', c.oauth())
-      mockPoolQuery.mockImplementation((sql: unknown) => {
-        const text = typeof sql === 'string' ? sql : ''
-        if (text.includes('FROM user_contexts')) {
-          return Promise.resolve({ rows: [{ context_id: 'ctx-other' }], rowCount: 1 })
-        }
-        return Promise.resolve({ rows: [], rowCount: 0 })
-      })
+      membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-other'] } })
       const res = await request(app)
         .post('/api/v1/internal/mcp-oauth/authorize-url')
         .set('Authorization', `Bearer ${RPC_PROXY_TOKEN}`)

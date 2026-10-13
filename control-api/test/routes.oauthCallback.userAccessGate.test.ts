@@ -4,7 +4,7 @@ import request from 'supertest'
 import { config } from '../src/config.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import { createOAuthCallbackRouter } from '../src/routes/external/oauthCallback.js'
-import { memberOf, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -109,7 +109,19 @@ describe('GET /api/v1/oauth-callback/:oauthClientId — per-user access re-check
 
   it('403 context_membership_denied when no Context of the user enables the server; no exchange, no grant', async () => {
     await seedAllowlistedContext(gateway, 'ctx-mine', ['some-other-server'])
-    memberOf(mockPoolQuery, ['ctx-mine'])
+    membership(mockPoolQuery, { contexts: { [USER_ID]: ['ctx-mine'] } })
+
+    const res = await callback()
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'context_membership_denied' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(grantWrites()).toHaveLength(0)
+  })
+
+  it('403 when the signed user is not a member but another user is; no exchange, no grant', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-business', [SERVER])
+    membership(mockPoolQuery, { contexts: { 'someone-else': ['ctx-business'] } })
 
     const res = await callback()
 
@@ -121,7 +133,7 @@ describe('GET /api/v1/oauth-callback/:oauthClientId — per-user access re-check
 
   it('200 when a Context of the user enables the server, though not its contextRef; exchanges and writes the user grant', async () => {
     await seedAllowlistedContext(gateway, 'ctx-business', [SERVER])
-    memberOf(mockPoolQuery, ['ctx-business'])
+    membership(mockPoolQuery, { contexts: { [USER_ID]: ['ctx-business'] } })
 
     const res = await callback()
 

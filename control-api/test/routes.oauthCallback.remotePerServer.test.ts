@@ -8,6 +8,7 @@ import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { attachServerToContext } from '../src/services/contextAllowlist.js'
+import { membershipResult } from './fixtures/contextAllowlist.js'
 import {
   discoverPilot,
   installRemoteServer,
@@ -46,9 +47,10 @@ vi.mock('../src/db.js', async importActual => {
     pool: {
       query: (text: string, values?: unknown[]) => {
         // Membership is the only non-OAuth read on these paths.
-        if (text.includes('FROM user_contexts')) {
-          return Promise.resolve({ rows: [{ context_id: dbHolder.context }], rowCount: 1 })
-        }
+        const member = membershipResult(text, values, {
+          contexts: { 'user-9': [dbHolder.context] },
+        })
+        if (member) return Promise.resolve(member)
         if (!dbHolder.db) throw new Error('test db not initialised')
         return dbHolder.db.query(text, values)
       },

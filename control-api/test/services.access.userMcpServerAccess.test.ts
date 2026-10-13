@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../src/config.js'
 import { userHasContextEnablingMcpServer } from '../src/services/access/mcpInvocable.js'
-import { memberOf, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -40,29 +40,33 @@ describe('userHasContextEnablingMcpServer', () => {
   it('true when one of the user Contexts allowlists the server', async () => {
     await seedAllowlistedContext(gateway, 'ctx-owner', ['notion'])
     await seedAllowlistedContext(gateway, 'ctx-business', ['notion', 'gdrive'])
-    memberOf(mockPoolQuery, ['ctx-business', 'ctx-unrelated'])
+    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-business', 'ctx-unrelated'] } })
     expect(await check(gateway, 'user-1', 'notion')).toBe(true)
-    const [, params] = mockPoolQuery.mock.calls[0]
-    expect(params).toEqual(['user-1'])
+  })
+
+  it('false when another user, not the asked one, belongs to the allowlisting Context', async () => {
+    await seedAllowlistedContext(gateway, 'ctx-business', ['notion'])
+    membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-business'] } })
+    expect(await check(gateway, 'user-1', 'notion')).toBe(false)
   })
 
   it('false when none of the user Contexts allowlists the server', async () => {
     await seedAllowlistedContext(gateway, 'ctx-a', ['gdrive'])
     await seedAllowlistedContext(gateway, 'ctx-b', [])
-    memberOf(mockPoolQuery, ['ctx-a', 'ctx-b'])
+    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-a', 'ctx-b'] } })
     expect(await check(gateway, 'user-1', 'notion')).toBe(false)
   })
 
   it('false when the allowlisting Context is one the user is NOT a member of', async () => {
     await seedAllowlistedContext(gateway, 'ctx-owner', ['notion'])
     await seedAllowlistedContext(gateway, 'ctx-mine', [])
-    memberOf(mockPoolQuery, ['ctx-mine'])
+    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-mine'] } })
     expect(await check(gateway, 'user-1', 'notion')).toBe(false)
   })
 
   it('false without listing Contexts when the user belongs to none', async () => {
     await seedAllowlistedContext(gateway, 'ctx-owner', ['notion'])
-    memberOf(mockPoolQuery, [])
+    membership(mockPoolQuery, { contexts: { 'user-1': [] } })
     const listSpy = vi.spyOn(gateway, 'listResource')
     expect(await check(gateway, 'user-1', 'notion')).toBe(false)
     expect(listSpy).not.toHaveBeenCalled()
@@ -70,7 +74,7 @@ describe('userHasContextEnablingMcpServer', () => {
 
   it('membership is read from user_contexts only (team membership does not count)', async () => {
     await seedAllowlistedContext(gateway, 'ctx-team', ['notion'])
-    memberOf(mockPoolQuery, [])
+    membership(mockPoolQuery, { contexts: { 'user-1': [] } })
     expect(await check(gateway, 'user-1', 'notion')).toBe(false)
     const sqls = mockPoolQuery.mock.calls.map(([sql]) => String(sql))
     expect(sqls.some(sql => sql.includes('FROM user_contexts'))).toBe(true)
@@ -78,7 +82,7 @@ describe('userHasContextEnablingMcpServer', () => {
   })
 
   it('propagates a Context list failure instead of answering false', async () => {
-    memberOf(mockPoolQuery, ['ctx-a'])
+    membership(mockPoolQuery, { contexts: { 'user-1': ['ctx-a'] } })
     vi.spyOn(gateway, 'listResource').mockRejectedValueOnce(new Error('apiserver down'))
     await expect(check(gateway, 'user-1', 'notion')).rejects.toThrow('apiserver down')
   })
