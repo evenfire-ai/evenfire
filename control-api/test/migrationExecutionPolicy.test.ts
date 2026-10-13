@@ -30,9 +30,9 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_invitation_idx',
 ])
 
-const USER_ACCESS_FOUNDATION_VERSION = '0129_user_access_foundation'
+const USER_ACCESS_FOUNDATION_VERSION = '0130_user_access_foundation'
 const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
-  '0143_authorization_revision_delete_compatibility'
+  '0144_authorization_revision_delete_compatibility'
 
 function expectedMigrationExecutionOrder(versions: readonly string[]): string[] {
   const withoutCompatibility = versions.filter(
@@ -46,7 +46,7 @@ function expectedMigrationExecutionOrder(versions: readonly string[]): string[] 
 
 describe('D34 migration execution policy', () => {
   it('classifies current-dev migrations before the re-slotted PR1 migrations', () => {
-    expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-10)).toEqual([
+    expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-11)).toEqual([
       '0119_dynamic_clients_table',
       '0120_dynamic_clients_runtime_access',
       '0121_oauth_install_identity',
@@ -57,16 +57,17 @@ describe('D34 migration execution policy', () => {
       '0126_bug192_password_admission',
       '0127_password_evaluation_retention',
       '0128_password_work_ownership',
+      '0129_workflow_schedules_concurrency_policy',
     ])
     expect(PR1_MIGRATION_VERSIONS).toEqual([
-      '0129_user_access_foundation',
-      '0130_invitation_delivery_commands',
-      '0131_catalog_utf8_ordering',
-      '0132_composable_catalog_revisions',
-      '0133_gfs_catalog_revision_components',
-      '0134_user_access_foundation_definer_temp_shadow_hardening',
-      '0135_legacy_password_security_epoch_backfill',
-      '0143_authorization_revision_delete_compatibility',
+      '0130_user_access_foundation',
+      '0131_invitation_delivery_commands',
+      '0132_catalog_utf8_ordering',
+      '0133_composable_catalog_revisions',
+      '0134_gfs_catalog_revision_components',
+      '0135_user_access_foundation_definer_temp_shadow_hardening',
+      '0136_legacy_password_security_epoch_backfill',
+      '0144_authorization_revision_delete_compatibility',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -90,10 +91,10 @@ describe('D34 migration execution policy', () => {
     expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
     expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0129'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0130'))
     ).toHaveLength(18)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0131'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0132'))
     ).toHaveLength(7)
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
@@ -233,6 +234,95 @@ describe('D34 migration execution policy', () => {
 })
 
 describe('D34 PR1 migration runner', () => {
+  it('records approved relocated aliases in the same transaction as each canonical receipt', async () => {
+    const transactions: string[] = []
+    const applied: string[] = []
+    const indexStates = new Map<string, Record<string, unknown>>()
+    let transaction = 0
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        legacyVersions: [`historical_${version}`],
+        preserveLegacyReceipts: true,
+        apply: vi.fn(async () => undefined),
+      })),
+    ]
+    await applyPendingPr1Migrations({
+      db: {
+        query: vi.fn(async (sql: string, values?: unknown[]) => {
+          if (sql === 'BEGIN') {
+            transaction += 1
+            transactions.push(`begin:${transaction}`)
+          }
+          if (sql === 'COMMIT') transactions.push(`commit:${transaction}`)
+          if (sql === 'ROLLBACK') transactions.push(`rollback:${transaction}`)
+          if (sql.includes('FROM pg_class index_rel')) {
+            const state = indexStates.get(String(values?.[0]))
+            return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
+          }
+          if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
+            const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
+            if (entry) {
+              indexStates.set(entry.name, {
+                table_name: entry.table,
+                indisunique: Boolean(entry.unique),
+                indisvalid: true,
+                definition: sql,
+              })
+            }
+          }
+          return { rows: [], rowCount: 0 }
+        }),
+      },
+      migrations,
+      appliedVersions: new Set(),
+      recordMigration: async (_db, version) => {
+        applied.push(version)
+        transactions.push(`receipt:${transaction}:${version}`)
+      },
+    })
+
+    const taskVersions = [...PR1_MIGRATION_VERSIONS]
+    const compatibilityIndex = taskVersions.indexOf(AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)
+    const compatibilityVersion = taskVersions.splice(compatibilityIndex, 1)[0]!
+    const foundationIndex = taskVersions.indexOf(USER_ACCESS_FOUNDATION_VERSION)
+    const afterFoundation = taskVersions.splice(foundationIndex + 1)
+    const expected = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      USER_ACCESS_FOUNDATION_VERSION,
+      `historical_${USER_ACCESS_FOUNDATION_VERSION}`,
+      compatibilityVersion,
+      `historical_${compatibilityVersion}`,
+      ...taskVersions
+        .slice(foundationIndex + 1)
+        .flatMap(version => [version, `historical_${version}`]),
+      ...afterFoundation.flatMap(version => [version, `historical_${version}`]),
+    ]
+    expect(applied).toEqual(expected)
+    expect(transactions.filter(event => event.startsWith('rollback:'))).toEqual([])
+    const transactionForReceipt = (version: string) =>
+      transactions.find(event => event.endsWith(`:${version}`))?.split(':')[1]
+    for (const version of PR1_MIGRATION_VERSIONS) {
+      expect(transactionForReceipt(`historical_${version}`), `${version} alias transaction`).toBe(
+        transactionForReceipt(version)
+      )
+    }
+    expect(
+      transactionForReceipt(`historical_${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}`),
+      'compatibility alias is recorded with the foundation transaction'
+    ).toBe(transactionForReceipt(USER_ACCESS_FOUNDATION_VERSION))
+    expect(transactions.filter(event => event.startsWith('begin:'))).toHaveLength(
+      DEV_POST_0106_MIGRATION_VERSIONS.length + PR1_MIGRATION_VERSIONS.length
+    )
+    expect(transactions.filter(event => event.startsWith('commit:'))).toHaveLength(
+      DEV_POST_0106_MIGRATION_VERSIONS.length + PR1_MIGRATION_VERSIONS.length
+    )
+  })
+
   it('commits and records each PR1 version independently in order', async () => {
     const queries: Array<{ sql: string; values?: unknown[] }> = []
     const db = {
@@ -347,6 +437,32 @@ describe('D34 PR1 migration runner', () => {
         recordMigration: vi.fn(),
       })
     ).rejects.toThrow('Unclassified post-0106 migrations')
+  })
+
+  it('rejects a historical alias that collides with a canonical DEV identity', async () => {
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        ...(version === USER_ACCESS_FOUNDATION_VERSION
+          ? {
+              legacyVersions: ['0129_workflow_schedules_concurrency_policy'],
+              preserveLegacyReceipts: true,
+            }
+          : {}),
+        apply: vi.fn(),
+      })),
+    ]
+    await expect(
+      applyPendingPr1Migrations({
+        db: { query: vi.fn() },
+        migrations,
+        appliedVersions: new Set(),
+        recordMigration: vi.fn(),
+      })
+    ).rejects.toThrow(
+      'Migration alias collides with canonical version: 0129_workflow_schedules_concurrency_policy'
+    )
   })
 
   it('applies classified dev-owned post-0106 migrations before PR1 migrations', async () => {
@@ -515,7 +631,7 @@ describe('D34 PR1 migration runner', () => {
           events.push(sql)
         }
         if (sql.includes('FROM pg_class index_rel')) {
-          events.push('prepare:0131')
+          events.push('prepare:0132')
           const entry = PR1_ONLINE_INDEX_PLAN.find(index => index.name === values?.[0])
           return {
             rows: entry
@@ -541,8 +657,8 @@ describe('D34 PR1 migration runner', () => {
       ...PR1_MIGRATION_VERSIONS.filter(
         version =>
           version !== USER_ACCESS_FOUNDATION_VERSION &&
-          version !== '0130_invitation_delivery_commands' &&
-          version !== '0131_catalog_utf8_ordering' &&
+          version !== '0131_invitation_delivery_commands' &&
+          version !== '0132_catalog_utf8_ordering' &&
           version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
       ),
     ])
@@ -557,18 +673,18 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(events.indexOf(AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)).toBeLessThan(
-      events.indexOf('prepare:0131')
+      events.indexOf('prepare:0132')
     )
     expect(events.indexOf(`receipt:${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}`)).toBeLessThan(
-      events.indexOf('prepare:0131')
+      events.indexOf('prepare:0132')
     )
     expect(events.filter(event => event === 'BEGIN')).toHaveLength(4)
     expect(events.filter(event => event === 'COMMIT')).toHaveLength(4)
     const repairCommit = events.indexOf('COMMIT')
-    expect(repairCommit).toBeLessThan(events.indexOf('prepare:0131'))
+    expect(repairCommit).toBeLessThan(events.indexOf('prepare:0132'))
   })
 
-  it('preserves the prior foundation alias when its 0143 successor is already recorded', async () => {
+  it('preserves the prior foundation alias when its 0144 successor is already recorded', async () => {
     const foundation = {
       version: USER_ACCESS_FOUNDATION_VERSION,
       legacyVersions: ['0109_user_access_foundation'],
@@ -671,7 +787,7 @@ describe('D34 PR1 migration runner', () => {
   it.each([
     AUTHORIZATION_REVISION_COMPATIBILITY_VERSION,
     '0138_authorization_revision_delete_compatibility',
-  ])('fails closed when %s is recorded without its 0129 prerequisite', async receipt => {
+  ])('fails closed when %s is recorded without its 0130 prerequisite', async receipt => {
     await expect(
       applyPendingPr1Migrations({
         db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },

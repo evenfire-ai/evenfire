@@ -117,6 +117,8 @@ type DbMigration = {
   version: string
   // Equivalent names used before a branch merge renumbered the same migration body.
   legacyVersions?: readonly string[]
+  // Retain same-body alias receipts so supported older runners do not replay this body.
+  preserveLegacyReceipts?: boolean
   apply: (db: DbClient) => Promise<void>
 }
 
@@ -6396,87 +6398,105 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   },
   {
     // Preserve the displaced Task 106 identity as a same-body receipt alias.
-    version: '0129_user_access_foundation',
+    version: '0130_user_access_foundation',
     legacyVersions: [
+      '0129_user_access_foundation',
       '0126_user_access_foundation',
       '0125_user_access_foundation',
       '0109_user_access_foundation',
       '0107_user_access_foundation',
       '0101_user_access_foundation',
     ],
+    preserveLegacyReceipts: true,
     apply: applyUserAccessFoundationSchema,
   },
   {
-    version: '0130_invitation_delivery_commands',
+    version: '0131_invitation_delivery_commands',
     legacyVersions: [
+      '0130_invitation_delivery_commands',
       '0127_invitation_delivery_commands',
       '0126_invitation_delivery_commands',
       '010a_invitation_delivery_commands',
       '0108_invitation_delivery_commands',
       '0102_invitation_delivery_commands',
     ],
+    preserveLegacyReceipts: true,
     apply: applyInvitationDeliveryCommandFoundation,
   },
   {
-    version: '0131_catalog_utf8_ordering',
+    version: '0132_catalog_utf8_ordering',
     legacyVersions: [
+      '0131_catalog_utf8_ordering',
       '0128_catalog_utf8_ordering',
       '0127_catalog_utf8_ordering',
       '010b_catalog_utf8_ordering',
       '0109_catalog_utf8_ordering',
       '0103_catalog_utf8_ordering',
     ],
+    preserveLegacyReceipts: true,
     apply: applyCatalogUtf8OrderingSchema,
   },
   {
-    version: '0132_composable_catalog_revisions',
+    version: '0133_composable_catalog_revisions',
     legacyVersions: [
+      '0132_composable_catalog_revisions',
       '0129_composable_catalog_revisions',
       '0128_composable_catalog_revisions',
       '010c_composable_catalog_revisions',
       '010a_composable_catalog_revisions',
       '0104_composable_catalog_revisions',
     ],
+    preserveLegacyReceipts: true,
     apply: applyComposableCatalogRevisionSchema,
   },
   {
     // Fix-forward for databases that recorded the first composable-catalog
     // body before the GFS resource-component mapping was completed.
-    version: '0133_gfs_catalog_revision_components',
+    version: '0134_gfs_catalog_revision_components',
     legacyVersions: [
+      '0133_gfs_catalog_revision_components',
       '012a_gfs_catalog_revision_components',
       '0129_gfs_catalog_revision_components',
       '010d_gfs_catalog_revision_components',
       '010b_gfs_catalog_revision_components',
       '0105_gfs_catalog_revision_components',
     ],
+    preserveLegacyReceipts: true,
     apply: applyComposableCatalogRevisionSchema,
   },
   {
     // The access-foundation bodies are immutable; harden their installed
     // SECURITY DEFINER search paths without replaying those historical bodies.
-    version: '0134_user_access_foundation_definer_temp_shadow_hardening',
+    version: '0135_user_access_foundation_definer_temp_shadow_hardening',
     legacyVersions: [
+      '0134_user_access_foundation_definer_temp_shadow_hardening',
       '012b_user_access_foundation_definer_temp_shadow_hardening',
       '012a_user_access_foundation_definer_temp_shadow_hardening',
     ],
+    preserveLegacyReceipts: true,
     apply: applyUserAccessFoundationDefinerTempShadowHardening,
   },
   {
-    version: '0135_legacy_password_security_epoch_backfill',
+    version: '0136_legacy_password_security_epoch_backfill',
     legacyVersions: [
+      '0135_legacy_password_security_epoch_backfill',
       '0130_legacy_password_security_epoch_backfill',
       '010e_legacy_password_security_epoch_backfill',
       '010c_legacy_password_security_epoch_backfill',
       '0106_legacy_password_security_epoch_backfill',
     ],
+    preserveLegacyReceipts: true,
     apply: backfillLegacyPasswordSecurityEpochs,
   },
   {
     // This narrow forward fix retains its late canonical receipt while the
     // runner executes it atomically immediately after the access foundation.
-    version: '0143_authorization_revision_delete_compatibility',
-    legacyVersions: ['0138_authorization_revision_delete_compatibility'],
+    version: '0144_authorization_revision_delete_compatibility',
+    legacyVersions: [
+      '0143_authorization_revision_delete_compatibility',
+      '0138_authorization_revision_delete_compatibility',
+    ],
+    preserveLegacyReceipts: true,
     apply: applyAuthorizationRevisionDeleteCompatibility,
   },
 ]

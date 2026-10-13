@@ -22,6 +22,23 @@ function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
+async function removeLegacyEpochMigrationReceipts(databasePool: Pool): Promise<void> {
+  await databasePool.query(
+    `DELETE FROM schema_migrations
+      WHERE version = ANY($1::text[])`,
+    [
+      [
+        '0136_legacy_password_security_epoch_backfill',
+        '0135_legacy_password_security_epoch_backfill',
+        '0130_legacy_password_security_epoch_backfill',
+        '010e_legacy_password_security_epoch_backfill',
+        '010c_legacy_password_security_epoch_backfill',
+        '0106_legacy_password_security_epoch_backfill',
+      ],
+    ]
+  )
+}
+
 function legacyToken(input: { userId: string; email: string; teamId: string; issuedAt: Date }) {
   vi.useFakeTimers()
   vi.setSystemTime(input.issuedAt)
@@ -106,10 +123,7 @@ describeRealPostgres('legacy password epoch backfill on real PostgreSQL', () => 
       validateLegacyUserSession(old.token, old.claims, { db: databasePool })
     ).resolves.toMatchObject({ status: 'valid' })
 
-    await databasePool.query(
-      `DELETE FROM schema_migrations
-        WHERE version = '0135_legacy_password_security_epoch_backfill'`
-    )
+    await removeLegacyEpochMigrationReceipts(databasePool)
     await initDb({ connect: () => databasePool.connect() })
 
     await expect(
@@ -128,7 +142,7 @@ describeRealPostgres('legacy password epoch backfill on real PostgreSQL', () => 
     const recorded = await databasePool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count
          FROM schema_migrations
-        WHERE version = '0135_legacy_password_security_epoch_backfill'`
+        WHERE version = '0136_legacy_password_security_epoch_backfill'`
     )
     expect(recorded.rows[0]?.count).toBe('1')
   })
@@ -159,15 +173,9 @@ describeRealPostgres('legacy password epoch backfill on real PostgreSQL', () => 
               ($3, $4, 'newer')`,
       [olderUser, new Date('2026-08-27T09:00:00Z'), newerUser, new Date('2026-08-27T11:00:00Z')]
     )
-    await databasePool.query(
-      `DELETE FROM schema_migrations
-        WHERE version = '0135_legacy_password_security_epoch_backfill'`
-    )
+    await removeLegacyEpochMigrationReceipts(databasePool)
     await initDb({ connect: () => databasePool.connect() })
-    await databasePool.query(
-      `DELETE FROM schema_migrations
-        WHERE version = '0135_legacy_password_security_epoch_backfill'`
-    )
+    await removeLegacyEpochMigrationReceipts(databasePool)
     await initDb({ connect: () => databasePool.connect() })
 
     const rows = await databasePool.query<{

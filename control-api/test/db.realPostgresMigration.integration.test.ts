@@ -2815,7 +2815,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
   it('prevents temp-type shadowing in access-foundation SECURITY DEFINER triggers', async () => {
     const { initDb } = await import('../src/db.js')
     const connector = { connect: () => dbPool.connect() }
-    const hardeningVersion = '0134_user_access_foundation_definer_temp_shadow_hardening'
+    const hardeningVersion = '0135_user_access_foundation_definer_temp_shadow_hardening'
 
     const preUpgradeFunctions = await readAccessFoundationDefinerState(dbPool)
     expect(preUpgradeFunctions.rows.map(row => row.function_name)).toEqual(
@@ -2834,11 +2834,19 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     for (const signature of accessFoundationDefinerSignatures) {
       await dbPool.query(`ALTER FUNCTION public.${signature} SET search_path = pg_catalog, public`)
     }
+    const hardeningReceipts = [
+      hardeningVersion,
+      '0134_user_access_foundation_definer_temp_shadow_hardening',
+      '012b_user_access_foundation_definer_temp_shadow_hardening',
+      '012a_user_access_foundation_definer_temp_shadow_hardening',
+    ]
     const removedMarker = await dbPool.query(
-      `DELETE FROM schema_migrations WHERE version = $1 RETURNING version`,
-      [hardeningVersion]
+      `DELETE FROM schema_migrations
+        WHERE version = ANY($1::text[])
+        RETURNING version`,
+      [hardeningReceipts]
     )
-    expect(removedMarker.rows).toEqual([{ version: hardeningVersion }])
+    expect(removedMarker.rows.map(row => row.version).sort()).toEqual([...hardeningReceipts].sort())
 
     await initDb(connector)
     const migratedMarker = await dbPool.query<{ version: string }>(
