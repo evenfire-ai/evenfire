@@ -2411,11 +2411,21 @@ export class AppService {
           try {
             // A failed retirement may have unlinked the observed marker, or a
             // conversion may have renamed its cleanup record before fsync failed.
-            // Repair only absence or this attempt's converted/original cleanup
-            // record; newer producers keep their authoritative marker revision.
+            // Refresh this attempt's original logout revision too: an older
+            // admitted logout may still hold it and must not retire the sole
+            // witness after this rejected credential survives rollback.
+            // Newer independent producers retain their authoritative revision.
             const currentMarker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
             if (currentMarker === null) {
               recordPendingExternalLogout(userDataDirectory, envKey)
+            } else if (currentMarker.intent.intent === 'logout-pending') {
+              if (pendingLogout.marker?.intent.intent === 'logout-pending') {
+                recordPendingExternalLogoutIfUnchanged(
+                  userDataDirectory,
+                  envKey,
+                  pendingLogout.marker
+                )
+              }
             } else if (currentMarker.intent.intent === 'keytar-cleanup-pending') {
               const convertedMarkerRestored =
                 attemptedCleanupMarker &&
