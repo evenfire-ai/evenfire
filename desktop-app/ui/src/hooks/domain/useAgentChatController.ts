@@ -1217,23 +1217,20 @@ export function useAgentChatController({
       const promise = runSwitchForIntent(agentRef, chatId, selectionIntentRevision, error => {
         options.onCurrentError?.(error)
       })
-      const request: PendingChatSwitchRequest | null =
-        readPendingSelection(agentRef)?.mode === 'specific'
-          ? {
-              agentRef,
-              chatId,
-              revision: selectionIntentRevision,
-              scope: currentAuthScopeRef.current,
-              settled: false,
-              promise,
-            }
-          : null
+      const request: PendingChatSwitchRequest = {
+        agentRef,
+        chatId,
+        revision: selectionIntentRevision,
+        scope: currentAuthScopeRef.current,
+        settled: false,
+        promise,
+      }
       pendingChatSwitchRequestRef.current = request
       try {
         await promise
       } finally {
         // Mark this execution, not whatever successor now occupies the ref.
-        if (request) request.settled = true
+        request.settled = true
       }
     },
     [
@@ -1241,7 +1238,6 @@ export function useAgentChatController({
       clearPendingSelection,
       isChatDeleted,
       isHostAccessBlocked,
-      readPendingSelection,
       runSwitchForIntent,
     ]
   )

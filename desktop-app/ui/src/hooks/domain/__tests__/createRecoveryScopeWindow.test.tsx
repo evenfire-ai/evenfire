@@ -18,7 +18,20 @@ afterEach(() => {
 
 it('does not restore an old-team chat when create rejects in the new render layout effect', async () => {
   const clerum = installMockClerum()
+  await clerum.chat.create('agent-x', 'chat-a')
   await clerum.chat.create('agent-x', 'chat-b')
+  await clerum.persistLastActive('agent-x', 'chat-a')
+  clerum.chat.setLastActive.mockImplementation(clerum.persistLastActive)
+  const loadMessages = clerum.chat.loadMessages.getMockImplementation()!
+  const restoredHistory = deferred<void>()
+  clerum.chat.loadMessages.mockImplementation(async (...args) => {
+    try {
+      return await loadMessages(...args)
+    } finally {
+      restoredHistory.resolve()
+    }
+  })
+  expect((await clerum.readIndex('agent-x')).lastActiveChatId).toBe('chat-a')
   await clerum.chat.upsertMessages('agent-x', 'chat-b', [
     { id: 'old-team-history', role: 'user', content: 'team-one history', timestamp: 1 },
   ])
@@ -74,9 +87,18 @@ it('does not restore an old-team chat when create rejects in the new render layo
   await layout.promise
   expect(await rejected.promise).toBe(createError)
   await waitFor(() => expect(app.result.current.team).toBe('team-2'))
-  expect(clerum.chat.setLastActive).not.toHaveBeenCalled()
-  expect(app.result.current.controller.activeChatId).toBeNull()
-  expect(app.result.current.controller.chatMessages).toEqual([])
-  expect(app.result.current.controller.chatMessagesLoading).toBe(false)
-  expect(params.navItem).toBe(DESKTOP_ROUTES.agents)
+  try {
+    expect((await clerum.readIndex('agent-x')).lastActiveChatId).toBe('chat-a')
+    expect(clerum.chat.setLastActive).not.toHaveBeenCalled()
+    expect(app.result.current.controller.activeChatId).toBeNull()
+    expect(app.result.current.controller.chatMessages).toEqual([])
+    expect(app.result.current.controller.chatMessagesLoading).toBe(false)
+    expect(params.navItem).toBe(DESKTOP_ROUTES.agents)
+  } finally {
+    // A guard-removal run can launch real restore I/O; let that producer finish
+    // before afterEach removes the bridge, preserving behavioral failure proof.
+    if (clerum.chat.setLastActive.mock.calls.length) {
+      await act(async () => await restoredHistory.promise)
+    }
+  }
 })

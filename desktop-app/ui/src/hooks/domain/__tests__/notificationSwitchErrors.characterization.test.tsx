@@ -66,6 +66,10 @@ describe('notification switch error ownership', () => {
       )
       const status = app.result.current.statusText
       const toasts = app.result.current.toasts
+      const activeTabId = app.result.current.workspaceTabs.activeTabId
+      expect(
+        app.result.current.workspaceTabs.tabs.find(tab => tab.id === activeTabId)?.chat
+      ).toEqual({ agentRef: 'agent-x', chatId: 'chat-3' })
       await act(async () => {
         gate.reject(new Error('obsolete notification failed'))
         await notification
@@ -75,6 +79,7 @@ describe('notification switch error ownership', () => {
         expect.objectContaining({ id: 'chat-3-history' }),
       ])
       expect(app.result.current.chatMessagesLoading).toBe(false)
+      expect(app.result.current.workspaceTabs.activeTabId).toBe(activeTabId)
       expect(app.result.current.statusText).toBe(status)
       expect(app.result.current.toasts).toEqual(toasts)
     } finally {
