@@ -1,15 +1,28 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
+import { config } from '../src/config.js'
 import { type DbClient, initDb } from '../src/db.js'
-import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
+import {
+  AccessCatalogRequestError,
+  buildAccessCatalog,
+} from '../src/services/access/accessCatalogCoordinator.js'
 import {
   AccessCatalogCursorError,
   decodeAccessCatalogCursor,
 } from '../src/services/access/accessCatalogCursor.js'
-import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
+import {
+  AccessBudgetExceededError,
+  AccessExecutionBudget,
+} from '../src/services/access/accessExecutionBudget.js'
+import { type CatalogRequestContext, catalogKey } from '../src/services/access/catalogContracts.js'
+import { requireCatalogProducer } from '../src/services/access/catalogProducers.js'
 import { resolveLiveAuthorization } from '../src/services/access/liveAuthorizationResolver.js'
-import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
+import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
+import {
+  canonicalEnvironmentId,
+  projectOperationalObject,
+} from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
@@ -181,5 +194,251 @@ describeRealPostgres('aggregate catalog coordinator on real PostgreSQL', () => {
     } finally {
       budget.close()
     }
+  })
+
+  it('keeps missing and ambiguous configured Context references root-local and advances cursors', async () => {
+    const suffix = randomBytes(5).toString('hex')
+    const names = {
+      missing: `a-missing-${suffix}`,
+      ambiguous: `b-ambiguous-${suffix}`,
+      canonical: `c-canonical-${suffix}`,
+      alias: `d-alias-${suffix}`,
+      contextFree: `e-context-free-${suffix}`,
+    }
+    const hostNamespace = config.hostsNamespace
+    const contextNamespace = config.contextsNamespace
+    const aliasName = `wire-${suffix}`
+    const ambiguousAlias = `collision-${suffix}`
+    const projection = (
+      kind: 'hosts' | 'contexts',
+      name: string,
+      spec: Record<string, unknown>
+    ) => {
+      const namespace = kind === 'hosts' ? hostNamespace : contextNamespace
+      return projectOperationalObject({
+        environmentId,
+        plural: kind,
+        namespace,
+        behaviorFingerprintKey: 'catalog-integrity-test-key',
+        relationshipNamespaces: {
+          context: contextNamespace,
+          mcpServer: config.mcpServersNamespace,
+          sharedFilesystem: config.sharedFilesystemsNamespace,
+        },
+        object: {
+          apiVersion: 'clerum.io/v1alpha1',
+          kind: kind === 'hosts' ? 'Host' : 'Context',
+          metadata: {
+            name,
+            namespace,
+            uid: randomUUID(),
+            resourceVersion: '1',
+            generation: 1,
+          },
+          spec: { enabled: true, ...spec },
+        },
+      })
+    }
+    const contextProjections = [
+      projection('contexts', `canonical-${suffix}`, { mcpServers: [], sharedFileSystems: [] }),
+      projection('contexts', `alias-source-${suffix}`, {
+        contextId: aliasName,
+        mcpServers: [],
+        sharedFileSystems: [],
+      }),
+      projection('contexts', `ambiguous-one-${suffix}`, {
+        contextId: ambiguousAlias,
+        mcpServers: [],
+        sharedFileSystems: [],
+      }),
+      projection('contexts', `ambiguous-two-${suffix}`, {
+        contextId: ambiguousAlias,
+        mcpServers: [],
+        sharedFileSystems: [],
+      }),
+    ]
+    const hostProjections = [
+      projection('hosts', names.missing, { contextRef: `missing-${suffix}` }),
+      projection('hosts', names.ambiguous, { contextRef: ambiguousAlias }),
+      projection('hosts', names.canonical, { contextRef: `canonical-${suffix}` }),
+      projection('hosts', names.alias, { contextRef: aliasName }),
+      projection('hosts', names.contextFree, {}),
+    ]
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name)
+       SELECT $1, agent_name FROM UNNEST($2::text[]) AS requested(agent_name)`,
+      [userId, Object.values(names)]
+    )
+
+    const index = new OperationalAccessIndex(databasePool, transaction(databasePool))
+    const indexBudget = AccessExecutionBudget.create('indexer')
+    try {
+      for (const [sourceFamily, projections] of [
+        ['context', contextProjections],
+        ['host', hostProjections],
+      ] as const) {
+        const stagingGeneration = await index.beginRelist({
+          environmentId,
+          sourceFamily,
+          budget: indexBudget,
+        })
+        await index.stageRelistPage({
+          environmentId,
+          sourceFamily,
+          stagingGeneration,
+          projections,
+          budget: indexBudget,
+        })
+        await index.promoteRelist({
+          environmentId,
+          sourceFamily,
+          stagingGeneration,
+          resourceVersion: '1',
+          budget: indexBudget,
+        })
+      }
+    } finally {
+      indexBudget.close()
+    }
+
+    let queryCount = 0
+    const measuredTransaction = <T>(work: (db: DbClient) => Promise<T>) =>
+      transaction(databasePool)(db =>
+        work({
+          query: (text, values) => {
+            queryCount += 1
+            return db.query(text, values)
+          },
+        })
+      )
+    const completePage = await buildAccessCatalog(
+      { session, families: ['user', 'host'], limit: 100 },
+      { transaction: measuredTransaction }
+    )
+
+    expect(completePage.complete).toBe(false)
+    expect(completePage.partialErrors).toEqual([
+      { producer: 'host', code: 'operational_source_unavailable', retryable: true },
+    ])
+    const itemIds = completePage.items.map(item => item.resource.logicalId)
+    expect(itemIds).toContain(userId)
+    expect(itemIds).toContain(`${hostNamespace}/${names.canonical}`)
+    expect(itemIds).toContain(`${hostNamespace}/${names.alias}`)
+    expect(itemIds).toContain(`${hostNamespace}/${names.contextFree}`)
+    expect(itemIds).not.toContain(`${hostNamespace}/${names.missing}`)
+    expect(itemIds).not.toContain(`${hostNamespace}/${names.ambiguous}`)
+    expect(JSON.stringify(completePage)).not.toMatch(/configured_context_(missing|ambiguous)/u)
+
+    const producerBudget = AccessExecutionBudget.create('catalog')
+    try {
+      const producerContext: CatalogRequestContext = {
+        db: databasePool,
+        budget: producerBudget,
+        principal: {
+          userId,
+          sessionContract: 'v1',
+          sessionRevision: '1',
+          userRevision: '1',
+          authorizationRevision: 'producer-context-integrity',
+          memberships: [],
+        },
+        environmentId,
+        sourceStates: new Map([
+          [
+            'host',
+            {
+              family: 'host',
+              generation: '1',
+              resourceVersion: '1',
+              status: 'current',
+            },
+          ],
+        ]),
+      }
+      const producerResult = await requireCatalogProducer('host').hydrateCanonicalKeys(
+        producerContext,
+        [
+          catalogKey(environmentId, 'host', `${hostNamespace}/${names.missing}`),
+          catalogKey(environmentId, 'host', `${hostNamespace}/${names.ambiguous}`),
+        ]
+      )
+      expect(Array.isArray(producerResult)).toBe(false)
+      const integrity = producerResult as unknown as {
+        resources: readonly unknown[]
+        incompleteRoots: readonly Readonly<{ key: readonly string[]; reason: string }>[]
+      }
+      expect(integrity.resources).toEqual([])
+      expect(integrity.incompleteRoots).toEqual([
+        {
+          key: catalogKey(environmentId, 'host', `${hostNamespace}/${names.missing}`),
+          reason: 'configured_context_missing',
+        },
+        {
+          key: catalogKey(environmentId, 'host', `${hostNamespace}/${names.ambiguous}`),
+          reason: 'configured_context_ambiguous',
+        },
+      ])
+    } finally {
+      producerBudget.close()
+    }
+
+    queryCount = 0
+    await buildAccessCatalog(
+      { session, families: ['host'], limit: 100 },
+      { transaction: measuredTransaction }
+    )
+    const multiRootQueryCount = queryCount
+
+    queryCount = 0
+    const firstHostPage = await buildAccessCatalog(
+      { session, families: ['host'], limit: 1 },
+      { transaction: measuredTransaction }
+    )
+    expect(firstHostPage.items).toEqual([])
+    expect(firstHostPage.complete).toBe(false)
+    expect(firstHostPage.nextCursor).not.toBeNull()
+    const cursorBudget = AccessExecutionBudget.create('catalog')
+    try {
+      const cursor = decodeAccessCatalogCursor(firstHostPage.nextCursor!, cursorBudget)
+      expect(cursor.lastCanonicalKey).toEqual([
+        environmentId,
+        'host',
+        `${hostNamespace}/${names.missing}`,
+      ])
+    } finally {
+      cursorBudget.close()
+    }
+    const firstPageQueryCount = queryCount
+
+    queryCount = 0
+    const oneHostPage = await buildAccessCatalog(
+      { session, families: ['host'], limit: 1, cursor: firstHostPage.nextCursor },
+      { transaction: measuredTransaction }
+    )
+    expect(oneHostPage.items).toEqual([])
+    expect(oneHostPage.nextCursor).not.toBe(firstHostPage.nextCursor)
+    expect(queryCount).toBe(firstPageQueryCount)
+    expect(multiRootQueryCount).toBe(firstPageQueryCount)
+
+    await expect(
+      buildAccessCatalog(
+        { session, families: ['host'], limit: 100 },
+        {
+          transaction: transaction(databasePool),
+          limits: { decodedBytes: 1 },
+        }
+      )
+    ).rejects.toBeInstanceOf(AccessBudgetExceededError)
+
+    await expect(
+      buildAccessCatalog(
+        { session: { ...session, userId: randomUUID() }, families: ['user', 'host'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<AccessCatalogRequestError>>({
+        code: 'authority_unavailable',
+      })
+    )
   })
 })

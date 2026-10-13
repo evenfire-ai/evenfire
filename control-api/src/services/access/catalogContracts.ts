@@ -72,6 +72,20 @@ export type HydratedCatalogResource = Readonly<{
   validUntil: string | null
 }>
 
+export type CatalogHydrationIncompleteRoot = Readonly<{
+  key: CatalogKey
+  reason: 'configured_context_missing' | 'configured_context_ambiguous'
+}>
+
+/** Internal producer signal for selected roots omitted due to configured-reference integrity. */
+export type CatalogHydrationResult = Readonly<{
+  resources: readonly HydratedCatalogResource[]
+  incompleteRoots: readonly CatalogHydrationIncompleteRoot[]
+}>
+
+/** Keep the unchanged fast path for complete pages; incomplete roots use the typed result. */
+export type CatalogHydrationOutcome = readonly HydratedCatalogResource[] | CatalogHydrationResult
+
 export type CatalogPrincipalSnapshot = Readonly<{
   userId: string
   sessionContract: 'v1' | 'v2'
@@ -112,7 +126,7 @@ export interface CatalogProducer {
   hydrateCanonicalKeys(
     context: CatalogRequestContext,
     keys: readonly CatalogKey[]
-  ): Promise<readonly HydratedCatalogResource[]>
+  ): Promise<CatalogHydrationOutcome>
 }
 
 export function catalogKey(
