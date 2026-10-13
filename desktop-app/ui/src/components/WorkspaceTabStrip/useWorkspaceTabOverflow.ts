@@ -43,14 +43,18 @@ export function useWorkspaceTabOverflow({
   }, [])
 
   const scrollTabIntoView = useCallback(
-    (tab: HTMLElement) => {
+    (tab: HTMLElement, direction?: 'left' | 'right') => {
       const scroller = scrollerRef.current
       if (!scroller || scroller.clientWidth <= 0) return false
       const viewportLeft = scroller.getBoundingClientRect().left + scroller.clientLeft
       const viewportRight = viewportLeft + scroller.clientWidth
       const rect = tab.getBoundingClientRect()
       let nextScrollLeft = scroller.scrollLeft
-      if (rect.left < viewportLeft - SCROLL_EPSILON) {
+      if (direction === 'right') {
+        nextScrollLeft += Math.max(0, rect.right - viewportRight)
+      } else if (direction === 'left') {
+        nextScrollLeft += Math.min(0, rect.left - viewportLeft)
+      } else if (rect.left < viewportLeft - SCROLL_EPSILON) {
         nextScrollLeft += rect.left - viewportLeft
       } else if (rect.right > viewportRight + SCROLL_EPSILON) {
         nextScrollLeft += rect.right - viewportRight
@@ -80,7 +84,7 @@ export function useWorkspaceTabOverflow({
             .slice()
             .reverse()
             .find(node => node.getBoundingClientRect().left < viewportLeft - SCROLL_EPSILON)
-    if (tab) scrollTabIntoView(tab)
+    if (tab) scrollTabIntoView(tab, direction)
   }
 
   const handleWheel = useCallback(

@@ -294,6 +294,45 @@ describe('WorkspaceTabStrip', () => {
     expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
   })
 
+  it.each([
+    { direction: 'right', widths: [96, 140], expected: 26 },
+    { direction: 'left', widths: [96, 140], expected: 0 },
+    { direction: 'right', widths: [160, 96, 120], expected: 90 },
+    { direction: 'left', widths: [160, 96, 120], expected: 0 },
+  ])(
+    'moves $direction using oversized variable-width tab boundaries ($widths)',
+    ({ direction, widths, expected }) => {
+      let state = createEmptyWorkspaceTabsState()
+      widths.forEach((_, index) => {
+        state = openAppTab(state, {
+          id: `oversized-${index}`,
+          appRef: 'example/app',
+          title: `Oversized ${index}`,
+        })
+      })
+      const onSelect = vi.fn()
+      const view = render(
+        <WorkspaceTabStrip
+          activeTabId={null}
+          onClose={vi.fn()}
+          onReorder={vi.fn()}
+          onSelect={onSelect}
+          tabs={state.tabs}
+        />
+      )
+      const layout = installTabStripLayout(view.container, widths, 118)
+      layout.measure()
+      expect(layout.viewportWidth()).toBe(70)
+      layout.setScrollLeft(10)
+      fireEvent.scroll(view.container.querySelector('.chat-view-tabs__scroller')!)
+      fireEvent.click(screen.getByRole('button', { name: `Scroll tabs ${direction}` }))
+      expect(layout.scrollLeft()).toBe(expected)
+      expect(direction === 'right' ? layout.scrollLeft() > 10 : layout.scrollLeft() < 10).toBe(true)
+      expect(onSelect).not.toHaveBeenCalled()
+      expect(view.container.querySelector('.chat-view-tab.is-active')).toBeNull()
+    }
+  )
+
   it('renders the tab order and exposes non-destructive view actions', () => {
     const onSelect = vi.fn()
     const onClose = vi.fn()
