@@ -1,6 +1,10 @@
 import type { Mock } from 'vitest'
+import { randomUUID } from 'node:crypto'
 import { config } from '../../src/config.js'
+import type { DbClient } from '../../src/db.js'
 import { attachServerToContext } from '../../src/services/contextAllowlist.js'
+import { setUserAgents } from '../../src/services/directory/agentAccess.js'
+import { setUserContexts } from '../../src/services/directory/contextAccess.js'
 import type { MockGateway } from '../mockGateway.js'
 
 /**
@@ -99,4 +103,39 @@ export function membership(
     const answered = membershipResult(sql, values, value)
     return answered ? Promise.resolve(answered) : otherwise(sql, values)
   })
+}
+
+/**
+ * Real-Postgres seed: an active user whose direct Context and agent access is
+ * written by the production writers (`setUserContexts`, `setUserAgents`), so
+ * the readers the gates use run against the rows production writes. Only the
+ * two direct tables are touched: a seed that also wrote team_contexts /
+ * team_agents would hide a reader that wrongly counted team access.
+ *
+ * Requires the suite's db mock to route `pool` and `withTransaction` to the
+ * test database. Returns the user id.
+ */
+export async function seedActiveMember(
+  db: Pick<DbClient, 'query'>,
+  access: { contexts?: string[]; agents?: string[] }
+): Promise<string> {
+  const operatorId = await seedControlAdmin(db)
+  const created = await db.query(`INSERT INTO users (email) VALUES ($1) RETURNING id::text AS id`, [
+    `member-${randomUUID()}@example.test`,
+  ])
+  const userId = String((created.rows[0] as { id: string }).id)
+  if (access.contexts?.length) await setUserContexts(userId, access.contexts, operatorId)
+  if (access.agents?.length) await setUserAgents(userId, access.agents, operatorId)
+  return userId
+}
+
+/** Real-Postgres seed: an active control admin, usable as a writer's operator. */
+export async function seedControlAdmin(db: Pick<DbClient, 'query'>): Promise<string> {
+  const id = randomUUID()
+  await db.query(
+    `INSERT INTO control_admin_users (id, username, password_hash, role, status)
+     VALUES ($1, $2, 'real-pg-fixture', 'admin', 'active')`,
+    [id, `fixture-admin-${id}`]
+  )
+  return id
 }
