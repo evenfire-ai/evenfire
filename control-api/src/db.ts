@@ -1783,6 +1783,30 @@ async function applyWorkflowRunRetentionColumnsMigration(db: DbClient): Promise<
   `)
 }
 
+/**
+ * Mirror of `spec.triggers.schedule.concurrencyPolicy` (and the legacy
+ * `spec.scheduling.concurrencyPolicy`), written by the WRC schedule sync and
+ * enforced by the control-api schedule worker. The default matches the CRD
+ * default (`Forbid`). The CHECK is part of the column definition, so
+ * `ADD COLUMN IF NOT EXISTS` skips the column and its constraint together on a
+ * re-run; the body is idempotent.
+ */
+async function applyWorkflowScheduleConcurrencyPolicyMigration(db: DbClient): Promise<void> {
+  await db.query(`
+    -- The schedule worker takes FOR UPDATE row locks on workflow_schedules every
+    -- sweep and the ALTER needs ACCESS EXCLUSIVE: bound the wait so a stuck
+    -- holder fails the migration Job loudly instead of hanging it (same 60s
+    -- budget and rationale as the plugin workload SDK reconciliation migration).
+    SET LOCAL lock_timeout = '60s';
+    ALTER TABLE workflow_schedules
+      ADD COLUMN IF NOT EXISTS concurrency_policy TEXT NOT NULL DEFAULT 'Forbid'
+        CONSTRAINT workflow_schedules_concurrency_policy_check
+        CHECK (concurrency_policy IN ('Forbid', 'Replace', 'Allow'));
+    -- Pending migrations share one transaction: do not leak the timeout.
+    SET LOCAL lock_timeout = '0';
+  `)
+}
+
 async function applyWorkflowTriggerSharedFoundationSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS workflow_approval_trigger_intents (
@@ -6348,6 +6372,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0128_password_work_ownership',
     apply: applyPasswordWorkOwnershipSchema,
+  },
+  {
+    version: '0129_workflow_schedules_concurrency_policy',
+    apply: applyWorkflowScheduleConcurrencyPolicyMigration,
   },
 ]
 
