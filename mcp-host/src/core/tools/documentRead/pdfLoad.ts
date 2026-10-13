@@ -83,6 +83,8 @@ export async function withPdfDocument<T>(
       isImageDecoderSupported: false,
       enableHWA: false,
       stopAtErrors: true,
+      maxImageSize: job.limits.maxEmbeddedImagePixels,
+      canvasMaxAreaInBytes: job.limits.maxEmbeddedImagePixels * 4,
       verbosity: 0,
       cMapUrl: join(PDF_ROOT, 'cmaps') + sep,
       cMapPacked: true,
@@ -96,7 +98,7 @@ export async function withPdfDocument<T>(
     // workbook, that is a property of the file rather than of the range.
     outcome =
       document.numPages < 1
-        ? { ok: false, reason: 'document_parse_failed' }
+        ? { ok: false, reason: 'document_empty' }
         : document.numPages > job.limits.maxPageCount
           ? { ok: false, reason: 'document_limits_exceeded', limit: 'page_count' }
           : await read(document)
@@ -106,6 +108,13 @@ export async function withPdfDocument<T>(
     const name = error instanceof Error ? error.name : undefined
     if (name === 'PasswordException') {
       outcome = { ok: false, reason: 'document_encrypted' }
+    } else if (
+      error instanceof Error &&
+      error.message === 'Image exceeded maximum allowed size and was removed.'
+    ) {
+      // pdfjs 6 rejects an oversized embedded image with this fixed error when
+      // stopAtErrors is enabled, before it decodes the image stream.
+      outcome = { ok: false, reason: 'document_limits_exceeded', limit: 'pixels' }
     } else if (name !== undefined && PDF_DATA_EXCEPTIONS.has(name)) {
       outcome = { ok: false, reason: 'document_parse_failed' }
     } else {

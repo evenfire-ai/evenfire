@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest'
+import ExcelJS from 'exceljs'
 import type { XlsxJob, XlsxOutcome } from '../types'
 import { runDocumentJob } from '../workerRunner'
 import {
   cfbBytes,
   continuationWorkbook,
   documentLimits,
+  emptySelectionWorkbook,
   emptyWorkbook,
   imageOnlyPdf,
   longRunningWorkbook,
   mergedWorkbook,
+  outOfRangeNumberWorkbook,
+  richHyperlinkWorkbook,
+  sheetlessWorkbook,
   surrogateWorkbook,
   valuesWorkbook,
   wideWorkbook,
@@ -31,7 +36,47 @@ async function parseDirect(bytes: Buffer, overrides: Partial<XlsxJob> = {}): Pro
   return parseXlsx(xlsxJob(bytes, overrides))
 }
 
+describe('XLSX parser cell shapes from other writers', () => {
+  it('reads a hyperlink whose display text is rich text as its plain text', async () => {
+    const outcome = (await runDocumentJob(xlsxJob(await richHyperlinkWorkbook()))) as Extract<
+      XlsxOutcome,
+      { ok: true }
+    >
+    expect(outcome).toMatchObject({ ok: true })
+    expect(outcome.sheets).toEqual([
+      { name: 'Links', startRow: 1, rows: [['bold label', 'after link']], truncated: false },
+    ])
+  })
+
+  it('fails a date-formatted number outside the Date range as document_parse_failed', async () => {
+    // Control: the same number without a date format is read as a number.
+    expect(await runDocumentJob(xlsxJob(await outOfRangeNumberWorkbook(false)))).toMatchObject({
+      ok: true,
+      sheets: [{ name: 'Dates', rows: [[1e20]] }],
+    })
+    expect(await runDocumentJob(xlsxJob(await outOfRangeNumberWorkbook(true)))).toEqual({
+      ok: false,
+      reason: 'document_parse_failed',
+    })
+  })
+})
+
 describe('XLSX parser values and selection', () => {
+  it('marks uncached and shared formulas as formula text while retaining cached zero and false', async () => {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('Formulas')
+    sheet.getCell('A1').value = { formula: 'SUM(1,2)' }
+    sheet.getCell('A2').value = { sharedFormula: 'A1' }
+    sheet.getCell('B1').value = { formula: '0', result: 0 }
+    sheet.getCell('C1').value = { formula: 'FALSE()', result: false }
+    const outcome = await runDocumentJob(xlsxJob(Buffer.from(await workbook.xlsx.writeBuffer())))
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('Formula reader failed')
+    expect(outcome.sheets[0]?.rows).toEqual([
+      ['[formula] =SUM(1,2)', 0, false],
+      ['[formula] =SUM(1,2)'],
+    ])
+  })
   it('returns computed values in workbook order through the real worker', async () => {
     const code = witnessCode()
     const bytes = await valuesWorkbook(code)
@@ -115,16 +160,33 @@ describe('XLSX limits and malformed files', () => {
     expect(await parseDirect(bytes)).toMatchObject({ ok: true })
   })
 
-  it('rejects non-ZIP bytes as parse-failed and rejects an empty workbook as parse-failed', async () => {
+  it('distinguishes malformed bytes from an empty workbook with a readable control', async () => {
     expect(await parseDirect(Buffer.from('this is not a zip document'))).toEqual({
       ok: false,
       reason: 'document_parse_failed',
     })
     expect(await parseDirect(await emptyWorkbook())).toEqual({
       ok: false,
-      reason: 'document_parse_failed',
+      reason: 'document_empty',
     })
     expect(await parseDirect(await valuesWorkbook(witnessCode()))).toMatchObject({ ok: true })
+  })
+
+  it('reports an empty selected sheet while reading the populated sheet of the same file', async () => {
+    const bytes = await emptySelectionWorkbook(witnessCode())
+    expect(await runDocumentJob(xlsxJob(bytes, { sheet: 'Empty' }))).toEqual({
+      ok: false,
+      reason: 'document_empty',
+    })
+    expect((await runDocumentJob(xlsxJob(bytes, { sheet: 'Values' }))).ok).toBe(true)
+  })
+
+  it('reports a sheetless workbook as empty and reads a normal workbook', async () => {
+    expect(await runDocumentJob(xlsxJob(await sheetlessWorkbook()))).toEqual({
+      ok: false,
+      reason: 'document_empty',
+    })
+    expect((await runDocumentJob(xlsxJob(await valuesWorkbook(witnessCode())))).ok).toBe(true)
   })
 
   it('resolves source_bytes before launching a worker while a smaller source succeeds', async () => {

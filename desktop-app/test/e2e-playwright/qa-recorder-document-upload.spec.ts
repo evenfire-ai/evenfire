@@ -192,8 +192,8 @@ const mcpHostRequire = createRequire(path.join(DESKTOP_APP_ROOT, '..', 'mcp-host
 
 /**
  * Build the PDF with the same document dependencies as the Host. The token is
- * generated only after admission, is drawn only into the page body, and never
- * appears in the file name or prompt.
+ * generated while this fixture is built (before app launch and admission), is
+ * drawn only into the page body, and never appears in the file name or prompt.
  */
 async function pdfDocumentFixture(): Promise<{
   fileName: string
@@ -697,7 +697,12 @@ test('document-upload fixture: an attached PDF reaches the model through documen
       const chip = fileChips(page).filter({ hasText: pdf.fileName })
       await expect(chip).toHaveCount(1, { timeout: 30_000 })
       await expect(chip).toHaveAttribute('data-file-status', 'ready', { timeout: 30_000 })
-      await expect(page.getByRole('alert').filter({ hasText: /no reader/i })).toHaveCount(0)
+      // Liveness witness for the absence check below: this same render proves
+      // that the PDF was classified and displayed as reader-supported.
+      await expect(chip).toBeVisible()
+      await expect(chip.locator('.composer-attachment-chip-meta')).toContainText(' · pdf')
+      // ComposerPanel renders a no-reader notice as `role=status`, not `alert`.
+      await expect(page.getByRole('status').filter({ hasText: /no reader/i })).toHaveCount(0)
       await composer(page).fill(DOCUMENT_PROMPT)
       await expect(sendButton(page)).toBeEnabled({ timeout: 20_000 })
     })
@@ -759,7 +764,12 @@ test('document-upload fixture: an attached XLSX reaches the model through docume
       const chip = fileChips(page).filter({ hasText: xlsx.fileName })
       await expect(chip).toHaveCount(1, { timeout: 30_000 })
       await expect(chip).toHaveAttribute('data-file-status', 'ready', { timeout: 30_000 })
-      await expect(page.getByRole('alert').filter({ hasText: /no reader/i })).toHaveCount(0)
+      // Liveness witness for the absence check below: this same render proves
+      // that the XLSX was classified and displayed as reader-supported.
+      await expect(chip).toBeVisible()
+      await expect(chip.locator('.composer-attachment-chip-meta')).toContainText(' · xlsx')
+      // ComposerPanel renders a no-reader notice as `role=status`, not `alert`.
+      await expect(page.getByRole('status').filter({ hasText: /no reader/i })).toHaveCount(0)
       await composer(page).fill(DOCUMENT_PROMPT)
       await expect(sendButton(page)).toBeEnabled({ timeout: 20_000 })
     })

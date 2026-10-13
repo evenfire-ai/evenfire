@@ -77,7 +77,7 @@ async function fileAttachment(
   return attachment
 }
 
-function message(attachment: Attachment): IncomingMessage {
+function message(attachment?: Attachment): IncomingMessage {
   return {
     content: 'Summarize the attached file.',
     channelType: 'rpc',
@@ -86,11 +86,11 @@ function message(attachment: Attachment): IncomingMessage {
     timestamp: '2026-10-13T10:00:00Z',
     messageId: 'message-1',
     hostRef: 'host-1',
-    attachments: [attachment],
+    attachments: attachment ? [attachment] : [],
   }
 }
 
-function registryFor(attachment: Attachment): NativeToolRegistry {
+function registryFor(attachment?: Attachment): NativeToolRegistry {
   return new NativeToolRegistry(
     config,
     'conversation-1',
@@ -117,6 +117,31 @@ function executionContext(toolName: string) {
 }
 
 describe('NativeToolRegistry — clerum__document_read (#656)', () => {
+  it('omits document_read without a PDF/XLSX attachment and registers both document formats', async () => {
+    const plain = await fileAttachment(
+      'plain-text',
+      'notes.txt',
+      'text/plain',
+      Buffer.from('notes')
+    )
+    expect(plain.fileReference?.reader).toBe('text')
+    expect(registryFor().get('clerum__document_read')).toBeNull()
+    expect(registryFor(plain).get('clerum__document_read')).toBeNull()
+    const pdf = await fileAttachment(
+      'pdf',
+      'report.pdf',
+      'application/pdf',
+      await pdfWithText(bodyToken())
+    )
+    const xlsx = await fileAttachment(
+      'xlsx',
+      'report.xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      await xlsxWithRows([['reader witness']])
+    )
+    expect(registryFor(pdf).get('clerum__document_read')?.name()).toBe('clerum__document_read')
+    expect(registryFor(xlsx).get('clerum__document_read')?.name()).toBe('clerum__document_read')
+  })
   it('rejects a foreign attachmentId and reads the current message attachment as the witness', async () => {
     const token = bodyToken()
     const attachment = await fileAttachment(

@@ -300,12 +300,17 @@ function zipLocalHeaderNames(bytes) {
   return names
 }
 
+/**
+ * A spreadsheet needs its workbook part, not just an `xl/` folder: an ordinary
+ * archive with a folder named `xl/` stays a plain zip, so it is never offered
+ * to the XLSX reader, which reads `xl/workbook.xml`.
+ */
 function officeClassFromZipNames(names) {
   if (!names) return null
   const hasWord = names.some(name => name.startsWith('word/'))
-  const hasSheet = names.some(name => name.startsWith('xl/'))
-  if (hasWord && !hasSheet) return 'docx'
-  if (hasSheet && !hasWord) return 'xlsx'
+  const hasWorkbook = names.includes('xl/workbook.xml')
+  if (hasWord && !hasWorkbook) return 'docx'
+  if (hasWorkbook && !hasWord) return 'xlsx'
   return null
 }
 

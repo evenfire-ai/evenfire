@@ -308,11 +308,11 @@ export interface FixtureProviderAttempt {
    */
   documentByteLength?: number
   /**
-   * The page of the file the Host's read tool delivered. Present only on the
-   * answer row, so the oracle can hash exactly that slice of the file.
+   * The page of a text file the Host's read tool delivered. Present only on a
+   * text answer row, so the oracle can hash exactly that slice of the file.
    */
   byteRange?: { offset: number; length: number }
-  /** Whether the Host delivered less than the whole file. Answer row only. */
+  /** Whether the Host delivered less than the whole text file. Text answer row only. */
   truncated?: boolean
   /** One of {@link FIXTURE_REJECTION_REASONS}. Present only on rejected rows. */
   reason?: string
@@ -650,6 +650,7 @@ export function appendedAttempts(
       current.model !== row.model ||
       current.imageSha256 !== row.imageSha256 ||
       current.responseKind !== row.responseKind ||
+      current.documentReader !== row.documentReader ||
       current.documentSha256 !== row.documentSha256 ||
       current.documentByteLength !== row.documentByteLength ||
       current.reason !== row.reason ||

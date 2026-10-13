@@ -232,10 +232,43 @@ export async function mergedWorkbook(): Promise<Buffer> {
   return Buffer.from(await workbook.xlsx.writeBuffer())
 }
 
+/** A hyperlink whose display text is partly bold, so it is stored as rich text. */
+export async function richHyperlinkWorkbook(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook()
+  const sheet = workbook.addWorksheet('Links')
+  sheet.getCell('A1').value = {
+    text: { richText: [{ font: { bold: true }, text: 'bold ' }, { text: 'label' }] },
+    hyperlink: 'https://example.invalid/page',
+  } as unknown as ExcelJS.CellHyperlinkValue
+  sheet.getCell('B1').value = 'after link'
+  return Buffer.from(await workbook.xlsx.writeBuffer())
+}
+
+/** `1e20` in A1, with a date format when `dateFormatted` (an Invalid Date). */
+export async function outOfRangeNumberWorkbook(dateFormatted: boolean): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook()
+  const sheet = workbook.addWorksheet('Dates')
+  const cell = sheet.getCell('A1')
+  cell.value = 1e20
+  if (dateFormatted) cell.numFmt = 'yyyy-mm-dd'
+  return Buffer.from(await workbook.xlsx.writeBuffer())
+}
+
 export async function emptyWorkbook(): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook()
   workbook.addWorksheet('Empty')
   return Buffer.from(await workbook.xlsx.writeBuffer())
+}
+
+export async function emptySelectionWorkbook(code: string): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook()
+  workbook.addWorksheet('Values').addRow([code])
+  workbook.addWorksheet('Empty')
+  return Buffer.from(await workbook.xlsx.writeBuffer())
+}
+
+export async function sheetlessWorkbook(): Promise<Buffer> {
+  return Buffer.from(await new ExcelJS.Workbook().xlsx.writeBuffer())
 }
 
 export async function continuationWorkbook(): Promise<Buffer> {
@@ -265,8 +298,7 @@ export async function surrogateWorkbook(value: string): Promise<Buffer> {
 export async function longRunningWorkbook(): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook()
   const sheet = workbook.addWorksheet('LongRunning')
-  // 5000 × 80 cells take about 1 s in the worker, of which about 260 ms is
-  // thread startup (measured on Node 24). Timeout tests sit between the two.
+  // 5000 × 80 cells exercise loading and continuation limits in a real child.
   for (let row = 0; row < 5_000; row += 1) {
     sheet.addRow(
       Array.from({ length: 80 }, (_, column) => `r${row}-c${column}-${(row * 7919) % 100_000}`)

@@ -45,6 +45,20 @@ const rows = {
     byteRange: { offset: 0, length: 65_536 },
     truncated: true,
   }),
+  pdfAnswer: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'document-answer',
+    documentReader: 'pdf',
+    documentSha256: DIGEST,
+  }),
+  xlsxAnswer: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'document-answer',
+    documentReader: 'xlsx',
+    documentSha256: DIGEST,
+  }),
   textOnly: (): Row => ({ model: 'glm-5.3-flash', imageSha256: null, responseKind: 'text-only' }),
 }
 
@@ -98,7 +112,7 @@ describe('imageCapabilityEvidence ledger rows', () => {
     }
   })
 
-  it('requires the delivered page on every document answer and nowhere else', () => {
+  it('requires the delivered page only on a text document answer', () => {
     // Witness: the well-formed answer row parses with its page.
     expect(parse([rows.answer()]).attempts[0]?.byteRange).toEqual({ offset: 0, length: 65_536 })
     const { byteRange: _range, ...withoutRange } = rows.answer()
@@ -120,6 +134,41 @@ describe('imageCapabilityEvidence ledger rows', () => {
       expect(() => parse([row]), label).toThrow(/byteRange|truncated/)
     }
   })
+
+  it('requires a closed-set documentReader on document rows and nowhere else', () => {
+    // Witnesses: document rows parse with every valid reader.
+    expect(parse([rows.read(), rows.pdfAnswer(), rows.xlsxAnswer()]).attempts).toMatchObject([
+      { documentReader: 'text' },
+      { documentReader: 'pdf' },
+      { documentReader: 'xlsx' },
+    ])
+    const { documentReader: _omitted, ...withoutReader } = rows.read()
+    for (const [label, row] of [
+      ['missing reader on a read row', withoutReader],
+      ['none reader on a read row', { ...rows.read(), documentReader: 'none' }],
+      ['numeric reader on an answer row', { ...rows.pdfAnswer(), documentReader: 7 }],
+      ['reader on a rejected row', { ...rows.rejected(), documentReader: 'text' }],
+      ['reader on a text-only row', { ...rows.textOnly(), documentReader: 'pdf' }],
+    ] as const) {
+      expect(() => parse([row]), label).toThrow(/documentReader/)
+    }
+  })
+
+  it('rejects paging fields on a PDF or XLSX document answer', () => {
+    // Witnesses: the structured reader answers parse without paging fields.
+    expect(parse([rows.pdfAnswer(), rows.xlsxAnswer()]).attempts).toEqual([
+      rows.pdfAnswer(),
+      rows.xlsxAnswer(),
+    ])
+    for (const row of [rows.pdfAnswer(), rows.xlsxAnswer()]) {
+      for (const [label, changed] of [
+        ['byteRange', { ...row, byteRange: { offset: 0, length: 10 } }],
+        ['truncated', { ...row, truncated: false }],
+      ] as const) {
+        expect(() => parse([changed]), label).toThrow(/byteRange and truncated/)
+      }
+    }
+  })
 })
 
 describe('appendedAttempts', () => {
@@ -137,6 +186,16 @@ describe('appendedAttempts', () => {
     ] as const) {
       expect(() => appendedAttempts(before, parse([...changed])), label).toThrow(/append-only/)
     }
+
+    const beforeRead = parse([rows.rejected(), rows.read()])
+    expect(
+      () =>
+        appendedAttempts(
+          beforeRead,
+          parse([rows.rejected(), { ...rows.read(), documentReader: 'pdf' }])
+        ),
+      'documentReader'
+    ).toThrow(/append-only/)
   })
 })
 

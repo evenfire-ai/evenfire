@@ -6,8 +6,8 @@
  *     ledger, output measurement, redaction, and the image attachments of the
  *     visual mode;
  *   - the worker (`worker.ts`, run by `workerRunner.ts`): parses and renders in
- *     an isolated `worker_threads` thread with a heap cap and a hard
- *     `terminate()`, using `pdf*.ts` for PDF and `xlsx*.ts` for XLSX;
+ *     an isolated child process with heap and resident-memory caps and a hard
+ *     kill, using `pdf*.ts` for PDF and `xlsx*.ts` for XLSX;
  *   - the tests.
  *
  * Document text is untrusted content, never instructions, and never reaches a
@@ -40,7 +40,7 @@ export interface DocumentReadParams {
 // ─── Tool result (serialized to the model) ──────────────────
 
 /**
- * Why a text read stopped before the end of its selection. `page_budget` and
+ * Why a read stopped before the end of its selection. `page_budget` and
  * `turn_budget` come from the turn's read ledger; the others from the
  * per-call limits.
  */
@@ -88,6 +88,7 @@ export type DocumentReadReason =
   | 'no_text_layer'
   | 'document_encrypted'
   | 'document_parse_failed'
+  | 'document_empty'
   | 'document_limits_exceeded'
   | 'invalid_range'
   | 'visual_not_supported'
@@ -95,6 +96,7 @@ export type DocumentReadReason =
 /** Which bound a `document_limits_exceeded` hit. */
 export type DocumentLimitName =
   | 'source_bytes'
+  | 'uncompressed_bytes'
   | 'page_count'
   | 'pixels'
   | 'image_bytes'
@@ -117,7 +119,8 @@ export type DocumentReadResult =
       /**
        * Returned pages whose text layer holds fewer than
        * `minTextCharsPerPage` characters; only present when the current model
-       * accepts images, so the model can read them again with `mode: 'visual'`.
+       * accepts images, capped at the current visual call/delivery capacity,
+       * so the model can read them again with `mode: 'visual'`.
        */
       visualCandidates?: number[]
       pages: PdfTextPage[]
@@ -129,6 +132,7 @@ export type DocumentReadResult =
       format: 'pdf'
       mode: 'visual'
       pageCount: number
+      continuation?: DocumentContinuation
       /** The rendered pages; their PNGs travel as typed image attachments. */
       images: PdfImageInfo[]
     }
@@ -171,6 +175,8 @@ export interface DocumentReadLimits {
    * already rejects larger files, and this bound holds for any other producer.
    */
   maxSourceBytes: number
+  /** Maximum declared uncompressed bytes of any ZIP entry and of their sum. */
+  maxUncompressedBytes: number
   /** Pages a document may have at all. */
   maxPageCount: number
   /** Pages one text call returns. */
@@ -185,6 +191,8 @@ export interface DocumentReadLimits {
   maxRenderDimension: number
   /** Pixels shared by every page of one visual call. */
   maxRenderPixelsPerCall: number
+  /** Embedded bitmap decode ceiling, independent of rendered output pixels. */
+  maxEmbeddedImagePixels: number
   /** Encoded PNG bytes of one rendered page. */
   maxImageBytes: number
   /** Rows one XLSX call returns, across sheets. */
@@ -193,16 +201,19 @@ export interface DocumentReadLimits {
   maxCellsPerCall: number
   /** Characters of one cell value; longer values are cut and end with `…`. */
   maxCellChars: number
-  /** Bytes of the structured outcome the worker posts back. */
+  /** Serialized outcome bytes, checked inside the child before IPC. */
   maxOutputBytes: number
-  /** Wall time of one worker job; on expiry the worker is terminated. */
+  /** Wall time of one child job; on expiry the parent kills it. */
   timeoutMs: number
-  /** `resourceLimits.maxOldGenerationSizeMb` of the worker. */
+  /** Configured child heap in MiB, narrowed by measured Linux cgroup headroom. */
   maxHeapMb: number
+  /** Configured child RSS in MiB; child and cgroup use a 25 ms sample fence. */
+  maxResidentMb: number
 }
 
 export const DEFAULT_DOCUMENT_READ_LIMITS: Readonly<DocumentReadLimits> = Object.freeze({
   maxSourceBytes: 11_534_336,
+  maxUncompressedBytes: 134_217_728,
   maxPageCount: 2_000,
   maxTextPagesPerCall: 50,
   maxExtractedChars: 400_000,
@@ -210,6 +221,7 @@ export const DEFAULT_DOCUMENT_READ_LIMITS: Readonly<DocumentReadLimits> = Object
   maxVisualPagesPerCall: 4,
   maxRenderDimension: 2_048,
   maxRenderPixelsPerCall: 8_000_000,
+  maxEmbeddedImagePixels: 40_000_000,
   maxImageBytes: 5_242_880,
   maxRowsPerCall: 5_000,
   maxCellsPerCall: 100_000,
@@ -217,6 +229,7 @@ export const DEFAULT_DOCUMENT_READ_LIMITS: Readonly<DocumentReadLimits> = Object
   maxOutputBytes: 33_554_432,
   timeoutMs: 30_000,
   maxHeapMb: 512,
+  maxResidentMb: 768,
 })
 
 // ─── Cursors ────────────────────────────────────────────────
@@ -257,10 +270,14 @@ export interface PdfVisualJob {
   kind: 'pdf_visual'
   bytes: Uint8Array
   pages: string | null
+  /** Null/absent starts the selection; a visual cursor always has offset zero. */
+  start?: PdfTextPosition | null
   maxDimension: number
+  /** Additional delivery bound applied to the actual number of rendered pages. */
+  maxDimensionAboveImageCount?: { count: number; maxDimension: number }
   maxPixelsPerCall: number
   maxImageBytes: number
-  /** Decoded PNG bytes of the whole call; split evenly across the selection. */
+  /** Encoded PNG bytes before base64; split evenly across rendered pages. */
   maxTotalImageBytes: number
   limits: DocumentReadLimits
 }
@@ -291,8 +308,10 @@ export type DocumentJobFailure = {
  * per-call limit binds; `next` is set exactly when pages or characters of the
  * selection remain. The Tool may return fewer pages to fit the ledger.
  * `pages[i].lowText` marks pages below `minTextCharsPerPage`. A selection in
- * which no page has any non-whitespace text is `no_text_layer`, never an
- * empty success.
+ * whose returned window has no text inspects the remaining selection until
+ * text is found, including before a resume cursor. This inspection is bounded
+ * by maxPageCount, child time and memory, not by the returned-page budget.
+ * Only an entirely textless selection is `no_text_layer`.
  *
  * Each page carries its whole text and the emitted window `[from, to)`, so
  * the Tool computes redaction over the complete page before slicing: a
@@ -321,15 +340,18 @@ export type PdfVisualOutcome =
       ok: true
       pageCount: number
       images: Array<PdfImageInfo & { png: Uint8Array }>
+      next?: PdfTextPosition
+      stoppedBy?: 'max_pages'
     }
   | DocumentJobFailure
 
 /**
- * Every cell is the computed value: formulas give their cached result, dates
+ * Every cell is the computed value: formulas give their cached result or
+ * `[formula] =<formula>` when no result is stored, dates
  * an ISO 8601 string, rich text and hyperlinks their plain text, error cells
  * their error string (`#DIV/0!`). Rows keep their worksheet width up to the
  * last non-empty cell. A workbook with no non-empty cell in the selection is
- * `document_parse_failed`, never an empty success.
+ * `document_empty`, never an empty success.
  */
 export type XlsxOutcome =
   | {
@@ -348,12 +370,16 @@ export type DocumentJobOutcome<J extends DocumentJob> = J extends PdfTextJob
     : XlsxOutcome
 
 /**
- * Runs one job in a fresh worker. Resolves with the job's outcome; a timeout
+ * Queues one job per Host process, then runs it in a fresh child. Linux
+ * cgroup-v2 headroom narrows configured caps; insufficient admission headroom
+ * and child/container memory overruns resolve with limit:'heap'. An unreadable
+ * or v1 cgroup rejects as a worker defect. macOS uses configured caps.
+ * Resolves with the job's outcome; a timeout
  * resolves `{ ok:false, reason:'document_limits_exceeded', limit:'time' }`, a
- * heap overrun `limit:'heap'`, an outcome above `maxOutputBytes`
- * `limit:'output_bytes'`, and any other worker crash
- * `document_parse_failed`. An aborted `signal` terminates the worker and
- * rejects with the signal's reason. Implemented by `workerRunner.ts`.
+ * an outcome above `maxOutputBytes`
+ * `limit:'output_bytes'`, and any other child crash rejects as a defect.
+ * An aborted signal rejects with its reason without spawning while queued,
+ * or kills an active child. Implemented by `workerRunner.ts`.
  */
 export type RunDocumentJob = <J extends DocumentJob>(
   job: J,

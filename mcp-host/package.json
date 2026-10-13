@@ -1,6 +1,6 @@
 {
   "name": "clerum-mcp-host",
-  "version": "0.1.559",
+  "version": "0.1.560",
   "description": "MCP Host - reads Host CRD and provides LLM access via OpenAI/Claude",
   "main": "dist/main.js",
   "engines": {
@@ -35,7 +35,7 @@
     "@google/genai": "^2.10.0",
     "@kubernetes/client-node": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@napi-rs/canvas": "^0.1.65",
+    "@napi-rs/canvas": "^1.0.11",
     "@types/pdfmake": "^0.3.2",
     "ajv": "^8.17.1",
     "async-mutex": "^0.5.0",
@@ -51,7 +51,7 @@
     "jszip": "^3.10.1",
     "openai": "^4.70.0",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^5.7.284",
+    "pdfjs-dist": "^6.4.299",
     "pdfmake": "^0.2.23",
     "playwright": "^1.59.1",
     "pptxgenjs": "^4.0.1",

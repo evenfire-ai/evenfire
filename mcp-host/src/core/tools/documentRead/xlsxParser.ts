@@ -2,7 +2,8 @@
  * Pure XLSX parsing for `clerum__document_read`, inside the isolated worker.
  *
  * Numbers, booleans and strings retain their values; empty cells become null.
- * Formulas use cached results only (never evaluation), dates become ISO 8601,
+ * Formulas use cached results, or `[formula] =<formula>` without one (never
+ * evaluation), dates become ISO 8601,
  * rich text is concatenated, hyperlinks use display text, and errors use their
  * error strings. ExcelJS resolves shared strings. Merged values appear only
  * on their master cells. Strings are returned whole: the Tool redacts each
@@ -15,19 +16,31 @@
  */
 import ExcelJS from 'exceljs'
 import type { XlsxCellValue, XlsxJob, XlsxOutcome, XlsxSheetResult } from './types'
+import { checkZipExpansion } from './zipLimits'
 
 const CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04]
+
+/**
+ * A cell whose stored value has no representation, such as a date-formatted
+ * number outside the JavaScript Date range. It is a property of the file, so
+ * the call fails as `document_parse_failed` rather than as a worker defect.
+ */
+class UnreadableCellError extends Error {}
 
 function computedValue(value: ExcelJS.CellValue): XlsxCellValue {
   if (value === null || value === undefined || value === '') return null
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return value
   }
-  if (value instanceof Date) return value.toISOString()
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw new UnreadableCellError()
+    return value.toISOString()
+  }
   if ('formula' in value || 'sharedFormula' in value) return computedValue(value.result)
   if ('richText' in value) return value.richText.map(part => part.text).join('') || null
-  if ('hyperlink' in value) return value.text || null
+  // A formatted display text is stored as rich text, not as a string.
+  if ('hyperlink' in value) return computedValue(value.text)
   if ('error' in value) return value.error
   throw new Error('Unsupported XLSX cell value')
 }
@@ -36,7 +49,11 @@ function cellValue(cell: ExcelJS.Cell): XlsxCellValue {
   if (cell.isMerged && cell.master !== cell) return null
   // ExcelJS 4.4's formula value getter omits falsy results; the dedicated
   // cached-result getter preserves both 0 and false, including shared formulas.
-  if (cell.type === ExcelJS.ValueType.Formula) return computedValue(cell.result)
+  if (cell.type === ExcelJS.ValueType.Formula) {
+    return cell.result === undefined || cell.result === null
+      ? '[formula] =' + cell.formula
+      : computedValue(cell.result)
+  }
   return computedValue(cell.value)
 }
 
@@ -77,6 +94,8 @@ export async function parseXlsx(job: XlsxJob): Promise<XlsxOutcome> {
   if (!ZIP_MAGIC.every((byte, index) => job.bytes[index] === byte)) {
     return { ok: false, reason: 'document_parse_failed' }
   }
+  const zipFailure = checkZipExpansion(job.bytes, job.limits.maxUncompressedBytes)
+  if (zipFailure) return zipFailure
 
   const workbook = new ExcelJS.Workbook()
   try {
@@ -84,10 +103,21 @@ export async function parseXlsx(job: XlsxJob): Promise<XlsxOutcome> {
     // prefix/suffix or allowing the loader to mutate the caller's bytes.
     await workbook.xlsx.load(Uint8Array.from(job.bytes).buffer)
   } catch {
-    // Only the load is a property of the file; a failure while walking a
-    // loaded workbook is a defect and crashes the worker.
+    // The load and an unreadable cell are properties of the file; any other
+    // failure while walking a loaded workbook is a defect and crashes the worker.
     return { ok: false, reason: 'document_parse_failed' }
   }
+  try {
+    return readWorkbook(job, workbook)
+  } catch (error) {
+    if (error instanceof UnreadableCellError) {
+      return { ok: false, reason: 'document_parse_failed' }
+    }
+    throw error
+  }
+}
+
+function readWorkbook(job: XlsxJob, workbook: ExcelJS.Workbook): XlsxOutcome {
   const worksheets = workbook.worksheets
   // Hidden and veryHidden sheets are included in workbook order.
   const sheetNames = worksheets.map(worksheet => worksheet.name)
@@ -105,7 +135,7 @@ export async function parseXlsx(job: XlsxJob): Promise<XlsxOutcome> {
   ) {
     return { ok: false, reason: 'invalid_range' }
   }
-  if (worksheets.length === 0) return { ok: false, reason: 'document_parse_failed' }
+  if (worksheets.length === 0) return { ok: false, reason: 'document_empty' }
   if (sheetIndex >= worksheets.length) return { ok: false, reason: 'invalid_range' }
 
   const selection = worksheets
@@ -115,11 +145,10 @@ export async function parseXlsx(job: XlsxJob): Promise<XlsxOutcome> {
       sheetIndex: sheetIndex + offset,
       lastRow: lastNonEmptyRow(worksheet),
     }))
-  // The shared contract treats a selection with no computed values as a
-  // parse failure, rather than an empty success. A named non-empty sheet
+  // A selection with no computed values has no content. A named non-empty sheet
   // may still have no rows remaining at its requested cursor.
   if (selection.every(sheet => sheet.lastRow === 0)) {
-    return { ok: false, reason: 'document_parse_failed' }
+    return { ok: false, reason: 'document_empty' }
   }
 
   const sheets: XlsxSheetResult[] = []

@@ -23,11 +23,13 @@ main program so its normal startup guard and crash handlers execute.
 The same fixture also answers the two provider turns of a document attachment.
 The Host never puts a file's content in the prompt: it announces its reader in
 the turn context. Text uses `clerum__attachment_read`; PDF and XLSX use
-`clerum__document_read`. The fixture refuses a PDF/XLSX line when that tool is
-not offered. After the selected reader's tool result arrives, it replies
+`clerum__document_read`. When neither read tool is offered, the request is
+handled as ordinary text-only. The fixture refuses a PDF/XLSX line when only the
+text reader is offered, and refuses a text line when only the document reader is
+offered. After the selected reader's tool result arrives, it replies
 `DOCUMENT_FIXTURE_SHA256:` plus the first 16 hex characters of the SHA-256 of
-the delivered PDF text or canonical XLSX sheet array. The prompt alone can never
-produce that answer.
+the delivered PDF page text or canonical XLSX sheet array. The prompt alone can
+never produce that answer.
 
 The ledger records `document-read-requested` (no digest yet, with
 `documentReader` and `documentByteLength` taken from the `attached_file` line)

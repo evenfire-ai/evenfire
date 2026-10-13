@@ -1,4 +1,5 @@
 import { createCanvas } from '@napi-rs/canvas'
+import type { ReadableStream } from 'node:stream/web'
 import type { PDFPageProxy, RenderParameters } from 'pdfjs-dist/types/src/display/api'
 import { withPdfDocument } from './pdfLoad'
 import { resolvePageSelection } from './selection'
@@ -6,6 +7,74 @@ import type { PdfVisualJob, PdfVisualOutcome } from './types'
 
 const MAX_RENDER_ATTEMPTS = 3
 const RETRY_SCALE = Math.sqrt(0.7)
+
+/**
+ * pdfjs 6.4.299 marks a failed operator list complete before rejecting its
+ * public render/getOperatorList promise, allowing partial success. Read the
+ * underlying stream so image-limit and data errors cannot be swallowed.
+ * This is the pdfjs 6 transport contract; an incompatible build is a defect.
+ */
+async function checkOperatorStream(page: PDFPageProxy): Promise<void> {
+  const internal = page as unknown as {
+    _id: number
+    _transport: {
+      getRenderingIntent(
+        intent: string,
+        annotationMode: number,
+        storage: null,
+        editing: boolean,
+        operatorList: boolean
+      ): {
+        renderingIntent: number
+        cacheKey: string
+        annotationStorageSerializable: { map: Map<unknown, unknown>; transfer: ArrayBuffer[] }
+        modifiedIds: Set<string>
+      }
+      messageHandler: {
+        sendWithStream(
+          name: string,
+          data: Record<string, unknown>,
+          strategy: undefined,
+          transfers: ArrayBuffer[]
+        ): ReadableStream<unknown>
+      }
+    }
+  }
+  const transport = internal._transport
+  if (
+    !Number.isSafeInteger(internal._id) ||
+    typeof transport?.getRenderingIntent !== 'function' ||
+    typeof transport?.messageHandler?.sendWithStream !== 'function'
+  ) {
+    throw new Error('Unsupported PDF operator-stream contract')
+  }
+  const intent = transport.getRenderingIntent('display', 0, null, false, true)
+  const stream = transport.messageHandler.sendWithStream(
+    'GetOperatorList',
+    {
+      pageId: page.pageNumber - 1,
+      pageIndex: page.pageNumber - 1,
+      pageProxyId: internal._id,
+      intent: intent.renderingIntent,
+      cacheKey: intent.cacheKey,
+      annotationStorage: intent.annotationStorageSerializable.map,
+      modifiedIds: intent.modifiedIds,
+    },
+    undefined,
+    intent.annotationStorageSerializable.transfer
+  )
+  if (typeof stream?.getReader !== 'function') {
+    throw new Error('Unsupported PDF operator-stream contract')
+  }
+  const reader = stream.getReader()
+  try {
+    while (!(await reader.read()).done) {
+      // Drain bounded child-local chunks. Rendering obtains its own list.
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
 
 async function renderPage(
   page: PDFPageProxy,
@@ -38,11 +107,24 @@ async function renderPage(
 
 export async function renderPdfPages(job: PdfVisualJob): Promise<PdfVisualOutcome> {
   return withPdfDocument(job, async (document): Promise<PdfVisualOutcome> => {
-    const selection = resolvePageSelection(job.pages, document.numPages)
-    if (!selection || selection.length > job.limits.maxVisualPagesPerCall) {
+    const requested = resolvePageSelection(job.pages, document.numPages)
+    const startIndex = job.start ? (requested?.indexOf(job.start.page) ?? -1) : 0
+    if (
+      !requested ||
+      startIndex < 0 ||
+      (job.start && job.start.charOffset !== 0) ||
+      !Number.isSafeInteger(job.limits.maxVisualPagesPerCall) ||
+      job.limits.maxVisualPagesPerCall < 1
+    ) {
       return { ok: false, reason: 'invalid_range' }
     }
-    const maxDimension = Math.min(job.maxDimension, job.limits.maxRenderDimension)
+    const selection = requested.slice(startIndex, startIndex + job.limits.maxVisualPagesPerCall)
+    const threshold = job.maxDimensionAboveImageCount
+    const maxDimension = Math.min(
+      job.maxDimension,
+      job.limits.maxRenderDimension,
+      threshold && selection.length > threshold.count ? threshold.maxDimension : Infinity
+    )
     const maxPixels = Math.min(job.maxPixelsPerCall, job.limits.maxRenderPixelsPerCall)
     // Each page's byte share is reserved up front, like its pixel share, so
     // the call's images together never exceed the aggregate bound.
@@ -70,9 +152,15 @@ export async function renderPdfPages(job: PdfVisualJob): Promise<PdfVisualOutcom
       pageCount: document.numPages,
       images: [],
     }
+    const nextPage = requested[startIndex + selection.length]
+    if (nextPage !== undefined) {
+      outcome.next = { page: nextPage, charOffset: 0 }
+      outcome.stoppedBy = 'max_pages'
+    }
     for (let index = 0; index < selection.length; index += 1) {
       const page = await document.getPage(selection[index])
       try {
+        await checkOperatorStream(page)
         const viewport = page.getViewport({ scale: 1 })
         if (
           !Number.isFinite(viewport.width) ||

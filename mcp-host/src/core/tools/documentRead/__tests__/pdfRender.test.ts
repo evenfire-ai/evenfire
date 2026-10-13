@@ -3,7 +3,7 @@ import { createCanvas, loadImage } from '@napi-rs/canvas'
 import { createHash } from 'node:crypto'
 import type { PdfVisualJob, PdfVisualOutcome } from '../types'
 import { runDocumentJob } from '../workerRunner'
-import { documentLimits, imageOnlyPdf, textPdf, witnessCode } from './fixtures'
+import { documentLimits, emptyPdf, imageOnlyPdf, textPdf, witnessCode } from './fixtures'
 
 function pdfVisualJob(
   bytes: Buffer,
@@ -45,6 +45,13 @@ async function samplePng(png: Uint8Array): Promise<Array<boolean>> {
 }
 
 describe('PDF visual rendering through the real worker', () => {
+  it('reports a zero-page PDF as document_empty and renders a readable control', async () => {
+    expect(await runDocumentJob(pdfVisualJob(await emptyPdf()))).toEqual({
+      ok: false,
+      reason: 'document_empty',
+    })
+    expect((await runDocumentJob(pdfVisualJob(await imageOnlyPdf(witnessCode())))).ok).toBe(true)
+  })
   it('delivers a random pixel-only code at the requested dimension limit', async () => {
     const code = witnessCode()
     const outcome = (await runDocumentJob(
@@ -67,23 +74,29 @@ describe('PDF visual rendering through the real worker', () => {
     )
   })
 
-  it('rejects a selection wider than the per-call visual page limit with a valid control', async () => {
+  it('paginates a selection wider than the visual page limit and renders its continuation', async () => {
     const bytes = await textPdf([witnessCode(), witnessCode()])
-    expect(
-      await runDocumentJob(
-        pdfVisualJob(bytes, {
-          pages: '1-2',
-          limits: documentLimits({ maxVisualPagesPerCall: 1 }),
-        })
-      )
-    ).toEqual({ ok: false, reason: 'invalid_range' })
-    const witness = await runDocumentJob(
+    const first = await runDocumentJob(
       pdfVisualJob(bytes, {
-        pages: '1',
+        pages: '1-2',
         limits: documentLimits({ maxVisualPagesPerCall: 1 }),
       })
     )
-    expect(witness).toMatchObject({ ok: true, images: [{ page: 1 }] })
+    expect(first).toMatchObject({
+      ok: true,
+      images: [{ page: 1 }],
+      next: { page: 2, charOffset: 0 },
+      stoppedBy: 'max_pages',
+    })
+    const witness = await runDocumentJob(
+      pdfVisualJob(bytes, {
+        pages: '1-2',
+        start: { page: 2, charOffset: 0 },
+        limits: documentLimits({ maxVisualPagesPerCall: 1 }),
+      })
+    )
+    expect(witness).toMatchObject({ ok: true, images: [{ page: 2 }] })
+    expect(witness.ok && witness.next).toBeUndefined()
   })
 
   it('applies the shared pixel budget across every selected page', async () => {

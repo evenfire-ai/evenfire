@@ -1450,14 +1450,23 @@ describe('ComposerPanel document attachments (#678)', () => {
 
   it('does not warn for a PDF the classifier can read', async () => {
     const report = await readyFile('file-6', 'report.pdf', pdfBytes, 'application/pdf')
+    const archive = await readyFile('file-4', 'archive.zip', zipBytes, 'application/zip')
     expect(report.status === 'ready' && report.classification.reader).toBe('pdf')
-    composerState.composerFileAttachments = [report]
+    expect(archive.status === 'ready' && archive.classification.reader).toBe('none')
+    composerState.composerFileAttachments = [report, archive]
     render(<ComposerPanel inline />)
 
-    const chip = screen.getByTestId('composer-file-chip')
-    expect(chip.textContent).toContain('report.pdf')
-    expect(chip.textContent).toContain('pdf')
-    expect(screen.queryByRole('status')).toBeNull()
+    const chips = screen.getAllByTestId('composer-file-chip')
+    expect(chips).toHaveLength(2)
+    expect(chips[0]?.textContent).toContain('report.pdf')
+    // The class is rendered independently of the filename token.
+    expect(chips[0]?.querySelector('.composer-attachment-chip-meta')?.textContent).toBe(
+      '35 B · pdf'
+    )
+    // Witness that the status branch is live: the unreadable twin renders it.
+    const statuses = screen.getAllByRole('status')
+    expect(statuses).toHaveLength(1)
+    expect(statuses[0]?.textContent).toContain('archive.zip is attached')
   })
 
   it('does not warn for an XLSX the classifier can read', async () => {
@@ -1467,14 +1476,23 @@ describe('ComposerPanel document attachments (#678)', () => {
       officeBytes('xl/workbook.xml'),
       XLSX_MEDIA_TYPE
     )
+    const archive = await readyFile('file-4', 'archive.zip', zipBytes, 'application/zip')
     expect(workbook.status === 'ready' && workbook.classification.reader).toBe('xlsx')
-    composerState.composerFileAttachments = [workbook]
+    expect(archive.status === 'ready' && archive.classification.reader).toBe('none')
+    composerState.composerFileAttachments = [workbook, archive]
     render(<ComposerPanel inline />)
 
-    const chip = screen.getByTestId('composer-file-chip')
-    expect(chip.textContent).toContain('q3.xlsx')
-    expect(chip.textContent).toContain('xlsx')
-    expect(screen.queryByRole('status')).toBeNull()
+    const chips = screen.getAllByTestId('composer-file-chip')
+    expect(chips).toHaveLength(2)
+    expect(chips[0]?.textContent).toContain('q3.xlsx')
+    // The class is rendered independently of the filename token.
+    expect(chips[0]?.querySelector('.composer-attachment-chip-meta')?.textContent).toBe(
+      '128 B · xlsx'
+    )
+    // Witness that the status branch is live: the unreadable twin renders it.
+    const statuses = screen.getAllByRole('status')
+    expect(statuses).toHaveLength(1)
+    expect(statuses[0]?.textContent).toContain('archive.zip is attached')
   })
 
   it('keeps the no-reader warning for a PDF built by an older classifier', async () => {

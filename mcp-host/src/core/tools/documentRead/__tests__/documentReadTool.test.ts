@@ -155,9 +155,13 @@ describe('DocumentReadTool dispatch and identity', () => {
     })
   })
 
-  it('rejects foreign, crossed and visual cursors before dispatching a job', async () => {
+  it('rejects foreign, crossed and nonzero visual cursors and accepts a text cursor', async () => {
     const pdf = admittedFile('pdf-file', await imageOnlyPdf(witnessCode()), 'application/pdf')
-    const { runJob, calls } = fakeRunner({ ok: true, pageCount: 1, pages: [] })
+    const { runJob, calls } = fakeRunner({
+      ok: true,
+      pageCount: 1,
+      pages: [{ page: 1, text: 'text', from: 0, to: 4, lowText: false }],
+    })
     const tool = toolFor([pdf], runJob)
     for (const cursor of ['not-a-cursor', 'v1.xlsx.0.1', 'v1.pdf.0.0']) {
       const result = await read(tool, { attachmentId: 'pdf-file', cursor })
@@ -166,10 +170,14 @@ describe('DocumentReadTool dispatch and identity', () => {
     const visual = await read(tool, {
       attachmentId: 'pdf-file',
       mode: 'visual',
-      cursor: 'v1.pdf.1.0',
+      cursor: 'v1.pdf.1.1',
     })
     expect(visual.body).toMatchObject({ status: 'error', reason: 'invalid_range' })
     expect(calls).toHaveLength(0)
+    expect((await read(tool, { attachmentId: 'pdf-file', cursor: 'v1.pdf.1.0' })).body.status).toBe(
+      'ok'
+    )
+    expect(calls).toHaveLength(1)
   })
 
   it('reports access failures and proves that an admitted read succeeds on the same path', async () => {

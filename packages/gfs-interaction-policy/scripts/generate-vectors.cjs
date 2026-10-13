@@ -61,6 +61,24 @@ const CT = ['[Content_Types].xml', '<?xml version="1.0"?><Types/>']
 const DOCX = zip([CT, ['_rels/.rels', '<Relationships/>'], ['word/document.xml', '<w:document/>']])
 const XLSX = zip([CT, ['_rels/.rels', '<Relationships/>'], ['xl/workbook.xml', '<workbook/>']])
 const PLAIN_ZIP = zip([['a.txt', 'hello']])
+// An ordinary archive that happens to hold a folder named xl/, with no workbook.
+const ZIP_WITH_XL_FOLDER = zip([
+  ['readme.txt', 'backup'],
+  ['xl/notes.txt', 'not a workbook'],
+])
+// A spreadsheet whose workbook part is not the first entry.
+const XLSX_WORKBOOK_LAST = zip([
+  CT,
+  ['_rels/.rels', '<Relationships/>'],
+  ['xl/worksheets/sheet1.xml', '<worksheet/>'],
+  ['xl/workbook.xml', '<workbook/>'],
+])
+// A document that also carries an xl/ folder without a workbook part.
+const DOCX_WITH_XL_FOLDER = zip([
+  CT,
+  ['word/document.xml', '<w:document/>'],
+  ['xl/notes.txt', 'not a workbook'],
+])
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 const JPEG = b([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10], 'JFIF', [0x00, 0x01, 0x01, 0x00, 0xff, 0xd9])
@@ -161,6 +179,34 @@ const classifier = [
     'archive.zip',
     'application/zip',
     T('binary_unsupported', 'magic', false, { detectedMediaType: 'application/zip' })
+  ),
+  v(
+    'zip with an xl folder but no workbook stays a plain zip',
+    ZIP_WITH_XL_FOLDER,
+    'backup.zip',
+    'application/zip',
+    T('binary_unsupported', 'magic', false, { detectedMediaType: 'application/zip' })
+  ),
+  v(
+    'zip with an xl folder but no workbook named .xlsx',
+    ZIP_WITH_XL_FOLDER,
+    'report.xlsx',
+    XLSX_MIME,
+    T('binary_unsupported', 'magic', true, { detectedMediaType: 'application/zip' })
+  ),
+  v(
+    'xlsx whose workbook is not the first entry',
+    XLSX_WORKBOOK_LAST,
+    'sheet.xlsx',
+    XLSX_MIME,
+    T('xlsx', 'magic', false)
+  ),
+  v(
+    'docx that also holds an xl folder',
+    DOCX_WITH_XL_FOLDER,
+    'letter.docx',
+    DOCX_MIME,
+    T('docx', 'magic', false)
   ),
   v(
     'zip named .docx without word entries',

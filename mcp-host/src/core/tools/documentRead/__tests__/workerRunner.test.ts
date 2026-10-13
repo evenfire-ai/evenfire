@@ -1,27 +1,28 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { EventEmitter, once } from 'node:events'
-import { Worker } from 'node:worker_threads'
-import type { DocumentJob, DocumentJobOutcome, XlsxOutcome } from '../types'
+import { type ChildProcess, spawn } from 'node:child_process'
+import { once } from 'node:events'
+import * as residentMemory from '../residentMemory'
+import { residentMemorySampler } from '../residentMemory'
+import type { DocumentJob, DocumentJobOutcome } from '../types'
 import { runDocumentJob } from '../workerRunner'
-import {
-  documentLimits,
-  longRunningWorkbook,
-  textPdf,
-  valuesWorkbook,
-  witnessCode,
-} from './fixtures'
+import { documentLimits, emptyWorkbook, textPdf, valuesWorkbook, witnessCode } from './fixtures'
 
-vi.mock('node:worker_threads', async importOriginal => {
-  const actual = await importOriginal<typeof import('node:worker_threads')>()
+const childObservation = vi.hoisted(() => ({
+  observe: undefined as ((child: ChildProcess) => void) | undefined,
+}))
+
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
   return {
     ...actual,
-    Worker: vi.fn(function mockedWorker(...args: ConstructorParameters<typeof actual.Worker>) {
-      return new actual.Worker(...args)
+    spawn: vi.fn((...args: Parameters<typeof actual.spawn>) => {
+      const child = actual.spawn(...args)
+      childObservation.observe?.(child)
+      childObservation.observe = undefined
+      return child
     }),
   }
 })
-
-const heavyWorkbook = longRunningWorkbook()
 
 function job(bytes: Buffer, overrides: Partial<DocumentJob> = {}): DocumentJob {
   return {
@@ -34,204 +35,220 @@ function job(bytes: Buffer, overrides: Partial<DocumentJob> = {}): DocumentJob {
   } as DocumentJob
 }
 
-function lastWorker(): Worker {
-  const result = vi.mocked(Worker).mock.results.at(-1)
-  if (!result || result.type !== 'return') throw new Error('The runner did not create a worker')
-  return result.value as Worker
+function lastChild(): ChildProcess {
+  const result = vi.mocked(spawn).mock.results.at(-1)
+  if (!result || result.type !== 'return') throw new Error('The runner did not create a child')
+  return result.value as ChildProcess
 }
 
-function onlineOf(worker: Worker): Promise<void> {
-  return new Promise(resolve => worker.once('online', () => resolve()))
+async function liveChild(): Promise<ChildProcess> {
+  const child = await new Promise<ChildProcess>(resolve => {
+    if (vi.mocked(spawn).mock.results.length > 0) resolve(lastChild())
+    else childObservation.observe = resolve
+  })
+  expect(child.pid).toBeGreaterThan(0)
+  expect(child.exitCode).toBeNull()
+  expect(child.signalCode).toBeNull()
+  return child
 }
 
-function exitOf(worker: Worker): Promise<number> {
-  return new Promise(resolve => worker.once('exit', code => resolve(code)))
-}
-
-async function observeLiveWorker(pending: Promise<unknown>, timeoutMs: number): Promise<Worker> {
-  const worker = lastWorker()
-  // Worker online is asynchronous, and this helper is called in the same tick
-  // as runner dispatch, so this subscription cannot miss the first online event.
-  const online = onlineOf(worker)
-  await vi.waitFor(
-    () => {
-      expect(worker.threadId).toBeGreaterThan(0)
-      return worker
-    },
-    { timeout: timeoutMs }
-  )
-  await Promise.race([online, new Promise(resolve => setTimeout(resolve, 100))])
-  expect(pending).toBeInstanceOf(Promise)
-  return worker
+async function control(): Promise<void> {
+  expect((await runDocumentJob(job(await valuesWorkbook(witnessCode())))).ok).toBe(true)
 }
 
 afterEach(async () => {
-  const exits = vi
-    .mocked(Worker)
+  childObservation.observe = undefined
+  vi.restoreAllMocks()
+  const children = vi
+    .mocked(spawn)
     .mock.results.filter(result => result.type === 'return')
-    .map(result => result.value as Worker)
-    .filter(worker => typeof worker.threadId === 'number' && worker.threadId > 0)
-    .map(worker => once(worker, 'exit'))
-  await Promise.all(exits)
+    .map(result => result.value as ChildProcess)
+    .filter(child => child.exitCode === null && child.signalCode === null)
+  await Promise.all(
+    children.map(async child => {
+      const exited = once(child, 'exit')
+      child.kill('SIGKILL')
+      await exited
+    })
+  )
   vi.clearAllMocks()
 })
 
-describe('document reader worker runner', () => {
-  it('rejects invalid runner limits without starting a worker and accepts valid limits', async () => {
-    const invalid = job(await valuesWorkbook(witnessCode()))
-    invalid.limits = documentLimits({ timeoutMs: 0, maxHeapMb: 1.5, maxOutputBytes: 0 })
+describe('document reader child runner', () => {
+  it.each([
+    { timeoutMs: 0 },
+    { maxHeapMb: 1.5 },
+    { maxOutputBytes: 0 },
+    { maxResidentMb: 0 },
+    { maxUncompressedBytes: Number.NaN },
+    { maxSourceBytes: -1 },
+    { maxRenderPixelsPerCall: 0 },
+    { maxEmbeddedImagePixels: 0 },
+  ])('rejects invalid limits %j before spawning and accepts valid limits', async limits => {
+    const invalid = job(await valuesWorkbook(witnessCode()), { limits: documentLimits(limits) })
     await expect(runDocumentJob(invalid)).rejects.toThrow('Invalid document reader limits')
-    expect(Worker).not.toHaveBeenCalled()
-
-    const valid = (await runDocumentJob(job(await valuesWorkbook(witnessCode())))) as Extract<
-      XlsxOutcome,
-      { ok: true }
-    >
-    expect(valid.ok).toBe(true)
-    expect(Worker).toHaveBeenCalledTimes(1)
+    expect(spawn).not.toHaveBeenCalled()
+    await control()
+    expect(spawn).toHaveBeenCalledTimes(1)
   })
 
-  it('resolves source_bytes before worker creation and admits the same bytes below the cap', async () => {
+  it('starts a real child with an empty environment and explicit heap bound', async () => {
+    await control()
+    expect(spawn).toHaveBeenCalledTimes(1)
+    const args = vi.mocked(spawn).mock.calls[0]!
+    expect(args[0]).toBe(process.execPath)
+    expect(args[1]).toContain('--max-old-space-size=256')
+    expect(args[2]?.env).toEqual({})
+    expect(args[2]?.stdio).toEqual(['ignore', 'ignore', 'ignore', 'ipc'])
+  })
+
+  it('resolves source_bytes before spawning and admits the same bytes below the cap', async () => {
     const bytes = await valuesWorkbook(witnessCode())
-    const oversized = job(bytes, { limits: documentLimits({ maxSourceBytes: bytes.length - 1 }) })
-    expect(await runDocumentJob(oversized)).toEqual({
-      ok: false,
-      reason: 'document_limits_exceeded',
-      limit: 'source_bytes',
-    })
-    expect(Worker).not.toHaveBeenCalled()
-    expect(await runDocumentJob(job(bytes))).toMatchObject({ ok: true })
+    expect(
+      await runDocumentJob(
+        job(bytes, {
+          limits: documentLimits({ maxSourceBytes: bytes.length - 1 }),
+        })
+      )
+    ).toEqual({ ok: false, reason: 'document_limits_exceeded', limit: 'source_bytes' })
+    expect(spawn).not.toHaveBeenCalled()
+    expect((await runDocumentJob(job(bytes))).ok).toBe(true)
   })
 
-  it('terminates a live worker on timeout and resolves limit time', async () => {
+  it('kills a live child on timeout, waits for exit, and resolves time', async () => {
     const pending = runDocumentJob(
-      job(await heavyWorkbook, { limits: documentLimits({ timeoutMs: 600, maxHeapMb: 256 }) })
+      job(await valuesWorkbook(witnessCode()), {
+        limits: documentLimits({ timeoutMs: 100 }),
+      })
     )
-    const worker = await observeLiveWorker(pending, 550)
-    const exited = exitOf(worker)
+    const child = await liveChild()
+    const exited = once(child, 'exit')
     await expect(pending).resolves.toEqual({
       ok: false,
       reason: 'document_limits_exceeded',
       limit: 'time',
     })
     await exited
-    // Node resets the id when the thread is gone: the post-call witness is
-    // the opposite of the pre-cancellation online/threadId witness.
-    expect(worker.threadId).toBe(-1)
+    expect(child.signalCode).toBe('SIGKILL')
+    await control()
   })
 
-  it('settles as a defect when terminate() rejects without an exit event', async () => {
+  it('settles as a defect when kill fails without an exit event', async () => {
     const pending = runDocumentJob(
-      job(await heavyWorkbook, { limits: documentLimits({ timeoutMs: 600, maxHeapMb: 256 }) })
+      job(await valuesWorkbook(witnessCode()), {
+        limits: documentLimits({ timeoutMs: 100 }),
+      })
     )
-    const worker = await observeLiveWorker(pending, 550)
-    const realTerminate = worker.terminate.bind(worker)
-    const terminate = vi
-      .spyOn(worker, 'terminate')
-      .mockRejectedValueOnce(new Error('terminate failed'))
+    const child = await liveChild()
+    const realKill = child.kill.bind(child)
+    const kill = vi.spyOn(child, 'kill').mockReturnValueOnce(false)
     try {
       await expect(pending).rejects.toThrow('Document reader worker failed')
-      // Witness: the timeout path ran and asked the worker to stop.
-      expect(terminate).toHaveBeenCalledTimes(1)
+      expect(kill).toHaveBeenCalledWith('SIGKILL')
     } finally {
-      const exited = exitOf(worker)
-      await realTerminate()
+      const exited = once(child, 'exit')
+      realKill('SIGKILL')
       await exited
     }
+    await control()
   })
 
-  it('terminates a live worker on abort and rejects with the signal reason', async () => {
+  it('kills a live child on abort and rejects with the exact signal reason', async () => {
     const controller = new AbortController()
     const reason = new Error('document read cancelled')
-    const pending = runDocumentJob(
-      job(await heavyWorkbook, {
-        limits: documentLimits({ timeoutMs: 10_000, maxHeapMb: 256 }),
-      }),
-      controller.signal
-    )
-    const worker = await observeLiveWorker(pending, 1_000)
-    const exited = exitOf(worker)
-    expect(controller.signal.aborted).toBe(false)
+    const pending = runDocumentJob(job(await valuesWorkbook(witnessCode())), controller.signal)
+    const child = await liveChild()
+    const exited = once(child, 'exit')
     controller.abort(reason)
-    await expect(pending).rejects.toThrow('document read cancelled')
+    await expect(pending).rejects.toBe(reason)
     await exited
+    expect(child.signalCode).toBe('SIGKILL')
+    await control()
   })
 
-  it('resolves a heap overrun as a typed document limit', async () => {
-    const pending = runDocumentJob(
-      job(await heavyWorkbook, { limits: documentLimits({ timeoutMs: 15_000, maxHeapMb: 24 }) })
-    )
-    const worker = await observeLiveWorker(pending, 10_000)
-    const exited = exitOf(worker)
-    await expect(pending).resolves.toEqual({
-      ok: false,
-      reason: 'document_limits_exceeded',
-      limit: 'heap',
-    })
-    await exited
+  it('rejects a pre-aborted job without spawning and accepts an active signal', async () => {
+    const controller = new AbortController()
+    const reason = new Error('document read cancelled before start')
+    controller.abort(reason)
+    await expect(
+      runDocumentJob(job(await valuesWorkbook(witnessCode())), controller.signal)
+    ).rejects.toBe(reason)
+    expect(spawn).not.toHaveBeenCalled()
+    await control()
+  })
+
+  it('maps V8 heap exhaustion to heap while a normal heap succeeds', async () => {
+    const bytes = await valuesWorkbook(witnessCode())
+    expect(
+      await runDocumentJob(
+        job(bytes, {
+          limits: documentLimits({ maxHeapMb: 24, timeoutMs: 15_000 }),
+        })
+      )
+    ).toEqual({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
+    expect((await runDocumentJob(job(bytes))).ok).toBe(true)
   }, 20_000)
 
-  it('resolves an oversized posted outcome as output_bytes with a normal-size control', async () => {
+  it('bounds output with a normal-size control', async () => {
     const bytes = await valuesWorkbook(witnessCode())
-    const oversized = job(bytes, {
-      limits: documentLimits({ maxOutputBytes: 1, timeoutMs: 5_000 }),
-    })
-    const pending = runDocumentJob(oversized)
-    const worker = await observeLiveWorker(pending, 1_000)
-    const exited = exitOf(worker)
-    await expect(pending).resolves.toEqual({
+    expect(
+      await runDocumentJob(job(bytes, { limits: documentLimits({ maxOutputBytes: 1 }) }))
+    ).toEqual({ ok: false, reason: 'document_limits_exceeded', limit: 'output_bytes' })
+    expect((await runDocumentJob(job(bytes))).ok).toBe(true)
+  })
+
+  it('accepts document_empty from a real child and reads a non-empty control', async () => {
+    expect(await runDocumentJob(job(await emptyWorkbook()))).toEqual({
       ok: false,
-      reason: 'document_limits_exceeded',
-      limit: 'output_bytes',
+      reason: 'document_empty',
     })
-    await exited
-    expect(await runDocumentJob(job(bytes))).toMatchObject({ ok: true })
+    await control()
   })
 
-  it('reports a crashing worker as a defect and never as document_parse_failed', async () => {
-    const pending = runDocumentJob(
-      job(Buffer.alloc(0), { kind: 'unknown' } as unknown as Partial<DocumentJob>)
+  it('reports a crashing child as a fixed defect and parses a control', async () => {
+    await expect(
+      runDocumentJob(
+        job(Buffer.alloc(0), {
+          kind: 'unknown',
+        } as unknown as Partial<DocumentJob>)
+      )
+    ).rejects.toThrow('Document reader worker failed')
+    await control()
+  })
+
+  it('fails loud on an unsupported sampler platform and samples the real platform', async () => {
+    expect(() => residentMemorySampler('win32')).toThrow(
+      'Unsupported document reader resident memory platform'
     )
-    const worker = await observeLiveWorker(pending, 1_000)
-    const exited = exitOf(worker)
-    await expect(pending).rejects.toThrow('Document reader worker failed')
-    await exited
+    const pending = runDocumentJob(job(await valuesWorkbook(witnessCode())))
+    const child = await liveChild()
+    expect(await residentMemorySampler(process.platform)(child.pid!)).toBeGreaterThan(0)
+    expect((await pending).ok).toBe(true)
   })
 
-  it('rejects a malformed posted message as a defect while a real message succeeds', async () => {
-    const malformed = new EventEmitter() as EventEmitter &
-      Partial<Worker> & { terminate: () => Promise<number> }
-    malformed.terminate = vi.fn(async () => {
-      process.nextTick(() => malformed.emit('exit', 1))
-      return 1
-    })
-    vi.mocked(Worker).mockImplementationOnce(function fakeWorker() {
-      return malformed as Worker
-    })
+  it('kills a real child when RSS sampling fails and accepts a working sampler', async () => {
+    const sampler = vi
+      .spyOn(residentMemory, 'residentMemorySampler')
+      .mockImplementationOnce(() => async () => {
+        throw new Error('RSS unavailable')
+      })
     const pending = runDocumentJob(job(await valuesWorkbook(witnessCode())))
-    await vi.waitFor(() => {
-      expect(Worker).toHaveBeenCalledTimes(1)
-      expect(malformed.emit).toBeTypeOf('function')
-    })
-    malformed.emit('message', { unexpected: true })
+    const child = await liveChild()
     await expect(pending).rejects.toThrow('Document reader worker failed')
-    expect(malformed.terminate).toHaveBeenCalledTimes(1)
-
-    const valid = (await runDocumentJob(job(await valuesWorkbook(witnessCode())))) as Extract<
-      XlsxOutcome,
-      { ok: true }
-    >
-    expect(valid.ok).toBe(true)
+    expect(child.signalCode).toBe('SIGKILL')
+    sampler.mockRestore()
+    await control()
   })
 
   it.each([
+    ['a malformed message', { unexpected: true }],
     ['an unknown failure reason', { ok: false, reason: 'disk_full' }],
     ['an unknown limit name', { ok: false, reason: 'document_limits_exceeded', limit: 'rows' }],
     ['a limits failure without its limit', { ok: false, reason: 'document_limits_exceeded' }],
     ['a limit on a non-limit failure', { ok: false, reason: 'invalid_range', limit: 'time' }],
     ['a success without sheets', { ok: true, sheetNames: ['Sheet1'] }],
     [
-      'a success with an object cell',
+      'an object cell',
       {
         ok: true,
         sheetNames: ['Sheet1'],
@@ -240,36 +257,85 @@ describe('document reader worker runner', () => {
     ],
     [
       'a continuation without its stop reason',
-      { ok: true, sheetNames: ['Sheet1'], sheets: [], next: { sheetIndex: 0, row: 8 } },
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [],
+        next: { sheetIndex: 0, row: 8 },
+      },
     ],
     [
       'a stop reason without a continuation',
-      { ok: true, sheetNames: ['Sheet1'], sheets: [], stoppedBy: 'max_rows' },
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [],
+        stoppedBy: 'max_rows',
+      },
     ],
     [
-      'a PDF text success for an XLSX job',
-      { ok: true, pageCount: 1, pages: [{ page: 1, text: 'x', from: 0, to: 1, lowText: false }] },
+      'a zero startRow',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [{ name: 'Sheet1', startRow: 0, truncated: false, rows: [['value']] }],
+      },
     ],
-  ])('rejects a posted outcome with %s as a defect', async (_name, message) => {
-    const fake = new EventEmitter() as EventEmitter &
-      Partial<Worker> & { terminate: () => Promise<number> }
-    fake.terminate = vi.fn(async () => {
-      process.nextTick(() => fake.emit('exit', 1))
-      return 1
-    })
-    vi.mocked(Worker).mockImplementationOnce(function fakeWorker() {
-      return fake as Worker
-    })
+    [
+      'a zero continuation row',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [],
+        next: { sheetIndex: 0, row: 0 },
+        stoppedBy: 'max_rows',
+      },
+    ],
+    [
+      'a continuation past sheetNames',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [],
+        next: { sheetIndex: 1, row: 2 },
+        stoppedBy: 'max_rows',
+      },
+    ],
+    [
+      'a PDF outcome for an XLSX job',
+      {
+        ok: true,
+        pageCount: 1,
+        pages: [{ page: 1, text: 'x', from: 0, to: 1, lowText: false }],
+      },
+    ],
+  ])('rejects %s at the process boundary with a real-child control', async (_name, message) => {
     const pending = runDocumentJob(job(await valuesWorkbook(witnessCode())))
-    await vi.waitFor(() => expect(Worker).toHaveBeenCalledTimes(1))
-    // Witness: the runner subscribed to the worker's message before it posted.
-    expect(fake.listenerCount('message')).toBe(1)
-    fake.emit('message', message)
+    const child = await liveChild()
+    const kill = vi.spyOn(child, 'kill')
+    expect(child.listenerCount('message')).toBe(1)
+    child.emit('message', message)
     await expect(pending).rejects.toThrow('Document reader worker failed')
-    expect(fake.terminate).toHaveBeenCalledTimes(1)
+    expect(kill).toHaveBeenCalledWith('SIGKILL')
+    await control()
   })
 
-  it('propagates a typed success from a real PDF job', async () => {
+  it.each([
+    { ok: true, pageCount: 1, pages: [{ page: 0, text: 'x', from: 0, to: 1, lowText: false }] },
+    { ok: true, pageCount: 0, pages: [] },
+    { ok: true, pageCount: 1, pages: [], next: { page: 0, charOffset: 0 }, stoppedBy: 'max_pages' },
+    { ok: true, pageCount: 1, pages: [], next: { page: 2, charOffset: 0 }, stoppedBy: 'max_pages' },
+  ])('rejects a non-producer PDF text position %j with a real PDF control', async message => {
+    const bytes = await textPdf([witnessCode()])
+    const pdfJob = job(bytes, { kind: 'pdf_text', pages: null, start: { page: 1, charOffset: 0 } })
+    const pending = runDocumentJob(pdfJob)
+    const child = await liveChild()
+    child.emit('message', message)
+    await expect(pending).rejects.toThrow('Document reader worker failed')
+    expect((await runDocumentJob(pdfJob)).ok).toBe(true)
+  })
+
+  it('propagates a typed success from a real PDF child', async () => {
     const outcome = (await runDocumentJob(
       job(await textPdf([witnessCode()]), {
         kind: 'pdf_text',

@@ -1,12 +1,7 @@
-import { parentPort, workerData } from 'node:worker_threads'
+import { serialize } from 'node:v8'
 import { renderPdfPages } from './pdfRender'
 import { parsePdfText } from './pdfText'
 import type { DocumentJob, DocumentJobOutcome } from './types'
-
-const { isMarkedAsUntransferable } = require('node:worker_threads') as {
-  // Node 24 provides this API; this package retains Node 20 type definitions.
-  isMarkedAsUntransferable(value: object): boolean
-}
 
 async function dispatch(job: DocumentJob): Promise<DocumentJobOutcome<DocumentJob>> {
   switch (job.kind) {
@@ -23,33 +18,23 @@ async function dispatch(job: DocumentJob): Promise<DocumentJobOutcome<DocumentJo
   }
 }
 
-async function run(): Promise<void> {
-  if (!parentPort) return
-  // Readers return typed outcomes for document conditions themselves. Any
-  // exception escaping them is a defect: it crashes the worker and the
-  // runner rejects, instead of being reported as an unreadable file.
-  try {
-    const outcome = await dispatch(workerData as DocumentJob)
-    const transfers: ArrayBuffer[] = []
-    if (outcome.ok && 'images' in outcome) {
-      for (const image of outcome.images) {
-        const png = image.png
-        // Only transfer the PNG's bytes. A pooled/partial/non-transferable
-        // backing store needs one owned copy; an owned buffer needs none.
-        image.png =
-          png.buffer instanceof ArrayBuffer &&
-          png.byteOffset === 0 &&
-          png.byteLength === png.buffer.byteLength &&
-          !isMarkedAsUntransferable(png.buffer)
-            ? png
-            : new Uint8Array(png)
-        transfers.push(image.png.buffer as ArrayBuffer)
-      }
-    }
-    parentPort.postMessage(outcome, transfers)
-  } finally {
-    parentPort.close()
-  }
-}
-
-void run()
+if (!process.send) throw new Error('Document reader requires an IPC channel')
+process.once('message', async (job: DocumentJob) => {
+  // Advanced IPC preserves Buffer subclasses, which pdfjs does not accept.
+  // Normalize the exact received view without another document-sized copy.
+  job.bytes = new Uint8Array(job.bytes.buffer, job.bytes.byteOffset, job.bytes.byteLength)
+  // Readers classify document conditions. An escaping exception crashes only
+  // this child, and the parent reports the fixed defect without its text.
+  const outcome = await dispatch(job)
+  // Measure strings and raw PNG bytes before IPC can copy them into the Host.
+  // Serialization and its temporary buffer stay inside the memory-capped child.
+  const bounded: DocumentJobOutcome<DocumentJob> =
+    serialize(outcome).byteLength > job.limits.maxOutputBytes
+      ? { ok: false, reason: 'document_limits_exceeded', limit: 'output_bytes' }
+      : outcome
+  if (!process.send) throw new Error('Document reader lost its IPC channel')
+  process.send(bounded, error => {
+    if (error) throw new Error('Document reader could not send its outcome')
+    process.disconnect()
+  })
+})

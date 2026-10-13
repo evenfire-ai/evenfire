@@ -143,6 +143,7 @@ describe('builders', () => {
       classification: declared,
     })
     assert.equal(built.ok, true, built.ok ? '' : built.message)
+    assert.equal(built.value.reader, 'pdf')
     assert.equal(built.value.id, `gfs:personal:${RID}@v7`)
     assert.equal(built.value.detection, 'declared')
     assert.equal(built.value.digest, undefined)

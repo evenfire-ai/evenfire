@@ -1,6 +1,12 @@
+import { type ChildProcess, spawn } from 'node:child_process'
 import { extname, join } from 'node:path'
 import { serialize } from 'node:v8'
-import { Worker } from 'node:worker_threads'
+import {
+  DOCUMENT_CGROUP_MARGIN_BYTES,
+  documentCgroupSampler,
+  effectiveDocumentMemoryCaps,
+} from './documentMemory'
+import { residentMemorySampler } from './residentMemory'
 import type {
   DocumentJob,
   DocumentJobFailure,
@@ -8,11 +14,6 @@ import type {
   DocumentLimitName,
   RunDocumentJob,
 } from './types'
-
-const { isMarkedAsUntransferable } = require('node:worker_threads') as {
-  // Available in the required Node 24 runtime, beyond our Node 20 typings.
-  isMarkedAsUntransferable(value: object): boolean
-}
 
 /**
  * A worker that crashes, exits without an outcome or posts a malformed one has
@@ -27,11 +28,13 @@ const JOB_FAILURE_REASONS: ReadonlySet<unknown> = new Set<DocumentJobFailure['re
   'no_text_layer',
   'document_encrypted',
   'document_parse_failed',
+  'document_empty',
   'document_limits_exceeded',
   'invalid_range',
 ])
 const LIMIT_NAMES: ReadonlySet<unknown> = new Set<DocumentLimitName>([
   'source_bytes',
+  'uncompressed_bytes',
   'page_count',
   'pixels',
   'image_bytes',
@@ -40,8 +43,8 @@ const LIMIT_NAMES: ReadonlySet<unknown> = new Set<DocumentLimitName>([
   'heap',
 ])
 
-const isCount = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) >= 0
+const isCount = (value: unknown, minimum = 0): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= minimum
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
 const isArrayOf = (value: unknown, item: (entry: unknown) => boolean): boolean =>
@@ -54,7 +57,7 @@ const hasStopReason = (message: Record<string, unknown>, stops: readonly string[
     : typeof message.stoppedBy === 'string' && stops.includes(message.stoppedBy)
 
 /**
- * The outcome contract the Tool relies on, checked at the thread boundary so
+ * The outcome contract the Tool relies on, checked at the process boundary so
  * a worker or dependency regression rejects as a defect instead of becoming a
  * malformed model-visible result. The Tool still checks content bounds.
  */
@@ -71,12 +74,13 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
   switch (kind) {
     case 'pdf_text':
       return (
-        isCount(message.pageCount) &&
+        isCount(message.pageCount, 1) &&
         isArrayOf(
           message.pages,
           page =>
             isRecord(page) &&
-            isCount(page.page) &&
+            isCount(page.page, 1) &&
+            page.page <= (message.pageCount as number) &&
             typeof page.text === 'string' &&
             isCount(page.from) &&
             isCount(page.to) &&
@@ -86,32 +90,41 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
         ) &&
         (message.next === undefined ||
           (isRecord(message.next) &&
-            isCount(message.next.page) &&
+            isCount(message.next.page, 1) &&
+            message.next.page <= message.pageCount &&
             isCount(message.next.charOffset))) &&
         hasStopReason(message, ['max_pages', 'max_extracted_chars'])
       )
     case 'pdf_visual':
       return (
-        isCount(message.pageCount) &&
+        isCount(message.pageCount, 1) &&
         isArrayOf(
           message.images,
           image =>
             isRecord(image) &&
-            isCount(image.page) &&
-            isCount(image.width) &&
-            isCount(image.height) &&
+            isCount(image.page, 1) &&
+            image.page <= (message.pageCount as number) &&
+            isCount(image.width, 1) &&
+            isCount(image.height, 1) &&
             image.png instanceof Uint8Array
-        )
+        ) &&
+        (message.next === undefined ||
+          (isRecord(message.next) &&
+            isCount(message.next.page, 1) &&
+            message.next.page <= message.pageCount &&
+            message.next.charOffset === 0)) &&
+        hasStopReason(message, ['max_pages'])
       )
     case 'xlsx':
       return (
+        Array.isArray(message.sheetNames) &&
         isArrayOf(message.sheetNames, name => typeof name === 'string') &&
         isArrayOf(
           message.sheets,
           sheet =>
             isRecord(sheet) &&
             typeof sheet.name === 'string' &&
-            isCount(sheet.startRow) &&
+            isCount(sheet.startRow, 1) &&
             typeof sheet.truncated === 'boolean' &&
             isArrayOf(sheet.rows, row =>
               isArrayOf(
@@ -123,41 +136,75 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
         (message.next === undefined ||
           (isRecord(message.next) &&
             isCount(message.next.sheetIndex) &&
-            isCount(message.next.row))) &&
+            message.next.sheetIndex < message.sheetNames.length &&
+            isCount(message.next.row, 1))) &&
         hasStopReason(message, ['max_rows', 'max_cells'])
       )
   }
 }
 
-function workerEntry(): { filename: string; eval: boolean } {
-  if (extname(__filename) !== '.ts') {
-    return { filename: join(__dirname, 'worker.js'), eval: false }
-  }
+function workerEntry(): string[] {
+  if (extname(__filename) !== '.ts') return [join(__dirname, 'worker.js')]
   const script = join(__dirname, 'worker.ts')
-  // Source tests/dev have TypeScript and no adjacent emitted worker.js. Like
-  // boundedSchemaValidation, use a static CommonJS bootstrap under eval. Only
-  // repository TypeScript is transpiled; document bytes remain workerData.
-  // Production dist runs the emitted worker directly and needs no compiler.
-  return {
-    eval: true,
-    filename: `
-      const fs = require('node:fs');
-      const load = require('node:module').createRequire(${JSON.stringify(script)});
-      const ts = load('typescript');
-      require.extensions['.ts'] = (module, filename) => {
-        const result = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-          fileName: filename,
-          compilerOptions: {
-            module: ts.ModuleKind.CommonJS,
-            target: ts.ScriptTarget.ES2022,
-            esModuleInterop: true
-          }
-        });
-        module._compile(result.outputText, filename);
-      };
-      load(${JSON.stringify(script)});
-    `,
-  }
+  // Source tests/dev transpile repository TypeScript in the child. The
+  // production entry is emitted JavaScript and never loads a compiler.
+  const bootstrap = [
+    "const fs = require('node:fs');",
+    "const load = require('node:module').createRequire(" + JSON.stringify(script) + ');',
+    "const ts = load('typescript');",
+    "require.extensions['.ts'] = (module, filename) => {",
+    "  const result = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {",
+    '    fileName: filename,',
+    '    compilerOptions: {',
+    '      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true',
+    '    }',
+    '  });',
+    '  module._compile(result.outputText, filename);',
+    '};',
+    'load(' + JSON.stringify(script) + ');',
+  ].join('\n')
+  return ['-e', bootstrap]
+}
+
+interface WaitingDocumentReader {
+  start: () => void
+}
+
+let documentReaderActive = false
+const waitingDocumentReaders: WaitingDocumentReader[] = []
+
+/** One child owns cgroup headroom until its exit is observed. */
+function acquireDocumentReader(signal?: AbortSignal): Promise<() => void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      const index = waitingDocumentReaders.indexOf(waiting)
+      if (index >= 0) waitingDocumentReaders.splice(index, 1)
+      reject(signal?.reason)
+    }
+    const waiting: WaitingDocumentReader = {
+      start: () => {
+        signal?.removeEventListener('abort', onAbort)
+        documentReaderActive = true
+        let released = false
+        resolve(() => {
+          if (released) return
+          released = true
+          // Settle the complete public promise chain before admitting the next
+          // job, including the async cgroup-read and child-outcome layers.
+          setImmediate(() => {
+            documentReaderActive = false
+            waitingDocumentReaders.shift()?.start()
+          })
+        })
+      },
+    }
+    if (signal?.aborted) return reject(signal.reason)
+    if (!documentReaderActive) waiting.start()
+    else {
+      waitingDocumentReaders.push(waiting)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    }
+  })
 }
 
 export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
@@ -165,6 +212,19 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
   signal?: AbortSignal
 ): Promise<DocumentJobOutcome<J>> => {
   if (signal?.aborted) return Promise.reject(signal.reason)
+  const requiredLimits = [
+    job.limits.maxSourceBytes,
+    job.limits.maxUncompressedBytes,
+    job.limits.timeoutMs,
+    job.limits.maxHeapMb,
+    job.limits.maxResidentMb,
+    job.limits.maxOutputBytes,
+    job.limits.maxRenderPixelsPerCall,
+    job.limits.maxEmbeddedImagePixels,
+  ]
+  if (requiredLimits.some(value => !Number.isSafeInteger(value) || value < 1)) {
+    return Promise.reject(new Error('Invalid document reader limits'))
+  }
   if (job.bytes.byteLength > job.limits.maxSourceBytes) {
     return Promise.resolve({
       ok: false,
@@ -172,130 +232,176 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       limit: 'source_bytes',
     } as DocumentJobOutcome<J>)
   }
-  if (
-    !Number.isSafeInteger(job.limits.timeoutMs) ||
-    job.limits.timeoutMs < 1 ||
-    !Number.isSafeInteger(job.limits.maxHeapMb) ||
-    job.limits.maxHeapMb < 1 ||
-    !Number.isSafeInteger(job.limits.maxOutputBytes) ||
-    job.limits.maxOutputBytes < 1
-  ) {
-    return Promise.reject(new Error('Invalid document reader limits'))
-  }
 
-  return new Promise((resolve, reject) => {
-    let worker: Worker | undefined
-    let outcome: DocumentJobOutcome<J> | undefined
-    let failure: DocumentJobFailure | undefined
-    let defect = false
-    let aborted = false
-    let abortReason: unknown
-    let exited = false
+  return acquireDocumentReader(signal).then(async release => {
+    let sampleResidentMemory: (pid: number) => Promise<number>
+    let sampleCgroupMemory: ReturnType<typeof documentCgroupSampler>
+    let caps: ReturnType<typeof effectiveDocumentMemoryCaps>
+    try {
+      sampleResidentMemory = residentMemorySampler(process.platform)
+      sampleCgroupMemory = documentCgroupSampler(process.platform)
+      caps = effectiveDocumentMemoryCaps(job.limits, await sampleCgroupMemory())
+    } catch {
+      release()
+      throw workerFailed()
+    }
+    if (signal?.aborted) {
+      release()
+      throw signal.reason
+    }
+    if (!caps) {
+      release()
+      return {
+        ok: false,
+        reason: 'document_limits_exceeded',
+        limit: 'heap',
+      } as DocumentJobOutcome<J>
+    }
+    const memoryCaps = caps
+    return new Promise<DocumentJobOutcome<J>>((resolve, reject) => {
+      let child: ChildProcess | undefined
+      let outcome: DocumentJobOutcome<J> | undefined
+      let failure: DocumentJobFailure | undefined
+      let defect = false
+      let aborted = false
+      let abortReason: unknown
+      let exited = false
+      let stopping = false
+      let sampling = false
+      let residentTimer: ReturnType<typeof setInterval> | undefined
 
-    const terminate = (nextFailure?: DocumentJobFailure) => {
-      if (exited) return
-      failure ??= nextFailure
-      // The exit handler settles the promise, even when terminate() is
-      // asynchronous or an error arrives while cancellation is in progress.
-      // A rejected terminate() may never be followed by an exit event, so it
-      // settles the call as a defect instead of leaving it pending.
-      void worker?.terminate().catch(() => {
-        if (exited) return
+      const cleanup = () => {
+        clearTimeout(timer)
+        clearInterval(residentTimer)
+        signal?.removeEventListener('abort', onAbort)
+      }
+      const terminate = (nextFailure?: DocumentJobFailure) => {
+        if (exited || stopping) return
+        if (failure === undefined) failure = nextFailure
+        stopping = true
+        try {
+          if (!child || !child.kill('SIGKILL')) throw workerFailed()
+        } catch {
+          // A failed kill may have no exit event. Reject instead of leaving the
+          // call pending; never turn a termination defect into a typed limit.
+          exited = true
+          cleanup()
+          reject(aborted ? abortReason : workerFailed())
+        }
+      }
+      const onAbort = () => {
+        aborted = true
+        abortReason = signal?.reason
+        terminate()
+      }
+      const timer = setTimeout(
+        () => terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'time' }),
+        job.limits.timeoutMs
+      )
+      const onExit = (code: number | null, exitSignal: NodeJS.Signals | null) => {
         exited = true
         cleanup()
-        reject(aborted ? abortReason : workerFailed())
-      })
-    }
-    const onAbort = () => {
-      aborted = true
-      abortReason = signal?.reason
-      terminate()
-    }
-    const timer = setTimeout(
-      () => terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'time' }),
-      job.limits.timeoutMs
-    )
-    const cleanup = () => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
-    const onExit = (code: number) => {
-      exited = true
-      cleanup()
-      if (aborted) reject(abortReason)
-      else if (failure) resolve(failure as DocumentJobOutcome<J>)
-      else if (defect || code !== 0 || !outcome) reject(workerFailed())
-      else resolve(outcome)
-    }
-
-    try {
-      const source = job.bytes
-      // Exact, transferable backing stores cross the boundary without copying.
-      // A view of a pooled/larger/SharedArrayBuffer gets one bounded owned copy.
-      const bytes =
-        source.buffer instanceof ArrayBuffer &&
-        source.byteOffset === 0 &&
-        source.byteLength === source.buffer.byteLength &&
-        !isMarkedAsUntransferable(source.buffer)
-          ? source
-          : new Uint8Array(source)
-      const entry = workerEntry()
-      worker = new Worker(entry.filename, {
-        eval: entry.eval,
-        workerData: { ...job, bytes },
-        transferList: [bytes.buffer as ArrayBuffer],
-        // Do not inherit test loaders or process heap flags that can override
-        // resourceLimits. Both source and dist have an explicit entry path.
-        execArgv: [],
-        resourceLimits: {
-          maxOldGenerationSizeMb: job.limits.maxHeapMb,
-          maxYoungGenerationSizeMb: Math.max(1, Math.min(16, Math.floor(job.limits.maxHeapMb / 4))),
-          stackSizeMb: 4,
-        },
-        // Contain and discard dependency diagnostics; no PDF text, file names,
-        // or parser errors can flow into the Host's logs via worker streams.
-        stdout: true,
-        stderr: true,
-      })
-      worker.stdout?.resume()
-      worker.stderr?.resume()
-      worker.once('message', (message: DocumentJobOutcome<J>) => {
+        if (aborted) reject(abortReason)
+        else if (failure) resolve(failure as DocumentJobOutcome<J>)
+        else if (!defect && (exitSignal === 'SIGABRT' || exitSignal === 'SIGKILL')) {
+          // V8 heap exhaustion aborts Node; the OS OOM killer uses SIGKILL.
+          resolve({
+            ok: false,
+            reason: 'document_limits_exceeded',
+            limit: 'heap',
+          } as DocumentJobOutcome<J>)
+        } else if (defect || code !== 0 || !outcome) reject(workerFailed())
+        else resolve(outcome)
+        release()
+      }
+      const sample = async () => {
+        if (sampling || stopping || exited || !child || child.pid === undefined) return
+        sampling = true
         try {
-          if (!isJobOutcome(job.kind, message)) {
-            defect = true
-            terminate()
-          } else if (serialize(message).byteLength > job.limits.maxOutputBytes) {
-            // V8 serialization measures the received structured outcome,
-            // including the raw PNG buffers, never base64 or content logging.
-            terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'output_bytes' })
-          } else {
-            outcome = message
+          const cgroup = await sampleCgroupMemory()
+          if (
+            !stopping &&
+            !exited &&
+            cgroup?.maxBytes !== null &&
+            cgroup !== null &&
+            cgroup.currentBytes >= cgroup.maxBytes - DOCUMENT_CGROUP_MARGIN_BYTES
+          ) {
+            terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
+            return
+          }
+          const bytes = await sampleResidentMemory(child.pid)
+          if (!stopping && !exited && bytes > memoryCaps.maxResidentBytes) {
+            terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
           }
         } catch {
-          defect = true
-          terminate()
+          // A read racing an observed exit needs no cap. Every failure while
+          // the child is still live is a defect and stops the job.
+          if (!stopping && !exited && child.exitCode === null && child.signalCode === null) {
+            defect = true
+            terminate()
+          }
+        } finally {
+          sampling = false
         }
-      })
-      worker.once('error', (error: Error & { code?: string }) => {
-        if (error.code === 'ERR_WORKER_OUT_OF_MEMORY') {
-          terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
-        } else {
-          defect = true
-          terminate()
-        }
-      })
-      worker.once('exit', onExit)
-      signal?.addEventListener('abort', onAbort, { once: true })
-      if (signal?.aborted) onAbort()
-    } catch (error) {
-      if (worker) {
-        defect = true
-        terminate()
-      } else {
-        // The worker never started (for example a missing emitted worker.js).
-        cleanup()
-        reject(signal?.aborted ? signal.reason : error)
       }
-    }
+
+      try {
+        child = spawn(
+          process.execPath,
+          ['--max-old-space-size=' + memoryCaps.maxHeapMb, ...workerEntry()],
+          {
+            // No Host secrets or inherited Node loaders reach the child.
+            env: {},
+            // Dependency diagnostics may contain document data. Discard them.
+            stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+            serialization: 'advanced',
+          }
+        )
+        child.once('message', (message: DocumentJobOutcome<J>) => {
+          try {
+            if (!isJobOutcome(job.kind, message)) {
+              defect = true
+              terminate()
+            } else if (serialize(message).byteLength > job.limits.maxOutputBytes) {
+              terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'output_bytes' })
+            } else {
+              outcome = message
+            }
+          } catch {
+            defect = true
+            terminate()
+          }
+        })
+        child.once('error', () => {
+          defect = true
+          terminate()
+        })
+        child.once('exit', onExit)
+        signal?.addEventListener('abort', onAbort, { once: true })
+        if (signal?.aborted) onAbort()
+        if (!stopping) {
+          residentTimer = setInterval(() => void sample(), 25)
+          void sample()
+          // Advanced IPC serializes only the supplied byte view. The source cap
+          // bounds this copy, and the caller retains ownership of its bytes.
+          if (!child.send) throw workerFailed()
+          child.send(job, error => {
+            if (error && !exited && !stopping) {
+              defect = true
+              terminate()
+            }
+          })
+        }
+      } catch {
+        if (child) {
+          defect = true
+          terminate()
+        } else {
+          cleanup()
+          reject(signal?.aborted ? signal.reason : workerFailed())
+          release()
+        }
+      }
+    })
   })
 }
