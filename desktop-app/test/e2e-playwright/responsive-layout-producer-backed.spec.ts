@@ -51,6 +51,7 @@ async function nativeSandboxViewState(app: ElectronApplication) {
     const view = window.contentView.children.at(-1)
     if (!view) throw new Error('Expected the producer-backed sandbox WebContentsView')
     return {
+      webContentsId: view.webContents.id,
       visible: view.getVisible(),
       bounds: view.getBounds(),
       scaleFactor: screen.getDisplayMatching(window.getBounds()).scaleFactor,
@@ -140,6 +141,11 @@ test('Desktop app tray layout is exercised with producer-backed notification and
     const page = await app.firstWindow()
     await test.step('compact navigation covers the native embed and restores its live bounds', async () => {
       await resizeDesktop(app!, 700)
+      await page.evaluate(() => window.localStorage.setItem('clerum.ui.sidebarWidth', '420'))
+      const savedWidthBeforeOverlay = await page.evaluate(() =>
+        window.localStorage.getItem('clerum.ui.sidebarWidth')
+      )
+      const nativeViewBeforeOverlay = await nativeSandboxViewState(app!)
       const trigger = page.getByTestId('compact-navigation-toggle')
       await expect(trigger).toBeVisible()
       await expect(page.locator('.sandbox-ui-embed-slot')).toBeVisible()
@@ -165,6 +171,7 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       expect(hiddenView.visible, 'native view must be hidden above the renderer overlay').toBe(
         false
       )
+      expect(hiddenView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
       expect(
         await page.locator('.workspace-layout').evaluate(element => (element as HTMLElement).inert)
       ).toBe(true)
@@ -176,12 +183,16 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       await expect(sidebar).not.toHaveClass(/compact-open/)
       await expect.poll(async () => (await nativeSandboxViewState(app!)).visible).toBe(true)
       expect(await trigger.evaluate(element => element === document.activeElement)).toBe(true)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        savedWidthBeforeOverlay
+      )
 
       const slotBox = await bounds(page.locator('.sandbox-ui-embed-slot'))
       const [restoredView, dpr] = await Promise.all([
         nativeSandboxViewState(app!),
         page.evaluate(() => window.devicePixelRatio),
       ])
+      expect(restoredView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
       const factor = dpr / restoredView.scaleFactor
       for (const [actual, expected] of [
         [restoredView.bounds.x, slotBox.x * factor],
@@ -197,6 +208,7 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       const separator = page.getByRole('separator', { name: 'Resize sidebar' })
       await expect(separator).toBeVisible()
       const desktopSidebar = page.locator('.left-nav')
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(420)
       await separator.focus()
       await separator.press('Home')
       await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(192)
@@ -230,10 +242,21 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       await expect
         .poll(async () => (await nativeSandboxViewState(app!)).bounds.x)
         .toBeGreaterThan(0)
-      const resizedSlot = await bounds(page.locator('.sandbox-ui-embed-slot'))
-      const resizedView = await nativeSandboxViewState(app!)
-      const resizedFactor = dpr / resizedView.scaleFactor
-      expect(Math.abs(resizedView.bounds.x - resizedSlot.x * resizedFactor)).toBeLessThanOrEqual(2)
+      const [resizedSlot, resizedView, resizedDpr] = await Promise.all([
+        bounds(page.locator('.sandbox-ui-embed-slot')),
+        nativeSandboxViewState(app!),
+        page.evaluate(() => window.devicePixelRatio),
+      ])
+      expect(resizedView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
+      const resizedFactor = resizedDpr / resizedView.scaleFactor
+      for (const [actual, expected] of [
+        [resizedView.bounds.x, resizedSlot.x * resizedFactor],
+        [resizedView.bounds.y, resizedSlot.y * resizedFactor],
+        [resizedView.bounds.width, resizedSlot.width * resizedFactor],
+        [resizedView.bounds.height, resizedSlot.height * resizedFactor],
+      ]) {
+        expect(Math.abs(actual! - expected!)).toBeLessThanOrEqual(2)
+      }
 
       await separator.focus()
       await separator.press('End')
