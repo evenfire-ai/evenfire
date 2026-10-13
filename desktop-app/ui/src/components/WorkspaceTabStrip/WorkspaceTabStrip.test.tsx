@@ -451,12 +451,12 @@ describe('WorkspaceTabStrip', () => {
     )
     restoreFutureRects()
     layout.syncTabRects()
-    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
-      false
-    )
-    expect(screen.getByRole('button', { name: 'Scroll tabs right' }).hasAttribute('disabled')).toBe(
-      true
-    )
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs left' }).matches('[aria-disabled="true"]')
+    ).toBe(false)
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs right' }).matches('[aria-disabled="true"]')
+    ).toBe(true)
 
     layout.resize(500)
     expect(screen.queryByRole('button', { name: 'Scroll tabs left' })).toBeNull()
@@ -502,9 +502,9 @@ describe('WorkspaceTabStrip', () => {
     layout.measure()
     layout.setScrollLeft(0)
     fireEvent.scroll(view.container.querySelector('.chat-view-tabs__scroller') as HTMLDivElement)
-    expect(screen.getByRole('button', { name: 'Scroll tabs right' }).hasAttribute('disabled')).toBe(
-      false
-    )
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs right' }).matches('[aria-disabled="true"]')
+    ).toBe(false)
 
     // The user moves to the left edge while the last tab stays active. Widening
     // removes overflow and narrowing it again must preserve that edge.
@@ -513,12 +513,12 @@ describe('WorkspaceTabStrip', () => {
     layout.resize(300)
 
     expect(layout.scrollLeft()).toBe(0)
-    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
-      true
-    )
-    expect(screen.getByRole('button', { name: 'Scroll tabs right' }).hasAttribute('disabled')).toBe(
-      false
-    )
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs left' }).matches('[aria-disabled="true"]')
+    ).toBe(true)
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs right' }).matches('[aria-disabled="true"]')
+    ).toBe(false)
   })
 
   it('reveals measured tabs, follows active changes, and leaves manual scroll alone', () => {
@@ -545,8 +545,8 @@ describe('WorkspaceTabStrip', () => {
     layout.measure()
     const left = screen.getByRole('button', { name: 'Scroll tabs left' })
     const right = screen.getByRole('button', { name: 'Scroll tabs right' })
-    expect(left.hasAttribute('disabled')).toBe(true)
-    expect(right.hasAttribute('disabled')).toBe(false)
+    expect(left.matches('[aria-disabled="true"]')).toBe(true)
+    expect(right.matches('[aria-disabled="true"]')).toBe(false)
 
     fireEvent.click(right)
     expect(layout.scrollLeft()).toBe(104)
@@ -554,16 +554,16 @@ describe('WorkspaceTabStrip', () => {
     expect(layout.scrollLeft()).toBe(272)
     expect(onSelect).not.toHaveBeenCalled()
 
-    for (let click = 0; click < 5 && !right.hasAttribute('disabled'); click += 1) {
+    for (let click = 0; click < 5 && !right.matches('[aria-disabled="true"]'); click += 1) {
       fireEvent.click(right)
     }
     expect(layout.scrollLeft()).toBe(layout.maximumScrollLeft())
-    expect(right.hasAttribute('disabled')).toBe(true)
-    expect(left.hasAttribute('disabled')).toBe(false)
+    expect(right.matches('[aria-disabled="true"]')).toBe(true)
+    expect(left.matches('[aria-disabled="true"]')).toBe(false)
 
     fireEvent.click(left)
     expect(layout.scrollLeft()).toBe(364)
-    expect(left.hasAttribute('disabled')).toBe(false)
+    expect(left.matches('[aria-disabled="true"]')).toBe(false)
     expect(onSelect).not.toHaveBeenCalled()
 
     layout.setScrollLeft(100)
@@ -624,9 +624,9 @@ describe('WorkspaceTabStrip', () => {
     const layout = installTabStripLayout(view.container, [60, 60, 60, 60], 150)
     layout.measure()
     expect(layout.viewportWidth()).toBe(102)
-    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
-      true
-    )
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs left' }).matches('[aria-disabled="true"]')
+    ).toBe(true)
 
     fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
     expect(layout.scrollLeft()).toBe(26)
@@ -648,12 +648,12 @@ describe('WorkspaceTabStrip', () => {
         tab => tab.querySelector('.chat-view-tab__label')?.textContent
       )
     ).toEqual(['d', 'a', 'b', 'c'])
-    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
-      false
-    )
-    expect(screen.getByRole('button', { name: 'Scroll tabs right' }).hasAttribute('disabled')).toBe(
-      false
-    )
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs left' }).matches('[aria-disabled="true"]')
+    ).toBe(false)
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs right' }).matches('[aria-disabled="true"]')
+    ).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs right' }))
     expect(layout.scrollLeft()).toBe(94)
     fireEvent.click(screen.getByRole('button', { name: 'Scroll tabs left' }))
@@ -752,9 +752,9 @@ describe('WorkspaceTabStrip', () => {
     scroller.scrollLeft = 100
     fireEvent.scroll(scroller)
     expect(layout.scrollLeft()).toBe(100)
-    expect(screen.getByRole('button', { name: 'Scroll tabs left' }).hasAttribute('disabled')).toBe(
-      false
-    )
+    expect(
+      screen.getByRole('button', { name: 'Scroll tabs left' }).matches('[aria-disabled="true"]')
+    ).toBe(false)
     expect(onSelect).not.toHaveBeenCalled()
   })
 

@@ -17104,6 +17104,17 @@ pre {
   margin-bottom: var(--space-0-5);
 }
 
+.chat-view-tabs__scroll-button[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.chat-view-tabs__scroll-button[aria-disabled='true']:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
 .chat-view-tabs__scroll-button svg {
   height: 14px;
   width: 14px;

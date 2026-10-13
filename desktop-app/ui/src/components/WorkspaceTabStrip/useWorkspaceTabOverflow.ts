@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type FocusEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { WorkspaceTabOverflowOptions, WorkspaceTabScrollState } from './types'
 
 const SCROLL_EPSILON = 1
@@ -10,6 +10,10 @@ export function useWorkspaceTabOverflow({
   stripRef,
 }: WorkspaceTabOverflowOptions) {
   const scrollerRef = useRef<HTMLDivElement | null>(null)
+  const leftButtonRef = useRef<HTMLButtonElement | null>(null)
+  const rightButtonRef = useRef<HTMLButtonElement | null>(null)
+  const keyboardArrowFocusRef = useRef(false)
+  const focusAfterOverflowRef = useRef(false)
   const activeTabToRevealRef = useRef<string | null>(null)
   const previousActiveTabIdRef = useRef<string | null>(null)
   const [scrollState, setScrollState] = useState<WorkspaceTabScrollState>({
@@ -25,6 +29,12 @@ export function useWorkspaceTabOverflow({
       hasOverflow: maximum > SCROLL_EPSILON,
       canScrollLeft: scroller.scrollLeft > SCROLL_EPSILON,
       canScrollRight: scroller.scrollLeft < maximum - SCROLL_EPSILON,
+    }
+    if (!next.hasOverflow && keyboardArrowFocusRef.current) {
+      const focused = document.activeElement
+      if (focused === leftButtonRef.current || focused === rightButtonRef.current) {
+        focusAfterOverflowRef.current = true
+      }
     }
     setScrollState(current =>
       current.hasOverflow === next.hasOverflow &&
@@ -165,16 +175,51 @@ export function useWorkspaceTabOverflow({
     revealPendingTab()
   }, [activeTabId, tabs, scrollState.hasOverflow, revealPendingTab])
 
+  useLayoutEffect(() => {
+    if (scrollState.hasOverflow || !focusAfterOverflowRef.current) return
+    focusAfterOverflowRef.current = false
+    // A user who deliberately moved focus while measurements settled keeps it.
+    if (document.activeElement && document.activeElement !== document.body) return
+    const strip = stripRef.current
+    const activeTab = strip?.querySelector<HTMLElement>(
+      '.chat-view-tab.is-active .chat-view-tab__select'
+    )
+    ;(activeTab ?? strip)?.focus({ preventScroll: true })
+  }, [scrollState.hasOverflow, stripRef])
+
+  const focusProps = {
+    onFocus: (event: FocusEvent<HTMLButtonElement>) => {
+      keyboardArrowFocusRef.current = event.currentTarget.matches(':focus-visible')
+    },
+    onKeyDown: () => {
+      keyboardArrowFocusRef.current = true
+    },
+    onPointerDown: () => {
+      keyboardArrowFocusRef.current = false
+    },
+    onBlur: () => {
+      keyboardArrowFocusRef.current = false
+    },
+  }
+
   return {
     scrollerRef,
     hasOverflow: scrollState.hasOverflow,
     leftButtonProps: {
-      disabled: !scrollState.canScrollLeft,
-      onClick: () => scrollToNearestHiddenTab('left'),
+      ...focusProps,
+      ref: leftButtonRef,
+      'aria-disabled': !scrollState.canScrollLeft,
+      onClick: () => {
+        if (scrollState.canScrollLeft) scrollToNearestHiddenTab('left')
+      },
     },
     rightButtonProps: {
-      disabled: !scrollState.canScrollRight,
-      onClick: () => scrollToNearestHiddenTab('right'),
+      ...focusProps,
+      ref: rightButtonRef,
+      'aria-disabled': !scrollState.canScrollRight,
+      onClick: () => {
+        if (scrollState.canScrollRight) scrollToNearestHiddenTab('right')
+      },
     },
   }
 }
