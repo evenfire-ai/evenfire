@@ -120,6 +120,36 @@ describe('useSidebarResize', () => {
     expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('460')
   })
 
+  it('clamps and persists keyboard input that exceeds the live maximum', () => {
+    vi.stubGlobal('innerWidth', 900)
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '430')
+    render(<SidebarResizeHandle />)
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+
+    expect(handle.getAttribute('aria-valuemax')).toBe('440')
+    expect(handle.getAttribute('aria-valuenow')).toBe('430')
+    fireEvent.keyDown(handle, { key: 'ArrowRight' })
+
+    expect(handle.getAttribute('aria-valuenow')).toBe('440')
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('440')
+  })
+
+  it('clamps and persists pointer input that exceeds the live maximum', () => {
+    vi.stubGlobal('innerWidth', 900)
+    window.localStorage.setItem('clerum.ui.sidebarWidth', '420')
+    render(<SidebarResizeHandle />)
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' })
+
+    fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 6 })
+    fireEvent.pointerMove(handle, { clientX: 140, pointerId: 6 })
+    expect(handle.getAttribute('aria-valuenow')).toBe('440')
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('420')
+    fireEvent.pointerUp(handle, { clientX: 140, pointerId: 6 })
+
+    expect(handle.getAttribute('aria-valuenow')).toBe('440')
+    expect(window.localStorage.getItem('clerum.ui.sidebarWidth')).toBe('440')
+  })
+
   it('preserves a wider preference when keyboard resize is blocked at the maximum', () => {
     vi.stubGlobal('innerWidth', 900)
     window.localStorage.setItem('clerum.ui.sidebarWidth', '460')
