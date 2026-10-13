@@ -49,6 +49,16 @@ describe('officePackageHasText', () => {
     expect(officePackageHasText(xlsx, holds)).toBe(true)
   })
 
+  it.each([
+    ['an attribute value holding a >', `<a v="x > ${needle}"/>`],
+    ['character data', `<t><![CDATA[${needle}]]></t>`],
+    ['a comment', `<a/><!-- ${needle} -->`],
+    ['a value left open', `<a v="${needle}`],
+  ])('reads %s', async (_label, xml) => {
+    const part = await pack({ 'xl/worksheets/sheet1.xml': xml })
+    expect(officePackageHasText(part, holds)).toBe(true)
+  })
+
   it('decodes character references', async () => {
     const docx = await pack({ 'word/document.xml': '<w:t>&#51;141592&#x36;53 &amp; more</w:t>' })
     expect(officePackageHasText(docx, holds)).toBe(true)

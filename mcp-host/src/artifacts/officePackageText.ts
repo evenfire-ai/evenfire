@@ -23,8 +23,6 @@ const CENTRAL_DIRECTORY_ENTRY = 0x02014b50
 const LOCAL_FILE_HEADER = 0x04034b50
 const TEXT_PART = /\.(?:xml|rels|vml)$/i
 const EMBEDDED_PACKAGE = /\.(?:docx|docm|xlsx|xlsm|pptx|pptm)$/i
-const TAG = /<[^>]*>/g
-const ATTRIBUTE_VALUE = /\s[^\s=<>"'/]+\s*=\s*(?:"([^"]*)"|'([^']*)')/g
 const CHARACTER_REFERENCE = /&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|(lt|gt|amp|quot|apos));/g
 const NAMED_REFERENCES: Record<string, string> = {
   lt: '<',
@@ -81,14 +79,51 @@ function searchPackage(
   return false
 }
 
+/** Sections whose content is read as it stands, up to their end mark. */
+const RAW_SECTIONS: ReadonlyArray<readonly [start: string, end: string]> = [
+  ['<![CDATA[', ']]>'],
+  ['<!--', '-->'],
+]
+
+/**
+ * Whether one XML part's text satisfies `matches`, read in a single pass: its
+ * text nodes, character data and comments run together, and each quoted
+ * attribute value on its own, so a '>' a value holds does not end its tag. A
+ * value or section left open runs to the end of the part, which is read too.
+ */
 function xmlHasText(xml: string, matches: (text: string) => boolean): boolean {
-  if (matches(decodeReferences(xml.replace(TAG, '')))) return true
-  // One pass over the whole part: text that merely looks like an attribute is
-  // text the first check already read, so reading it again costs nothing.
-  for (const attribute of xml.matchAll(ATTRIBUTE_VALUE)) {
-    if (matches(decodeReferences(attribute[1] ?? attribute[2] ?? ''))) return true
+  const text: string[] = []
+  let at = 0
+  while (at < xml.length) {
+    const open = xml.indexOf('<', at)
+    if (open < 0) {
+      text.push(xml.slice(at))
+      break
+    }
+    text.push(xml.slice(at, open))
+    const raw = RAW_SECTIONS.find(([start]) => xml.startsWith(start, open))
+    if (raw) {
+      const close = xml.indexOf(raw[1], open + raw[0].length)
+      const end = close < 0 ? xml.length : close
+      text.push(xml.slice(open + raw[0].length, end))
+      at = end + raw[1].length
+      continue
+    }
+    let i = open + 1
+    while (i < xml.length && xml[i] !== '>') {
+      const quote = xml[i]
+      if (quote !== '"' && quote !== "'") {
+        i++
+        continue
+      }
+      const close = xml.indexOf(quote, i + 1)
+      const end = close < 0 ? xml.length : close
+      if (matches(decodeReferences(xml.slice(i + 1, end)))) return true
+      i = end + 1
+    }
+    at = i + 1
   }
-  return false
+  return matches(decodeReferences(text.join('')))
 }
 
 function decodeReferences(text: string): string {
