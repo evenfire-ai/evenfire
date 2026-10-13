@@ -15,10 +15,7 @@ test('retries session hydration after committed reset without resubmitting the r
       response.request().method() === 'POST'
   )
   const firstSessionResponsePromise = page.waitForResponse(
-    response =>
-      response.url().endsWith('/api/v1/me') &&
-      response.request().method() === 'GET' &&
-      response.status() === 503
+    response => response.url().endsWith('/api/v1/me') && response.request().method() === 'GET'
   )
   await page.getByRole('button', { name: 'Reset password' }).click()
 
@@ -27,8 +24,8 @@ test('retries session hydration after committed reset without resubmitting the r
     firstSessionResponsePromise,
   ])
   expect(resetResponse.status()).toBe(200)
-  expect(firstSessionResponse.status()).toBe(503)
-  expect(await firstSessionResponse.json()).toEqual({ error: 'authority_unavailable' })
+  expect(firstSessionResponse.status()).toBe(404)
+  expect(await firstSessionResponse.json()).toEqual({ error: 'User not found' })
 
   await expect(
     page.getByText(

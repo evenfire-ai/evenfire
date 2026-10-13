@@ -102,7 +102,7 @@ const apiServer = createServer(async (request, response) => {
     }
     authenticatedMeReads += 1
     if (authenticatedMeReads === 1) {
-      sendJson(response, 503, { error: 'authority_unavailable' }, { 'retry-after': '2' })
+      sendJson(response, 404, { error: 'User not found' })
       return
     }
     sendJson(response, 200, member)
