@@ -199,6 +199,18 @@ describe('document reader Tool outcomes through real child readers', () => {
       )
       expect(JSON.parse(rendered.content).status).toBe('ok')
       expect(rendered.attachments?.[0]?.dataBase64?.length).toBeGreaterThan(0)
+      const readable = admittedFile(
+        'text-control',
+        await textPdf([witnessCode()]),
+        'application/pdf'
+      )
+      const textControl = await tool(readable).execute(
+        { attachmentId: readable.id },
+        context(supported ? profile : null)
+      )
+      const textBody = JSON.parse(textControl.content)
+      expect(textBody.status).toBe('ok')
+      expect(textBody.pages[0].text.length).toBeGreaterThan(0)
     }
   )
 
@@ -214,6 +226,11 @@ describe('document reader Tool outcomes through real child readers', () => {
     expect(failed.reason).toBe('document_parse_failed')
     expect(failed.message).toContain('malformed or its content has the wrong format')
     expect(failed.message).toContain('file name or declared media type does not match')
+    const readable = admittedFile('valid-pdf', await textPdf([witnessCode()]), 'application/pdf')
+    const pdfControl = await tool(readable).execute({ attachmentId: readable.id }, context())
+    const pdfBody = JSON.parse(pdfControl.content)
+    expect(pdfBody.status).toBe('ok')
+    expect(pdfBody.pages[0].text.length).toBeGreaterThan(0)
     const workbook = admittedFile(
       'empty-selection',
       await emptySelectionWorkbook(witnessCode()),
