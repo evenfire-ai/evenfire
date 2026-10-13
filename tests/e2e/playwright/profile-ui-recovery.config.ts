@@ -3,11 +3,6 @@ import path from 'node:path'
 
 const port = Number(process.env.PROFILE_UI_RECOVERY_PORT || 31873)
 const baseURL = `http://127.0.0.1:${port}`
-const scratchRoot = process.env.CODEX_SCRATCH_ROOT
-
-if (!scratchRoot) {
-  throw new Error('CODEX_SCRATCH_ROOT is required for Profile UI recovery browser artifacts')
-}
 
 export default defineConfig({
   testDir: path.join(__dirname, 'profile-ui-recovery'),
@@ -17,7 +12,7 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   reporter: [['list']],
-  outputDir: path.join(scratchRoot, 'evenfire', 'pr1056-profile-ui-recovery-results'),
+  outputDir: path.join(__dirname, 'test-results', 'profile-ui-recovery'),
   use: {
     ...devices['Desktop Chrome'],
     baseURL,
