@@ -787,3 +787,33 @@ describe('R20-M6 queued source-plan fencing', () => {
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
   })
 })
+
+describe('R20-M7 restore response epoch fencing', () => {
+  it('returns signed-out state when logout completes during awaited cleanup retirement', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const entered = deferred()
+    const release = deferred()
+    const readEncrypted = h.tokenStore.getSafeStorageSessionToken.bind(h.tokenStore)
+    vi.spyOn(h.tokenStore, 'getSafeStorageSessionToken').mockImplementationOnce(async (...args) => {
+      const token = await readEncrypted(...args)
+      entered.resolve()
+      await release.promise
+      return token
+    })
+    const restoring = h.service.initialize()
+    await entered.promise
+    await h.service.logout()
+    release.resolve()
+    await expect(restoring).resolves.toEqual({ authenticated: false, me: null })
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.state.me).toBeNull()
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalled()
+  })
+})
