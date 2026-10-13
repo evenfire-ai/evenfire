@@ -221,4 +221,64 @@ describe('R6 invitation/password producer response mappings', () => {
     expect(response.headers['set-cookie']).toBeUndefined()
     expect(JSON.stringify(response.body)).not.toMatch(/verification_busy|r6-|sql|stack/i)
   })
+
+  it('maps a real producer password mismatch for desktop authorization', async () => {
+    directory.verifyUserPassword.mockResolvedValueOnce(false)
+
+    const response = await request(publicApp())
+      .post('/invitations/desktop-authorization')
+      .set('authorization', 'Bearer r6-synthetic-session')
+      .send({ password: 'R6-synthetic-current-password' })
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Invalid password' })
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toMatch(/invalid_password|r6-|sql|stack/i)
+    expect(directory.verifyUserPassword).toHaveBeenCalledWith({
+      userId: 'r6-user',
+      email: 'r6-member@example.invalid',
+      password: 'R6-synthetic-current-password',
+    })
+    expect(desktopFlow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
+  })
+
+  it('maps an unavailable desktop-authorization producer to bounded public retry guidance', async () => {
+    directory.verifyUserPassword.mockRejectedValueOnce(
+      new PasswordAdmissionError(503, 23, 'authority_failure')
+    )
+
+    const response = await request(publicApp())
+      .post('/invitations/desktop-authorization')
+      .set('authorization', 'Bearer r6-synthetic-session')
+      .send({ password: 'R6-synthetic-current-password' })
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'authority_unavailable', retryAfterSeconds: 23 })
+    expect(response.headers['retry-after']).toBe('23')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toMatch(/authority_failure|r6-|sql|stack/i)
+    expect(desktopFlow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
+  })
+
+  it('maps the producer desktop-registration not-found code without leaking details', async () => {
+    directory.verifyUserPassword.mockResolvedValueOnce(true)
+    desktopFlow.storeDesktopAuthorizationToken.mockRejectedValueOnce(
+      new Error(
+        'Member registration service POST /invitations-flow/desktop-authorizations failed (404): private'
+      )
+    )
+
+    const response = await request(publicApp())
+      .post('/invitations/desktop-authorization')
+      .set('authorization', 'Bearer r6-synthetic-session')
+      .send({ password: 'R6-synthetic-current-password' })
+
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({ error: 'Invitation setup not found' })
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toMatch(
+      /desktop-authorization|private|r6-|sql|stack/i
+    )
+    expect(desktopFlow.storeDesktopAuthorizationToken).toHaveBeenCalledOnce()
+  })
 })
