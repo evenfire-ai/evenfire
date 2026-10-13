@@ -3974,12 +3974,15 @@ export function useAgentChatController({
       } = {}
     ) => {
       if (isHostAccessBlocked(agentName) || (chatId && isChatDeleted(agentName, chatId))) return
-      const selectsSpecificChat = Boolean(
-        chatId && !options.selectLatest && !options.suppressAutoSelect
-      )
+      const selectionMode = options.selectLatest
+        ? 'latest'
+        : options.suppressAutoSelect || !chatId
+          ? 'none'
+          : 'specific'
+      const selectsSpecificChat = selectionMode === 'specific'
       const preservesCurrentChatRoute = Boolean(
         !chatId &&
-        !options.selectLatest &&
+        selectionMode === 'none' &&
         selectedAgent === agentName &&
         navItem === DESKTOP_ROUTES.chat
       )
@@ -4009,17 +4012,17 @@ export function useAgentChatController({
       // history completion here. Route/agent changes and specific/latest
       // selections still advance selection ownership before their effects run.
       if (!preservesCurrentChatRoute) beginSelectionIntent(selectsSpecificChat)
-      if (options.selectLatest) {
+      if (selectionMode === 'latest') {
         writePendingSelection(agentName, { mode: 'latest', chatId: null })
         return
       }
-      if (options.suppressAutoSelect || !chatId) {
+      if (selectionMode === 'none') {
         writePendingSelection(agentName, { mode: 'none', chatId: null })
         return
       }
       const specificSelection: Extract<PendingChatSelection, { mode: 'specific' }> = {
         mode: 'specific',
-        chatId,
+        chatId: chatId!,
       }
       if (options.title) specificSelection.title = options.title
       if (options.isRemote !== undefined) specificSelection.isRemote = options.isRemote
@@ -4038,7 +4041,7 @@ export function useAgentChatController({
       cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
       if (options.title) {
-        upsertProvisionalEntry(chatId, options.title, options.isRemote === true)
+        upsertProvisionalEntry(chatId!, options.title, options.isRemote === true)
       }
     },
     [
