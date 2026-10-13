@@ -69,6 +69,7 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 const GENERATORS = [
   'clerum__generate_chart',
   'clerum__generate_dashboard',
+  'clerum__generate_docx',
   'clerum__generate_pdf',
   'clerum__generate_pptx',
   'clerum__generate_xlsx',
