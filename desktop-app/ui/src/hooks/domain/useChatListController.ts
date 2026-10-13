@@ -1421,6 +1421,8 @@ export function useChatListController({
         throw new Error('Chat deletion is unavailable while host access is blocked')
       }
       const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
+      const requestScope = currentAuthorityScopeRef.current
+      const requestRevision = host.current?.getSelectionIntentRevision()
       try {
         const fence = await chatStore.captureDeleteFence(authorityScope)
         if (
@@ -1432,7 +1434,12 @@ export function useChatListController({
         }
         return { agentRef, fence, hostAuthorityEpoch }
       } catch (error) {
-        host.current?.pushToast('Could not confirm chat access. Please try again.', 'error')
+        if (
+          currentAuthorityScopeRef.current === requestScope &&
+          host.current?.getSelectionIntentRevision() === requestRevision
+        ) {
+          host.current?.pushToast('Could not confirm chat access. Please try again.', 'error')
+        }
         throw error
       }
     },
@@ -1461,6 +1468,7 @@ export function useChatListController({
       const requestGeneration = requestGenerationRef.current
       const authorityScopeGeneration = authorityScopeGenerationRef.current
       const authorityScopeAtDelete = currentAuthorityScopeRef.current
+      const selectionRevisionAtDelete = host.current?.getSelectionIntentRevision()
       const stillOwned = () =>
         authorityScopeGenerationRef.current === authorityScopeGeneration &&
         currentAuthorityScopeRef.current === authorityScopeAtDelete
@@ -1477,7 +1485,12 @@ export function useChatListController({
       try {
         result = await chatStore.deleteChat(agentRef, chatId, deletion.fence)
       } catch {
-        host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
+        if (
+          stillOwned() &&
+          host.current?.getSelectionIntentRevision() === selectionRevisionAtDelete
+        ) {
+          host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
+        }
         return
       }
       if (!stillOwned()) return
