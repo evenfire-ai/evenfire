@@ -370,7 +370,9 @@ export function useChatListController({
   // Indirection so the catalog loaders (defined above the queue) can trigger a
   // retry of pending renames after a listSessions poll without depending on the
   // queue's identity. Wired in an effect once the queue is defined.
-  const flushPendingRenamesRef = useRef<(serverChatKeys?: Set<string>) => void>(() => {})
+  const flushPendingRenamesRef = useRef<(serverChatKeys?: Set<string>, agentRef?: string) => void>(
+    () => {}
+  )
 
   useEffect(() => {
     requestGenerationRef.current += 1
@@ -613,7 +615,10 @@ export function useChatListController({
 
         // §2.5: a rename that 404'd (session not yet server-side) retries now that
         // the poll reports which sessions exist.
-        flushPendingRenamesRef.current(new Set(serverSessions.map(s => `${agentRef}:${s.chatId}`)))
+        flushPendingRenamesRef.current(
+          new Set(serverSessions.map(s => `${agentRef}:${s.chatId}`)),
+          agentRef
+        )
 
         const latestServerSession = serverSessions[0]
         // A mode:none request suppresses this one deferred catalog result. Consume
@@ -1223,12 +1228,13 @@ export function useChatListController({
    * session to materialize server-side) is retried ONLY when a listSessions poll
    * reports its session present (`serverChatKeys` has the key) — a reconnect does
    * not make the session exist, so a bare `window 'online'` event (no keys) never
-   * retries it. 'offline' entries (a network / 5xx failure) retry unconditionally,
-   * which is exactly the reconnect case.
+   * retries it. 'offline' entries (a network / 5xx failure) retry for the arriving
+   * Host, or for every Host on reconnect when no agent filter is supplied.
    */
   const flushPendingRenames = useCallback(
-    async (serverChatKeys?: Set<string>) => {
+    async (serverChatKeys?: Set<string>, agentRef?: string) => {
       for (const entry of [...pendingRenamesRef.current.values()]) {
+        if (agentRef !== undefined && entry.agentRef !== agentRef) continue
         // FIX 1: skip a key with a PATCH already in flight (attemptRenameRpc
         // guards this too, but skipping avoids spawning a no-op).
         if (entry.sending) continue
@@ -1317,8 +1323,8 @@ export function useChatListController({
   }, [flushPendingRenames])
 
   useEffect(() => {
-    flushPendingRenamesRef.current = (serverChatKeys?: Set<string>) => {
-      void flushPendingRenames(serverChatKeys)
+    flushPendingRenamesRef.current = (serverChatKeys?: Set<string>, agentRef?: string) => {
+      void flushPendingRenames(serverChatKeys, agentRef)
     }
   }, [flushPendingRenames])
 
@@ -1539,25 +1545,28 @@ export function useChatListController({
         )
         setLatestChatSessionsLoading(false)
 
-        const sessionGroups = await Promise.all(
+        await Promise.all(
           requestedAgentNames.map(async agentRef => {
+            const requestStillCurrent = () =>
+              !cancelled &&
+              authorityScopeGenerationRef.current === authorityScopeGeneration &&
+              currentAuthorityScopeRef.current === authorityScopeAtRequest &&
+              getHostAuthorityEpoch(agentRef) === hostAuthorityEpochByAgent.get(agentRef) &&
+              !isHostAccessBlocked(agentRef)
             // This feeds only the cross-agent sidebar preview. Do not follow
             // cursors here; the selected-agent session list exposes explicit
             // on-demand pagination through `loadMoreChatSessions`.
-            let serverResult: SessionsListResult
+            let serverSessions: SessionsListResult['items'] = []
             try {
-              serverResult = await readSessionCatalog(chatStore, agentRef, {
+              const serverResult = await readSessionCatalog(chatStore, agentRef, {
                 agent: agentRef,
                 limit: SESSION_CATALOG_PAGE_LIMIT,
               })
+              if (!requestStillCurrent()) return
+              reportCatalogOnline(agentRef, authorityScopeGeneration)
+              serverSessions = serverResult.items
             } catch (error) {
-              if (
-                !cancelled &&
-                authorityScopeGenerationRef.current === authorityScopeGeneration &&
-                currentAuthorityScopeRef.current === authorityScopeAtRequest &&
-                getHostAuthorityEpoch(agentRef) === hostAuthorityEpochByAgent.get(agentRef) &&
-                !isHostAccessBlocked(agentRef)
-              ) {
+              if (requestStillCurrent()) {
                 if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
                 else if (isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
                 if (
@@ -1568,105 +1577,63 @@ export function useChatListController({
                   reportCatalogOffline(agentRef)
                 }
               }
-              return { agentRef, sessions: [] as SessionsListResult['items'] }
             }
-            if (
-              cancelled ||
-              authorityScopeGenerationRef.current !== authorityScopeGeneration ||
-              currentAuthorityScopeRef.current !== authorityScopeAtRequest ||
-              getHostAuthorityEpoch(agentRef) !== hostAuthorityEpochByAgent.get(agentRef) ||
-              isHostAccessBlocked(agentRef)
-            ) {
-              return { agentRef, sessions: [] as SessionsListResult['items'] }
-            }
-            reportCatalogOnline(agentRef, authorityScopeGeneration)
-            return {
-              agentRef,
-              sessions: serverResult.items.filter(
+            if (!requestStillCurrent()) return
+            const sessions: LatestCatalogSession[] = serverSessions
+              .filter(
                 session =>
                   session.agent === agentRef &&
-                  !isHostAccessBlocked(agentRef) &&
                   !deletedChatIdsByAgentRef.current.get(agentRef)?.has(session.chatId)
-              ),
-            }
-          })
-        )
-        if (cancelled || currentAuthorityScopeRef.current !== authorityScopeAtRequest) return
-        for (const group of sessionGroups) {
-          if (
-            getHostAuthorityEpoch(group.agentRef) !==
-              hostAuthorityEpochByAgent.get(group.agentRef) ||
-            isHostAccessBlocked(group.agentRef)
-          )
-            continue
-          seedSessionSnapshots(
-            fsm,
-            group.agentRef,
-            group.sessions.filter(
-              session => !deletedChatIdsByAgentRef.current.get(group.agentRef)?.has(session.chatId)
-            )
-          )
-        }
-        setLatestChatSessions(previous => {
-          const sessions: LatestCatalogSession[] = []
-          for (const group of sessionGroups) {
-            if (
-              getHostAuthorityEpoch(group.agentRef) !==
-                hostAuthorityEpochByAgent.get(group.agentRef) ||
-              isHostAccessBlocked(group.agentRef)
-            )
-              continue
-            for (const session of group.sessions) {
-              if (deletedChatIdsByAgentRef.current.get(group.agentRef)?.has(session.chatId))
-                continue
-              sessions.push({ ...session, agentRef: group.agentRef })
-            }
-          }
-          const cached = previous.filter(
-            item =>
-              getHostAuthorityEpoch(item.agentRef) ===
-                hostAuthorityEpochByAgent.get(item.agentRef) &&
-              !isHostAccessBlocked(item.agentRef) &&
-              !deletedChatIdsByAgentRef.current.get(item.agentRef)?.has(item.id)
-          )
-          // §2.2 precedence (cases A-F) lives in `mergeCatalogPage`; Latest keys
-          // entries by (agentRef, chatId) and uses the "Remote · <id>" placeholder.
-          return mergeCatalogPage<LatestSidebarChatEntry, LatestCatalogSession>({
-            cached,
-            sessions,
-            entryKey: item => `${item.agentRef}:${item.id}`,
-            sessionKey: session => `${session.agentRef}:${session.chatId}`,
-            entryPendingRename: item => pendingRenameStateFor(item.agentRef, item.id),
-            sessionPendingRename: session =>
-              pendingRenameStateFor(session.agentRef, session.chatId),
-            placeholderFor: remotePlaceholder,
-            serverOnlyEntry: (session, title) => ({
-              id: session.chatId,
-              title,
-              createdAt: session.lastActivityAt,
-              updatedAt: session.lastActivityAt,
-              messageCount: knownServerMessageCount(session),
-              remote: true,
-              agentRef: session.agentRef,
-            }),
-          })
-        })
+              )
+              .map(session => ({ ...session, agentRef }))
+            seedSessionSnapshots(fsm, agentRef, sessions)
+            setLatestChatSessions(previous => {
+              if (!requestStillCurrent()) return previous
+              const deleted = deletedChatIdsByAgentRef.current.get(agentRef)
+              const cached = previous.filter(
+                item => item.agentRef === agentRef && !deleted?.has(item.id)
+              )
+              // §2.2 precedence (cases A-F) lives in `mergeCatalogPage`; merge
+              // only this Host's entries so another Host's arrival preserves them.
+              const merged = mergeCatalogPage<LatestSidebarChatEntry, LatestCatalogSession>({
+                cached,
+                sessions: sessions.filter(session => !deleted?.has(session.chatId)),
+                entryKey: item => `${item.agentRef}:${item.id}`,
+                sessionKey: session => `${session.agentRef}:${session.chatId}`,
+                entryPendingRename: item => pendingRenameStateFor(item.agentRef, item.id),
+                sessionPendingRename: session =>
+                  pendingRenameStateFor(session.agentRef, session.chatId),
+                placeholderFor: remotePlaceholder,
+                serverOnlyEntry: (session, title) => ({
+                  id: session.chatId,
+                  title,
+                  createdAt: session.lastActivityAt,
+                  updatedAt: session.lastActivityAt,
+                  messageCount: knownServerMessageCount(session),
+                  remote: true,
+                  agentRef: session.agentRef,
+                }),
+              })
+              return [...merged, ...previous.filter(item => item.agentRef !== agentRef)].sort(
+                byUpdatedDesc
+              )
+            })
 
-        // §2.5: retry any rename that 404'd, now that this cross-agent poll
-        // reports which sessions exist server-side.
-        flushPendingRenamesRef.current(
-          new Set(
-            sessionGroups.flatMap(group =>
-              isHostAccessBlocked(group.agentRef)
-                ? []
-                : group.sessions
+            // §2.5: retry only this Host's pending renames as its poll settles.
+            if (requestStillCurrent()) {
+              flushPendingRenamesRef.current(
+                new Set(
+                  sessions
                     .filter(
                       session =>
-                        !deletedChatIdsByAgentRef.current.get(group.agentRef)?.has(session.chatId)
+                        !deletedChatIdsByAgentRef.current.get(agentRef)?.has(session.chatId)
                     )
-                    .map(session => `${group.agentRef}:${session.chatId}`)
-            )
-          )
+                    .map(session => `${agentRef}:${session.chatId}`)
+                ),
+                agentRef
+              )
+            }
+          })
         )
       } finally {
         if (!cancelled) {
