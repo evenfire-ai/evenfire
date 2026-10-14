@@ -58,20 +58,29 @@ verification of this revision; record the backend revisions separately.
 
 ## B. Establish the real development producer
 
-The known setup commands below are reference context for a later authorized
-session, not proof that Member Registration is deployed in this cluster:
+Obtain the actual development cluster, zone, project, account, Kubernetes user and
+context from the owner's approved private infrastructure record. Keep concrete
+infrastructure identifiers out of this public repository and sanitized receipts.
+The existing setup sequence is shown with verified-input variables below. It is
+reference context for a later authorized session, not proof that Member
+Registration is deployed in that cluster:
 
 ```sh
-gcloud container clusters get-credentials clerum-dev \
-  --zone=us-central1-a --project=eventfire-491421 \
-  --account=<authorized-dev-account>
-kubectl config set-credentials \
-  gke_eventfire-491421_us-central1-a_clerum-dev \
-  --exec-arg=--account=<authorized-dev-account>
-LOCAL_KUBE_CONTEXT=gke_eventfire-491421_us-central1-a_clerum-dev npm run ui
+gcloud container clusters get-credentials "${VERIFIED_DEV_CLUSTER:?Confirm the development cluster}" \
+  --zone="${VERIFIED_DEV_ZONE:?Confirm the development zone}" --project="${VERIFIED_DEV_PROJECT:?Confirm the development project}" \
+  --account="${AUTHORIZED_DEV_ACCOUNT:?Confirm the authorized account}"
+kubectl config set-credentials "${VERIFIED_DEV_KUBE_USER:?Confirm the Kubernetes user}" \
+  --exec-arg="--account=${AUTHORIZED_DEV_ACCOUNT:?Confirm the authorized account}"
+LOCAL_KUBE_CONTEXT="${VERIFIED_DEV_CONTEXT:?Confirm the development context}" npm run ui
 ```
 
-Earlier read-only discovery found no `registration` namespace in that context.
+Confirm that the Kubernetes user entry belongs to the intended context before
+changing its account binding. Required expansions fail before a command runs when
+a verified input is missing; no command falls back to the current context. Populate
+these variables locally from the approved
+record; do not invent values, commit them or paste them into a PR receipt.
+
+Earlier read-only discovery found no `registration` namespace in the owner-selected development context.
 The Control API configuration referenced the external registration hub at
 `registration.evenfire.ai`; its deployment ownership, version, database and
 isolation were not established. Reconfirm these facts. Do not select the first
@@ -80,10 +89,9 @@ similarly named service or infer the producer from the UI launch command.
 After access is authorized, use explicit-context read-only discovery:
 
 ```sh
-DEV_CONTEXT=gke_eventfire-491421_us-central1-a_clerum-dev
-kubectl --context="$DEV_CONTEXT" get namespaces
-kubectl --context="$DEV_CONTEXT" get services --all-namespaces
-kubectl --context="$DEV_CONTEXT" get deployments --all-namespaces \
+kubectl --context="${VERIFIED_DEV_CONTEXT:?Confirm the development context}" get namespaces
+kubectl --context="${VERIFIED_DEV_CONTEXT:?Confirm the development context}" get services --all-namespaces
+kubectl --context="${VERIFIED_DEV_CONTEXT:?Confirm the development context}" get deployments --all-namespaces \
   -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGES:.spec.template.spec.containers[*].image
 ```
 
@@ -105,7 +113,7 @@ port and namespace first. Use a task-owned loopback forward in a dedicated
 terminal, without inventing names or ports:
 
 ```sh
-kubectl --context="$DEV_CONTEXT" -n "$VERIFIED_NAMESPACE" port-forward \
+kubectl --context="${VERIFIED_DEV_CONTEXT:?Confirm the development context}" -n "$VERIFIED_NAMESPACE" port-forward \
   --address=127.0.0.1 "service/$VERIFIED_SERVICE" ":$VERIFIED_SERVICE_PORT"
 ```
 
