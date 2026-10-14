@@ -5,7 +5,8 @@ import {
   redactArtifactForDelivery,
 } from '../../artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from '../../artifacts/artifactRedaction'
-import { officePackageHasText } from '../../artifacts/officePackageText'
+import { OFFICE_PACKAGE_LIMITS, officePackageHasText } from '../../artifacts/officePackageText'
+import { withoutSeparators } from '../../artifacts/shownNumbers'
 import { logger } from '../../logger'
 import {
   ArtifactPathError,
@@ -58,6 +59,12 @@ type BuildGeneratedArtifactAttachmentParams = {
   maxBytes: number
   sourcePayload?: unknown
   secretEntriesProvider?: () => ArtifactSecretEntry[]
+  /**
+   * Texts every package of this format holds on its own (officeBoilerplate).
+   * A protected value found in them is left to the payload check, since the
+   * package scan cannot tell it from the generator's own text.
+   */
+  packageBoilerplate?: readonly string[]
 }
 
 function extension(filename: string | undefined): string {
@@ -143,10 +150,20 @@ function sourcePayloadContainsRedactableSecretEntry(
   sourcePayload: unknown,
   entries: ArtifactSecretEntry[]
 ): boolean {
-  if (sourcePayload === undefined || entries.length === 0) return false
+  return payloadSecretEntries(sourcePayload, entries).length > 0
+}
+
+/** The entries `sourcePayload` holds anywhere in its strings, numbers and keys. */
+function payloadSecretEntries(
+  sourcePayload: unknown,
+  entries: ArtifactSecretEntry[]
+): ArtifactSecretEntry[] {
+  if (sourcePayload === undefined || entries.length === 0) return []
   const texts: string[] = []
   payloadTexts(sourcePayload, texts, new Set(), 0)
-  return texts.some(text => textContainsRedactableSecretEntry(text, entries))
+  return entries.filter(entry =>
+    texts.some(text => textContainsRedactableSecretEntry(text, [entry]))
+  )
 }
 
 export function isInternalGeneratedArtifactSourceTool(sourceTool: string | undefined): boolean {
@@ -231,9 +248,21 @@ export function buildGeneratedArtifactAttachment(
       // A generator can write a value in a form the payload never spelled, as
       // a sheet stores the text "3,141,592,653" as the number 3141592653, so
       // the package is read as delivered. One that cannot be read is withheld.
-      if (secretEntries.length > 0 && OFFICE_PACKAGE_FORMATS.has(expectedFormat)) {
-        const found = officePackageHasText(fileBuffer, text =>
-          textContainsRedactableSecretEntry(text, secretEntries)
+      const boilerplate = params.packageBoilerplate ?? []
+      const packageEntries = secretEntries.filter(
+        entry => !boilerplate.some(text => text.includes(entry.value))
+      )
+      if (packageEntries.length > 0 && OFFICE_PACKAGE_FORMATS.has(expectedFormat)) {
+        // Numbers are compared as shown without separators, so any locale's
+        // grouping of a protected value matches.
+        const shownValues = packageEntries
+          .map(entry => withoutSeparators(entry.value))
+          .filter(value => value.length >= 4)
+        const found = officePackageHasText(
+          fileBuffer,
+          text => textContainsRedactableSecretEntry(text, packageEntries),
+          OFFICE_PACKAGE_LIMITS,
+          shownValues.length > 0 ? shown => shownValues.some(value => shown.includes(value)) : null
         )
         if (found !== false) {
           warnSkip(
@@ -243,6 +272,19 @@ export function buildGeneratedArtifactAttachment(
           )
           return null
         }
+      }
+    }
+    // A text file is redacted byte by byte, which misses a protected value its
+    // markup splits ("probe-**redaction**-value") and a preview shows joined:
+    // such a file is withheld. The printed forms of the arguments carry it whole.
+    if (!isBinaryArtifactFormat(expectedFormat) && secretEntries.length > 0) {
+      const text = fileBuffer.toString('utf8')
+      const split = payloadSecretEntries(params.sourcePayload, secretEntries).filter(
+        entry => !text.includes(entry.value)
+      )
+      if (split.length > 0) {
+        warnSkip('text_redaction_unavailable', params.sourceTool, params.artifact)
+        return null
       }
     }
     const redacted = redactArtifactForDelivery(expectedFormat, fileBuffer, secretEntries)

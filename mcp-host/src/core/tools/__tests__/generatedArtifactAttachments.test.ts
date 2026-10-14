@@ -574,6 +574,167 @@ describe('generated internal artifact attachments', () => {
     })
   })
 
+  describe('what a delivered file shows that its arguments never spelled', () => {
+    function toolWith(name: string, secrets: string[]) {
+      process.env.CLERUM_OUTPUT_DIR = outputDir
+      const registry = new NativeToolRegistry(
+        {
+          workspacePath: outputDir,
+          shellTimeout: 5000,
+          toolTimeout: 60000,
+          toolProgressInterval: 30000,
+          httpAllowlist: [],
+          envAllowlist: ['PATH'],
+          memoryMaxSize: 1048576,
+        },
+        'conv-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        null,
+        {
+          maxBytes: 52_428_800,
+          secretEntriesProvider: () => secrets.map((value, i) => ({ name: `PROBE_${i}`, value })),
+        }
+      )
+      return registry.get(name)!
+    }
+
+    function packageXml(file: string): string {
+      return [...zipEntries(file)]
+        .filter(([name]) => name.endsWith('.xml'))
+        .map(([, data]) => data.toString('utf8'))
+        .join('\n')
+    }
+
+    function sheet(cell: unknown, format?: string) {
+      return {
+        filename: 'shown.xlsx',
+        sheets: [
+          { name: 'S', rows: [['D'], [cell]], ...(format ? { columnFormats: { D: format } } : {}) },
+        ],
+      }
+    }
+
+    it('holds back a date its arguments spell, through the argument check', async () => {
+      const result = await toolWith('clerum__generate_xlsx', ['2026-01-02']).execute(
+        sheet('2026-01-02')
+      )
+      expect(result.is_error).toBe(false)
+      expect(result.attachments ?? []).toHaveLength(0)
+    })
+
+    it.each([
+      ['a UTC time shown with a space', '2026-01-02 15:04:05', '2026-01-02T15:04:05Z', undefined],
+      [
+        'a time with an offset shown in UTC',
+        '2026-01-02 09:34:05',
+        '2026-01-02T15:04:05+05:30',
+        undefined,
+      ],
+      ['a date under a day-first format', '02/01/2026', '2026-01-02', 'dd/mm/yyyy'],
+      ['grouped digits', '3,141,592,653', 3141592653, '#,##0'],
+      ['digits grouped the German way', '3.141.592.653', 3141592653, '#,##0'],
+      ['digits beside quoted text', 'sk-123456', 123456, '"sk-"0'],
+    ])('does not attach a sheet that shows %s', async (_label, secret, cell, format) => {
+      const result = await toolWith('clerum__generate_xlsx', [secret]).execute(sheet(cell, format))
+      expect(result.is_error).toBe(false)
+      // Witness: neither the arguments nor the package spell the value.
+      expect(JSON.stringify(sheet(cell, format))).not.toContain(secret)
+      expect(packageXml(path.join(outputDir, 'shown.xlsx'))).not.toContain(secret)
+      expect(result.attachments ?? []).toHaveLength(0)
+    })
+
+    it('attaches the same sheet when no protected value is shown', async () => {
+      const result = await toolWith('clerum__generate_xlsx', ['9,999,999,999']).execute(
+        sheet(3141592653, '#,##0')
+      )
+      expect(result.attachments ?? []).toHaveLength(1)
+    })
+
+    it('does not attach a deck whose chart label shows the protected value grouped', async () => {
+      const deck = {
+        filename: 'labels.pptx',
+        slides: [
+          {
+            layout: 'title-chart',
+            title: 'Revenue',
+            chart: { type: 'bar', labels: ['A'], datasets: [{ label: 'S', data: [3141592653] }] },
+          },
+        ],
+      }
+      const leaked = await toolWith('clerum__generate_pptx', ['3,141,592,653']).execute(deck)
+      expect(leaked.is_error).toBe(false)
+      expect(packageXml(path.join(outputDir, 'labels.pptx'))).not.toContain('3,141,592,653')
+      expect(leaked.attachments ?? []).toHaveLength(0)
+      const ordinary = await toolWith('clerum__generate_pptx', ['9,999,999,999']).execute(deck)
+      expect(ordinary.attachments ?? []).toHaveLength(1)
+    })
+
+    it('does not attach a chart image whose value label shows the protected value', async () => {
+      const chart = (filename: string) => ({
+        filename,
+        type: 'bar',
+        showValues: true,
+        valueFormat: 'plain',
+        data: { labels: ['A'], datasets: [{ label: 'S', data: [3141592653] }] },
+      })
+      const leaked = await toolWith('clerum__generate_chart', ['3,141,592,653']).execute(
+        chart('v.png')
+      )
+      expect(leaked.is_error).toBe(false)
+      expect(leaked.attachments ?? []).toHaveLength(0)
+      const ordinary = await toolWith('clerum__generate_chart', ['9,999,999,999']).execute(
+        chart('c.png')
+      )
+      expect(ordinary.attachments ?? []).toHaveLength(1)
+    })
+
+    it("attaches ordinary documents when a protected value is also the generators' own text", async () => {
+      const common = ['Office', '1000', 'Calibri', 'General', 'main', 'false', 'solid']
+      const calls: Array<[string, Record<string, unknown>]> = [
+        [
+          'clerum__generate_docx',
+          { filename: 'o.docx', title: 'Quarterly', body: 'Revenue grew.' },
+        ],
+        ['clerum__generate_xlsx', sheet(1200, 'integer')],
+        [
+          'clerum__generate_pptx',
+          {
+            filename: 'o.pptx',
+            slides: [
+              { layout: 'title-bullets', title: 'T', bullets: ['a'] },
+              {
+                layout: 'title-chart',
+                title: 'C',
+                chart: { type: 'bar', labels: ['A'], datasets: [{ label: 'S', data: [5] }] },
+              },
+            ],
+          },
+        ],
+      ]
+      for (const [name, args] of calls) {
+        const result = await toolWith(name, common).execute(args)
+        expect(result.attachments ?? [], name).toHaveLength(1)
+      }
+    }, 60_000)
+
+    it('does not attach markdown whose markup splits a protected value, and redacts a whole one', async () => {
+      const md = toolWith('clerum__generate_markdown', ['probe-redaction-value'])
+      const split = await md.execute({
+        filename: 's.md',
+        content: 'key: probe-**redaction**-value',
+      })
+      expect(split.attachments ?? []).toHaveLength(0)
+      const whole = await md.execute({ filename: 'w.md', content: 'key: probe-redaction-value' })
+      expect(whole.attachments).toHaveLength(1)
+      expect(decoded(whole.attachments![0]!).toString('utf8')).not.toContain(
+        'probe-redaction-value'
+      )
+    })
+  })
+
   it('native internal tools return generated artifact attachments through the adapter', async () => {
     const config: NativeToolConfig = {
       workspacePath: outputDir,

@@ -36,6 +36,7 @@ import {
   MAX_CHART_DIMENSION,
   MIN_CHART_DIMENSION,
 } from './chartThemes'
+import { drawnTexts, recordDrawnText } from './drawnText'
 import { PNG_BASE_PPM } from './embeddedImages'
 import { CHART_FONT_STACK, ensureFontsReady, sanitizeForFont } from './fonts'
 import { choose } from './ownEntry'
@@ -923,6 +924,7 @@ export async function runGenerateChart(
     // relative to the image.
     const canvas = createCanvas(layoutWidth, layoutHeight)
     const ctx = canvas.getContext('2d') as SKRSContext2D
+    const shownText = recordDrawnText(ctx)
     // Chart.js types target a browser CanvasRenderingContext2D; the Skia
     // context is API-compatible for the subset Chart.js uses.
     chart = new Chart(ctx as any, config)
@@ -963,7 +965,10 @@ export async function runGenerateChart(
       `sheets[].images: [{ path: '${target.filename}' }] to the XLSX generator, or ` +
       `image: { path: '${target.filename}' } or chart: { path: '${target.filename}' } ` +
       'on a PPTX slide.'
-    return artifactResult(target, 'png', { summary, warnings })
+    return {
+      ...artifactResult(target, 'png', { summary, warnings }),
+      shownText: drawnTexts(shownText),
+    }
   } catch (err) {
     if (err instanceof ChartDataError) return { success: false, error: err.message }
     return { success: false, error: err instanceof Error ? err.message : String(err) }

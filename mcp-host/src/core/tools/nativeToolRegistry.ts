@@ -19,6 +19,7 @@ import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
 import type { McpTool } from '../../types'
 import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
+import { boilerplateTexts } from '../../workflow/officeBoilerplate'
 import { printedForms } from '../../workflow/toolText'
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
@@ -104,6 +105,14 @@ class InternalToolAdapter implements Tool {
             result.artifact?.format ?? 'unknown'
           })`)
         : `Error: ${result.error ?? 'Unknown error'}`
+      const format = result.success ? result.artifact?.format : undefined
+      // Office packages carry the generator's own text; a protected value
+      // found only there is left to the payload check (officeBoilerplate).
+      const packageBoilerplate =
+        (format === 'docx' || format === 'xlsx' || format === 'pptx') &&
+        (this.attachmentOptions.secretEntriesProvider?.().length ?? 0) > 0
+          ? await boilerplateTexts(format)
+          : undefined
       const attachment =
         result.success && result.artifact
           ? buildGeneratedArtifactAttachment({
@@ -112,9 +121,11 @@ class InternalToolAdapter implements Tool {
               outputDir: this.outputDir,
               maxBytes: this.attachmentOptions.maxBytes,
               // The file shows the arguments as the generator prints them, so a
-              // secret split by a tag or an escape is checked whole too.
-              sourcePayload: [params, printedForms(params)],
+              // secret split by a tag or an escape is checked whole too, and
+              // anything else it shows that they do not spell (chart labels).
+              sourcePayload: [params, printedForms(params), result.shownText ?? []],
               secretEntriesProvider: this.attachmentOptions.secretEntriesProvider,
+              packageBoilerplate,
             })
           : null
       const images = result.success

@@ -1,6 +1,7 @@
 /**
  * How a sheet column is read and formatted: requested formats, the plan per column, and the value and width each cell is written with.
  */
+import { isModelledFormatCode } from '../artifacts/shownNumbers'
 import { headerText } from './tableRows'
 import {
   type SheetCell,
@@ -226,19 +227,51 @@ export function fits(spec: FormatSpec, cell: SheetCell): boolean {
   }
 }
 
-/** The value written for `cell` and the format it is shown with. */
+/** The sections of a format code, split at ';' outside quotes, brackets and escapes. */
+function formatSections(code: string): string[] {
+  const sections: string[] = []
+  let start = 0
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]
+    if (ch === '\\') i++
+    else if (ch === '"' || ch === '[') {
+      const end = code.indexOf(ch === '"' ? '"' : ']', i + 1)
+      i = end < 0 ? code.length : end
+    } else if (ch === ';') {
+      sections.push(code.slice(start, i))
+      start = i + 1
+    }
+  }
+  sections.push(code.slice(start))
+  return sections
+}
+
+/** `section` with its color, condition and locale tags first, then `sign`. */
+function signed(section: string, sign: string): string {
+  const tags = /^(?:\[[^\]]*\])*/.exec(section)?.[0] ?? ''
+  return `${tags}${sign}${section.slice(tags.length)}`
+}
+
 /**
  * `numFmt` showing a "+" before a positive value, as the cell was written. A
  * format of one section gets its negative and zero sections too, since Excel
- * would otherwise print a negative as "-+5".
+ * would otherwise print a negative as "-+5". The sign goes after the tags that
+ * open a section. A format with a text section or a condition keeps its
+ * sections as they are, as does one the sign would make invalid.
  */
 function withPlus(numFmt: string | undefined): string {
   const format = numFmt ?? 'General'
-  const sections = format.split(';')
-  if (sections.length === 1) return `+${format};-${format};${format}`
-  return [`+${sections[0]}`, ...sections.slice(1)].join(';')
+  const sections = formatSections(format)
+  const plain = sections.map(section => section.replace(/"[^"]*"|\\./g, ''))
+  if (plain.some(section => section.includes('@') || /\[[<>=]/.test(section))) return format
+  const plus =
+    sections.length === 1
+      ? `${signed(format, '+')};${signed(format, '-')};${format}`
+      : [signed(sections[0], '+'), ...sections.slice(1)].join(';')
+  return isModelledFormatCode(plus) ? plus : format
 }
 
+/** The value written for `cell` and the format it is shown with. */
 export function cellOutput(
   cell: SheetCell,
   plan: ColumnPlan

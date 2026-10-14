@@ -212,6 +212,12 @@ export interface InternalToolResult {
    */
   content?: string
   error?: string
+  /**
+   * Text the file shows that its arguments do not spell, such as the value
+   * labels a chart image draws. The attachment check reads it with the
+   * arguments; it is never sent to the model.
+   */
+  shownText?: string[]
 }
 
 /**
