@@ -1010,99 +1010,106 @@ export function useAgentChatController({
       // into chat B). The Phase-2 reconcile below re-derives state for this chat.
       setAgentError(null)
       setFailedAgentSend(null)
-      await chatStore.setLastActive(agentRef, chatId)
-      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
-
-      unfillableServerGapUpperBoundsRef.current.delete(key)
-
-      // Renderer-local relevance guard for a fast A→B→A switch: THIS switch's
-      // reconcile is aborted the moment the user switches away. Passed into
-      // `reconcileChat` as a per-call `isRelevant` (replaces the Phase-2
-      // AbortController) so a background reconcile — system:resume, or a bell
-      // approval on a NON-visible chat — is never subject to an active-chat guard.
-      const isStillActive = () => {
-        const visible = activeChatVisibilityRef.current
-        return (
-          activeChatSwitchRequestRef.current === switchRequest &&
-          visible.selectedAgent === agentRef &&
-          visible.activeChatId === chatId
-        )
-      }
-
-      // PHASE 1 — render only the newest local page. The authoritative reconcile
-      // below requests a delta after the newest cached server turn.
-      let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
+      // Observe failures immediately while the cache loads, then propagate them
+      // from this selection's completion, including early returns.
+      const lastActive = Promise.allSettled([chatStore.setLastActive(agentRef, chatId)])
       try {
-        cached = canReuseActiveSwitch
-          ? ([...chatMessagesRef.current] as AgentChatMessage[])
-          : ((await chatStore.loadMessages(
-              agentRef,
-              chatId,
-              LOCAL_MESSAGE_PAGE_SIZE
-            )) as AgentChatMessage[])
-      } catch (error) {
-        console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
+        if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
+
+        unfillableServerGapUpperBoundsRef.current.delete(key)
+
+        // Renderer-local relevance guard for a fast A→B→A switch: THIS switch's
+        // reconcile is aborted the moment the user switches away. Passed into
+        // `reconcileChat` as a per-call `isRelevant` (replaces the Phase-2
+        // AbortController) so a background reconcile — system:resume, or a bell
+        // approval on a NON-visible chat — is never subject to an active-chat guard.
+        const isStillActive = () => {
+          const visible = activeChatVisibilityRef.current
+          return (
+            activeChatSwitchRequestRef.current === switchRequest &&
+            visible.selectedAgent === agentRef &&
+            visible.activeChatId === chatId
+          )
+        }
+
+        // PHASE 1 — render only the newest local page. The authoritative reconcile
+        // below requests a delta after the newest cached server turn.
+        let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
+        try {
+          cached = canReuseActiveSwitch
+            ? ([...chatMessagesRef.current] as AgentChatMessage[])
+            : ((await chatStore.loadMessages(
+                agentRef,
+                chatId,
+                LOCAL_MESSAGE_PAGE_SIZE
+              )) as AgentChatMessage[])
+        } catch (error) {
+          console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
+        }
+        const hasOlderServerMessages =
+          nextServerBackfillBeforeTurn(cached as AgentChatMessage[]) !== undefined
+        const hasOlderLocalMessages =
+          !hasOlderServerMessages &&
+          cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
+          (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
+        if (!isStillActive()) return
+        loadedLocalMessageCountRef.current = cached.length
+        setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
+        if (!canReuseActiveSwitch) setChatMessages(cached as AgentChatMessage[])
+        // Phase 1 rendered the cache → clear the blocking spinner. The reconcile
+        // runs under the `syncing` indicator (RECONCILE_STARTED, dispatched by the
+        // reconcile gate) instead.
+        setChatMessagesLoading(false)
+        // D.5: opening the chat clears its "completed_unread" badge. CHAT_OPENED
+        // resets the FSM's `unreadTerminal` flag so a LATER hidden terminal re-marks
+        // (without it the flag is write-once-true and the badge never reappears) and
+        // its `clear_unread` effect mirrors the clear to disk+sidebar. The
+        // unconditional clear below ALSO runs because on a cold reload the FSM flag
+        // is fresh-`false` while the persisted disk badge is `true` — CHAT_OPENED's
+        // flag-gated effect wouldn't fire, so the badge must still be cleared here.
+        dispatchSession(key, { type: 'CHAT_OPENED' })
+        void chatStore.clearUnreadTerminal(agentRef, chatId)
+        clearUnreadInList(chatId)
+        scrollChatToBottom()
+
+        // A deliberate user re-open grants a fresh re-rejoin quota — the cap only
+        // exists to stop the automatic stream-loss → rejoin loop (P1-stall). A
+        // capped chat therefore clears its offline banner when reopened + reconciled
+        // clean.
+        tracker.resetRejoinAttempts(key)
+
+        // PHASE 2/3 — the single reconcile gate (§4.3) owns fetch+retry, ambiguous 404,
+        // offline, the SERVER_SNAPSHOT, the idle replace (auto-title / S4 upsert /
+        // epoch-anchored zombie-ack) and the live rejoin (approval re-seed).
+        // `taskIdHint` = the pre-await zombie's task, which drives the durable
+        // getTaskResult fallback + response-file attachment load; the zombie-ack
+        // itself no longer needs a taskId to match (R2's epoch replaces the old
+        // `recoveringTaskIdByKeyRef` bookkeeping).
+        //
+        // The gate re-reads the same bounded local page inside hydrate so an SSE
+        // terminal that lands between Phase 1 and reconciliation is included
+        // without transferring the complete local transcript over IPC. Note
+        // (best-effort): `reconcileChat` is single-flight per key — if a background
+        // reconcile is already in flight for THIS key, this call coalesces onto it
+        // and its `isRelevant`/`taskIdHint` are ignored; `hydrateActiveChatFromServer`'s
+        // own `isActive()` guard still prevents rendering into the wrong chat.
+        const zombieBefore = tracker.get(key)
+        const latestCachedTurn = latestServerTurnNumber(cached as AgentChatMessage[])
+        const reconcileFromTurn =
+          latestCachedTurn === undefined ? undefined : Math.max(0, latestCachedTurn - 1)
+        await reconcileChat(key, {
+          reason: 'switch_to_chat',
+          taskIdHint: zombieBefore?.taskId,
+          isRelevant: isStillActive,
+          messagesQuery: {
+            limit: SERVER_TURN_PAGE_SIZE,
+            ...(reconcileFromTurn !== undefined ? { afterTurn: reconcileFromTurn } : {}),
+          },
+        })
+      } finally {
+        const [lastActiveResult] = await lastActive
+        if (lastActiveResult.status === 'rejected') throw lastActiveResult.reason
       }
-      const hasOlderServerMessages =
-        nextServerBackfillBeforeTurn(cached as AgentChatMessage[]) !== undefined
-      const hasOlderLocalMessages =
-        !hasOlderServerMessages &&
-        cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
-        (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
-      if (!isStillActive()) return
-      loadedLocalMessageCountRef.current = cached.length
-      setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
-      if (!canReuseActiveSwitch) setChatMessages(cached as AgentChatMessage[])
-      // Phase 1 rendered the cache → clear the blocking spinner. The reconcile
-      // runs under the `syncing` indicator (RECONCILE_STARTED, dispatched by the
-      // reconcile gate) instead.
-      setChatMessagesLoading(false)
-      // D.5: opening the chat clears its "completed_unread" badge. CHAT_OPENED
-      // resets the FSM's `unreadTerminal` flag so a LATER hidden terminal re-marks
-      // (without it the flag is write-once-true and the badge never reappears) and
-      // its `clear_unread` effect mirrors the clear to disk+sidebar. The
-      // unconditional clear below ALSO runs because on a cold reload the FSM flag
-      // is fresh-`false` while the persisted disk badge is `true` — CHAT_OPENED's
-      // flag-gated effect wouldn't fire, so the badge must still be cleared here.
-      dispatchSession(key, { type: 'CHAT_OPENED' })
-      void chatStore.clearUnreadTerminal(agentRef, chatId)
-      clearUnreadInList(chatId)
-      scrollChatToBottom()
-
-      // A deliberate user re-open grants a fresh re-rejoin quota — the cap only
-      // exists to stop the automatic stream-loss → rejoin loop (P1-stall). A
-      // capped chat therefore clears its offline banner when reopened + reconciled
-      // clean.
-      tracker.resetRejoinAttempts(key)
-
-      // PHASE 2/3 — the single reconcile gate (§4.3) owns fetch+retry, ambiguous 404,
-      // offline, the SERVER_SNAPSHOT, the idle replace (auto-title / S4 upsert /
-      // epoch-anchored zombie-ack) and the live rejoin (approval re-seed).
-      // `taskIdHint` = the pre-await zombie's task, which drives the durable
-      // getTaskResult fallback + response-file attachment load; the zombie-ack
-      // itself no longer needs a taskId to match (R2's epoch replaces the old
-      // `recoveringTaskIdByKeyRef` bookkeeping).
-      //
-      // The gate re-reads the same bounded local page inside hydrate so an SSE
-      // terminal that lands between Phase 1 and reconciliation is included
-      // without transferring the complete local transcript over IPC. Note
-      // (best-effort): `reconcileChat` is single-flight per key — if a background
-      // reconcile is already in flight for THIS key, this call coalesces onto it
-      // and its `isRelevant`/`taskIdHint` are ignored; `hydrateActiveChatFromServer`'s
-      // own `isActive()` guard still prevents rendering into the wrong chat.
-      const zombieBefore = tracker.get(key)
-      const latestCachedTurn = latestServerTurnNumber(cached as AgentChatMessage[])
-      const reconcileFromTurn =
-        latestCachedTurn === undefined ? undefined : Math.max(0, latestCachedTurn - 1)
-      await reconcileChat(key, {
-        reason: 'switch_to_chat',
-        taskIdHint: zombieBefore?.taskId,
-        isRelevant: isStillActive,
-        messagesQuery: {
-          limit: SERVER_TURN_PAGE_SIZE,
-          ...(reconcileFromTurn !== undefined ? { afterTurn: reconcileFromTurn } : {}),
-        },
-      })
     },
     [
       currentTeamId,

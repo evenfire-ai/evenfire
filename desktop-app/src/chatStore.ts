@@ -1755,6 +1755,7 @@ export class ChatStore {
     return this.serializeIndex(agentRef, async () => {
       const index = await this.getIndex(agentRef)
       if (this.isDeletedInScope(index, chatId)) return
+      if (index.lastActiveChatId === chatId) return
       index.lastActiveChatId = chatId
       await this.saveIndex(agentRef, index)
     })
