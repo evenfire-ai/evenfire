@@ -394,9 +394,16 @@ jobs:
           # They run with the real producer and PostgreSQL in the dedicated local
           # integration lane; do not replace them with a test-only token producer.
           node ../scripts/ci/password-recovery-suite-contract.mjs verify
+          private_selection="$(node ../scripts/ci/password-recovery-suite-contract.mjs private all)"
+          mapfile -t private_suites <<< "$private_selection"
+          test "${#private_suites[@]}" -eq 2
+          exclude_args=()
+          for suite in "${private_suites[@]}"; do
+            test -s "$suite"
+            exclude_args+=(--exclude "$suite")
+          done
           FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres \
-            --exclude 'test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts' \
-            --exclude 'test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts' \
+            "${exclude_args[@]}" \
             --reporter=default --reporter=json --outputFile="$report" 2>&1 | tee "$log_file"
           node ../scripts/ci/password-recovery-suite-contract.mjs report publicPostgres "$report"
           sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
