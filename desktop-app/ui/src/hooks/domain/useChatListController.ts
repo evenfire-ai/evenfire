@@ -1422,7 +1422,6 @@ export function useChatListController({
       }
       const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
       const requestScope = currentAuthorityScopeRef.current
-      const requestRevision = host.current?.getSelectionIntentRevision()
       try {
         const fence = await chatStore.captureDeleteFence(authorityScope)
         if (
@@ -1434,10 +1433,9 @@ export function useChatListController({
         }
         return { agentRef, fence, hostAuthorityEpoch }
       } catch (error) {
-        if (
-          currentAuthorityScopeRef.current === requestScope &&
-          host.current?.getSelectionIntentRevision() === requestRevision
-        ) {
+        // Confirmation belongs to the destructive operation, not the visible
+        // conversation. Same-scope navigation must not hide its failure.
+        if (currentAuthorityScopeRef.current === requestScope) {
           host.current?.pushToast('Could not confirm chat access. Please try again.', 'error')
         }
         throw error
@@ -1459,16 +1457,19 @@ export function useChatListController({
         deletion.hostAuthorityEpoch !== getHostAuthorityEpoch(agentRef) ||
         isHostAccessBlocked(agentRef)
       ) {
-        host.current?.pushToast(
-          'Delete cancelled because chat access changed. Please try again.',
-          'error'
-        )
+        // A changed Host/epoch cancels the operation within its own scope. An
+        // old team's confirmation must not present into the new team's UI.
+        if (isAuthenticated && sameAuthorityScope(deletion.fence.authorityScope, authorityScope)) {
+          host.current?.pushToast(
+            'Delete cancelled because chat access changed. Please try again.',
+            'error'
+          )
+        }
         return
       }
       const requestGeneration = requestGenerationRef.current
       const authorityScopeGeneration = authorityScopeGenerationRef.current
       const authorityScopeAtDelete = currentAuthorityScopeRef.current
-      const selectionRevisionAtDelete = host.current?.getSelectionIntentRevision()
       const stillOwned = () =>
         authorityScopeGenerationRef.current === authorityScopeGeneration &&
         currentAuthorityScopeRef.current === authorityScopeAtDelete
@@ -1485,10 +1486,7 @@ export function useChatListController({
       try {
         result = await chatStore.deleteChat(agentRef, chatId, deletion.fence)
       } catch {
-        if (
-          stillOwned() &&
-          host.current?.getSelectionIntentRevision() === selectionRevisionAtDelete
-        ) {
+        if (stillOwned()) {
           host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
         }
         return
