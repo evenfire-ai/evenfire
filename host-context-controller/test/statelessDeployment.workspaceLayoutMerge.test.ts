@@ -12,7 +12,6 @@ import { createHash } from 'node:crypto'
 import {
   chmodSync,
   cpSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -47,9 +46,8 @@ afterEach(() => {
 
 function chmodRecursive(dir: string): void {
   chmodSync(dir, 0o755)
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name)
-    if (lstatSync(path).isDirectory()) chmodRecursive(path)
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) chmodRecursive(join(dir, entry.name))
   }
 }
 
@@ -122,12 +120,14 @@ function copyTree(root: string): string {
 function snapshot(root: string): Record<string, string> {
   const out: Record<string, string> = {}
   const walk = (dir: string, rel: string) => {
-    for (const name of readdirSync(dir).sort()) {
-      const path = join(dir, name)
-      const key = rel ? `${rel}/${name}` : name
-      const st = lstatSync(path)
-      if (st.isSymbolicLink()) out[key] = `link:${readlinkSync(path)}`
-      else if (st.isDirectory()) {
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+    )
+    for (const entry of entries) {
+      const path = join(dir, entry.name)
+      const key = rel ? `${rel}/${entry.name}` : entry.name
+      if (entry.isSymbolicLink()) out[key] = `link:${readlinkSync(path)}`
+      else if (entry.isDirectory()) {
         out[key] = 'dir'
         walk(path, key)
       } else out[key] = createHash('sha256').update(readFileSync(path)).digest('hex')
