@@ -1467,13 +1467,14 @@ export function useAgentChatController({
     const selectionIntentRevision = selectionIntentRevisionRef.current
     const requestedSelection = readPendingSelection(selectedAgent)
     const pendingSwitch = pendingChatSwitchRequestRef.current
+    // Public registration preserves only a matching same-agent specific intent;
+    // a later specific write advances revision, so its destination cannot drift.
     const sharesPendingSwitch = Boolean(
       requestedSelection?.mode === 'specific' &&
       pendingSwitch?.state !== 'rejected' &&
       pendingSwitch?.revision === selectionIntentRevision &&
       pendingSwitch.scope === currentAuthScopeRef.current &&
-      pendingSwitch.agentRef === selectedAgent &&
-      pendingSwitch.chatId === requestedSelection.chatId
+      pendingSwitch.agentRef === selectedAgent
     )
     const switchForEffect = (chatId: string) => {
       if (sharesPendingSwitch) return pendingSwitch!.promise
