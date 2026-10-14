@@ -313,15 +313,64 @@ if (
         app = undefined
       }
     }
+    let launches = 0
+    let launchedBuild: Build | undefined
     const launch = async (build: Build) => {
       await close()
       const launched = await launchDesktopApp(testInfo, 'issue-1091-ab', entries[build])
       app = launched.app
       page = launched.page
+      launchedBuild = build
+      // Keep each main process's output so a lost session can be explained after the run.
+      const log = fs.createWriteStream(testInfo.outputPath(`main-${++launches}-${build}.log`), {
+        mode: 0o600,
+      })
+      app.process().stdout?.pipe(log)
+      app.process().stderr?.pipe(log)
     }
     const authenticated = async () => {
-      await expect(page.getByTestId('nav-chat')).toBeVisible()
-      await expect(page.locator('#email-input')).toBeHidden()
+      try {
+        await expect(page.getByTestId('nav-chat')).toBeVisible()
+        await expect(page.locator('#email-input')).toBeHidden()
+      } catch (error) {
+        const userData = path.join(runDir, 'user-data')
+        const tokenName = fs
+          .readdirSync(userData)
+          .find(name => /^session-token-.*\.enc$/.test(name))
+        const diagnosis = {
+          build: launchedBuild,
+          launch: launches,
+          token: tokenName
+            ? {
+                bytes: fs.statSync(path.join(userData, tokenName)).size,
+                mtime: fs.statSync(path.join(userData, tokenName)).mtime.toISOString(),
+                decrypt: await app!.evaluate(
+                  async ({ safeStorage }, file) => {
+                    try {
+                      const fsp = process.mainModule!.require('node:fs/promises')
+                      return `ok length=${safeStorage.decryptString(await fsp.readFile(file)).length}`
+                    } catch (failure) {
+                      return `error: ${String((failure as Error)?.message).slice(0, 160)}`
+                    }
+                  },
+                  path.join(userData, tokenName)
+                ),
+              }
+            : 'absent',
+          session: await page
+            .evaluate(async () => {
+              const state = await window.clerum.auth.getSessionState()
+              return { authenticated: Boolean(state.authenticated), hasMe: Boolean(state.me) }
+            })
+            .catch(failure => `error: ${String((failure as Error)?.message).slice(0, 160)}`),
+        }
+        fs.writeFileSync(
+          testInfo.outputPath(`session-diagnosis-${launches}.json`),
+          JSON.stringify(diagnosis, null, 2),
+          { mode: 0o600 }
+        )
+        throw error
+      }
     }
     const snapshot = () => readHostSnapshot(HOSTS[1], HOSTS[1], context)
     const ready = () => waitForStatelessReady(270_000, context, HOSTS[1], HOSTS[1])
