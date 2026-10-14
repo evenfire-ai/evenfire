@@ -89,6 +89,7 @@ const CONNECTOR_IMAGE = 'ghcr.io/acme/linear-mcp:1.4.0'
 function mcpServer(options: {
   managed?: boolean
   status?: { conditions?: McpServerCondition[] }
+  secretName?: string
 }): McpServerResource {
   return {
     metadata: { name: SERVER_NAME, namespace: NAMESPACE },
@@ -97,7 +98,7 @@ function mcpServer(options: {
       contextRef: 'default',
       ...(options.managed === undefined ? {} : { managed: options.managed }),
       envSecret: {
-        name: SECRET_NAME,
+        name: options.secretName ?? SECRET_NAME,
         keys: [
           { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
           { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
@@ -194,6 +195,23 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+})
+
+it('shows an error instead of a credential form for a non-canonical Secret reference', async () => {
+  mockGetMcpServer.mockResolvedValue(
+    mcpServer({ secretName: '  linear-credentials  ', status: { conditions: [] } })
+  )
+  render(
+    <ToastProvider>
+      <EditMcpServerPage />
+    </ToastProvider>
+  )
+
+  expect((await screen.findByRole('alert')).textContent).toContain('"  linear-credentials  "')
+  expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+  expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  expect(mockCreateMcpSecret).not.toHaveBeenCalled()
 })
 
 // ─── R1-H2 / mini-spec §1: ownership is a function of `spec` alone ─────────

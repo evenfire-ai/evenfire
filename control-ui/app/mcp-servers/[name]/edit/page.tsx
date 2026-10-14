@@ -14,6 +14,11 @@ import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import {
+  nonCanonicalEnvSecretName,
+  resolveEnvSecret,
+  resolveRegistryCredentialSource,
+} from '@components/UpdateConnectorCredentials/mcpServerCredentialResolvers'
+import {
   isRecipeOwned,
   resolveCredentialSurface,
 } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
@@ -33,14 +38,7 @@ import {
   getMcpServer,
   updateMcpServer,
 } from '@lib/api'
-import type {
-  ContextResource,
-  EgressBinding,
-  EnvSecret,
-  EnvSecretKeyMapping,
-  HostResource,
-  McpServerResource,
-} from '@lib/api'
+import type { ContextResource, EgressBinding, HostResource, McpServerResource } from '@lib/api'
 import {
   hostOwnedContextNamesForConnector,
   mergeAccessSummaries,
@@ -48,28 +46,6 @@ import {
 } from '@lib/connectorAccess'
 import type { EgressEditorStatus } from '@lib/egressModel'
 import { extractOAuthImmutables, oauthClientSecretRefName } from '@lib/oauthInstall'
-
-/**
- * Narrows `server.spec.envSecret` (typed as `unknown` on the generic
- * `AnyRecord` spec) into the shape UpdateConnectorCredentials needs. A
- * malformed or partial envSecret (missing name, keys not an array, or no
- * usable key mappings) is treated the same as "no envSecret" — there is
- * nothing safely rotatable through this form either way.
- */
-function resolveEnvSecret(spec: Record<string, unknown> | undefined): EnvSecret | undefined {
-  const raw = spec?.envSecret
-  if (!raw || typeof raw !== 'object') return undefined
-  const candidate = raw as { name?: unknown; keys?: unknown }
-  if (typeof candidate.name !== 'string' || !Array.isArray(candidate.keys)) return undefined
-  const keys = candidate.keys.filter(
-    (k): k is EnvSecretKeyMapping =>
-      Boolean(k) &&
-      typeof (k as EnvSecretKeyMapping).secretKey === 'string' &&
-      typeof (k as EnvSecretKeyMapping).envVar === 'string'
-  )
-  if (keys.length === 0) return undefined
-  return { name: candidate.name, keys }
-}
 
 function parseConnectorEditTab(value: string | string[] | undefined): ConnectorEditTab {
   const candidate = Array.isArray(value) ? value[0] : value
@@ -80,20 +56,6 @@ type ContextAccess = {
   agents: Array<{ id: string; label: string }>
   teams: Array<{ id: string; label: string }>
   users: Array<{ id: string; label: string }>
-}
-
-function resolveRegistryCredentialSource(
-  metadata: McpServerResource['metadata'] | undefined
-): { name: string; version: string } | undefined {
-  const labels = (metadata?.labels ?? {}) as Record<string, unknown>
-  const annotations = (metadata?.annotations ?? {}) as Record<string, unknown>
-  const name = String(
-    annotations['clerum.io/catalog-id'] ?? labels['clerum.io/catalog-id'] ?? ''
-  ).trim()
-  const version = String(
-    annotations['clerum.io/catalog-version'] ?? labels['clerum.io/catalog-version'] ?? ''
-  ).trim()
-  return name && version ? { name, version } : undefined
 }
 
 const EMPTY_CONTEXT_ACCESS: ContextAccess = { agents: [], teams: [], users: [] }
@@ -302,6 +264,9 @@ export default function EditMcpServerPage() {
   const envSecret = server?.spec
     ? resolveEnvSecret(server.spec as Record<string, unknown>)
     : undefined
+  const nonCanonicalSecretName = server?.spec
+    ? nonCanonicalEnvSecretName(server.spec as Record<string, unknown>)
+    : undefined
   const oauthImmutables = server?.spec
     ? extractOAuthImmutables(server.spec as Record<string, unknown>)
     : null
@@ -370,11 +335,14 @@ export default function EditMcpServerPage() {
           ) : server ? (
             activeTab === 'credentials' ? (
               <div className="cu-connector-edit-form">
-                {oauthImmutables ? (
-                  // An OAuth connector's credential lives in its clientSecretRef
-                  // Secret, not spec.envSecret — so UpdateConnectorCredentials would
-                  // fall to its "nothing to rotate here" branch and mislead. Show the
-                  // accurate OAuth panel instead (D-B7; rotation is a follow-up).
+                {nonCanonicalSecretName !== undefined ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    This connector stores a non-canonical Secret name:{' '}
+                    <code>{JSON.stringify(nonCanonicalSecretName)}</code>. Correct the connector
+                    reference before editing credentials.
+                  </div>
+                ) : oauthImmutables ? (
+                  // OAuth credentials live in clientSecretRef, not envSecret.
                   <OAuthImmutableFields
                     oauth={oauthImmutables}
                     credentialSecretName={oauthClientSecretRefName(
