@@ -516,6 +516,8 @@ jobs:
         run: E2E_VITEST_SUITE_GROUP=node-unit bash scripts/e2e/run-vitest-e2e.sh
       - name: Run E2E static-audit regression matrix
         run: python3 -m tools.test_e2e_static_audit_scope
+      - name: Audit live Profile UI recovery Playwright spec
+        run: python3 tools/e2e_static_audit.py tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
 
   # ─── Registry contract — boot evenfire-registry and drive the real client ──
   # Catches wire-format drift in clerumRegistryClient.ts before merge. Requires
