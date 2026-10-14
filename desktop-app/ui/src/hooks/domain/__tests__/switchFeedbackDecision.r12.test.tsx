@@ -125,3 +125,92 @@ it.each(['imperative', 'sidebar'] as const)(
     expect(controller.result.current.chatMessagesLoading).toBe(false)
   }
 )
+
+it('a coalesced sidebar failure without cancellation reports exactly once', async () => {
+  const clerum = installMockClerum()
+  await clerum.chat.create('agent-x', 'requested')
+  await clerum.chat.upsertMessages('agent-x', 'requested', [
+    { id: 'requested-history', role: 'user', content: 'requested real history', timestamp: 1 },
+  ])
+  clerum.chat.getIndex.mockImplementation(clerum.readIndex)
+  const controller = renderController({ loadMenuData: false })
+  await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+  const gate = deferred<void>()
+  clerum.chat.setLastActive.mockImplementationOnce(() => gate.promise)
+  let request!: Promise<void>
+  act(() => {
+    controller.result.current.setPendingChatSelection('agent-x', 'requested', { deferSwitch: true })
+    request = controller.result.current.handleSelectChat('requested')
+    controller.rerender({ navItem: DESKTOP_ROUTES.chat })
+  })
+  await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+  expect(controller.result.current.chatMessagesLoading).toBe(true)
+  await act(async () => {
+    gate.reject(new Error('current sidebar coalesced failure'))
+    await expect(request).resolves.toBeUndefined()
+  })
+  await waitFor(() => expect(controller.result.current.chatMessagesLoading).toBe(false))
+  expect(clerum.chat.setLastActive).toHaveBeenCalledTimes(1)
+  expect(controller.spies.pushToast).toHaveBeenCalledTimes(1)
+  expect(controller.result.current.activeChatId).toBe('requested')
+  expect(controller.result.current.chatMessages).toEqual([])
+  expect((await clerum.readIndex('agent-x')).chats.map(chat => chat.id)).toEqual(['requested'])
+})
+
+it('cancelled coalesced waiter cannot report or settle a superseding imperative load', async () => {
+  const clerum = installMockClerum()
+  for (const id of ['requested', 'successor']) {
+    await clerum.chat.create('agent-x', id)
+    await clerum.chat.upsertMessages('agent-x', id, [
+      { id: `${id}-history`, role: 'user', content: `${id} real transcript`, timestamp: 1 },
+    ])
+  }
+  clerum.chat.getIndex.mockImplementation(clerum.readIndex)
+  const controller = renderController({ loadMenuData: false })
+  await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+  const first = deferred<void>()
+  const next = deferred<void>()
+  const successorEntered = deferred<void>()
+  clerum.chat.setLastActive.mockImplementationOnce(() => first.promise)
+  let request!: Promise<void>
+  act(() => {
+    controller.result.current.setPendingChatSelection('agent-x', 'requested', { deferSwitch: true })
+    request = controller.result.current.switchToChat('agent-x', 'requested', {
+      onCurrentError: error => controller.spies.pushToast(String(error), 'error'),
+    })
+    controller.rerender({ navItem: DESKTOP_ROUTES.chat })
+  })
+  const observed = request.catch(error => error)
+  await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+  act(() => controller.rerender({ navItem: DESKTOP_ROUTES.agents }))
+  await waitFor(() => expect(controller.result.current.activeChatId).toBeNull())
+  clerum.chat.setLastActive.mockImplementationOnce(async () => {
+    successorEntered.resolve()
+    await next.promise
+    await clerum.persistLastActive('agent-x', 'successor')
+  })
+  let successor!: Promise<void>
+  act(() => {
+    successor = controller.result.current.switchToChat('agent-x', 'successor')
+  })
+  await successorEntered.promise
+  const error = new Error('cancelled waiter and superseded origin')
+  await act(async () => {
+    first.reject(error)
+    expect(await observed).toBe(error)
+  })
+  expect(controller.spies.pushToast).not.toHaveBeenCalled()
+  expect(controller.result.current.activeChatId).toBe('successor')
+  expect(controller.result.current.chatMessagesLoading).toBe(true)
+  expect(controller.result.current.chatMessages).toEqual([])
+  await act(async () => {
+    next.resolve()
+    await successor
+  })
+  expect(controller.result.current.chatMessages).toEqual([
+    expect.objectContaining({ id: 'successor-history' }),
+  ])
+  expect(controller.result.current.chatMessagesLoading).toBe(false)
+  expect((await clerum.readIndex('agent-x')).lastActiveChatId).toBe('successor')
+  expect(clerum.chat.setLastActive).toHaveBeenCalledTimes(2)
+})

@@ -386,6 +386,11 @@ describe('useAppController — chat drawer keepNavItem', () => {
       })
 
       const callsBeforeOpen = clerum.chat.setLastActive.mock.calls.length
+      const activeTabBeforeOpen = app.result.current.workspaceTabs.activeTabId
+      expect(
+        app.result.current.workspaceTabs.tabs.find(tab => tab.id === activeTabBeforeOpen)?.chat
+          ?.chatId
+      ).toBe('chat-1')
       clerum.chat.setLastActive.mockRejectedValueOnce(new Error('chat store write failed'))
       await act(async () => {
         await app.result.current.handleOpenNotification({
@@ -401,6 +406,8 @@ describe('useAppController — chat drawer keepNavItem', () => {
         } as Parameters<typeof app.result.current.handleOpenNotification>[0])
       })
       await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
+
+      expect(app.result.current.workspaceTabs.activeTabId).toBe(activeTabBeforeOpen)
 
       expect({
         switchAttempts: clerum.chat.setLastActive.mock.calls.length - callsBeforeOpen,
