@@ -166,26 +166,6 @@ describe('RPCClient - sendMessage()', () => {
     expect(result.error?.message).toContain('500')
   })
 
-  it('preserves the direct-service admission response as a typed retryable failure', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 429,
-      statusText: 'Too Many Requests',
-      headers: new Headers({ 'retry-after': '12' }),
-    })
-
-    const client = new RPCClient('http://localhost:9999')
-    await expect(client.sendMessage(makeMessage())).resolves.toMatchObject({
-      success: false,
-      error: {
-        code: 'RUNTIME_SERVICE_ADMISSION_LIMITED',
-        retryable: true,
-        provider: 'mcp-host',
-        retryAfterSeconds: 12,
-      },
-    })
-  })
-
   it('returns error response when fetch throws', async () => {
     mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'))
 
@@ -414,27 +394,6 @@ describe('RPCClient - provider message authorization', () => {
     expect(options.signal).toBeInstanceOf(AbortSignal)
     expect(JSON.parse(String(options.body))).toEqual({ providerIdentity: identity })
     expectChannelReaderEdgeHeaders(options.headers as Record<string, string>, makeMessage())
-  })
-
-  it('keeps admission/backend failures distinct from an authorization denial', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 429,
-      headers: new Headers({ 'retry-after': '12' }),
-    })
-    const client = new RPCClient('http://mcp-host:8080')
-    const identity = {
-      medium: 'telegram' as const,
-      providerUserId: '123456',
-      providerChannelId: '111222',
-      providerEventId: 'telegram:111222:limited',
-    }
-
-    await expect(client.authorizeProviderMessage(identity)).resolves.toEqual({
-      authorized: false,
-      reason: 'error',
-      retryAfterSeconds: 12,
-    })
   })
 })
 

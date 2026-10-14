@@ -106,7 +106,7 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).toHaveBeenCalledOnce()
   })
 
-  it('keeps provider events retryable after direct message admission rejects them', async () => {
+  it('keeps non-Telegram provider events retryable after direct admission rejects them', async () => {
     vi.useFakeTimers()
     const rpc = rpcClient()
     rpc.sendMessage = vi
@@ -127,7 +127,7 @@ describe('ChannelReader provider event idempotency', () => {
       notificationDeliveryClient: null,
       adapters: new Map(),
     })
-    const message = telegramMessage()
+    const message = telegramMessage({ channelType: 'slack', providerIdentity: undefined })
 
     await reader.handleMessages([message, message])
     expect(rpc.sendMessage).toHaveBeenCalledOnce()

@@ -318,6 +318,8 @@ type ChannelReaderRpcClient = Pick<
   confirmTeamsLinkSession?: RPCClient['confirmTeamsLinkSession']
 }
 
+type ProviderMessageAuthorizationResult = Awaited<ReturnType<RPCClient['authorizeProviderMessage']>>
+
 type ChannelType = ChannelAdapter['channelType']
 type CommunicationChannelRef = {
   namespace: string
@@ -338,6 +340,7 @@ export class ChannelReader {
   private adapters: Map<string, ChannelAdapter> = new Map()
   private channels: CommunicationChannelCRD[] = []
   private running: boolean = false
+  private stopRequested: boolean = false
   private needsRestart: boolean = false
   private rpcClient: ChannelReaderRpcClient
   private notificationDeliveryClient: NotificationDeliveryClient | null
@@ -1488,7 +1491,8 @@ export class ChannelReader {
         }
       }
       if (msg.providerIdentity && this.rpcClient.authorizeProviderMessage) {
-        const authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
+        const authorization = await this.authorizeProviderMessageWithAdmissionRetry(msg)
+        if (!authorization) continue
         if (!authorization.authorized) {
           if (authorization.reason === 'error') {
             this.deferProviderEvent(msg, authorization.retryAfterSeconds)
@@ -1557,6 +1561,11 @@ export class ChannelReader {
           await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext)
         } catch (err) {
           console.error(`[Main] Progress flow failed, falling back:`, err)
+          if (msg.channelType === 'telegram') {
+            // A progress failure may follow an accepted message POST. Never
+            // submit again without an acceptance receipt.
+            continue
+          }
           // Fall back to synchronous
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
           this.releaseProviderEventAfterAdmissionLimit(msg, response)
@@ -1671,8 +1680,71 @@ export class ChannelReader {
   }
 
   private releaseProviderEventAfterAdmissionLimit(msg: Message, response: MessageResponse): void {
+    if (msg.channelType === 'telegram') return
     if (response.error?.code !== 'RUNTIME_SERVICE_ADMISSION_LIMITED') return
     this.deferProviderEvent(msg, response.error.retryAfterSeconds)
+  }
+
+  private async waitForProviderAdmissionRetry(
+    msg: Message,
+    retryAfterSeconds: number | undefined
+  ): Promise<boolean> {
+    if (
+      !Number.isSafeInteger(retryAfterSeconds) ||
+      retryAfterSeconds! < 1 ||
+      retryAfterSeconds! > 60
+    ) {
+      return false
+    }
+
+    const eventKey = this.providerEventDedupeKey(msg)
+    if (eventKey) {
+      this.processedProviderEvents.set(eventKey, { seenAt: Date.now() })
+    }
+    await this.sleep(retryAfterSeconds! * 1000)
+    return !this.stopRequested
+  }
+
+  private async authorizeProviderMessageWithAdmissionRetry(
+    msg: Message
+  ): Promise<ProviderMessageAuthorizationResult | null> {
+    if (!msg.providerIdentity || !this.rpcClient.authorizeProviderMessage) return null
+
+    let authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
+    if (msg.channelType !== 'telegram') return authorization
+    while (
+      !authorization.authorized &&
+      authorization.directServiceAdmissionLimited === true &&
+      authorization.retryAfterSeconds !== undefined
+    ) {
+      if (!(await this.waitForProviderAdmissionRetry(msg, authorization.retryAfterSeconds))) {
+        return null
+      }
+      authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
+    }
+    return authorization
+  }
+
+  private async sendTelegramMessageWithAdmissionRetry(
+    msg: Message,
+    traceContext: TraceContextV1
+  ): Promise<MessageResponse | null> {
+    let response = await this.rpcClient.sendMessage(msg, { async: true, traceContext })
+    while (response.error?.code === 'RUNTIME_SERVICE_ADMISSION_LIMITED') {
+      if (!(await this.waitForProviderAdmissionRetry(msg, response.error.retryAfterSeconds))) {
+        return response
+      }
+
+      const authorization = await this.authorizeProviderMessageWithAdmissionRetry(msg)
+      if (!authorization?.authorized) {
+        if (authorization?.reason === 'unresolved') {
+          await this.sendUnresolvedSenderNotice(msg)
+        }
+        return null
+      }
+      response = await this.rpcClient.sendMessage(msg, { async: true, traceContext })
+    }
+    return response
   }
 
   /**
@@ -1884,7 +1956,11 @@ export class ChannelReader {
     traceContext: TraceContextV1
   ): Promise<void> {
     // 1. Send message with async=true
-    const response = await this.rpcClient.sendMessage(msg, { async: true, traceContext })
+    const response =
+      msg.channelType === 'telegram'
+        ? await this.sendTelegramMessageWithAdmissionRetry(msg, traceContext)
+        : await this.rpcClient.sendMessage(msg, { async: true, traceContext })
+    if (!response) return
     this.releaseProviderEventAfterAdmissionLimit(msg, response)
 
     if (!response.taskId) {
@@ -2501,6 +2577,7 @@ export class ChannelReader {
    * channels appear.
    */
   async start(): Promise<void> {
+    this.stopRequested = false
     console.log('[Main] Starting Clerum Channel Reader...')
     console.log(`[Main] Mode: ${config.devMode ? 'DEV' : 'PRODUCTION'}`)
     console.log(`[Main] Host ref: "${config.hostRef}"`)
@@ -2578,6 +2655,7 @@ export class ChannelReader {
    */
   async stop(): Promise<void> {
     console.log('[Main] Stopping...')
+    this.stopRequested = true
     this.running = false
     if (this.watcher) {
       this.watcher.stopWatch()

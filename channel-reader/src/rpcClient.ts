@@ -146,6 +146,7 @@ export interface ChannelReaderRuntimeSource {
 
 const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT = 1
 const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX = 60
+const DIRECT_SERVICE_ADMISSION_ERROR = 'runtime_service_admission_limited'
 
 export class RuntimeServiceAdmissionLimitedError extends Error {
   constructor(readonly retryAfterSeconds: number) {
@@ -165,6 +166,34 @@ function runtimeAdmissionRetryAfter(response: Response): number {
     seconds <= RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX
     ? seconds
     : RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT
+}
+
+function runtimeAdmissionRetryAfterFromHeader(response: Response): number | undefined {
+  const value = response.headers.get('retry-after')
+  if (!value || !/^(?:0|[1-9]\d{0,2})$/.test(value)) return undefined
+  const seconds = Number(value)
+  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 60 ? seconds : undefined
+}
+
+async function directServiceAdmissionRetryAfter(response: Response): Promise<number | undefined> {
+  const header = response.headers.get('retry-after')
+  if (!header || !/^(?:0|[1-9]\d{0,2})$/.test(header)) return undefined
+  const headerSeconds = Number(header)
+  if (
+    !Number.isSafeInteger(headerSeconds) ||
+    headerSeconds < 1 ||
+    headerSeconds > RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX
+  ) {
+    return undefined
+  }
+
+  const body = (await response.json().catch(() => null)) as {
+    error?: unknown
+    retryAfterSeconds?: unknown
+  } | null
+  return body?.error === DIRECT_SERVICE_ADMISSION_ERROR && body.retryAfterSeconds === headerSeconds
+    ? headerSeconds
+    : undefined
 }
 
 /**
@@ -230,13 +259,13 @@ export class RPCClient {
       })
 
       if (response.status === 429) {
-        const retryAfter = response.headers.get('retry-after')
-        const parsedRetryAfter =
-          retryAfter && /^(?:0|[1-9]\d{0,2})$/.test(retryAfter) ? Number(retryAfter) : NaN
-        const retryAfterSeconds =
-          Number.isSafeInteger(parsedRetryAfter) && parsedRetryAfter >= 1 && parsedRetryAfter <= 60
-            ? parsedRetryAfter
-            : undefined
+        const isTelegram = message.channelType === 'telegram'
+        const retryAfterSeconds = isTelegram
+          ? await directServiceAdmissionRetryAfter(response)
+          : runtimeAdmissionRetryAfterFromHeader(response)
+        if (isTelegram && retryAfterSeconds === undefined) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        }
         return {
           success: false,
           error: {
@@ -286,6 +315,7 @@ export class RPCClient {
     authorized: boolean
     reason?: 'unresolved' | 'error'
     retryAfterSeconds?: number
+    directServiceAdmissionLimited?: boolean
   }> {
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/provider-messages/authorize`, {
@@ -299,7 +329,23 @@ export class RPCClient {
         body: JSON.stringify({ providerIdentity: identity }),
       })
       if (!response.ok) {
-        if (response.status === 429 || response.status >= 500) {
+        if (response.status === 429) {
+          const isTelegram = identity.medium === 'telegram'
+          const retryAfterSeconds = isTelegram
+            ? await directServiceAdmissionRetryAfter(response)
+            : runtimeAdmissionRetryAfterFromHeader(response)
+          return {
+            authorized: false,
+            reason: 'error',
+            ...(retryAfterSeconds === undefined
+              ? {}
+              : {
+                  retryAfterSeconds,
+                  ...(isTelegram ? { directServiceAdmissionLimited: true } : {}),
+                }),
+          }
+        }
+        if (response.status >= 500) {
           const retryAfter = response.headers.get('retry-after')
           const parsedRetryAfter =
             retryAfter && /^(?:0|[1-9]\d{0,2})$/.test(retryAfter) ? Number(retryAfter) : NaN
