@@ -47,7 +47,11 @@ export interface RenderControllerResult {
  * factory, so epoch comparisons in the controller are exercised for real.
  */
 export function renderController(
-  overrides: Partial<ControllerParams> = {}
+  overrides: Partial<ControllerParams> = {},
+  options: {
+    /** Called with the controller's return value on every render, for frame-level assertions. */
+    onRender?: (value: ReturnType<typeof useAgentChatController>) => void
+  } = {}
 ): RenderControllerResult {
   const spies = {
     pushToast: vi.fn(),
@@ -93,7 +97,7 @@ export function renderController(
     (p: Partial<ControllerParams>) => {
       const hostAuthority = useHarnessHostAuthority()
       authority = hostAuthority
-      return useAgentChatController({
+      const value = useAgentChatController({
         onHostAccessRevoked: hostAuthority.onHostAccessRevoked,
         onHostAuthorityUncertain: hostAuthority.onHostAuthorityUncertain,
         isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
@@ -101,6 +105,8 @@ export function renderController(
         hostAuthorityRevision: hostAuthority.revision,
         ...p,
       } as ControllerParams)
+      options.onRender?.(value)
+      return value
     },
     {
       initialProps: params,

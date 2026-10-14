@@ -100,6 +100,7 @@ import {
   projectSessionState,
 } from './sessionFsm'
 import { mapTrackerStatusToProgress, readApprovalInputPreview } from './trackerToProgress'
+import { type TranscriptMemoEntry, createTranscriptMemo, transcriptMemoKey } from './transcriptMemo'
 import type { PushNotificationInput } from './types'
 import {
   type ChatListControllerHost,
@@ -141,6 +142,13 @@ const MAX_ACTIVITY_EVENTS_PER_MESSAGE = 100
 const MAX_MESSAGES_WITH_ACTIVITY_PER_AGENT = 50
 const LOCAL_MESSAGE_PAGE_SIZE = 80
 const SERVER_TURN_PAGE_SIZE = 40
+// #1091 A9: transcripts kept for instant reopen. The A/B harness reopens at most
+// this many chats per Host, newest first, so the LRU never thrashes there.
+const TRANSCRIPT_MEMO_LIMITS = {
+  maxChats: 8,
+  maxMessages: 3 * LOCAL_MESSAGE_PAGE_SIZE,
+  maxAttachmentBase64Chars: 8 * 1024 * 1024,
+}
 const MAX_RECONCILE_DELTA_PAGES = 5
 const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
   'The Host did not receive the selected Global Files; the message was sent without them.'
@@ -592,6 +600,8 @@ export function useAgentChatController({
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
     clearAllComposerDrafts()
+    // The memo key already carries the scope; this frees the previous scope's entries.
+    transcriptMemoRef.current?.clear()
     sendScopeGeneration.current += 1
     agentSendSetupOwnerRef.current = null
     agentSendInFlightRef.current = false
@@ -620,6 +630,67 @@ export function useAgentChatController({
     navItem,
     selectedAgent,
   })
+  // #1091 A9: per-mount, like the FSM store, so test renders stay isolated.
+  const transcriptMemoRef = useRef<ReturnType<typeof createTranscriptMemo> | null>(null)
+  if (!transcriptMemoRef.current) {
+    transcriptMemoRef.current = createTranscriptMemo(TRANSCRIPT_MEMO_LIMITS)
+  }
+  const transcriptMemo = transcriptMemoRef.current
+  const chatTranscriptMemoKey = useCallback(
+    (agentRef: string, chatId: string) =>
+      transcriptMemoKey(currentAuthScopeRef.current, agentRef, chatId),
+    []
+  )
+  // Every change to the visible transcript (send, stream, hydrate, older page)
+  // goes through `chatMessages`, so recording each settled commit keeps the memo
+  // current. A commit whose state does not match the visible selection is a
+  // transition between chats and is skipped.
+  useEffect(() => {
+    if (chatMessagesLoading || !activeChatId || !selectedAgent) return
+    const visible = activeChatVisibilityRef.current
+    if (visible.activeChatId !== activeChatId || visible.selectedAgent !== selectedAgent) return
+    transcriptMemo.set(chatTranscriptMemoKey(selectedAgent, activeChatId), {
+      messages: chatMessages,
+      hasOlderMessages,
+      loadedLocalMessageCount: loadedLocalMessageCountRef.current,
+    })
+  }, [
+    activeChatId,
+    chatMessages,
+    chatMessagesLoading,
+    chatTranscriptMemoKey,
+    hasOlderMessages,
+    selectedAgent,
+    transcriptMemo,
+  ])
+
+  const rememberedTranscript = useCallback(
+    (agentRef: string, chatId: string): TranscriptMemoEntry | undefined => {
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return undefined
+      return transcriptMemo.get(chatTranscriptMemoKey(agentRef, chatId))
+    },
+    [chatTranscriptMemoKey, isChatDeleted, isHostAccessBlocked, transcriptMemo]
+  )
+
+  /** Show a newly selected chat: its remembered transcript, or a blank list with the spinner. */
+  const presentSelectedTranscript = useCallback(
+    (remembered: TranscriptMemoEntry | undefined) => {
+      cancelOlderMessagesLoad()
+      if (remembered) {
+        chatMessagesRef.current = remembered.messages
+        setChatMessages(remembered.messages)
+        setChatMessagesLoading(false)
+        setHasOlderMessages(remembered.hasOlderMessages)
+        loadedLocalMessageCountRef.current = remembered.loadedLocalMessageCount
+        return
+      }
+      setChatMessages([])
+      setChatMessagesLoading(true)
+      setHasOlderMessages(false)
+      loadedLocalMessageCountRef.current = 0
+    },
+    [cancelOlderMessagesLoad]
+  )
   const activeChatSwitchRequestRef = useRef<symbol | null>(null)
   const activeChatSwitchKeyRef = useRef<string | null>(null)
   // Latest `pushToast` for the hoisted tracker callbacks (onTrackerTerminal reads
@@ -946,6 +1017,7 @@ export function useAgentChatController({
     // login/logout / team-switch cycles (security review, hygiene).
     resetReplyNotificationDedupe()
     chatStore.clearCachedRemoteData()
+    transcriptMemo.clear()
     setChatMessages([])
     setChatMessagesLoading(false)
     setHasOlderMessages(false)
@@ -963,6 +1035,7 @@ export function useAgentChatController({
     resetReplyNotificationDedupe,
     chatStore.clearCachedRemoteData,
     cancelOlderMessagesLoad,
+    transcriptMemo,
   ])
 
   // Unified switch (post-D.4): cache-first render → server reconcile → tracker
@@ -986,6 +1059,7 @@ export function useAgentChatController({
         activeChatSwitchRequestRef.current = switchRequest
         activeChatSwitchKeyRef.current = switchKey
       }
+      const remembered = canReuseActiveSwitch ? undefined : rememberedTranscript(agentRef, chatId)
       // A same-chat click must coalesce onto an already-running loud recovery.
       // Superseding it would discard the stream-loss caller that owns the Resend
       // or durable-result UX. Genuine chat changes still cancel stale work.
@@ -997,13 +1071,7 @@ export function useAgentChatController({
         selectedAgent: agentRef,
       }
       setActiveChatId(chatId)
-      if (!canReuseActiveSwitch) {
-        setChatMessages([])
-        setChatMessagesLoading(true)
-        setHasOlderMessages(false)
-        cancelOlderMessagesLoad()
-        loadedLocalMessageCountRef.current = 0
-      }
+      if (!canReuseActiveSwitch) presentSelectedTranscript(remembered)
       // The error/resend banner is per-chat view state, not global: clear it on
       // every chat switch (same-agent switches don't trip the selectedAgent
       // cleanup effect, so without this a stream error from chat A would bleed
@@ -1046,16 +1114,36 @@ export function useAgentChatController({
         } catch (error) {
           console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
         }
-        const hasOlderServerMessages =
-          nextServerBackfillBeforeTurn(cached as AgentChatMessage[]) !== undefined
-        const hasOlderLocalMessages =
-          !hasOlderServerMessages &&
-          cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
-          (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
-        if (!isStillActive()) return
-        loadedLocalMessageCountRef.current = cached.length
-        setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
-        if (!canReuseActiveSwitch) setChatMessages(cached as AgentChatMessage[])
+        // #1091 A9: the remembered transcript is already on screen. Keep it when
+        // the disk page is its newest part (or the disk read returned nothing);
+        // otherwise the disk page wins, e.g. a reply persisted while the chat was
+        // hidden. The Host reconcile below runs in both cases.
+        const keepRemembered =
+          remembered !== undefined &&
+          (cached.length === 0 ||
+            sameMessageSequence(
+              remembered.messages.slice(-cached.length),
+              cached as AgentChatMessage[]
+            ))
+        if (keepRemembered) {
+          cached = remembered.messages as typeof cached
+          if (!isStillActive()) return
+        } else {
+          const hasOlderServerMessages =
+            nextServerBackfillBeforeTurn(cached as AgentChatMessage[]) !== undefined
+          const hasOlderLocalMessages =
+            !hasOlderServerMessages &&
+            cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
+            (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
+          if (!isStillActive()) return
+          loadedLocalMessageCountRef.current = cached.length
+          setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
+          if (!canReuseActiveSwitch) {
+            // Hydrate merges onto the ref, so a replaced memo must not linger there.
+            chatMessagesRef.current = cached as AgentChatMessage[]
+            setChatMessages(cached as AgentChatMessage[])
+          }
+        }
         // Phase 1 rendered the cache → clear the blocking spinner. The reconcile
         // runs under the `syncing` indicator (RECONCILE_STARTED, dispatched by the
         // reconcile gate) instead.
@@ -1120,7 +1208,8 @@ export function useAgentChatController({
       reconcileChat,
       scrollChatToBottom,
       clearUnreadInList,
-      cancelOlderMessagesLoad,
+      rememberedTranscript,
+      presentSelectedTranscript,
       chatStore.setLastActive,
       chatStore.loadMessages,
       chatStore.clearUnreadTerminal,
@@ -1343,11 +1432,7 @@ export function useAgentChatController({
         selectedAgent,
       }
       setActiveChatId(requestedSelection.chatId)
-      setChatMessages([])
-      setChatMessagesLoading(true)
-      setHasOlderMessages(false)
-      cancelOlderMessagesLoad()
-      loadedLocalMessageCountRef.current = 0
+      presentSelectedTranscript(rememberedTranscript(selectedAgent, requestedSelection.chatId))
       if (requestedSelection.title) {
         upsertProvisionalEntry(
           requestedSelection.chatId,
@@ -1436,7 +1521,15 @@ export function useAgentChatController({
     return () => {
       cancelled = true
     }
-  }, [cancelOlderMessagesLoad, currentTeamId, navItem, selectedAgent, isHostAccessBlocked])
+  }, [
+    cancelOlderMessagesLoad,
+    currentTeamId,
+    navItem,
+    selectedAgent,
+    isHostAccessBlocked,
+    presentSelectedTranscript,
+    rememberedTranscript,
+  ])
 
   // ─── Activity / progress state updaters (hoisted from sendAgentMessage so the
   //     tracker subscription effect and tracker callbacks can share them) ───
@@ -1962,6 +2055,8 @@ export function useAgentChatController({
         reconcileChatRef.current?.supersede(chatKey)
         fsm.dispatch(chatKey, { type: 'RESET' })
       }
+      // A held Host's transcripts must not reappear from memory once it is released.
+      transcriptMemo.deleteAgent(agentRef)
       const stopActivity = activityUnsubByAgentRef.current[agentRef]
       if (stopActivity) {
         delete activityUnsubByAgentRef.current[agentRef]
@@ -2003,6 +2098,7 @@ export function useAgentChatController({
     [
       tracker,
       fsm,
+      transcriptMemo,
       hideAgent,
       chatStore.clearCachedRemoteData,
       clearList,
@@ -3803,17 +3899,14 @@ export function useAgentChatController({
         selectedAgent: agentName,
       }
       setActiveChatId(chatId)
-      setChatMessages([])
-      setChatMessagesLoading(true)
-      setHasOlderMessages(false)
-      cancelOlderMessagesLoad()
-      loadedLocalMessageCountRef.current = 0
+      presentSelectedTranscript(rememberedTranscript(agentName, chatId))
       if (options.title) {
         upsertProvisionalEntry(chatId, options.title, options.isRemote === true)
       }
     },
     [
-      cancelOlderMessagesLoad,
+      presentSelectedTranscript,
+      rememberedTranscript,
       currentTeamId,
       writePendingSelection,
       upsertProvisionalEntry,
