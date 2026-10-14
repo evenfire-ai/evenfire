@@ -80,6 +80,37 @@ it('reports a FleetBoard create-phase rejection once without misclassifying reco
   expect(app.getVm().chatMessagesLoading).toBe(false)
 })
 
+it('does not present an old create-phase failure after navigation, while the raw awaiter rejects', async () => {
+  const { app, clerum } = await mountActions()
+  clerum.chat.setLastActive.mockImplementation(clerum.persistLastActive)
+  const held = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+  clerum.chat.create.mockReturnValueOnce(held.promise)
+  let request!: Promise<void>
+  act(() => {
+    request = app.getVm().handleCreateChat()
+  })
+  const observed = request.catch(cause => cause)
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-2' }))
+  await waitFor(() => expect(screen.getByText('chat-2 real history')).toBeTruthy())
+  const status = { text: app.getVm().statusText, tone: app.getVm().statusTone }
+  const error = new Error('obsolete creation failed before persistence')
+  await act(async () => {
+    held.reject(error)
+    expect(await observed).toBe(error)
+  })
+  expect(app.getVm().activeChatId).toBe('chat-2')
+  expect(app.getVm().activeMessages.map(message => message.content)).toEqual([
+    'chat-2 real history',
+  ])
+  expect(app.getVm().chatMessagesLoading).toBe(false)
+  expect(app.getVm().toasts).toEqual([])
+  expect(screen.queryAllByRole('alert')).toEqual([])
+  expect({ text: app.getVm().statusText, tone: app.getVm().statusTone }).toEqual(status)
+  const index = await clerum.readIndex('agent-x')
+  expect(index.chats.map(chat => chat.id).sort()).toEqual(['chat-1', 'chat-2'])
+  expect(index.lastActiveChatId).toBe('chat-2')
+})
+
 it('reports opening a successfully created FleetBoard chat as one open failure', async () => {
   const { app, clerum } = await mountActions()
   clerum.chat.setLastActive.mockRejectedValueOnce(new Error('created chat open failed'))
