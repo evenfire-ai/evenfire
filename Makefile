@@ -1401,6 +1401,11 @@ test-e2e-stateless-suspend-wake: ## Run stateless suspend/wake E2E gate (Phase 1
 	@echo "Running stateless suspend/wake E2E gate..."
 	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-suspend-wake.sh
 
+.PHONY: test-e2e-hcc-storage-layout-switch
+test-e2e-hcc-storage-layout-switch: ## Run the #825 storage-layout gate across lifecycle switches (needs an owned branch profile, E2E_PROFILE_PORTS_ENV, E2E_DEV_LOGIN_EMAIL, forwards held)
+	@echo "Running HCC storage-layout switch E2E gate..."
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-storage-layout-switch.sh
+
 .PHONY: test-e2e-stateless-wake-recovery
 test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R1 warm draining / R2 cold suspended / R3 drained-window p95 budgets; needs port-forwards + seeded chatllm-stateless)
 	@echo "Running stateless wake-recovery latency gate..."
