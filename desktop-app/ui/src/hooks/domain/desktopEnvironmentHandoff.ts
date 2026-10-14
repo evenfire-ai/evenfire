@@ -13,6 +13,19 @@ import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
 
 const LOCALHOST_OPTION_ID = '__localhost__'
 
+export function reportDesktopEnvironmentSelected(
+  state: DesktopRuntimeConfigState,
+  setStatus: SetStatusFn
+) {
+  const selected = state.options.find(option => option.id === state.activeOptionId)
+  setStatus(
+    selected ? `Environment selected: ${selected.label}.` : 'Environment selected.',
+    'success',
+    undefined,
+    { global: false, toast: true }
+  )
+}
+
 type DesktopEnvironmentHandoffState = {
   booting: boolean
   busy: boolean
@@ -398,6 +411,7 @@ export function createDesktopEnvironmentSetupHandler({
         reportAuthenticationStateChanged(authState, setStatus, setPendingDesktopEnvironmentSetup)
         return
       }
+      reportDesktopEnvironmentSelected(selection.runtimeConfigState, setStatus)
       try {
         await onSessionNeedsLoad({ preserveNav: true })
       } catch (error) {

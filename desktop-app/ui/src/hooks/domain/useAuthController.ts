@@ -13,6 +13,7 @@ import type {
 import type { Tone } from '../../uiTypes'
 import {
   createDesktopEnvironmentSetupHandler,
+  reportDesktopEnvironmentSelected,
   resolveDesktopEnvironmentRestMatch,
 } from './desktopEnvironmentHandoff'
 import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
@@ -405,25 +406,15 @@ export function useAuthController({
     }
   }
 
-  const applySelectedRuntimeConfigState = useCallback(
-    (state: DesktopRuntimeConfigState) => {
-      // Switching environment (pre-login) must not carry another env's cached
-      // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
-      // without logout), so a full clear is sufficient — no per-env query keys.
-      desktopQueryClient.clear()
-      setRuntimeConfigState(state)
-      setDesktopSetupAuthorizationToken('')
-      setDesktopSetupStarted(false)
-      const selected = state.options.find(option => option.id === state.activeOptionId)
-      setStatus(
-        selected ? `Environment selected: ${selected.label}.` : 'Environment selected.',
-        'success',
-        undefined,
-        { global: false, toast: true }
-      )
-    },
-    [setStatus]
-  )
+  const applySelectedRuntimeConfigState = useCallback((state: DesktopRuntimeConfigState) => {
+    // Switching environment (pre-login) must not carry another env's cached
+    // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
+    // without logout), so a full clear is sufficient — no per-env query keys.
+    desktopQueryClient.clear()
+    setRuntimeConfigState(state)
+    setDesktopSetupAuthorizationToken('')
+    setDesktopSetupStarted(false)
+  }, [])
 
   const handleSelectRuntimeConfig = useCallback(
     async (optionId: string): Promise<DesktopRuntimeConfigState | null> => {
@@ -432,6 +423,7 @@ export function useAuthController({
         setBackendSwitchHint(null)
         const state = await window.clerum.auth.selectRuntimeConfig(optionId)
         applySelectedRuntimeConfigState(state)
+        reportDesktopEnvironmentSelected(state, setStatus)
         return state
       } catch (error) {
         setStatus(
@@ -459,6 +451,11 @@ export function useAuthController({
           expectedSessionGeneration
         )
         applySelectedRuntimeConfigState(selection.runtimeConfigState)
+        if (selection.runtimeConfigState.activeOptionId !== optionId) {
+          throw new Error(
+            'Selected desktop environment does not match the requested saved profile.'
+          )
+        }
         return selection
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -702,6 +699,7 @@ export function useAuthController({
           return
         }
         setPendingDesktopEnvironmentSetup(null)
+        reportDesktopEnvironmentSelected(selection.runtimeConfigState, setStatus)
         try {
           await onSessionNeedsLoad({ preserveNav: true })
         } catch (error) {

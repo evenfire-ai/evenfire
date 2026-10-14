@@ -57,6 +57,8 @@ let desktopSetupTokenListener:
 let confirmDesktopEnvironmentSetupForTest: (() => Promise<void>) | null = null
 let confirmDesktopEnvironmentSwitchForTest: (() => void) | null = null
 let cancelDesktopEnvironmentSwitchForTest: (() => void) | null = null
+let selectRuntimeConfigForTest: ((id: string) => Promise<DesktopRuntimeConfigState | null>) | null =
+  null
 let setBootingForTest: ((value: boolean) => void) | null = null
 let setAuthenticatedForTest: ((value: boolean) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
@@ -77,6 +79,7 @@ function Probe() {
   confirmDesktopEnvironmentSetupForTest = auth.handleConfirmDesktopEnvironmentSetup
   confirmDesktopEnvironmentSwitchForTest = auth.handleConfirmDesktopEnvironmentSwitchConfirmation
   cancelDesktopEnvironmentSwitchForTest = auth.handleCancelDesktopEnvironmentSwitchConfirmation
+  selectRuntimeConfigForTest = auth.handleSelectRuntimeConfig
 
   return (
     <>
@@ -92,6 +95,12 @@ function Probe() {
         {auth.pendingDesktopEnvironmentSetup?.rpcProxyBaseUrl || 'none'}
       </div>
       <div data-testid="setup-complete">{auth.desktopEnvironmentSetupComplete ? 'yes' : 'no'}</div>
+      <div data-testid="active-environment">
+        {auth.runtimeConfigState?.activeOptionId || 'none'}
+      </div>
+      <div data-testid="active-rest">
+        {auth.runtimeConfigState?.currentConfig?.externalRestApiBaseUrl || 'none'}
+      </div>
     </>
   )
 }
@@ -126,6 +135,7 @@ beforeEach(async () => {
   confirmDesktopEnvironmentSetupForTest = null
   confirmDesktopEnvironmentSwitchForTest = null
   cancelDesktopEnvironmentSwitchForTest = null
+  selectRuntimeConfigForTest = null
   setBootingForTest = null
   setAuthenticatedForTest = null
   runtimeConfigModule = null
@@ -308,6 +318,7 @@ describe('Desktop environment handoff', () => {
     expect(nativeAppService!.getCachedUserId()).toBe('new-user')
     expect(mocks.loadSession).not.toHaveBeenCalled()
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toEqual([])
     expect(mocks.setStatus).toHaveBeenLastCalledWith(
       'The desktop session changed while processing this link. Open it again.',
       'info'
@@ -336,6 +347,12 @@ describe('Desktop environment handoff', () => {
     })
     await act(async () => confirmDesktopEnvironmentSetupForTest?.())
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledOnce()
+    expect(mocks.loadSession).toHaveBeenCalledOnce()
+    expect(nativeAppService!.getRuntimeConfigState().currentConfig?.externalRestApiBaseUrl).toBe(
+      linked.externalRestApiBaseUrl
+    )
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toEqual([])
     expect(mocks.setStatus).toHaveBeenLastCalledWith(
       'Could not verify the desktop session. Try opening the link again.',
       'error'
@@ -669,12 +686,91 @@ describe('Desktop environment handoff', () => {
     expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
     expect(mocks.loadSession).toHaveBeenCalledWith({ preserveNav: true })
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
-    expect(mocks.setStatus).toHaveBeenCalledWith(
-      expect.stringContaining('Environment selected: Example tenant'),
-      'success',
-      undefined,
-      { global: false, toast: true }
+    expect(nativeAppService!.getRuntimeConfigState().activeOptionId).toBe(targetOptionId)
+    expect(screen.getByTestId('active-rest')).toHaveTextContent(
+      `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
     )
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toEqual([
+      [
+        'Environment selected: Example tenant (api.example.test).',
+        'success',
+        undefined,
+        { global: false, toast: true },
+      ],
+    ])
+  })
+
+  it('preserves successful manual selection feedback through the native producer', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    const targetOptionId = await savedTargetOptionId()
+    mocks.selectRuntimeConfig.mockImplementationOnce(id =>
+      nativeAppService!.selectRuntimeConfig(id)
+    )
+    mocks.setStatus.mockClear()
+
+    await act(async () => {
+      await selectRuntimeConfigForTest?.(targetOptionId)
+    })
+
+    expect(nativeAppService!.getRuntimeConfigState().activeOptionId).toBe(targetOptionId)
+    expect(screen.getByTestId('active-environment')).toHaveTextContent(targetOptionId)
+    expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
+    expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toEqual([
+      [
+        'Environment selected: Example tenant (api.example.test).',
+        'success',
+        undefined,
+        { global: false, toast: true },
+      ],
+    ])
+  })
+
+  it('retains a verified native selection when subsequent session loading fails', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    const targetOptionId = await savedTargetOptionId()
+    mocks.loadSession.mockRejectedValueOnce(new Error('fixture session unavailable'))
+
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(nativeAppService!.getRuntimeConfigState().activeOptionId).toBe(targetOptionId)
+    expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledOnce()
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toHaveLength(1)
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'Could not load the selected desktop environment: fixture session unavailable',
+      'error'
+    )
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+  })
+
+  it('rejects a handoff response selecting a different native profile', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    const otherOptionId = nativeAppService!.getRuntimeConfigState().activeOptionId
+    if (!otherOptionId) throw new Error('The config producer did not return the active profile')
+    mocks.selectRuntimeConfigForHandoff.mockImplementationOnce((_id, generation) =>
+      nativeAppService!.selectRuntimeConfigForHandoff(otherOptionId, generation)
+    )
+    mocks.loadSession.mockClear()
+
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(nativeAppService!.getRuntimeConfigState().activeOptionId).toBe(otherOptionId)
+    expect(mocks.loadSession).not.toHaveBeenCalled()
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toEqual([])
+    expect(mocks.setStatus).toHaveBeenLastCalledWith(
+      'Failed to switch environment: Selected desktop environment does not match the requested saved profile.',
+      'error'
+    )
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
   })
 
   it('does not load a saved environment when generation changes after selection', async () => {
@@ -712,6 +808,8 @@ describe('Desktop environment handoff', () => {
     )
     expect(mocks.loadSession).not.toHaveBeenCalled()
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(nativeAppService!.getRuntimeConfigState().activeOptionId).toBe(otherOption.id)
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toEqual([])
     expect(mocks.setStatus).toHaveBeenCalledWith(
       'The desktop session changed while processing this link. Open it again.',
       'info'
@@ -885,12 +983,18 @@ describe('Desktop environment handoff', () => {
     expect((await runtimeConfigModule!.getDesktopRuntimeConfigState()).activeOptionId).toBe(
       savedOption.id
     )
-    expect(mocks.setStatus).toHaveBeenCalledWith(
-      expect.stringContaining(`Environment selected: ${linkedEnvironment.appName}`),
-      'success',
-      undefined,
-      { global: false, toast: true }
+    expect(screen.getByTestId('active-environment')).toHaveTextContent(savedOption.id)
+    expect(screen.getByTestId('active-rest')).toHaveTextContent(
+      linkedEnvironment.externalRestApiBaseUrl
     )
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toEqual([
+      [
+        'Environment selected: New tenant (new-api.example.test).',
+        'success',
+        undefined,
+        { global: false, toast: true },
+      ],
+    ])
   })
 
   it('keeps the exact active REST profile when a same-origin sibling appears before confirmation', async () => {
