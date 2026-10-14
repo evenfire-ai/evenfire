@@ -359,6 +359,47 @@ describe('Desktop environment handoff', () => {
     )
   })
 
+  it('completes a verified linked setup with exactly one trusted success notification', async () => {
+    const linked = {
+      externalRestApiBaseUrl: 'https://new-api.example.test',
+      appName: 'Untrusted Profile label',
+    }
+    const { AuthClient } = await import('../../../../../src/authClient')
+    vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment').mockResolvedValue({
+      externalRestApiBaseUrl: linked.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: 'https://new-rpc.example.test',
+      appName: 'Discovered environment',
+    })
+    mocks.saveRuntimeConfig.mockImplementationOnce((config, generation) =>
+      nativeAppService!.saveRuntimeConfig(config, generation)
+    )
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linked)
+    mocks.setStatus.mockClear()
+
+    await act(async () => confirmDesktopEnvironmentSetupForTest?.())
+
+    const state = nativeAppService!.getRuntimeConfigState()
+    const selected = state.options.find(option => option.id === state.activeOptionId)
+    expect(selected).toMatchObject({
+      externalRestApiBaseUrl: linked.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: 'https://new-rpc.example.test',
+    })
+    expect(screen.getByTestId('active-environment')).toHaveTextContent(state.activeOptionId!)
+    expect(screen.getByTestId('active-rest')).toHaveTextContent(linked.externalRestApiBaseUrl)
+    expect(screen.getByTestId('setup-complete')).toHaveTextContent('yes')
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.saveRuntimeConfig).toHaveBeenCalledOnce()
+    expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(mocks.setStatus.mock.calls.filter(([, tone]) => tone === 'success')).toEqual([
+      ['Desktop environment saved.', 'success'],
+    ])
+    expect(mocks.setStatus.mock.calls.some(([message]) => message.includes(linked.appName))).toBe(
+      false
+    )
+  })
+
   it('rejects a saved linked profile when another native profile becomes active before verification', async () => {
     const linked = { externalRestApiBaseUrl: 'https://new-api.example.test', appName: 'New' }
     const other = runtimeConfigModule!
