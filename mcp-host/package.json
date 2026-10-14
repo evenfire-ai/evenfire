@@ -49,6 +49,7 @@
     "jose": "^6.2.1",
     "jsonwebtoken": "^9.0.2",
     "jszip": "^3.10.1",
+    "numfmt": "^3.2.6",
     "openai": "^4.70.0",
     "pdf-lib": "^1.17.1",
     "pdfmake": "^0.2.23",
