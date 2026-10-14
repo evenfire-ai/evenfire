@@ -678,6 +678,78 @@ describe('single-series charts', () => {
   })
 })
 
+describe('the decimal convention is read only from values the chart plots', () => {
+  it("is not taken from a record's label", () => {
+    const read = (label: string) =>
+      normalizeChartData({ datasets: [{ label: 'S', data: [{ label, value: '1,234' }] }] }, bar)
+        .datasets[0].data
+    expect(read('A')).toEqual([1234])
+    // Only the label changes: it is text, not a value.
+    expect(read('1.234,5')).toEqual([1234])
+  })
+
+  it('is not taken from the label of a [label, value] pair', () => {
+    const r = normalizeChartData({ datasets: [{ label: 'S', data: [['1.234,5', '1,234']] }] }, bar)
+    expect(r.datasets[0].data).toEqual([1234])
+  })
+
+  it.each(['gauge', 'waterfall', 'funnel'] as const)(
+    '%s: is not taken from a dropped series, which is not read at all',
+    chartType => {
+      const kept = { label: 'Kept', data: ['1,234'] }
+      const r = normalizeChartData(
+        { labels: ['A'], datasets: [kept, { label: 'Dropped', data: ['1.234,5'] }] },
+        { chartType }
+      )
+      expect(r.datasets[0].data).toEqual([1234])
+      // A dropped series the chart could not read does not reject the chart.
+      const unread = normalizeChartData(
+        { labels: ['A'], datasets: [kept, { label: 'Dropped', data: ['not a number'] }] },
+        { chartType }
+      )
+      expect(unread.datasets[0].data).toEqual([1234])
+      expect(unread.warnings.join(' ')).toContain('1 extra dataset(s) were dropped')
+    }
+  )
+
+  it.each([
+    [
+      'points',
+      [
+        { x: '1.234,5', y: '1' },
+        { x: '2', y: '1.200' },
+      ],
+    ],
+    [
+      '[x, y] arrays',
+      [
+        ['1.234,5', '1'],
+        ['2', '1.200'],
+      ],
+    ],
+  ])('is taken from the coordinates of scatter %s', (_label, data) => {
+    const r = normalizeChartData({ datasets: [{ label: 'S', data }] }, { chartType: 'scatter' })
+    expect(r.datasets[0].data).toEqual([
+      { x: 1234.5, y: 1 },
+      { x: 2, y: 1200 },
+    ])
+  })
+
+  it('is still taken from the values of every series a chart draws', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['A', 'B'],
+        datasets: [
+          { label: 'One', data: ['1.200', '3'] },
+          { label: 'Two', data: ['1.234,5', '2'] },
+        ],
+      },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([1200, 3])
+  })
+})
+
 describe('values written as text that no chart can hold', () => {
   it.each([
     ['1e400', /too large for a chart/],

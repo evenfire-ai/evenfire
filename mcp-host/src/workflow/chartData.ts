@@ -230,9 +230,17 @@ class NumberReader {
   }
 }
 
-/** Every string a chart's data holds, at the depths values are read from. */
-function dataTexts(datasets: unknown[]): string[] {
+/**
+ * The text of every value the chart reads as a number, where the point readers
+ * read it: a plain value, the second member of a [label, value] pair, a
+ * record's value field (the first one that holds a number, as readRecordPoint
+ * takes it) or, on scatter and bubble, x, y and the radius of a point or of an
+ * [x, y, r] array. Labels and other
+ * fields are text, not values, so they never set the decimal convention.
+ */
+function dataTexts(datasets: unknown[], chartType: string): string[] {
   const texts: string[] = []
+  const isXY = XY_TYPES.has(chartType)
   const add = (v: unknown) => {
     if (typeof v === 'string') texts.push(v)
   }
@@ -240,9 +248,33 @@ function dataTexts(datasets: unknown[]): string[] {
     const data = (ds as { data?: unknown } | null)?.data
     if (!Array.isArray(data)) continue
     for (const entry of data) {
-      add(entry)
-      if (Array.isArray(entry)) entry.forEach(add)
-      else if (entry && typeof entry === 'object') Object.values(entry).forEach(add)
+      if (typeof entry === 'string') add(entry)
+      else if (Array.isArray(entry)) {
+        if (isXY && entry.length >= 2) {
+          add(entry[0])
+          add(entry[1])
+          if (chartType === 'bubble') add(entry[2])
+        } else if (!isXY && entry.length === 2) add(entry[1])
+      } else if (entry && typeof entry === 'object') {
+        const obj = entry as Record<string, unknown>
+        if (isXY) {
+          add(obj.x)
+          add(obj.y)
+          if (chartType === 'bubble') add(obj.r ?? obj.radius ?? obj.size)
+          continue
+        }
+        for (const key of VALUE_KEYS) {
+          if (!(key in obj)) continue
+          const value = obj[key]
+          add(value)
+          // NumberReader.read returns or throws here, so readRecordPoint stops.
+          const read =
+            typeof value === 'number'
+              ? Number.isFinite(value)
+              : typeof value === 'string' && parseText(value) !== undefined
+          if (read) break
+        }
+      }
     }
   }
   return texts
@@ -569,12 +601,17 @@ export function normalizeChartData(raw: unknown, opts: NormalizeOptions): Normal
   }
 
   const isXY = XY_TYPES.has(chartType)
-  const reader = new NumberReader(dataTexts(obj.datasets))
+  // A single-series chart draws only the first dataset, so the rest are left
+  // out before anything is read from them: their values must not set the
+  // decimal convention, their labels must not become categories, and a value
+  // the chart could not read must not reject it.
+  const retained = SINGLE_SERIES_TYPES.has(chartType) ? obj.datasets.slice(0, 1) : obj.datasets
+  const reader = new NumberReader(dataTexts(retained, chartType))
   const datasets: NormalizedDataset[] = []
   /** Per dataset, the label each value carried, when every value carried one. */
   const labelled: Array<string[] | undefined> = []
 
-  obj.datasets.forEach((dsRaw, index) => {
+  retained.forEach((dsRaw, index) => {
     if (dsRaw === null || typeof dsRaw !== 'object' || Array.isArray(dsRaw)) {
       fail(`${root}.datasets[${index}] must be an object with a \`data\` array.`)
     }
@@ -599,16 +636,12 @@ export function normalizeChartData(raw: unknown, opts: NormalizeOptions): Normal
     datasets.push({ ...(carryStyle(ds) as NormalizedDataset), data: series.data })
   })
 
-  // A single-series chart draws only the first dataset, so the rest are left out
-  // before anything is read from them: their labels must not become categories.
-  if (SINGLE_SERIES_TYPES.has(chartType) && datasets.length > 1) {
-    const extra = datasets.length - 1
+  if (retained.length < obj.datasets.length) {
+    const extra = obj.datasets.length - retained.length
     warnings.push(
       `\`${root}.datasets[${extra === 1 ? '1' : `1..${extra}`}]\`: "${chartType}" draws a ` +
         `single series; ${extra} extra dataset(s) were dropped.`
     )
-    datasets.splice(1)
-    labelled.splice(1)
   }
 
   if (labelled.some(Boolean)) {
