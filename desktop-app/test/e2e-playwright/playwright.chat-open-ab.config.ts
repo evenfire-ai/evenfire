@@ -17,7 +17,8 @@ export default defineConfig({
   ...base,
   globalSetup: undefined,
   projects: [{ name: 'chat-open-ab', testMatch: /chat-open-ab\.spec\.ts/ }],
-  timeout: 2_400_000,
+  // Paced opens, 65 s rate-limit windows between launches and stateless suspension waits.
+  timeout: 5_400_000,
   expect: { timeout: 30_000 },
   retries: 0,
   workers: 1,

@@ -77,7 +77,14 @@ function isolatedPath(runDir: string, target: string): string {
     throw new Error(`Cache target escapes isolation through a symlink: ${target}`)
   return target
 }
+// Each open sends about 8 REST requests, several of them counted by control-api's 120/min
+// per-session limit; spacing opens keeps a launch under that limit. The wait is outside the timing.
+const OPEN_PACE_MS = 4_000
+let lastOpenAt = 0
 async function openChat(page: Page, host: string, label: string, chat: Chat): Promise<number> {
+  const pace = lastOpenAt + OPEN_PACE_MS - Date.now()
+  if (pace > 0) await page.waitForTimeout(pace)
+  lastOpenAt = Date.now()
   await page
     .getByRole('navigation', { name: 'Chat breadcrumb', exact: true })
     .getByRole('button', { name: 'Chat', exact: true })
