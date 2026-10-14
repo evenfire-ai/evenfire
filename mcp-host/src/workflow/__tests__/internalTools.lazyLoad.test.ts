@@ -1,5 +1,6 @@
-// Importing the internal tools loads no document library: the host starts
-// without them, and each loads the first time its generator runs.
+// Importing the internal tools loads no document library and no generator
+// module: the host starts without them, and each loads the first time its
+// generator runs.
 import { describe, expect, it, vi } from 'vitest'
 import { createRequire } from 'module'
 import * as path from 'path'
@@ -23,6 +24,16 @@ vi.mock('chart.js', () => (imported.push('chart.js'), {}))
 vi.mock('@napi-rs/canvas', () => (imported.push('@napi-rs/canvas'), {}))
 vi.mock('jszip', () => (imported.push('jszip'), {}))
 
+// Generator modules, recorded and left as they are.
+const generators = vi.hoisted(() => [] as string[])
+vi.mock('../dashboardRender', async original => (generators.push('dashboardRender'), original()))
+vi.mock('../dashboardCharts', async original => (generators.push('dashboardCharts'), original()))
+vi.mock('../chartGenerator', async original => (generators.push('chartGenerator'), original()))
+vi.mock('../pdfGenerator', async original => (generators.push('pdfGenerator'), original()))
+vi.mock('../docxGenerator', async original => (generators.push('docxGenerator'), original()))
+vi.mock('../xlsxWorkbook', async original => (generators.push('xlsxWorkbook'), original()))
+vi.mock('../pptxDeck', async original => (generators.push('pptxDeck'), original()))
+
 /** Libraries Node has loaded through require, which vi.mock does not see. */
 function required(): string[] {
   const cache = createRequire(path.resolve('package.json')).cache
@@ -38,5 +49,11 @@ describe('internal tools module', () => {
     expect(INTERNAL_TOOLS.length).toBeGreaterThan(0)
     expect(imported).toEqual([])
     expect(required()).toEqual(before)
+  })
+
+  it('loads no generator module when imported', async () => {
+    const { INTERNAL_TOOLS } = await import('../internalTools')
+    expect(INTERNAL_TOOLS.length).toBeGreaterThan(0)
+    expect(generators).toEqual([])
   })
 })

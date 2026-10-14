@@ -7,13 +7,12 @@
  *
  * This file lists them. Each schema is in toolSchemas/, and each generator is
  * its own module, loaded with its library on first use: pdfmake (PDF), docx
- * (DOCX), exceljs (XLSX), pptxgenjs (PPTX), chart.js (PNG charts); markdown and
- * the dashboard HTML are written as strings. No headless browser is involved,
+ * (DOCX), exceljs (XLSX), pptxgenjs (PPTX), chart.js (PNG charts), and the
+ * dashboard renderer; markdown and the dashboard HTML are written as strings. No headless browser is involved,
  * but @napi-rs/canvas is native, and charts, PDFs and the measuring of DOCX
  * tables and slide text read the fonts the image installs (fonts.ts).
  */
 import { CONTEXT_FILES_TOOLS, loadContextFilesMounts } from './contextFiles'
-import { runGenerateDashboard } from './dashboardRender'
 import { runGenerateMarkdown } from './markdownGenerator'
 import { runGeneratePptx } from './pptxGenerator'
 import { fromModule, nullsUnset, prepared } from './toolExecution'
@@ -72,7 +71,10 @@ const generateXlsx: InternalToolDefinition = { ...XLSX_TOOL, execute: runGenerat
 const generateDashboardTool: InternalToolDefinition = {
   ...DASHBOARD_TOOL,
   execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
-    return runGenerateDashboard(args, outputDir)
+    return fromModule(
+      () => import('./dashboardRender'),
+      m => m.runGenerateDashboard(args, outputDir)
+    )
   },
 }
 
