@@ -131,7 +131,7 @@ set +x
 read -r -s -p 'Isolated Control API PostgreSQL admin DSN: ' CONTROL_API_REAL_PG_ADMIN_URL; printf '\n'
 read -r -s -p 'Authorized producer PostgreSQL DSN: ' CONTROL_API_REAL_MEMBER_REGISTRATION_PG_URL; printf '\n'
 read -r -s -p 'Verified producer API base URL: ' CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL; printf '\n'
-read -r -s -p 'Authorized producer HMAC secret: ' CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET; printf '\n'
+read -r -s -p 'Authorized producer HMAC secret (hidden)> ' CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET; printf '\n'
 export CONTROL_API_REAL_PG_ADMIN_URL CONTROL_API_REAL_MEMBER_REGISTRATION_PG_URL
 export CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET
 ```
