@@ -3,7 +3,6 @@ import express from 'express'
 import bcrypt from 'bcryptjs'
 import { createPublicKey, randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
-import request from 'supertest'
 import { initDb } from '../src/db.js'
 import { passwordAdmissionDenialsTotal } from '../src/observability/metrics.js'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
@@ -18,6 +17,11 @@ import {
 } from '../src/services/directory/membership.js'
 import { createPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
+import {
+  type ExternalRestHttpProcess,
+  boundedRequest as request,
+  startExternalRestHttpProcess,
+} from './helpers/externalRestHttpProcess.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({
@@ -718,21 +722,17 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     )
       .export({ type: 'spki', format: 'pem' })
       .toString()
-    const { createAuthRouter } = await import('../../external-rest-api/src/routes/auth.js')
-    const { config: externalConfig } = await import('../../external-rest-api/src/config.js')
-    const { withExternalRequestContext } =
-      await import('../../external-rest-api/src/requestContext.js')
     const server = app.listen(0, '127.0.0.1')
     await new Promise<void>(resolve => server.once('listening', resolve))
     const address = server.address() as { port: number }
-    const previous = externalConfig.controlApiBaseUrl
-    externalConfig.controlApiBaseUrl = `http://127.0.0.1:${address.port}`
-    const edge = express()
-    edge.set('trust proxy', 1)
-    edge.use(express.json())
-    edge.use(withExternalRequestContext)
-    edge.use('/api/v1', createAuthRouter())
+    let child: ExternalRestHttpProcess | undefined
     try {
+      child = await startExternalRestHttpProcess({
+        controlApiBaseUrl: `http://127.0.0.1:${address.port}`,
+        controlApiServiceToken: 'synthetic-login-service-token',
+        jwtPrivateKey: process.env.CONTROL_API_SESSION_JWT_PRIVATE_KEY!,
+      })
+      const edge = child.baseUrl
       await holder.pool.query("INSERT INTO users(email) VALUES ('no-password@example.invalid')")
       for (const email of [
         'member@example.invalid',
@@ -762,10 +762,14 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       )
       expect(keys).toContain('external_authentication_attempt:ip:192.0.2.123')
     } finally {
-      externalConfig.controlApiBaseUrl = previous
-      await new Promise<void>((resolve, reject) =>
-        server.close(error => (error ? reject(error) : resolve()))
-      )
+      try {
+        await child?.stop()
+      } finally {
+        server.closeAllConnections()
+        await new Promise<void>((resolve, reject) =>
+          server.close(error => (error ? reject(error) : resolve()))
+        )
+      }
     }
   })
 })

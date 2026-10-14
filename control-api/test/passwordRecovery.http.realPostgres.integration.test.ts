@@ -3,7 +3,11 @@ import express from 'express'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import type { Server } from 'node:http'
 import { Pool } from 'pg'
-import request from 'supertest'
+import {
+  type ExternalRestHttpProcess,
+  boundedRequest as request,
+  startExternalRestHttpProcess,
+} from './helpers/externalRestHttpProcess.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -19,11 +23,9 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
   let db: typeof import('../src/db.js')
   let controlApp: express.Express
   let controlServer: Server
-  let publicApp: express.Express
+  let publicApp: string
+  let publicProcess: ExternalRestHttpProcess
   let bcrypt: typeof import('bcryptjs').default
-  let externalConfig: (typeof import('../../external-rest-api/src/config.js'))['config']
-  let previousBaseUrl: string
-  let previousServiceToken: string
   let sourceCounter = 1
 
   beforeAll(async () => {
@@ -66,21 +68,18 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     controlServer = controlApp.listen(0, '127.0.0.1')
     await new Promise<void>(resolve => controlServer.once('listening', resolve))
 
-    externalConfig = (await import('../../external-rest-api/src/config.js')).config
-    previousBaseUrl = externalConfig.controlApiBaseUrl
-    previousServiceToken = externalConfig.controlApiServiceToken
-    externalConfig.controlApiBaseUrl = `http://127.0.0.1:${(controlServer.address() as { port: number }).port}/api/v1`
-    externalConfig.controlApiServiceToken = serviceToken
-    const { createApp } = await import('../../external-rest-api/src/app.js')
-    publicApp = createApp()
+    publicProcess = await startExternalRestHttpProcess({
+      controlApiBaseUrl: `http://127.0.0.1:${(controlServer.address() as { port: number }).port}/api/v1`,
+      controlApiServiceToken: serviceToken,
+      jwtPublicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    })
+    publicApp = publicProcess.baseUrl
   }, 60_000)
 
   afterAll(async () => {
+    let childCleanup: PromiseSettledResult<void | undefined> | undefined
     try {
-      if (externalConfig) {
-        externalConfig.controlApiBaseUrl = previousBaseUrl
-        externalConfig.controlApiServiceToken = previousServiceToken
-      }
+      ;[childCleanup] = await Promise.allSettled([publicProcess?.stop()])
       if (controlServer) {
         await new Promise<void>((resolve, reject) =>
           controlServer.close(error => (error ? reject(error) : resolve()))
@@ -95,6 +94,7 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
       await admin?.end()
       vi.unstubAllEnvs()
     }
+    if (childCleanup?.status === 'rejected') throw childCleanup.reason
   })
 
   async function acceptedInvitationSession() {
@@ -102,7 +102,8 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
       await import('../src/services/directory/membership.js')
     const { signExternalSessionToken } =
       await import('../src/utils/auth/externalSessionAuthToken.js')
-    const { verifyToken } = await import('../../external-rest-api/src/authToken.js')
+    const { verifyExternalSessionToken: verifyToken } =
+      await import('../src/utils/auth/externalSessionAuthToken.js')
     const email = `r2m1-${randomBytes(8).toString('hex')}@example.invalid`
     const invitation = await createSilentInvitationForTeams({
       inviteeName: 'Synthetic invited member',

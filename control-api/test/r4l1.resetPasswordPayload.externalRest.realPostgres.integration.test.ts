@@ -7,7 +7,6 @@ import { once } from 'node:events'
 import { type Server, createServer, request as httpRequest } from 'node:http'
 import path from 'node:path'
 import { Pool } from 'pg'
-import request from 'supertest'
 import { config as controlConfig } from '../src/config.js'
 import { initDb } from '../src/db.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
@@ -16,6 +15,11 @@ import { createExternalInvitationsRouter } from '../src/routes/external/invitati
 import { createSilentInvitationForTeams } from '../src/services/directory/membership.js'
 import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { registerAndSendInvitation } from '../src/services/invitationFlowRegistrationService.js'
+import {
+  type ExternalRestHttpProcess,
+  boundedRequest as request,
+  startExternalRestHttpProcess,
+} from './helpers/externalRestHttpProcess.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({ pool: null as unknown as Pool }))
@@ -46,14 +50,8 @@ const internalToken = 'Synthetic-R4-L1-Internal-Token'
 const tenantId = 'r4-l1-test-tenant'
 const tenantKid = 'r4-l1-test-credential'
 const tenantSecret = 'Synthetic-R4-L1-Member-Registration-Secret'
-type ExternalConfig = typeof import('../../external-rest-api/src/config.js').config
-type ExternalRouterFactory =
-  typeof import('../../external-rest-api/src/routes/invitations.js').createInvitationsRouter
-type ExternalAuthoritySender =
-  typeof import('../../external-rest-api/src/http/passwordAdmissionError.js').sendPasswordAuthorityError
-let externalConfig: ExternalConfig
-let createInvitationsRouter: ExternalRouterFactory
-let sendPasswordAuthorityError: ExternalAuthoritySender
+const externalConfig = { controlApiBaseUrl: '' }
+const publicChildren: ExternalRestHttpProcess[] = []
 let originalExternalJwtKey: string | undefined
 
 function listen(server: Server): Promise<number> {
@@ -194,10 +192,17 @@ realProducer('R4-L1 reset password payload through the public route and real pro
   let controlApiPort = 0
   let controlBaseUrl = ''
   let producerBaseUrl = ''
-  let publicApp: express.Express
+  async function publicApp() {
+    const child = await startExternalRestHttpProcess({
+      controlApiBaseUrl: externalConfig.controlApiBaseUrl,
+      controlApiServiceToken: internalToken,
+      jwtPrivateKey: controlConfig.sessionJwtPrivateKey,
+    })
+    publicChildren.push(child)
+    return child.baseUrl
+  }
   let producerResponses: Array<{ status: number; error: string | null }> = []
   let originalControlConfig: Record<string, unknown> = {}
-  let originalExternalConfig: Record<string, unknown> = {}
 
   beforeAll(async () => {
     originalExternalJwtKey = process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY
@@ -208,13 +213,6 @@ realProducer('R4-L1 reset password payload through the public route and real pro
         publicKeyEncoding: { type: 'spki', format: 'pem' },
       }).publicKey
     }
-    externalConfig = (await import('../../external-rest-api/src/config.js')).config
-    createInvitationsRouter = (await import('../../external-rest-api/src/routes/invitations.js'))
-      .createInvitationsRouter
-    sendPasswordAuthorityError = (
-      await import('../../external-rest-api/src/http/passwordAdmissionError.js')
-    ).sendPasswordAuthorityError
-
     admin = new Pool({ connectionString: adminUrl })
     await admin.query(`CREATE DATABASE "${controlDatabase}"`)
     await admin.query(`CREATE DATABASE "${producerDatabase}"`)
@@ -240,12 +238,6 @@ realProducer('R4-L1 reset password payload through the public route and real pro
       desktopAppName: controlConfig.desktopAppName,
       internalServiceToken: controlConfig.internalServiceTokens['external-rest-api'],
     }
-    originalExternalConfig = {
-      controlApiBaseUrl: externalConfig.controlApiBaseUrl,
-      controlApiServiceToken: externalConfig.controlApiServiceToken,
-      controlApiServiceName: externalConfig.controlApiServiceName,
-    }
-
     const producerPort = await freeLoopbackPort()
     memberRegistrationProcess = spawn(
       path.join(memberRegistrationRoot!, 'node_modules/.bin/tsx'),
@@ -314,21 +306,12 @@ realProducer('R4-L1 reset password payload through the public route and real pro
     controlBaseUrl = `http://127.0.0.1:${controlApiPort}/api/v1`
 
     externalConfig.controlApiBaseUrl = controlBaseUrl
-    externalConfig.controlApiServiceToken = internalToken
-    externalConfig.controlApiServiceName = 'external-rest-api'
-    publicApp = express()
-    publicApp.use(express.json())
-    publicApp.use(createInvitationsRouter())
-    publicApp.use(
-      (error: unknown, _req: express.Request, res: express.Response, _next: unknown) => {
-        if (sendPasswordAuthorityError(error, res)) return
-        res.status(500).json({ error: 'Internal Server Error' })
-      }
-    )
   }, 60_000)
 
   afterAll(async () => {
+    let childCleanup: PromiseSettledResult<void>[] | undefined
     try {
+      childCleanup = await Promise.allSettled(publicChildren.splice(0).map(child => child.stop()))
       await ambiguousProxy?.close()
       if (controlServer) {
         await new Promise<void>(resolve => controlServer!.close(() => resolve()))
@@ -364,13 +347,14 @@ realProducer('R4-L1 reset password payload through the public route and real pro
           originalControlConfig.internalServiceToken
         )
       }
-      Object.assign(externalConfig, originalExternalConfig)
       if (originalExternalJwtKey === undefined) {
         delete process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY
       } else {
         process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY = originalExternalJwtKey
       }
     }
+    const failed = childCleanup?.find(result => result.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
   })
 
   async function createReset(emailLabel: string) {
@@ -422,12 +406,14 @@ realProducer('R4-L1 reset password payload through the public route and real pro
   it('returns sanitized 400 for the producer invalid-payload response and allows valid retry', async () => {
     producerResponses = []
     const reset = await createReset('empty')
-    const empty = await request(publicApp).post('/invitations/password').send({
-      token: reset.proof,
-      email: reset.email,
-      invitationId: reset.invitationId,
-      password: '',
-    })
+    const empty = await request(await publicApp())
+      .post('/api/v1/invitations/password')
+      .send({
+        token: reset.proof,
+        email: reset.email,
+        invitationId: reset.invitationId,
+        password: '',
+      })
 
     expect(empty.status).toBe(400)
     expect(empty.body).toEqual({ error: 'Password must be between 8 and 256 characters' })
@@ -451,12 +437,14 @@ realProducer('R4-L1 reset password payload through the public route and real pro
     })
 
     const replacementPassword = `Synthetic-R4-L1-Replacement-${randomUUID()}`
-    const valid = await request(publicApp).post('/invitations/password').send({
-      token: reset.proof,
-      email: reset.email,
-      invitationId: reset.invitationId,
-      password: replacementPassword,
-    })
+    const valid = await request(await publicApp())
+      .post('/api/v1/invitations/password')
+      .send({
+        token: reset.proof,
+        email: reset.email,
+        invitationId: reset.invitationId,
+        password: replacementPassword,
+      })
     expect(valid.status).toBe(200)
     expect(valid.headers['set-cookie']).toEqual(
       expect.arrayContaining([expect.stringContaining('profile_session=')])
@@ -488,12 +476,14 @@ realProducer('R4-L1 reset password payload through the public route and real pro
     const proxyBaseUrl = await ambiguousProxy.start()
     externalConfig.controlApiBaseUrl = proxyBaseUrl
     const replacementPassword = `Synthetic-R4-L1-Ambiguous-${randomUUID()}`
-    const unknown = await request(publicApp).post('/invitations/password').send({
-      token: reset.proof,
-      email: reset.email,
-      invitationId: reset.invitationId,
-      password: replacementPassword,
-    })
+    const unknown = await request(await publicApp())
+      .post('/api/v1/invitations/password')
+      .send({
+        token: reset.proof,
+        email: reset.email,
+        invitationId: reset.invitationId,
+        password: replacementPassword,
+      })
     await ambiguousProxy.droppedResetResponse
     expect(unknown.status).toBe(503)
     expect(unknown.body).toEqual({ error: 'recovery_outcome_unknown', retryAfterSeconds: 2 })
@@ -523,12 +513,14 @@ realProducer('R4-L1 reset password payload through the public route and real pro
     ).toBe(true)
 
     externalConfig.controlApiBaseUrl = controlBaseUrl
-    const replay = await request(publicApp).post('/invitations/password').send({
-      token: reset.proof,
-      email: reset.email,
-      invitationId: reset.invitationId,
-      password: replacementPassword,
-    })
+    const replay = await request(await publicApp())
+      .post('/api/v1/invitations/password')
+      .send({
+        token: reset.proof,
+        email: reset.email,
+        invitationId: reset.invitationId,
+        password: replacementPassword,
+      })
     expect(replay.status).toBe(409)
     expect(replay.headers['set-cookie']).toBeUndefined()
     expect(ambiguousProxy.resetPostCount).toBe(1)

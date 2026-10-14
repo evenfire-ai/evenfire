@@ -4,11 +4,15 @@ import bcrypt from 'bcryptjs'
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
 import { type Server } from 'node:http'
 import { Pool } from 'pg'
-import request from 'supertest'
 import { config as controlConfig } from '../src/config.js'
 import { initDb } from '../src/db.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { createExternalUsersRouter } from '../src/routes/external/users.js'
+import {
+  type ExternalRestHttpProcess,
+  boundedRequest as request,
+  startExternalRestHttpProcess,
+} from './helpers/externalRestHttpProcess.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({ pool: null as unknown as Pool }))
@@ -44,15 +48,11 @@ realPg('R6 credential-generation update fence (Control API + External REST, Post
   const email = `r6-credential-${randomUUID()}@example.invalid`
   let admin: Pool
   let server: Server
-  let publicApp: express.Express
+  let publicApp: string
+  let publicProcess: ExternalRestHttpProcess
   let userId: string
   let sessionToken: string
   let initialHash: string
-  let externalConfig: typeof import('../../external-rest-api/src/config.js').config
-  let createMeRouter: typeof import('../../external-rest-api/src/routes/me.js').createMeRouter
-  let oldExternalBaseUrl: string
-  let oldExternalServiceToken: string
-  let oldExternalServiceName: string
   const oldExternalJwtPublicKey = process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY
   const oldInternalToken = controlConfig.internalServiceTokens['external-rest-api']
 
@@ -96,32 +96,19 @@ realPg('R6 credential-generation update fence (Control API + External REST, Post
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('Control API did not bind TCP')
 
-    vi.resetModules()
-    externalConfig = (await import('../../external-rest-api/src/config.js')).config
-    createMeRouter = (await import('../../external-rest-api/src/routes/me.js')).createMeRouter
-    oldExternalBaseUrl = externalConfig.controlApiBaseUrl
-    oldExternalServiceToken = externalConfig.controlApiServiceToken
-    oldExternalServiceName = externalConfig.controlApiServiceName
-    externalConfig.controlApiBaseUrl = `http://127.0.0.1:${address.port}/api/v1`
-    externalConfig.controlApiServiceToken = internalToken
-    externalConfig.controlApiServiceName = 'external-rest-api'
-
-    publicApp = express()
-    publicApp.use(express.json())
-    publicApp.use(createMeRouter())
-    publicApp.use((_error: unknown, _req: express.Request, res: express.Response) =>
-      res.status(500).json({ error: 'Internal Server Error' })
-    )
+    publicProcess = await startExternalRestHttpProcess({
+      controlApiBaseUrl: `http://127.0.0.1:${address.port}/api/v1`,
+      controlApiServiceToken: internalToken,
+      jwtPrivateKey: controlConfig.sessionJwtPrivateKey,
+    })
+    publicApp = publicProcess.baseUrl
   }, 60_000)
 
   afterAll(async () => {
+    let childCleanup: PromiseSettledResult<void | undefined> | undefined
     try {
+      ;[childCleanup] = await Promise.allSettled([publicProcess?.stop()])
       if (server) await new Promise<void>(resolve => server.close(() => resolve()))
-      if (externalConfig) {
-        externalConfig.controlApiBaseUrl = oldExternalBaseUrl
-        externalConfig.controlApiServiceToken = oldExternalServiceToken
-        externalConfig.controlApiServiceName = oldExternalServiceName
-      }
       if (oldExternalJwtPublicKey === undefined) {
         delete process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY
       } else {
@@ -133,6 +120,7 @@ realPg('R6 credential-generation update fence (Control API + External REST, Post
     } finally {
       await admin?.end()
     }
+    if (childCleanup?.status === 'rejected') throw childCleanup.reason
   })
 
   it('returns 409 without overwriting the concurrent credential and preserves public guidance', async () => {
@@ -157,7 +145,7 @@ realPg('R6 credential-generation update fence (Control API + External REST, Post
     })
 
     const change = request(publicApp)
-      .put('/me/password')
+      .put('/api/v1/me/password')
       .set('authorization', `Bearer ${sessionToken}`)
       .send({ currentPassword, newPassword: submittedPassword })
       .then(response => response)

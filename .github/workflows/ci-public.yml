@@ -134,6 +134,11 @@ jobs:
         working-directory: external-rest-api
         run: npm ci
 
+      - name: Build External REST composed HTTP child
+        if: matrix.service == 'control-api'
+        working-directory: external-rest-api
+        run: npm run build
+
       # External REST producer-contract tests import Control API route sources
       # directly, so install the producer's dependencies in this isolated job.
       - name: Install Control API producer dependencies
@@ -356,6 +361,10 @@ jobs:
       - name: Install External REST contract-test dependencies
         working-directory: external-rest-api
         run: npm ci
+
+      - name: Build External REST composed HTTP child
+        working-directory: external-rest-api
+        run: npm run build
 
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api

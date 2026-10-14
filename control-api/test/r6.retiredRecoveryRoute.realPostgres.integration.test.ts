@@ -4,7 +4,6 @@ import bcrypt from 'bcryptjs'
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
 import { type Server } from 'node:http'
 import { Pool } from 'pg'
-import request from 'supertest'
 import { config as controlConfig } from '../src/config.js'
 import { initDb } from '../src/db.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
@@ -12,6 +11,11 @@ import { createExternalInvitationsRouter } from '../src/routes/external/invitati
 import { createSilentInvitationForTeams } from '../src/services/directory/membership.js'
 import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
+import {
+  type ExternalRestHttpProcess,
+  boundedRequest as request,
+  startExternalRestHttpProcess,
+} from './helpers/externalRestHttpProcess.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({ pool: null as unknown as Pool }))
@@ -54,18 +58,14 @@ realPg('R6 retired-user password reset route and public mapping (PostgreSQL)', (
   let admin: Pool
   let server: Server
   let producerApp: express.Express
-  let app: express.Express
+  let app: string
+  let publicProcess: ExternalRestHttpProcess
   let userId: string
   let invitationId: string
   let invitationToken: string
   let initialHash: string
-  let externalConfig: typeof import('../../external-rest-api/src/config.js').config
-  let createPublicInvitationsRouter: typeof import('../../external-rest-api/src/routes/invitations.js').createInvitationsRouter
   let publicAddress: string
   const oldInternalToken = controlConfig.internalServiceTokens['external-rest-api']
-  let oldExternalBaseUrl: string
-  let oldExternalServiceToken: string
-  let oldExternalServiceName: string
   const oldExternalJwtPublicKey = process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY
 
   beforeAll(async () => {
@@ -125,34 +125,19 @@ realPg('R6 retired-user password reset route and public mapping (PostgreSQL)', (
     )
       .export({ type: 'spki', format: 'pem' })
       .toString()
-    vi.resetModules()
-    externalConfig = (await import('../../external-rest-api/src/config.js')).config
-    createPublicInvitationsRouter = (
-      await import('../../external-rest-api/src/routes/invitations.js')
-    ).createInvitationsRouter
-    oldExternalBaseUrl = externalConfig.controlApiBaseUrl
-    oldExternalServiceToken = externalConfig.controlApiServiceToken
-    oldExternalServiceName = externalConfig.controlApiServiceName
-    externalConfig.controlApiBaseUrl = `${publicAddress}/api/v1`
-    externalConfig.controlApiServiceToken = internalToken
-    externalConfig.controlApiServiceName = 'external-rest-api'
-
-    app = express()
-    app.use(express.json())
-    app.use(createPublicInvitationsRouter())
-    app.use((_error: unknown, _req: express.Request, res: express.Response, _next: unknown) =>
-      res.status(500).json({ error: 'Internal Server Error' })
-    )
+    publicProcess = await startExternalRestHttpProcess({
+      controlApiBaseUrl: `${publicAddress}/api/v1`,
+      controlApiServiceToken: internalToken,
+      jwtPrivateKey: controlConfig.sessionJwtPrivateKey,
+    })
+    app = publicProcess.baseUrl
   }, 60_000)
 
   afterAll(async () => {
+    let childCleanup: PromiseSettledResult<void | undefined> | undefined
     try {
+      ;[childCleanup] = await Promise.allSettled([publicProcess?.stop()])
       if (server) await new Promise<void>(resolve => server.close(() => resolve()))
-      if (externalConfig) {
-        externalConfig.controlApiBaseUrl = oldExternalBaseUrl
-        externalConfig.controlApiServiceToken = oldExternalServiceToken
-        externalConfig.controlApiServiceName = oldExternalServiceName
-      }
       if (oldExternalJwtPublicKey === undefined) {
         delete process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY
       } else {
@@ -164,11 +149,12 @@ realPg('R6 retired-user password reset route and public mapping (PostgreSQL)', (
     } finally {
       await admin?.end()
     }
+    if (childCleanup?.status === 'rejected') throw childCleanup.reason
   })
 
   it('emits user_retired at Control API and maps it to a non-enumerating public result', async () => {
     const preview = await request(app)
-      .get('/invitations/token/r6-synthetic-retired-reset-proof')
+      .get('/api/v1/invitations/token/r6-synthetic-retired-reset-proof')
       .expect(200)
     expect(preview.body).toMatchObject({
       id: invitationId,
@@ -190,7 +176,7 @@ realPg('R6 retired-user password reset route and public mapping (PostgreSQL)', (
       .expect(401, { error: 'user_retired' })
 
     const response = await request(app)
-      .post('/invitations/password')
+      .post('/api/v1/invitations/password')
       .send({
         token: 'r6-synthetic-retired-reset-proof',
         email,
