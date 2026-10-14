@@ -2,25 +2,26 @@ import { type DbClient, pool, withTransaction } from '../../db.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import {
+  type GenericInvitationForTeamsInput,
+  type GenericInvitationPurpose,
   INVITATION_TTL_HOURS,
-  type InvitationForTeamsInput,
   type InvitationPurpose,
   type InvitationRow,
   type InvitationTeamAssignment,
   type InvitationTeamRow,
   type InvitationUserRow,
   type InvitationWithTeams,
+  activateDraftInvitation,
+  cleanupStaleDraftInvitations,
   ensureInvitationUser,
   getInvitationRecordById,
   getInvitationRecordByToken,
   getInvitationRecordByTokenOrId,
   insertInvitationForTeams,
-  insertInvitationTeams,
   invitationForTeamsResponse,
   invitationResponse,
   invitationUserIsRetired,
   loadInvitationTeams,
-  lockPasswordResetUser,
   normalizeInvitationPurpose,
   normalizeInvitationTeamAssignments,
 } from './invitationStore.js'
@@ -43,20 +44,8 @@ export {
 export { withPasswordWorkLease as withMemberPasswordWorkLease } from '../auth/passwordWorkOwnership.js'
 export type { MemberPasswordWorkLease } from '../auth/passwordWorkOwnership.js'
 
-const DRAFT_INVITATION_CLEANUP_HOURS = 24
 const DRAFT_INVITATION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 let draftInvitationCleanupTimer: ReturnType<typeof setInterval> | null = null
-
-class PasswordResetPrincipalUnavailableError extends Error {}
-
-async function cleanupStaleDraftInvitations(): Promise<void> {
-  await pool.query(
-    `DELETE FROM invitations
-      WHERE status = 'draft'
-        AND created_at < NOW() - ($1::text || ' hours')::interval`,
-    [String(DRAFT_INVITATION_CLEANUP_HOURS)]
-  )
-}
 
 export function startDraftInvitationCleanup(intervalMs = DRAFT_INVITATION_CLEANUP_INTERVAL_MS) {
   if (draftInvitationCleanupTimer) return
@@ -352,18 +341,12 @@ export async function addMemberToTeam(
 }
 
 async function createInvitationForTeamsRecord(
-  input: InvitationForTeamsInput,
+  input: GenericInvitationForTeamsInput,
   options: { sendEmail: boolean }
 ) {
   cleanupStaleDraftInvitations().catch(() => undefined)
   const purpose = normalizeInvitationPurpose(input.purpose)
   const inserted = await withTransaction(async db => {
-    if (purpose === 'password_reset') {
-      const principal = await lockPasswordResetUser(db, input.email.trim().toLowerCase())
-      if (!principal || invitationUserIsRetired(principal)) {
-        throw new PasswordResetPrincipalUnavailableError()
-      }
-    }
     return insertInvitationForTeams(db, {
       ...input,
       purpose,
@@ -389,22 +372,8 @@ async function createInvitationForTeamsRecord(
     }
   )
 
-  const activated = await pool.query(
-    `UPDATE invitations
-        SET status = 'pending'
-      WHERE id = $1
-        AND status = 'draft'
-      RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at, expires_at, accepted_at, accepted_user_id`,
-    [inserted.invitation.id]
-  )
-  const pending = activated.rows[0] as InvitationRow | undefined
+  const pending = await activateDraftInvitation(pool, inserted.invitation.id)
   if (!pending) {
-    if (purpose === 'password_reset') {
-      const current = await getInvitationRecordById(pool, inserted.invitation.id)
-      if (current?.status === 'revoked') {
-        return invitationForTeamsResponse(current, inserted.teams)
-      }
-    }
     throw new Error('Failed to activate invitation after registration')
   }
   return invitationForTeamsResponse(
@@ -437,7 +406,7 @@ export async function createInvitationForTeams(input: {
   inviteeName: string
   email: string
   teamAssignments?: readonly InvitationTeamAssignment[]
-  purpose?: InvitationPurpose
+  purpose?: GenericInvitationPurpose
   fallbackRole?: InviteRole
 }) {
   return createInvitationForTeamsRecord(input, { sendEmail: true })
@@ -448,7 +417,7 @@ export async function createSilentInvitationForTeams(input: {
   email: string
   teamAssignments?: readonly InvitationTeamAssignment[]
   fallbackRole?: InviteRole
-  purpose?: InvitationPurpose
+  purpose?: GenericInvitationPurpose
 }) {
   return createInvitationForTeamsRecord(input, { sendEmail: false })
 }
@@ -534,38 +503,6 @@ export async function createPasswordSetupInvitationForUser(userId: string) {
     email: created.email,
     teamId: created.team_id,
   }
-}
-
-export async function requestProfilePasswordReset(email: string): Promise<{ requested: true }> {
-  const normalizedEmail = email.trim().toLowerCase()
-  if (!normalizedEmail) return { requested: true }
-
-  const userResult = await pool.query(
-    `SELECT id, email, name
-       FROM users
-      WHERE email = $1
-        AND lifecycle_state = 'active'
-      LIMIT 1`,
-    [normalizedEmail]
-  )
-  const user =
-    (userResult.rows[0] as { id: string; email: string; name: string | null } | undefined) || null
-  if (!user) {
-    return { requested: true }
-  }
-
-  try {
-    await createInvitationForTeams({
-      inviteeName: user.name || user.email.split('@')[0] || user.email,
-      email: user.email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
-    })
-  } catch (error) {
-    if (!(error instanceof PasswordResetPrincipalUnavailableError)) throw error
-  }
-  return { requested: true }
 }
 
 export async function softDeleteMember(teamId: string, userId: string, operatorSub: string) {
@@ -1448,3 +1385,5 @@ export async function revokeManagedInvitationForUser(managerUserId: string, invi
   await pool.query(`UPDATE invitations SET status = 'revoked' WHERE id = $1`, [invitation.id])
   return { revoked: true as const, id: invitation.id, email: invitation.email }
 }
+
+export { requestProfilePasswordReset } from './passwordResetInvitations.js'

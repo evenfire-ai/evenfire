@@ -27,6 +27,10 @@ import {
   updateUserPassword,
   withMemberPasswordWorkLease,
 } from '../src/services/directory/membership.js'
+import {
+  createPasswordResetInvitation,
+  createSilentPasswordResetInvitation,
+} from '../src/services/directory/passwordResetInvitations.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({
@@ -244,12 +248,9 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     expect((await row()).failures).toEqual([])
   })
   it('serializes authenticated password change and recovery through one durable owner', async () => {
-    const invitation = await createSilentInvitationForTeams({
+    const invitation = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     let resolveCompareEntered!: () => void
     let releaseCompare!: () => void
@@ -324,12 +325,9 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     expect(bcrypt.getRounds(credential.password_hash)).toBe(12)
   })
   it('completes authenticated reset with a one-connection PostgreSQL pool', async () => {
-    const invitation = await createSilentInvitationForTeams({
+    const invitation = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     const previousPool = holder.pool
     const singleConnectionPool = new Pool({
@@ -431,12 +429,9 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     ).toBe('0')
   })
   it('does not accept a pending password-reset link through generic invitation acceptance', async () => {
-    const invitation = await createSilentInvitationForTeams({
+    const invitation = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
 
     await expect(acceptInvitationForEmail(email, '', invitation.id)).resolves.toEqual({
@@ -453,13 +448,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   })
   it('revokes every other pending password-reset link for the same account only', async () => {
     const makeReset = (address: string) =>
-      createSilentInvitationForTeams({
-        inviteeName: 'Synthetic member',
-        email: address,
-        purpose: 'password_reset',
-        teamAssignments: [],
-        fallbackRole: 'member',
-      })
+      createSilentPasswordResetInvitation({ inviteeName: 'Synthetic member', email: address })
     const redeemed = await makeReset(email)
     const sibling = await makeReset(email)
     await expect(getInvitationByToken(redeemed.token)).resolves.toMatchObject({
@@ -533,12 +522,9 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   })
 
   it('maps the email producer token to its distinct recovery row ID', async () => {
-    const invitation = await createInvitationForTeams({
+    const invitation = await createPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     expect(invitationFlow.registerAndSendInvitation).toHaveBeenCalledWith(
       email,
@@ -573,13 +559,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
 
   it('allows at most one credential mutation when sibling reset links race', async () => {
     const makeReset = () =>
-      createSilentInvitationForTeams({
-        inviteeName: 'Synthetic member',
-        email,
-        purpose: 'password_reset',
-        teamAssignments: [],
-        fallbackRole: 'member',
-      })
+      createSilentPasswordResetInvitation({ inviteeName: 'Synthetic member', email })
     const first = await makeReset()
     const second = await makeReset()
     const hash = vi.spyOn(bcrypt, 'hash')
@@ -622,13 +602,15 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   })
   it('rejects expired, revoked, wrong-purpose and wrong-account recovery credentials', async () => {
     const makeInvitation = (purpose: 'password_reset' | 'member_invitation') =>
-      createSilentInvitationForTeams({
-        inviteeName: 'Synthetic member',
-        email,
-        purpose,
-        teamAssignments: [],
-        fallbackRole: 'member',
-      })
+      purpose === 'password_reset'
+        ? createSilentPasswordResetInvitation({ inviteeName: 'Synthetic member', email })
+        : createSilentInvitationForTeams({
+            inviteeName: 'Synthetic member',
+            email,
+            purpose,
+            teamAssignments: [],
+            fallbackRole: 'member',
+          })
     const expired = await makeInvitation('password_reset')
     const revoked = await makeInvitation('password_reset')
     const wrongAccount = await makeInvitation('password_reset')
@@ -661,12 +643,9 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     ).toBe(hash)
   })
   it('fails recovery closed when durable password work authority is unavailable', async () => {
-    const invitation = await createSilentInvitationForTeams({
+    const invitation = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     await holder.pool.query(
       'ALTER TABLE password_verification_work RENAME TO password_verification_work_unavailable'
@@ -690,12 +669,9 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     }
   })
   it('bounds recovery hashing with the shared owner and does not hash while it is busy', async () => {
-    const invitation = await createSilentInvitationForTeams({
+    const invitation = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     const lease = await acquirePasswordWork()
     expect(lease).not.toBeNull()

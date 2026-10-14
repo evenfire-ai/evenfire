@@ -9,6 +9,7 @@ import {
   createSilentInvitationForTeams,
   setInvitationPasswordForEmail,
 } from '../src/services/directory/membership.js'
+import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({
@@ -102,12 +103,9 @@ realPg('R2-M5 password-reset row-lock compatibility on PostgreSQL 16', () => {
     expect(accepted).not.toHaveProperty('error')
     await holder.pool.query('DELETE FROM team_members WHERE user_id = $1', [userId])
 
-    const recoveryInvitation = await createSilentInvitationForTeams({
+    const recoveryInvitation = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R2-M5 member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     recoveryInvitationId = recoveryInvitation.id
   })

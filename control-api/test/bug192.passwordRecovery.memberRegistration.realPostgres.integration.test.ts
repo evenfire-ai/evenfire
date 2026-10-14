@@ -9,6 +9,7 @@ import { createExternalAuthRouter } from '../src/routes/external/auth.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
 import { passwordIdentifierKey } from '../src/services/auth/passwordAdmissionState.js'
 import { createInvitationForTeams } from '../src/services/directory/membership.js'
+import { createPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({
@@ -136,12 +137,9 @@ realCrossService(
         .expect(429)
       expect(deniedLogin.body.error).toBe('rate_limited')
 
-      const invitation = await createInvitationForTeams({
+      const invitation = await createPasswordResetInvitation({
         inviteeName: 'Synthetic issue 1055 member',
         email,
-        purpose: 'password_reset',
-        teamAssignments: [],
-        fallbackRole: 'member',
       })
       const flowRows = await memberRegistrationDb.query(
         `SELECT invitation_jwt

@@ -15,6 +15,7 @@ import {
   setInvitationPasswordForUser,
   withMemberPasswordWorkLease,
 } from '../src/services/directory/membership.js'
+import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { createPostgresCommitReplyBlackhole } from './helpers/realPostgresCancellation.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -71,10 +72,9 @@ realPg('password-work operation preservation on PostgreSQL 16', () => {
     const email = `${randomBytes(8).toString('hex')}@example.invalid`
     const user = (await local.query('INSERT INTO users(email) VALUES ($1) RETURNING id', [email]))
       .rows[0]
-    const invitation = await createSilentInvitationForTeams({
+    const invitation = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic preservation member',
       email,
-      purpose: 'password_reset',
     })
     return { email, userId: user.id as string, invitation }
   }
@@ -185,10 +185,9 @@ realPg('password-work operation preservation on PostgreSQL 16', () => {
 
   it('keeps a real lost-COMMIT outcome above failed owner cleanup in an outer reservation', async () => {
     const fixture = await resetFixture()
-    const sibling = await createSilentInvitationForTeams({
+    const sibling = await createSilentPasswordResetInvitation({
       email: fixture.email,
       inviteeName: 'Synthetic sibling',
-      purpose: 'password_reset',
     })
     const blackhole = await createPostgresCommitReplyBlackhole(connectionString)
     const proxyPool = new Pool({ connectionString: blackhole.connectionString, max: 1 })
@@ -291,10 +290,9 @@ realPg('password-work operation preservation on PostgreSQL 16', () => {
 
   it('keeps concurrent supplied domain operations at one committed reset', async () => {
     const fixture = await resetFixture()
-    const sibling = await createSilentInvitationForTeams({
+    const sibling = await createSilentPasswordResetInvitation({
       email: fixture.email,
       inviteeName: 'Synthetic sibling',
-      purpose: 'password_reset',
     })
     const hash = vi.spyOn(bcrypt, 'hash')
     const outcomes = await withMemberPasswordWorkLease(lease =>

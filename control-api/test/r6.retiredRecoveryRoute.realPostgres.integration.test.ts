@@ -10,6 +10,7 @@ import { initDb } from '../src/db.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
 import { createSilentInvitationForTeams } from '../src/services/directory/membership.js'
+import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -80,12 +81,9 @@ realPg('R6 retired-user password reset route and public mapping (PostgreSQL)', (
       [email, initialHash]
     )
     userId = String(user.rows[0].id)
-    const invitation = await createSilentInvitationForTeams({
+    const invitation = await createSilentPasswordResetInvitation({
       inviteeName: 'R6 synthetic retired member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     invitationId = invitation.id
     invitationToken = invitation.token

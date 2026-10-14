@@ -1,4 +1,4 @@
-import { type DbClient } from '../../db.js'
+import { type DbClient, pool } from '../../db.js'
 import { type InviteRole, normalizeTeamRoleInput } from './types.js'
 
 export const INVITATION_TTL_HOURS = 48
@@ -368,4 +368,35 @@ export function invitationForTeamsResponse(invitation: InvitationRow, teams: Inv
       role: team.role,
     })),
   }
+}
+
+const DRAFT_INVITATION_CLEANUP_HOURS = 24
+
+export async function cleanupStaleDraftInvitations(): Promise<void> {
+  await pool.query(
+    `DELETE FROM invitations
+      WHERE status = 'draft'
+        AND created_at < NOW() - ($1::text || ' hours')::interval`,
+    [String(DRAFT_INVITATION_CLEANUP_HOURS)]
+  )
+}
+
+export type GenericInvitationPurpose = Exclude<InvitationPurpose, 'password_reset'>
+export type GenericInvitationForTeamsInput = Omit<InvitationForTeamsInput, 'purpose'> & {
+  purpose?: GenericInvitationPurpose
+}
+
+export async function activateDraftInvitation(
+  db: Pick<DbClient, 'query'>,
+  invitationId: string
+): Promise<InvitationRow | undefined> {
+  const activated = await db.query(
+    `UPDATE invitations
+        SET status = 'pending'
+      WHERE id = $1
+        AND status = 'draft'
+      RETURNING id, team_id, invitee_name, email, role, token, status, purpose, created_at, expires_at, accepted_at, accepted_user_id`,
+    [invitationId]
+  )
+  return activated.rows[0] as InvitationRow | undefined
 }

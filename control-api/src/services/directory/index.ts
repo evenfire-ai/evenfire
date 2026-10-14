@@ -52,7 +52,6 @@ export {
   listManagedPendingInvitationsForUser,
   resendInvitation,
   resendManagedInvitationForUser,
-  requestProfilePasswordReset,
   revokeManagedInvitationForUser,
   revokePendingInvitation,
   findMembership,
@@ -107,3 +106,9 @@ export {
 export type { WorkflowGrantTeam, WorkflowGrantUser } from './workflowGrants.js'
 
 export * from './adminProvisioning.js'
+
+export {
+  requestProfilePasswordReset,
+  createPasswordResetInvitation,
+  createSilentPasswordResetInvitation,
+} from './passwordResetInvitations.js'

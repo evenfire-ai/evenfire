@@ -16,6 +16,7 @@ import {
   setInvitationPasswordForEmail,
   updateUserPassword,
 } from '../src/services/directory/membership.js'
+import { createPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -98,12 +99,9 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     return metric.values.find(value => value.labels.reason === reason)?.value ?? 0
   }
   async function recoverPassword(nextPassword: string) {
-    const invitation = await createInvitationForTeams({
+    const invitation = await createPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email: 'member@example.invalid',
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     const proof = 'synthetic-trusted-reset-proof'
     invitationFlow.validateInvitationFlowToken.mockResolvedValue({
@@ -412,19 +410,13 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     }
   })
   it('returns acknowledged password recovery after a post-commit client cleanup failure', async () => {
-    const invitation = await createInvitationForTeams({
+    const invitation = await createPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email: 'member@example.invalid',
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
-    const sibling = await createInvitationForTeams({
+    const sibling = await createPasswordResetInvitation({
       inviteeName: 'Synthetic member',
       email: 'member@example.invalid',
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     const connect = holder.pool.connect.bind(holder.pool)
     const connectSpy = vi.spyOn(holder.pool, 'connect')

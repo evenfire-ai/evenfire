@@ -14,6 +14,7 @@ import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { sendPasswordAdmissionError } from '../src/middleware/passwordLoginAdmission.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
 import { createSilentInvitationForTeams } from '../src/services/directory/membership.js'
+import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { registerAndSendInvitation } from '../src/services/invitationFlowRegistrationService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -382,19 +383,13 @@ realProducer('R4-L1 reset password payload through the public route and real pro
         [email, originalHash]
       )
     ).rows[0].id as string
-    const invitation = await createSilentInvitationForTeams({
+    const invitation = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R4-L1 member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
-    const sibling = await createSilentInvitationForTeams({
+    const sibling = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R4-L1 member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     await registerAndSendInvitation(
       email,

@@ -11,6 +11,7 @@ import {
   createSilentInvitationForTeams,
   setInvitationPasswordForEmail,
 } from '../src/services/directory/membership.js'
+import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { createPostgresCommitReplyBlackhole } from './helpers/realPostgresCancellation.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -84,19 +85,13 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
     )
     userId = user.rows[0].id as string
 
-    const primary = await createSilentInvitationForTeams({
+    const primary = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R2-H2 member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
-    const sibling = await createSilentInvitationForTeams({
+    const sibling = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R2-H2 member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     resetInvitationId = primary.id
     siblingInvitationId = sibling.id
@@ -201,19 +196,13 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
       [retryEmail, retryUserHash]
     )
     const retryUserId = retryUser.rows[0].id as string
-    const retryReset = await createSilentInvitationForTeams({
+    const retryReset = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R2-H3 member',
       email: retryEmail,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
-    const retrySibling = await createSilentInvitationForTeams({
+    const retrySibling = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R2-H3 member',
       email: retryEmail,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
 
     await normalPool.query(`
@@ -313,19 +302,13 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
         [retryEmail, retryUserHash]
       )
       const retryUserId = retryUser.rows[0].id as string
-      const reset = await createSilentInvitationForTeams({
+      const reset = await createSilentPasswordResetInvitation({
         inviteeName: 'Synthetic R3-M1 member',
         email: retryEmail,
-        purpose: 'password_reset',
-        teamAssignments: [],
-        fallbackRole: 'member',
       })
-      const sibling = await createSilentInvitationForTeams({
+      const sibling = await createSilentPasswordResetInvitation({
         inviteeName: 'Synthetic R3-M1 member',
         email: retryEmail,
-        purpose: 'password_reset',
-        teamAssignments: [],
-        fallbackRole: 'member',
       })
 
       await normalPool.query(`CREATE SEQUENCE ${sequenceName}`)

@@ -11,6 +11,7 @@ import {
   createSilentInvitationForTeams,
   setInvitationPasswordForEmail,
 } from '../src/services/directory/membership.js'
+import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { createPostgresFatalCommitReplyInjector } from './helpers/realPostgresFatalCommit.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
@@ -78,19 +79,13 @@ realPg('R4-M2 PostgreSQL session termination after COMMIT dispatch', () => {
       [email, originalHash]
     )
     userId = user.rows[0].id as string
-    const primary = await createSilentInvitationForTeams({
+    const primary = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R4-M2 member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
-    const sibling = await createSilentInvitationForTeams({
+    const sibling = await createSilentPasswordResetInvitation({
       inviteeName: 'Synthetic R4-M2 member',
       email,
-      purpose: 'password_reset',
-      teamAssignments: [],
-      fallbackRole: 'member',
     })
     resetInvitationId = primary.id
     siblingInvitationId = sibling.id
