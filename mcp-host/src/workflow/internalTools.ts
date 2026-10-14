@@ -3,7 +3,8 @@
  *
  * Available to all workflows — no MCP server required. Each tool produces
  * a document artifact (markdown, PDF, DOCX, XLSX, PPTX, PNG chart, HTML
- * dashboard) and writes it to the output directory (getOutputDir).
+ * dashboard) and writes it to the output directory: the caller's own folder in
+ * chat (workspace/callerOutputs.ts), getOutputDir in a workflow.
  *
  * This file lists them. Each schema is in toolSchemas/, and each generator is
  * its own module, loaded with its library on first use: pdfmake (PDF), docx

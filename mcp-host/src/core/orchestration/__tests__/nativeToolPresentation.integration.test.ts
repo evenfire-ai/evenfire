@@ -21,6 +21,7 @@ import type { SingleTurnProvider } from '../../../llm/types'
 import { logger } from '../../../logger'
 import { McpManager } from '../../../mcp/manager'
 import type { Task, TaskResponsePayload } from '../../../queue/types'
+import { CALLER_OUTPUTS_DIR } from '../../../workspace/callerOutputs'
 import { ConversationManager } from '../../conversation/conversation'
 import {
   CAPABILITY_CONTRACT_TEXT,
@@ -39,6 +40,19 @@ import { NATIVE_DIRECT_DEV_BASELINE } from './nativeDirectDevBaseline'
 
 type RemoteTool = { name: string; description: string; inputSchema: Record<string, unknown> }
 const remote = vi.hoisted(() => ({ catalogs: new Map<string, RemoteTool[]>(), calls: vi.fn() }))
+// statfs reports the volume sized to its free space, so the disk's occupancy
+// never meets the free-space floor of the caller's folder.
+vi.mock('fs', async original => {
+  const actual = await original<typeof import('fs')>()
+  return {
+    ...actual,
+    statfsSync: (target: string, options: { bigint: true }) => {
+      const reading = actual.statfsSync(target, options)
+      return { ...reading, blocks: reading.bavail, bfree: reading.bavail }
+    },
+  }
+})
+
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   Client: class {
     server = ''
@@ -144,6 +158,7 @@ const toolResult = (messages: ChatMessage[], id: string) => {
 }
 
 let outputDir: string
+let callerRoot: string
 let logEvents: Array<Record<string, unknown>>
 const savedConfig = {
   enableApproval: appConfig.enableApproval,
@@ -158,7 +173,10 @@ const savedOutputDir = process.env.CLERUM_OUTPUT_DIR
 
 beforeEach(() => {
   outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'native-presentation-'))
-  process.env.CLERUM_OUTPUT_DIR = outputDir
+  // The task's managed caller root; its generated decks go to its own folder.
+  callerRoot = path.join(outputDir, 'users', 'authenticated-user')
+  fs.mkdirSync(callerRoot, { recursive: true })
+  delete process.env.CLERUM_OUTPUT_DIR
   logEvents = []
   vi.spyOn(logger, 'info').mockImplementation(((entry: unknown) => {
     if (entry && typeof entry === 'object' && 'component' in entry)
@@ -178,7 +196,12 @@ afterEach(async () => {
 })
 
 const events = (component: string) => logEvents.filter(event => event.component === component)
-const pptxFiles = () => fs.readdirSync(outputDir).filter(file => file.endsWith('.pptx'))
+const pptxFiles = () => {
+  const generated = path.join(callerRoot, CALLER_OUTPUTS_DIR)
+  return fs.existsSync(generated)
+    ? fs.readdirSync(generated).filter(file => file.endsWith('.pptx'))
+    : []
+}
 
 async function runScenario(scenario: Scenario, turns: Turn[]) {
   Object.assign(appConfig, {
@@ -294,6 +317,7 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
     onComplete: vi.fn(),
     onFail: vi.fn(),
     dynamicEnvProvider: () => ({}),
+    gfsCallerWorkspacePath: callerRoot,
   }
   const executor = new TaskExecutor(task, deps)
   // `tool:called` is emitted once per execution, after admission. The call ids

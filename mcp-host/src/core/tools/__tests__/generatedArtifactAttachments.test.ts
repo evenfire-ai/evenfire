@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs'
 import JSZip from 'jszip'
 import * as os from 'os'
 import * as path from 'path'
 import { zipEntries } from '../../../workflow/__tests__/support/zipEntries'
 import type { ArtifactMetadata } from '../../../workflow/types'
+import { CALLER_OUTPUTS_DIR } from '../../../workspace/callerOutputs'
 import type { NativeToolConfig } from '../../interfaces'
 import type { Attachment } from '../../types'
 import {
@@ -52,14 +53,37 @@ function officePackage(text: string): Promise<Buffer> {
     .generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
 }
 
+// statfs reports the volume sized to its free space, so the disk's occupancy
+// never meets the free-space floor of the caller's folder.
+vi.mock('fs', async original => {
+  const actual = await original<typeof import('fs')>()
+  return {
+    ...actual,
+    statfsSync: (target: string, options: { bigint: true }) => {
+      const reading = actual.statfsSync(target, options)
+      return { ...reading, blocks: reading.bavail, bfree: reading.bavail }
+    },
+  }
+})
+
 describe('generated internal artifact attachments', () => {
   let outputDir: string
+  // The chat caller the registries below generate for: a managed caller root
+  // (`<host>/users/<key>`), whose own folder receives their files.
+  let callerRoot: string
   let originalOutputDir: string | undefined
 
   beforeEach(() => {
     originalOutputDir = process.env.CLERUM_OUTPUT_DIR
     outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-generated-attachments-'))
+    callerRoot = path.join(outputDir, 'host', 'users', 'caller-a')
+    fs.mkdirSync(callerRoot, { recursive: true })
   })
+
+  /** A file the chat generators wrote for the test caller. */
+  function generated(name: string): string {
+    return path.join(callerRoot, CALLER_OUTPUTS_DIR, name)
+  }
 
   afterEach(() => {
     if (originalOutputDir === undefined) delete process.env.CLERUM_OUTPUT_DIR
@@ -323,7 +347,6 @@ describe('generated internal artifact attachments', () => {
     ['a markdown link holding a reference', 'probe-[red&#97;ction](https://a.example)-value'],
     ['an image', 'probe-![redaction](missing.png)-value'],
   ])('does not attach a PDF that prints a secret split by %s', async (_label, body) => {
-    process.env.CLERUM_OUTPUT_DIR = outputDir
     const registry = new NativeToolRegistry(
       {
         workspacePath: outputDir,
@@ -343,7 +366,14 @@ describe('generated internal artifact attachments', () => {
       {
         maxBytes: 52_428_800,
         secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
-      }
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      callerRoot
     )
     const pdf = registry.get('clerum__generate_pdf')!
     const leaked = await pdf.execute({ filename: 'split.pdf', body })
@@ -354,7 +384,6 @@ describe('generated internal artifact attachments', () => {
   })
 
   it('does not attach a document whose arguments hold a secret with a quote or a backslash', async () => {
-    process.env.CLERUM_OUTPUT_DIR = outputDir
     const secret = 'probe"redac\\tion-value'
     const registry = new NativeToolRegistry(
       {
@@ -375,7 +404,14 @@ describe('generated internal artifact attachments', () => {
       {
         maxBytes: 52_428_800,
         secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: secret }],
-      }
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      callerRoot
     )
     const pdf = registry.get('clerum__generate_pdf')!
     const leaked = await pdf.execute({ filename: 'quoted.pdf', body: `value: ${secret}` })
@@ -384,7 +420,6 @@ describe('generated internal artifact attachments', () => {
   })
 
   it('does not attach a DOCX whose table cell prints a secret a link splits', async () => {
-    process.env.CLERUM_OUTPUT_DIR = outputDir
     const registry = new NativeToolRegistry(
       {
         workspacePath: outputDir,
@@ -404,7 +439,14 @@ describe('generated internal artifact attachments', () => {
       {
         maxBytes: 52_428_800,
         secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
-      }
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      callerRoot
     )
     const docx = registry.get('clerum__generate_docx')!
     const cell = 'probe-[redaction](https://a.example)-value'
@@ -421,7 +463,6 @@ describe('generated internal artifact attachments', () => {
     const protectedValue = 'probe-redaction-value'
 
     function xlsxTool() {
-      process.env.CLERUM_OUTPUT_DIR = outputDir
       const registry = new NativeToolRegistry(
         {
           workspacePath: outputDir,
@@ -441,7 +482,14 @@ describe('generated internal artifact attachments', () => {
         {
           maxBytes: 52_428_800,
           secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: protectedValue }],
-        }
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        callerRoot
       )
       return registry.get('clerum__generate_xlsx')!
     }
@@ -476,7 +524,7 @@ describe('generated internal artifact attachments', () => {
         sheets: [{ name: 'S', rows: [{ [key]: 'ordinary' }] }],
       })
       expect(result.is_error).toBe(false)
-      expect(sheetXml(path.join(outputDir, 'keyed.xlsx'))).toContain(protectedValue)
+      expect(sheetXml(generated('keyed.xlsx'))).toContain(protectedValue)
       expect(result.attachments ?? []).toHaveLength(0)
     })
   })
@@ -485,7 +533,6 @@ describe('generated internal artifact attachments', () => {
     const protectedValue = '3141592653'
 
     function tool(name: string) {
-      process.env.CLERUM_OUTPUT_DIR = outputDir
       const registry = new NativeToolRegistry(
         {
           workspacePath: outputDir,
@@ -505,7 +552,14 @@ describe('generated internal artifact attachments', () => {
         {
           maxBytes: 52_428_800,
           secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: protectedValue }],
-        }
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        callerRoot
       )
       return registry.get(name)!
     }
@@ -535,9 +589,7 @@ describe('generated internal artifact attachments', () => {
         })
         expect(result.is_error).toBe(false)
         // Witness: the sheet holds, as a number, digits the arguments never spelled.
-        expect(packageXml(path.join(outputDir, 'stored.xlsx'))).toContain(
-          `<v>${protectedValue}</v>`
-        )
+        expect(packageXml(generated('stored.xlsx'))).toContain(`<v>${protectedValue}</v>`)
         expect(result.attachments ?? []).toHaveLength(0)
       }
     )
@@ -548,7 +600,7 @@ describe('generated internal artifact attachments', () => {
         sheets: [{ name: 'S', rows: [['Amount'], ['1,234']], columnFormats: { Amount: '0' } }],
       })
       expect(result.is_error).toBe(false)
-      expect(packageXml(path.join(outputDir, 'ordinary.xlsx'))).toContain('<v>1234</v>')
+      expect(packageXml(generated('ordinary.xlsx'))).toContain('<v>1234</v>')
       expect(result.attachments ?? []).toHaveLength(1)
     })
 
@@ -565,7 +617,7 @@ describe('generated internal artifact attachments', () => {
       })
       const leaked = await tool('clerum__generate_pptx').execute(deck(['3,141,592,653']))
       expect(leaked.is_error).toBe(false)
-      expect(packageXml(path.join(outputDir, 'chart.pptx'))).toContain(protectedValue)
+      expect(packageXml(generated('chart.pptx'))).toContain(protectedValue)
       expect(leaked.attachments ?? []).toHaveLength(0)
 
       const ordinary = await tool('clerum__generate_pptx').execute(deck(['1,234']))
@@ -576,7 +628,6 @@ describe('generated internal artifact attachments', () => {
 
   describe('what a delivered file shows that its arguments never spelled', () => {
     function toolWith(name: string, secrets: string[]) {
-      process.env.CLERUM_OUTPUT_DIR = outputDir
       const registry = new NativeToolRegistry(
         {
           workspacePath: outputDir,
@@ -596,7 +647,14 @@ describe('generated internal artifact attachments', () => {
         {
           maxBytes: 52_428_800,
           secretEntriesProvider: () => secrets.map((value, i) => ({ name: `PROBE_${i}`, value })),
-        }
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        callerRoot
       )
       return registry.get(name)!
     }
@@ -642,7 +700,7 @@ describe('generated internal artifact attachments', () => {
       expect(result.is_error).toBe(false)
       // Witness: neither the arguments nor the package spell the value.
       expect(JSON.stringify(sheet(cell, format))).not.toContain(secret)
-      expect(packageXml(path.join(outputDir, 'shown.xlsx'))).not.toContain(secret)
+      expect(packageXml(generated('shown.xlsx'))).not.toContain(secret)
       expect(result.attachments ?? []).toHaveLength(0)
     })
 
@@ -666,7 +724,7 @@ describe('generated internal artifact attachments', () => {
       }
       const leaked = await toolWith('clerum__generate_pptx', ['3,141,592,653']).execute(deck)
       expect(leaked.is_error).toBe(false)
-      expect(packageXml(path.join(outputDir, 'labels.pptx'))).not.toContain('3,141,592,653')
+      expect(packageXml(generated('labels.pptx'))).not.toContain('3,141,592,653')
       expect(leaked.attachments ?? []).toHaveLength(0)
       const ordinary = await toolWith('clerum__generate_pptx', ['9,999,999,999']).execute(deck)
       expect(ordinary.attachments ?? []).toHaveLength(1)
@@ -745,7 +803,6 @@ describe('generated internal artifact attachments', () => {
       envAllowlist: ['PATH'],
       memoryMaxSize: 1048576,
     }
-    process.env.CLERUM_OUTPUT_DIR = outputDir
     const registry = new NativeToolRegistry(
       config,
       'conv-1',
@@ -754,7 +811,14 @@ describe('generated internal artifact attachments', () => {
       undefined,
       undefined,
       null,
-      { maxBytes: 52_428_800 }
+      { maxBytes: 52_428_800 },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      callerRoot
     )
 
     const result = await registry.get('clerum__generate_markdown')!.execute({

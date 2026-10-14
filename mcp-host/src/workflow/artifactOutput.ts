@@ -4,6 +4,9 @@
 import { createHash, randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
+import { freeSpaceFloor } from '../internalTools/gfsDownloadStore'
+import { logger } from '../logger'
+import { CALLER_OUTPUTS_DIR } from '../workspace/callerOutputs'
 import type { ArtifactMetadata, InternalToolResult } from './types'
 
 const MAX_STEM_LENGTH = 120
@@ -272,7 +275,9 @@ export function getDirectorySize(dir: string): number {
 }
 
 /**
- * Enforce the per-recipe output quota before a file is written.
+ * Enforce the output quota of one folder before a file is written: a workflow
+ * run's output, or one chat caller's folder, so in chat each user has their
+ * own. A caller's folder must also leave the Host volume its free-space floor.
  *
  * Reads the ceiling from `CLERUM_WORKFLOW_OUTPUT_QUOTA_MB` (default: 50 MB).
  * Throws if the current directory usage + `incomingBytes` would exceed the cap.
@@ -301,6 +306,45 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
         `${mb(incomingBytes)} MB, over the ${quotaMB} MB limit. Make the file smaller, or ask ` +
         'the user to remove earlier generated files or an operator to raise ' +
         'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
+    )
+  }
+  if (path.basename(outputDir) === CALLER_OUTPUTS_DIR)
+    enforceFreeSpaceFloor(outputDir, incomingBytes)
+}
+
+let unmeasurableVolumeReported = false
+
+/**
+ * Every caller's folder shares the Host volume, so their quotas together do
+ * not bound it: a write must leave the free space GFS keeps (freeSpaceFloor).
+ * Nothing is removed to make room. A volume that cannot be measured does not
+ * refuse the write; that is logged once.
+ */
+function enforceFreeSpaceFloor(outputDir: string, incomingBytes: number): void {
+  let space: fs.BigIntStatsFs | undefined
+  try {
+    space = fs.statfsSync(outputDir, { bigint: true })
+  } catch {
+    space = undefined
+  }
+  if (!space || space.bsize <= 0n || space.blocks <= 0n || space.bavail < 0n) {
+    if (!unmeasurableVolumeReported) {
+      unmeasurableVolumeReported = true
+      logger.warn(
+        { component: 'ArtifactOutput' },
+        'Could not measure the Host volume; generated files are written without the free-space floor'
+      )
+    }
+    return
+  }
+  const blocks = (BigInt(incomingBytes) + space.bsize - 1n) / space.bsize
+  const floor = freeSpaceFloor(space)
+  if (blocks * space.bsize + floor > space.bavail * space.bsize) {
+    const mb = (bytes: bigint) => (Number(bytes) / (1024 * 1024)).toFixed(1)
+    throw new Error(
+      `Not enough free space: the Host keeps ${mb(floor)} MB free and this file needs ` +
+        `${mb(BigInt(incomingBytes))} MB. Make the file smaller, or ask the user to remove ` +
+        'earlier generated files or an operator to free space on the Host.'
     )
   }
 }

@@ -1,4 +1,4 @@
-/** Where generated artifacts are written: the run's /output in a workflow, the Host workspace in chat. */
+/** Where a workflow run writes its artifacts (/output); in chat, the former shared folder. */
 import * as path from 'path'
 import { config } from '../config'
 
@@ -46,6 +46,9 @@ export function validateOutputPath(p: string, outputDir: string): string {
 
 /**
  * Resolve the directory for generated artifacts. Re-evaluated on every call.
+ * Chat generation does not use it: each caller's files go to their own folder
+ * (workspace/callerOutputs.ts), and in chat this only names the former shared
+ * folder, counted once at startup.
  *
  * Resolution order:
  *   1. `CLERUM_OUTPUT_DIR` — explicit override (dev / tests / ad-hoc).

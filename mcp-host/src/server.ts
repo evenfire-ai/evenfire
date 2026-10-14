@@ -81,11 +81,11 @@ import {
   openExistingArtifactFile,
   resolveExistingArtifactFile,
 } from './workflow/artifactPaths'
-import { getOutputDir } from './workflow/internalTools'
 import { isInternalWorkflowArtifactName } from './workflow/mcpHostJwtState'
 import { runtimeAuthHealthSnapshot } from './workflow/runtimeAuthHealth'
 import { createWorkflowRouter } from './workflow/workflowRouter'
 import { WorkflowService } from './workflow/workflowService'
+import type { CallerOutputLookup } from './workspace/callerOutputs'
 
 export type {
   HostActivityEvent,
@@ -130,6 +130,12 @@ export type {
   SetModelResult,
   SetTitleResult,
 } from './server/types'
+
+/** A caller's generated files cannot be reached safely; no other folder is used instead. */
+const ARTIFACT_STORE_UNAVAILABLE = {
+  error: 'Generated files are unavailable right now',
+  code: 'artifact_store_unavailable',
+} as const
 
 /**
  * Body budgets for chat payloads carrying base64 attachments.
@@ -359,6 +365,7 @@ export class RPCServer {
   private setTitleHandler: SetTitleHandler | null = null
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
+  private chatArtifactDirResolver: ((userId: string) => CallerOutputLookup) | null = null
   private lifecycleGate: RuntimeLifecycleGate | null = null
 
   constructor(port: number = 8080) {
@@ -708,16 +715,20 @@ export class RPCServer {
       '/v1/runtime/artifacts',
       rejectWorkflowRuntimeArtifacts,
       runtimeEdgeGuard(['rpc-proxy']),
-      (_req, res) => {
+      (req, res) => {
         try {
-          // Re-resolved per request: getOutputDir() depends on the Host CRD, which
-          // hydrates async after boot — a captured value would freeze the path
-          // (and point at the old /tmp emptyDir). D.2b.
-          const artifactDir = getOutputDir()
-          if (!fs.existsSync(artifactDir)) {
+          // Only the caller's own folder, re-verified per request; none yet
+          // means nothing generated.
+          const lookup = this.callerArtifactDir(req)
+          if ('missing' in lookup) {
             json(res, 200, { artifacts: [] })
             return
           }
+          if (!('dir' in lookup)) {
+            json(res, 503, ARTIFACT_STORE_UNAVAILABLE)
+            return
+          }
+          const artifactDir = lookup.dir
           const files = []
           for (const entry of fs.readdirSync(artifactDir, { withFileTypes: true })) {
             if (!entry.isFile() || isInternalWorkflowArtifactName(entry.name)) continue
@@ -752,7 +763,17 @@ export class RPCServer {
           json(res, 404, { error: 'Artifact not found' })
           return
         }
-        const artifactDir = getOutputDir()
+        // Another user's file is not found here, whatever its name.
+        const lookup = this.callerArtifactDir(req)
+        if ('missing' in lookup) {
+          json(res, 404, { error: 'Artifact not found' })
+          return
+        }
+        if (!('dir' in lookup)) {
+          json(res, 503, ARTIFACT_STORE_UNAVAILABLE)
+          return
+        }
+        const artifactDir = lookup.dir
         let artifact: OpenedArtifactFile
         try {
           artifact = openExistingArtifactFile(artifactDir, filename)
@@ -938,6 +959,18 @@ export class RPCServer {
 
   setArtifactSecretEntriesProvider(provider: () => ArtifactSecretEntry[]): void {
     this.artifactSecretEntriesProvider = provider
+  }
+
+  /** Where a Desktop user's generated files are (callerOutputs.ts). */
+  setChatArtifactDirResolver(resolver: (userId: string) => CallerOutputLookup): void {
+    this.chatArtifactDirResolver = resolver
+  }
+
+  /** The requesting user's folder; unwired or without a user, unavailable, never a shared one. */
+  private callerArtifactDir(req: Request): CallerOutputLookup {
+    const userId = getRuntimeCallerContext(req)?.userId
+    if (!this.chatArtifactDirResolver || !userId) return { failureCode: 'ENOENT' }
+    return this.chatArtifactDirResolver(userId)
   }
 
   /** Stage 3 (stateless-agents) — wire the DRAINING fence + activity tracker
