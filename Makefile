@@ -1406,6 +1406,30 @@ test-e2e-hcc-storage-layout-switch: ## Run the #825 storage-layout gate across l
 	@echo "Running HCC storage-layout switch E2E gate..."
 	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-storage-layout-switch.sh
 
+.PHONY: test-e2e-825-desktop-continuity
+test-e2e-825-desktop-continuity: ## Run the #825 Desktop journey across stateful/stateless switches (owned branch profile, forwards held, real model turns)
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	test -n "$$ctx" || { echo "Refusing #825 Desktop E2E: explicit Kubernetes context is required" >&2; exit 1; }; \
+	test -n "$${E2E_DEV_LOGIN_EMAIL:-}" || { echo "Set E2E_DEV_LOGIN_EMAIL to the seeded Desktop login (admin@evenfire.local on a T2 profile)" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	. scripts/e2e/e2e-lib.sh; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	report="$${E2E_825_DESKTOP_REPORT:-$(CURDIR)/desktop-app/test-results/e2e-825-desktop-continuity.json}"; \
+	mkdir -p "$$(dirname "$$report")"; rm -f "$$report"; \
+	cd desktop-app && npm run verify:electron && npm run build; \
+	status=0; \
+	env -u ELECTRON_RUN_AS_NODE KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_825_DESKTOP_CONTINUITY=1 \
+		PLAYWRIGHT_JSON_OUTPUT_NAME="$$report" ./node_modules/.bin/playwright test \
+		--config test/e2e-playwright/playwright.config.ts --reporter=list,json --retries=0 \
+		stateful-stateless-switch-continuity.spec.ts || status=$$?; \
+	echo "E2E_825_DESKTOP_PLAYWRIGHT_EXIT=$$status"; \
+	node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).stats; console.log(`E2E_825_DESKTOP_STATS expected=$${s.expected} unexpected=$${s.unexpected} skipped=$${s.skipped} flaky=$${s.flaky}`); process.exit(s.expected > 0 && s.unexpected === 0 && s.skipped === 0 && s.flaky === 0 ? 0 : 1)' "$$report" || status=1; \
+	if [ "$$status" = 0 ]; then echo E2E_825_DESKTOP_RESULT=PASS; else echo E2E_825_DESKTOP_RESULT=FAIL; fi; \
+	exit $$status
+
 .PHONY: test-e2e-stateless-wake-recovery
 test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R1 warm draining / R2 cold suspended / R3 drained-window p95 budgets; needs port-forwards + seeded chatllm-stateless)
 	@echo "Running stateless wake-recovery latency gate..."
