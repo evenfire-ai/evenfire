@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Server, createServer } from 'node:http'
 import { type AddressInfo } from 'node:net'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
+import { setupInvitationPasswordWithToken } from '../src/services/invitationsService.js'
 
 const recoveryProof = 'synthetic-one-use-recovery-proof'
 
@@ -114,5 +115,64 @@ describe('password reset preview authority failures', () => {
     expect(response.body).toEqual({ error: 'authority_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(requestedPath).toContain(encodeURIComponent(recoveryProof))
+  })
+})
+
+const fetchMock = vi.fn()
+
+describe('setupInvitationPasswordWithToken', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('preserves invalid recovery proof as a safe link error', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'invalid_invitation' }), { status: 400 })
+    )
+
+    await expect(
+      setupInvitationPasswordWithToken(
+        'synthetic-proof',
+        'member@example.invalid',
+        'synthetic-row-id',
+        'synthetic-password'
+      )
+    ).resolves.toEqual({ error: 'invalid_invitation' })
+  })
+
+  it('continues to identify password-policy rejections as invalid passwords', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'invalid_password' }), { status: 400 })
+    )
+
+    await expect(
+      setupInvitationPasswordWithToken(
+        'synthetic-proof',
+        'member@example.invalid',
+        'synthetic-row-id',
+        'short'
+      )
+    ).resolves.toEqual({ error: 'invalid_password' })
+  })
+
+  it('keeps invalid-payload outside the allowlist when a password was supplied', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'invalid payload' }), { status: 400 })
+    )
+
+    await expect(
+      setupInvitationPasswordWithToken(
+        'synthetic-proof',
+        'member@example.invalid',
+        'synthetic-row-id',
+        'Synthetic-Valid-Password-123'
+      )
+    ).rejects.toMatchObject({
+      status: 503,
+      body: { error: 'authority_unavailable' },
+    })
   })
 })

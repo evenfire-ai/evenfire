@@ -83,8 +83,10 @@ jobs:
             pinned_suites: gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/mcp-host.json
           - service: control-api
-            pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
+            pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts passwordRecovery.http.contract.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
+          - service: external-rest-api
+            pinned_suites: invitations.passwordRecovery.public.test.ts
           - service: codex-llm-proxy
             pinned_suites: originPolicy.test.ts server.security.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/codex-llm-proxy.json
@@ -139,7 +141,7 @@ jobs:
         working-directory: external-rest-api
         run: npm run build
 
-      # External REST producer-contract tests import Control API route sources
+      # Inherited entity-change contracts still import Control API sources.
       # directly, so install the producer's dependencies in this isolated job.
       - name: Install Control API producer dependencies
         if: matrix.service == 'external-rest-api'
@@ -366,6 +368,9 @@ jobs:
         working-directory: external-rest-api
         run: npm run build
 
+      - name: Validate recovery suite selection contract
+        run: node --test scripts/tests/password-recovery-suite-contract.test.mjs
+
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
         env:
@@ -388,18 +393,12 @@ jobs:
           # producer and its database, neither of which is available to public CI.
           # They run with the real producer and PostgreSQL in the dedicated local
           # integration lane; do not replace them with a test-only token producer.
-          for suite in \
-            test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts \
-            test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts; do
-            test -s "$suite" || {
-              echo "excluded private recovery suite is missing or empty: $suite" >&2
-              exit 1
-            }
-          done
+          node ../scripts/ci/password-recovery-suite-contract.mjs verify
           FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres \
             --exclude 'test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts' \
             --exclude 'test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts' \
             --reporter=default --reporter=json --outputFile="$report" 2>&1 | tee "$log_file"
+          node ../scripts/ci/password-recovery-suite-contract.mjs report publicPostgres "$report"
           sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
           grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
             echo 'real-Postgres control-api lane executed zero passing test files' >&2

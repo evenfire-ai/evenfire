@@ -3,7 +3,11 @@ import express from 'express'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import type { Server } from 'node:http'
 import { Pool } from 'pg'
-import request from 'supertest'
+import {
+  type ExternalRestHttpProcess,
+  boundedRequest as request,
+  startExternalRestHttpProcess,
+} from './helpers/externalRestHttpProcess.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const flow = vi.hoisted(() => ({
@@ -22,10 +26,13 @@ realPg('R2-H1 invitation admission identity on PostgreSQL', () => {
   let db: typeof import('../src/db.js')
   let controlApp: express.Express
   let controlServer: Server
-  let edge: express.Express
-  let externalConfig: (typeof import('../../external-rest-api/src/config.js'))['config']
-  let previousBaseUrl: string
-  let previousServiceToken: string
+  let edge: string
+  let publicProcess: ExternalRestHttpProcess
+  let completionPosts = 0
+  let invitationId: string
+  let invitationToken: string
+  const email = 'synthetic-member@example.invalid'
+  const completionProof = 'synthetic-owned-completion-proof'
 
   beforeAll(async () => {
     admin = new Pool({ connectionString: adminUrl })
@@ -45,6 +52,15 @@ realPg('R2-H1 invitation admission identity on PostgreSQL', () => {
 
     db = await import('../src/db.js')
     await db.initDb()
+    await db.pool.query('INSERT INTO users(email) VALUES ($1)', [email])
+    const { createSilentPasswordResetInvitation } =
+      await import('../src/services/directory/passwordResetInvitations.js')
+    const invitation = await createSilentPasswordResetInvitation({
+      email,
+      inviteeName: 'Synthetic admission principal',
+    })
+    invitationId = invitation.id
+    invitationToken = invitation.token
     const { requireInternalService, requireInternalToken } =
       await import('../src/middleware/internalServiceAuth.js')
     const { createExternalInvitationsRouter } =
@@ -52,6 +68,11 @@ realPg('R2-H1 invitation admission identity on PostgreSQL', () => {
     controlApp = express()
     controlApp.use(express.json())
     controlApp.use(requireInternalToken)
+    controlApp.use((req, _res, next) => {
+      if (req.method === 'POST' && req.path === '/api/v1/external/invitations/password-token')
+        completionPosts++
+      next()
+    })
     const api = express.Router()
     api.use('/external', requireInternalService('external-rest-api'))
     api.use(createExternalInvitationsRouter())
@@ -59,64 +80,31 @@ realPg('R2-H1 invitation admission identity on PostgreSQL', () => {
     controlServer = controlApp.listen(0, '127.0.0.1')
     await new Promise<void>(resolve => controlServer.once('listening', resolve))
 
-    externalConfig = (await import('../../external-rest-api/src/config.js')).config
-    previousBaseUrl = externalConfig.controlApiBaseUrl
-    previousServiceToken = externalConfig.controlApiServiceToken
-    externalConfig.controlApiBaseUrl = `http://127.0.0.1:${(controlServer.address() as { port: number }).port}/api/v1`
-    externalConfig.controlApiServiceToken = serviceToken
-    const { ControlApiError, controlApiRequest } =
-      await import('../../external-rest-api/src/controlApiClient.js')
-    const { withExternalRequestContext } =
-      await import('../../external-rest-api/src/requestContext.js')
-
-    // This test edge uses the production request-context middleware and
-    // Control API client. The client, rather than the test, produces the
-    // authenticated x-external-client-ip header consumed by Control API.
-    edge = express()
-    edge.set('trust proxy', 1)
-    edge.use(express.json())
-    edge.use(withExternalRequestContext)
-    edge.get('/probe/preview/:token', async (req, res, next) => {
-      try {
-        res
-          .status(200)
-          .json(await controlApiRequest('GET', `/external/invitations/token/${req.params.token}`))
-      } catch (error) {
-        if (error instanceof ControlApiError) {
-          res.status(error.status).json(error.body)
-          return
-        }
-        next(error)
-      }
+    publicProcess = await startExternalRestHttpProcess({
+      controlApiBaseUrl: `http://127.0.0.1:${(controlServer.address() as { port: number }).port}/api/v1`,
+      controlApiServiceToken: serviceToken,
+      jwtPublicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
     })
-    edge.post('/probe/complete', async (req, res, next) => {
-      try {
-        res.status(200).json(
-          await controlApiRequest('POST', '/external/invitations/password-token', {
-            body: req.body,
-          })
-        )
-      } catch (error) {
-        if (error instanceof ControlApiError) {
-          res.status(error.status).json(error.body)
-          return
-        }
-        next(error)
-      }
-    })
+    edge = publicProcess.baseUrl
   }, 60_000)
 
   beforeEach(async () => {
-    flow.validateInvitationFlowToken.mockReset().mockRejectedValue(new Error('invalid proof'))
+    completionPosts = 0
+    flow.validateInvitationFlowToken
+      .mockReset()
+      .mockImplementation(async (token: string, claimedEmail?: string) => {
+        if (token === completionProof && claimedEmail === undefined) {
+          return { email, invitationUuid: invitationToken }
+        }
+        throw new Error('invalid proof')
+      })
     await db.pool.query('TRUNCATE rate_limit_buckets')
   })
 
   afterAll(async () => {
+    let childCleanup: PromiseSettledResult<void | undefined> | undefined
     try {
-      if (externalConfig) {
-        externalConfig.controlApiBaseUrl = previousBaseUrl
-        externalConfig.controlApiServiceToken = previousServiceToken
-      }
+      ;[childCleanup] = await Promise.allSettled([publicProcess?.stop()])
       if (controlServer) {
         await new Promise<void>((resolve, reject) =>
           controlServer.close(error => (error ? reject(error) : resolve()))
@@ -131,19 +119,20 @@ realPg('R2-H1 invitation admission identity on PostgreSQL', () => {
       await admin?.end()
       vi.unstubAllEnvs()
     }
+    if (childCleanup?.status === 'rejected') throw childCleanup.reason
   })
 
   async function preview(source: string) {
     return request(edge)
-      .get('/probe/preview/not-a-signed-flow-token')
+      .get('/api/v1/invitations/token/not-a-signed-flow-token')
       .set('X-Forwarded-For', source)
   }
 
   async function complete(source: string) {
-    return request(edge).post('/probe/complete').set('X-Forwarded-For', source).send({
-      email: 'synthetic-member@example.invalid',
-      token: 'invalid',
-      invitationId: '00000000-0000-4000-8000-000000000001',
+    return request(edge).post('/api/v1/invitations/password').set('X-Forwarded-For', source).send({
+      email,
+      token: completionProof,
+      invitationId,
       password: 'Synthetic-Password-12',
     })
   }
@@ -158,7 +147,13 @@ realPg('R2-H1 invitation admission identity on PostgreSQL', () => {
     const response = await complete('198.51.100.11')
     expect(response.status).toBe(400)
     expect(response.body).toEqual({ error: 'invalid_invitation' })
-    expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(11)
+    expect(completionPosts).toBe(1)
+    const buckets = (await db.pool.query('SELECT bucket_key FROM rate_limit_buckets')).rows.map(
+      row => row.bucket_key
+    )
+    expect(buckets).toContain('invite-token:password-token:external-client-ip:198.51.100.11')
+    expect(buckets).toContain('invite-token:preview:external-client-ip:198.51.100.11')
+    expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(12)
   })
 
   it('isolates completion budgets by the trusted external client identity', async () => {
@@ -171,7 +166,13 @@ realPg('R2-H1 invitation admission identity on PostgreSQL', () => {
     const response = await complete('198.51.100.22')
     expect(response.status).toBe(400)
     expect(response.body).toEqual({ error: 'invalid_invitation' })
-    expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(11)
+    expect(completionPosts).toBe(11)
+    const buckets = (await db.pool.query('SELECT bucket_key FROM rate_limit_buckets')).rows.map(
+      row => row.bucket_key
+    )
+    expect(buckets).toContain('invite-token:password-token:external-client-ip:198.51.100.21')
+    expect(buckets).toContain('invite-token:password-token:external-client-ip:198.51.100.22')
+    expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(22)
   })
 
   it('does not trust an asserted source when the internal service gate rejects the caller', async () => {

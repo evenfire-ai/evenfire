@@ -53,7 +53,11 @@ run_local_producer_suite() {
     printf 'Member Registration dependencies are missing under EVENFIRE_MEMBER_REGISTRATION_ROOT\n' >&2
     return 1
   fi
-  run_suite test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts
+  test -s "$REPO_ROOT/external-rest-api/dist/app.js" || {
+    printf 'Build External REST before the local composed producer suite\n' >&2
+    return 1
+  }
+  run_suite "$(node "$REPO_ROOT/scripts/ci/password-recovery-suite-contract.mjs" private local)"
 }
 
 run_configured_producer_suite() {
@@ -62,7 +66,7 @@ run_configured_producer_suite() {
     CONTROL_API_REAL_MEMBER_REGISTRATION_PG_URL \
     CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL \
     CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET
-  run_suite test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts
+  run_suite "$(node "$REPO_ROOT/scripts/ci/password-recovery-suite-contract.mjs" private configured)"
 }
 
 case "$MODE" in

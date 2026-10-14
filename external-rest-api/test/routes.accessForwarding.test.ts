@@ -1,10 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import {
-  PASSWORD_CREDENTIAL_CHANGED_RESPONSE,
-  PASSWORD_NOT_SET_RESPONSE,
-} from '../../control-api/src/routes/external/passwordErrorResponses.js'
 import { createMeRouter } from '../src/routes/me.js'
 import { createTeamRouter } from '../src/routes/team.js'
 
@@ -169,42 +165,6 @@ describe('routes/access forwarding', () => {
         ],
       })
     expect(meServiceMock.getMyTeamDirectory).toHaveBeenCalledWith('user-1', 'good-token')
-  })
-
-  it('maps the Control API credential-changed response to actionable password guidance', async () => {
-    const upstreamFetch = await preparePasswordApiError(PASSWORD_CREDENTIAL_CHANGED_RESPONSE)
-    const app = appWith(createMeRouter)
-
-    try {
-      await request(app)
-        .put('/me/password')
-        .set('authorization', 'Bearer good-token')
-        .send({ currentPassword: 'synthetic-current', newPassword: 'synthetic-next-password' })
-        .expect(409)
-        .expect({
-          error: 'Your password changed during this request. Sign in again with your new password.',
-        })
-      expect(upstreamFetch).toHaveBeenCalledTimes(1)
-    } finally {
-      upstreamFetch.mockRestore()
-    }
-  })
-
-  it('preserves the password-not-set message for the existing Control API 409 response', async () => {
-    const upstreamFetch = await preparePasswordApiError(PASSWORD_NOT_SET_RESPONSE)
-    const app = appWith(createMeRouter)
-
-    try {
-      await request(app)
-        .put('/me/password')
-        .set('authorization', 'Bearer good-token')
-        .send({ currentPassword: 'synthetic-current', newPassword: 'synthetic-next-password' })
-        .expect(409)
-        .expect({ error: 'Password is not set' })
-      expect(upstreamFetch).toHaveBeenCalledTimes(1)
-    } finally {
-      upstreamFetch.mockRestore()
-    }
   })
 
   it('maps password-work contention to a sanitized 429 and permits a later retry', async () => {
