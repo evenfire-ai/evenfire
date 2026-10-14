@@ -33,9 +33,13 @@ import {
   test,
 } from '@playwright/test'
 import { execFile } from 'node:child_process'
+import { realpathSync } from 'node:fs'
+import nodePath from 'node:path'
 import { promisify } from 'node:util'
 import {
+  DESKTOP_APP_ROOT,
   EXTERNAL_REST_API_BASE_URL,
+  MAIN_ENTRY,
   RPC_PROXY_BASE_URL,
   assertAllowedTarget,
   desktopCredentials,
@@ -46,6 +50,25 @@ import {
 } from './qa-recorder-helpers'
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * The journey only proves this branch if Desktop runs from this checkout: the
+ * Electron runtime from its node_modules and the main bundle it just built.
+ */
+async function expectCheckoutBuild(app: ElectronApplication): Promise<void> {
+  const identity = await app.evaluate(({ app: electronApp }) => ({
+    packaged: electronApp.isPackaged,
+    execPath: process.execPath,
+    argv: process.argv,
+  }))
+  const electronDist = realpathSync(nodePath.join(DESKTOP_APP_ROOT, 'node_modules/electron/dist'))
+  console.info(
+    `[825] desktop build execPath=${identity.execPath} main=${MAIN_ENTRY} packaged=${identity.packaged}`
+  )
+  expect(identity.packaged, 'Desktop must not be a packaged app').toBe(false)
+  expect(realpathSync(identity.execPath).startsWith(`${electronDist}${nodePath.sep}`)).toBe(true)
+  expect(identity.argv).toContain(MAIN_ENTRY)
+}
 
 const HOST_NAMESPACE = 'mcp-host'
 const WORKSPACE_PATH = '/workspace'
@@ -516,6 +539,7 @@ test('#825 — a conversation survives stateful -> stateless -> stateful switche
 
     await test.step('1. log in through the UI', async () => {
       ;({ app, page } = await launchDesktopApp(testInfo))
+      await expectCheckoutBuild(app)
       await login(currentPage(), credentials)
       await expect(currentPage().getByTestId('nav-chat')).toBeVisible({ timeout: 30_000 })
     })
@@ -552,6 +576,7 @@ test('#825 — a conversation survives stateful -> stateless -> stateful switche
         app = undefined
         page = undefined
         ;({ app, page } = await launchDesktopApp(testInfo))
+        await expectCheckoutBuild(app)
         const p = currentPage()
         await expect(p.locator('.boot-overlay')).toBeHidden({ timeout: 30_000 })
         await expect(p.getByTestId('nav-chat')).toBeVisible({ timeout: 30_000 })
