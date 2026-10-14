@@ -14,6 +14,7 @@ import {
   type RecipeSecretItem,
   type SecretIdentity,
   apiSend,
+  deleteMcpSecret,
   deleteRecipeSecret,
   getMcpServers,
   getRecipeSecrets,
@@ -46,6 +47,9 @@ type McpSecretRow = {
   servers: string[]
   registryEntries: string[]
   registrySources: Array<{ name: string; version: string }>
+  /** Live Secret identity for compare-and-delete; absent on older backends. */
+  uid?: string
+  resourceVersion?: string
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
@@ -112,6 +116,7 @@ export function SecretsTable({
   const [mcpRows, setMcpRows] = useState<McpSecretRow[]>([])
   const [mcpLoading, setMcpLoading] = useState(false)
   const [mcpError, setMcpError] = useState('')
+  const [mcpDeletingName, setMcpDeletingName] = useState<string | null>(null)
 
   // Recipe secrets state
   const [recipeSearchQuery, setRecipeSearchQuery] = useState('')
@@ -256,16 +261,24 @@ export function SecretsTable({
         if (item.name) addSecret(item.name)
       }
 
+      const identityByName = new Map(
+        (provisioned.items ?? [])
+          .filter(item => item.name && item.uid && item.resourceVersion)
+          .map(item => [item.name, { uid: item.uid!, resourceVersion: item.resourceVersion! }])
+      )
+
       const nextRows = Array.from(usage.entries())
         .map(([name, details]) => {
           const registrySources = Array.from(details.registrySources.values()).sort((a, b) =>
             `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`)
           )
+          const identity = identityByName.get(name)
           return {
             name,
             servers: Array.from(details.servers).sort((a, b) => a.localeCompare(b)),
             registryEntries: registrySources.map(source => `${source.name}@${source.version}`),
             registrySources,
+            ...(identity ? identity : {}),
           }
         })
         .sort((a, b) => a.name.localeCompare(b.name))
@@ -398,6 +411,34 @@ export function SecretsTable({
   function navigateToRecipeEdit(name: string, namespace: string) {
     const qs = new URLSearchParams({ namespace })
     router.push(CONTROL_ROUTES.secrets.editRecipe(name, Object.fromEntries(qs)))
+  }
+
+  async function deleteMcpSecretRow(row: McpSecretRow) {
+    const { name, uid, resourceVersion } = row
+    if (!uid || !resourceVersion) {
+      setMcpError(
+        `Secret ${name} has no current identity. Refresh the page and review the latest state before deleting it.`
+      )
+      return
+    }
+    const ok = await confirm({
+      title: 'Delete connector Secret',
+      message: `Delete connector secret ${name}? Connectors referencing it will fail until they are reconfigured.`,
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    })
+    if (!ok) return
+    setMcpDeletingName(name)
+    setMcpError('')
+    try {
+      await deleteMcpSecret(name, { uid, resourceVersion } satisfies SecretIdentity)
+      showToast(`Secret ${name} deleted.`, { tone: 'success' })
+      await loadMcpSecretReferences()
+    } catch (e) {
+      setMcpError(e instanceof Error ? e.message : 'Failed to delete connector secret')
+    } finally {
+      setMcpDeletingName(null)
+    }
   }
 
   async function deleteRecipeSecretRow(row: RecipeSecretRow) {
@@ -736,17 +777,18 @@ export function SecretsTable({
                             },
                             {
                               key: 'delete',
-                              label: 'Delete',
+                              label: mcpDeletingName === row.name ? 'Deleting…' : 'Delete',
                               danger: true,
                               // deleteMcpSecret requires the Secret's live
                               // uid/resourceVersion as its CAS precondition.
-                              // Connector rows are derived from McpServer
-                              // references and no list API returns that
-                              // identity, so delete stays inert rather than
+                              // The provisioned listing carries it; without it
+                              // (older backend) delete stays inert rather than
                               // issuing an unfenced delete.
-                              disabled: true,
-                              disabledReason: 'Delete is not available for this secret.',
-                              onClick: () => {},
+                              disabled:
+                                !row.uid || !row.resourceVersion || mcpDeletingName === row.name,
+                              disabledReason:
+                                'Refresh to load this Secret identity before deleting it.',
+                              onClick: () => void deleteMcpSecretRow(row),
                             },
                           ]}
                         />

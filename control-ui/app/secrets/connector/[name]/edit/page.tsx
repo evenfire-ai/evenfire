@@ -8,6 +8,7 @@ import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { IconKey } from '@components/Sidebar/icons'
 import { TabBar } from '@components/TabBar'
+import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import {
   nonCanonicalEnvSecretName,
@@ -18,8 +19,9 @@ import {
   isRecipeOwned,
   resolveCredentialSurface,
 } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
+import { Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { getMcpServers } from '@lib/api'
+import { getMcpServers, listMcpSecrets, updateMcpSecret } from '@lib/api'
 import type { McpServerResource } from '@lib/api'
 
 function serverRefersToSecret(server: McpServerResource, secretName: string): boolean {
@@ -52,11 +54,21 @@ function EditConnectorSecretContent() {
 
   const [servers, setServers] = useState<McpServerResource[] | null>(null)
   const [loadError, setLoadError] = useState('')
+  // The provisioned Secret listing: undefined while loading, null when the
+  // Secret does not exist, otherwise its name + key names (never values).
+  const [secretSummary, setSecretSummary] = useState<
+    { name: string; keys: string[] } | null | undefined
+  >(undefined)
+  const [keyValues, setKeyValues] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const { showToast } = useToast()
 
   useEffect(() => {
     if (!secretName) {
       setLoadError('Missing secret name in URL.')
       setServers([])
+      setSecretSummary(null)
       return
     }
     let cancelled = false
@@ -72,6 +84,15 @@ function EditConnectorSecretContent() {
           )
           setServers([])
         }
+      })
+    listMcpSecrets()
+      .then(result => {
+        if (cancelled) return
+        const match = (result.items ?? []).find(item => item.name === secretName)
+        setSecretSummary(match ? { name: match.name, keys: match.keys } : null)
+      })
+      .catch(() => {
+        if (!cancelled) setSecretSummary(null)
       })
     return () => {
       cancelled = true
@@ -138,13 +159,37 @@ function EditConnectorSecretContent() {
     router.push(CONTROL_ROUTES.secrets.connector)
   }
 
+  const filledKeyData = () =>
+    Object.fromEntries(
+      Object.entries(keyValues).filter(([key, value]) => key.length > 0 && value.trim().length > 0)
+    )
+
+  async function saveDirectRotation() {
+    const data = filledKeyData()
+    if (Object.keys(data).length === 0) {
+      setSaveError('Fill in at least one key to rotate its value.')
+      return
+    }
+    setSaving(true)
+    setSaveError('')
+    try {
+      await updateMcpSecret(secretName, data)
+      showToast(`Secret ${secretName} updated.`, { tone: 'success' })
+      backToList()
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Failed to update secret')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <AuthGate>
       <DashboardLayout isDetailPage>
         <CreatePageHeader
           icon={<IconKey />}
           title={`Edit connector secret${secretName ? `: ${secretName}` : ''}`}
-          subtitle="Update the values stored in this Secret through a connector that references it. Values are write-only; the form explains which keys are required."
+          subtitle="Rotate the values stored in this Secret. Values are write-only; only the keys you fill in are replaced."
           backLabel="Back to secrets"
           onBack={backToList}
         />
@@ -181,10 +226,66 @@ function EditConnectorSecretContent() {
               !identityError &&
               !serverQueryError &&
               !unknownServerError ? (
-              <div className="cu-banner cu-banner--error">
-                No connector currently references Secret <code>{secretName || '(unnamed)'}</code>.
-                Attach it to a connector before rotating it from here.
-              </div>
+              secretSummary === undefined ? (
+                <p className="cu-muted" role="status">
+                  Loading connector secret…
+                </p>
+              ) : secretSummary === null ? (
+                <div className="cu-banner cu-banner--error">
+                  No connector secret named <code>{secretName || '(unnamed)'}</code> exists. It may
+                  have been deleted.
+                </div>
+              ) : (
+                <>
+                  <h2>Rotate stored values</h2>
+                  <p className="cu-muted">
+                    No connector references this Secret yet, so changes take effect for the next
+                    connector that attaches it. Only the keys you fill in are replaced; every other
+                    key already on the Secret is kept.
+                  </p>
+                  {saveError ? (
+                    <div className="cu-banner cu-banner--error" role="alert">
+                      {saveError}
+                    </div>
+                  ) : null}
+                  {secretSummary.keys.length === 0 ? (
+                    <p className="cu-muted">This Secret has no keys yet.</p>
+                  ) : (
+                    secretSummary.keys.map(key => (
+                      <Field
+                        key={key}
+                        label={key}
+                        htmlFor={`secret-key-${key}`}
+                        description="Write-only — leave blank to keep the current value."
+                      >
+                        <TextInput
+                          id={`secret-key-${key}`}
+                          type="password"
+                          name={key}
+                          autoComplete="off"
+                          value={keyValues[key] ?? ''}
+                          onChange={e =>
+                            setKeyValues(current => ({ ...current, [key]: e.target.value }))
+                          }
+                        />
+                      </Field>
+                    ))
+                  )}
+                  <div className="cu-create-actions">
+                    <button type="button" className="cu-btn cu-btn--ghost" onClick={backToList}>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--primary"
+                      onClick={() => void saveDirectRotation()}
+                      disabled={saving || secretSummary.keys.length === 0}
+                    >
+                      {saving ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                </>
+              )
             ) : (
               <>
                 {attachedServers.length > 1 ? (

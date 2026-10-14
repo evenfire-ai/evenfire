@@ -10,6 +10,7 @@ import {
   getMcpServer,
   getMcpServers,
   getRegistryCredentialSchema,
+  listMcpSecrets,
   updateMcpSecret,
 } from '../../lib/api'
 import { buildMcpServerReference } from '../../test/fixtures/mcpServer'
@@ -45,6 +46,7 @@ vi.mock('../../lib/api', () => ({
   getMcpServer: vi.fn(),
   getMcpServers: vi.fn(),
   getRegistryCredentialSchema: vi.fn(),
+  listMcpSecrets: vi.fn(),
   updateMcpSecret: vi.fn(),
 }))
 
@@ -52,6 +54,7 @@ const mockCreateMcpSecret = vi.mocked(createMcpSecret)
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockGetMcpServers = vi.mocked(getMcpServers)
 const mockGetRegistryCredentialSchema = vi.mocked(getRegistryCredentialSchema)
+const mockListMcpSecrets = vi.mocked(listMcpSecrets)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
 
 function server(options: {
@@ -131,6 +134,9 @@ beforeEach(() => {
     namespace: 'mcp-server',
     keys: ['api-key'],
     affectedConnectors: ['linear-conn'],
+  })
+  mockListMcpSecrets.mockResolvedValue({
+    items: [{ name: 'linear-credentials', keys: ['api-key', 'refresh-token'] }],
   })
 })
 
@@ -285,12 +291,43 @@ describe('EditConnectorSecretPage', () => {
     expect(mockCreateMcpSecret).not.toHaveBeenCalled()
   })
 
-  it('explains when no connector currently references the secret', async () => {
+  it('rotates values directly when no connector references the secret yet', async () => {
     mockGetMcpServers.mockResolvedValue({ items: [] })
     await renderPage()
 
-    expect(screen.getByText(/No connector currently references Secret/i)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(screen.getByText('Rotate stored values')).toBeInTheDocument()
+    expect(screen.getByText(/No connector references this Secret yet/i)).toBeInTheDocument()
+    expect(screen.getByLabelText('api-key')).toBeInTheDocument()
+    expect(screen.getByLabelText('refresh-token')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'new-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await flush()
+
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith('linear-credentials', {
+      'api-key': 'new-token',
+    })
+    expect(navigation.push).toHaveBeenCalledWith('/secrets/connector')
+  })
+
+  it('keeps unfilled keys out of the direct rotation and refuses empty saves', async () => {
+    mockGetMcpServers.mockResolvedValue({ items: [] })
+    await renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await flush()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Fill in at least one key')
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  })
+
+  it('explains when the secret itself no longer exists', async () => {
+    mockGetMcpServers.mockResolvedValue({ items: [] })
+    mockListMcpSecrets.mockResolvedValue({ items: [] })
+    await renderPage()
+
+    expect(screen.getByText(/No connector secret named/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
   })
 
   it('shows the connector load error without presenting an empty result as verified', async () => {

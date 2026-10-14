@@ -6,6 +6,7 @@ import {
   getMcpServer,
   getMcpServers,
   getRegistryCredentialSchema,
+  listMcpSecrets,
   updateMcpSecret,
 } from '../../lib/api'
 import { buildRegistryMcpServerReference } from '../../test/fixtures/mcpServer'
@@ -27,6 +28,7 @@ vi.mock('../../lib/api', () => ({
   getMcpServer: vi.fn(),
   getMcpServers: vi.fn(),
   getRegistryCredentialSchema: vi.fn(),
+  listMcpSecrets: vi.fn(),
   updateMcpSecret: vi.fn(),
 }))
 
@@ -41,6 +43,7 @@ beforeEach(() => {
   // contract rather than being hidden by a fixture-owned `managed: true`.
   expect(connector.spec?.managed).toBe(true)
   vi.mocked(getMcpServers).mockResolvedValue({ items: [connector] })
+  vi.mocked(listMcpSecrets).mockResolvedValue({ items: [] })
   vi.mocked(getMcpServer).mockResolvedValue(connector)
   vi.mocked(getRegistryCredentialSchema).mockResolvedValue({
     required: true,

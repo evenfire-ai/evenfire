@@ -10,6 +10,7 @@ import {
 } from '@testing-library/react'
 import {
   apiSend,
+  deleteMcpSecret,
   deleteRecipeSecret,
   getMcpServers,
   getRecipeSecrets,
@@ -36,6 +37,7 @@ vi.mock('../../lib/api', async () => {
   return {
     ...actual,
     apiSend: vi.fn(),
+    deleteMcpSecret: vi.fn(),
     deleteRecipeSecret: vi.fn(),
     getMcpServers: vi.fn(),
     getRecipeSecrets: vi.fn(),
@@ -45,6 +47,7 @@ vi.mock('../../lib/api', async () => {
 })
 
 const apiSendMock = vi.mocked(apiSend)
+const deleteMcpSecretMock = vi.mocked(deleteMcpSecret)
 const deleteRecipeSecretMock = vi.mocked(deleteRecipeSecret)
 const getMcpServersMock = vi.mocked(getMcpServers)
 const getRecipeSecretsMock = vi.mocked(getRecipeSecrets)
@@ -56,10 +59,12 @@ const listMcpSecretsMock = vi.mocked(listMcpSecrets)
 beforeEach(() => {
   apiSendMock.mockReset()
   apiSendMock.mockResolvedValue(undefined as never)
+  deleteMcpSecretMock.mockReset()
+  deleteMcpSecretMock.mockResolvedValue(undefined as never)
   deleteRecipeSecretMock.mockReset()
   deleteRecipeSecretMock.mockResolvedValue(undefined as never)
   // The provisioned listing defaults to empty; connector tests that care
-  // about unreferenced secrets override it explicitly.
+  // about unreferenced secrets or delete identity override it explicitly.
   listMcpSecretsMock.mockReset()
   listMcpSecretsMock.mockResolvedValue({ items: [] })
 })
@@ -479,7 +484,7 @@ describe('SecretsTable — connector row actions', () => {
     cleanup()
   })
 
-  function mockConnectorRow() {
+  function mockConnectorRow(identity?: { uid?: string; resourceVersion?: string }) {
     getMcpServersMock.mockResolvedValue({
       items: [
         buildDirectCrdMcpServerReference({
@@ -492,6 +497,11 @@ describe('SecretsTable — connector row actions', () => {
         }),
       ],
     })
+    if (identity) {
+      listMcpSecretsMock.mockResolvedValue({
+        items: [{ name: 'linear-credentials', keys: ['api-key'], ...identity }],
+      })
+    }
   }
 
   async function openRowMenu() {
@@ -501,25 +511,52 @@ describe('SecretsTable — connector row actions', () => {
     fireEvent.click(trigger)
   }
 
-  it('offers Update and a disabled Delete alongside Add on every connector row', async () => {
-    mockConnectorRow()
+  it('offers Update, enabled Delete, and Add on a connector row with identity', async () => {
+    mockConnectorRow({
+      uid: 'uid-linear-1',
+      resourceVersion: '42',
+    })
     renderTable()
     await openRowMenu()
 
     expect(screen.getByRole('menuitem', { name: 'Add' })).toBeEnabled()
     expect(screen.getByRole('menuitem', { name: 'Update' })).toBeEnabled()
-    const deleteAction = screen.getByRole('menuitem', { name: /^Delete/ })
-    expect(deleteAction).toHaveAttribute('aria-disabled', 'true')
-    expect(screen.getByText('Delete is not available for this secret.')).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /^Delete/ })).toBeEnabled()
   })
 
-  it('keeps the disabled Delete inert instead of confirming or calling the API', async () => {
-    mockConnectorRow()
+  it('deletes a connector secret through its live identity after confirmation', async () => {
+    mockConnectorRow({
+      uid: 'uid-linear-1',
+      resourceVersion: '42',
+    })
+    deleteMcpSecretMock.mockResolvedValue({ name: 'linear-credentials', namespace: 'mcp-servers' })
     renderTable()
     await openRowMenu()
 
     fireEvent.click(screen.getByRole('menuitem', { name: /^Delete/ }))
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
 
+    await waitFor(() => {
+      expect(deleteMcpSecretMock).toHaveBeenCalledWith('linear-credentials', {
+        uid: 'uid-linear-1',
+        resourceVersion: '42',
+      })
+    })
+  })
+
+  it('keeps Delete disabled without a listing-provided identity', async () => {
+    mockConnectorRow()
+    renderTable()
+    await openRowMenu()
+
+    const deleteAction = screen.getByRole('menuitem', { name: /^Delete/ })
+    expect(deleteAction).toHaveAttribute('aria-disabled', 'true')
+    expect(
+      screen.getByText('Refresh to load this Secret identity before deleting it.')
+    ).toBeInTheDocument()
+
+    fireEvent.click(deleteAction)
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(apiSendMock).not.toHaveBeenCalled()
   })
