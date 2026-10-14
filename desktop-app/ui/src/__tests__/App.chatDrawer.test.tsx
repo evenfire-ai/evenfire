@@ -17,6 +17,7 @@ import {
   openFilesTab,
   openPreviewTab,
   openSettingsTab,
+  selectWorkspaceTab,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
@@ -174,6 +175,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
+  let navigationIntentSequence = 0
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   // React-setState-faithful: bail out on an unchanged reference (so the
   // idempotent reconcile effect can't spin), otherwise commit + re-render.
@@ -193,9 +195,23 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
+  const beginUserNavigationIntent = vi.fn(() => {
+    navigationIntentSequence += 1
+    controller.navigationIntentSequence = navigationIntentSequence
+    forceControllerRender()
+    return navigationIntentSequence
+  })
+  const selectWorkspaceTabById = vi.fn((id: string) => {
+    if (!controller.workspaceTabs.tabs.some(tab => tab.id === id)) return false
+    beginUserNavigationIntent()
+    clearAppsPicker()
+    setWorkspaceTabs((state: WorkspaceState) => selectWorkspaceTab(state, id))
+    return true
+  })
   // Faithful to the real controller's openFilesSection: open/focus a files tab at
   // `path` through the real store producer (dedupe by path lives in the store).
   const openFilesSection = vi.fn((path: string | null = null) => {
+    beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openFilesTab(state, { id: nextWorkspaceTabId(), path })
@@ -205,6 +221,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // Faithful to the real controller's openPreviewSection: open/focus a preview
   // tab for a previewable file through the real store producer (dedupe by gfsUri).
   const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+    beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
@@ -220,6 +237,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     forceControllerRender()
   })
   const showAppsPicker = vi.fn(() => {
+    beginUserNavigationIntent()
     // The picker residual is redundant when an app tab is already active.
     if (controller.appsPickerActive) return
     if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
@@ -230,6 +248,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // (useReactiveController), so these drive the store — never set navItem.
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
     if (item === DESKTOP_ROUTES.chat) {
+      beginUserNavigationIntent()
       controller.selectedAgent = null
       clearAppsPicker()
       setWorkspaceTabs((state: WorkspaceState) => focusChatState(state, nextWorkspaceTabId()))
@@ -241,6 +260,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     } else {
       const section = settingsSectionForRoute(item)
       if (section) {
+        beginUserNavigationIntent()
         if (section === 'agents') controller.selectedAgent = null
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
@@ -259,6 +279,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       controller.selectedAgent = agentName
       controller.activeChatId = options.chatId ?? null
       if (!options.keepNavItem) {
+        beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           activateChatState(state, agentName, options.chatId ?? null, nextWorkspaceTabId())
@@ -278,6 +299,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       // Faithful routing: workflow notifications navigate to the plugins section;
       // sdk notifications navigate away without touching the agent chat state.
       if (notification.kind === 'workflow_completed') {
+        beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           openSettingsTab(state, { id: nextWorkspaceTabId(), section: 'plugins' })
@@ -289,6 +311,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       controller.selectedAgent = notification.agentName ?? controller.selectedAgent
       controller.activeChatId = notification.chatId ?? null
       if (!options.keepNavItem) {
+        beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           activateChatState(
@@ -319,6 +342,9 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     selectedContext: null,
     selectedTeam: null,
     workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
+    navigationIntentSequence,
+    beginUserNavigationIntent,
+    selectWorkspaceTabById,
     setWorkspaceTabs,
     activeWorkspaceTab: undefined,
     nextWorkspaceTabId,

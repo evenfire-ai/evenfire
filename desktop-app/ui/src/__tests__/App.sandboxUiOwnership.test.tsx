@@ -12,6 +12,7 @@ import {
   createWorkspaceTabsState,
   openFilesTab,
   openPreviewTab,
+  selectWorkspaceTab,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
@@ -91,6 +92,7 @@ function makeController(): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
+  let navigationIntentSequence = 0
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   const setWorkspaceTabs = vi.fn((updater: unknown) => {
     const next =
@@ -106,7 +108,21 @@ function makeController(): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
+  const beginUserNavigationIntent = vi.fn(() => {
+    navigationIntentSequence += 1
+    controller.navigationIntentSequence = navigationIntentSequence
+    forceControllerRender()
+    return navigationIntentSequence
+  })
+  const selectWorkspaceTabById = vi.fn((id: string) => {
+    if (!controller.workspaceTabs.tabs.some(tab => tab.id === id)) return false
+    beginUserNavigationIntent()
+    clearAppsPicker()
+    setWorkspaceTabs((state: WorkspaceState) => selectWorkspaceTab(state, id))
+    return true
+  })
   const openFilesSection = vi.fn((path: string | null = null) => {
+    beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openFilesTab(state, { id: nextWorkspaceTabId(), path })
@@ -114,6 +130,7 @@ function makeController(): AppController {
     forceControllerRender()
   })
   const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+    beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
@@ -129,6 +146,7 @@ function makeController(): AppController {
     forceControllerRender()
   })
   const showAppsPicker = vi.fn(() => {
+    beginUserNavigationIntent()
     if (controller.appsPickerActive) return
     if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
     controller.appsPickerActive = true
@@ -151,6 +169,9 @@ function makeController(): AppController {
     selectedContext: null,
     selectedTeam: null,
     workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
+    navigationIntentSequence,
+    beginUserNavigationIntent,
+    selectWorkspaceTabById,
     setWorkspaceTabs,
     activeWorkspaceTab: undefined,
     nextWorkspaceTabId,

@@ -1,6 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../constants/navigation'
 import type { GfsPreviewResource } from '../../lib/gfsPreview'
+import {
+  type GfsResourceNavigationContext,
+  type GfsResourceNavigationRequest,
+  assignGfsResourceNavigationOwner,
+  canCompleteGfsResourceNavigation,
+  isGfsResourceNavigationOwnerPresent,
+} from '../../lib/gfsResourceNavigationIntent'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -9,6 +16,8 @@ import {
   openFilesTab,
   openPreviewTab,
   openSettingsTab,
+  selectWorkspaceTab,
+  setFilesTabPath,
 } from '../../lib/workspaceTabs'
 import type { WorkspaceTabsState } from '../../lib/workspaceTabs.types'
 import { mapKindToRoute, settingsSectionForRoute } from '../../lib/workspaceTabsRoute'
@@ -30,8 +39,28 @@ import type { AgentWorkspaceRoute, NavItem } from '../../uiTypes'
  * `navItem` and the residual can never both be live in one commit.
  */
 export function useNavigationController() {
-  const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTabsState>(() =>
+  const [workspaceTabs, setWorkspaceTabsState] = useState<WorkspaceTabsState>(() =>
     createWorkspaceTabsState('chat-tab-1')
+  )
+  const workspaceTabsRef = useRef(workspaceTabs)
+  const setWorkspaceTabs = useCallback((action: SetStateAction<WorkspaceTabsState>) => {
+    const current = workspaceTabsRef.current
+    const next = typeof action === 'function' ? action(current) : action
+    if (next === current) return
+    workspaceTabsRef.current = next
+    setWorkspaceTabsState(next)
+  }, [])
+  const [navigationIntentSequence, setNavigationIntentSequence] = useState(0)
+  const navigationIntentSequenceRef = useRef(0)
+  const beginUserNavigationIntent = useCallback(() => {
+    const next = navigationIntentSequenceRef.current + 1
+    navigationIntentSequenceRef.current = next
+    setNavigationIntentSequence(next)
+    return next
+  }, [])
+  const isNavigationIntentCurrent = useCallback(
+    (sequence: number) => navigationIntentSequenceRef.current === sequence,
+    []
   )
   // Residual: the Apps route shown with no launched app (the picker). Launching
   // an app creates a store app tab and clears this.
@@ -41,8 +70,6 @@ export function useNavigationController() {
     AGENT_WORKSPACE_ROUTES.connectors
   )
 
-  const workspaceTabsRef = useRef(workspaceTabs)
-  workspaceTabsRef.current = workspaceTabs
   const tabSequenceRef = useRef(2)
   const nextWorkspaceTabId = useCallback(() => `ws-tab-${tabSequenceRef.current++}`, [])
 
@@ -73,8 +100,9 @@ export function useNavigationController() {
   // skipped) when an app tab is already active, since that already derives to
   // the Apps route.
   const showAppsPicker = useCallback(() => {
+    beginUserNavigationIntent()
     setAppsPickerActive(activeWorkspaceTab(workspaceTabsRef.current)?.kind !== 'app')
-  }, [])
+  }, [beginUserNavigationIntent])
 
   // Ensure a chat tab is active (navItem → chat this commit) without agent
   // logic: keep the active chat tab, else focus the last chat tab, else seed a
@@ -87,6 +115,7 @@ export function useNavigationController() {
   // re-deriving the same rule in its own layer, so the loaded chat can never
   // drift from the focused one (D4).
   const focusChatSection = useCallback((): { agentRef: string; chatId: string } | null => {
+    beginUserNavigationIntent()
     setAppsPickerActive(false)
     const current = workspaceTabsRef.current
     const active = activeWorkspaceTab(current)
@@ -115,7 +144,7 @@ export function useNavigationController() {
     const id = nextWorkspaceTabId()
     setWorkspaceTabs(state => newChatTab(state, id, null))
     return null
-  }, [nextWorkspaceTabId])
+  }, [beginUserNavigationIntent, nextWorkspaceTabId])
 
   /**
    * Activate a chat tab so `navItem` derives to `chat` in the same commit as the
@@ -127,6 +156,7 @@ export function useNavigationController() {
    */
   const activateChatTab = useCallback(
     (agentRef: string | null, chatId: string | null, title?: string) => {
+      beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
       setWorkspaceTabs(current =>
@@ -140,16 +170,17 @@ export function useNavigationController() {
           : newChatTab(current, id, agentRef)
       )
     },
-    [nextWorkspaceTabId]
+    [beginUserNavigationIntent, nextWorkspaceTabId]
   )
 
   const openSettingsSection = useCallback(
     (section: Parameters<typeof openSettingsTab>[1]['section']) => {
+      beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
       setWorkspaceTabs(current => openSettingsTab(current, { id, section }))
     },
-    [nextWorkspaceTabId]
+    [beginUserNavigationIntent, nextWorkspaceTabId]
   )
 
   // Open/focus a files tab at `path` (a gfsUri, or `null` for the virtual root).
@@ -157,11 +188,12 @@ export function useNavigationController() {
   // deep-link to a specific gfsUri both route here (mini-spec 06 §3).
   const openFilesSection = useCallback(
     (path: string | null = null) => {
+      beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
       setWorkspaceTabs(current => openFilesTab(current, { id, path }))
     },
-    [nextWorkspaceTabId]
+    [beginUserNavigationIntent, nextWorkspaceTabId]
   )
 
   // Open/focus a preview tab for a previewable file (spec 18 §3.B.1). Dedupes by
@@ -169,6 +201,7 @@ export function useNavigationController() {
   // instead of stacking duplicates. A direct clone of `openFilesSection`.
   const openPreviewSection = useCallback(
     (preview: GfsPreviewResource) => {
+      beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
       setWorkspaceTabs(current =>
@@ -183,7 +216,106 @@ export function useNavigationController() {
         })
       )
     },
-    [nextWorkspaceTabId]
+    [beginUserNavigationIntent, nextWorkspaceTabId]
+  )
+
+  const beginGfsResourceNavigation = useCallback(
+    (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest => {
+      const intentSequence = beginUserNavigationIntent()
+      const state = workspaceTabsRef.current
+      const owner = assignGfsResourceNavigationOwner(state)
+      return {
+        id,
+        uri,
+        ownerTabId: owner.createDestination ? nextWorkspaceTabId() : owner.ownerTabId,
+        createDestination: owner.createDestination,
+        intentSequence,
+        principalGeneration,
+      }
+    },
+    [beginUserNavigationIntent, nextWorkspaceTabId]
+  )
+
+  const isGfsResourceNavigationCurrent = useCallback(
+    (request: GfsResourceNavigationRequest, principalGeneration: number): boolean => {
+      const state = workspaceTabsRef.current
+      const context: GfsResourceNavigationContext = {
+        intentSequence: navigationIntentSequenceRef.current,
+        principalGeneration,
+        activeTabId: state.activeTabId,
+        tabs: state.tabs,
+      }
+      return canCompleteGfsResourceNavigation(request, context)
+    },
+    []
+  )
+
+  const activateGfsResourceNavigation = useCallback(
+    (request: GfsResourceNavigationRequest, principalGeneration: number): boolean => {
+      if (
+        !isNavigationIntentCurrent(request.intentSequence) ||
+        request.principalGeneration !== principalGeneration
+      ) {
+        return false
+      }
+      const state = workspaceTabsRef.current
+      let next: WorkspaceTabsState
+      if (request.createDestination) {
+        if (state.tabs.some(tab => tab.id === request.ownerTabId)) return false
+        next = openFilesTab(state, { id: request.ownerTabId, path: null })
+      } else {
+        if (!isGfsResourceNavigationOwnerPresent(request, state.tabs)) return false
+        next = selectWorkspaceTab(state, request.ownerTabId)
+      }
+      if (next.activeTabId !== request.ownerTabId) return false
+      setAppsPickerActive(false)
+      setWorkspaceTabs(next)
+      return true
+    },
+    [isNavigationIntentCurrent, setWorkspaceTabs]
+  )
+
+  const completeGfsResourceNavigationPreview = useCallback(
+    (
+      request: GfsResourceNavigationRequest,
+      preview: GfsPreviewResource,
+      principalGeneration: number,
+      returnLocation: { gfsUri: string | null; name: string | null }
+    ): boolean => {
+      if (!isGfsResourceNavigationCurrent(request, principalGeneration)) return false
+      const id = nextWorkspaceTabId()
+      const ownerWithRestoredLocation = setFilesTabPath(
+        workspaceTabsRef.current,
+        request.ownerTabId,
+        returnLocation.gfsUri,
+        returnLocation.name ?? undefined
+      )
+      const next = openPreviewTab(ownerWithRestoredLocation, {
+        id,
+        title: preview.name,
+        gfsUri: preview.gfsUri,
+        fileKind: preview.kind,
+        byteLength: preview.bytes,
+        ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+        ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+      })
+      setAppsPickerActive(false)
+      setWorkspaceTabs(next)
+      return next.activeTabId !== request.ownerTabId
+    },
+    [isGfsResourceNavigationCurrent, nextWorkspaceTabId, setWorkspaceTabs]
+  )
+
+  const selectWorkspaceTabById = useCallback(
+    (id: string): boolean => {
+      const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
+      if (!tab) return false
+      beginUserNavigationIntent()
+      setAppsPickerActive(false)
+      setWorkspaceTabs(state => selectWorkspaceTab(state, id))
+      return true
+    },
+    [beginUserNavigationIntent, setWorkspaceTabs]
   )
 
   // Base section navigation: every legacy `handleNavSelect(route)` call-site
@@ -230,6 +362,14 @@ export function useNavigationController() {
     // Universal tab store.
     workspaceTabs,
     setWorkspaceTabs,
+    navigationIntentSequence,
+    beginUserNavigationIntent,
+    isNavigationIntentCurrent,
+    beginGfsResourceNavigation,
+    isGfsResourceNavigationCurrent,
+    activateGfsResourceNavigation,
+    completeGfsResourceNavigationPreview,
+    selectWorkspaceTabById,
     activeTab,
     nextWorkspaceTabId,
     appsPickerActive,

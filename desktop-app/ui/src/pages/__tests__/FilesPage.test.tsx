@@ -256,7 +256,10 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, undefined, folder.gfsUri, handled)
 
     expect(await screen.findByRole('button', { name: 'Linked folder' })).toBeTruthy()
-    expect(openUri).toHaveBeenCalledWith(folder.gfsUri)
+    expect(openUri).toHaveBeenCalledWith(
+      folder.gfsUri,
+      expect.objectContaining({ shouldContinue: expect.any(Function) })
+    )
     expect(handled).toHaveBeenCalledOnce()
   })
 
@@ -298,7 +301,10 @@ describe('FilesPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'report.txt', level: 3 })).toBeTruthy()
     await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
-    expect(openUri).toHaveBeenCalledWith(file.gfsUri)
+    expect(openUri).toHaveBeenCalledWith(
+      file.gfsUri,
+      expect.objectContaining({ shouldContinue: expect.any(Function) })
+    )
     expect(handled).toHaveBeenCalledOnce()
   })
 
@@ -4121,7 +4127,12 @@ describe('FilesPage', () => {
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
 
-    await waitFor(() => expect(openUri).toHaveBeenCalledWith('gfs://main/resource-1'))
+    await waitFor(() =>
+      expect(openUri).toHaveBeenCalledWith(
+        'gfs://main/resource-1',
+        expect.objectContaining({ shouldContinue: expect.any(Function) })
+      )
+    )
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open route' })).toBeNull())
   })
 

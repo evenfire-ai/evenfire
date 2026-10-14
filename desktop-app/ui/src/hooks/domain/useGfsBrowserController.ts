@@ -968,6 +968,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         clearIfUnavailable?: boolean
         background?: boolean
         onFailure?: (failure: GfsUriOpenFailure) => void
+        shouldContinue?: () => boolean
       }
     ) => {
       const background = options?.background === true
@@ -978,6 +979,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       const generation = background ? openUriGenerationRef.current : ++openUriGenerationRef.current
       const backgroundGeneration = background ? ++backgroundOpenUriGenerationRef.current : undefined
       const isCurrent = () =>
+        options?.shouldContinue?.() !== false &&
         openUriGenerationRef.current === generation &&
         (!background ||
           (backgroundOpenUriGenerationRef.current === backgroundGeneration &&

@@ -105,6 +105,90 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     })
   })
 
+  it('restores the owning Files route atomically when a current link opens its Preview tab', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const filesPath = 'gfs://main/11111111111111111111111111111111'
+    const linkedUri = 'gfs://main/22222222222222222222222222222222'
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-owner', path: filesPath, title: 'Reports' })
+      )
+    )
+    const request = result.current.beginGfsResourceNavigation(1084, linkedUri, 4)
+    expect(request.ownerTabId).toBe('files-owner')
+    expect(result.current.activateGfsResourceNavigation(request, 4)).toBe(true)
+
+    let completed = false
+    act(() => {
+      completed = result.current.completeGfsResourceNavigationPreview(
+        request,
+        {
+          gfsUri: linkedUri,
+          kind: 'markdown',
+          name: 'linked-note.md',
+          bytes: 18,
+        },
+        4,
+        { gfsUri: filesPath, name: 'Reports' }
+      )
+    })
+
+    const owner = result.current.workspaceTabs.tabs.find(tab => tab.id === 'files-owner')
+    expect(completed).toBe(true)
+    expect(result.current.activeTab?.kind).toBe('preview')
+    expect(result.current.activeTab?.preview?.gfsUri).toBe(linkedUri)
+    expect(owner?.files?.path).toBe(filesPath)
+    expect(owner?.title).toBe('Reports')
+  })
+
+  it('never reactivates a link owner after the user selects another tab', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uriA = 'gfs://main/11111111111111111111111111111111'
+    const uriB = 'gfs://main/22222222222222222222222222222222'
+    act(() => {
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(openFilesTab(state, { id: 'files-a', path: uriA, title: 'Files A' }), {
+          id: 'files-b',
+          path: uriB,
+          title: 'Files B',
+        })
+      )
+      result.current.selectWorkspaceTabById('files-a')
+    })
+
+    const request = result.current.beginGfsResourceNavigation(1085, uriA, 4)
+    expect(request.ownerTabId).toBe('files-a')
+    expect(result.current.activateGfsResourceNavigation(request, 4)).toBe(true)
+    act(() => {
+      result.current.selectWorkspaceTabById('files-b')
+    })
+
+    let completed = true
+    act(() => {
+      completed = result.current.completeGfsResourceNavigationPreview(
+        request,
+        {
+          gfsUri: uriA,
+          kind: 'markdown',
+          name: 'linked-note.md',
+          bytes: 18,
+        },
+        4,
+        { gfsUri: uriA, name: 'Files A' }
+      )
+    })
+
+    expect(completed).toBe(false)
+    expect(result.current.activeTab?.id).toBe('files-b')
+    expect(result.current.workspaceTabs.tabs.find(tab => tab.id === 'files-a')?.files?.path).toBe(
+      uriA
+    )
+    expect(result.current.workspaceTabs.tabs.find(tab => tab.id === 'files-b')?.files?.path).toBe(
+      uriB
+    )
+    expect(result.current.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')).toHaveLength(0)
+  })
+
   it('openPreviewSection dedupes by gfsUri: re-opening the same file focuses its tab', () => {
     const { result } = renderHook(() => useNavigationController())
     act(() =>

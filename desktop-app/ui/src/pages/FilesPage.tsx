@@ -53,6 +53,7 @@ import {
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
+import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
@@ -246,10 +247,15 @@ export function FilesPage({
   pendingGfsUri,
   onPendingGfsUriHandled,
   pendingGfsDeepLink,
+  workspaceTabId,
+  pendingGfsDeepLinkOwnerTabId,
+  isPendingGfsDeepLinkCurrent,
+  onExplicitNavigationIntent,
   onPendingGfsDeepLinkOutcome,
   remoteGfsChangeEpoch,
   onLocationChange,
   onOpenPreview,
+  onOpenPendingGfsPreview,
   routeDialogRequestId = 0,
   onRouteDialogRequestHandled,
 }: FilesPageProps) {
@@ -298,6 +304,7 @@ export function FilesPage({
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const draggingResourceRef = useRef<GfsDriveResource | null>(null)
   const movingResourceRef = useRef<string | null>(null)
+  const pageActiveRef = useRef(true)
   const hoveredFolderRef = useRef<string | null>(null)
   const folderDropAccessRef = useRef(new Map<string, FolderDropAccessResult>())
   const folderDropChecksRef = useRef(new Map<string, Promise<FolderDropAccessResult>>())
@@ -311,6 +318,17 @@ export function FilesPage({
   const createFolderInputId = useId()
   const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  const seedPendingRef = useRef(false)
+  const beginExplicitFilesNavigation = useCallback(() => {
+    seedPendingRef.current = false
+    onExplicitNavigationIntent?.()
+  }, [onExplicitNavigationIntent])
+  useEffect(() => {
+    pageActiveRef.current = true
+    return () => {
+      pageActiveRef.current = false
+    }
+  }, [])
   const {
     current,
     crumbs,
@@ -550,12 +568,12 @@ export function FilesPage({
   // old modal-era contract. When no `onOpenPreview` is wired, it reports
   // "not previewable" so the caller downloads instead of silently doing nothing.
   const openFilePreview = (
-    resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name' | 'version'>
+    resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name' | 'version'>,
+    openPreview = onOpenPreview
   ): boolean => {
     const preview = resolveGfsPreview(resource)
-    if (!preview || !onOpenPreview) return false
-    onOpenPreview(preview)
-    return true
+    if (!preview || !openPreview) return false
+    return openPreview(preview) !== false
   }
 
   useEffect(() => {
@@ -863,6 +881,7 @@ export function FilesPage({
 
   const handleRefreshCurrent = async () => {
     if (!current || refreshingCurrent) return
+    beginExplicitFilesNavigation()
     setRefreshingCurrent(true)
     try {
       const refreshed = await ctrl.refreshCurrentLocation()
@@ -881,27 +900,51 @@ export function FilesPage({
   const handleOpenGfsLink = async (
     uri: string,
     onFailure?: (failure: GfsUriOpenFailure) => void,
-    onOpened?: () => void
+    onOpened?: () => void,
+    isCurrent?: () => boolean,
+    openPendingPreview?: (
+      preview: GfsPreviewResource,
+      returnLocation: { gfsUri: string | null; name: string | null }
+    ) => boolean
   ) => {
     const returnCrumbs = [...crumbs]
-    const opened = onFailure ? await ctrl.openUri(uri, { onFailure }) : await ctrl.openUri(uri)
+    const shouldContinue = () => pageActiveRef.current && (isCurrent?.() ?? true)
+    const opened =
+      onFailure || isCurrent
+        ? await ctrl.openUri(uri, { onFailure, shouldContinue })
+        : await ctrl.openUri(uri, { shouldContinue })
+    // The resolver may settle after this keyed FilesPage has unmounted or the
+    // pending link has changed. Do not let that stale continuation open a
+    // preview, start a download, or restore this page's breadcrumbs.
+    if (!shouldContinue()) return false
     if (opened === false) return false
     if (typeof opened === 'object' && opened.kind === 'file') {
+      const preview = resolveGfsPreview(opened)
+      // A valid pending-link preview callback may select its new Preview tab.
+      // It already checked that this request still owned the active Files tab.
+      // Settle that successful handoff before the resulting unmount invalidates
+      // the Files-page ownership predicate.
+      if (preview && openPendingPreview) {
+        const returnCrumb = returnCrumbs.at(-1)
+        const previewOpened = openPendingPreview(preview, {
+          gfsUri: returnCrumb?.gfsUri ?? null,
+          name: returnCrumb?.name ?? null,
+        })
+        if (!previewOpened) return false
+        onOpened?.()
+        return true
+      }
       const previewOpened = openFilePreview(opened)
+      if (!shouldContinue()) return false
       ctrl.restoreCrumbs(returnCrumbs)
-      if (!previewOpened) await handleDownload(opened.gfsUri, opened.name)
+      if (!previewOpened) {
+        await handleDownload(opened.gfsUri, opened.name)
+      }
+      if (!shouldContinue()) return false
     }
     onOpened?.()
     return true
   }
-
-  // A non-null seed rebuilds the breadcrumb stack asynchronously (openUri is a
-  // network round-trip). Until it lands, `current` is still the virtual root, and
-  // reporting that transient `null` back up would clobber the owning tab's
-  // persisted path to null — losing the location if the user switches tabs
-  // mid-load (mini-spec 06 §3). Arm on a non-null seed so location reports are
-  // withheld until the seed is consumed; a null seed (root tab) never arms.
-  const seedPendingRef = useRef(false)
 
   /**
    * Open a link handed over from the app level (a plugin's `gfs://` click that
@@ -926,8 +969,20 @@ export function FilesPage({
     const link = pendingGfsDeepLink
     if (!link) return
     let current = true
+    const isCurrent = () =>
+      current &&
+      pageActiveRef.current &&
+      (!pendingGfsDeepLinkOwnerTabId || pendingGfsDeepLinkOwnerTabId === workspaceTabId) &&
+      (isPendingGfsDeepLinkCurrent?.() ?? true)
     seedPendingRef.current = true
     setPendingGfsDeepLinkFailure(null)
+
+    if (!isCurrent()) {
+      onPendingGfsDeepLinkOutcome?.(link.id, 'superseded')
+      return () => {
+        current = false
+      }
+    }
 
     if (normalizeGfsResourceUri(link.uri) !== link.uri) {
       setPendingGfsDeepLinkFailure({
@@ -942,7 +997,7 @@ export function FilesPage({
     }
 
     const reportFailure = (failure: GfsUriOpenFailure) => {
-      if (!current) return
+      if (!isCurrent()) return
       if (failure.kind === 'superseded') {
         onPendingGfsDeepLinkOutcome?.(link.id, 'superseded')
         return
@@ -969,11 +1024,18 @@ export function FilesPage({
       onPendingGfsDeepLinkOutcome?.(link.id, retryable ? 'retryable' : 'terminal')
     }
 
-    void handleOpenGfsLink(link.uri, reportFailure, () => {
-      if (!current) return
-      setPendingGfsDeepLinkFailure(null)
-      onPendingGfsDeepLinkOutcome?.(link.id, 'opened')
-    }).catch(error => reportFailure({ kind: 'error', error }))
+    void handleOpenGfsLink(
+      link.uri,
+      reportFailure,
+      () => {
+        setPendingGfsDeepLinkFailure(null)
+        onPendingGfsDeepLinkOutcome?.(link.id, 'opened')
+      },
+      isCurrent,
+      onOpenPendingGfsPreview
+        ? (preview, returnLocation) => onOpenPendingGfsPreview(link.id, preview, returnLocation)
+        : undefined
+    ).catch(error => reportFailure({ kind: 'error', error }))
 
     return () => {
       current = false
@@ -1490,6 +1552,7 @@ export function FilesPage({
 
   const openManage = (resource: GfsDriveResource) => {
     if (resource.resourceId !== current?.resourceId) {
+      beginExplicitFilesNavigation()
       manageReturnCrumbsRef.current = [...crumbs]
       ctrl.openResource(resource)
     } else {
@@ -1565,6 +1628,7 @@ export function FilesPage({
       pushToast?.(`You do not have read access to ${resource.name || resource.drive}`, 'error')
       return
     }
+    beginExplicitFilesNavigation()
     if (resource.kind === 'directory') {
       if (currentIsFolder) ctrl.openChild(resource)
       else ctrl.openResource(resource)
@@ -1642,6 +1706,7 @@ export function FilesPage({
                   color="neutral"
                   disabled={!current}
                   onClick={() => {
+                    beginExplicitFilesNavigation()
                     manageReturnCrumbsRef.current = null
                     setManageOpen(false)
                     ctrl.reset()
@@ -1667,7 +1732,10 @@ export function FilesPage({
                         className="da-gfs-drive__breadcrumb"
                         color="neutral"
                         disabled={index === crumbs.length - 1}
-                        onClick={() => ctrl.goToCrumb(index)}
+                        onClick={() => {
+                          beginExplicitFilesNavigation()
+                          ctrl.goToCrumb(index)
+                        }}
                         variant="text"
                       >
                         {crumb.name}
@@ -2080,7 +2148,10 @@ export function FilesPage({
             </header>
             <div className="da-gfs-link-dialog__body">
               <GfsFilePicker
-                onOpen={handleOpenGfsLink}
+                onOpen={uri => {
+                  beginExplicitFilesNavigation()
+                  return handleOpenGfsLink(uri)
+                }}
                 onOpened={() => setOpenLinkOpen(false)}
                 busy={resolving}
                 error={openError}

@@ -20,6 +20,13 @@ export interface FilesPageProps {
   onPendingGfsUriHandled?: () => void
   /** App-queued deep link whose resolve outcome controls main-process acknowledgment. */
   pendingGfsDeepLink?: { id: number; uri: string } | null
+  /** Stable destination tab captured by the App navigation authority. */
+  workspaceTabId?: string
+  pendingGfsDeepLinkOwnerTabId?: string
+  /** Live owner/session/intent fence for this queued request. */
+  isPendingGfsDeepLinkCurrent?: () => boolean
+  /** App-owned intent ordering for explicit navigation within this Files tab. */
+  onExplicitNavigationIntent?: () => void
   onPendingGfsDeepLinkOutcome?: (
     id: number,
     outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
@@ -40,7 +47,13 @@ export interface FilesPageProps {
    * the file kind and hands the descriptor up to the tab store through this
    * callback. Absent ⇒ no preview surface is available (the file downloads).
    */
-  onOpenPreview?: (preview: GfsPreviewResource) => void
+  onOpenPreview?: (preview: GfsPreviewResource) => void | boolean
+  /** Guarded preview completion for the queued resource-link request. */
+  onOpenPendingGfsPreview?: (
+    id: number,
+    preview: GfsPreviewResource,
+    returnLocation: { gfsUri: string | null; name: string | null }
+  ) => boolean
   /** Monotonic App request to open the existing route-entry dialog. */
   routeDialogRequestId?: number
   onRouteDialogRequestHandled?: (requestId: number) => void
