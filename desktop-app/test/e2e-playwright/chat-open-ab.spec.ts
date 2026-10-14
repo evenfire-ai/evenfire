@@ -33,6 +33,8 @@ import {
 // Phase OL (cached opens, large-cache relaunch) needs the stateless Host to stay up for the
 // whole phase; phase W needs it to suspend within minutes. They run as two invocations so the
 // HCC idle cadence can differ between them.
+// O measures each chat's first open after launch (open_cached_ms, read from disk) apart from
+// its reopen in the same session (open_memo_ms), which the AFTER build serves from memory.
 type Build = 'before' | 'after'
 type Chat = { id: string; count: number; lastText: string }
 type Catalog = {
@@ -53,8 +55,12 @@ type Sample = {
   chatId?: string
   observed_at_install?: boolean
   observer_installed_ms?: number
+  /** The transcript was missing or empty at some point between the click and the measurement. */
+  blank?: boolean
 }
 const HOSTS = ['chatllm', 'chatllm-stateless'] as const
+// The Desktop remembers the last 8 transcripts it showed (`transcriptMemo`); reopens stay within it.
+const REMEMBERED_CHATS = 8
 const MESSAGES = '[data-testid="user-message"], [data-testid="agent-response"]'
 const LIMIT_WINDOW_MS = 65_000
 const RATE_LIMITED = /\b429\b|Too Many Requests/g
@@ -92,7 +98,12 @@ function isolatedPath(runDir: string, target: string): string {
 // per-session limit; spacing opens keeps a launch under that limit. The wait is outside the timing.
 const OPEN_PACE_MS = 4_000
 let lastOpenAt = 0
-async function openChat(page: Page, host: string, label: string, chat: Chat): Promise<number> {
+async function openChat(
+  page: Page,
+  host: string,
+  label: string,
+  chat: Chat
+): Promise<{ ms: number; blank: boolean }> {
   const pace = lastOpenAt + OPEN_PACE_MS - Date.now()
   if (pace > 0) await page.waitForTimeout(pace)
   lastOpenAt = Date.now()
@@ -130,11 +141,13 @@ async function openChat(page: Page, host: string, label: string, chat: Chat): Pr
     .toBe(true)
   return page.evaluate(
     ({ selector, chat, messages }) =>
-      new Promise<number>((resolve, reject) => {
+      new Promise<{ ms: number; blank: boolean }>((resolve, reject) => {
         const button = document.querySelector<HTMLButtonElement>(`${selector} button`)
         if (!button || button.disabled)
           throw new Error(`Chat row has no enabled open button: ${selector}`)
         let started: number
+        let clicked = false
+        let blank = false
         // The sidebar previews only the latest sessions, so the active-row witness is checked outside the timing.
         const finish = () => {
           const transcripts = document.querySelectorAll('[data-testid="message-list"]')
@@ -146,6 +159,8 @@ async function openChat(page: Page, host: string, label: string, chat: Chat): Pr
           }
           const transcript = transcripts[0]
           const bubbles = transcript?.querySelectorAll(messages)
+          // React commits a click's state synchronously, so every check after the click sees the new chat's frames.
+          if (clicked && !bubbles?.length) blank = true
           if (
             bubbles?.length === chat.count &&
             bubbles[chat.count - 1]?.textContent?.includes(chat.lastText) &&
@@ -154,7 +169,7 @@ async function openChat(page: Page, host: string, label: string, chat: Chat): Pr
           ) {
             observer.disconnect()
             clearTimeout(deadline)
-            resolve(performance.now() - started)
+            resolve({ ms: performance.now() - started, blank })
           }
         }
         const observer = new MutationObserver(finish)
@@ -170,6 +185,7 @@ async function openChat(page: Page, host: string, label: string, chat: Chat): Pr
         }, 120_000)
         started = performance.now()
         button.click()
+        clicked = true
         finish()
       }),
     {
@@ -631,8 +647,22 @@ if (
               // Stateless first: the sidebar preview orders cached chats by their first load, and L needs stateful rows in it.
               for (const catalog of [...report.catalogs].reverse()) {
                 const checked = new Set<string>()
-                for (let pass = 1; pass <= (id === 1 ? 3 : 2); pass++) {
+                // Round 1 is always BEFORE, so its first cached pass cannot be served from memory.
+                const firstCachedPass = id === 1 ? 2 : 1
+                // Reopens stay inside the remembered window: the last chats opened, newest first,
+                // skipping the active chat (a click on it changes nothing) until the end.
+                const remembered = catalog.chats.slice(
+                  -Math.min(catalog.chats.length, REMEMBERED_CHATS)
+                )
+                if (remembered.length < 2)
+                  throw new Error(`precondition: ${catalog.host} needs two chats to reopen.`)
+                const reopenOrder = [
+                  ...remembered.slice(0, -1).reverse(),
+                  remembered[remembered.length - 1]!,
+                ]
+                for (let pass = 1; pass <= firstCachedPass + 1; pass++) {
                   const remote = id === 1 && pass === 1
+                  const reopen = pass > firstCachedPass
                   if (!remote)
                     await test.step(`precondition: ${catalog.host} transcripts are cached`, async () => {
                       await expect
@@ -655,16 +685,26 @@ if (
                         )
                         .toBe(true)
                     })
-                  for (const chat of catalog.chats) {
-                    const ms = await openChat(page, catalog.host, hostLabels[catalog.host]!, chat)
+                  for (const chat of reopen ? reopenOrder : catalog.chats) {
+                    const { ms, blank } = await openChat(
+                      page,
+                      catalog.host,
+                      hostLabels[catalog.host]!,
+                      chat
+                    )
                     samples.push({
                       round: id,
                       build,
                       host: catalog.host,
-                      metric: remote ? 'open_remote_ms' : 'open_cached_ms',
+                      metric: remote
+                        ? 'open_remote_ms'
+                        : reopen
+                          ? 'open_memo_ms'
+                          : 'open_cached_ms',
                       pass,
                       chatId: chat.id,
                       ms,
+                      blank,
                     })
                     if (!checked.has(chat.id)) {
                       await expect
@@ -818,6 +858,40 @@ if (
             aa_spread_ms: spread,
             budget_ms: budget,
             passed: after <= before + budget,
+          })
+          const memoBefore = quantiles(values('before', host, 'open_memo_ms')).p50,
+            memoAfter = quantiles(values('after', host, 'open_memo_ms')).p50
+          report.gates.push({
+            metric: 'open_memo_ms',
+            host,
+            before: memoBefore,
+            after: memoAfter,
+            passed: memoAfter < memoBefore,
+          })
+          // AFTER reopens never show an empty transcript. The witnesses prove the observer does see
+          // one where it happens: on AFTER first opens (disk path) and on every BEFORE reopen.
+          const blanks = (build: Build, metric: string) =>
+            samples.filter(
+              sample =>
+                sample.build === build &&
+                sample.host === host &&
+                sample.metric === metric &&
+                sample.blank
+            ).length
+          const witness = {
+            after_reopen_blank: blanks('after', 'open_memo_ms'),
+            after_first_open_blank: blanks('after', 'open_cached_ms'),
+            before_reopen_blank: blanks('before', 'open_memo_ms'),
+          }
+          report.gates.push({
+            metric: 'reopen_blank_witness',
+            host,
+            ...witness,
+            passed:
+              values('after', host, 'open_memo_ms').length > 0 &&
+              witness.after_reopen_blank === 0 &&
+              witness.after_first_open_blank > 0 &&
+              witness.before_reopen_blank > 0,
           })
         }
         const before = quantiles(values('before', HOSTS[0], 'relaunch_ms')).p50,
