@@ -28,7 +28,7 @@ require_environment() {
 run_suite() {
   local suite="$1"
   local output
-  if [[ ! -s "$CONTROL_API_DIR/$suite" ]]; then
+  if [[ -z "$suite" || "$suite" == *$'\n'* || ! -f "$CONTROL_API_DIR/$suite" || ! -s "$CONTROL_API_DIR/$suite" ]]; then
     printf 'Required producer-backed suite is missing or empty: %s\n' "$suite" >&2
     return 1
   fi
@@ -57,7 +57,9 @@ run_local_producer_suite() {
     printf 'Build External REST before the local composed producer suite\n' >&2
     return 1
   }
-  run_suite "$(node "$REPO_ROOT/scripts/ci/password-recovery-suite-contract.mjs" private local)"
+  local suite
+  suite="$(node "$REPO_ROOT/scripts/ci/password-recovery-suite-contract.mjs" private local)" || return 1
+  run_suite "$suite"
 }
 
 run_configured_producer_suite() {
@@ -66,7 +68,9 @@ run_configured_producer_suite() {
     CONTROL_API_REAL_MEMBER_REGISTRATION_PG_URL \
     CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL \
     CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET
-  run_suite "$(node "$REPO_ROOT/scripts/ci/password-recovery-suite-contract.mjs" private configured)"
+  local suite
+  suite="$(node "$REPO_ROOT/scripts/ci/password-recovery-suite-contract.mjs" private configured)" || return 1
+  run_suite "$suite"
 }
 
 case "$MODE" in

@@ -369,6 +369,8 @@ jobs:
         run: npm run build
 
       - name: Validate recovery suite selection contract
+        env:
+          CODEX_SCRATCH_ROOT: ${{ runner.temp }}
         run: node --test scripts/tests/password-recovery-suite-contract.test.mjs
 
       - name: Run control-api real Postgres suites (migration + GFS)
