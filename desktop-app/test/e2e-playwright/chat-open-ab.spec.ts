@@ -22,7 +22,6 @@ import {
   desktopCredentials,
   launchDesktopApp,
   login,
-  openExactAgentChat,
   validateMainEntry,
 } from './qa-recorder-helpers'
 
@@ -47,6 +46,7 @@ type Sample = {
 const HOSTS = ['chatllm', 'chatllm-stateless'] as const
 const MESSAGES = '[data-testid="user-message"], [data-testid="agent-response"]'
 const LIMIT_WINDOW_MS = 65_000
+const RATE_LIMITED = /\b429\b|Too Many Requests/g
 const rows = (host: string) =>
   `[data-testid="latest-session-row"][data-agent-ref=${JSON.stringify(host)}]`
 const row = (host: string, id: string) => `${rows(host)}[data-chat-id=${JSON.stringify(id)}]`
@@ -82,7 +82,16 @@ async function openChat(page: Page, host: string, label: string, chat: Chat): Pr
     .getByRole('navigation', { name: 'Chat breadcrumb', exact: true })
     .getByRole('button', { name: 'Chat', exact: true })
     .click()
-  await openExactAgentChat(page, host, label)
+  // Switch Hosts from the Chat page: the Agents page refreshes the access catalog and the
+  // team directory on every visit, which exhausts the per-minute API limits at this pace.
+  const switchAgent = page.getByRole('button', { name: /^Switch chat agent$/ })
+  await expect(switchAgent).toBeVisible()
+  if (!(await switchAgent.getByText(label, { exact: true }).isVisible())) {
+    await switchAgent.click()
+    await page.getByRole('menuitem', { name: label, exact: true }).click()
+  }
+  await expect(switchAgent).toContainText(label)
+  await expect(page.getByRole('textbox', { name: 'Agent message composer' })).toBeVisible()
   const more = page.getByRole('button', { name: 'Show more', exact: true })
   const loadMore = page.getByRole('button', { name: 'Load more', exact: true })
   const target = page.locator(agentRow(host, chat.id))
@@ -317,6 +326,7 @@ if (
       }
     }
     let launches = 0
+    let mainLog = ''
     let launchedBuild: Build | undefined
     const launch = async (build: Build) => {
       await close()
@@ -330,7 +340,8 @@ if (
       page = launched.page
       launchedBuild = build
       // Keep each main process's output so a lost session can be explained after the run.
-      const log = fs.createWriteStream(testInfo.outputPath(`main-${++launches}-${build}.log`), {
+      mainLog = testInfo.outputPath(`main-${++launches}-${build}.log`)
+      const log = fs.createWriteStream(mainLog, {
         mode: 0o600,
       })
       app.process().stdout?.pipe(log)
@@ -423,6 +434,12 @@ if (
       })
       try {
         await action(record.id)
+        // A rate-limited round runs on stale or empty catalogs, so its timings are not valid samples.
+        const limited = fs.readFileSync(mainLog, 'utf8').match(RATE_LIMITED)?.length ?? 0
+        if (limited)
+          throw new Error(
+            `Round ${record.id} (${scenario} ${build}) logged ${limited} rate-limited responses in ${path.basename(mainLog)}.`
+          )
       } finally {
         stopped = true
         await observation
@@ -610,6 +627,10 @@ if (
                       chat.count
                     )
                     // The sidebar previews only the latest sessions: when this chat has a row it is the active one, otherwise none is.
+                    // An empty preview would satisfy "none is active" without checking anything.
+                    await expect(
+                      page.locator('[data-testid="latest-session-row"]').first()
+                    ).toBeVisible()
                     const inSidebar = (await page.locator(row(catalog.host, chat.id)).count()) > 0
                     await expect(
                       page.locator('[data-testid="latest-session-row"][aria-current="true"]')
