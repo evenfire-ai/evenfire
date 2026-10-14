@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +29,53 @@ const green = () => ({
 test('exact checked-in census and full reporter pass', () => {
   assert.equal(verifySuiteManifest(root, manifest), manifest)
   assert.deepEqual(reportViolations(root, manifest, 'publicPostgres', green()), [])
+})
+test('pathname replacement cannot substitute nonempty contents after a suite is opened', () => {
+  const scratchRoot = process.env.CODEX_SCRATCH_ROOT
+  assert.ok(scratchRoot, 'CODEX_SCRATCH_ROOT is required for manifest fixtures')
+  const repositoryScratch = join(scratchRoot, 'evenfire')
+  mkdirSync(repositoryScratch, { recursive: true })
+  const fixture = mkdtempSync(join(repositoryScratch, 'recovery-manifest-'))
+  const selection = {
+    version: 1,
+    publicPostgres: ['control-api/test/public.realPostgres.test.ts'],
+    privatePostgres: {
+      local: 'control-api/test/local.realPostgres.test.ts',
+      configured: 'control-api/test/configured.realPostgres.test.ts',
+    },
+    composedContract: ['control-api/test/contract.test.ts'],
+    consumer: ['external-rest-api/test/consumer.test.ts'],
+  }
+  const originalRead = fs.readFileSync
+  try {
+    for (const directory of ['control-api/test', 'external-rest-api/test'])
+      mkdirSync(join(fixture, directory), { recursive: true })
+    for (const entry of [
+      ...selection.publicPostgres,
+      ...Object.values(selection.privatePostgres),
+      ...selection.composedContract,
+      ...selection.consumer,
+    ])
+      writeFileSync(join(fixture, entry), '// fixture\n')
+    const selected = join(fixture, selection.publicPostgres[0])
+    writeFileSync(selected, '')
+    let replaced = false
+    fs.readFileSync = (...args) => {
+      if (!replaced) {
+        replaced = true
+        fs.renameSync(selected, join(fixture, 'original-empty-suite'))
+        writeFileSync(selected, '// replacement\n')
+      }
+      return originalRead(...args)
+    }
+    syncBuiltinESMExports()
+    assert.throws(() => verifySuiteManifest(fixture, selection), /Missing or empty recovery suite/)
+    assert.equal(replaced, true)
+  } finally {
+    fs.readFileSync = originalRead
+    syncBuiltinESMExports()
+    rmSync(fixture, { recursive: true, force: true })
+  }
 })
 for (const [label, mutate] of [
   [

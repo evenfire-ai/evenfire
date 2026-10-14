@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { pinnedSuiteViolations } from './assert-pinned-vitest-suites.mjs'
@@ -35,8 +35,13 @@ export function verifySuiteManifest(root, manifest) {
     )
       throw new Error('Invalid recovery suite path')
     const path = resolve(root, entry)
-    if (!statSync(path).isFile() || !readFileSync(path, 'utf8').trim())
-      throw new Error(`Missing or empty recovery suite: ${entry}`)
+    const descriptor = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK)
+    try {
+      if (!fstatSync(descriptor).isFile() || !readFileSync(descriptor, 'utf8').trim())
+        throw new Error(`Missing or empty recovery suite: ${entry}`)
+    } finally {
+      closeSync(descriptor)
+    }
   }
   function collect(directory) {
     return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
