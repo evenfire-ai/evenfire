@@ -196,6 +196,52 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
   )
 
   it.each(HOSTS)(
+    'b2. %s: an empty disk page (a tombstone this session has not loaded) drops the remembered transcript',
+    async host => {
+      const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const controller = mount(host)
+      await settleMount()
+      await open(controller, host, 'chat-a')
+      await open(controller, host, 'chat-b')
+      // `ChatStore.loadMessages` returns [] once the index carries a tombstone
+      // for the chat; the renderer's deleted-chat set has not been refreshed.
+      disk['chat-a'] = []
+
+      const diskRead = deferred<AgentChatMessage[]>()
+      clerum.chat.loadMessages.mockImplementationOnce(() => diskRead.promise)
+      const reopenStart = frames.length
+      let reopen!: Promise<void>
+      await act(async () => {
+        reopen = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      // Witnesses: the reopen was a memo hit and it read the disk page.
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', transcript('chat-a'))
+      expect(clerum.chat.loadMessages).toHaveBeenLastCalledWith(host, 'chat-a', 80, undefined)
+      await act(async () => {
+        diskRead.resolve([])
+        await reopen
+      })
+      expect(controller.result.current.chatMessages).toEqual([])
+
+      await open(controller, host, 'chat-b')
+      const againStart = frames.length
+      const chatARead = deferred<AgentChatMessage[]>()
+      clerum.chat.loadMessages.mockImplementationOnce(() => chatARead.promise)
+      let again!: Promise<void>
+      await act(async () => {
+        again = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      // The entry is gone: the next open is blank behind the spinner, not remembered.
+      expect(blankFrame(frames.slice(againStart), 'chat-a')).toBe(true)
+      await act(async () => {
+        chatARead.resolve([])
+        await again
+      })
+    }
+  )
+
+  it.each(HOSTS)(
     'c. %s: when the disk page matches, the remembered list and paging offset are kept',
     async host => {
       const disk = { 'chat-a': transcript('chat-a', 81), 'chat-b': transcript('chat-b') }

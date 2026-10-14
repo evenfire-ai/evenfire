@@ -1114,17 +1114,20 @@ export function useAgentChatController({
         } catch (error) {
           console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
         }
-        // #1091 A9: the remembered transcript is already on screen. Keep it when
-        // the disk page is its newest part (or the disk read returned nothing);
-        // otherwise the disk page wins, e.g. a reply persisted while the chat was
-        // hidden. The Host reconcile below runs in both cases.
+        // #1091 A9: the remembered transcript is already on screen. Keep it only
+        // when the disk page is its newest part; otherwise the disk page wins,
+        // e.g. a reply persisted while the chat was hidden. An empty page also
+        // wins: `loadMessages` returns [] for a durably tombstoned chat, which
+        // this session may not have loaded into `deletedChatIdsByAgentRef` yet,
+        // and recording [] drops the memo entry. The Host reconcile below runs
+        // in both cases.
         const keepRemembered =
           remembered !== undefined &&
-          (cached.length === 0 ||
-            sameMessageSequence(
-              remembered.messages.slice(-cached.length),
-              cached as AgentChatMessage[]
-            ))
+          cached.length > 0 &&
+          sameMessageSequence(
+            remembered.messages.slice(-cached.length),
+            cached as AgentChatMessage[]
+          )
         if (keepRemembered) {
           cached = remembered.messages as typeof cached
           if (!isStillActive()) return
