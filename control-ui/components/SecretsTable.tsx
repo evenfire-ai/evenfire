@@ -18,6 +18,7 @@ import {
   getMcpServers,
   getRecipeSecrets,
   getRecipes,
+  listMcpSecrets,
 } from '../lib/api'
 import { getProviderLabel, getProvidersWithCompleteCredentials } from '../lib/llm'
 import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs'
@@ -48,7 +49,10 @@ type McpSecretRow = {
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
-  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' } | null // missing rows: not yet provisioned, ownership chosen at create time.
+  | { kind: 'shared' }
+  | { kind: 'owner-recipe'; recipeName: string }
+  | { kind: 'unlabeled' }
+  | null // missing rows: not yet provisioned, ownership chosen at create time.
 type RecipeSecretRow = {
   name: string
   namespace: string
@@ -207,7 +211,10 @@ export function SecretsTable({
     setMcpLoading(true)
     setMcpError('')
     try {
-      const result = await getMcpServers()
+      // Server references carry the usage columns, but a Secret created
+      // moments ago is referenced by no server yet — the provisioned
+      // listing (names + keys only) keeps it visible immediately.
+      const [result, provisioned] = await Promise.all([getMcpServers(), listMcpSecrets()])
       const usage = new Map<
         string,
         { servers: Set<string>; registrySources: Map<string, { name: string; version: string }> }
@@ -243,6 +250,10 @@ export function SecretsTable({
             version: catalogVersion,
           })
         }
+      }
+
+      for (const item of provisioned.items ?? []) {
+        if (item.name) addSecret(item.name)
       }
 
       const nextRows = Array.from(usage.entries())

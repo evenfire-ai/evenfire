@@ -14,6 +14,7 @@ import {
   getMcpServers,
   getRecipeSecrets,
   getRecipes,
+  listMcpSecrets,
 } from '../../lib/api'
 import {
   buildDirectCrdMcpServerReference,
@@ -39,6 +40,7 @@ vi.mock('../../lib/api', async () => {
     getMcpServers: vi.fn(),
     getRecipeSecrets: vi.fn(),
     getRecipes: vi.fn(),
+    listMcpSecrets: vi.fn(),
   }
 })
 
@@ -47,6 +49,7 @@ const deleteRecipeSecretMock = vi.mocked(deleteRecipeSecret)
 const getMcpServersMock = vi.mocked(getMcpServers)
 const getRecipeSecretsMock = vi.mocked(getRecipeSecrets)
 const getRecipesMock = vi.mocked(getRecipes)
+const listMcpSecretsMock = vi.mocked(listMcpSecrets)
 
 // apiSend is the shared write path for every scope in this table, so its state
 // is reset for the whole file rather than per describe.
@@ -55,6 +58,10 @@ beforeEach(() => {
   apiSendMock.mockResolvedValue(undefined as never)
   deleteRecipeSecretMock.mockReset()
   deleteRecipeSecretMock.mockResolvedValue(undefined as never)
+  // The provisioned listing defaults to empty; connector tests that care
+  // about unreferenced secrets override it explicitly.
+  listMcpSecretsMock.mockReset()
+  listMcpSecretsMock.mockResolvedValue({ items: [] })
 })
 
 function renderTable(
@@ -210,6 +217,35 @@ describe('SecretsTable — connector marketplace source', () => {
       expect(screen.getByText(/@org\/new@9\.9\.9/)).toBeTruthy()
     })
     expect(screen.queryByText(/stale@0\.0\.1/)).toBeNull()
+  })
+
+  it('lists a newly created connector secret that no server references yet', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({
+          name: 'attached-conn',
+          secretName: 'attached-conn-credentials',
+        }),
+      ],
+    })
+    listMcpSecretsMock.mockResolvedValue({
+      items: [
+        { name: 'attached-conn-credentials', keys: ['api-key'] },
+        { name: 'brand-new-conn-credentials', keys: ['api-key'] },
+      ],
+    })
+
+    renderTable()
+
+    const freshRow = await waitFor(() => {
+      const row = screen.getByText('brand-new-conn-credentials').closest('tr')!
+      expect(row).toBeTruthy()
+      return row
+    })
+    expect(within(freshRow).getByText('Not yet attached to a connector.')).toBeInTheDocument()
+    expect(within(freshRow).getByText('Created manually or source unknown.')).toBeInTheDocument()
+    const attachedRow = screen.getByText('attached-conn-credentials').closest('tr')!
+    expect(within(attachedRow).getByText('1 server(s): attached-conn')).toBeInTheDocument()
   })
 })
 
