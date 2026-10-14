@@ -19,6 +19,7 @@ afterEach(() => {
 it('does not open or publish an old-team successful create delivered in the new render layout effect', async () => {
   const clerum = installMockClerum()
   await clerum.chat.create('agent-x', 'chat-a')
+  clerum.chat.getIndex.mockImplementation(clerum.readIndex)
   await clerum.persistLastActive('agent-x', 'chat-a')
   clerum.chat.setLastActive.mockImplementation(clerum.persistLastActive)
   expect((await clerum.readIndex('agent-x')).lastActiveChatId).toBe('chat-a')
@@ -56,6 +57,7 @@ it('does not open or publish an old-team successful create delivered in the new 
     { wrapper: ({ children }) => <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider> }
   )
   await waitFor(() => expect(app.result.current.controller.chatListLoading).toBe(false))
+  expect(app.result.current.controller.chatList.map(chat => chat.id)).toEqual(['chat-a'])
   const createProducer = clerum.chat.create.getMockImplementation()!
   clerum.chat.create.mockImplementationOnce(async (agentRef, chatId) => {
     const created = await createProducer(agentRef, chatId)
@@ -79,6 +81,10 @@ it('does not open or publish an old-team successful create delivered in the new 
     true
   )
   resolveInLayout = true
+  const nextCatalog = deferred<Awaited<ReturnType<typeof clerum.readIndex>>>()
+  // Production binds storage by environment/user, NOT by team. Hold the next
+  // real index to distinguish early create publication from authorized reload.
+  clerum.chat.getIndex.mockReturnValueOnce(nextCatalog.promise)
   // Normal-priority state commits: layout delivers real already-persisted create
   // metadata before passive effects invalidate the old request generation.
   app.result.current.setTeam('team-2')
@@ -93,4 +99,14 @@ it('does not open or publish an old-team successful create delivered in the new 
   expect(app.result.current.controller.chatMessages).toEqual([])
   expect(app.result.current.controller.chatMessagesLoading).toBe(false)
   expect(spies.pushToast).not.toHaveBeenCalled()
+  await act(async () => {
+    nextCatalog.resolve(await clerum.readIndex('agent-x'))
+  })
+  await waitFor(() => expect(app.result.current.controller.chatListLoading).toBe(false))
+  expect(app.result.current.controller.chatList.map(chat => chat.id).sort()).toEqual(
+    ['chat-a', metadata.id].sort()
+  )
+  expect((await clerum.readIndex('agent-x')).chats.map(chat => chat.id).sort()).toEqual(
+    ['chat-a', metadata.id].sort()
+  )
 })

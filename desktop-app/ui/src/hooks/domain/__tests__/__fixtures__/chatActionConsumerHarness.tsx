@@ -10,7 +10,7 @@ import { NotificationsContext } from '@contexts/NotificationsContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, waitFor } from '@testing-library/react'
 import { ToastStack } from '@components/Common'
-import { buildChatMessageSemanticModel } from '@lib/chatMessageSemantics'
+import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { useAgentChatActionsValue } from '../../../useAgentChatActionsValue'
 import { useAppController } from '../../../useAppController'
 
@@ -43,9 +43,9 @@ export async function renderChatActionConsumer(children: ReactNode) {
                     localSearchQuery: '',
                     localSearchCurrentMatch: null,
                     semanticModelsByMessageId: new Map(
-                      vm.activeMessages.map(message => [
-                        message.id,
-                        buildChatMessageSemanticModel(message),
+                      buildLoadedChatSemanticModels(vm.activeMessages).map(model => [
+                        model.messageId,
+                        model,
                       ])
                     ),
                   }}
