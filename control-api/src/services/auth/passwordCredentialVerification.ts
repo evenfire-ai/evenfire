@@ -1,10 +1,8 @@
 import bcrypt from 'bcryptjs'
 import { type DbTransactionClient, pool, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
-import {
-  type PasswordAdmissionDenialReason,
-  passwordAdmissionDenialsTotal,
-} from '../../observability/metrics.js'
+import { type PasswordAdmissionDenialReason } from '../../observability/metrics.js'
+import { PasswordAdmissionError } from './passwordAdmissionError.js'
 import {
   type PasswordIdentifierState,
   admitPasswordIdentifier,
@@ -18,20 +16,8 @@ import { acquirePasswordWork } from './passwordWorkOwnership.js'
 export const PASSWORD_DUMMY_HASH = '$2b$12$DdpJSFUb/dYx43plh72Ia.k9RJ8krESZ/DtTRUbdQq/ngzfJuyCUu'
 const logger = rootLogger.child({ module: 'password-admission' })
 
-export class PasswordAdmissionError extends Error {
-  constructor(
-    readonly status: 429 | 503,
-    readonly retryAfterSeconds: number,
-    readonly reason: PasswordAdmissionDenialReason,
-    readonly publicError:
-      | 'rate_limited'
-      | 'authority_unavailable'
-      | 'recovery_outcome_unknown' = status === 429 ? 'rate_limited' : 'authority_unavailable'
-  ) {
-    super(status === 429 ? 'rate_limited' : 'authority_unavailable')
-    passwordAdmissionDenialsTotal.inc({ reason })
-  }
-}
+export { PasswordAdmissionError } from './passwordAdmissionError.js'
+
 function denied(retryMs: number, reason: PasswordAdmissionDenialReason): never {
   throw new PasswordAdmissionError(
     429,

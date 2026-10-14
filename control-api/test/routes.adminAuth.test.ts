@@ -82,9 +82,7 @@ describe('routes/adminAuth', () => {
     directorySvc.withMemberPasswordWorkLease.mockImplementation(
       async (work: (lease: unknown) => Promise<unknown>) =>
         work({
-          release: async () => undefined,
-          releaseWithin: async () => undefined,
-          confirmReleaseWithinCommitted: () => undefined,
+          commitWith: vi.fn(),
         })
     )
     adminSvc.isValidAdminEmail.mockReturnValue(true)

@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
+import { PasswordAdmissionError as LeafError } from '../src/services/auth/passwordAdmissionError.js'
 import { PasswordAdmissionError } from '../src/services/auth/passwordCredentialVerification.js'
-import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
+import {
+  acquirePasswordWork,
+  runPasswordMutation,
+  withPasswordWorkLease,
+} from '../src/services/auth/passwordWorkOwnership.js'
 import { withMemberPasswordWorkLease } from '../src/services/directory/membership.js'
 
 // Own-service lifecycle seam. Real PostgreSQL and wire faults are verified separately.
@@ -109,5 +114,131 @@ describe('password-work reservation preservation', () => {
     expect(lease!.release()).toBe(first)
     await expect(first).rejects.toThrow('private release failure')
     expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(1)
+  })
+
+  it('retains the exact error constructor identity at the compatibility export', () => {
+    expect(LeafError).toBe(PasswordAdmissionError)
+  })
+
+  it('retains an acknowledged result despite connection cleanup failure', async () => {
+    state.commit = 'ack_cleanup'
+    const value = { committed: true }
+    expect(await runPasswordMutation(async () => value, { mode: 'one_use_recovery' })).toBe(value)
+    expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(1)
+  })
+
+  it.each(['standard', 'one_use_recovery'] as const)(
+    'preserves %s unknown outcome above fallback release failure without outer replay',
+    async mode => {
+      state.commit = 'unknown'
+      const work = vi.fn(async () => ({ committed: true }))
+      await expect(
+        withPasswordWorkLease(lease => lease.commitWith(work, { mode }))
+      ).rejects.toMatchObject({
+        status: 503,
+        publicError:
+          mode === 'one_use_recovery' ? 'recovery_outcome_unknown' : 'authority_unavailable',
+      })
+      expect(work).toHaveBeenCalledTimes(1)
+      expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(2)
+    }
+  )
+
+  it('maps a definitive transaction rejection to the existing authority contract', async () => {
+    state.commit = 'reject'
+    await expect(
+      runPasswordMutation(async () => 'result', { mode: 'one_use_recovery' })
+    ).rejects.toMatchObject({ status: 503, publicError: 'authority_unavailable' })
+  })
+
+  it('rejects concurrent, recursive and terminal reuse before another callback runs', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.integer({ min: 2, max: 16 }), async count => {
+        await withPasswordWorkLease(async lease => {
+          let calls = 0
+          const outcomes = await Promise.allSettled(
+            Array.from({ length: count }, () =>
+              lease.commitWith(
+                async () => {
+                  calls++
+                  await expect(
+                    lease.commitWith(
+                      async () => {
+                        calls++
+                      },
+                      { mode: 'standard' }
+                    )
+                  ).rejects.toBeInstanceOf(PasswordAdmissionError)
+                  return 'committed'
+                },
+                { mode: 'standard' }
+              )
+            )
+          )
+          expect(calls).toBe(1)
+          expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1)
+          await expect(
+            lease.commitWith(
+              async () => {
+                calls++
+              },
+              { mode: 'standard' }
+            )
+          ).rejects.toBeInstanceOf(PasswordAdmissionError)
+          expect(calls).toBe(1)
+        })
+      }),
+      { numRuns: 30 }
+    )
+  })
+
+  it('rejects a foreign lease without acquiring or executing work', async () => {
+    const work = vi.fn()
+    await expect(
+      runPasswordMutation(work, {
+        mode: 'standard',
+        lease: { commitWith: vi.fn() },
+      })
+    ).rejects.toBeInstanceOf(PasswordAdmissionError)
+    expect(work).not.toHaveBeenCalled()
+    expect(query).not.toHaveBeenCalled()
+  })
+
+  it('does not release a raw reservation while its terminal callback is running', async () => {
+    const raw = await acquirePasswordWork()
+    let resume!: () => void
+    const gate = new Promise<void>(resolve => {
+      resume = resolve
+    })
+    const terminal = runPasswordMutation(
+      async () => {
+        await gate
+        return 'committed'
+      },
+      {
+        mode: 'standard',
+        lease: raw!,
+      }
+    )
+    try {
+      await expect(raw!.release()).rejects.toBeInstanceOf(PasswordAdmissionError)
+      expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(0)
+    } finally {
+      resume()
+    }
+    expect(await terminal).toBe('committed')
+    await raw!.release()
+    expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(1)
+  })
+
+  it('prevents mutation after raw release was already requested', async () => {
+    const raw = await acquirePasswordWork()
+    const releasing = raw!.release()
+    const work = vi.fn()
+    await expect(
+      runPasswordMutation(work, { mode: 'standard', lease: raw! })
+    ).rejects.toBeInstanceOf(PasswordAdmissionError)
+    await releasing
+    expect(work).not.toHaveBeenCalled()
   })
 })

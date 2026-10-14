@@ -59,9 +59,6 @@ export {
   getMe,
   listMembers,
   listPendingInvitations,
-  setInvitationPasswordForUser,
-  setInvitationPasswordForEmail,
-  withMemberPasswordWorkLease,
   searchDirectory,
   softDeleteMember,
   startDraftInvitationCleanup,
@@ -69,9 +66,14 @@ export {
   updateManagedMemberRoleForUser,
   updateMemberRole,
   updateProfile,
-  updateUserPassword,
 } from './membership.js'
-export type { MemberPasswordWorkLease } from './membership.js'
+export {
+  setInvitationPasswordForUser,
+  setInvitationPasswordForEmail,
+  updateUserPassword,
+} from './memberPassword.js'
+export { withPasswordWorkLease as withMemberPasswordWorkLease } from '../auth/passwordWorkOwnership.js'
+export type { MemberPasswordWorkLease } from '../auth/passwordWorkOwnership.js'
 
 export {
   getTeamContexts,
